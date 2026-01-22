@@ -102,7 +102,7 @@ static uint32_t calculate_waveform(uint32_t current_aera_size,
     if (current_unitary_waveform_cell < buffer_len) {
       unitary_waveform[current_unitary_waveform_cell] =
           ((sin((x * 2.00 * PI) / (float)current_aera_size))) *
-          (WAVE_AMP_RESOLUTION / 2.00);
+          WAVE_AMP_RESOLUTION;
     }
     current_unitary_waveform_cell++;
   }
@@ -131,10 +131,14 @@ uint32_t init_waves(volatile float *unitary_waveform,
   const float high_freq = g_sp3ctra_config.high_frequency;
   const int sample_rate = g_sp3ctra_config.sampling_frequency;
   
-  // Calculate number of octaves and notes per octave for memory optimization
-  float num_octaves = log2f(high_freq / low_freq);
-  int num_full_octaves = (int)ceilf(num_octaves);
+  // 🎵 FIXED: Use user-defined num_octaves instead of dynamic calculation
+  // This eliminates "jumps" when frequency range changes slightly
+  int num_full_octaves = g_sp3ctra_config.num_octaves;
   if (num_full_octaves < 1) num_full_octaves = 1;
+  if (num_full_octaves > 10) num_full_octaves = 10;
+  
+  // Calculate actual octave span for logging (informational only)
+  float actual_octaves = log2f(high_freq / low_freq);
   
   // Notes in first octave (reference octave for waveform generation)
   int notes_per_octave = total_notes / num_full_octaves;
@@ -144,9 +148,22 @@ uint32_t init_waves(volatile float *unitary_waveform,
   float effective_comma = (float)notes_per_octave / 12.0f;
 
   log_info("SYNTH", "---------- WAVES INIT ---------");
-  log_info("SYNTH", "Freq range: %.1f - %.1f Hz (%.2f octaves)", low_freq, high_freq, num_octaves);
+  log_info("SYNTH", "Freq range: %.1f - %.1f Hz (%.2f actual, %d fixed octaves)", 
+           low_freq, high_freq, actual_octaves, num_full_octaves);
   log_info("SYNTH", "Notes: %d, Notes/octave: %d, Effective commas/semitone: %.2f", 
            total_notes, notes_per_octave, effective_comma);
+  
+  // 🔍 DIAGNOSTIC: Log frequency mapping for key positions
+  log_info("SYNTH", "🔍 Frequency mapping test:");
+  int test_positions[] = {0, total_notes/4, total_notes/2, (3*total_notes)/4, total_notes-1};
+  for (int ti = 0; ti < 5; ti++) {
+    int test_note = test_positions[ti];
+    if (test_note >= 0 && test_note < total_notes) {
+      float test_freq = calculate_frequency_for_note(test_note, total_notes, low_freq, high_freq);
+      log_info("SYNTH", "  Note %4d/%d (%.1f%%) → %.2f Hz", 
+               test_note, total_notes, 100.0f * test_note / (total_notes-1), test_freq);
+    }
+  }
 
   // First pass: Calculate buffer_len needed for first octave waveforms only
   for (int comma_cnt = 0; comma_cnt < notes_per_octave; comma_cnt++) {
@@ -202,6 +219,37 @@ uint32_t init_waves(volatile float *unitary_waveform,
     }
   }
 
+  // 🔧 FIX: Initialize orphan notes when total_notes is not divisible by num_octaves
+  // Example: 3456 notes / 10 octaves = 345.6 → 345 notes/octave → 3450 notes covered
+  // Notes 3450-3455 would be uninitialized → CRASH!
+  int covered_notes = notes_per_octave * (num_full_octaves + 1);
+  if (covered_notes < total_notes && notes_per_octave > 0) {
+    int orphan_count = total_notes - (int)note - 1;  // note is the last configured note index
+    
+    if (orphan_count > 0) {
+      log_info("SYNTH", "Initializing %d orphan notes (indices %d-%d)", 
+               orphan_count, (int)note + 1, total_notes - 1);
+      
+      // Use the last configured note's waveform for orphan notes
+      uint32_t last_area_size = waves[note].area_size;
+      volatile float* last_start_ptr = waves[note].start_ptr;
+      uint32_t last_octave_coeff = waves[note].octave_coeff;
+      
+      for (int orphan_idx = (int)note + 1; orphan_idx < total_notes; orphan_idx++) {
+        // Calculate frequency using logarithmic distribution (correct frequency)
+        float orphan_freq = calculate_frequency_for_note(orphan_idx, total_notes, low_freq, high_freq);
+        
+        waves[orphan_idx].frequency = orphan_freq;
+        waves[orphan_idx].area_size = last_area_size;
+        waves[orphan_idx].start_ptr = last_start_ptr;
+        waves[orphan_idx].current_idx = 0;
+        waves[orphan_idx].octave_coeff = last_octave_coeff;
+        waves[orphan_idx].octave_divider = 1;
+        waves[orphan_idx].current_volume = 0.0f;
+      }
+    }
+  }
+
   // Log first and last note info
   if (total_notes > 0) {
     log_info("SYNTH", "First note: %.2f Hz, area_size=%u, oct_coeff=%u", 
@@ -211,10 +259,10 @@ uint32_t init_waves(volatile float *unitary_waveform,
              waves[total_notes-1].octave_coeff);
   }
 
-  // Sanity check
+  // Sanity check - should now always pass
   if ((int)note < total_notes - 1) {
-    log_warning("SYNTH", "Wave generation: only %d notes configured (expected %d)", 
-                (int)note + 1, total_notes);
+    log_debug("SYNTH", "Note coverage: last main note=%d, total=%d (orphans handled above)", 
+                (int)note, total_notes);
   }
 
   log_info("SYNTH", "-------------------------------");

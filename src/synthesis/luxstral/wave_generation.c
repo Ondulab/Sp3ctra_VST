@@ -73,7 +73,7 @@ static uint32_t calculate_waveform(uint32_t current_aera_size,
     if (current_unitary_waveform_cell < buffer_len) {
       unitary_waveform[current_unitary_waveform_cell] =
           ((sin((x * 2.00 * PI) / (float)current_aera_size))) *
-          (WAVE_AMP_RESOLUTION / 2.00);
+          WAVE_AMP_RESOLUTION;
     }
     current_unitary_waveform_cell++;
   }

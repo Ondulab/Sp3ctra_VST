@@ -52,6 +52,7 @@ sp3ctra_config_t g_sp3ctra_config = {
     
     // Musical scale
     .semitone_per_octave = 12,
+    .num_octaves = 8,  // Fixed number of octaves (no dynamic calculation)
     .comma_per_semitone = 36,
     
     // Envelope parameters (very fast response)

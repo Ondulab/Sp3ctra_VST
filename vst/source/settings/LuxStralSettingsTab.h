@@ -15,7 +15,9 @@
  * - Dynamics Processing
  * - Performance
  */
-class LuxStralSettingsTab : public juce::Component
+class LuxStralSettingsTab : public juce::Component,
+                            public juce::ComboBox::Listener,
+                            public juce::Slider::Listener
 {
 public:
     LuxStralSettingsTab(Sp3ctraAudioProcessor& processor);
@@ -32,14 +34,18 @@ private:
     juce::Viewport viewport;
     juce::Component contentComponent;
 
-    // Section: Frequency Range
-    juce::Label freqRangeSectionLabel;
-    juce::Label lowFreqLabel;
-    juce::Slider lowFreqSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> lowFreqAttachment;
-    juce::Label highFreqLabel;
-    juce::Slider highFreqSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> highFreqAttachment;
+    // Section: Musical Tuning (replaces Low/High Frequency)
+    juce::Label tuningRangeSectionLabel;
+    juce::Label tuningLabel;
+    juce::Slider tuningSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> tuningAttachment;
+    juce::Label rootNoteLabel;
+    juce::ComboBox rootNoteComboBox;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> rootNoteAttachment;
+    juce::Label numOctavesLabel;
+    juce::Slider numOctavesSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> numOctavesAttachment;
+    juce::Label freqRangeInfoLabel;  // Displays calculated frequency range
 
     // Section: Envelope Parameters
     juce::Label envelopeSectionLabel;
@@ -90,6 +96,16 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> numWorkersAttachment;
 
     void layoutContentComponent();
+    
+    // Listener callbacks
+    void comboBoxChanged(juce::ComboBox* comboBoxThatHasChanged) override;
+    void sliderValueChanged(juce::Slider* slider) override;
+    
+    // Helper functions
+    float getRootNoteFrequency() const;  // Get frequency from root note selection
+    int getMaxOctavesForRootNote() const;  // Calculate max octaves to stay under 20kHz
+    void updateOctavesSliderRange();  // Update slider range based on root note
+    void updateFrequencyRangeInfo();  // Update info label
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxStralSettingsTab)
 };

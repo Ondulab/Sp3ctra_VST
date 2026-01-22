@@ -1,5 +1,6 @@
 #include "LuxStralSettingsTab.h"
 #include "../Sp3ctraConstants.h"
+#include <cmath>
 
 //==============================================================================
 LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
@@ -12,34 +13,59 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     viewport.setScrollBarsShown(true, false);
 
     // ========================================================================
-    // Section: Frequency Range
+    // Section: Musical Tuning (eliminates frequency jumps)
     // ========================================================================
-    freqRangeSectionLabel.setText("Frequency Range", juce::dontSendNotification);
-    freqRangeSectionLabel.setFont(juce::Font(juce::FontOptions(15.0f)).boldened());
-    freqRangeSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
-    contentComponent.addAndMakeVisible(freqRangeSectionLabel);
+    tuningRangeSectionLabel.setText("Musical Tuning", juce::dontSendNotification);
+    tuningRangeSectionLabel.setFont(juce::Font(juce::FontOptions(15.0f)).boldened());
+    tuningRangeSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
+    contentComponent.addAndMakeVisible(tuningRangeSectionLabel);
 
-    lowFreqLabel.setText("Low Frequency:", juce::dontSendNotification);
-    lowFreqLabel.setJustificationType(juce::Justification::centredRight);
-    contentComponent.addAndMakeVisible(lowFreqLabel);
+    // Tuning (A4 reference)
+    tuningLabel.setText("Tuning (A4):", juce::dontSendNotification);
+    tuningLabel.setJustificationType(juce::Justification::centredRight);
+    contentComponent.addAndMakeVisible(tuningLabel);
     
-    lowFreqSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    lowFreqSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
-    lowFreqSlider.setTextValueSuffix(" Hz");
-    contentComponent.addAndMakeVisible(lowFreqSlider);
-    lowFreqAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "luxstralLowFreq", lowFreqSlider);
+    tuningSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    tuningSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    tuningSlider.setTextValueSuffix(" Hz");
+    contentComponent.addAndMakeVisible(tuningSlider);
+    tuningAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "luxstralTuning", tuningSlider);
 
-    highFreqLabel.setText("High Frequency:", juce::dontSendNotification);
-    highFreqLabel.setJustificationType(juce::Justification::centredRight);
-    contentComponent.addAndMakeVisible(highFreqLabel);
+    // Root Note (ComboBox)
+    rootNoteLabel.setText("Root Note:", juce::dontSendNotification);
+    rootNoteLabel.setJustificationType(juce::Justification::centredRight);
+    contentComponent.addAndMakeVisible(rootNoteLabel);
     
-    highFreqSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    highFreqSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
-    highFreqSlider.setTextValueSuffix(" Hz");
-    contentComponent.addAndMakeVisible(highFreqSlider);
-    highFreqAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "luxstralHighFreq", highFreqSlider);
+    // Populate ComboBox with note names (C1 to B6)
+    const char* noteLetters[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+    for (int octave = 1; octave <= 6; octave++) {
+        for (int note = 0; note < 12; note++) {
+            rootNoteComboBox.addItem(juce::String(noteLetters[note]) + juce::String(octave), 
+                                     (octave - 1) * 12 + note + 1);  // ItemID starts at 1
+        }
+    }
+    contentComponent.addAndMakeVisible(rootNoteComboBox);
+    rootNoteAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        apvts, "luxstralRootNote", rootNoteComboBox);
+
+    // Number of Octaves
+    numOctavesLabel.setText("Octaves:", juce::dontSendNotification);
+    numOctavesLabel.setJustificationType(juce::Justification::centredRight);
+    contentComponent.addAndMakeVisible(numOctavesLabel);
+    
+    numOctavesSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    numOctavesSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+    numOctavesSlider.setRange(1, 10, 1);  // Integer steps
+    contentComponent.addAndMakeVisible(numOctavesSlider);
+    numOctavesAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "luxstralNumOctaves", numOctavesSlider);
+
+    // Frequency Range Info Label (read-only, displays calculated range)
+    freqRangeInfoLabel.setText("Range: -- Hz to -- Hz", juce::dontSendNotification);
+    freqRangeInfoLabel.setFont(juce::Font(juce::FontOptions(12.0f)).italicised());
+    freqRangeInfoLabel.setColour(juce::Label::textColourId, juce::Colours::grey);
+    contentComponent.addAndMakeVisible(freqRangeInfoLabel);
 
     // ========================================================================
     // Section: Envelope Parameters
@@ -191,6 +217,15 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     numWorkersAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralNumWorkers", numWorkersSlider);
 
+    // Add listeners for dynamic octave limitation
+    rootNoteComboBox.addListener(this);
+    tuningSlider.addListener(this);
+    numOctavesSlider.addListener(this);
+    
+    // Initial update of octave range and info label
+    updateOctavesSliderRange();
+    updateFrequencyRangeInfo();
+
     layoutContentComponent();
 }
 
@@ -231,18 +266,25 @@ void LuxStralSettingsTab::layoutContentComponent()
     int contentWidth = viewport.getWidth() - 40;
 
     // ========================================================================
-    // Section: Frequency Range
+    // Section: Musical Tuning
     // ========================================================================
-    freqRangeSectionLabel.setBounds(padding, yPos, contentWidth, 25);
+    tuningRangeSectionLabel.setBounds(padding, yPos, contentWidth, 25);
     yPos += 30;
     
-    lowFreqLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    lowFreqSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    tuningLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    tuningSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
     yPos += rowHeight + itemSpacing;
     
-    highFreqLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    highFreqSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
-    yPos += rowHeight + sectionSpacing;
+    rootNoteLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    rootNoteComboBox.setBounds(padding + labelWidth + 10, yPos, 100, rowHeight);
+    yPos += rowHeight + itemSpacing;
+    
+    numOctavesLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    numOctavesSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + itemSpacing;
+    
+    freqRangeInfoLabel.setBounds(padding, yPos, contentWidth, 20);
+    yPos += 25 + sectionSpacing;
 
     // ========================================================================
     // Section: Envelope Parameters
@@ -320,4 +362,126 @@ void LuxStralSettingsTab::layoutContentComponent()
 
     // Set content component size for scrolling
     contentComponent.setSize(viewport.getWidth(), yPos);
+}
+
+//==============================================================================
+// Listener implementations
+//==============================================================================
+
+void LuxStralSettingsTab::comboBoxChanged(juce::ComboBox* comboBoxThatHasChanged)
+{
+    if (comboBoxThatHasChanged == &rootNoteComboBox)
+    {
+        updateOctavesSliderRange();
+        updateFrequencyRangeInfo();
+    }
+}
+
+void LuxStralSettingsTab::sliderValueChanged(juce::Slider* slider)
+{
+    if (slider == &tuningSlider || slider == &numOctavesSlider)
+    {
+        // Also update when tuning changes (affects frequency calculations)
+        if (slider == &tuningSlider)
+        {
+            updateOctavesSliderRange();
+        }
+        updateFrequencyRangeInfo();
+    }
+}
+
+//==============================================================================
+// Helper functions for dynamic octave limitation
+//==============================================================================
+
+float LuxStralSettingsTab::getRootNoteFrequency() const
+{
+    // Get current tuning (A4 reference)
+    float tuning = static_cast<float>(tuningSlider.getValue());
+    
+    // Get root note index (0-71 for C1-B6)
+    int rootNoteIndex = rootNoteComboBox.getSelectedId() - 1;  // ItemID starts at 1
+    if (rootNoteIndex < 0) rootNoteIndex = 0;
+    
+    // Calculate frequency using equal temperament
+    // A4 is note index 45 (A1=9, A2=21, A3=33, A4=45)
+    // Formula: freq = tuning * 2^((noteIndex - 45) / 12)
+    float semitonesFromA4 = static_cast<float>(rootNoteIndex - 45);
+    float rootFreq = tuning * std::pow(2.0f, semitonesFromA4 / 12.0f);
+    
+    return rootFreq;
+}
+
+int LuxStralSettingsTab::getMaxOctavesForRootNote() const
+{
+    constexpr float MAX_FREQUENCY = 20000.0f;  // Nyquist-safe limit
+    
+    float rootFreq = getRootNoteFrequency();
+    if (rootFreq <= 0.0f) return 1;
+    
+    // Calculate max octaves: max_octaves = floor(log2(MAX_FREQUENCY / rootFreq))
+    float maxOctavesFloat = std::log2(MAX_FREQUENCY / rootFreq);
+    int maxOctaves = static_cast<int>(std::floor(maxOctavesFloat));
+    
+    // Clamp to valid range [1, 10]
+    if (maxOctaves < 1) maxOctaves = 1;
+    if (maxOctaves > 10) maxOctaves = 10;
+    
+    return maxOctaves;
+}
+
+void LuxStralSettingsTab::updateOctavesSliderRange()
+{
+    int maxOctaves = getMaxOctavesForRootNote();
+    
+    // Get current APVTS parameter value (the authoritative source)
+    auto* param = apvts.getParameter("luxstralNumOctaves");
+    int currentValue = static_cast<int>(param->convertFrom0to1(param->getValue()));
+    
+    // Update the slider range (this doesn't trigger attachment notification)
+    numOctavesSlider.setRange(1, maxOctaves, 1);
+    
+    // Clamp current value if it exceeds new max
+    if (currentValue > maxOctaves)
+    {
+        // CRITICAL FIX: Update BOTH the slider AND the APVTS parameter directly
+        // The setValueNotifyingHost() ensures the processor gets the new value
+        float normalizedValue = param->convertTo0to1(static_cast<float>(maxOctaves));
+        param->setValueNotifyingHost(normalizedValue);
+        
+        // Also update slider (will be synced via attachment, but do it explicitly for UI)
+        numOctavesSlider.setValue(maxOctaves, juce::dontSendNotification);
+    }
+    
+    // Update label to show max
+    numOctavesLabel.setText(juce::String("Octaves (max ") + juce::String(maxOctaves) + "):", 
+                           juce::dontSendNotification);
+}
+
+void LuxStralSettingsTab::updateFrequencyRangeInfo()
+{
+    float rootFreq = getRootNoteFrequency();
+    int numOctaves = static_cast<int>(numOctavesSlider.getValue());
+    
+    // Calculate high frequency
+    float highFreq = rootFreq * std::pow(2.0f, static_cast<float>(numOctaves));
+    
+    // Clamp to 20kHz for display
+    if (highFreq > 20000.0f) highFreq = 20000.0f;
+    
+    // Format the info label
+    juce::String infoText = juce::String::formatted("Range: %.1f Hz to %.1f Hz", rootFreq, highFreq);
+    
+    // Add warning if approaching Nyquist
+    if (highFreq >= 19000.0f)
+    {
+        infoText += " (near Nyquist limit)";
+        freqRangeInfoLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+    }
+    else
+    {
+        freqRangeInfoLabel.setColour(juce::Label::textColourId, juce::Colours::grey);
+    }
+    
+    freqRangeInfoLabel.setText(infoText, juce::dontSendNotification);
 }
