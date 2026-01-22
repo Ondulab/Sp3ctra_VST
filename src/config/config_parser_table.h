@@ -61,10 +61,10 @@ static const config_param_def_t CONFIG_PARAMS[] = {
                  high_frequency, 20.0f, 20000.0f),
     
     // Envelope slew section
-    CONFIG_PARAM("envelope_slew", "tau_up_base_ms", PARAM_TYPE_FLOAT, 
-                 tau_up_base_ms, 0.001f, 1000.0f),
-    CONFIG_PARAM("envelope_slew", "tau_down_base_ms", PARAM_TYPE_FLOAT, 
-                 tau_down_base_ms, 0.001f, 1000.0f),
+    CONFIG_PARAM("envelope_slew", "tau_up_base_ms", PARAM_TYPE_FLOAT,
+                 tau_up_base_ms, 0.5f, 5000.0f),
+    CONFIG_PARAM("envelope_slew", "tau_down_base_ms", PARAM_TYPE_FLOAT,
+                 tau_down_base_ms, 0.5f, 5000.0f),
     CONFIG_PARAM("envelope_slew", "decay_freq_ref_hz", PARAM_TYPE_FLOAT, 
                  decay_freq_ref_hz, 20.0f, 20000.0f),
     CONFIG_PARAM("envelope_slew", "decay_freq_beta", PARAM_TYPE_FLOAT, 

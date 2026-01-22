@@ -6,9 +6,10 @@
 extern "C" {
     #include "../../src/core/context.h"
     #include "../../src/utils/logger.h"
-    #include "luxstral/synth_luxstral.h"  // LuxStral synthesis engine
-    #include "luxstral/vst_adapters.h"    // Audio buffer init functions
-    #include "luxstral/wave_generation.h" // Hot-reload frequency API
+    #include "luxstral/synth_luxstral.h"           // LuxStral synthesis engine
+    #include "luxstral/synth_luxstral_algorithms.h" // Envelope coefficient update
+    #include "luxstral/vst_adapters.h"             // Audio buffer init functions
+    #include "luxstral/wave_generation.h"          // Hot-reload frequency API
 }
 
 //==============================================================================
@@ -56,36 +57,53 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         PARAM_VISUALIZER_MODE,
         "Visualizer Mode",
         juce::StringArray{"Image", "Waveform", "Inverted Waveform"},
-        0  // Default = Image mode
+        2  // Default = Inverted Waveform mode
     ));
     
     // ========================================================================
     // LUXSTRAL SYNTHESIS PARAMETERS
-    // Configuration based on sp3ctra.ini [synth_luxstral] and [image_processing_luxstral]
+    // Musical approach: Tuning + Root Note + Num Octaves
+    // This eliminates "jumps" when changing frequency range continuously
     // ========================================================================
     
-    // Frequency Range (Musical mapping: C2 to ~8 octaves above)
+    // Tuning (A4 reference frequency, standard = 440 Hz)
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "luxstralLowFreq",
-        "LuxStral Low Frequency",
-        juce::NormalisableRange<float>(20.0f, 200.0f, 0.01f),
-        65.41f,  // C2 (as specified in config)
+        "luxstralTuning",
+        "LuxStral Tuning (A4)",
+        juce::NormalisableRange<float>(415.0f, 466.0f, 0.1f),  // A4 baroque to A4 sharp
+        440.0f,  // Standard concert pitch
         "Hz"
     ));
     
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "luxstralHighFreq",
-        "LuxStral High Frequency",
-        juce::NormalisableRange<float>(1000.0f, 20000.0f, 1.0f),
-        16744.04f,  // ~8 octaves above C2 (as specified in config)
-        "Hz"
+    // Root Note (MIDI note number: C0=12, C1=24, C2=36, ..., C8=108)
+    // ComboBox with all chromatic notes from C1 to C6
+    juce::StringArray noteNames;
+    const char* noteLetters[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+    for (int octave = 1; octave <= 6; octave++) {
+        for (int note = 0; note < 12; note++) {
+            noteNames.add(juce::String(noteLetters[note]) + juce::String(octave));
+        }
+    }
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        "luxstralRootNote",
+        "LuxStral Root Note",
+        noteNames,
+        12  // Default: C2 (index 12 = C1 is 0, so C2 is index 12)
+    ));
+    
+    // Number of Octaves (integer, 1-10)
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        "luxstralNumOctaves",
+        "LuxStral Num Octaves",
+        1, 10,
+        8  // Default: 8 octaves
     ));
     
     // Envelope Parameters (very fast response for LuxStral)
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         "luxstralAttackMs",
         "LuxStral Attack Time",
-        juce::NormalisableRange<float>(0.001f, 1000.0f, 0.001f, 0.3f),  // Skewed, min 0.001ms
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f),  // Skewed, 0.5ms to 5000ms
         0.5f,  // tau_up_base_ms = 0.5 (as specified in config)
         "ms"
     ));
@@ -93,7 +111,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         "luxstralReleaseMs",
         "LuxStral Release Time",
-        juce::NormalisableRange<float>(0.001f, 10000.0f, 0.001f, 0.3f),  // Skewed, min 0.001ms
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f),  // Skewed, 0.5ms to 5000ms
         0.5f,  // tau_down_base_ms = 0.5 (as specified in config)
         "ms"
     ));
@@ -219,8 +237,9 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener(PARAM_LOG_LEVEL, this);
     
     // Register LuxStral parameter listeners
-    apvts.addParameterListener("luxstralLowFreq", this);
-    apvts.addParameterListener("luxstralHighFreq", this);
+    apvts.addParameterListener("luxstralTuning", this);
+    apvts.addParameterListener("luxstralRootNote", this);
+    apvts.addParameterListener("luxstralNumOctaves", this);
     apvts.addParameterListener("luxstralAttackMs", this);
     apvts.addParameterListener("luxstralReleaseMs", this);
     apvts.addParameterListener("luxstralInvertIntensity", this);
@@ -395,6 +414,9 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     // Update global config with audio parameters
     extern sp3ctra_config_t g_sp3ctra_config;
     
+    // Check if sample rate changed (important for Nyquist frequency clamp)
+    int oldSampleRate = g_sp3ctra_config.sampling_frequency;
+    
     // Set audio parameters
     g_sp3ctra_config.sampling_frequency = (int)sampleRate;
     g_sp3ctra_config.audio_buffer_size = samplesPerBlock;
@@ -402,6 +424,13 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     // Musical scale parameters (required for wave generation)
     g_sp3ctra_config.semitone_per_octave = 12;  // Standard musical scale
     g_sp3ctra_config.comma_per_semitone = 36;   // Default granularity
+    
+    // 🔧 CRITICAL: Recalculate frequencies with new sample rate (Nyquist clamp)
+    if (oldSampleRate != (int)sampleRate) {
+        log_info("VST", "Sample rate changed from %d to %d Hz - recalculating frequencies", 
+                 oldSampleRate, (int)sampleRate);
+        applyConfigurationToCore(false);  // Recalculate with new Nyquist limit
+    }
     
     // 🛑 CRITICAL FIX: Stop AudioProcessingThread WITHOUT touching the worker pool!
     // The worker pool uses MAX_BUFFER_SIZE for its buffers and does NOT need to be restarted.
@@ -660,11 +689,20 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
         // Just update g_sp3ctra_config silently (no restart)
         applyConfigurationToCore(false);
         
-        // 🔧 HOT-RELOAD: Frequency range changes require waveform regeneration
+        // 🔧 HOT-RELOAD: Musical parameters (tuning, root note, octaves) change frequency range
         // This triggers fade-out → regenerate → fade-in for smooth transition
-        if (parameterID == "luxstralLowFreq" || parameterID == "luxstralHighFreq") {
-            log_info("VST", "Frequency range changed - requesting hot-reload");
+        if (parameterID == "luxstralTuning" || 
+            parameterID == "luxstralRootNote" || 
+            parameterID == "luxstralNumOctaves") {
+            log_info("VST", "Musical parameter changed - requesting hot-reload");
             request_frequency_reinit();
+        }
+        
+        // 🔧 HOT-RELOAD: Envelope parameters (Attack/Release) require coefficient update
+        // Recalculates alpha_up and alpha_down_weighted for all oscillators
+        if (parameterID == "luxstralAttackMs" || parameterID == "luxstralReleaseMs") {
+            log_info("VST", "Envelope parameter changed - updating coefficients");
+            update_gap_limiter_coefficients();
         }
         
         return;  // Done - synthesis engine will pick up changes automatically
@@ -770,10 +808,44 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     // Synchronize LuxStral parameters from APVTS to g_sp3ctra_config
     // ========================================================================
     
-    // Frequency Range
-    g_sp3ctra_config.low_frequency = apvts.getRawParameterValue("luxstralLowFreq")->load();
-    g_sp3ctra_config.high_frequency = apvts.getRawParameterValue("luxstralHighFreq")->load();
-    g_sp3ctra_config.start_frequency = g_sp3ctra_config.low_frequency;  // Backward compatibility
+    // 🎵 Musical Frequency Calculation from Tuning + Root Note + Num Octaves
+    // This eliminates "jumps" caused by dynamic octave recalculation
+    float tuning = apvts.getRawParameterValue("luxstralTuning")->load();
+    int rootNoteIndex = (int)apvts.getRawParameterValue("luxstralRootNote")->load();
+    int numOctaves = (int)apvts.getRawParameterValue("luxstralNumOctaves")->load();
+    
+    // Convert ComboBox index to MIDI note number
+    // Index 0 = C1 = MIDI 24, Index 12 = C2 = MIDI 36, etc.
+    int rootNoteMidi = 24 + rootNoteIndex;  // C1 starts at MIDI 24
+    
+    // Calculate frequency from MIDI note: freq = tuning * 2^((midi - 69) / 12)
+    // A4 (MIDI 69) = tuning Hz
+    float lowFrequency = tuning * powf(2.0f, (float)(rootNoteMidi - 69) / 12.0f);
+    float highFrequency = lowFrequency * powf(2.0f, (float)numOctaves);
+    
+    // Clamp high frequency to 20 kHz and Nyquist frequency
+    if (highFrequency > 20000.0f) {
+        highFrequency = 20000.0f;
+    }
+    
+    // Additional safety: clamp to Nyquist frequency if sample rate is known
+    extern sp3ctra_config_t g_sp3ctra_config;
+    float nyquist = (float)g_sp3ctra_config.sampling_frequency * 0.5f;
+    if (nyquist > 0 && highFrequency > nyquist) {
+        log_warning("VST", "High frequency %.1f Hz clamped to Nyquist %.1f Hz", highFrequency, nyquist);
+        highFrequency = nyquist;
+    }
+    
+    // Store calculated frequencies
+    g_sp3ctra_config.low_frequency = lowFrequency;
+    g_sp3ctra_config.high_frequency = highFrequency;
+    g_sp3ctra_config.start_frequency = lowFrequency;  // Backward compatibility
+    
+    // Store the fixed number of octaves (no more dynamic calculation!)
+    g_sp3ctra_config.num_octaves = numOctaves;
+    
+    log_debug("VST", "Musical config: tuning=%.1f Hz, root=%d (MIDI %d), octaves=%d -> %.1f - %.1f Hz",
+              tuning, rootNoteIndex, rootNoteMidi, numOctaves, lowFrequency, highFrequency);
     
     // Envelope Parameters
     g_sp3ctra_config.tau_up_base_ms = apvts.getRawParameterValue("luxstralAttackMs")->load();

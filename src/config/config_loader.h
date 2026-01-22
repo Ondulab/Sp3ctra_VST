@@ -51,6 +51,7 @@ typedef struct {
     int semitone_per_octave;      // Always 12 (standard musical scale)
     int comma_per_semitone;       // Calculated based on DPI and frequency range
     int pixels_per_note;          // Always 1 for maximum resolution
+    int num_octaves;              // Fixed number of octaves (set by user, not calculated dynamically)
     
     // Image processing parameters - LUXSTRAL SYNTHESIS
     int additive_enable_non_linear_mapping;    // Enable/disable gamma correction (0/1)

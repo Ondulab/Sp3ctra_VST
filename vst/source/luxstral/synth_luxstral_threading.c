@@ -526,11 +526,10 @@ void synth_precompute_wave_data(float *imageData, DoubleBuffer *db) {
       const float* start_ptr = (const float*)ptr;  // Safe cast: read-only access
       
       // Optimize loop: hoist invariant loads, enable better compiler optimizations
+      // 🔧 FIX: Use modulo instead of single subtraction to handle octave_coeff > area_size
+      // This happens when num_octaves is high (e.g., 10 octaves → oct_coeff=1024 > area_size=726)
       for (int buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
-        int32_t new_idx = (cur_idx + octave_coeff);
-        if ((uint32_t)new_idx >= area_size) {
-          new_idx -= area_size;
-        }
+        int32_t new_idx = (cur_idx + octave_coeff) % area_size;  // SAFE: Always within bounds
 
         pre_idx_base[buff_idx] = new_idx;
         pre_wave_base[buff_idx] = *(start_ptr + new_idx);
