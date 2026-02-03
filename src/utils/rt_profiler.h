@@ -27,7 +27,7 @@ extern "C" {
 #define RT_PROFILER_CRITICAL_MUTEX_WAIT_US  100    /* Critical if > 100µs */
 
 /* Reporting interval */
-#define RT_PROFILER_REPORT_INTERVAL_FRAMES  1000   /* Report every 1000 frames (~20s @ 48kHz) */
+#define RT_PROFILER_REPORT_INTERVAL_FRAMES  500   /* Report every 500 frames (~10s @ 48kHz, ~5s @ 96kHz) */
 
 /**
  * @brief Real-time profiler structure
@@ -65,6 +65,15 @@ typedef struct {
     
     /* Timing helper */
     struct timeval callback_start_time;
+    
+    /* Thread performance tracking */
+    atomic_uint_fast64_t audio_thread_total_time_us;
+    atomic_uint_fast64_t audio_thread_iteration_count;
+    atomic_uint_fast64_t audio_thread_max_time_us;
+    
+    atomic_uint_fast64_t udp_thread_total_time_us;
+    atomic_uint_fast64_t udp_thread_packet_count;
+    atomic_uint_fast64_t udp_thread_max_time_us;
 } RTProfiler;
 
 /**
@@ -188,6 +197,24 @@ float rt_profiler_get_cpu_percent(RTProfiler *profiler);
  * @return 1 if performance is good, 0 if there are issues
  */
 int rt_profiler_is_healthy(RTProfiler *profiler);
+
+/**
+ * @brief Report audio processing thread iteration time
+ * Call this after each synthesis iteration
+ * 
+ * @param profiler Profiler instance
+ * @param elapsed_us Time spent in iteration (microseconds)
+ */
+void rt_profiler_report_audio_thread_iteration(RTProfiler *profiler, uint64_t elapsed_us);
+
+/**
+ * @brief Report UDP thread packet processing time
+ * Call this after processing each UDP packet
+ * 
+ * @param profiler Profiler instance
+ * @param elapsed_us Time spent processing packet (microseconds)
+ */
+void rt_profiler_report_udp_thread_packet(RTProfiler *profiler, uint64_t elapsed_us);
 
 #ifdef __cplusplus
 }

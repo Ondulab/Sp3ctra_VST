@@ -6,6 +6,11 @@
 #include "AudioProcessingThread.h"  // Thread for synth_AudioProcess()
 #include "Sp3ctraConstants.h"
 
+// C headers for RT profiling
+extern "C" {
+    #include "../../src/utils/rt_profiler.h"
+}
+
 //==============================================================================
 /**
  * @brief Sp3ctra VST Audio Processor
@@ -121,6 +126,8 @@ private:
     // UDP Batch Update state (prevents multiple UDP restarts)
     std::atomic<bool> udpBatchUpdateActive{false};
     std::atomic<bool> udpNeedsRestart{false};
+    
+    // Note: RT Profiler is now global (g_vst_rt_profiler) to be accessible from C threads
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Sp3ctraAudioProcessor)
 };

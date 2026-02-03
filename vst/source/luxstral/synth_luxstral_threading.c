@@ -22,9 +22,14 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <sys/mman.h>  // For mlock() - prevent page faults in RT threads
 
 #ifdef __linux__
 #include <sched.h>
+#endif
+
+#ifdef __APPLE__
+#include <pthread/qos.h>
 #endif
 
 /* External RT Profiler */
@@ -266,6 +271,14 @@ int synth_init_thread_pool(void) {
  */
 void *synth_persistent_worker_thread(void *arg) {
   synth_thread_worker_t *worker = (synth_thread_worker_t *)arg;
+
+  // 🔧 RT PRIORITY: Set QoS to USER_INTERACTIVE for this worker thread
+  // Must be called from within the thread itself (pthread_set_qos_class_self_np)
+#ifdef __APPLE__
+  if (pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) == 0) {
+    log_startup_detail("SYNTH", "Worker %d: QoS set to USER_INTERACTIVE", worker->thread_id);
+  }
+#endif
 
   while (!synth_pool_shutdown && !synth_workers_must_exit) {
     // Deterministic execution with barriers
@@ -770,6 +783,26 @@ int init_rt_safe_buffers(void) {
   g_rt_stereo_R_buffer.worker_buffer = 1;
   pthread_mutex_init(&g_rt_stereo_R_buffer.swap_mutex, NULL);
 
+  // ========================================================================
+  // 🔧 RT OPTIMIZATION: Lock RT-safe buffers in memory to prevent page faults
+  // ========================================================================
+  size_t buffer_bytes = (size_t)MAX_BUFFER_SIZE * sizeof(float);
+  int mlock_success = 0;
+  int mlock_total = 6;  // 3 buffer types × 2 double-buffer slots
+  
+  if (mlock(g_rt_luxstral_buffer.buffers[0], buffer_bytes) == 0) mlock_success++;
+  if (mlock(g_rt_luxstral_buffer.buffers[1], buffer_bytes) == 0) mlock_success++;
+  if (mlock(g_rt_stereo_L_buffer.buffers[0], buffer_bytes) == 0) mlock_success++;
+  if (mlock(g_rt_stereo_L_buffer.buffers[1], buffer_bytes) == 0) mlock_success++;
+  if (mlock(g_rt_stereo_R_buffer.buffers[0], buffer_bytes) == 0) mlock_success++;
+  if (mlock(g_rt_stereo_R_buffer.buffers[1], buffer_bytes) == 0) mlock_success++;
+  
+  if (mlock_success == mlock_total) {
+    log_info("SYNTH", "RT-safe buffers locked in memory (mlock) - page faults prevented");
+  } else if (mlock_success > 0) {
+    log_warning("SYNTH", "Partial mlock: %d/%d RT-safe buffers locked", mlock_success, mlock_total);
+  }
+  
   log_info("SYNTH", "RT-safe double buffering system initialized (MAX_BUFFER_SIZE=%d)", MAX_BUFFER_SIZE);
   return 0;
 }

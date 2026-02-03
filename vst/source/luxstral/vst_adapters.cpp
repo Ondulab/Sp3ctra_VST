@@ -11,6 +11,7 @@
 #include "vst_adapters.h"
 #include <cstring>
 #include <cstdlib>
+#include <sys/mman.h>  // For mlock() - prevent page faults in RT threads
 
 // Note: vst_adapters.h already includes everything we need
 // No need to include vst_adapters_c.h here (would cause redefinitions)
@@ -145,6 +146,33 @@ int luxstral_init_audio_buffers(int buffer_size) {
     // audioProcessingThread blocks waiting for g_vst_callback_consumed_buffer=1
     // but processBlock() never signals because ready=0 → DEADLOCK!
     __atomic_store_n(&g_vst_callback_consumed_buffer, 1, __ATOMIC_RELEASE);
+    
+    // ========================================================================
+    // 🔧 RT OPTIMIZATION: Lock audio buffers in memory to prevent page faults
+    // Page faults during RT audio processing can cause latency spikes of 50ms+!
+    // mlock() ensures the buffers stay in physical RAM and are never swapped.
+    // ========================================================================
+    size_t buffer_bytes = (size_t)buffer_size * sizeof(float);
+    int mlock_success = 0;
+    int mlock_total = 4;  // 2 channels × 2 double-buffer slots
+    
+    for (int i = 0; i < 2; i++) {
+        if (mlock(luxstral_buffers_L[i].data, buffer_bytes) == 0) {
+            mlock_success++;
+        }
+        if (mlock(luxstral_buffers_R[i].data, buffer_bytes) == 0) {
+            mlock_success++;
+        }
+    }
+    
+    if (mlock_success == mlock_total) {
+        log_info("SYNTH", "Audio buffers locked in memory (mlock) - page faults prevented");
+    } else if (mlock_success > 0) {
+        log_warning("SYNTH", "Partial mlock: %d/%d buffers locked (may need elevated privileges)", 
+                    mlock_success, mlock_total);
+    } else {
+        log_info("SYNTH", "mlock unavailable - continuing without memory locking");
+    }
     
     log_info("SYNTH", "Audio buffers initialized successfully");
     return 0;

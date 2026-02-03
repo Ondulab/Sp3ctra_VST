@@ -3,6 +3,11 @@
 #include <juce_core/juce_core.h>
 #include "Sp3ctraCore.h"
 
+// macOS QoS support for RT priority
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
+
 // Forward declaration of C function
 extern "C" {
     void* audioProcessingThread(void* arg);
@@ -61,7 +66,7 @@ public:
      * - Context->running flag for shutdown
      */
     void run() override {
-        log_info("SYNTH", "AudioProcessingThread starting...");
+        log_info("SYNTH", "AudioProcessingThread starting with RT priority...");
         
         if (!core) {
             log_error("SYNTH", "AudioProcessingThread: core is null!");
@@ -73,6 +78,16 @@ public:
             log_error("SYNTH", "AudioProcessingThread: Context is null!");
             return;
         }
+        
+        // 🔧 RT PRIORITY BOOST: Set macOS QoS to highest user-interactive level
+        // This ensures the audio processing thread gets CPU time before other processes
+#ifdef __APPLE__
+        if (pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) == 0) {
+            log_info("SYNTH", "AudioProcessingThread: QoS set to USER_INTERACTIVE");
+        } else {
+            log_warning("SYNTH", "AudioProcessingThread: Failed to set QoS class");
+        }
+#endif
         
         // 🔧 CRITICAL FIX: Set audio_thread_running, NOT running!
         // This allows stopping ONLY the audio thread during buffer size changes

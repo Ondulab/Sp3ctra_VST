@@ -140,48 +140,115 @@ void rt_profiler_print_stats(RTProfiler *profiler) {
     float cpu_percent = rt_profiler_get_cpu_percent(profiler);
     
     uint64_t underruns = atomic_load(&profiler->underrun_count);
-    uint64_t miss_add = atomic_load(&profiler->buffer_miss_luxstral);
-    uint64_t miss_poly = atomic_load(&profiler->buffer_miss_luxsynth);
-    uint64_t miss_photo = atomic_load(&profiler->buffer_miss_luxwave);
-    uint64_t miss_total = miss_add + miss_poly + miss_photo;
+    uint64_t miss_luxstral = atomic_load(&profiler->buffer_miss_luxstral);
     
-    log_debug("RT_PROFILER", "=== Performance Stats (after %llu callbacks) ===", 
+    log_debug("RT_PROFILER", "=== Thread Performance (last %llu callbacks) ===", 
              profiler->callback_count);
-    log_debug("RT_PROFILER", "  Callback: avg=%llu µs, max=%llu µs, budget=%llu µs",
-             avg_callback_us, profiler->max_callback_time_us, profiler->callback_budget_us);
-    log_debug("RT_PROFILER", "  CPU usage: %.1f%% of available time", cpu_percent);
-    log_debug("RT_PROFILER", "  Underruns: %llu total", underruns);
+    log_debug("RT_PROFILER", "  Audio Config: %d frames @ %dHz = %llu µs budget",
+             profiler->buffer_size, profiler->sample_rate, profiler->callback_budget_us);
+    log_debug("RT_PROFILER", "");
     
-    /* Buffer miss stats */
-    if (miss_total > 0) {
-        float miss_rate_add = (miss_add * 100.0f) / profiler->callback_count;
-        float miss_rate_poly = (miss_poly * 100.0f) / profiler->callback_count;
-        float miss_rate_photo = (miss_photo * 100.0f) / profiler->callback_count;
-        
-        log_debug("RT_PROFILER", "  Buffer miss: %llu total (%.2f%%)", miss_total,
-                 (miss_total * 100.0f) / profiler->callback_count);
-        log_debug("RT_PROFILER", "    - LuxStral: %llu (%.2f%%)", miss_add, miss_rate_add);
-        log_debug("RT_PROFILER", "    - LuxSynth: %llu (%.2f%%)", miss_poly, miss_rate_poly);
-        log_debug("RT_PROFILER", "    - LuxWave: %llu (%.2f%%)", miss_photo, miss_rate_photo);
+    /* processBlock (RT callback) stats */
+    float callback_ratio = (avg_callback_us * 100.0f) / profiler->callback_budget_us;
+    float max_callback_ratio = (profiler->max_callback_time_us * 100.0f) / profiler->callback_budget_us;
+    
+    log_debug("RT_PROFILER", "  processBlock (RT callback):");
+    log_debug("RT_PROFILER", "    Avg: %llu µs (%.1f%% of budget)", avg_callback_us, callback_ratio);
+    log_debug("RT_PROFILER", "    Max: %llu µs (%.1f%% of budget)", profiler->max_callback_time_us, max_callback_ratio);
+    log_debug("RT_PROFILER", "    Calls: %llu", profiler->callback_count);
+    
+    if (callback_ratio < 50.0f) {
+        log_debug("RT_PROFILER", "    Status: ✅ HEALTHY (<<< budget)");
+    } else if (callback_ratio < 80.0f) {
+        log_debug("RT_PROFILER", "    Status: ⚠️  CAUTION (approaching budget)");
     } else {
-        log_debug("RT_PROFILER", "  Buffer miss: 0 (0.00%%)");
+        log_debug("RT_PROFILER", "    Status: 🔥 NEAR LIMIT");
     }
+    log_debug("RT_PROFILER", "");
+    
+    /* AudioProcessingThread (synthesis) stats */
+    uint64_t audio_iterations = atomic_load(&profiler->audio_thread_iteration_count);
+    if (audio_iterations > 0) {
+        uint64_t audio_total = atomic_load(&profiler->audio_thread_total_time_us);
+        uint64_t audio_max = atomic_load(&profiler->audio_thread_max_time_us);
+        uint64_t audio_avg = audio_total / audio_iterations;
+        
+        float audio_ratio = (audio_avg * 100.0f) / profiler->callback_budget_us;
+        float audio_max_ratio = (audio_max * 100.0f) / profiler->callback_budget_us;
+        
+        log_debug("RT_PROFILER", "  AudioProcessingThread (synthesis):");
+        log_debug("RT_PROFILER", "    Avg: %llu µs (%.1f%% of budget)", audio_avg, audio_ratio);
+        log_debug("RT_PROFILER", "    Max: %llu µs (%.1f%% of budget)", audio_max, audio_max_ratio);
+        log_debug("RT_PROFILER", "    Iterations: %llu", audio_iterations);
+        
+        if (audio_ratio < 80.0f) {
+            log_debug("RT_PROFILER", "    Status: ✅ HEALTHY (within budget)");
+        } else if (audio_ratio < 100.0f) {
+            log_debug("RT_PROFILER", "    Status: ⚠️  NEAR LIMIT (>80%% budget)");
+        } else {
+            log_debug("RT_PROFILER", "    Status: 🔥 OVERLOAD (causing buffer misses!)");
+        }
+        
+        /* Reset thread counters for next period */
+        atomic_store(&profiler->audio_thread_total_time_us, 0);
+        atomic_store(&profiler->audio_thread_iteration_count, 0);
+        atomic_store(&profiler->audio_thread_max_time_us, 0);
+    } else {
+        log_debug("RT_PROFILER", "  AudioProcessingThread: No data");
+    }
+    log_debug("RT_PROFILER", "");
+    
+    /* UDP Receiver stats */
+    uint64_t udp_packets = atomic_load(&profiler->udp_thread_packet_count);
+    if (udp_packets > 0) {
+        uint64_t udp_total = atomic_load(&profiler->udp_thread_total_time_us);
+        uint64_t udp_max = atomic_load(&profiler->udp_thread_max_time_us);
+        uint64_t udp_avg = udp_total / udp_packets;
+        
+        log_debug("RT_PROFILER", "  UDP Receiver:");
+        log_debug("RT_PROFILER", "    Avg: %llu µs per packet", udp_avg);
+        log_debug("RT_PROFILER", "    Max: %llu µs", udp_max);
+        log_debug("RT_PROFILER", "    Packets: %llu", udp_packets);
+        log_debug("RT_PROFILER", "    Status: ✅ LOW IMPACT");
+        
+        /* Reset UDP counters */
+        atomic_store(&profiler->udp_thread_total_time_us, 0);
+        atomic_store(&profiler->udp_thread_packet_count, 0);
+        atomic_store(&profiler->udp_thread_max_time_us, 0);
+    } else {
+        log_debug("RT_PROFILER", "  UDP Receiver: waiting (no packets)");
+    }
+    log_debug("RT_PROFILER", "");
+    
+    /* Buffer miss stats - LuxStral only (VST mode) */
+    log_debug("RT_PROFILER", "  Buffer Issues:");
+    log_debug("RT_PROFILER", "    Underruns: %llu total", underruns);
+    if (miss_luxstral > 0) {
+        float miss_rate = (miss_luxstral * 100.0f) / profiler->callback_count;
+        log_debug("RT_PROFILER", "    LuxStral buffer miss: %llu (%.2f%%)", miss_luxstral, miss_rate);
+    } else {
+        log_debug("RT_PROFILER", "    LuxStral buffer miss: 0 (0.00%%)");
+    }
+    log_debug("RT_PROFILER", "");
     
     /* Mutex stats */
     if (profiler->mutex_lock_attempts > 0) {
         uint64_t avg_mutex_wait = profiler->mutex_total_wait_us / profiler->mutex_lock_attempts;
         float contention_rate = (profiler->mutex_contentions * 100.0f) / profiler->mutex_lock_attempts;
         
-        log_debug("RT_PROFILER", "  Mutex: %llu locks, %.2f%% contention, avg wait=%llu µs, max=%llu µs",
-                 profiler->mutex_lock_attempts, contention_rate, 
+        log_debug("RT_PROFILER", "  Mutex Contention:");
+        log_debug("RT_PROFILER", "    Locks: %llu, Contentions: %.2f%%",
+                 profiler->mutex_lock_attempts, contention_rate);
+        log_debug("RT_PROFILER", "    Avg wait: %llu µs, Max: %llu µs",
                  avg_mutex_wait, profiler->mutex_max_wait_us);
+        log_debug("RT_PROFILER", "");
     }
     
-    /* Health check */
+    /* Overall health check */
     if (!rt_profiler_is_healthy(profiler)) {
         log_warning("RT_PROFILER", "⚠️  PERFORMANCE ISSUES DETECTED!");
     } else {
-        log_debug("RT_PROFILER", "✅ Performance is healthy");
+        log_debug("RT_PROFILER", "✅ Overall performance is healthy");
     }
 }
 
@@ -256,4 +323,30 @@ int rt_profiler_is_healthy(RTProfiler *profiler) {
     }
     
     return 1;  /* All checks passed */
+}
+
+void rt_profiler_report_audio_thread_iteration(RTProfiler *profiler, uint64_t elapsed_us) {
+    if (!profiler->enabled) return;
+    
+    atomic_fetch_add(&profiler->audio_thread_total_time_us, elapsed_us);
+    atomic_fetch_add(&profiler->audio_thread_iteration_count, 1);
+    
+    /* Update max time */
+    uint64_t current_max = atomic_load(&profiler->audio_thread_max_time_us);
+    if (elapsed_us > current_max) {
+        atomic_store(&profiler->audio_thread_max_time_us, elapsed_us);
+    }
+}
+
+void rt_profiler_report_udp_thread_packet(RTProfiler *profiler, uint64_t elapsed_us) {
+    if (!profiler->enabled) return;
+    
+    atomic_fetch_add(&profiler->udp_thread_total_time_us, elapsed_us);
+    atomic_fetch_add(&profiler->udp_thread_packet_count, 1);
+    
+    /* Update max time */
+    uint64_t current_max = atomic_load(&profiler->udp_thread_max_time_us);
+    if (elapsed_us > current_max) {
+        atomic_store(&profiler->udp_thread_max_time_us, elapsed_us);
+    }
 }
