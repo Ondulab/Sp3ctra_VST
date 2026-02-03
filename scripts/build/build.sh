@@ -160,9 +160,13 @@ else
     echo -e "${CYAN}Build type: Release${NC}"
 fi
 
-# Determine parallel jobs (Linux only)
+# Determine parallel jobs
 if [ "$UNAME_S" = "Linux" ]; then
     JOBS=$(nproc 2>/dev/null || echo 2)
+    echo -e "${CYAN}Using $JOBS parallel jobs${NC}"
+    MAKE_JOBS="-j$JOBS"
+elif [ "$UNAME_S" = "Darwin" ]; then
+    JOBS=$(sysctl -n hw.ncpu 2>/dev/null || echo 2)
     echo -e "${CYAN}Using $JOBS parallel jobs${NC}"
     MAKE_JOBS="-j$JOBS"
 else

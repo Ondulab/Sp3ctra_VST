@@ -134,6 +134,43 @@ else
     echo -e "${YELLOW}⚠ Standalone not found${NC}"
 fi
 
+# Copy binaries to prebuilt/ directory (for Git distribution)
+if [ "$BUILD_CONFIG" = "Release" ]; then
+    echo ""
+    echo -e "${BLUE}Copying binaries to prebuilt/ directory...${NC}"
+    
+    PREBUILT_DIR="$PROJECT_DIR/prebuilt"
+    mkdir -p "$PREBUILT_DIR/VST3"
+    mkdir -p "$PREBUILT_DIR/AU"
+    mkdir -p "$PREBUILT_DIR/Standalone"
+    
+    # Copy VST3
+    if [ -d "$VST3_PATH" ]; then
+        echo -e "${YELLOW}Copying VST3...${NC}"
+        rm -rf "$PREBUILT_DIR/VST3/Sp3ctra.vst3"
+        cp -R "$VST3_PATH" "$PREBUILT_DIR/VST3/"
+        echo -e "${GREEN}✓ VST3 copied to prebuilt/VST3/${NC}"
+    fi
+    
+    # Copy AU
+    if [ -d "$AU_PATH" ]; then
+        echo -e "${YELLOW}Copying AU...${NC}"
+        rm -rf "$PREBUILT_DIR/AU/Sp3ctra.component"
+        cp -R "$AU_PATH" "$PREBUILT_DIR/AU/"
+        echo -e "${GREEN}✓ AU copied to prebuilt/AU/${NC}"
+    fi
+    
+    # Copy Standalone
+    if [ -d "$STANDALONE_PATH" ]; then
+        echo -e "${YELLOW}Copying Standalone...${NC}"
+        rm -rf "$PREBUILT_DIR/Standalone/Sp3ctra.app"
+        cp -R "$STANDALONE_PATH" "$PREBUILT_DIR/Standalone/"
+        echo -e "${GREEN}✓ Standalone copied to prebuilt/Standalone/${NC}"
+    fi
+    
+    echo -e "${GREEN}✓ Binaries ready for Git distribution in prebuilt/${NC}"
+fi
+
 # Install if requested
 if [ $INSTALL_PLUGINS -eq 1 ]; then
     echo ""
