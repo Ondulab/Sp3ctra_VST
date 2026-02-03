@@ -6,11 +6,16 @@
 extern "C" {
     #include "../../src/core/context.h"
     #include "../../src/utils/logger.h"
+    #include "../../src/utils/rt_profiler.h"
     #include "luxstral/synth_luxstral.h"           // LuxStral synthesis engine
     #include "luxstral/synth_luxstral_algorithms.h" // Envelope coefficient update
     #include "luxstral/vst_adapters.h"             // Audio buffer init functions
     #include "luxstral/wave_generation.h"          // Hot-reload frequency API
 }
+
+// Global RT Profiler accessible from C threads (audioProcessingThread)
+// This must be declared here (not in header) to avoid multiple definition errors
+RTProfiler g_vst_rt_profiler = {0};
 
 //==============================================================================
 // Create parameter layout (called once during construction)
@@ -421,6 +426,47 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     g_sp3ctra_config.sampling_frequency = (int)sampleRate;
     g_sp3ctra_config.audio_buffer_size = samplesPerBlock;
     
+    // ========================================================================
+    // 🔧 ADAPTIVE PERFORMANCE FIX: Detect sample rate / buffer size issues
+    // ========================================================================
+    // Calculate available time budget per buffer (in microseconds)
+    double bufferDurationUs = (samplesPerBlock / sampleRate) * 1000000.0;
+    
+    // Empirical threshold: synthesis takes ~2200µs per buffer with 8 workers
+    // This is safe at 48kHz (2667µs budget) but overloaded at 96kHz (1333µs budget)
+    const double SYNTHESIS_TIME_ESTIMATE_US = 2200.0;
+    double loadRatio = SYNTHESIS_TIME_ESTIMATE_US / bufferDurationUs;
+    
+    if (loadRatio > 1.0) {
+        log_warning("VST", "⚠️  PERFORMANCE WARNING: Sample rate too high for current buffer size!");
+        log_warning("VST", "    Sample Rate: %.0f Hz, Buffer Size: %d samples", sampleRate, samplesPerBlock);
+        log_warning("VST", "    Budget per buffer: %.0f µs, Estimated synthesis time: %.0f µs", 
+                    bufferDurationUs, SYNTHESIS_TIME_ESTIMATE_US);
+        log_warning("VST", "    Load ratio: %.1f%% (synthesis takes %.1fx available time)", 
+                    loadRatio * 100.0, loadRatio);
+        log_warning("VST", "");
+        log_warning("VST", "🔧 RECOMMENDED FIXES:");
+        log_warning("VST", "    1. Increase DAW buffer size to %.0f samples or more", 
+                    SYNTHESIS_TIME_ESTIMATE_US * sampleRate / 1000000.0);
+        log_warning("VST", "    2. Or reduce sample rate to 48 kHz");
+        log_warning("VST", "    3. Or reduce LuxStral worker threads from 8 to 4-6");
+        log_warning("VST", "");
+    } else {
+        log_info("VST", "✅ Performance headroom: %.0f µs budget, ~%.0f µs synthesis (%.1f%% load)", 
+                 bufferDurationUs, SYNTHESIS_TIME_ESTIMATE_US, loadRatio * 100.0);
+    }
+    
+    // Initialize RT profiler for performance monitoring
+    rt_profiler_init(&g_vst_rt_profiler, (int)sampleRate, samplesPerBlock);
+    
+    // Enable profiler only if log level is Debug
+    bool enableProfiler = (g_sp3ctra_config.log_level == LOG_LEVEL_DEBUG);
+    rt_profiler_set_enabled(&g_vst_rt_profiler, enableProfiler ? 1 : 0);
+    
+    if (enableProfiler) {
+        log_info("VST", "RT Profiler enabled (log level = Debug) - reporting every 500 frames");
+    }
+    
     // Musical scale parameters (required for wave generation)
     g_sp3ctra_config.semitone_per_octave = 12;  // Standard musical scale
     g_sp3ctra_config.comma_per_semitone = 36;   // Default granularity
@@ -479,10 +525,12 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     }
     
     // Restart audio processing thread with new buffer size
-    log_info("VST", "Starting AudioProcessingThread...");
+    // 🔧 RT PRIORITY: Use JUCE's highest thread priority
+    // This ensures the audio synthesis thread runs with highest priority to avoid glitches
+    log_info("VST", "Starting AudioProcessingThread with RT priority...");
     audioProcessingThread = std::make_unique<AudioProcessingThread>(sp3ctraCore.get());
-    audioProcessingThread->startThread();
-    log_info("VST", "AudioProcessingThread started");
+    audioProcessingThread->startThread(juce::Thread::Priority::highest);  // Maximum priority
+    log_info("VST", "AudioProcessingThread started with Priority::highest");
     
     log_info("VST", "=============================================================");
     
@@ -526,6 +574,8 @@ bool Sp3ctraAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) 
 
 void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
+    rt_profiler_callback_start(&g_vst_rt_profiler);
+    
     juce::ScopedNoDenormals noDenormals;
     auto totalNumOutputChannels = getTotalNumOutputChannels();
     const int numSamples = buffer.getNumSamples();
@@ -544,6 +594,11 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         
         // Get read buffer (opposite of write buffer)
         int readIdx = 1 - luxstral_buffer_index;
+        
+        // RT Profiler: Report buffer miss if data not ready
+        if (!luxstral_buffers_L[readIdx].ready || !luxstral_buffers_R[readIdx].ready) {
+            rt_profiler_report_buffer_miss_luxstral(&g_vst_rt_profiler);
+        }
         
         // Check if we have ready audio data from LuxStral synthesis
         if (luxstral_buffers_L[readIdx].ready && luxstral_buffers_R[readIdx].ready) {
@@ -578,6 +633,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         // If no data ready, buffer stays silent (already cleared)
     }
     // No fallback tone - silence when no data available
+    
+    rt_profiler_callback_end(&g_vst_rt_profiler);
     
     juce::ignoreUnused(midiMessages);
 }
@@ -772,6 +829,19 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
     } else {
         // For other non-UDP, non-LuxStral parameters (sensor DPI, log level, visualizer mode)
         applyConfigurationToCore(false);  // needsSocketRestart = false
+        
+        // Enable/disable RT profiler dynamically based on log level
+        if (parameterID == PARAM_LOG_LEVEL) {
+            extern sp3ctra_config_t g_sp3ctra_config;
+            bool enableProfiler = (g_sp3ctra_config.log_level == LOG_LEVEL_DEBUG);
+            rt_profiler_set_enabled(&g_vst_rt_profiler, enableProfiler ? 1 : 0);
+            
+            if (enableProfiler) {
+                log_info("VST", "RT Profiler enabled (log level = Debug)");
+            } else {
+                log_info("VST", "RT Profiler disabled (log level < Debug)");
+            }
+        }
     }
 }
 

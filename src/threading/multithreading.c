@@ -12,10 +12,12 @@
 #include "udp.h"
 #include "logger.h"
 #include "../utils/image_debug_stubs.h"
+#include "../utils/rt_profiler.h"
 #include "../processing/image_preprocessor.h"
 #include "../processing/image_sequencer.h"
 #include "../synthesis/luxwave/synth_luxwave.h"
 #include <time.h>
+#include <sys/time.h>
 
 /* VST synchronization function declaration (defined in vst_adapters.cpp) */
 #ifdef VST_MODE
@@ -773,9 +775,25 @@ void *audioProcessingThread(void *arg) {
     audio_image_buffers_get_read_pointers(audioBuffers, &audio_read_R,
                                           &audio_read_G, &audio_read_B);
 
+    // Measure synthesis time for performance profiling
+    struct timeval iteration_start, iteration_end;
+    gettimeofday(&iteration_start, NULL);
+
     // Call synthesis routine directly with stable image data
     // This will NEVER block, even if scanner disconnects!
     synth_AudioProcess(audio_read_R, audio_read_G, audio_read_B, context->doubleBuffer);
+
+    // Report iteration time to profiler (VST mode only - uses extern profiler)
+#ifdef VST_MODE
+    gettimeofday(&iteration_end, NULL);
+    int64_t sec_diff = (int64_t)(iteration_end.tv_sec - iteration_start.tv_sec);
+    int64_t usec_diff = (int64_t)(iteration_end.tv_usec - iteration_start.tv_usec);
+    uint64_t elapsed_us = (uint64_t)(sec_diff * 1000000LL + usec_diff);
+    
+    // Access VST's global profiler
+    extern RTProfiler g_vst_rt_profiler;
+    rt_profiler_report_audio_thread_iteration(&g_vst_rt_profiler, elapsed_us);
+#endif
 
 #ifndef VST_MODE
     // Standalone mode: Small sleep to prevent excessive CPU usage
