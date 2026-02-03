@@ -1,0 +1,60 @@
+{
+  "Name": "Sp3ctra",
+  "Version": "0.0.1",
+  "Factory Info": {
+    "Vendor": "Ondulab",
+    "URL": "",
+    "E-Mail": "",
+    "Flags": {
+      "Unicode": true,
+      "Classes Discardable": false,
+      "Component Non Discardable": false,
+    },
+  },
+  "Classes": [
+    {
+      "CID": "ABCDEF019182FAEB4F6E647553703363",
+      "Category": "Audio Module Class",
+      "Name": "Sp3ctra",
+      "Vendor": "Ondulab",
+      "Version": "0.0.1",
+      "SDKVersion": "VST 3.7.12",
+      "Sub Categories": [
+        "Instrument",
+        "Synth",
+      ],
+      "Class Flags": 2,
+      "Cardinality": 2147483647,
+      "Snapshots": [
+      ],
+    },
+    {
+      "CID": "ABCDEF011234ABCD4F6E647553703363",
+      "Category": "Component Controller Class",
+      "Name": "Sp3ctra",
+      "Vendor": "Ondulab",
+      "Version": "0.0.1",
+      "SDKVersion": "VST 3.7.12",
+      "Sub Categories": [
+        "Instrument",
+        "Synth",
+      ],
+      "Class Flags": 2,
+      "Cardinality": 2147483647,
+      "Snapshots": [
+      ],
+    },
+    {
+      "CID": "ABCDEF01C0DEF00D4F6E647553703363",
+      "Category": "Plugin Compatibility Class",
+      "Name": "Sp3ctra",
+      "Vendor": "Ondulab",
+      "Version": "0.0.1",
+      "SDKVersion": "VST 3.7.12",
+      "Class Flags": 0,
+      "Cardinality": 2147483647,
+      "Snapshots": [
+      ],
+    },
+  ],
+}

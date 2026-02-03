@@ -119,6 +119,16 @@ build_nogui/
 # Exception: Allow scripts/build directory
 !scripts/build/
 
+# === Prebuilt binaries (for distribution via Git) ===
+# Allow the prebuilt/ directory structure but track binaries
+!prebuilt/
+!prebuilt/README.md
+!prebuilt/VST3/
+!prebuilt/AU/
+!prebuilt/Standalone/
+# Track all files in prebuilt/ (including .vst3, .component, .app bundles)
+!prebuilt/**/*
+
 # Object and intermediate files
 *.o
 *.obj
