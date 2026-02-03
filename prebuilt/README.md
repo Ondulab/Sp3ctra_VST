@@ -1,18 +1,17 @@
 # Binaires Pré-Compilés Sp3ctra VST
 
-Ce dossier contient les versions pré-compilées du plugin Sp3ctra pour macOS.
+Ce dossier contient les versions pré-compilées du plugin Sp3ctra pour macOS, **sous forme d'archives ZIP**.
 
 ## Structure
 
 ```
 prebuilt/
-├── VST3/
-│   └── Sp3ctra.vst3/      # Plugin VST3
-├── AU/
-│   └── Sp3ctra.component/  # Plugin Audio Unit
-└── Standalone/
-    └── Sp3ctra.app/        # Application standalone
+├── Sp3ctra-VST3.zip        # Archive du plugin VST3
+├── Sp3ctra-AU.zip          # Archive du plugin Audio Unit
+└── Sp3ctra-Standalone.zip  # Archive de l'application standalone
 ```
+
+> **Note** : Les archives ZIP résolvent les problèmes de liens symboliques avec Git et garantissent un transfert complet des binaires.
 
 ## Installation Rapide
 

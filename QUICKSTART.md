@@ -28,8 +28,8 @@ cd Sp3ctra_VST
 
 Cette commande :
 - ✅ Compile VST3, AU et Standalone
-- ✅ Copie automatiquement les binaires dans `prebuilt/`
-- ✅ Prépare pour distribution Git
+- ✅ Crée automatiquement des archives ZIP dans `prebuilt/`
+- ✅ Prépare les archives pour distribution Git
 
 ### 2. Commiter les binaires
 

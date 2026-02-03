@@ -12,8 +12,8 @@ Ce guide explique comment distribuer et installer le plugin Sp3ctra VST via Git,
 
 Le script de build va automatiquement :
 - ✅ Compiler le VST3, AU et Standalone en mode Release
-- ✅ Copier les binaires dans le dossier `prebuilt/`
-- ✅ Préparer les fichiers pour être commités dans Git
+- ✅ Créer des archives ZIP dans le dossier `prebuilt/`
+- ✅ Préparer les archives pour être commitées dans Git
 
 ### 2. Vérifier les binaires
 
@@ -178,11 +178,26 @@ git push
 2. **Traçabilité** : Chaque commit de code a son binaire correspondant
 3. **Accessibilité** : Un simple `git clone` suffit pour tout avoir
 
+### Pourquoi des archives ZIP ?
+
+Les bundles macOS (.vst3, .component, .app) sont en réalité des **répertoires** contenant des liens symboliques et des structures complexes. Git a des limitations avec ces structures :
+
+1. **Liens symboliques** : Git les stocke comme pointeurs texte (quelques Ko seulement)
+2. **Métadonnées macOS** : Peuvent être perdues lors du clone
+3. **Structure complexe** : Les bundles peuvent ne pas être transférés correctement
+
+**Solution** : Les archives ZIP préservent parfaitement :
+- ✅ Tous les liens symboliques
+- ✅ Les métadonnées macOS
+- ✅ La structure complète du bundle
+- ✅ Compression = réduction de la taille Git
+
 ### Taille du dépôt
 
-Les binaires VST3/AU sont relativement petits (quelques MB). Le `.gitignore` est configuré pour :
+Les archives ZIP sont compressées (quelques MB). Le `.gitignore` est configuré pour :
 - ❌ Ignorer les builds temporaires (`vst/build/`)
-- ✅ Tracker les binaires finaux (`prebuilt/`)
+- ❌ Ignorer les bundles extraits (`prebuilt/VST3/`, `prebuilt/AU/`, etc.)
+- ✅ Tracker uniquement les archives ZIP (`prebuilt/*.zip`)
 
 ### Sécurité
 

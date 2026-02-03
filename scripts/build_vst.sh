@@ -134,41 +134,52 @@ else
     echo -e "${YELLOW}⚠ Standalone not found${NC}"
 fi
 
-# Copy binaries to prebuilt/ directory (for Git distribution)
+# Create ZIP archives for Git distribution (solves symlink issues)
 if [ "$BUILD_CONFIG" = "Release" ]; then
     echo ""
-    echo -e "${BLUE}Copying binaries to prebuilt/ directory...${NC}"
+    echo -e "${BLUE}Creating ZIP archives for Git distribution...${NC}"
     
     PREBUILT_DIR="$PROJECT_DIR/prebuilt"
-    mkdir -p "$PREBUILT_DIR/VST3"
-    mkdir -p "$PREBUILT_DIR/AU"
-    mkdir -p "$PREBUILT_DIR/Standalone"
+    mkdir -p "$PREBUILT_DIR"
     
-    # Copy VST3
+    # Create VST3 archive
     if [ -d "$VST3_PATH" ]; then
-        echo -e "${YELLOW}Copying VST3...${NC}"
-        rm -rf "$PREBUILT_DIR/VST3/Sp3ctra.vst3"
-        cp -R "$VST3_PATH" "$PREBUILT_DIR/VST3/"
-        echo -e "${GREEN}✓ VST3 copied to prebuilt/VST3/${NC}"
+        echo -e "${YELLOW}Creating VST3 archive...${NC}"
+        cd "$(dirname "$VST3_PATH")"
+        rm -f "$PREBUILT_DIR/Sp3ctra-VST3.zip"
+        zip -r -q "$PREBUILT_DIR/Sp3ctra-VST3.zip" "Sp3ctra.vst3"
+        VST3_SIZE=$(du -h "$PREBUILT_DIR/Sp3ctra-VST3.zip" | cut -f1)
+        echo -e "${GREEN}✓ VST3 archive created: $VST3_SIZE${NC}"
+        cd "$BUILD_DIR"
     fi
     
-    # Copy AU
+    # Create AU archive
     if [ -d "$AU_PATH" ]; then
-        echo -e "${YELLOW}Copying AU...${NC}"
-        rm -rf "$PREBUILT_DIR/AU/Sp3ctra.component"
-        cp -R "$AU_PATH" "$PREBUILT_DIR/AU/"
-        echo -e "${GREEN}✓ AU copied to prebuilt/AU/${NC}"
+        echo -e "${YELLOW}Creating AU archive...${NC}"
+        cd "$(dirname "$AU_PATH")"
+        rm -f "$PREBUILT_DIR/Sp3ctra-AU.zip"
+        zip -r -q "$PREBUILT_DIR/Sp3ctra-AU.zip" "Sp3ctra.component"
+        AU_SIZE=$(du -h "$PREBUILT_DIR/Sp3ctra-AU.zip" | cut -f1)
+        echo -e "${GREEN}✓ AU archive created: $AU_SIZE${NC}"
+        cd "$BUILD_DIR"
     fi
     
-    # Copy Standalone
+    # Create Standalone archive
     if [ -d "$STANDALONE_PATH" ]; then
-        echo -e "${YELLOW}Copying Standalone...${NC}"
-        rm -rf "$PREBUILT_DIR/Standalone/Sp3ctra.app"
-        cp -R "$STANDALONE_PATH" "$PREBUILT_DIR/Standalone/"
-        echo -e "${GREEN}✓ Standalone copied to prebuilt/Standalone/${NC}"
+        echo -e "${YELLOW}Creating Standalone archive...${NC}"
+        cd "$(dirname "$STANDALONE_PATH")"
+        rm -f "$PREBUILT_DIR/Sp3ctra-Standalone.zip"
+        zip -r -q "$PREBUILT_DIR/Sp3ctra-Standalone.zip" "Sp3ctra.app"
+        STANDALONE_SIZE=$(du -h "$PREBUILT_DIR/Sp3ctra-Standalone.zip" | cut -f1)
+        echo -e "${GREEN}✓ Standalone archive created: $STANDALONE_SIZE${NC}"
+        cd "$BUILD_DIR"
     fi
     
-    echo -e "${GREEN}✓ Binaries ready for Git distribution in prebuilt/${NC}"
+    echo ""
+    echo -e "${GREEN}✓ ZIP archives ready for Git distribution in prebuilt/${NC}"
+    echo -e "${BLUE}Archives can now be committed to Git:${NC}"
+    echo "  git add prebuilt/*.zip"
+    echo "  git commit -m \"chore: update prebuilt binaries\""
 fi
 
 # Install if requested

@@ -120,14 +120,18 @@ build_nogui/
 !scripts/build/
 
 # === Prebuilt binaries (for distribution via Git) ===
-# Allow the prebuilt/ directory structure but track binaries
+# Track prebuilt/ directory and ZIP archives, but ignore extracted bundles
 !prebuilt/
 !prebuilt/README.md
-!prebuilt/VST3/
-!prebuilt/AU/
-!prebuilt/Standalone/
-# Track all files in prebuilt/ (including .vst3, .component, .app bundles)
-!prebuilt/**/*
+!prebuilt/*.zip
+# Ignore extracted bundles and temp directories
+prebuilt/**/*.vst3/
+prebuilt/**/*.component/
+prebuilt/**/*.app/
+prebuilt/.temp/
+prebuilt/VST3/
+prebuilt/AU/
+prebuilt/Standalone/
 
 # Object and intermediate files
 *.o
