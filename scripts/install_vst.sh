@@ -19,10 +19,13 @@ PREBUILT_DIR="$PROJECT_DIR/prebuilt"
 VST3_INSTALL_DIR="$HOME/Library/Audio/Plug-Ins/VST3"
 AU_INSTALL_DIR="/Library/Audio/Plug-Ins/Components"
 
-# Source paths (prebuilt binaries)
-VST3_SOURCE="$PREBUILT_DIR/VST3/Sp3ctra.vst3"
-AU_SOURCE="$PREBUILT_DIR/AU/Sp3ctra.component"
-STANDALONE_SOURCE="$PREBUILT_DIR/Standalone/Sp3ctra.app"
+# Source paths (prebuilt ZIP archives)
+VST3_ARCHIVE="$PREBUILT_DIR/Sp3ctra-VST3.zip"
+AU_ARCHIVE="$PREBUILT_DIR/Sp3ctra-AU.zip"
+STANDALONE_ARCHIVE="$PREBUILT_DIR/Sp3ctra-Standalone.zip"
+
+# Temporary extraction directory
+TEMP_DIR="$PREBUILT_DIR/.temp"
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}  Sp3ctra VST Installation Script${NC}"
@@ -92,22 +95,48 @@ if [ ! -d "$PREBUILT_DIR" ]; then
     exit 1
 fi
 
-# Function to check and install a plugin
-install_plugin() {
-    local SOURCE="$1"
+# Function to extract and install a plugin from ZIP archive
+install_plugin_from_zip() {
+    local ARCHIVE="$1"
     local DEST_DIR="$2"
     local PLUGIN_NAME="$3"
     local NEEDS_SUDO="$4"
     
-    if [ ! -e "$SOURCE" ]; then
-        echo -e "${YELLOW}⚠ $PLUGIN_NAME not found in prebuilt directory${NC}"
-        echo -e "${YELLOW}  Expected: $SOURCE${NC}"
+    if [ ! -f "$ARCHIVE" ]; then
+        echo -e "${YELLOW}⚠ $PLUGIN_NAME archive not found${NC}"
+        echo -e "${YELLOW}  Expected: $ARCHIVE${NC}"
+        echo -e "${YELLOW}  Please compile the project first: ./scripts/build_vst.sh${NC}"
         return 1
     fi
     
-    echo -e "${BLUE}Installing $PLUGIN_NAME...${NC}"
-    echo -e "${YELLOW}  Source: $SOURCE${NC}"
-    echo -e "${YELLOW}  Target: $DEST_DIR/${NC}"
+    echo -e "${BLUE}Installing $PLUGIN_NAME from ZIP archive...${NC}"
+    
+    # Create temporary directory for extraction
+    mkdir -p "$TEMP_DIR"
+    
+    # Extract archive
+    echo -e "${YELLOW}  Extracting archive...${NC}"
+    unzip -q -o "$ARCHIVE" -d "$TEMP_DIR"
+    
+    # Find the extracted bundle
+    local BUNDLE_NAME=""
+    if [ "$PLUGIN_NAME" = "VST3" ]; then
+        BUNDLE_NAME="Sp3ctra.vst3"
+    elif [ "$PLUGIN_NAME" = "AU" ]; then
+        BUNDLE_NAME="Sp3ctra.component"
+    elif [ "$PLUGIN_NAME" = "Standalone" ]; then
+        BUNDLE_NAME="Sp3ctra.app"
+    fi
+    
+    local EXTRACTED_BUNDLE="$TEMP_DIR/$BUNDLE_NAME"
+    
+    if [ ! -e "$EXTRACTED_BUNDLE" ]; then
+        echo -e "${RED}✗ Failed to extract $BUNDLE_NAME${NC}"
+        rm -rf "$TEMP_DIR"
+        return 1
+    fi
+    
+    echo -e "${YELLOW}  Installing to $DEST_DIR/${NC}"
     
     # Create destination directory
     if [ "$NEEDS_SUDO" = "true" ]; then
@@ -117,7 +146,7 @@ install_plugin() {
     fi
     
     # Remove existing installation if present
-    local DEST_PATH="$DEST_DIR/$(basename "$SOURCE")"
+    local DEST_PATH="$DEST_DIR/$BUNDLE_NAME"
     if [ -e "$DEST_PATH" ]; then
         echo -e "${YELLOW}  Removing existing installation...${NC}"
         if [ "$NEEDS_SUDO" = "true" ]; then
@@ -129,10 +158,13 @@ install_plugin() {
     
     # Copy plugin
     if [ "$NEEDS_SUDO" = "true" ]; then
-        sudo cp -R "$SOURCE" "$DEST_DIR/"
+        sudo cp -R "$EXTRACTED_BUNDLE" "$DEST_DIR/"
     else
-        cp -R "$SOURCE" "$DEST_DIR/"
+        cp -R "$EXTRACTED_BUNDLE" "$DEST_DIR/"
     fi
+    
+    # Cleanup temp directory
+    rm -rf "$TEMP_DIR"
     
     echo -e "${GREEN}✓ $PLUGIN_NAME installed successfully${NC}"
     return 0
@@ -141,27 +173,38 @@ install_plugin() {
 # Install VST3
 if [ $INSTALL_VST3 -eq 1 ]; then
     echo ""
-    install_plugin "$VST3_SOURCE" "$VST3_INSTALL_DIR" "VST3" "false"
+    install_plugin_from_zip "$VST3_ARCHIVE" "$VST3_INSTALL_DIR" "VST3" "false"
 fi
 
 # Install AU
 if [ $INSTALL_AU -eq 1 ]; then
     echo ""
     echo -e "${YELLOW}Audio Unit installation requires administrator privileges${NC}"
-    install_plugin "$AU_SOURCE" "$AU_INSTALL_DIR" "AU" "true"
+    install_plugin_from_zip "$AU_ARCHIVE" "$AU_INSTALL_DIR" "AU" "true"
 fi
 
 # Show standalone location
 if [ $INSTALL_STANDALONE -eq 1 ]; then
     echo ""
-    if [ -e "$STANDALONE_SOURCE" ]; then
-        echo -e "${GREEN}✓ Standalone app available at:${NC}"
-        echo -e "  $STANDALONE_SOURCE"
-        echo ""
-        echo -e "${BLUE}To launch standalone:${NC}"
-        echo "  open \"$STANDALONE_SOURCE\""
+    if [ -f "$STANDALONE_ARCHIVE" ]; then
+        # Extract standalone to temp and show location
+        mkdir -p "$TEMP_DIR"
+        unzip -q -o "$STANDALONE_ARCHIVE" -d "$TEMP_DIR"
+        STANDALONE_APP="$TEMP_DIR/Sp3ctra.app"
+        
+        if [ -e "$STANDALONE_APP" ]; then
+            echo -e "${GREEN}✓ Standalone app extracted${NC}"
+            echo -e "${BLUE}To launch standalone:${NC}"
+            echo "  open \"$STANDALONE_APP\""
+            echo ""
+            echo -e "${YELLOW}Note: Standalone is temporary. For permanent access, extract manually:${NC}"
+            echo "  unzip \"$STANDALONE_ARCHIVE\" -d ~/Applications/"
+        else
+            echo -e "${RED}✗ Failed to extract Standalone${NC}"
+            rm -rf "$TEMP_DIR"
+        fi
     else
-        echo -e "${YELLOW}⚠ Standalone app not found in prebuilt directory${NC}"
+        echo -e "${YELLOW}⚠ Standalone archive not found in prebuilt directory${NC}"
     fi
 fi
 
