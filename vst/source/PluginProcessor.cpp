@@ -961,9 +961,61 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     g_sp3ctra_config.sensor_dpi = sensorDpi;
     g_sp3ctra_config.log_level = (log_level_t)logLevel;
     
-    // 🔧 CRITICAL FIX: Initialize pixels_per_note (required for LuxStral)
-    // Default value = 1 (maximum resolution: 1 pixel = 1 note/comma)
-    g_sp3ctra_config.pixels_per_note = 1;
+    // ========================================================================
+    // 🔧 ADAPTIVE OSCILLATOR COUNT — RT-safe resolution scaling
+    //
+    // Root cause of crackling at high SR / small buffer size:
+    //   The synthesis wall-time scales as: t_synth ≈ k × num_oscillators × buffer_size
+    //   where k ≈ 2600/(3456×128) ≈ 5.88e-3 µs per oscillator per sample
+    //   (calibrated from RT Profiler: 3456 osc, 8 workers, 128 smp → ~2600 µs).
+    //
+    //   At 48kHz/128: budget=2666 µs, synth=2600 µs (97%) → stale 20%+ → crackling!
+    //   At 96kHz/128: budget=1333 µs, synth=2600 µs (195%) → impossible!
+    //
+    // Fix: increase pixels_per_note (power of 2) to reduce oscillator count so
+    //   that t_synth ≤ TARGET_SYNTH_LOAD × budget at the CURRENT sample rate.
+    //   Since t_synth ∝ buffer_size and budget ∝ buffer_size, the optimal
+    //   pixels_per_note depends ONLY on sample_rate (buffer_size cancels out).
+    //
+    // Result per sample rate (TARGET=60%, 3456 CIS pixels, 8 workers):
+    //   ≤44.1 kHz → pixels_per_note=1 → 3456 osc → max ~90% budget (marginal ok)
+    //   48.0 kHz → pixels_per_note=2 → 1728 osc → max ~49% budget ✓
+    //   88.2 kHz → pixels_per_note=2 → 1728 osc → max ~97% (marginal, see note)
+    //   96.0 kHz → pixels_per_note=4 →  864 osc → max ~49% budget ✓
+    //  192.0 kHz → pixels_per_note=8 →  432 osc → max ~49% budget ✓
+    //
+    // Note: always use a power of 2 — CIS_MAX_PIXELS_NB=3456=2⁷×27 is divisible
+    //   by all powers of 2 up to 128 (required by synth_runtime_init).
+    // ========================================================================
+    {
+        const double US_PER_OSC_SAMPLE = 5.882e-3;  // calibrated: 2600µs / (3456 × 128)
+        const double TARGET_SYNTH_LOAD = 0.60;      // target ≤ 60% of callback budget
+
+        int sr = g_sp3ctra_config.sampling_frequency;
+        int adaptive_ppn = 1;  // default: max resolution
+
+        if (sr > 0) {
+            // Max oscillators that fit within TARGET_SYNTH_LOAD of the budget.
+            // Budget = buffer_size / sr × 1e6 µs → cancels with t_synth numerator:
+            //   max_osc = TARGET × 1e6 / (US_PER_OSC_SAMPLE × sr)
+            double max_osc = TARGET_SYNTH_LOAD * 1e6 / (US_PER_OSC_SAMPLE * (double)sr);
+            int cis_pixels = get_cis_pixels_nb();
+            if (cis_pixels <= 0) cis_pixels = 3456;  // hardware fallback
+
+            // Smallest power of 2 that keeps oscillators ≤ max_osc
+            while ((double)(cis_pixels / adaptive_ppn) > max_osc && adaptive_ppn < 128) {
+                adaptive_ppn *= 2;
+            }
+
+            log_info("VST",
+                "Adaptive resolution: SR=%d Hz → pixels_per_note=%d → %d osc "
+                "(target ≤%.0f osc for %.0f%% load)",
+                sr, adaptive_ppn, cis_pixels / adaptive_ppn,
+                max_osc, TARGET_SYNTH_LOAD * 100.0);
+        }
+
+        g_sp3ctra_config.pixels_per_note = adaptive_ppn;
+    }
     
     // ========================================================================
     // Synchronize LuxStral parameters from APVTS to g_sp3ctra_config
