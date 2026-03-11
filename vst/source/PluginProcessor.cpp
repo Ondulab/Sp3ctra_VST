@@ -505,11 +505,26 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
         // 🔧 SIMPLIFIED: Just stop the audio processing thread
         // DO NOT signal workers to exit! They stay alive and ready for the new thread.
         audioProcessingThread->requestStop();
-        audioProcessingThread->stopThread(2000);
-        audioProcessingThread.reset();
+        audioProcessingThread->stopThread(5000);  // 5 second timeout (generous)
         
-        log_info("VST", "AudioProcessingThread stopped (worker pool untouched)");
+        // 🔧 SAFETY: Only destroy thread object if thread actually exited
+        // Destroying a still-running Thread causes PAC failure crash on ARM64
+        if (!audioProcessingThread->isThreadRunning()) {
+            audioProcessingThread.reset();
+            log_info("VST", "AudioProcessingThread stopped (worker pool untouched)");
+        } else {
+            log_error("VST", "AudioProcessingThread did NOT exit within timeout!");
+            log_error("VST", "Leaking thread object to avoid crash (PAC failure)");
+            audioProcessingThread.release();  // Leak intentionally to avoid crash
+        }
     }
+    
+    // 🔧 CRITICAL: Reset consumer tracking state before restarting the thread.
+    // If lastConsumedReadIdx holds a stale value (e.g. 0) from the previous session,
+    // and the new thread writes to buffer[0] first, processBlock would see readIdx=0
+    // matching lastConsumedReadIdx=0 → "SAME DATA" branch → never signals consumed
+    // → producer spin-waits 85ms → 85ms silence gap at startup.
+    lastConsumedReadIdx = -1;
     
     // STATIC ALLOCATION: Buffers are pre-allocated for MAX_BUFFER_SIZE (4096)
     // NO cleanup/reinit needed! Buffers already exist and are large enough
@@ -549,6 +564,26 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     audioProcessingThread = std::make_unique<AudioProcessingThread>(sp3ctraCore.get());
     audioProcessingThread->startThread(juce::Thread::Priority::highest);  // Maximum priority
     log_info("VST", "AudioProcessingThread started with Priority::highest");
+    
+    // ========================================================================
+    // 🔧 CRITICAL FIX: Regenerate wavetables when sample rate changes
+    //
+    // Root cause of pitch shift + crackling at SR changes:
+    //   - init_waves() is called ONCE at first synth_IfftInit().
+    //   - It bakes area_size = sample_rate / base_freq into each oscillator.
+    //   - phase_inc = note_freq / base_freq (independent of SR — correct).
+    //   - BUT playback pitch = note_freq * (actual_SR / init_SR) if SR changes.
+    //   - Example: init at 44.1kHz → change to 48kHz → pitch ×1.088 (+150 cents).
+    //
+    // Fix: call request_frequency_reinit() after the thread restarts.
+    // The thread will call check_and_process_frequency_reinit() on its first
+    // synthesis cycle, which calls init_waves() with the NEW sample rate.
+    // ========================================================================
+    if (luxstralInitialized && oldSampleRate != (int)sampleRate) {
+        log_info("VST", "🎵 Requesting wavetable regeneration for SR %d → %d Hz",
+                 oldSampleRate, (int)sampleRate);
+        request_frequency_reinit();
+    }
     
     log_info("VST", "=============================================================");
     
@@ -601,56 +636,84 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // Clear output buffer first
     buffer.clear();
     
-    // Only read audio if LuxStral engine is initialized
-    // CRITICAL: synth_AudioProcess() is called by AudioProcessingThread, NOT here!
-    // This callback must be RT-safe: NO blocking calls, NO nanosleep(), NO mutex locks
+    // ========================================================================
+    // 🎯 LOCK-FREE DOUBLE-BUFFER CONSUMER (RT-SAFE)
+    //
+    // Architecture: AudioProcessingThread (producer) writes audio to a double-
+    // buffer. processBlock (consumer) reads from it. The key insight is:
+    //
+    //   processBlock must NEVER output silence when the producer is mid-write.
+    //   Instead, it re-outputs the last successfully read buffer.
+    //
+    // We track which buffer was last consumed via lastConsumedReadIdx.
+    // Only signal "consumed" ONCE per new buffer (avoids double-triggering).
+    // DO NOT set ready=0 in the consumer — let the producer manage ready flags.
+    // ========================================================================
     if (luxstralInitialized && sp3ctraCore && luxstral_are_audio_buffers_ready()) {
-        // Get audio data from LuxStral synthesis buffers (filled by AudioProcessingThread)
         extern AudioImageBuffer luxstral_buffers_L[2];
         extern AudioImageBuffer luxstral_buffers_R[2];
         extern volatile int luxstral_buffer_index;
+        extern sp3ctra_config_t g_sp3ctra_config;
         
-        // Get read buffer (opposite of write buffer)
-        int readIdx = 1 - luxstral_buffer_index;
+        // Read current buffer index with ACQUIRE (ARM64 memory ordering)
+        int readIdx = 1 - __atomic_load_n(&luxstral_buffer_index, __ATOMIC_ACQUIRE);
         
-        // RT Profiler: Report buffer miss if data not ready
-        if (!luxstral_buffers_L[readIdx].ready || !luxstral_buffers_R[readIdx].ready) {
-            rt_profiler_report_buffer_miss_luxstral(&g_vst_rt_profiler);
-        }
+        // Check if the buffer at readIdx has new data
+        int leftReady = __atomic_load_n(&luxstral_buffers_L[readIdx].ready, __ATOMIC_ACQUIRE);
+        int rightReady = __atomic_load_n(&luxstral_buffers_R[readIdx].ready, __ATOMIC_ACQUIRE);
         
-        // Check if we have ready audio data from LuxStral synthesis
-        if (luxstral_buffers_L[readIdx].ready && luxstral_buffers_R[readIdx].ready) {
+        const int synthBufferSize = g_sp3ctra_config.audio_buffer_size;
+        const int samplesToRead = (numSamples <= synthBufferSize) ? numSamples : synthBufferSize;
+        
+        if (leftReady && rightReady && readIdx != lastConsumedReadIdx) {
+            // ✅ NEW DATA available — copy to JUCE output and signal producer
             float* leftData = luxstral_buffers_L[readIdx].data;
             float* rightData = luxstral_buffers_R[readIdx].data;
             
             if (leftData && rightData) {
-                // Copy LuxStral stereo audio to JUCE buffer
                 if (totalNumOutputChannels >= 1) {
                     float* destLeft = buffer.getWritePointer(0);
-                    for (int i = 0; i < numSamples; ++i) {
+                    for (int i = 0; i < samplesToRead; ++i)
                         destLeft[i] = leftData[i];
-                    }
                 }
-                
                 if (totalNumOutputChannels >= 2) {
                     float* destRight = buffer.getWritePointer(1);
-                    for (int i = 0; i < numSamples; ++i) {
+                    for (int i = 0; i < samplesToRead; ++i)
                         destRight[i] = rightData[i];
-                    }
                 }
                 
-                // Mark buffer as consumed (atomic-safe)
-                luxstral_buffers_L[readIdx].ready = 0;
-                luxstral_buffers_R[readIdx].ready = 0;
+                // Track which buffer we consumed (don't signal twice for same data)
+                lastConsumedReadIdx = readIdx;
                 
-                // 🎯 VST SYNCHRONIZATION FIX: Signal audioProcessingThread that buffer was consumed
-                // This wakes up the synthesis thread so it can generate the next buffer
+                // Signal producer that it can generate the next buffer
+                // DO NOT set ready=0 — producer manages ready flags
                 luxstral_signal_buffer_consumed();
             }
+        } else if (leftReady && rightReady) {
+            // ♻️ SAME DATA as last time (producer hasn't finished next buffer yet)
+            // Re-output the same audio — much better than silence!
+            float* leftData = luxstral_buffers_L[readIdx].data;
+            float* rightData = luxstral_buffers_R[readIdx].data;
+            
+            if (leftData && rightData) {
+                if (totalNumOutputChannels >= 1) {
+                    float* destLeft = buffer.getWritePointer(0);
+                    for (int i = 0; i < samplesToRead; ++i)
+                        destLeft[i] = leftData[i];
+                }
+                if (totalNumOutputChannels >= 2) {
+                    float* destRight = buffer.getWritePointer(1);
+                    for (int i = 0; i < samplesToRead; ++i)
+                        destRight[i] = rightData[i];
+                }
+            }
+            // DO NOT signal consumed — producer is still working on the next buffer
+        } else {
+            // 🔇 No data ready at all (startup or after long pause)
+            // Buffer already cleared — silence is appropriate here
+            rt_profiler_report_buffer_miss_luxstral(&g_vst_rt_profiler);
         }
-        // If no data ready, buffer stays silent (already cleared)
     }
-    // No fallback tone - silence when no data available
     
     rt_profiler_callback_end(&g_vst_rt_profiler);
     

@@ -92,6 +92,13 @@ private:
     bool luxstralInitialized = false;
     bool coreNeedsInit = true;  // Lazy init: wait for setStateInformation() before starting UDP
     
+    // 🔧 DOUBLE-BUFFER CONSUMER TRACKING:
+    // Tracks which buffer index was last consumed by processBlock.
+    // This prevents signaling "consumed" twice for the same data,
+    // and allows re-outputting old audio instead of silence when producer is mid-write.
+    // -1 = no buffer consumed yet (startup)
+    int lastConsumedReadIdx = -1;
+    
     // Test tone phase accumulator (fallback if LuxStral not working)
     // Note: testTonePhase removed - no longer using 440Hz fallback tone
     

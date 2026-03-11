@@ -11,7 +11,9 @@
 #include "vst_adapters.h"
 #include <cstring>
 #include <cstdlib>
-#include <sys/mman.h>  // For mlock() - prevent page faults in RT threads
+#include <sys/mman.h>   // For mlock() - prevent page faults in RT threads
+#include <sched.h>      // For sched_yield() - lock-free spin-wait
+#include <sys/time.h>   // For gettimeofday() - spin-wait timeout
 
 // Note: vst_adapters.h already includes everything we need
 // No need to include vst_adapters_c.h here (would cause redefinitions)
@@ -21,12 +23,12 @@
 // VST-specific audio buffers for LuxStral (RENAMED to avoid conflicts)
 AudioImageBuffer luxstral_buffers_L[2] = {{nullptr, 0, 0}, {nullptr, 0, 0}};
 AudioImageBuffer luxstral_buffers_R[2] = {{nullptr, 0, 0}, {nullptr, 0, 0}};
-volatile int luxstral_buffer_index = 0;
+volatile int luxstral_buffer_index = 0;  // 🔧 Access ONLY via __atomic_*_n for ARM64
 
 // VST callback synchronization (producer/consumer handoff)
-pthread_mutex_t g_vst_callback_sync_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t g_vst_callback_sync_cond = PTHREAD_COND_INITIALIZER;
-volatile int g_vst_callback_consumed_buffer = 1;  // Start as "consumed" so thread can generate first buffer
+// 🔧 LOCK-FREE: Replaced pthread_cond with atomic flag polling
+// pthread_cond_signal() without mutex caused lost signals → 200ms audio gaps
+volatile int g_vst_callback_consumed_buffer = 1;  // 🔧 Access ONLY via __atomic_*_n
 
 // Flag to track buffer initialization
 static bool luxstral_audio_buffers_initialized = false;
@@ -224,13 +226,9 @@ void luxstral_init_callback_sync(void) {
  * @brief Cleanup callback synchronization system
  */
 void luxstral_cleanup_callback_sync(void) {
-    // Wake up any waiting threads before cleanup
-    pthread_mutex_lock(&g_vst_callback_sync_mutex);
-    g_vst_callback_consumed_buffer = 1;
-    pthread_cond_broadcast(&g_vst_callback_sync_cond);
-    pthread_mutex_unlock(&g_vst_callback_sync_mutex);
-    
-    log_info("SYNTH", "Callback synchronization cleaned up");
+    // 🔧 LOCK-FREE: Just set flag to unblock any waiting thread
+    __atomic_store_n(&g_vst_callback_consumed_buffer, 1, __ATOMIC_RELEASE);
+    log_info("SYNTH", "Callback synchronization cleaned up (lock-free)");
 }
 
 /**
@@ -239,51 +237,85 @@ void luxstral_cleanup_callback_sync(void) {
  * This is called by the VST's processBlock() after reading audio data.
  * It wakes up the audioProcessingThread so it can generate the next buffer.
  * 
- * RT-SAFE: This function is called from the audio thread, so it must be fast!
+ * RT-SAFE: This function is called from the audio thread.
+ * LOCK-FREE: Single atomic store, no mutex, no pthread_cond_signal.
+ * This eliminates the lost-signal race condition that caused 200ms audio gaps.
  */
 void luxstral_signal_buffer_consumed(void) {
-    // RT-safe: no locking in audio callback
+    // 🔧 LOCK-FREE: Single atomic store with release semantics
+    // No pthread_cond_signal needed - producer polls the flag directly
     __atomic_store_n(&g_vst_callback_consumed_buffer, 1, __ATOMIC_RELEASE);
-    pthread_cond_signal(&g_vst_callback_sync_cond);  // Wake up audioProcessingThread
 }
 
 /**
  * @brief Wait for processBlock() to consume the current buffer
  * 
  * This is called by audioProcessingThread before generating a new buffer.
- * It blocks until processBlock() signals that it has read the current buffer.
+ * It polls the atomic flag until processBlock() signals consumption.
  * 
- * NON-RT: This runs in the synthesis thread, blocking is acceptable here.
+ * NON-RT: This runs in the synthesis thread, yielding is acceptable.
+ * 
+ * 🔧 LOCK-FREE REWRITE: Replaced pthread_cond_timedwait (200ms timeout,
+ * signal loss race) with atomic polling + sched_yield (~microsecond latency).
+ * This eliminates the fundamental race condition where pthread_cond_signal
+ * without mutex caused lost signals → 200ms audio gaps → crackling.
  */
 void luxstral_wait_for_buffer_consumed(void) {
-    pthread_mutex_lock(&g_vst_callback_sync_mutex);
+    // Fast path: check if already consumed (common case after first buffer)
+    if (__atomic_load_n(&g_vst_callback_consumed_buffer, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&g_vst_callback_consumed_buffer, 0, __ATOMIC_RELEASE);
+        return;
+    }
 
-    // Wait until callback has consumed the buffer (with timeout to avoid deadlock)
-    while (__atomic_load_n(&g_vst_callback_consumed_buffer, __ATOMIC_ACQUIRE) == 0) {
-        struct timespec timeout;
-        struct timeval now;
-        gettimeofday(&now, NULL);
+    // Adaptive spin-wait with timeout
+    // Phase 1: Tight spin (nanosecond response for immediate availability)
+    // Phase 2: Yield-based polling (microsecond response, CPU-friendly)
+    // Phase 3: Timeout (prevents deadlock when audio stops)
+    struct timeval start_time;
+    gettimeofday(&start_time, NULL);
+    
+    // Timeout: 2× buffer duration or 50ms minimum (prevents deadlock)
+    // g_sp3ctra_config is declared in config_loader.h (included via vst_adapters.h)
+    int sample_rate = g_sp3ctra_config.sampling_frequency > 0 ? 
+                      g_sp3ctra_config.sampling_frequency : 48000;
+    int buffer_size = g_sp3ctra_config.audio_buffer_size > 0 ? 
+                      g_sp3ctra_config.audio_buffer_size : 512;
+    int64_t timeout_us = (int64_t)buffer_size * 2000000LL / (int64_t)sample_rate;
+    if (timeout_us < 50000) timeout_us = 50000;  // 50ms minimum
 
-        // 200ms timeout to avoid deadlock when audio is stopped.
-        timeout.tv_sec = now.tv_sec;
-        timeout.tv_nsec = now.tv_usec * 1000 + 200000000;
-        if (timeout.tv_nsec >= 1000000000) {
-            timeout.tv_sec++;
-            timeout.tv_nsec -= 1000000000;
-        }
-
-        if (pthread_cond_timedwait(&g_vst_callback_sync_cond,
-                                   &g_vst_callback_sync_mutex,
-                                   &timeout) == ETIMEDOUT) {
-            pthread_mutex_unlock(&g_vst_callback_sync_mutex);
-            return;
+    int spin_count = 0;
+    while (!__atomic_load_n(&g_vst_callback_consumed_buffer, __ATOMIC_ACQUIRE)) {
+        spin_count++;
+        
+        if (spin_count < 100) {
+            // Phase 1: Tight spin (first ~100 iterations ≈ microseconds)
+            #if defined(__aarch64__)
+            __asm__ volatile("yield");  // ARM64 hint: release pipeline
+            #elif defined(__x86_64__)
+            __asm__ volatile("pause");  // x86 hint: reduce power in spin
+            #endif
+        } else {
+            // Phase 2: Yield CPU (every 100 spins)
+            if (spin_count % 100 == 0) {
+                sched_yield();
+            }
+            
+            // Phase 3: Check timeout (every 1000 spins)
+            if (spin_count % 1000 == 0) {
+                struct timeval now;
+                gettimeofday(&now, NULL);
+                int64_t elapsed_us = (int64_t)(now.tv_sec - start_time.tv_sec) * 1000000LL +
+                                     (int64_t)(now.tv_usec - start_time.tv_usec);
+                if (elapsed_us > timeout_us) {
+                    // Timeout: audio probably stopped, don't block forever
+                    return;
+                }
+            }
         }
     }
 
     // Buffer was consumed, reset flag so we wait next time
     __atomic_store_n(&g_vst_callback_consumed_buffer, 0, __ATOMIC_RELEASE);
-
-    pthread_mutex_unlock(&g_vst_callback_sync_mutex);
 }
 
 } // extern "C"

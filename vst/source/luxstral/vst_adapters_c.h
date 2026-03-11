@@ -112,23 +112,28 @@ void vst_log_error(const char* message);
 #include "utils/image_debug_stubs.h"
 
 /* Audio Buffers -------------------------------------------------*/
+/* 🔧 FIX: All accesses to ready/buffer_index MUST use __atomic_*_n builtins
+ * with ACQUIRE/RELEASE ordering to ensure correct memory ordering on ARM64
+ * (Apple Silicon). Plain volatile does NOT provide acquire/release semantics
+ * on weakly-ordered architectures, causing stale data reads → crackling.
+ * 
+ * We keep volatile int (not _Atomic) for C/C++ cross-compatibility,
+ * but mandate __atomic_load_n/__atomic_store_n for ALL accesses.           */
 typedef struct {
     float *data;
-    volatile int ready;
+    volatile int ready;         /* ACCESS ONLY via __atomic_*_n builtins! */
     uint64_t write_timestamp_us;
 } AudioImageBuffer;
 
 // RENAMED to avoid conflicts with audio_c_api.h
 extern AudioImageBuffer luxstral_buffers_L[2];
 extern AudioImageBuffer luxstral_buffers_R[2];
-extern volatile int luxstral_buffer_index;
+extern volatile int luxstral_buffer_index;  /* ACCESS ONLY via __atomic_*_n! */
 
 /* VST Audio Callback Synchronization ----------------------------*/
-// Condition variable to synchronize audioProcessingThread with DAW callback
-// The thread waits for processBlock() to signal after consuming a buffer
-extern pthread_mutex_t g_vst_callback_sync_mutex;
-extern pthread_cond_t g_vst_callback_sync_cond;
-extern volatile int g_vst_callback_consumed_buffer;  // Flag: 1 = callback read buffer, thread can proceed
+// 🔧 LOCK-FREE: Replaced pthread_cond with atomic flag polling
+// pthread_cond_signal() without mutex caused lost signals → 200ms audio gaps
+extern volatile int g_vst_callback_consumed_buffer;  /* ACCESS via __atomic_*_n! */
 
 // Compatibility macros for LuxStral code
 #define buffers_L luxstral_buffers_L

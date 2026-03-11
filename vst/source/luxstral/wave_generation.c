@@ -43,8 +43,16 @@ static float g_global_fade_current = 1.0f;
 static float g_global_fade_target = 1.0f;
 
 // Exponential fade coefficient (sample-by-sample smoothing)
-// tau = 50ms at 48kHz → alpha = 1 - exp(-1/(0.05*48000)) ≈ 0.000416
-#define GLOBAL_FADE_ALPHA 0.0004f
+// 🔧 FIX: Compute fade alpha dynamically from actual sample rate
+// Was hardcoded for 48kHz, causing wrong fade speed at other sample rates
+// tau = 50ms → alpha = 1 - exp(-1/(tau_s * Fs))
+static float get_global_fade_alpha(void) {
+    float Fs = (float)g_sp3ctra_config.sampling_frequency;
+    if (Fs < 8000.0f) Fs = 48000.0f;  // Safety fallback
+    const float tau_s = 0.05f;  // 50ms fade time
+    return 1.0f - expf(-1.0f / (tau_s * Fs));
+}
+#define GLOBAL_FADE_ALPHA get_global_fade_alpha()
 
 /* Private includes ----------------------------------------------------------*/
 

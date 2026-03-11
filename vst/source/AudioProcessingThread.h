@@ -8,9 +8,10 @@
 #include <pthread/qos.h>
 #endif
 
-// Forward declaration of C function
+// Forward declaration of C functions
 extern "C" {
     void* audioProcessingThread(void* arg);
+    void luxstral_signal_buffer_consumed(void);  // Unblock spin-wait on shutdown
     #include "core/context.h"
     #include "utils/logger.h"
 }
@@ -104,11 +105,17 @@ public:
     
     /**
      * @brief Request thread stop (custom method)
+     * 
+     * 🔧 FIX: Sets audio_thread_running=0 AND signals the consumed-buffer flag
+     * so luxstral_wait_for_buffer_consumed() returns immediately instead of
+     * spinning for 50ms. Without this, stopThread(2000) could timeout on
+     * slow machines, and the subsequent .reset() would destroy the Thread
+     * object while the thread is still in JUCE cleanup → PAC failure crash.
      */
     void requestStop() {
         log_info("SYNTH", "AudioProcessingThread: Requesting thread stop");
         
-        // 🔧 CRITICAL FIX: Set audio_thread_running = 0, NOT running!
+        // 🔧 Step 1: Set audio_thread_running = 0 (NOT running!)
         // This stops ONLY the audio thread, UDP thread keeps running
         if (core) {
             Context* ctx = core->getContext();
@@ -116,6 +123,14 @@ public:
                 ctx->audio_thread_running = 0;
             }
         }
+        
+        // 🔧 Step 2: Signal the consumed flag to unblock the spin-wait immediately
+        // Without this, the thread sits in luxstral_wait_for_buffer_consumed()
+        // for up to 50ms before checking audio_thread_running
+        luxstral_signal_buffer_consumed();
+        
+        // 🔧 Step 3: Also use JUCE's built-in thread exit mechanism
+        signalThreadShouldExit();
     }
     
 private:
