@@ -67,6 +67,37 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     freqRangeInfoLabel.setColour(juce::Label::textColourId, juce::Colours::grey);
     contentComponent.addAndMakeVisible(freqRangeInfoLabel);
 
+    // Equal-Loudness Compensation (Physiological Filter)
+    physiologicalFilterLabel.setText("Equal-Loudness:", juce::dontSendNotification);
+    physiologicalFilterLabel.setJustificationType(juce::Justification::centredRight);
+    contentComponent.addAndMakeVisible(physiologicalFilterLabel);
+    
+    physiologicalFilterToggle.setButtonText("Compensate (A-weighting)");
+    physiologicalFilterToggle.setTooltip(
+        "Compensates for human hearing sensitivity (ISO 226 / A-weighting).\n"
+        "Boosts bass frequencies and attenuates mid frequencies (~1-5 kHz)\n"
+        "so all frequencies are perceived at equal loudness.\n\n"
+        "Regenerates wavetables automatically when toggled.");
+    contentComponent.addAndMakeVisible(physiologicalFilterToggle);
+    physiologicalFilterAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "luxstralPhysiologicalFilter", physiologicalFilterToggle);
+
+    // Correction depth (0.0 = flat, 1.0 = full A-weighting inverse)
+    physiologicalDepthLabel.setText("Correction Depth:", juce::dontSendNotification);
+    physiologicalDepthLabel.setJustificationType(juce::Justification::centredRight);
+    physiologicalDepthLabel.setTooltip(
+        "Intensity of the equal-loudness correction.\n"
+        "0.0 = flat (no correction), 1.0 = full inverse A-weighting.\n"
+        "0.5 is a balanced starting point.");
+    contentComponent.addAndMakeVisible(physiologicalDepthLabel);
+
+    physiologicalDepthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    physiologicalDepthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 20);
+    physiologicalDepthSlider.setTooltip(physiologicalDepthLabel.getTooltip());
+    contentComponent.addAndMakeVisible(physiologicalDepthSlider);
+    physiologicalDepthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "luxstralPhysiologicalDepth", physiologicalDepthSlider);
+
     // ========================================================================
     // Section: Envelope Parameters
     // ========================================================================
@@ -284,7 +315,15 @@ void LuxStralSettingsTab::layoutContentComponent()
     yPos += rowHeight + itemSpacing;
     
     freqRangeInfoLabel.setBounds(padding, yPos, contentWidth, 20);
-    yPos += 25 + sectionSpacing;
+    yPos += 25 + itemSpacing;
+    
+    physiologicalFilterLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    physiologicalFilterToggle.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + itemSpacing;
+
+    physiologicalDepthLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    physiologicalDepthSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + sectionSpacing;
 
     // ========================================================================
     // Section: Envelope Parameters

@@ -46,6 +46,12 @@ private:
     juce::Slider numOctavesSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> numOctavesAttachment;
     juce::Label freqRangeInfoLabel;  // Displays calculated frequency range
+    juce::Label physiologicalFilterLabel;
+    juce::ToggleButton physiologicalFilterToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> physiologicalFilterAttachment;
+    juce::Label physiologicalDepthLabel;
+    juce::Slider physiologicalDepthSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> physiologicalDepthAttachment;
 
     // Section: Envelope Parameters
     juce::Label envelopeSectionLabel;

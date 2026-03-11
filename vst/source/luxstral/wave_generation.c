@@ -60,7 +60,8 @@ static float calculate_frequency_for_note(int note, int total_notes, float low_f
 static uint32_t calculate_waveform(uint32_t current_aera_size,
                                    uint32_t current_unitary_waveform_cell,
                                    uint32_t buffer_len,
-                                   volatile struct waveParams *params);
+                                   volatile struct waveParams *params,
+                                   float amplitude_scale);
 
 /* Private user code ---------------------------------------------------------*/
 
@@ -91,23 +92,94 @@ static float calculate_frequency_for_note(int note, int total_notes, float low_f
 static uint32_t calculate_waveform(uint32_t current_aera_size,
                                    uint32_t current_unitary_waveform_cell,
                                    uint32_t buffer_len,
-                                   volatile struct waveParams *params) {
+                                   volatile struct waveParams *params,
+                                   float amplitude_scale) {
   (void)params; // Suppress unused parameter warning
 
   unitary_waveform[current_unitary_waveform_cell] = 0;
 
   // Generate sinusoidal waveform (SIN is now implicit)
+  // amplitude_scale applies physiological compensation (1.0 = no change)
   for (uint32_t x = 0; x < current_aera_size; x++) {
     // sanity check
     if (current_unitary_waveform_cell < buffer_len) {
       unitary_waveform[current_unitary_waveform_cell] =
           ((sin((x * 2.00 * PI) / (float)current_aera_size))) *
-          WAVE_AMP_RESOLUTION;
+          WAVE_AMP_RESOLUTION * amplitude_scale;
     }
     current_unitary_waveform_cell++;
   }
 
   return current_unitary_waveform_cell;
+}
+
+/**************************************************************************************
+ * Physiological (Equal-Loudness) Compensation
+ * Based on inverse A-weighting (IEC 61672:2003)
+ *
+ * The human ear is most sensitive around 1-5 kHz and less sensitive at
+ * low and very high frequencies. This function computes a gain factor
+ * that compensates for this non-uniform sensitivity:
+ *   - Bass frequencies get boosted (gain > 1.0)
+ *   - Mid frequencies (~1-4 kHz) stay near unity (gain ≈ 1.0)
+ *   - Extreme treble gets slightly boosted (gain > 1.0)
+ *
+ * The gain is normalized so that 1 kHz = 1.0 (reference frequency).
+ **************************************************************************************/
+
+/**
+ * @brief Compute the A-weighting relative response RA(f) for a given frequency
+ * 
+ * Formula from IEC 61672:2003:
+ * RA(f) = (12194² × f⁴) / ((f² + 20.6²) × √((f² + 107.7²)(f² + 737.9²)) × (f² + 12194²))
+ */
+static float compute_a_weighting_ra(float f) {
+    float f2 = f * f;
+    float f4 = f2 * f2;
+    
+    float num = 12194.0f * 12194.0f * f4;
+    
+    float d1 = f2 + 20.6f * 20.6f;
+    float d2 = f2 + 107.7f * 107.7f;
+    float d3 = f2 + 737.9f * 737.9f;
+    float d4 = f2 + 12194.0f * 12194.0f;
+    
+    float den = d1 * sqrtf(d2 * d3) * d4;
+    
+    if (den < 1e-30f) return 0.0f;
+    
+    return num / den;
+}
+
+float compute_physiological_gain(float frequency_hz) {
+    if (frequency_hz <= 0.0f) return 1.0f;
+
+    // Clamp frequency to audible range to avoid extreme values
+    if (frequency_hz < 20.0f)    frequency_hz = 20.0f;
+    if (frequency_hz > 20000.0f) frequency_hz = 20000.0f;
+
+    float ra_f  = compute_a_weighting_ra(frequency_hz);
+    float ra_1k = compute_a_weighting_ra(1000.0f); // Reference: 0 dB at 1 kHz
+
+    if (ra_f < 1e-30f || ra_1k < 1e-30f) return 1.0f;
+
+    // A-weighting relative to 1 kHz (in dB)
+    float a_db = 20.0f * log10f(ra_f / ra_1k);
+
+    // Apply correction depth in dB domain: depth=0 → 0 dB correction, depth=1 → full inverse
+    // Scales the A-weighting inverse continuously to avoid excessive colouration.
+    float depth = g_sp3ctra_config.physiological_correction_depth;
+    if (depth < 0.0f) depth = 0.0f;
+    if (depth > 1.0f) depth = 1.0f;
+
+    float corrected_db = -a_db * depth;
+
+    // Safety clamp: ±15 dB (factor ~5.6 max boost, 0.18 max cut)
+    // At depth=0.5, 65 Hz produces ~13 dB → headroom without hard clipping.
+    if (corrected_db >  15.0f) corrected_db =  15.0f;
+    if (corrected_db < -15.0f) corrected_db = -15.0f;
+
+    return powf(10.0f, corrected_db / 20.0f);
 }
 
 /**
@@ -175,9 +247,15 @@ uint32_t init_waves(volatile float *unitary_waveform,
     buffer_len += area_size;
   }
 
+  // Physiological filter status
+  int phys_filter = g_sp3ctra_config.physiological_filter_enabled;
+  log_info("SYNTH", "Physiological (equal-loudness) filter: %s", phys_filter ? "ENABLED" : "DISABLED");
   log_info("SYNTH", "Waveform buffer: %u samples (first octave only)", buffer_len);
 
-  // Second pass: Generate waveforms for first octave and assign to all notes
+  // Second pass: Generate waveforms for first octave (always at unity amplitude ±1.0)
+  // Physiological compensation is handled separately via waves[note].physiological_gain
+  // applied at mixdown in apply_gap_limiter_ramp().
+
   current_unitary_waveform_cell = 0;
   
   for (int comma_cnt = 0; comma_cnt < notes_per_octave; comma_cnt++) {
@@ -189,10 +267,11 @@ uint32_t init_waves(volatile float *unitary_waveform,
     uint32_t current_area_size = (uint32_t)(sample_rate / base_frequency);
     if (current_area_size < 2) current_area_size = 2;
     
-    // Generate waveform for this base frequency
+    // Waveforms are always at unity amplitude ±1.0 (amplitude_scale = 1.0)
+    // Physiological gain is stored per-note in struct wave and applied at mixdown
     current_unitary_waveform_cell = 
         calculate_waveform(current_area_size, current_unitary_waveform_cell,
-                           buffer_len, parameters);
+                           buffer_len, parameters, 1.0f);
 
     // Assign this waveform to all octaves
     for (int octave = 0; octave < num_full_octaves + 1; octave++) {
@@ -215,6 +294,9 @@ uint32_t init_waves(volatile float *unitary_waveform,
         // Higher octave = 2x frequency = step through waveform 2x faster
         waves[note].octave_coeff = (uint32_t)powf(2.0f, (float)octave);
         waves[note].octave_divider = 1;
+        
+        // Initialize physiological gain to unity (will be set below)
+        waves[note].physiological_gain = 1.0f;
       }
     }
   }
@@ -263,6 +345,47 @@ uint32_t init_waves(volatile float *unitary_waveform,
   if ((int)note < total_notes - 1) {
     log_debug("SYNTH", "Note coverage: last main note=%d, total=%d (orphans handled above)", 
                 (int)note, total_notes);
+  }
+
+  // -----------------------------------------------------------------------
+  // Per-note physiological gain (Option A):
+  // Each note gets a gain based on its ACTUAL frequency (not the shared base
+  // waveform frequency). This is the only correct approach since waveforms
+  // are shared across octaves and cannot encode per-octave amplitude.
+  //
+  // Gains are RMS-normalized across ALL notes so that mean(gain^2) = 1.0,
+  // preserving total energy when all oscillators are active simultaneously.
+  // -----------------------------------------------------------------------
+  if (phys_filter) {
+    // Step 1: compute raw gains per note
+    for (int n = 0; n < total_notes; n++)
+      waves[n].physiological_gain = compute_physiological_gain(waves[n].frequency);
+
+    // Step 2: compute RMS across all notes
+    float sum_sq = 0.0f;
+    for (int n = 0; n < total_notes; n++)
+      sum_sq += waves[n].physiological_gain * waves[n].physiological_gain;
+    float rms = (total_notes > 0) ? sqrtf(sum_sq / (float)total_notes) : 1.0f;
+
+    // Step 3: normalize — mean(gain^2) = 1.0
+    if (rms > 1e-9f) {
+      for (int n = 0; n < total_notes; n++)
+        waves[n].physiological_gain /= rms;
+    }
+
+    // Log gain range for diagnostics
+    float g_min = waves[0].physiological_gain;
+    float g_max = waves[0].physiological_gain;
+    for (int n = 1; n < total_notes; n++) {
+      if (waves[n].physiological_gain < g_min) g_min = waves[n].physiological_gain;
+      if (waves[n].physiological_gain > g_max) g_max = waves[n].physiological_gain;
+    }
+    log_info("SYNTH", "Physiological gains: RMS=%.4f → normalized range [%.3f, %.3f]",
+             rms, g_min, g_max);
+  } else {
+    // Filter disabled: unity gain for all notes
+    for (int n = 0; n < total_notes; n++)
+      waves[n].physiological_gain = 1.0f;
   }
 
   log_info("SYNTH", "-------------------------------");

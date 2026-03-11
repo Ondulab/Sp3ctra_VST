@@ -48,8 +48,11 @@ struct wave {
     // GAP_LIMITER: Precomputed envelope coefficients (RT-optimized)
     float alpha_up;                         // Attack coefficient (precomputed)
     float alpha_down_weighted;              // Release coefficient with frequency weighting (precomputed)
-    
-    
+
+    // Physiological (equal-loudness) gain — precomputed at init, RMS-normalized across all notes
+    // Applied to target_volume in apply_gap_limiter_ramp() (1.0 = no change, inactive when filter OFF)
+    float physiological_gain;
+
     // Frequency (keep as float for initialization calculations)
     float frequency;
     
