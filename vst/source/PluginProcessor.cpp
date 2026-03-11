@@ -477,13 +477,12 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     // Initialize RT profiler for performance monitoring
     rt_profiler_init(&g_vst_rt_profiler, (int)sampleRate, samplesPerBlock);
     
-    // Enable profiler only if log level is Debug
-    bool enableProfiler = (g_sp3ctra_config.log_level == LOG_LEVEL_DEBUG);
-    rt_profiler_set_enabled(&g_vst_rt_profiler, enableProfiler ? 1 : 0);
-    
-    if (enableProfiler) {
-        log_info("VST", "RT Profiler enabled (log level = Debug) - reporting every 500 frames");
-    }
+    // RT Profiler is ALWAYS enabled — summary printed at INFO level every 500 callbacks.
+    // This allows diagnosing crackling / producer-overload at any log level.
+    // Set log level to Debug for the verbose per-metric breakdown.
+    rt_profiler_set_enabled(&g_vst_rt_profiler, 1);
+    log_info("VST", "RT Profiler active - reporting every %d frames (log_info summary always visible)",
+             RT_PROFILER_REPORT_INTERVAL_FRAMES);
     
     // Musical scale parameters (required for wave generation)
     g_sp3ctra_config.semitone_per_octave = 12;  // Standard musical scale
@@ -692,6 +691,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         } else if (leftReady && rightReady) {
             // ♻️ SAME DATA as last time (producer hasn't finished next buffer yet)
             // Re-output the same audio — much better than silence!
+            // Count stale re-outputs for RT Profiler diagnostics (always, not only Debug)
+            rt_profiler_report_stale_luxstral(&g_vst_rt_profiler);
             float* leftData = luxstral_buffers_L[readIdx].data;
             float* rightData = luxstral_buffers_R[readIdx].data;
             
@@ -926,17 +927,11 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
         // For other non-UDP, non-LuxStral parameters (sensor DPI, log level, visualizer mode)
         applyConfigurationToCore(false);  // needsSocketRestart = false
         
-        // Enable/disable RT profiler dynamically based on log level
+        // RT Profiler stays ALWAYS enabled — profiler output uses log_info (not log_debug)
+        // so it is visible regardless of log level. Changing log level only affects
+        // the verbose per-metric breakdown (which uses log_debug).
         if (parameterID == PARAM_LOG_LEVEL) {
-            extern sp3ctra_config_t g_sp3ctra_config;
-            bool enableProfiler = (g_sp3ctra_config.log_level == LOG_LEVEL_DEBUG);
-            rt_profiler_set_enabled(&g_vst_rt_profiler, enableProfiler ? 1 : 0);
-            
-            if (enableProfiler) {
-                log_info("VST", "RT Profiler enabled (log level = Debug)");
-            } else {
-                log_info("VST", "RT Profiler disabled (log level < Debug)");
-            }
+            log_info("VST", "Log level changed - RT Profiler summary remains visible at INFO");
         }
     }
 }
