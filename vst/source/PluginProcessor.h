@@ -98,6 +98,11 @@ private:
     // and allows re-outputting old audio instead of silence when producer is mid-write.
     // -1 = no buffer consumed yet (startup)
     int lastConsumedReadIdx = -1;
+    // pixels_per_note used during the last synth_IfftInit() call.
+    // If it changes on SR switch (e.g. 96kHz→48kHz: ppn 4→2), the waves[]
+    // array must be reallocated via synth_luxstral_cleanup() + synth_IfftInit().
+    // Otherwise init_waves() writes past the old allocation → Bus Error (SIGBUS).
+    int lastInitPixelsPerNote = 0;
     
     // Test tone phase accumulator (fallback if LuxStral not working)
     // Note: testTonePhase removed - no longer using 440Hz fallback tone
