@@ -495,26 +495,27 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
         applyConfigurationToCore(false);  // Recalculate with new Nyquist limit
     }
     
-    // 🛑 CRITICAL FIX: Stop AudioProcessingThread WITHOUT touching the worker pool!
-    // The worker pool uses MAX_BUFFER_SIZE for its buffers and does NOT need to be restarted.
-    // Only luxstral_buffers_L/R need to be reallocated (done by luxstral_init_audio_buffers).
+    // 🛑 Stop AudioProcessingThread cleanly.
+    // We MUST know whether it stopped before deciding to call synth_luxstral_cleanup().
+    // Calling cleanup while the thread is still running causes use-after-free (SIGSEGV).
+    bool audioThreadStoppedCleanly = true;  // assume no thread → clean by default
     if (audioProcessingThread) {
         log_info("VST", "Stopping AudioProcessingThread for buffer reallocation...");
-        
-        // 🔧 SIMPLIFIED: Just stop the audio processing thread
-        // DO NOT signal workers to exit! They stay alive and ready for the new thread.
         audioProcessingThread->requestStop();
-        audioProcessingThread->stopThread(5000);  // 5 second timeout (generous)
-        
-        // 🔧 SAFETY: Only destroy thread object if thread actually exited
-        // Destroying a still-running Thread causes PAC failure crash on ARM64
+        audioProcessingThread->stopThread(5000);  // 5 second timeout
+
         if (!audioProcessingThread->isThreadRunning()) {
             audioProcessingThread.reset();
-            log_info("VST", "AudioProcessingThread stopped (worker pool untouched)");
+            log_info("VST", "AudioProcessingThread stopped cleanly");
+            audioThreadStoppedCleanly = true;
         } else {
+            // 🔧 CRITICAL: Do NOT call synth_luxstral_cleanup() if the thread is still
+            // running. Cleanup frees waves[] while the thread accesses it → SIGSEGV.
+            // Leak the thread object instead of risking a PAC failure on ARM64.
             log_error("VST", "AudioProcessingThread did NOT exit within timeout!");
-            log_error("VST", "Leaking thread object to avoid crash (PAC failure)");
-            audioProcessingThread.release();  // Leak intentionally to avoid crash
+            log_error("VST", "Leaking thread object to avoid use-after-free / PAC crash");
+            audioProcessingThread.release();
+            audioThreadStoppedCleanly = false;
         }
     }
     
@@ -549,15 +550,20 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     // shut down the worker pool, then fall through to the full synth_IfftInit()
     // path which calls synth_runtime_init() with the correct new ppn.
     // ========================================================================
-    if (luxstralInitialized && g_sp3ctra_config.pixels_per_note != lastInitPixelsPerNote) {
+    // 🔧 SIGBUS+SIGSEGV guard: only cleanup if thread stopped cleanly.
+    // Calling synth_luxstral_cleanup() while the thread still runs → use-after-free.
+    if (audioThreadStoppedCleanly &&
+        luxstralInitialized &&
+        g_sp3ctra_config.pixels_per_note != lastInitPixelsPerNote) {
         log_info("VST",
-            "pixels_per_note changed (%d → %d): full LuxStral reinit required "
-            "(waves[] realloc to avoid SIGBUS)",
+            "pixels_per_note changed (%d → %d): full LuxStral reinit required",
             lastInitPixelsPerNote, g_sp3ctra_config.pixels_per_note);
-        synth_luxstral_cleanup();   // frees waves[], shuts down worker pool
+        synth_luxstral_cleanup();
         luxstralInitialized = false;
-        // Falls through to the !luxstralInitialized branch immediately below
     }
+
+    // Track whether synth_IfftInit() was called this cycle (waves[] freshly calloc'd)
+    bool synthJustInitialized = false;
 
     // Initialize LuxStral on first call only
     if (!luxstralInitialized) {
@@ -571,6 +577,7 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
         
         if (result == 0) {
             luxstralInitialized = true;
+            synthJustInitialized = true;  // waves[] calloc'd — start_ptrs = NULL until init_waves()
             // Record ppn used — detect change on next prepareToPlay() to avoid SIGBUS
             lastInitPixelsPerNote = g_sp3ctra_config.pixels_per_note;
             log_info("VST", "LuxStral initialized successfully (pixels_per_note=%d, notes=%d)",
@@ -582,46 +589,47 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     } else {
         log_info("VST", "LuxStral already initialized");
     }
-    
-    // Restart audio processing thread with new buffer size
-    // 🔧 RT PRIORITY: Use JUCE's highest thread priority
-    // This ensures the audio synthesis thread runs with highest priority to avoid glitches
+
+    // ========================================================================
+    // 🔧 CRITICAL FIX (SIGSEGV A): Request wavetable reinit BEFORE startThread().
+    //
+    // synth_IfftInit() allocates waves[] via calloc → ALL start_ptr fields = NULL.
+    // init_waves() fills them in — it is called by check_and_process_frequency_reinit()
+    // inside synth_IfftMode(), which runs at the TOP of each synthesis cycle.
+    //
+    // Race condition (original code): if request_frequency_reinit() was called AFTER
+    // startThread(), the thread could call synth_precompute_wave_data() (which reads
+    // waves[].start_ptr) BEFORE check_and_process_frequency_reinit() processed the
+    // pending reinit → NULL dereference → SIGSEGV.
+    //
+    // Fix: set FREQ_REINIT_PENDING BEFORE startThread().  The thread's very first
+    // check_and_process_frequency_reinit() call will then always run init_waves()
+    // before synth_precompute_wave_data().
+    //
+    // This covers three cases that leave waves[].start_ptr == NULL:
+    //   1. First-ever init (first synth_IfftInit())
+    //   2. SR change (old SR → new SR baked into area_size)
+    //   3. ppn change → cleanup → synth_IfftInit() → new calloc'd waves[]
+    // ========================================================================
+    bool needsWavetableReinit = synthJustInitialized || (oldSampleRate != (int)sampleRate);
+
+    if (luxstralInitialized && needsWavetableReinit) {
+        if (oldSampleRate != (int)sampleRate) {
+            log_info("VST", "🎵 Queuing wavetable reinit BEFORE thread start (SR %d→%d Hz)",
+                     oldSampleRate, (int)sampleRate);
+        } else {
+            log_info("VST", "🎵 Queuing wavetable reinit BEFORE thread start (fresh synth_IfftInit)");
+        }
+        // Reset stale state first (thread was stopped — safe to force IDLE)
+        reset_frequency_reinit_state();
+        request_frequency_reinit();   // sets PENDING before thread starts
+    }
+
+    // ── Start thread AFTER reinit is queued ───────────────────────────────
     log_info("VST", "Starting AudioProcessingThread with RT priority...");
     audioProcessingThread = std::make_unique<AudioProcessingThread>(sp3ctraCore.get());
-    audioProcessingThread->startThread(juce::Thread::Priority::highest);  // Maximum priority
-    log_info("VST", "AudioProcessingThread started with Priority::highest");
-    
-    // ========================================================================
-    // 🔧 CRITICAL FIX: Regenerate wavetables when sample rate changes
-    //
-    // Root cause of pitch shift + crackling at SR changes:
-    //   - init_waves() is called ONCE at first synth_IfftInit().
-    //   - It bakes area_size = sample_rate / base_freq into each oscillator.
-    //   - phase_inc = note_freq / base_freq (independent of SR — correct).
-    //   - BUT playback pitch = note_freq * (actual_SR / init_SR) if SR changes.
-    //   - Example: init at 44.1kHz → change to 48kHz → pitch ×1.088 (+150 cents).
-    //
-    // Fix: call request_frequency_reinit() after the thread restarts.
-    // The thread will call check_and_process_frequency_reinit() on its first
-    // synthesis cycle, which calls init_waves() with the NEW sample rate.
-    // ========================================================================
-    if (luxstralInitialized && oldSampleRate != (int)sampleRate) {
-        log_info("VST", "🎵 Requesting wavetable regeneration for SR %d → %d Hz",
-                 oldSampleRate, (int)sampleRate);
-        // ====================================================================
-        // 🔧 CRITICAL: Reset stale reinit state BEFORE requesting a new one.
-        //
-        // If the audio thread was stopped while a fade-out was in progress,
-        // g_freq_reinit_state stays == FREQ_REINIT_PENDING.
-        // request_frequency_reinit() uses a CAS(IDLE→PENDING) which FAILS
-        // when state is already PENDING → "Reinit already in progress,
-        // ignoring request" → wavetables never rebuilt for new SR → pitch shift.
-        //
-        // Safe here because the AudioProcessingThread was stopped above.
-        // ====================================================================
-        reset_frequency_reinit_state();
-        request_frequency_reinit();
-    }
+    audioProcessingThread->startThread(juce::Thread::Priority::highest);
+    log_info("VST", "AudioProcessingThread started - wavetable reinit will run on first cycle");
     
     log_info("VST", "=============================================================");
     
