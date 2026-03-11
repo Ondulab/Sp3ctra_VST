@@ -430,6 +430,19 @@ int is_frequency_reinit_fading_out(void) {
     return atomic_load(&g_freq_reinit_state) == FREQ_REINIT_PENDING;
 }
 
+void reset_frequency_reinit_state(void)
+{
+    // Force state back to IDLE unconditionally.
+    // Must only be called when the audio thread is NOT running (e.g. from
+    // prepareToPlay() after the AudioProcessingThread has been stopped).
+    // A thread stopped mid-fade leaves g_freq_reinit_state == FREQ_REINIT_PENDING,
+    // which blocks the next request_frequency_reinit() CAS → silent ignore → wrong SR.
+    int prev = atomic_exchange(&g_freq_reinit_state, FREQ_REINIT_IDLE);
+    if (prev != FREQ_REINIT_IDLE) {
+        log_info("FREQ_REINIT", "Stale reinit state cleared (was %d) - ready for new request", prev);
+    }
+}
+
 /**
  * @brief Check and process pending frequency reinit
  * Called at the beginning of synth_IfftMode() BEFORE workers start
