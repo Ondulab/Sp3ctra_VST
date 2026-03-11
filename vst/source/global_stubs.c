@@ -1,10 +1,10 @@
 // Stubs temporaires pour permettre la compilation du VST minimal
 // Ces variables seront remplacées par une architecture instanciée dans la version finale
 
-#include "../../src/core/context.h"
-#include "../../src/config/config_loader.h"
-#include "../../src/processing/image_sequencer.h"
-#include "../../src/synthesis/luxwave/synth_luxwave.h"
+#include "core/context.h"
+#include "config/config_loader.h"
+#include "processing/image_sequencer.h"
+#include "synthesis/luxwave/synth_luxwave.h"
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -18,8 +18,8 @@
 
 // 🔧 VST Global buffers for synthesis (used by processBlock)
 // These are stub pointers - actual allocation in Sp3ctraCore
-#include "../../src/audio/buffers/audio_image_buffers.h"
-#include "../../src/threading/multithreading.h"
+#include "audio/buffers/audio_image_buffers.h"
+#include "threading/multithreading.h"
 
 AudioImageBuffers *g_audioImageBuffers = NULL;
 DoubleBuffer *g_doubleBuffer = NULL;

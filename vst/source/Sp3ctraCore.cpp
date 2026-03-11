@@ -3,14 +3,14 @@
 
 // C includes with extern "C" block
 extern "C" {
-    #include "../../src/core/context.h"
-    #include "../../src/audio/buffers/doublebuffer.h"
-    #include "../../src/audio/buffers/audio_image_buffers.h"
-    #include "../../src/communication/network/udp.h"
-    #include "../../src/config/config_loader.h"
-    #include "../../src/utils/logger.h"
-    #include "../../src/threading/multithreading.h"
-    #include "../../src/processing/image_preprocessor.h"
+    #include "core/context.h"
+    #include "audio/buffers/doublebuffer.h"
+    #include "audio/buffers/audio_image_buffers.h"
+    #include "communication/network/udp.h"
+    #include "config/config_loader.h"
+    #include "utils/logger.h"
+    #include "threading/multithreading.h"
+    #include "processing/image_preprocessor.h"
     #include "luxstral/synth_luxstral_state.h"
     #include <arpa/inet.h>
     #include <sys/socket.h>

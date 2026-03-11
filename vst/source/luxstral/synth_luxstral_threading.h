@@ -12,7 +12,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "vst_adapters.h"
-#include "../../config/config_instrument.h"  // For CIS_MAX_PIXELS_NB
+#include "config/config_instrument.h"  // For CIS_MAX_PIXELS_NB
 #include <stdint.h>
 #include <stddef.h>
 #include <pthread.h>

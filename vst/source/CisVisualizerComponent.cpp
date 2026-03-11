@@ -6,9 +6,9 @@
 
 // Include C core headers for CIS data access
 extern "C" {
-    #include "../../src/audio/buffers/audio_image_buffers.h"
-    #include "../../src/config/config_instrument.h"
-    #include "../../src/config/config_loader.h"
+    #include "audio/buffers/audio_image_buffers.h"
+    #include "config/config_instrument.h"
+    #include "config/config_loader.h"
 }
 
 //==============================================================================

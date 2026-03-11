@@ -103,23 +103,13 @@ void vst_log_error(const char* message);
     } while(0)
 
 /* Error Handling ------------------------------------------------*/
-static inline void die(const char* msg) {
-    luxstral_log_error("FATAL", "%s", msg);
-    // In VST we can't exit, just log the error
-}
+/* die() is declared in utils/error.h and implemented in utils/error.c  */
+/* The VST edition logs the error without calling exit().                */
+#include "utils/error.h"
 
 /* Image Debug Stubs ---------------------------------------------*/
-static inline void image_debug_init(void) {}
-static inline void image_debug_mark_new_image_boundary(void) {}
-static inline void image_debug_capture_raw_scanner_line(
-    const uint8_t *r, const uint8_t *g, const uint8_t *b) {
-    (void)r; (void)g; (void)b;
-}
-static inline int image_debug_is_oscillator_capture_enabled(void) { return 0; }
-static inline void image_debug_capture_volume_sample_fast(
-    int note, float current_vol, float target_vol) {
-    (void)note; (void)current_vol; (void)target_vol;
-}
+/* All image_debug_* stubs are defined in utils/image_debug_stubs.h      */
+#include "utils/image_debug_stubs.h"
 
 /* Audio Buffers -------------------------------------------------*/
 typedef struct {
@@ -168,16 +158,9 @@ int luxstral_are_audio_buffers_ready(void);  // bool not available in C89
 /* RT Profiler - use real definition from rt_profiler.h --------*/
 // No stubs needed - rt_profiler.h is already included via includes chain
 
-/* Lock-Free Pan System Stubs -----------------------------------*/
-static inline void lock_free_pan_init(void) {}
-static inline void lock_free_pan_cleanup(void) {}
-static inline void lock_free_pan_update(int note, float pan_position) {
-    (void)note; (void)pan_position;
-}
-static inline void lock_free_pan_get_gains(int note, float *left, float *right) {
-    *left = 0.707f;
-    *right = 0.707f;
-}
+/* Lock-Free Pan System -------------------------------------------*/
+/* Real implementation in audio/pan/lock_free_pan.c — use real header */
+#include "audio/pan/lock_free_pan.h"
 
 /* Wave Generation Types -----------------------------------------*/
 // Note: wave_generation.h defines these types properly

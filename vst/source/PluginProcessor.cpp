@@ -4,9 +4,9 @@
 
 // Include C headers for global config access
 extern "C" {
-    #include "../../src/core/context.h"
-    #include "../../src/utils/logger.h"
-    #include "../../src/utils/rt_profiler.h"
+    #include "core/context.h"
+    #include "utils/logger.h"
+    #include "utils/rt_profiler.h"
     #include "luxstral/synth_luxstral.h"           // LuxStral synthesis engine
     #include "luxstral/synth_luxstral_algorithms.h" // Envelope coefficient update
     #include "luxstral/vst_adapters.h"             // Audio buffer init functions
