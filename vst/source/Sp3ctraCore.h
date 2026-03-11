@@ -12,7 +12,7 @@ extern "C" {
     struct sockaddr_in;
     
     // Include context.h here to avoid incomplete type issues
-    #include "../../src/core/context.h"
+    #include "core/context.h"
 }
 
 /**

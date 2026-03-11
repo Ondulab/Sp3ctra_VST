@@ -81,53 +81,53 @@ target_sources(Sp3ctraVST
 target_sources(Sp3ctraVST
     PRIVATE
         # UDP communication
-        ../src/communication/network/udp.c
+        source/communication/network/udp.c
         
         # Configuration system
-        ../src/config/config_loader.c
+        source/config/config_loader.c
         
         # Logging system
-        ../src/utils/logger.c
-        ../src/utils/error.c
-        ../src/utils/rt_profiler.c
+        source/utils/logger.c
+        source/utils/error.c
+        source/utils/rt_profiler.c
         
         # Threading (for udpThread and buffer initialization)
-        ../src/threading/multithreading.c
+        source/threading/multithreading.c
 
         # Image preprocessing (required for VST path)
-        ../src/processing/image_preprocessor.c
+        source/processing/image_preprocessor.c
 
         # Pan system (required for stereo mode)
-        ../src/audio/pan/lock_free_pan.c
+        source/audio/pan/lock_free_pan.c
 
         # KissFFT (required by image_preprocessor luxsynth path)
-        ../src/synthesis/luxsynth/kissfft/kiss_fft.c
-        ../src/synthesis/luxsynth/kissfft/kiss_fftr.c
+        source/synthesis/luxsynth/kissfft/kiss_fft.c
+        source/synthesis/luxsynth/kissfft/kiss_fftr.c
         
         # Audio buffers (DoubleBuffer, AudioImageBuffers)
-        ../src/audio/buffers/audio_image_buffers.c
+        source/audio/buffers/audio_image_buffers.c
         
         # Stubs for missing functions
-        ../src/utils/stubs.c
+        source/utils/stubs.c
 )
 
-# Add include directories for C headers
+# Add include directories for C headers (all migrated into vst/source/)
 target_include_directories(Sp3ctraVST
     PRIVATE
-        ../src
-        ../src/core
-        ../src/config
-        ../src/utils
-        ../src/communication/network
-        ../src/audio/buffers
-        ../src/audio/pan
-        ../src/audio/rtaudio
-        ../src/threading
-        ../src/processing
-        ../src/synthesis/common
-        ../src/synthesis/luxwave
-        ../src/synthesis/luxstral
-        ../src/synthesis/luxsynth
+        ${CMAKE_CURRENT_SOURCE_DIR}/source
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/config
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/utils
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/communication/network
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/audio/buffers
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/audio/pan
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/audio/rtaudio
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/threading
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/processing
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/common
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/luxwave
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/luxsynth
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/luxstral
 )
 
 # Compile definitions

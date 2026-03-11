@@ -33,7 +33,7 @@
 #include "wave_generation.h"
 
 // Image preprocessing (fallback when no UDP data yet)
-#include "../../src/processing/image_preprocessor.h"
+#include "../processing/image_preprocessor.h"
 
 #ifdef __APPLE__
 #include <stdlib.h>

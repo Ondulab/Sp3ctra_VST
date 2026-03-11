@@ -8,7 +8,7 @@
 
 // C headers for RT profiling
 extern "C" {
-    #include "../../src/utils/rt_profiler.h"
+    #include "utils/rt_profiler.h"
 }
 
 //==============================================================================

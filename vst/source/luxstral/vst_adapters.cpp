@@ -38,7 +38,7 @@ static int luxstral_audio_buffer_size = 0;  // Track current buffer size for rea
 // RT Profiler (disabled in VST)
 // Define g_rt_profiler here with proper type from rt_profiler.h
 extern "C" {
-#include "../../src/utils/rt_profiler.h"
+#include "../utils/rt_profiler.h"
 }
 
 // Global instance (disabled)
@@ -48,7 +48,7 @@ RTProfiler g_rt_profiler = {0};
 
 // Include the unified C logger
 extern "C" {
-#include "../../src/utils/logger.h"
+#include "../utils/logger.h"
 }
 
 extern "C" {

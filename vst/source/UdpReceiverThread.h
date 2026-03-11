@@ -6,8 +6,8 @@
 // Forward declaration of C function
 extern "C" {
     void* udpThread(void* arg);
-    #include "../../src/core/context.h"
-    #include "../../src/utils/logger.h"
+    #include "core/context.h"
+    #include "utils/logger.h"
 }
 
 /**
