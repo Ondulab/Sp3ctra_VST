@@ -115,6 +115,19 @@ void request_frequency_reinit(void);
 int check_and_process_frequency_reinit(void);
 
 /**
+ * @brief Force-reset the frequency reinit state machine to IDLE.
+ *
+ * Call this BEFORE request_frequency_reinit() whenever the audio processing
+ * thread has been stopped externally (e.g. prepareToPlay() SR change).
+ * If the thread was stopped mid-fade, g_freq_reinit_state stays PENDING and
+ * the next request_frequency_reinit() would silently fail (CAS rejects
+ * IDLE→PENDING when state is already PENDING) → wrong SR → pitch shift.
+ *
+ * Safe to call from the non-RT main thread when the audio thread is NOT running.
+ */
+void reset_frequency_reinit_state(void);
+
+/**
  * @brief Check if frequency reinit is currently in progress (fading out)
  * @return 1 if fading out, 0 otherwise
  */

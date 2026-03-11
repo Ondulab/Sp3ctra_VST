@@ -608,6 +608,18 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     if (luxstralInitialized && oldSampleRate != (int)sampleRate) {
         log_info("VST", "🎵 Requesting wavetable regeneration for SR %d → %d Hz",
                  oldSampleRate, (int)sampleRate);
+        // ====================================================================
+        // 🔧 CRITICAL: Reset stale reinit state BEFORE requesting a new one.
+        //
+        // If the audio thread was stopped while a fade-out was in progress,
+        // g_freq_reinit_state stays == FREQ_REINIT_PENDING.
+        // request_frequency_reinit() uses a CAS(IDLE→PENDING) which FAILS
+        // when state is already PENDING → "Reinit already in progress,
+        // ignoring request" → wavetables never rebuilt for new SR → pitch shift.
+        //
+        // Safe here because the AudioProcessingThread was stopped above.
+        // ====================================================================
+        reset_frequency_reinit_state();
         request_frequency_reinit();
     }
     
