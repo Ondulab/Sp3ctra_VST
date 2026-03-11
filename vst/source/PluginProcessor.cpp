@@ -961,57 +961,59 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     g_sp3ctra_config.sensor_dpi = sensorDpi;
     g_sp3ctra_config.log_level = (log_level_t)logLevel;
     
-    // ========================================================================
-    // 🔧 ADAPTIVE OSCILLATOR COUNT — RT-safe resolution scaling
-    //
-    // Root cause of crackling at high SR / small buffer size:
-    //   The synthesis wall-time scales as: t_synth ≈ k × num_oscillators × buffer_size
-    //   where k ≈ 2600/(3456×128) ≈ 5.88e-3 µs per oscillator per sample
-    //   (calibrated from RT Profiler: 3456 osc, 8 workers, 128 smp → ~2600 µs).
-    //
-    //   At 48kHz/128: budget=2666 µs, synth=2600 µs (97%) → stale 20%+ → crackling!
-    //   At 96kHz/128: budget=1333 µs, synth=2600 µs (195%) → impossible!
-    //
-    // Fix: increase pixels_per_note (power of 2) to reduce oscillator count so
-    //   that t_synth ≤ TARGET_SYNTH_LOAD × budget at the CURRENT sample rate.
-    //   Since t_synth ∝ buffer_size and budget ∝ buffer_size, the optimal
-    //   pixels_per_note depends ONLY on sample_rate (buffer_size cancels out).
-    //
-    // Result per sample rate (TARGET=60%, 3456 CIS pixels, 8 workers):
-    //   ≤44.1 kHz → pixels_per_note=1 → 3456 osc → max ~90% budget (marginal ok)
-    //   48.0 kHz → pixels_per_note=2 → 1728 osc → max ~49% budget ✓
-    //   88.2 kHz → pixels_per_note=2 → 1728 osc → max ~97% (marginal, see note)
-    //   96.0 kHz → pixels_per_note=4 →  864 osc → max ~49% budget ✓
-    //  192.0 kHz → pixels_per_note=8 →  432 osc → max ~49% budget ✓
-    //
-    // Note: always use a power of 2 — CIS_MAX_PIXELS_NB=3456=2⁷×27 is divisible
-    //   by all powers of 2 up to 128 (required by synth_runtime_init).
-    // ========================================================================
+    // 🔧 Adaptive oscillator count — see calibration comment inside the block.
     {
-        const double US_PER_OSC_SAMPLE = 5.882e-3;  // calibrated: 2600µs / (3456 × 128)
-        const double TARGET_SYNTH_LOAD = 0.60;      // target ≤ 60% of callback budget
+        // ====================================================================
+        // Calibration (RT Profiler data, macOS Apple Silicon):
+        //   8 workers, 3456 osc, 128 smp → synth wall-time ~2600 µs
+        //   → k_8w = 2600 / (3456 × 128) ≈ 5.882e-3 µs / osc / sample
+        //
+        // With N workers each thread processes ceil(osc/N) oscillators.
+        // Wall time scales as (8/N) relative to the 8-worker baseline:
+        //   k_Nw = k_8w × (8 / N)
+        //
+        // Target: 90% of callback budget (generous; preserves ppn=1 at
+        //   44.1 kHz / 8 workers where actual load is ~90%).
+        //
+        // Formula (buffer_size cancels: t_synth ∝ buf_size, budget ∝ buf_size):
+        //   max_osc = 0.90 × 1e6 × N / (k_8w × 8 × SR)
+        //
+        // SR / Workers result table (CIS_PIXELS=3456, ppn=power-of-2):
+        //   44.1kHz / 8w → ppn=1 (3456 osc, ~90%)  max resolution ✓
+        //   44.1kHz / 5w → ppn=2 (1728 osc, ~90%)  was 143% → stale+crackling!
+        //   48.0kHz / 8w → ppn=2 (1728 osc, ~49%)  ✓
+        //   48.0kHz / 5w → ppn=4  (864 osc, ~49%)  ✓
+        //   96.0kHz / 8w → ppn=4  (864 osc, ~49%)  ✓
+        //   96.0kHz / 5w → ppn=8  (432 osc, ~49%)  ✓
+        // ====================================================================
+        const double K_8W = 5.882e-3;      // µs per oscillator per sample (8 workers)
+        const double TARGET = 0.90;        // 90% load target
+
+        // Read num_workers NOW (needed before the APVTS sync block below sets it)
+        int n_workers = (int)apvts.getRawParameterValue("luxstralNumWorkers")->load();
+        if (n_workers < 1) n_workers = 1;
 
         int sr = g_sp3ctra_config.sampling_frequency;
-        int adaptive_ppn = 1;  // default: max resolution
+        int adaptive_ppn = 1;  // default: max resolution (SR unknown yet)
 
         if (sr > 0) {
-            // Max oscillators that fit within TARGET_SYNTH_LOAD of the budget.
-            // Budget = buffer_size / sr × 1e6 µs → cancels with t_synth numerator:
-            //   max_osc = TARGET × 1e6 / (US_PER_OSC_SAMPLE × sr)
-            double max_osc = TARGET_SYNTH_LOAD * 1e6 / (US_PER_OSC_SAMPLE * (double)sr);
-            int cis_pixels = get_cis_pixels_nb();
-            if (cis_pixels <= 0) cis_pixels = 3456;  // hardware fallback
+            // Effective cost per osc-sample for N workers
+            double k_eff = K_8W * 8.0 / (double)n_workers;
+            double max_osc = TARGET * 1e6 / (k_eff * (double)sr);
 
-            // Smallest power of 2 that keeps oscillators ≤ max_osc
+            int cis_pixels = get_cis_pixels_nb();
+            if (cis_pixels <= 0) cis_pixels = 3456;
+
+            // Smallest power of 2 keeping oscillator count ≤ max_osc
             while ((double)(cis_pixels / adaptive_ppn) > max_osc && adaptive_ppn < 128) {
                 adaptive_ppn *= 2;
             }
 
             log_info("VST",
-                "Adaptive resolution: SR=%d Hz → pixels_per_note=%d → %d osc "
-                "(target ≤%.0f osc for %.0f%% load)",
-                sr, adaptive_ppn, cis_pixels / adaptive_ppn,
-                max_osc, TARGET_SYNTH_LOAD * 100.0);
+                "Adaptive resolution: SR=%d Hz, workers=%d → pixels_per_note=%d → %d osc "
+                "(≤%.0f osc for %.0f%% load target)",
+                sr, n_workers, adaptive_ppn, cis_pixels / adaptive_ppn,
+                max_osc, TARGET * 100.0);
         }
 
         g_sp3ctra_config.pixels_per_note = adaptive_ppn;
