@@ -86,9 +86,16 @@ int barrier_wait(barrier_t *barrier) {
   while (gen == barrier->generation) {
     pthread_cond_wait(&barrier->cond, &barrier->mutex);
     
-    // 🔧 CRITICAL: Check exit flags after wakeup from broadcast
+    // 🔧 FIX: Check exit flags after wakeup from broadcast
+    // If generation has already advanced (last thread reset waiting=0),
+    // do NOT decrement waiting — it's already 0 and would underflow to -1,
+    // corrupting the barrier for any subsequent reuse.
     if (synth_workers_must_exit || synth_pool_shutdown) {
-      barrier->waiting--;  // Remove ourselves from waiting count
+      if (gen == barrier->generation) {
+        // Generation hasn't advanced yet: we're still in the wait set
+        barrier->waiting--;
+      }
+      // If gen != barrier->generation, the last thread already reset waiting=0
       pthread_mutex_unlock(&barrier->mutex);
       return -1;  // Early exit
     }
