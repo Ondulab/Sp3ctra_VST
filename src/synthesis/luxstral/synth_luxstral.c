@@ -123,7 +123,7 @@ int32_t synth_IfftInit(void) {
     // Use standard random function on Linux
     uint32_t aRandom32bit = rand();
 #endif
-    waves[i].current_idx = aRandom32bit % waves[i].area_size;
+    waves[i].phase_acc = (float)(aRandom32bit % waves[i].area_size);
     waves[i].current_volume = 0;
     
     }
@@ -139,30 +139,28 @@ int32_t synth_IfftInit(void) {
   log_info("SYNTH", "Buffer length = %d uint16", (int)buffer_len);
 
   uint8_t FreqStr[256] = {0};
-  sprintf((char *)FreqStr, " %d -> %dHz      Octave:%d",
+  sprintf((char *)FreqStr, " %d -> %dHz      PhaseInc:%.4f",
           (int)waves[0].frequency, (int)waves[get_current_number_of_notes() - 1].frequency,
-          (int)sqrt(waves[get_current_number_of_notes() - 1].octave_coeff));
+          (double)waves[get_current_number_of_notes() - 1].phase_inc);
 
   log_info("SYNTH", "First note Freq = %dHz, Size = %d", (int)waves[0].frequency,
          (int)waves[0].area_size);
-  log_info("SYNTH", "Last note Freq = %dHz, Size = %d, Octave = %d",
+  log_info("SYNTH", "Last note Freq = %dHz, Size = %d, PhaseInc = %.4f",
          (int)waves[get_current_number_of_notes() - 1].frequency,
-         (int)waves[get_current_number_of_notes() - 1].area_size /
-             (int)sqrt(waves[get_current_number_of_notes() - 1].octave_coeff),
-         (int)sqrt(waves[get_current_number_of_notes() - 1].octave_coeff));
+         (int)waves[get_current_number_of_notes() - 1].area_size,
+         (double)waves[get_current_number_of_notes() - 1].phase_inc);
 
   log_info("SYNTH", "-------------------------------");
 
 #ifdef PRINT_IFFT_FREQUENCY
   for (uint32_t pix = 0; pix < NUMBER_OF_NOTES; pix++) {
-    printf("FREQ = %0.2f, SIZE = %d, OCTAVE = %d\n", waves[pix].frequency,
-           (int)waves[pix].area_size, (int)waves[pix].octave_coeff);
+    printf("FREQ = %0.2f, SIZE = %d, PHASE_INC = %.5f\n", waves[pix].frequency,
+           (int)waves[pix].area_size, (double)waves[pix].phase_inc);
 #ifdef PRINT_IFFT_FREQUENCY_FULL
-    int32_t output = 0;
     for (uint32_t idx = 0;
-         idx < (waves[pix].area_size / waves[pix].octave_coeff); idx++) {
-      output = *(waves[pix].start_ptr + (idx * waves[pix].octave_coeff));
-      printf("%d\n", output);
+         idx < (uint32_t)((float)waves[pix].area_size / waves[pix].phase_inc); idx++) {
+      float sample = waves[pix].start_ptr[(uint32_t)(idx * waves[pix].phase_inc)];
+      printf("%d\n", (int)sample);
     }
 #endif
   }
@@ -171,11 +169,10 @@ int32_t synth_IfftInit(void) {
 
   printf("First note Freq = %dHz\nSize = %d\n", (int)waves[0].frequency,
          (int)waves[0].area_size);
-  printf("Last  note Freq = %dHz\nSize = %d\nOctave = %d\n",
+  printf("Last  note Freq = %dHz\nSize = %d\nPhaseInc = %.5f\n",
          (int)waves[NUMBER_OF_NOTES - 1].frequency,
-         (int)waves[NUMBER_OF_NOTES - 1].area_size /
-             (int)sqrt(waves[NUMBER_OF_NOTES - 1].octave_coeff),
-         (int)sqrt(waves[NUMBER_OF_NOTES - 1].octave_coeff));
+         (int)waves[NUMBER_OF_NOTES - 1].area_size,
+         (double)waves[NUMBER_OF_NOTES - 1].phase_inc);
 
   printf("-------------------------------\n");
 #endif

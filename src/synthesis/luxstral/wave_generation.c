@@ -9,6 +9,7 @@
 #include "config.h"
 #include "wave_generation.h"
 #include "../../config/config_loader.h"
+#include "../../config/config_synth_luxstral.h"
 
 #include "math.h"
 #include "stdio.h"
@@ -177,12 +178,31 @@ uint32_t init_waves(volatile float *unitary_waveform,
   const uint32_t commas_per_octave =
       (uint32_t)(g_sp3ctra_config.semitone_per_octave) * parameters->commaPerSemitone;
 
-  log_info("SYNTH", "---------- WAVES INIT ---------");
+  // Oversampling factor: 2^WAVE_REF_OCTAVE  (table virtual sample rate = Fs × oversample)
+  // The table is generated at the reference octave frequency so that:
+  //   - High notes (octave > REF) have phase_inc = 2^(oct-REF): smaller step than the legacy
+  //     integer octave_coeff (2^oct), preserving more waveform detail per audio sample.
+  //   - Low notes  (octave < REF) have phase_inc < 1: sub-sample interpolation gives even
+  //     finer precision than a step-1 traversal of a large table.
+  // Memory reduction: area_size = Fs / (f_oct0 × 2^REF) → 2^REF times smaller than baseline.
+  const float oversample = (float)(1u << WAVE_REF_OCTAVE);  // = 2^WAVE_REF_OCTAVE
 
-  // First pass: calculate total buffer length for first-octave waveforms
+  log_info("SYNTH", "---------- WAVES INIT ---------");
+  log_info("SYNTH", "Wave table reference octave : %d  (oversample = x%.0f)",
+           WAVE_REF_OCTAVE, (double)oversample);
+
+  // -------------------------------------------------------------------------
+  // First pass: calculate total buffer length for reference-octave waveforms.
+  // Tables are generated at f_ref = f_oct0 × oversample so they are 2^REF times
+  // smaller than the legacy oct-0 tables while retaining full quality via
+  // linear interpolation in the hot path.
+  // -------------------------------------------------------------------------
   for (uint32_t comma_cnt = 0; comma_cnt < commas_per_octave; comma_cnt++) {
-    float frequency = calculate_frequency(comma_cnt, parameters);
-    buffer_len += (uint32_t)(g_sp3ctra_config.sampling_frequency / frequency);
+    float frequency    = calculate_frequency(comma_cnt, parameters);   // f at octave 0
+    float f_ref        = frequency * oversample;                        // f at ref octave
+    uint32_t area_size = (uint32_t)(g_sp3ctra_config.sampling_frequency / f_ref);
+    if (area_size < WAVE_TABLE_MIN_ENTRIES) area_size = WAVE_TABLE_MIN_ENTRIES;
+    buffer_len += area_size;
   }
 
   // Physiological filter status
@@ -190,32 +210,45 @@ uint32_t init_waves(volatile float *unitary_waveform,
   log_info("SYNTH", "Physiological (equal-loudness) filter: %s",
            phys_filter ? "ENABLED" : "DISABLED");
 
-  // Second pass: compute and store waveforms for the reference octave (always ±1.0)
-  // Physiological compensation is handled via waves[note].physiological_gain
-  // applied at mixdown in apply_gap_limiter_ramp().
+  // -------------------------------------------------------------------------
+  // Second pass: generate waveforms at the reference-octave resolution and
+  // assign them to all octaves with a float phase_inc per note.
+  //
+  // phase_inc = f_note / f_ref_comma = 2^(octave − WAVE_REF_OCTAVE)
+  //   octave = REF → phase_inc = 1.0   (one-to-one traversal)
+  //   octave > REF → phase_inc > 1.0   (skip entries, but interpolated)
+  //   octave < REF → phase_inc < 1.0   (sub-entry interpolation, very fine)
+  //
+  // Waveform amplitude is always unity ±1.0; physiological gain is applied
+  // separately at mixdown via waves[note].physiological_gain.
+  // -------------------------------------------------------------------------
   for (uint32_t comma_cnt = 0; comma_cnt < commas_per_octave; comma_cnt++) {
-    float frequency = calculate_frequency(comma_cnt, parameters);
+    float frequency        = calculate_frequency(comma_cnt, parameters);  // f at oct 0
+    float f_ref            = frequency * oversample;                       // f at ref oct
+    uint32_t current_aera_size = (uint32_t)(g_sp3ctra_config.sampling_frequency / f_ref);
+    if (current_aera_size < WAVE_TABLE_MIN_ENTRIES) current_aera_size = WAVE_TABLE_MIN_ENTRIES;
 
-    uint32_t current_aera_size = (uint32_t)((g_sp3ctra_config.sampling_frequency / frequency));
-
-    // Waveforms always at unity amplitude ±1.0
+    // Generate sinusoidal waveform at reference-octave resolution (unity amplitude)
     current_unitary_waveform_cell =
         calculate_waveform(current_aera_size, current_unitary_waveform_cell,
                            buffer_len, parameters, 1.0f);
 
-    // Assign this waveform to all octaves
+    // Assign this shared table to all octaves with the correct phase_inc
     for (uint32_t octave = 0;
          octave <= (get_current_number_of_notes() / commas_per_octave);
          octave++) {
       note = comma_cnt + commas_per_octave * octave;
       if ((int)note < get_current_number_of_notes()) {
-        waves[note].frequency = frequency * pow(2, octave);
-        waves[note].area_size = current_aera_size;
-        waves[note].start_ptr =
+        float f_note = frequency * powf(2.0f, (float)octave);
+        waves[note].frequency  = f_note;
+        waves[note].area_size  = current_aera_size;
+        waves[note].start_ptr  =
             &unitary_waveform[current_unitary_waveform_cell - current_aera_size];
-        waves[note].current_idx = 0;
-        waves[note].octave_coeff = pow(2, octave);
-        waves[note].octave_divider = 1;
+        // Float phase accumulator — initialized to 0, randomized after this function
+        waves[note].phase_acc  = 0.0f;
+        // phase_inc = 2^(octave − WAVE_REF_OCTAVE):
+        //   stored as float so sub-unity values (low octaves) are handled seamlessly
+        waves[note].phase_inc  = f_note / f_ref;
         waves[note].physiological_gain = 1.0f;  // initialized; set below
       }
     }

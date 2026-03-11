@@ -57,7 +57,8 @@ typedef struct synth_thread_worker_s {
   
 
   // Pre-computed waves[] data (read-only)
-  int32_t *precomputed_new_idx; // size: (notes_per_thread * g_sp3ctra_config.audio_buffer_size)
+  // NOTE: precomputed_new_idx removed — phase is now a float (phase_acc/phase_inc)
+  //       and is committed directly inside synth_precompute_wave_data() (single-threaded).
   float *precomputed_wave_data; // size: (notes_per_thread * g_sp3ctra_config.audio_buffer_size)
   float *precomputed_volume;    // Dynamically allocated based on notes_per_thread
   

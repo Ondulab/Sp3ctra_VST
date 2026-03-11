@@ -9,6 +9,7 @@
 #include "vst_adapters_c.h"
 #include "wave_generation.h"
 #include "synth_luxstral_algorithms.h"
+#include "config_synth_luxstral.h"
 #include "math.h"
 #include "stdio.h"
 #include "stdlib.h"
@@ -287,14 +288,13 @@ uint32_t init_waves(volatile float *unitary_waveform,
         waves[note].area_size = current_area_size;
         // Store pointer to base waveform
         waves[note].start_ptr = &unitary_waveform[current_unitary_waveform_cell - current_area_size];
-        // Reset index
-        waves[note].current_idx = 0;
-        
-        // Octave coefficient: how much faster to step through waveform
-        // Higher octave = 2x frequency = step through waveform 2x faster
-        waves[note].octave_coeff = (uint32_t)powf(2.0f, (float)octave);
-        waves[note].octave_divider = 1;
-        
+        // Float phase accumulator — initialized to 0, randomised after init_waves() returns
+        waves[note].phase_acc = 0.0f;
+        // phase_inc = note_frequency / base_frequency
+        //   = 2^(octave + comma/notes_per_octave) which equals note_freq / (sample_rate/area_size)
+        // Values below 1 for bass notes (sub-sample resolution), above 1 for treble (skip samples)
+        waves[note].phase_inc = note_frequency / base_frequency;
+
         // Initialize physiological gain to unity (will be set below)
         waves[note].physiological_gain = 1.0f;
       }
@@ -315,18 +315,18 @@ uint32_t init_waves(volatile float *unitary_waveform,
       // Use the last configured note's waveform for orphan notes
       uint32_t last_area_size = waves[note].area_size;
       volatile float* last_start_ptr = waves[note].start_ptr;
-      uint32_t last_octave_coeff = waves[note].octave_coeff;
-      
+      // base_freq for last comma ≈ sample_rate / last_area_size
+      float last_base_freq = (float)sample_rate / (float)last_area_size;
+
       for (int orphan_idx = (int)note + 1; orphan_idx < total_notes; orphan_idx++) {
         // Calculate frequency using logarithmic distribution (correct frequency)
         float orphan_freq = calculate_frequency_for_note(orphan_idx, total_notes, low_freq, high_freq);
-        
-        waves[orphan_idx].frequency = orphan_freq;
-        waves[orphan_idx].area_size = last_area_size;
-        waves[orphan_idx].start_ptr = last_start_ptr;
-        waves[orphan_idx].current_idx = 0;
-        waves[orphan_idx].octave_coeff = last_octave_coeff;
-        waves[orphan_idx].octave_divider = 1;
+
+        waves[orphan_idx].frequency  = orphan_freq;
+        waves[orphan_idx].area_size  = last_area_size;
+        waves[orphan_idx].start_ptr  = last_start_ptr;
+        waves[orphan_idx].phase_acc  = 0.0f;
+        waves[orphan_idx].phase_inc  = orphan_freq / last_base_freq;
         waves[orphan_idx].current_volume = 0.0f;
       }
     }
@@ -334,11 +334,11 @@ uint32_t init_waves(volatile float *unitary_waveform,
 
   // Log first and last note info
   if (total_notes > 0) {
-    log_info("SYNTH", "First note: %.2f Hz, area_size=%u, oct_coeff=%u", 
-             waves[0].frequency, waves[0].area_size, waves[0].octave_coeff);
-    log_info("SYNTH", "Last note: %.2f Hz, area_size=%u, oct_coeff=%u", 
-             waves[total_notes-1].frequency, waves[total_notes-1].area_size, 
-             waves[total_notes-1].octave_coeff);
+    log_info("SYNTH", "First note: %.2f Hz, area_size=%u, phase_inc=%.5f",
+             waves[0].frequency, waves[0].area_size, (double)waves[0].phase_inc);
+    log_info("SYNTH", "Last note:  %.2f Hz, area_size=%u, phase_inc=%.5f",
+             waves[total_notes-1].frequency, waves[total_notes-1].area_size,
+             (double)waves[total_notes-1].phase_inc);
   }
 
   // Sanity check - should now always pass
@@ -460,7 +460,7 @@ int check_and_process_frequency_reinit(void) {
 #else
             uint32_t aRandom32bit = (uint32_t)rand();
 #endif
-            waves[note].current_idx = aRandom32bit % waves[note].area_size;
+            waves[note].phase_acc = (float)(aRandom32bit % waves[note].area_size);
             waves[note].current_volume = 0.0f;
             // target_volume will be set by image data naturally
         }

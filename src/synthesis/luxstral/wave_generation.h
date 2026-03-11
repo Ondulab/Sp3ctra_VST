@@ -32,15 +32,20 @@ struct waveParams {
 
 /* Wave structure (moved from shared.h) */
 struct wave {
-    // Waveform data pointers
+    // Waveform table pointer and size
     volatile float *start_ptr;              // Float32 waveform table pointer
-    
-    // Index and size parameters (shared between float and Q24)
-    uint32_t current_idx;
-    uint32_t area_size;
-    uint32_t octave_coeff;
-    uint32_t octave_divider;
-    
+    uint32_t area_size;                     // Number of samples in the table (ref-octave resolution)
+
+    // Phase accumulator — replaces legacy integer current_idx / octave_coeff / octave_divider.
+    // Table is generated at reference octave R (WAVE_REF_OCTAVE) so:
+    //   phase_inc = f_note / f_ref_comma = 2^(octave − WAVE_REF_OCTAVE)
+    //   phase_acc ∈ [0, area_size)   (float, enables linear sub-sample interpolation)
+    // Low notes  (octave < R): phase_inc < 1  → interpolated between consecutive entries
+    // Ref note   (octave = R): phase_inc = 1  → one-to-one table traversal
+    // High notes (octave > R): phase_inc > 1  → large steps, still interpolated accurately
+    float phase_acc;                        // Current read position within the table
+    float phase_inc;                        // Phase advance per audio sample
+
     // Volume parameters - Float32
     float target_volume;
     float current_volume;
