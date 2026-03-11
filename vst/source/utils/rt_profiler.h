@@ -48,9 +48,11 @@ typedef struct {
     atomic_uint_fast64_t underrun_count;
     
     /* Buffer miss tracking (atomic for thread safety) */
-    atomic_uint_fast64_t buffer_miss_luxstral;
+    atomic_uint_fast64_t buffer_miss_luxstral;      /* ready=0, silence output */
     atomic_uint_fast64_t buffer_miss_luxsynth;
     atomic_uint_fast64_t buffer_miss_luxwave;
+    /* Stale-buffer re-output: producer is mid-write, consumer re-outputs last frame */
+    atomic_uint_fast64_t buffer_stale_luxstral;     /* "SAME DATA" re-output count */
     
     /* Mutex contention tracking */
     uint64_t mutex_lock_attempts;
@@ -120,11 +122,21 @@ void rt_profiler_report_underrun(RTProfiler *profiler);
 
 /**
  * @brief Report a buffer miss for additive synthesis
- * Call when the additive synthesis buffer is not ready
+ * Call when the additive synthesis buffer is not ready (ready=0, outputs silence)
  * 
  * @param profiler Profiler instance
  */
 void rt_profiler_report_buffer_miss_luxstral(RTProfiler *profiler);
+
+/**
+ * @brief Report a stale-buffer re-output for additive synthesis
+ * Call when processBlock re-outputs the same buffer because the producer
+ * is still mid-write (readIdx == lastConsumedReadIdx → "SAME DATA" branch).
+ * Stale outputs are better than silence but reveal producer latency.
+ * 
+ * @param profiler Profiler instance
+ */
+void rt_profiler_report_stale_luxstral(RTProfiler *profiler);
 
 /**
  * @brief Report a buffer miss for polyphonic synthesis
