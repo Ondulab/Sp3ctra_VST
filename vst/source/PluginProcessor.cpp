@@ -535,6 +535,30 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
         return;
     }
 
+    // ========================================================================
+    // 🔧 SIGBUS FIX: pixels_per_note change requires full runtime realloc.
+    //
+    // The waves[] array is sized at synth_IfftInit() time for:
+    //   num_notes = cis_pixels / pixels_per_note_AT_INIT
+    //
+    // If pixels_per_note changes between prepareToPlay() calls (e.g. SR switch
+    // 96kHz→48kHz: ppn 4→2), init_waves() would try to write 1728 entries into
+    // an array allocated for 864 → out-of-bounds write → Bus Error (SIGBUS).
+    //
+    // Fix: detect the change, call synth_luxstral_cleanup() to free waves[] and
+    // shut down the worker pool, then fall through to the full synth_IfftInit()
+    // path which calls synth_runtime_init() with the correct new ppn.
+    // ========================================================================
+    if (luxstralInitialized && g_sp3ctra_config.pixels_per_note != lastInitPixelsPerNote) {
+        log_info("VST",
+            "pixels_per_note changed (%d → %d): full LuxStral reinit required "
+            "(waves[] realloc to avoid SIGBUS)",
+            lastInitPixelsPerNote, g_sp3ctra_config.pixels_per_note);
+        synth_luxstral_cleanup();   // frees waves[], shuts down worker pool
+        luxstralInitialized = false;
+        // Falls through to the !luxstralInitialized branch immediately below
+    }
+
     // Initialize LuxStral on first call only
     if (!luxstralInitialized) {
         log_info("VST", "First-time initialization of LuxStral...");
@@ -547,7 +571,10 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
         
         if (result == 0) {
             luxstralInitialized = true;
-            log_info("VST", "LuxStral initialized successfully");
+            // Record ppn used — detect change on next prepareToPlay() to avoid SIGBUS
+            lastInitPixelsPerNote = g_sp3ctra_config.pixels_per_note;
+            log_info("VST", "LuxStral initialized successfully (pixels_per_note=%d, notes=%d)",
+                     lastInitPixelsPerNote, get_cis_pixels_nb() / lastInitPixelsPerNote);
         } else {
             log_error("VST", "LuxStral initialization FAILED");
             return;
