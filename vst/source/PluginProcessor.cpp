@@ -198,6 +198,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         8  // num_workers = 8 (as specified in config)
     ));
     
+    // Physiological Filter (Equal-Loudness Compensation)
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        "luxstralPhysiologicalFilter",
+        "LuxStral Equal-Loudness Compensation",
+        false  // Disabled by default (flat response)
+    ));
+
+    // Physiological correction depth (0.0 = no correction, 1.0 = full A-weighting inverse)
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        "luxstralPhysiologicalDepth",
+        "LuxStral Equal-Loudness Depth",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f),
+        0.5f,  // Default: 50% of full A-weighting inverse
+        ""
+    ));
+    
     return { params.begin(), params.end() };
 }
 
@@ -257,6 +273,8 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("luxstralSummationResponseExp", this);
     apvts.addParameterListener("luxstralNoiseGateThreshold", this);
     apvts.addParameterListener("luxstralNumWorkers", this);
+    apvts.addParameterListener("luxstralPhysiologicalFilter", this);
+    apvts.addParameterListener("luxstralPhysiologicalDepth", this);
     
     // Create Sp3ctra core (but do NOT initialize yet - lazy init)
     sp3ctraCore = std::make_unique<Sp3ctraCore>();
@@ -755,6 +773,21 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
             request_frequency_reinit();
         }
         
+        // 🔧 HOT-RELOAD: Physiological filter toggle requires wavetable regeneration
+        // Waveform amplitudes change when equal-loudness compensation is enabled/disabled
+        if (parameterID == "luxstralPhysiologicalFilter") {
+            log_info("VST", "Physiological filter %s - requesting wavetable regeneration",
+                     newValue > 0.5f ? "ENABLED" : "DISABLED");
+            request_frequency_reinit();
+        }
+        
+        // 🔧 HOT-RELOAD: Depth change requires re-weighting all wavetable gains
+        if (parameterID == "luxstralPhysiologicalDepth") {
+            log_info("VST", "Physiological depth changed to %.2f - requesting wavetable regeneration",
+                     newValue);
+            request_frequency_reinit();
+        }
+        
         // 🔧 HOT-RELOAD: Envelope parameters (Attack/Release) require coefficient update
         // Recalculates alpha_up and alpha_down_weighted for all oscillators
         if (parameterID == "luxstralAttackMs" || parameterID == "luxstralReleaseMs") {
@@ -948,6 +981,13 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     // Performance
     g_sp3ctra_config.num_workers = 
         (int)apvts.getRawParameterValue("luxstralNumWorkers")->load();
+    
+    // Physiological Filter (Equal-Loudness Compensation on wavetables)
+    g_sp3ctra_config.physiological_filter_enabled = 
+        (int)apvts.getRawParameterValue("luxstralPhysiologicalFilter")->load();
+    // FIX: this field was never written → depth was 0.0f (zero-init) → all gains = 1.000
+    g_sp3ctra_config.physiological_correction_depth =
+        apvts.getRawParameterValue("luxstralPhysiologicalDepth")->load();
     
     // Update logger level immediately
     logger_init((log_level_t)logLevel);

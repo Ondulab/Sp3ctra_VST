@@ -99,7 +99,12 @@ void update_gap_limiter_coefficients(void) {
  */
 void apply_gap_limiter_ramp(int note, float target_volume, const float *pre_wave, float *volumeBuffer) {
     (void)pre_wave; // No longer used (phase weighting removed)
-    
+
+    // Apply per-note physiological (equal-loudness) gain.
+    // Gain is RMS-normalized at init so total energy is preserved.
+    // waves[note].physiological_gain = 1.0 when filter is disabled.
+    target_volume *= waves[note].physiological_gain;
+
     // Set the target volume for the oscillator
     waves[note].target_volume = target_volume;
 

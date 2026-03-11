@@ -54,11 +54,15 @@ static const config_param_def_t CONFIG_PARAMS[] = {
     CONFIG_PARAM("instrument", "sensor_dpi", PARAM_TYPE_INT, 
                  sensor_dpi, 200, 400),
     
-    // LuxStral synthesis section (frequency mapping)
-    CONFIG_PARAM("synth_luxstral", "low_frequency", PARAM_TYPE_FLOAT, 
+    // LuxStral synthesis section (frequency mapping and physiological correction)
+    CONFIG_PARAM("synth_luxstral", "low_frequency", PARAM_TYPE_FLOAT,
                  low_frequency, 20.0f, 20000.0f),
-    CONFIG_PARAM("synth_luxstral", "high_frequency", PARAM_TYPE_FLOAT, 
+    CONFIG_PARAM("synth_luxstral", "high_frequency", PARAM_TYPE_FLOAT,
                  high_frequency, 20.0f, 20000.0f),
+    CONFIG_PARAM("synth_luxstral", "physiological_filter_enabled", PARAM_TYPE_BOOL,
+                 physiological_filter_enabled, 0, 1),
+    CONFIG_PARAM("synth_luxstral", "physiological_correction_depth", PARAM_TYPE_FLOAT,
+                 physiological_correction_depth, 0.0f, 1.0f),
     
     // Envelope slew section
     CONFIG_PARAM("envelope_slew", "tau_up_base_ms", PARAM_TYPE_FLOAT,

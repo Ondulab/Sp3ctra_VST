@@ -48,8 +48,11 @@ struct wave {
     // GAP_LIMITER: Precomputed envelope coefficients (RT-optimized)
     float alpha_up;                         // Attack coefficient (precomputed)
     float alpha_down_weighted;              // Release coefficient with frequency weighting (precomputed)
-    
-    
+
+    // Physiological (equal-loudness) gain — precomputed at init, RMS-normalized across all notes
+    // Applied to target_volume in apply_gap_limiter_ramp() (1.0 = no change, inactive when filter OFF)
+    float physiological_gain;
+
     // Frequency (keep as float for initialization calculations)
     float frequency;
     
@@ -73,6 +76,18 @@ extern volatile float *unitary_waveform;  // Now a pointer to dynamically alloca
 uint32_t init_waves(volatile float *unitary_waveform,
                     volatile struct wave *waves,
                     volatile struct waveParams *parameters);
+
+/**
+ * @brief Compute physiological (equal-loudness) gain compensation for a given frequency
+ * 
+ * Uses inverse A-weighting (IEC 61672:2003) to compensate for human hearing sensitivity.
+ * Boosts frequencies where the ear is less sensitive (bass, extreme treble)
+ * and attenuates frequencies where the ear is most sensitive (~1-5 kHz).
+ * 
+ * @param frequency_hz Frequency in Hz (must be > 0)
+ * @return Gain factor (1.0 = no change at 1 kHz reference, >1.0 = boost, <1.0 = attenuate)
+ */
+float compute_physiological_gain(float frequency_hz);
 
 /**************************************************************************************
  * Hot-reload frequency range API

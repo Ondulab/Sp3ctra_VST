@@ -55,6 +55,8 @@ static const sp3ctra_config_t DEFAULT_CONFIG = {
     .semitone_per_octave = 12,
     .comma_per_semitone = 36,
     .pixels_per_note = 1,
+    .physiological_filter_enabled = 0,      // Disabled by default
+    .physiological_correction_depth = 0.3f, // 30% of A-weighting inverse correction
 
     // Envelope slew parameters
     .tau_up_base_ms = 0.5f,

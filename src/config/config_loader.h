@@ -52,6 +52,8 @@ typedef struct {
     int comma_per_semitone;       // Calculated based on DPI and frequency range
     int pixels_per_note;          // Always 1 for maximum resolution
     int num_octaves;              // Fixed number of octaves (set by user, not calculated dynamically)
+    int physiological_filter_enabled;       // Enable/disable A-weighting inverse compensation (0/1)
+    float physiological_correction_depth;   // Correction depth in dB-domain (0.0=none, 1.0=full, default 0.3)
     
     // Image processing parameters - LUXSTRAL SYNTHESIS
     int additive_enable_non_linear_mapping;    // Enable/disable gamma correction (0/1)
