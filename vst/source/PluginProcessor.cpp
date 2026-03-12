@@ -9,6 +9,8 @@ extern "C" {
     #include "utils/rt_profiler.h"
     #include "luxstral/synth_luxstral.h"           // LuxStral synthesis engine
     #include "luxstral/synth_luxstral_algorithms.h" // Envelope coefficient update
+    #include "luxstral/synth_luxstral_threading.h" // synth_shutdown_thread_pool()
+    #include "luxstral/synth_luxstral_runtime.h"   // synth_runtime_free_buffers()
     #include "luxstral/vst_adapters.h"             // Audio buffer init functions
     #include "luxstral/wave_generation.h"          // Hot-reload frequency API
 }
@@ -537,18 +539,33 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     }
 
     // ========================================================================
-    // 🔧 SIGBUS FIX: pixels_per_note change requires full runtime realloc.
+    // 🔧 SIGBUS+SIGSEGV FIX: pixels_per_note change requires full runtime realloc.
     //
     // The waves[] array is sized at synth_IfftInit() time for:
     //   num_notes = cis_pixels / pixels_per_note_AT_INIT
     //
-    // If pixels_per_note changes between prepareToPlay() calls (e.g. SR switch
-    // 96kHz→48kHz: ppn 4→2), init_waves() would try to write 1728 entries into
-    // an array allocated for 864 → out-of-bounds write → Bus Error (SIGBUS).
+    // If pixels_per_note changes between prepareToPlay() calls, two bugs occur:
     //
-    // Fix: detect the change, call synth_luxstral_cleanup() to free waves[] and
-    // shut down the worker pool, then fall through to the full synth_IfftInit()
-    // path which calls synth_runtime_init() with the correct new ppn.
+    //   BUG 1 — HIGHER SR (SIGSEGV / crash):
+    //     ppn increases (e.g. 2→4): waves[] shrinks (1728→864 entries).
+    //     Old pool workers have end_note=1728. synth_precompute_wave_data()
+    //     accesses waves[864..1727] → OUT OF BOUNDS → NULL start_ptr → SIGSEGV.
+    //
+    //   BUG 2 — LOWER SR (pitch appears to drop):
+    //     ppn decreases (e.g. 4→2): waves[] grows (864→1728 entries).
+    //     Old pool workers only cover notes 0..863. Notes 864..1727 are never
+    //     synthesized → only the lower half of the frequency range is output
+    //     → perceived pitch drop. Correct on restart because pool is rebuilt.
+    //
+    // Root cause: synth_pool_initialized stays 1 after synth_luxstral_cleanup(),
+    // so synth_IfftMode() reuses stale worker note ranges for the new waves[].
+    //
+    // Fix: call synth_shutdown_thread_pool() BEFORE synth_luxstral_cleanup() so
+    // synth_pool_initialized is reset to 0. synth_IfftMode() will then call
+    // synth_init_thread_pool() with the correct new note count on first cycle.
+    //
+    // Also call synth_runtime_free_buffers() to release the old waves[] and
+    // unitary_waveform[] allocations and prevent ~40 MB leaks per SR change.
     // ========================================================================
     // 🔧 SIGBUS+SIGSEGV guard: only cleanup if thread stopped cleanly.
     // Calling synth_luxstral_cleanup() while the thread still runs → use-after-free.
@@ -556,8 +573,20 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
         luxstralInitialized &&
         g_sp3ctra_config.pixels_per_note != lastInitPixelsPerNote) {
         log_info("VST",
-            "pixels_per_note changed (%d → %d): full LuxStral reinit required",
+            "pixels_per_note changed (%d → %d): shutting down pool + full LuxStral reinit",
             lastInitPixelsPerNote, g_sp3ctra_config.pixels_per_note);
+
+        // STEP 1: Shut down worker pool FIRST (resets synth_pool_initialized = 0).
+        // Workers are still alive and blocking on g_worker_start_barrier.
+        // synth_shutdown_thread_pool() performs the barrier dance to unblock them,
+        // then joins all threads and frees their per-note buffers.
+        synth_shutdown_thread_pool();
+
+        // STEP 2: Release old waves[] and unitary_waveform[] to prevent memory leaks.
+        // synth_IfftInit() will call synth_runtime_allocate_buffers() to rebuild them.
+        synth_runtime_free_buffers();
+
+        // STEP 3: Release the remaining LuxStral working buffers (additiveBuffer, etc.)
         synth_luxstral_cleanup();
         luxstralInitialized = false;
     }
@@ -1008,63 +1037,13 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     g_sp3ctra_config.sensor_dpi = sensorDpi;
     g_sp3ctra_config.log_level = (log_level_t)logLevel;
     
-    // 🔧 Adaptive oscillator count — see calibration comment inside the block.
-    {
-        // ====================================================================
-        // Calibration (RT Profiler data, macOS Apple Silicon):
-        //   8 workers, 3456 osc, 128 smp → synth wall-time ~2600 µs
-        //   → k_8w = 2600 / (3456 × 128) ≈ 5.882e-3 µs / osc / sample
-        //
-        // With N workers each thread processes ceil(osc/N) oscillators.
-        // Wall time scales as (8/N) relative to the 8-worker baseline:
-        //   k_Nw = k_8w × (8 / N)
-        //
-        // Target: 90% of callback budget (generous; preserves ppn=1 at
-        //   44.1 kHz / 8 workers where actual load is ~90%).
-        //
-        // Formula (buffer_size cancels: t_synth ∝ buf_size, budget ∝ buf_size):
-        //   max_osc = 0.90 × 1e6 × N / (k_8w × 8 × SR)
-        //
-        // SR / Workers result table (CIS_PIXELS=3456, ppn=power-of-2):
-        //   44.1kHz / 8w → ppn=1 (3456 osc, ~90%)  max resolution ✓
-        //   44.1kHz / 5w → ppn=2 (1728 osc, ~90%)  was 143% → stale+crackling!
-        //   48.0kHz / 8w → ppn=2 (1728 osc, ~49%)  ✓
-        //   48.0kHz / 5w → ppn=4  (864 osc, ~49%)  ✓
-        //   96.0kHz / 8w → ppn=4  (864 osc, ~49%)  ✓
-        //   96.0kHz / 5w → ppn=8  (432 osc, ~49%)  ✓
-        // ====================================================================
-        const double K_8W = 5.882e-3;      // µs per oscillator per sample (8 workers)
-        const double TARGET = 0.90;        // 90% load target
-
-        // Read num_workers NOW (needed before the APVTS sync block below sets it)
-        int n_workers = (int)apvts.getRawParameterValue("luxstralNumWorkers")->load();
-        if (n_workers < 1) n_workers = 1;
-
-        int sr = g_sp3ctra_config.sampling_frequency;
-        int adaptive_ppn = 1;  // default: max resolution (SR unknown yet)
-
-        if (sr > 0) {
-            // Effective cost per osc-sample for N workers
-            double k_eff = K_8W * 8.0 / (double)n_workers;
-            double max_osc = TARGET * 1e6 / (k_eff * (double)sr);
-
-            int cis_pixels = get_cis_pixels_nb();
-            if (cis_pixels <= 0) cis_pixels = 3456;
-
-            // Smallest power of 2 keeping oscillator count ≤ max_osc
-            while ((double)(cis_pixels / adaptive_ppn) > max_osc && adaptive_ppn < 128) {
-                adaptive_ppn *= 2;
-            }
-
-            log_info("VST",
-                "Adaptive resolution: SR=%d Hz, workers=%d → pixels_per_note=%d → %d osc "
-                "(≤%.0f osc for %.0f%% load target)",
-                sr, n_workers, adaptive_ppn, cis_pixels / adaptive_ppn,
-                max_osc, TARGET * 100.0);
-        }
-
-        g_sp3ctra_config.pixels_per_note = adaptive_ppn;
-    }
+    // Maximum resolution: always 1 pixel = 1 oscillator (3456 oscillators).
+    // The former adaptive reduction (calibrated on ~760 KB multi-table design)
+    // is no longer needed: the shared sine table (4 KB, L1-resident) eliminates
+    // the cache-miss bottleneck that made high oscillator counts CPU-expensive.
+    g_sp3ctra_config.pixels_per_note = 1;
+    log_info("VST", "Resolution: pixels_per_note=1 → %d oscillators (max, shared sine table)",
+             get_cis_pixels_nb());
     
     // ========================================================================
     // Synchronize LuxStral parameters from APVTS to g_sp3ctra_config
