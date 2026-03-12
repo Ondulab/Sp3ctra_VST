@@ -132,7 +132,7 @@ void synth_process_worker_range(synth_thread_worker_t *worker);
 void synth_precompute_wave_data(float *imageData, struct DoubleBuffer *db);
 
 /* Thread pool access for synthesis core */
-#define MAX_WORKERS 8  // Maximum number of worker threads supported
+#define MAX_WORKERS 16  // Maximum number of worker threads (M-series: 10–12 perf cores)
 extern synth_thread_worker_t *thread_pool;  // Dynamically allocated based on num_workers
 extern pthread_t *worker_threads;           // Dynamically allocated based on num_workers
 extern int num_workers;                     // Actual number of workers (from config)

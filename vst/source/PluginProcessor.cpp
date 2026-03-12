@@ -192,12 +192,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         ""
     ));
     
-    // Performance
+    // Performance — up to 16 workers (parallelised precompute + process)
     params.push_back(std::make_unique<juce::AudioParameterInt>(
         "luxstralNumWorkers",
         "LuxStral Worker Threads",
-        1, 8,
-        8  // num_workers = 8 (as specified in config)
+        1, 16,
+        8  // default 8 — increase to 12–16 for 96 kHz / 3456 osc
     ));
     
     // Physiological Filter (Equal-Loudness Compensation)
