@@ -347,7 +347,33 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
   // Main note processing loop - optimized for cache efficiency
   for (note = worker->start_note; note < worker->end_note; note++) {
     local_note_idx = note - worker->start_note;
-    
+
+    // -----------------------------------------------------------------------
+    // Sine precompute — PARALLEL (moved from synth_precompute_wave_data Phase 3).
+    //
+    // Each worker fills its own disjoint precomputed_wave_data range; no mutex
+    // or lock needed.  waves[note].phase_acc write is safe because workers
+    // process disjoint note ranges (no two workers share the same note index).
+    //
+    // Shared g_sine_table[1024] (4 KB) stays in L1 cache for the full loop.
+    // -----------------------------------------------------------------------
+    {
+      float*      pre_wave_w = worker->precomputed_wave_data +
+                               (size_t)local_note_idx * audio_buffer_size;
+      float       phase = waves[note].phase_acc;
+      const float inc   = waves[note].phase_inc;
+      const float fsize = (float)SINE_TABLE_SIZE;
+      for (int s = 0; s < audio_buffer_size; s++) {
+        phase += inc;
+        if (phase >= fsize) phase -= fsize;
+        const int   i0   = (int)phase;
+        const float frac = phase - (float)i0;
+        const int   i1   = (i0 + 1) & SINE_TABLE_MASK;
+        pre_wave_w[s] = g_sine_table[i0] + frac * (g_sine_table[i1] - g_sine_table[i0]);
+      }
+      waves[note].phase_acc = phase;  /* safe: disjoint per-worker ranges */
+    }
+
     // ✅ OPTIMIZATION: Prefetch next iteration data (improves cache hit rate)
     if (note + 1 < worker->end_note) {
       __builtin_prefetch(&worker->precomputed_volume[local_note_idx + 1], 0, 3);
@@ -431,9 +457,8 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
     apply_volume_weighting(worker->thread_sumVolumeBuffer, vol_buf,
                           volume_weighting_exp, audio_buffer_size);
 
-    // NOTE: phase continuity is now committed in synth_precompute_wave_data()
-    //       (single-threaded, before workers start) via waves[note].phase_acc.
-    //       No per-note write needed here — workers are read-only w.r.t. wave state.
+    // NOTE: phase_acc is committed at the top of this loop (sine precompute block).
+    //       Each worker owns a disjoint note range → no concurrent write conflict.
   }
 
   // NOTE: RT-safe buffer writing removed - causes audio corruption
@@ -515,61 +540,17 @@ void synth_precompute_wave_data(float *imageData, DoubleBuffer *db) {
   //            g_sp3ctra_config.stereo_mode_enabled, lg_sum, rg_sum);
   // }
 
-  // Phase 3: Lock-free parallel pre-computation of waves[] data by ranges
-  // Each worker computes independently without mutex contention
-  // THREAD-SAFETY ANALYSIS:
-  // - Each worker processes a disjoint range of notes (no overlap)
-  // - waves[note] reads are thread-safe (read-only access during precomputation)
-  // - waves[note].current_idx writes are deferred until after worker completion
-  // - Preprocessed data already copied, no more mutex needed
-  
-  for (int i = 0; i < num_workers; i++) {
-    synth_thread_worker_t *worker = &thread_pool[i];
-
-    for (int note = worker->start_note; note < worker->end_note; note++) {
-      int local_note_idx = note - worker->start_note;
-      float* pre_wave_base = worker->precomputed_wave_data + (size_t)local_note_idx * g_sp3ctra_config.audio_buffer_size;
-
-      // -----------------------------------------------------------------------
-      // Float-phase precompute with linear interpolation — shared sine table.
-      //
-      // All oscillators read from the global g_sine_table[SINE_TABLE_SIZE] (4 KB),
-      // which fits entirely in L1 cache → zero cache misses vs the former
-      // per-comma multi-table design (~760 KB scattered across memory).
-      //
-      // phase_inc = frequency × SINE_TABLE_SIZE / Fs  (set once at init_waves)
-      //   - any frequency range, any octave: same uniform formula
-      //
-      // Wrap uses power-of-2 bitmask (i1 = (i0+1) & SINE_TABLE_MASK) — no branch.
-      // Linear interpolation gives < −107 dB THD per oscillator.
-      //
-      // ✅ LOCK-FREE: Read-only access to waves[note] fields (thread-safe).
-      //    phase_acc is written here (single-threaded) before workers start.
-      // -----------------------------------------------------------------------
-      float       phase = waves[note].phase_acc;
-      const float inc   = waves[note].phase_inc;
-      const float fsize = (float)SINE_TABLE_SIZE;
-
-      for (int buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
-        phase += inc;
-        if (phase >= fsize) phase -= fsize;
-        // Note: phase_inc is always > 0 (frequency > 0), so no negative guard needed.
-
-        const int   i0   = (int)phase;
-        const float frac = phase - (float)i0;
-        const int   i1   = (i0 + 1) & SINE_TABLE_MASK;  // O(1) power-of-2 wrap — no branch
-        pre_wave_base[buff_idx] = g_sine_table[i0] + frac * (g_sine_table[i1] - g_sine_table[i0]);
-      }
-      // Commit phase: safe because workers are blocked at g_worker_start_barrier
-      waves[note].phase_acc = phase;
-    }
-  }
-  
-  // ✅ PERFORMANCE BOOST: Eliminated per-note mutex contention
-  // BEFORE: 6912 mutex locks per buffer (catastrophic for RT performance)
-  // AFTER: 1 mutex lock per buffer (6912x reduction!)
-  // Expected speedup: 50-70% reduction in precomputation time
-  // Expected spike reduction: Eliminates mutex-induced latency spikes
+  // Phase 3 (REMOVED): sine precompute loop was single-threaded here.
+  // It is now executed IN PARALLEL inside each worker's synth_process_worker_range()
+  // at the top of the per-note loop, using each worker's disjoint note range.
+  //
+  // Impact: 3456 × buffer_len sine interpolations go from O(1 thread) to O(N workers).
+  //   Before: all 3456 notes computed serially on the audio thread → bottleneck at 96 kHz
+  //   After:  each worker computes ceil(3456/N) notes → ~N× speedup on the precompute phase
+  //
+  // Thread-safety: each worker writes to disjoint waves[start..end-1].phase_acc ranges.
+  //
+  // ✅ PERFORMANCE: 1 mutex lock per buffer (volume/pan copy above) — unchanged.
 }
 
 /**
