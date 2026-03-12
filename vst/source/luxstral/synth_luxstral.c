@@ -100,90 +100,70 @@ int32_t synth_IfftInit(void) {
     return -1;
   }
 
-  // Set global pointers to dynamically allocated arrays
+  // Set global waves pointer (allocated in synth_runtime_allocate_buffers)
   waves = synth_runtime_get_waves();
-  unitary_waveform = synth_runtime_get_unitary_waveform();
 
   // Register cleanup functions
   atexit(synth_runtime_free_buffers);
   atexit(synth_shutdown_thread_pool);
   atexit(synth_luxstral_cleanup);
 
-  // Initialize default parameters
+  // Initialize the shared sine table (4 KB, L1-resident, must run before init_waves)
+  init_sine_table();
+
+  // Initialize default parameters (kept for hot-reload compatibility)
   wavesGeneratorParams.commaPerSemitone = g_sp3ctra_config.comma_per_semitone;
-  wavesGeneratorParams.startFrequency = (uint32_t)g_sp3ctra_config.start_frequency; // Cast to uint32_t
+  wavesGeneratorParams.startFrequency = (uint32_t)g_sp3ctra_config.start_frequency;
   wavesGeneratorParams.harmonization = MAJOR;
   wavesGeneratorParams.harmonizationLevel = 100;
   wavesGeneratorParams.waveformOrder = 1;
 
-  buffer_len = init_waves(unitary_waveform, waves, &wavesGeneratorParams);
+  init_waves(waves, &wavesGeneratorParams);
+  buffer_len = 0; /* No waveform buffer needed — shared sine table is global */
 
   // Precompute GAP_LIMITER envelope coefficients for all oscillators
   update_gap_limiter_coefficients();
 
-  // Start with random index
-  for (int i = 0; i < get_current_number_of_notes(); i++) {
+  /* Randomize initial phase for each oscillator to avoid constructive interference
+   * (all oscillators at phase 0 simultaneously would produce a harsh transient).
+   * Range: [0, SINE_TABLE_SIZE) — matches the new shared table indexing.        */
+  for (int i = 0; i < get_current_number_of_notes(); i++)
+  {
 #ifdef __APPLE__
     uint32_t aRandom32bit = arc4random();
 #else
-    // Use standard random function on Linux
-    uint32_t aRandom32bit = rand();
+    uint32_t aRandom32bit = (uint32_t)rand();
 #endif
-    waves[i].phase_acc = (float)(aRandom32bit % waves[i].area_size);
-    waves[i].current_volume = 0;
-    
-    }
-
-  if (buffer_len > (2400000 - 1)) {
-    log_error("SYNTH", "RAM overflow");
-    die("synth init failed");
-    return -1;
+    waves[i].phase_acc     = (float)(aRandom32bit % (uint32_t)SINE_TABLE_SIZE);
+    waves[i].current_volume = 0.0f;
   }
 
+  /* buffer_len is always 0 with the shared sine table — no overflow possible */
+  (void)buffer_len;
+
   log_info("SYNTH", "Note number = %d", (int)get_current_number_of_notes());
-  log_info("SYNTH", "Using Float32 path");
-  log_info("SYNTH", "Buffer length = %d uint16", (int)buffer_len);
+  log_info("SYNTH", "Using Float32 path + shared sine table (%d entries, 4 KB)",
+           SINE_TABLE_SIZE);
 
-  uint8_t FreqStr[256] = {0};
-  sprintf((char *)FreqStr, " %d -> %dHz      PhaseInc:%.4f",
-          (int)waves[0].frequency, (int)waves[get_current_number_of_notes() - 1].frequency,
-          (double)waves[get_current_number_of_notes() - 1].phase_inc);
-
-  log_info("SYNTH", "First note Freq = %dHz, Size = %d", (int)waves[0].frequency,
-         (int)waves[0].area_size);
-  log_info("SYNTH", "Last note Freq = %dHz, Size = %d, PhaseInc = %.4f",
-         (int)waves[get_current_number_of_notes() - 1].frequency,
-         (int)waves[get_current_number_of_notes() - 1].area_size,
-         (double)waves[get_current_number_of_notes() - 1].phase_inc);
+  if (get_current_number_of_notes() > 0)
+  {
+    log_info("SYNTH", "First note: %.2f Hz, phase_inc=%.5f",
+             waves[0].frequency, (double)waves[0].phase_inc);
+    log_info("SYNTH", "Last  note: %.2f Hz, phase_inc=%.5f",
+             waves[get_current_number_of_notes() - 1].frequency,
+             (double)waves[get_current_number_of_notes() - 1].phase_inc);
+  }
 
   log_info("SYNTH", "-------------------------------");
 
 #ifdef PRINT_IFFT_FREQUENCY
-  for (uint32_t pix = 0; pix < NUMBER_OF_NOTES; pix++) {
-    printf("FREQ = %0.2f, SIZE = %d, PHASE_INC = %.5f\n", waves[pix].frequency,
-           (int)waves[pix].area_size, (double)waves[pix].phase_inc);
-#ifdef PRINT_IFFT_FREQUENCY_FULL
-    for (uint32_t idx = 0;
-         idx < (uint32_t)((float)waves[pix].area_size / waves[pix].phase_inc); idx++) {
-      float sample = waves[pix].start_ptr[(uint32_t)(idx * waves[pix].phase_inc)];
-      printf("%d\n", (int)sample);
-    }
-#endif
+  for (uint32_t pix = 0; pix < (uint32_t)get_current_number_of_notes(); pix++)
+  {
+    printf("FREQ = %0.2f, PHASE_INC = %.5f\n",
+           waves[pix].frequency, (double)waves[pix].phase_inc);
   }
   printf("-------------------------------\n");
-  printf("Buffer length = %d uint16\n", (int)buffer_len);
-
-  printf("First note Freq = %dHz\nSize = %d\n", (int)waves[0].frequency,
-         (int)waves[0].area_size);
-  printf("Last  note Freq = %dHz\nSize = %d\nPhaseInc = %.5f\n",
-         (int)waves[NUMBER_OF_NOTES - 1].frequency,
-         (int)waves[NUMBER_OF_NOTES - 1].area_size,
-         (double)waves[NUMBER_OF_NOTES - 1].phase_inc);
-
-  printf("-------------------------------\n");
 #endif
-
-  // Note: "Note number" already logged above - removed duplicate here
 
   // Allocate imageRef dynamically
   imageRef = (int32_t*)calloc(get_current_number_of_notes(), sizeof(int32_t));

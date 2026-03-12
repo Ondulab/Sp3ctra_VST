@@ -531,35 +531,34 @@ void synth_precompute_wave_data(float *imageData, DoubleBuffer *db) {
       float* pre_wave_base = worker->precomputed_wave_data + (size_t)local_note_idx * g_sp3ctra_config.audio_buffer_size;
 
       // -----------------------------------------------------------------------
-      // Float-phase precompute with linear interpolation.
+      // Float-phase precompute with linear interpolation — shared sine table.
       //
-      // Table generated at WAVE_REF_OCTAVE → phase_inc = f_note / f_ref_comma:
-      //   < 1.0  → bass notes: sub-sample stepping (very fine resolution)
-      //   = 1.0  → reference-octave notes: 1-to-1 traversal
-      //   > 1.0  → treble notes: skip-sample stepping, still interpolated
+      // All oscillators read from the global g_sine_table[SINE_TABLE_SIZE] (4 KB),
+      // which fits entirely in L1 cache → zero cache misses vs the former
+      // per-comma multi-table design (~760 KB scattered across memory).
       //
-      // Linear interpolation eliminates staircase artefacts at high octaves,
-      // improving THD by ~50-60 dB.  Workload per note is constant regardless
-      // of octave → note-count-based worker partitioning remains optimal.
+      // phase_inc = frequency × SINE_TABLE_SIZE / Fs  (set once at init_waves)
+      //   - any frequency range, any octave: same uniform formula
       //
-      // ✅ LOCK-FREE: Read-only access to waves[note] fields (thread-safe)
+      // Wrap uses power-of-2 bitmask (i1 = (i0+1) & SINE_TABLE_MASK) — no branch.
+      // Linear interpolation gives < −107 dB THD per oscillator.
+      //
+      // ✅ LOCK-FREE: Read-only access to waves[note] fields (thread-safe).
       //    phase_acc is written here (single-threaded) before workers start.
       // -----------------------------------------------------------------------
-      float       phase    = waves[note].phase_acc;
-      const float inc      = waves[note].phase_inc;
-      const uint32_t area_size  = waves[note].area_size;
-      const float   farea  = (float)area_size;
-      const volatile float *start_ptr = waves[note].start_ptr;
+      float       phase = waves[note].phase_acc;
+      const float inc   = waves[note].phase_inc;
+      const float fsize = (float)SINE_TABLE_SIZE;
 
       for (int buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
         phase += inc;
-        if (phase >= farea) phase -= farea;
-        if (phase <  0.0f)  phase += farea;   // guard against negative inc
+        if (phase >= fsize) phase -= fsize;
+        // Note: phase_inc is always > 0 (frequency > 0), so no negative guard needed.
 
         const int   i0   = (int)phase;
         const float frac = phase - (float)i0;
-        const int   i1   = (i0 + 1 < (int)area_size) ? i0 + 1 : 0;
-        pre_wave_base[buff_idx] = start_ptr[i0] + frac * (start_ptr[i1] - start_ptr[i0]);
+        const int   i1   = (i0 + 1) & SINE_TABLE_MASK;  // O(1) power-of-2 wrap — no branch
+        pre_wave_base[buff_idx] = g_sine_table[i0] + frac * (g_sine_table[i1] - g_sine_table[i0]);
       }
       // Commit phase: safe because workers are blocked at g_worker_start_barrier
       waves[note].phase_acc = phase;

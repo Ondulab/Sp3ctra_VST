@@ -18,7 +18,9 @@ synth_runtime_config_t g_synth_runtime = {0};
 
 /* Dynamic buffer pointers (will be allocated at runtime) */
 static struct wave *g_waves_dynamic = NULL;
-static float *g_unitary_waveform_dynamic = NULL;
+/* NOTE: g_unitary_waveform_dynamic removed — replaced by the global shared
+ * g_sine_table[SINE_TABLE_SIZE] (4 KB) defined in wave_generation.c.
+ * The former 40 MB allocation (10M × 4 bytes) is no longer needed.        */
 
 int synth_runtime_init(int max_pixels, int pixels_per_note) {
     if (pixels_per_note < 1) {
@@ -36,10 +38,10 @@ int synth_runtime_init(int max_pixels, int pixels_per_note) {
     g_synth_runtime.pixels_per_note = pixels_per_note;
     g_synth_runtime.num_notes = max_pixels / pixels_per_note;
     
-    log_info("RUNTIME", "Initialized: %d pixels, %d pixels/note, %d notes",
-           g_synth_runtime.max_pixels,
-           g_synth_runtime.pixels_per_note,
-           g_synth_runtime.num_notes);
+    log_info("RUNTIME", "Initialized runtime: %d notes (px=%d, px/note=%d)",
+             g_synth_runtime.num_notes,
+             g_synth_runtime.max_pixels,
+             g_synth_runtime.pixels_per_note);
     
     return 0;
 }
@@ -58,19 +60,12 @@ int synth_runtime_allocate_buffers(void) {
         return -1;
     }
     
-    // Allocate unitary waveform (size is constant)
-    #define WAVEFORM_TABLE_SIZE (10000000)
-    size_t waveform_size = WAVEFORM_TABLE_SIZE * sizeof(float);
-    g_unitary_waveform_dynamic = (float*)calloc(WAVEFORM_TABLE_SIZE, sizeof(float));
-    if (!g_unitary_waveform_dynamic) {
-        log_error("SYNTH", "Failed to allocate unitary waveform (%zu bytes)", waveform_size);
-        free(g_waves_dynamic);
-        g_waves_dynamic = NULL;
-        return -1;
-    }
-    
-    log_info("RUNTIME", "Allocated buffers: waves=%zu bytes, waveform=%zu bytes",
-           waves_size, waveform_size);
+    /* The shared sine table (g_sine_table[SINE_TABLE_SIZE] = 4 KB) is a static
+     * global array in wave_generation.c — no heap allocation needed here.    */
+    log_info("RUNTIME", "Allocated waves array: %d notes, %d bytes/note",
+             g_synth_runtime.num_notes, (int)sizeof(struct wave));
+    log_info("RUNTIME", "Shared sine table: %d entries (4 KB) — no heap alloc",
+             SINE_TABLE_SIZE);
     
     return 0;
 }
@@ -81,11 +76,6 @@ void synth_runtime_free_buffers(void) {
         g_waves_dynamic = NULL;
     }
     
-    if (g_unitary_waveform_dynamic) {
-        free(g_unitary_waveform_dynamic);
-        g_unitary_waveform_dynamic = NULL;
-    }
-    
     log_info("RUNTIME", "Freed dynamic buffers");
 }
 
@@ -94,6 +84,6 @@ struct wave* synth_runtime_get_waves(void) {
     return g_waves_dynamic;
 }
 
-float* synth_runtime_get_unitary_waveform(void) {
-    return g_unitary_waveform_dynamic;
-}
+/* synth_runtime_get_unitary_waveform() removed — the shared sine table
+ * g_sine_table[] in wave_generation.c replaces the former per-comma buffer.
+ * Callers should use g_sine_table directly via wave_generation.h.           */
