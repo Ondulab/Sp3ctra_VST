@@ -56,10 +56,9 @@ void synth_runtime_free_buffers(void);
  */
 struct wave* synth_runtime_get_waves(void);
 
-/**
- * @brief Get dynamically allocated unitary waveform
- * @return Pointer to unitary waveform (NULL if not allocated)
- */
-float* synth_runtime_get_unitary_waveform(void);
+/* synth_runtime_get_unitary_waveform() removed.
+ * The per-comma waveform buffer (formerly ~40 MB) has been replaced by the
+ * global shared sine table g_sine_table[SINE_TABLE_SIZE] (4 KB) defined in
+ * wave_generation.h. Use g_sine_table directly wherever needed.            */
 
 #endif /* __SYNTH_LUXSTRAL_RUNTIME_H__ */

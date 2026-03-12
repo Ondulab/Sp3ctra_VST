@@ -31,26 +31,26 @@
 #define SOFT_LIMIT_KNEE_DEFAULT       0.1f    // Default: knee width for smooth transition
 
 /**************************************************************************************
- * Wavetable Multi-Resolution Configuration
+ * Shared Sine Table Configuration
  *
- * Reference octave R determines the virtual sample rate of each comma table:
- *   Fs_virtual = Fs_audio × 2^R  (table is generated at this higher virtual rate)
- *   area_size per comma  = Fs_audio / (f_oct0 × 2^R)
- *   phase_inc  per note  = 2^(octave − R)   (float, enables sub-sample interpolation)
+ * A single power-of-2 table (g_sine_table[SINE_TABLE_SIZE]) is shared by ALL
+ * oscillators, replacing the former per-comma multi-table design.
  *
- * Quality vs memory tradeoff (Fs_audio = 96 kHz, f_oct0 ≈ 65 Hz):
- *   R=0  →  area_size ≈ 1468  entries, THD_interp < −113 dB  (baseline, 8× more memory)
- *   R=3  →  area_size ≈  184  entries, THD_interp <  −76 dB  (8× less memory, optimal)
- *   R=4  →  area_size ≈   92  entries, THD_interp <  −70 dB  (16× less memory)
+ * Architecture change summary:
+ *   OLD: ~345 comma tables × ~550 entries avg = ~760 KB heap allocation
+ *        → scatter-gather memory pattern → frequent L1/L2 cache misses
+ *   NEW: 1 table × 1024 entries = 4 KB static global
+ *        → always L1-resident → zero cache misses in hot path
  *
- * Linear interpolation in the precompute loop eliminates the staircase artefact
- * present with integer step addressing, improving THD by 50–60 dB for high octaves.
+ * phase_inc per note = frequency × SINE_TABLE_SIZE / Fs  (wave_generation.h)
+ *
+ * THD with linear interpolation:
+ *   N=1024 → < −107 dB per oscillator   (−72 dB total with 3456 oscillators)
+ *   N=2048 → < −119 dB per oscillator   (−84 dB total — increase SINE_TABLE_SIZE)
+ *
+ * SINE_TABLE_SIZE and SINE_TABLE_MASK are defined in wave_generation.h.
+ * WAVE_REF_OCTAVE and WAVE_TABLE_MIN_ENTRIES are no longer applicable.
  **************************************************************************************/
-/* Reference octave for table generation (0 = lowest note, 3 = ~C5 ≈ 523 Hz)        */
-#define WAVE_REF_OCTAVE          3
-
-/* Safety floor: prevents degenerate tables for extreme parameters                   */
-#define WAVE_TABLE_MIN_ENTRIES   16
 
 /**************************************************************************************
  * Adaptive Slew/Decay Configuration
