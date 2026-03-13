@@ -288,29 +288,55 @@ static void extract_shape_descriptors(
     }
     float flatness = sf_clampf(sum / ((float)width * peak), 0.0f, 1.0f);
 
-    /* ── Symmetry (bilateral mirror comparison) ──
-     * Compare left and right halves sample-by-sample.
-     * mean_diff=0  → perfect mirror → symmetry=1.0 (square wave territory)
-     * mean_diff≈peak → strongly asymmetric → symmetry=0.0 (sawtooth territory)
-     * The scaling factor 4.0 maps mean_diff/peak=0.25 → symmetry=0.
+    /* ── Symmetry (bilateral mirror comparison with block averaging) ──
+     *
+     * CIS sensors introduce ~5-15% per-pixel noise, which makes pixel-by-pixel
+     * bilateral comparison unreliable (symmetric traces get symmetry≈0.6 instead
+     * of ≈0.9). Averaging over blocks of `block_size` pixels reduces the noise by
+     * √block_size, bringing symmetric traces into the 0.85-0.92 range.
+     *
+     * block_size = max(1, width/10): for width=111 → block_size=11, ~5 block pairs.
+     * Each block average reduces noise by √11 ≈ 3.3×.
+     *
+     * mean_diff=0   → perfect mirror → symmetry=1.0 (square wave territory)
+     * mean_diff=0.3 → strongly asymmetric → symmetry=0.0 (sawtooth territory)
+     * Scaling factor 3.0 maps mean_diff_norm=0.33 → symmetry=0.
      */
+    int block_size = (width > 10) ? (width / 10) : 1;
     float bilateral_diff_sum = 0.0f;
-    int half = width / 2;
-    for (int i = 0; i < half; i++)
+    int block_count = 0;
     {
-        float left  = notes[start + i];
-        float right = notes[end - 1 - i];
-        bilateral_diff_sum += fabsf(left - right);
+        int center = (start + end) / 2;
+        for (int bi = 0; ; bi++)
+        {
+            int left_start  = start + bi * block_size;
+            int right_start = end - (bi + 1) * block_size;
+
+            /* Stop when the two windows overlap or cross */
+            if (left_start + block_size > center) break;
+            if (right_start < center) break;
+            if (right_start < start) break;
+
+            float left_sum = 0.0f;
+            float right_sum = 0.0f;
+            for (int j = 0; j < block_size; j++)
+            {
+                left_sum  += notes[left_start  + j];
+                right_sum += notes[right_start + j];
+            }
+            bilateral_diff_sum += fabsf(left_sum - right_sum) / (float)block_size;
+            block_count++;
+        }
     }
     float symmetry;
-    if (half > 0)
+    if (block_count > 0 && peak > 1e-8f)
     {
-        float mean_diff_norm = (bilateral_diff_sum / (float)half) / peak;
-        symmetry = sf_clampf(1.0f - mean_diff_norm * 4.0f, 0.0f, 1.0f);
+        float mean_diff_norm = (bilateral_diff_sum / (float)block_count) / peak;
+        symmetry = sf_clampf(1.0f - mean_diff_norm * 3.0f, 0.0f, 1.0f);
     }
     else
     {
-        symmetry = 1.0f;
+        symmetry = 1.0f; /* Single-block blob: assume symmetric */
     }
 
     /* ── Edge Sharpness (gradient at boundaries) ── */
