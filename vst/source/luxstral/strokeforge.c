@@ -435,6 +435,81 @@ static void compute_harmonic_recipe(StrokeForgeBlob *blob)
 }
 
 /**************************************************************************************
+ * Step 4b: Compute Harmonic Recipe — Pulse Wave Model (WAVETABLE mode)
+ *
+ * Maps blob shape to a mathematically correct pulse wave with variable duty cycle.
+ * This model unifies sine / triangle / square / pulse into one continuous formula:
+ *
+ *   symmetry  → duty_cycle D:
+ *     sym=1.0 → D=0.50  square wave  (odd harmonics only)
+ *     sym=0.0 → D=0.25  pulse wave   (all harmonics, more asymmetric)
+ *
+ *   flatness  → extra rolloff on top of the pulse 1/h base:
+ *     flat=1.0 (rectangle) → extra=0.0 → total 1/h   rolloff  (square)
+ *     flat=0.0 (gaussian)  → extra=1.0 → total 1/h²  rolloff  (triangle)
+ *
+ * Normalized pulse wave formula (h_1 always = 1.0):
+ *   amp(h) = |sin(h×π×D)| / (h × sin(π×D))  ×  (1/h ^ extra_rolloff)
+ *
+ * Verification @ D=0.5 (square), extra=0:  h1=1, h2=0, h3=1/3, h5=1/5  ✓
+ *              @ D=0.5 (square), extra=1:  h1=1, h2=0, h3=1/9, h5=1/25 ✓  (triangle)
+ *              @ D=0.25,         extra=0:  h1=1, h2=0.707, h3=0.333, h4=0 (pulse)
+ **************************************************************************************/
+static void compute_harmonic_recipe_pulse_wave(StrokeForgeBlob *blob)
+{
+    int max_h       = g_sp3ctra_config.strokeforge_max_harmonics;
+    float amp_floor = g_sp3ctra_config.strokeforge_harmonic_amplitude_floor;
+
+    float symmetry    = blob->shape.symmetry;
+    float flatness    = blob->shape.flatness;
+    float morph_depth = blob->shape.morph_depth;
+
+    /* duty_cycle in [0.25, 0.50]: guarantees sin(π×D) > 0 at all times */
+    float duty_cycle = 0.25f + symmetry * 0.25f;
+    float sin_fund   = sinf(3.14159265f * duty_cycle); /* always > 0 in this range */
+
+    /* extra_rolloff: maps flatness to additional harmonic decay
+     *   flat_mapped=1.0 (flatness ≥ 0.85, rectangle) → extra=0 → square series
+     *   flat_mapped=0.0 (flatness ≤ 0.45, gaussian)  → extra=1 → triangle series
+     */
+    float flat_mapped   = sf_clampf((flatness - 0.45f) / 0.40f, 0.0f, 1.0f);
+    float extra_rolloff = 1.0f - flat_mapped; /* [1.0=triangle .. 0.0=square] */
+
+    /* Fundamental is always normalized to 1.0 */
+    blob->harmonic_amplitudes[0] = 1.0f;
+    blob->harmonic_count = 1;
+
+    for (int h = 2; h <= max_h; h++)
+    {
+        /* Morph gate: limits how many harmonics are active (width-dependent) */
+        float morph_gate = sf_clampf(
+            1.0f + morph_depth * (float)max_h - (float)h, 0.0f, 1.0f);
+
+        /* Normalized pulse wave: |sin(h×π×D)| / (h × sin(π×D)) */
+        float h_pulse = fabsf(sinf((float)h * 3.14159265f * duty_cycle)) /
+                        ((float)h * sin_fund);
+
+        /* Additional flatness-driven rolloff: 1/h^extra_rolloff
+         * At h=1 this is always 1.0 (normalization preserved).
+         * At h=3, extra=1 (triangle): ×(1/3) → total h3 = (1/3)×(1/3) = 1/9 ✓
+         */
+        float h_rolloff = 1.0f / powf((float)h, extra_rolloff);
+
+        float amp = h_pulse * h_rolloff * morph_gate;
+
+        if (amp < amp_floor)
+        {
+            blob->harmonic_amplitudes[h - 1] = 0.0f;
+        }
+        else
+        {
+            blob->harmonic_amplitudes[h - 1] = amp;
+            blob->harmonic_count = h;
+        }
+    }
+}
+
+/**************************************************************************************
  * Step 5: Find Nearest Oscillator for Each Harmonic
  *
  * Given the blob's fundamental frequency (center_note), compute the note index
@@ -657,43 +732,103 @@ void strokeforge_analyze_frame(
         notes, num_notes, threshold, min_width, merge_gap,
         out->blobs, STROKEFORGE_MAX_BLOBS);
 
-    /* Steps 2-5: Process each blob */
-    for (int b = 0; b < out->blob_count; b++)
+    /* -----------------------------------------------------------------------
+     * Complexity gate — determine frame_mode BEFORE per-blob processing.
+     *
+     * BYPASS (blob_count != 1):
+     *   Multiple blobs → StrokeForge harmonics from blob A would collide with
+     *   blob B's fundamentals → bell-like beating artifacts.  Solution: bypass
+     *   entirely and let the spectral synthesis run clean.
+     *
+     * PHASE_SMOOTH (single thin blob, width < STROKEFORGE_WAVETABLE_MIN_WIDTH):
+     *   Set phase targets only.  No amplitude override.  Non-intrusive.
+     *
+     * WAVETABLE (single wide blob, width ≥ STROKEFORGE_WAVETABLE_MIN_WIDTH):
+     *   Pulse-wave morphing — StrokeForge suppresses spectral amplitude within
+     *   the blob range and injects its own harmonic recipe exclusively.
+     * ----------------------------------------------------------------------- */
+    if (out->blob_count != 1)
     {
-        StrokeForgeBlob *blob = &out->blobs[b];
-
-        /* Step 2: Compute amplitudes (centroid, peak, gaussian-weighted) */
-        compute_blob_amplitudes(notes, blob);
-
-        /* Step 3: Extract shape descriptors */
-        extract_shape_descriptors(notes, blob);
-    }
-
-    /* Step 3b: Apply temporal smoothing (center_note + symmetry) BEFORE recipe */
-    if (out->blob_count > 0)
-    {
-        apply_temporal_smoothing(out->blobs, out->blob_count);
-    }
-    else
-    {
-        /* No blobs: reset smooth state so next appearance starts fresh */
+        /* BYPASS: zero or multiple blobs → pure spectral passthrough */
+        out->frame_mode = STROKEFORGE_MODE_BYPASS;
+        for (int i = 0; i < num_notes && i < STROKEFORGE_MAX_NOTES; i++)
+        {
+            out->note_to_blob[i]             = STROKEFORGE_NO_BLOB;
+            out->note_is_harmonic_of_blob[i] = STROKEFORGE_NO_BLOB;
+            out->note_harmonic_rank[i]        = 0;
+            out->note_harmonic_amplitude[i]   = 0.0f;
+            out->note_target_phase[i]         = STROKEFORGE_PHASE_FREE;
+        }
+        /* Reset smooth state: clean restart when single blob re-appears */
         s_smooth_state.valid = 0;
         s_smooth_state.count = 0;
+        return;
     }
 
-    for (int b = 0; b < out->blob_count; b++)
+    /* --- Single blob path ------------------------------------------------- */
     {
-        StrokeForgeBlob *blob = &out->blobs[b];
+        StrokeForgeBlob *blob = &out->blobs[0];
 
-        /* Step 4: Compute harmonic recipe from (smoothed) shape */
-        compute_harmonic_recipe(blob);
+        /* Step 2: Centroid, peak, gaussian-weighted amplitude */
+        compute_blob_amplitudes(notes, blob);
 
-        /* Step 5: Find nearest oscillator note for each harmonic */
-        find_harmonic_note_indices(blob, num_notes);
+        /* Step 3: Shape descriptors */
+        extract_shape_descriptors(notes, blob);
+
+        /* Step 3b: Temporal smoothing (IIR on center_note + symmetry) */
+        apply_temporal_smoothing(out->blobs, 1);
+
+        if ((int)blob->width_notes < STROKEFORGE_WAVETABLE_MIN_WIDTH)
+        {
+            /* ---------------------------------------------------------------
+             * PHASE_SMOOTH mode — thin blob.
+             * Gentle phase coherence between neighboring notes; no amplitude
+             * change so the spectral synthesis remains fully in control.
+             * --------------------------------------------------------------- */
+            out->frame_mode = STROKEFORGE_MODE_PHASE_SMOOTH;
+
+            /* Initialize all sentinels */
+            for (int i = 0; i < num_notes && i < STROKEFORGE_MAX_NOTES; i++)
+            {
+                out->note_to_blob[i]             = STROKEFORGE_NO_BLOB;
+                out->note_is_harmonic_of_blob[i] = STROKEFORGE_NO_BLOB;
+                out->note_harmonic_rank[i]        = 0;
+                out->note_harmonic_amplitude[i]   = 0.0f;
+                out->note_target_phase[i]         = STROKEFORGE_PHASE_FREE;
+            }
+
+            /* Phase hints: tag notes inside blob with a common target phase */
+            if (g_sp3ctra_config.strokeforge_phase_coherence_enabled)
+            {
+                for (int i = blob->start_note;
+                     i < blob->end_note && i < STROKEFORGE_MAX_NOTES; i++)
+                {
+                    out->note_to_blob[i]     = 0;   /* blob index 0 */
+                    out->note_target_phase[i] = 0.0f;
+                }
+            }
+        }
+        else
+        {
+            /* ---------------------------------------------------------------
+             * WAVETABLE mode — wide isolated blob.
+             * Pulse-wave harmonic recipe replaces spectral synthesis within
+             * the blob range.  RT engine will suppress spectral amplitude for
+             * all notes inside the blob (note_to_blob != STROKEFORGE_NO_BLOB)
+             * and use note_harmonic_amplitude for harmonic target notes.
+             * --------------------------------------------------------------- */
+            out->frame_mode = STROKEFORGE_MODE_WAVETABLE;
+
+            /* Step 4: Pulse-wave recipe (flatness + symmetry → waveform type) */
+            compute_harmonic_recipe_pulse_wave(blob);
+
+            /* Step 5: Map each harmonic to nearest CIS oscillator note index */
+            find_harmonic_note_indices(blob, num_notes);
+
+            /* Step 6: Full per-note lookup tables */
+            build_note_lookups(out, num_notes);
+        }
     }
-
-    /* Step 6: Build per-note lookup tables */
-    build_note_lookups(out, num_notes);
 
     /* ── DEBUG: Rate-limited logging of blob analysis results ── */
     {
