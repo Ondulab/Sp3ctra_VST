@@ -243,6 +243,17 @@ static void compute_blob_amplitudes(
 
 /**************************************************************************************
  * Step 3: Extract Shape Descriptors (Flatness, Symmetry, Edge Sharpness)
+ *
+ * Flatness  — fill factor: mean(notes/peak) over blob extent.
+ *             Rectangle → ~1.0, Gaussian bell → ~0.4-0.6.
+ *             More robust than kurtosis for CIS sensor data.
+ *
+ * Symmetry  — bilateral: compare left and right halves of the amplitude profile
+ *             pixel by pixel and normalize by peak.
+ *             Perfect mirror → 1.0, strongly asymmetric → 0.0.
+ *             More robust than skewness for medium-width blobs.
+ *
+ * Edge      — gradient magnitude at the two boundary pixels.
  **************************************************************************************/
 static void extract_shape_descriptors(
     const float *notes,
@@ -265,65 +276,65 @@ static void extract_shape_descriptors(
     float peak = blob->peak_amplitude;
     if (peak < 1e-8f) peak = 1e-8f; /* Avoid division by zero */
 
-    /* Normalize profile to [0, 1] relative to peak */
-    /* Compute statistical moments for kurtosis and skewness */
+    /* ── Flatness (fill factor = mean normalized amplitude) ──
+     * Rectangle profile → all values ≈ peak → mean/peak ≈ 1.0 → flatness=1.0
+     * Gaussian profile  → mean ≈ 0.4..0.7 * peak           → flatness=0.4..0.7
+     * Much more numerically stable than kurtosis for CIS sensor data.
+     */
     float sum = 0.0f;
-    float sum_sq = 0.0f;
-
     for (int i = start; i < end; i++)
     {
-        float v = notes[i] / peak;
-        sum += v;
-        sum_sq += v * v;
+        sum += notes[i];
     }
+    float flatness = sf_clampf(sum / ((float)width * peak), 0.0f, 1.0f);
 
-    float mean = sum / (float)width;
-    float variance = (sum_sq / (float)width) - (mean * mean);
-    if (variance < 1e-12f) variance = 1e-12f;
-    float stddev = sqrtf(variance);
-
-    /* ── Flatness (from excess kurtosis) ── */
-    /* Kurtosis: gaussian≈3, uniform/rectangular≈1.8 */
-    float sum_4th = 0.0f;
-    float sum_3rd = 0.0f;
-    for (int i = start; i < end; i++)
+    /* ── Symmetry (bilateral mirror comparison) ──
+     * Compare left and right halves sample-by-sample.
+     * mean_diff=0  → perfect mirror → symmetry=1.0 (square wave territory)
+     * mean_diff≈peak → strongly asymmetric → symmetry=0.0 (sawtooth territory)
+     * The scaling factor 4.0 maps mean_diff/peak=0.25 → symmetry=0.
+     */
+    float bilateral_diff_sum = 0.0f;
+    int half = width / 2;
+    for (int i = 0; i < half; i++)
     {
-        float v = (notes[i] / peak - mean) / stddev;
-        float v2 = v * v;
-        sum_3rd += v2 * v;
-        sum_4th += v2 * v2;
+        float left  = notes[start + i];
+        float right = notes[end - 1 - i];
+        bilateral_diff_sum += fabsf(left - right);
     }
-    float kurtosis = sum_4th / (float)width;
-    /* Map kurtosis: 1.8 (flat/rectangular) → flatness=1, 3.0 (gaussian) → flatness=0 */
-    float flatness = sf_clampf(1.0f - (kurtosis - 1.8f) / (3.0f - 1.8f), 0.0f, 1.0f);
-
-    /* ── Symmetry (from skewness) ── */
-    float skewness = sum_3rd / (float)width;
-    /* Symmetric (skew≈0) → symmetry=1, asymmetric → symmetry=0 */
-    float symmetry = sf_clampf(1.0f - fabsf(skewness) * 2.0f, 0.0f, 1.0f);
+    float symmetry;
+    if (half > 0)
+    {
+        float mean_diff_norm = (bilateral_diff_sum / (float)half) / peak;
+        symmetry = sf_clampf(1.0f - mean_diff_norm * 4.0f, 0.0f, 1.0f);
+    }
+    else
+    {
+        symmetry = 1.0f;
+    }
 
     /* ── Edge Sharpness (gradient at boundaries) ── */
     float left_edge = 0.0f;
     float right_edge = 0.0f;
     if (width >= 3)
     {
-        left_edge = fabsf(notes[start + 1] - notes[start]) / peak;
-        right_edge = fabsf(notes[end - 1] - notes[end - 2]) / peak;
+        left_edge  = fabsf(notes[start + 1] - notes[start]) / peak;
+        right_edge = fabsf(notes[end - 1]   - notes[end - 2]) / peak;
     }
     else if (width == 2)
     {
-        left_edge = fabsf(notes[start + 1] - notes[start]) / peak;
+        left_edge  = fabsf(notes[start + 1] - notes[start]) / peak;
         right_edge = left_edge;
     }
     float edge_sharpness = sf_clampf((left_edge + right_edge) * 0.5f, 0.0f, 1.0f);
 
-    /* ── Morph Depth (combined from width) ── */
+    /* ── Morph Depth (derived from blob width) ── */
     float morph_width_scale = g_sp3ctra_config.strokeforge_morph_width_scale;
     float morph_depth = sf_clampf(blob->width_notes / morph_width_scale, 0.0f, 1.0f);
 
     /* Store descriptors */
-    blob->shape.flatness = flatness;
-    blob->shape.symmetry = symmetry;
+    blob->shape.flatness    = flatness;
+    blob->shape.symmetry    = symmetry;
     blob->shape.edge_sharpness = edge_sharpness;
     blob->shape.morph_depth = morph_depth;
 }
@@ -341,14 +352,20 @@ static void compute_harmonic_recipe(StrokeForgeBlob *blob)
     float morph_depth = blob->shape.morph_depth;
     /* Note: flatness is captured in morph_depth via shape extraction */
 
-    /* Rolloff exponent: sharp edges → slow rolloff (~1/n), soft edges → moderate (1/n^1.3)
-     * Formula: 0.5 + 0.8*(1 - edge_sharpness)
-     *   edge=0.0 → rolloff=1.30  (h4≈0.165, h5≈0.117, h6≈0.088 — all above floor 0.086)
-     *   edge=0.5 → rolloff=0.90  (h4≈0.232, h6≈0.152 — very rich, sawtooth-like)
-     *   edge=1.0 → rolloff=0.50  (very slow rolloff, maximally bright)
-     * Previously was 1.0+(1-edge) which gave 2.0 for edge=0 → h4=0.0625 (below floor 0.086)
+    /* Rolloff exponent: blends between edge-driven (sawtooth) and symmetry-driven (square)
+     *
+     * Sawtooth (symmetry=0): all harmonics, rolloff_exp = 0.5 + 0.8*(1-edge)
+     *   edge=0.0 → rolloff=1.30  (h4≈0.165, sawtooth-like)
+     *   edge=0.5 → rolloff=0.90  (h4≈0.232, bright sawtooth)
+     *
+     * Square wave (symmetry=1): ONLY odd harmonics matter, rolloff_exp → 1.0
+     *   → h3=1/3=0.333, h5=1/5=0.200, h7=1/7=0.143 (true 1/n series)
+     *   → even harmonics zeroed out by parity=0 regardless of rolloff
+     *
+     * Blend: rolloff_exp = rolloff_base*(1-symmetry) + 1.0*symmetry
      */
-    float rolloff_exp = 0.5f + 0.8f * (1.0f - edge_sharpness);
+    float rolloff_base = 0.5f + 0.8f * (1.0f - edge_sharpness);
+    float rolloff_exp  = rolloff_base * (1.0f - symmetry) + 1.0f * symmetry;
 
     /* Fundamental is always 1.0 */
     blob->harmonic_amplitudes[0] = 1.0f;
