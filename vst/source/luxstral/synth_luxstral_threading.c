@@ -14,6 +14,7 @@
 #include "synth_luxstral_math.h"
 #include "pow_approx.h"
 #include "wave_generation.h"
+#include "strokeforge.h"
 #include "../../utils/rt_profiler.h"
 #include <stdio.h>
 #include <string.h>
@@ -516,6 +517,48 @@ void synth_precompute_wave_data(float *imageData, DoubleBuffer *db) {
       memcpy(worker->precomputed_right_gain,
              &db->preprocessed_data.stereo.right_gains[worker->start_note],
              notes_this_worker * sizeof(float));
+    }
+    
+    // StrokeForge: Mode-aware amplitude override.
+    //
+    // Three exclusive modes (set by strokeforge_analyze_frame in preprocessor):
+    //
+    //   BYPASS       — blob_count != 1 (zero or multiple blobs).
+    //                  Complex spectral scene: StrokeForge harmonics from blob A
+    //                  would collide with blob B → bell-like beating artifacts.
+    //                  Solution: skip entirely, pure spectral passthrough.
+    //
+    //   PHASE_SMOOTH — Single thin blob (width < STROKEFORGE_WAVETABLE_MIN_WIDTH).
+    //                  Phase hints only: note_target_phase[] is set for notes
+    //                  inside the blob, but NO amplitude changes.
+    //                  Spectral synthesis runs unmodified.
+    //
+    //   WAVETABLE    — Single wide isolated blob.
+    //                  Full amplitude control: spectral amplitude suppressed
+    //                  inside the blob range, replaced by pulse-wave harmonic
+    //                  recipe.  Notes outside the blob are untouched.
+    if (g_sp3ctra_config.strokeforge_enabled) {
+      const StrokeForgeFrameData *sf = &db->preprocessed_data.strokeforge;
+
+      if (sf->frame_mode == STROKEFORGE_MODE_WAVETABLE) {
+        // WAVETABLE: suppress spectral inside blob, inject harmonic amplitudes
+        for (int n = 0; n < notes_this_worker; n++) {
+          int global_note = worker->start_note + n;
+          if (global_note >= STROKEFORGE_MAX_NOTES) break;
+
+          float sf_amp = sf->note_harmonic_amplitude[global_note];
+          if (sf_amp > 0.0f) {
+            // Harmonic target → use pulse-wave amplitude
+            worker->precomputed_volume[n] = sf_amp;
+          } else if (sf->note_to_blob[global_note] != STROKEFORGE_NO_BLOB) {
+            // Inside blob but not a harmonic target → mute spectral
+            // (blob range is fully controlled by the wavetable recipe)
+            worker->precomputed_volume[n] = 0.0f;
+          }
+          // Outside blob → pure spectral passthrough (unchanged)
+        }
+      }
+      // BYPASS or PHASE_SMOOTH: no amplitude changes — spectral runs clean
     }
   }
   
