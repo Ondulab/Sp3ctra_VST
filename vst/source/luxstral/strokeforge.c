@@ -399,11 +399,17 @@ static void compute_harmonic_recipe(StrokeForgeBlob *blob)
 
     for (int h = 2; h <= max_h; h++)
     {
-        /* Parity factor: symmetric blobs suppress even harmonics */
+        /* Parity factor: symmetric blobs suppress even harmonics.
+         * Quadratic curve: symmetry=0.85 → parity=(0.15)²=0.023 (h2≈0.011, inaudible)
+         *                  symmetry=1.00 → parity=0 (perfect square wave)
+         *                  symmetry=0.00 → parity=1 (full sawtooth)
+         * Linear would give parity=0.15 → h2=0.07 (still audible) for symmetry=0.85.
+         */
         float parity = 1.0f;
         if (h % 2 == 0)
         {
-            parity = 1.0f - symmetry; /* symmetry=1 → even=0, symmetry=0 → even=1 */
+            float asym = 1.0f - symmetry;
+            parity = asym * asym; /* (1-sym)^2: steeper suppression near symmetry=1 */
         }
 
         /* Decay: 1/n^rolloff */
