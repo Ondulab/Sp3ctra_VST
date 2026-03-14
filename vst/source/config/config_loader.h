@@ -191,19 +191,15 @@ typedef struct {
     float display_rotation_smoothing;          // Rotation smoothing factor (0.0-0.95)
     
     // StrokeForge — Blob-centric harmonic morphing
-    int   strokeforge_enabled;                 // Master toggle (0=off/pure sine mode, 1=on)
-    float strokeforge_blob_base_threshold;     // Amplitude minimum for blob detection [0.01-0.2]
-    int   strokeforge_blob_contrast_adaptive;  // 1=threshold adapts to contrast, 0=fixed
-    float strokeforge_blob_contrast_sensitivity; // How much contrast affects threshold [0.0-1.0]
-    int   strokeforge_blob_min_width;          // Minimum blob width in notes [1-50]
-    int   strokeforge_blob_merge_gap;          // Max gap between sub-blobs to merge [0-20]
-    int   strokeforge_max_harmonics;           // Maximum harmonics per blob [1-16]
-    float strokeforge_harmonic_amplitude_floor; // Min harmonic amplitude before cutoff [0.001-0.1]
-    float strokeforge_volume_center_sigma;     // Gaussian sigma for center weighting [0.1-2.0]
-    int   strokeforge_phase_coherence_enabled; // 1=lock phases within blobs, 0=free
-    float strokeforge_phase_smooth_alpha;      // Phase transition smoothing [0.01-0.5]
-    float strokeforge_morph_width_scale;       // Notes of width for morph=1.0 [2.0-500.0]
-    int   strokeforge_wavetable_min_width;     // Min blob width (notes) to enter WAVETABLE mode [10-200]
+    /* ── StrokeForge — Blob-to-note with waveform morphing ──────────────────
+     * Blob width controls sine→square morphing; Gaussian focus concentrates
+     * energy on the blob center note (attenuates neighboring oscillators).     */
+    int   strokeforge_enabled;                 /* Master toggle                             */
+    float strokeforge_blob_base_threshold;     /* Min amplitude for blob detection [0.01-0.5] */
+    int   strokeforge_blob_min_width;          /* Min blob width in notes [1-50]            */
+    int   strokeforge_blob_merge_gap;          /* Max gap between sub-blobs to merge [0-20] */
+    float strokeforge_morph_width_scale;       /* Width (notes) where morph reaches 1.0 (square) [10-500] */
+    float strokeforge_blob_focus_sigma;        /* Gaussian sigma in notes [0.5-100]; small=pure tone, large=spectral cloud */
 } sp3ctra_config_t;
 
 /**************************************************************************************

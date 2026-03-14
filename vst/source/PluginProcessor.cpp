@@ -223,7 +223,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     // Master enable/disable
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         "sfEnabled",
-        "StrokeForge Enable",
+        "StrokeForge Enable",  /* Keep ID for preset compat */
         false  // Disabled by default
     ));
 
@@ -310,11 +310,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         400.0f, ""
     ));
 
-    // Wavetable mode: minimum blob width (in notes) to enter pulse-wave morphing
+    // Wavetable mode: minimum blob width (in notes) — kept for preset compat, unused
     params.push_back(std::make_unique<juce::AudioParameterInt>(
         "sfWavetableMinWidth",
         "StrokeForge Wavetable Min Width",
         1, 200, 50
+    ));
+
+    // Gaussian focus sigma (notes): controls how many oscillators are active per blob
+    // Small = pure tone (only center note), Large = spectral cloud (many notes)
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        "sfBlobFocusSigma",
+        "StrokeForge Focus Sigma",
+        juce::NormalisableRange<float>(0.5f, 100.0f, 0.5f, 0.4f),  // skewed towards small values
+        20.0f, "notes"
     ));
 
     return { params.begin(), params.end() };
@@ -393,6 +402,7 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("sfPhaseSmoothAlpha", this);
     apvts.addParameterListener("sfMorphWidthScale", this);
     apvts.addParameterListener("sfWavetableMinWidth", this);
+    apvts.addParameterListener("sfBlobFocusSigma", this);
     
     // Create Sp3ctra core (but do NOT initialize yet - lazy init)
     sp3ctraCore = std::make_unique<Sp3ctraCore>();
@@ -1251,34 +1261,22 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         apvts.getRawParameterValue("luxstralPhysiologicalDepth")->load();
     
     // ========================================================================
-    // StrokeForge — Blob-centric harmonic morphing parameters
+    // StrokeForge — Blob-to-note mapping with waveform morphing
+    // 6 active parameters; legacy IDs kept in APVTS for preset compatibility
+    // but no longer mapped to g_sp3ctra_config.
     // ========================================================================
     g_sp3ctra_config.strokeforge_enabled =
         (int)apvts.getRawParameterValue("sfEnabled")->load();
     g_sp3ctra_config.strokeforge_blob_base_threshold =
         apvts.getRawParameterValue("sfBlobBaseThreshold")->load();
-    g_sp3ctra_config.strokeforge_blob_contrast_adaptive =
-        (int)apvts.getRawParameterValue("sfBlobContrastAdaptive")->load();
-    g_sp3ctra_config.strokeforge_blob_contrast_sensitivity =
-        apvts.getRawParameterValue("sfBlobContrastSensitivity")->load();
     g_sp3ctra_config.strokeforge_blob_min_width =
         (int)apvts.getRawParameterValue("sfBlobMinWidth")->load();
     g_sp3ctra_config.strokeforge_blob_merge_gap =
         (int)apvts.getRawParameterValue("sfBlobMergeGap")->load();
-    g_sp3ctra_config.strokeforge_max_harmonics =
-        (int)apvts.getRawParameterValue("sfMaxHarmonics")->load();
-    g_sp3ctra_config.strokeforge_harmonic_amplitude_floor =
-        apvts.getRawParameterValue("sfHarmonicAmpFloor")->load();
-    g_sp3ctra_config.strokeforge_volume_center_sigma =
-        apvts.getRawParameterValue("sfVolumeCenterSigma")->load();
-    g_sp3ctra_config.strokeforge_phase_coherence_enabled =
-        (int)apvts.getRawParameterValue("sfPhaseCoherence")->load();
-    g_sp3ctra_config.strokeforge_phase_smooth_alpha =
-        apvts.getRawParameterValue("sfPhaseSmoothAlpha")->load();
     g_sp3ctra_config.strokeforge_morph_width_scale =
         apvts.getRawParameterValue("sfMorphWidthScale")->load();
-    g_sp3ctra_config.strokeforge_wavetable_min_width =
-        (int)apvts.getRawParameterValue("sfWavetableMinWidth")->load();
+    g_sp3ctra_config.strokeforge_blob_focus_sigma =
+        apvts.getRawParameterValue("sfBlobFocusSigma")->load();
 
     // Update logger level immediately
     logger_init((log_level_t)logLevel);

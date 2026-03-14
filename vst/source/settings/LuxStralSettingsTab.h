@@ -129,6 +129,12 @@ private:
     juce::Slider sfMorphWidthSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMorphWidthAttachment;
 
+    // Focus sigma: Gaussian half-width (notes) controlling how many oscillators
+    // are active per blob. Small = pure tone, large = spectral cloud.
+    juce::Label  sfFocusSigmaLabel;
+    juce::Slider sfFocusSigmaSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfFocusSigmaAttachment;
+
     void layoutContentComponent();
 
     // Listener callbacks

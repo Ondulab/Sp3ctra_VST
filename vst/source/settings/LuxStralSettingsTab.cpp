@@ -319,6 +319,24 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     sfMorphWidthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "sfMorphWidthScale", sfMorphWidthSlider);
 
+    // Focus Sigma — Gaussian half-width controlling active oscillators per blob
+    sfFocusSigmaLabel.setText("Focus Sigma:", juce::dontSendNotification);
+    sfFocusSigmaLabel.setJustificationType(juce::Justification::centredRight);
+    sfFocusSigmaLabel.setTooltip(
+        "Gaussian focus sigma (notes): controls active oscillators per stroke.\n"
+        "  0.5-5   = pure tone (1-2 notes ring per stroke)\n"
+        "  10-20   = soft focus (~1 semitone bandwidth)\n"
+        "  50-100  = spectral cloud (many notes active)\n"
+        "Tip: set 1-5 to get a precise-pitch square wave.");
+    contentComponent.addAndMakeVisible(sfFocusSigmaLabel);
+    sfFocusSigmaSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    sfFocusSigmaSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    sfFocusSigmaSlider.setTextValueSuffix(" notes");
+    sfFocusSigmaSlider.setTooltip(sfFocusSigmaLabel.getTooltip());
+    contentComponent.addAndMakeVisible(sfFocusSigmaSlider);
+    sfFocusSigmaAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfBlobFocusSigma", sfFocusSigmaSlider);
+
     // Add listeners for dynamic octave limitation
     rootNoteComboBox.addListener(this);
     tuningSlider.addListener(this);
@@ -494,6 +512,10 @@ void LuxStralSettingsTab::layoutContentComponent()
 
     sfMorphWidthLabel.setBounds(padding, yPos, labelWidth, rowHeight);
     sfMorphWidthSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + itemSpacing;
+
+    sfFocusSigmaLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    sfFocusSigmaSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
     yPos += rowHeight + padding;
 
     // Set content component size for scrolling
