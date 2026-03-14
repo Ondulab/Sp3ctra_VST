@@ -778,7 +778,11 @@ void strokeforge_analyze_frame(
         /* Step 3b: Temporal smoothing (IIR on center_note + symmetry) */
         apply_temporal_smoothing(out->blobs, 1);
 
-        if ((int)blob->width_notes < STROKEFORGE_WAVETABLE_MIN_WIDTH)
+        /* WAVETABLE threshold: use config value, fall back to compile-time default */
+        if ((int)blob->width_notes <
+            (g_sp3ctra_config.strokeforge_wavetable_min_width > 0
+                 ? g_sp3ctra_config.strokeforge_wavetable_min_width
+                 : STROKEFORGE_WAVETABLE_MIN_WIDTH))
         {
             /* ---------------------------------------------------------------
              * PHASE_SMOOTH mode — thin blob.
