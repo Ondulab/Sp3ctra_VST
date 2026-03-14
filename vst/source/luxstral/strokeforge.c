@@ -188,26 +188,41 @@ void strokeforge_analyze_frame(
         g_waveform_morph = morph;
     }
 
-    /* Step 3: Gaussian focus attenuation for every blob.
+    /* Step 3: Per-blob: Gaussian focus OR spectral passthrough.
      *
-     * For each note inside a blob:
-     *   note_attenuation[n] = exp( -(n - center)² / (2 × sigma²) )
+     * Two modes depending on blob width vs spectral_width_threshold (T):
      *
-     * sigma = strokeforge_blob_focus_sigma (in note-counts):
-     *   Small  (3–5)  → only the center note plays → very pure tone
-     *   Medium (10)   → a few notes active  → "focused" timbre
-     *   Large  (50+)  → most blob notes active → spectral cloud
+     *   blob->width_notes < T  (or T == 0):
+     *     Gaussian focus: only the center note plays at full volume.
+     *     note_attenuation[n] = exp( -(n - center)² / (2 × sigma²) )
+     *     sigma = strokeforge_blob_focus_sigma:
+     *       Small  (3–5)  → pure tone (1–2 active notes)
+     *       Medium (10)   → focused timbre (~semitone bandwidth)
+     *       Large  (50+)  → spectral cloud
      *
-     * Notes outside all blobs keep their original image amplitude (= 1.0).
+     *   blob->width_notes >= T  (T > 0):
+     *     Spectral passthrough: note_attenuation stays 1.0 for all notes
+     *     in this blob → raw image pixel intensities flow through unchanged,
+     *     as if StrokeForge were disabled for that region.
+     *     Use case: wide painted areas → full spectral texture.
+     *
+     * Notes outside all blobs always keep attenuation = 1.0 (spectral).
      */
     {
         float sigma = g_sp3ctra_config.strokeforge_blob_focus_sigma;
         if (sigma < 0.5f) sigma = 0.5f;
         float inv_2sigma2 = 1.0f / (2.0f * sigma * sigma);
+        float spectral_thresh = g_sp3ctra_config.strokeforge_spectral_width_threshold;
 
         for (int b = 0; b < out->blob_count; b++)
         {
             const StrokeForgeBlob *blob = &out->blobs[b];
+
+            /* Wide blob → spectral passthrough: skip Gaussian, leave 1.0 */
+            if (spectral_thresh > 0.0f && blob->width_notes >= spectral_thresh)
+                continue;
+
+            /* Narrow blob → Gaussian focus */
             float center = (float)blob->center_note;
 
             for (int n = blob->start_note;

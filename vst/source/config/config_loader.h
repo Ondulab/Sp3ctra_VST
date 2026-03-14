@@ -200,6 +200,7 @@ typedef struct {
     int   strokeforge_blob_merge_gap;          /* Max gap between sub-blobs to merge [0-20] */
     float strokeforge_morph_width_scale;       /* Width (notes) where morph reaches 1.0 (square) [10-500] */
     float strokeforge_blob_focus_sigma;        /* Gaussian sigma in notes [0.5-100]; small=pure tone, large=spectral cloud */
+    float strokeforge_spectral_width_threshold; /* Blob width (notes) >= this → raw spectral passthrough (no Gaussian); 0=disabled [0-3456] */
 } sp3ctra_config_t;
 
 /**************************************************************************************
