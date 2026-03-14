@@ -356,8 +356,13 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
     // or lock needed.  waves[note].phase_acc write is safe because workers
     // process disjoint note ranges (no two workers share the same note index).
     //
-    // Shared g_sine_table[1024] (4 KB) stays in L1 cache for the full loop.
+    // Shared g_sine_table[1024] + g_square_table[1024] both stay in L1 cache.
+    // g_waveform_morph: 0.0=pure sine, 1.0=pure square — single volatile read
+    // before the note loop avoids repeated volatile dereferences in the hot path.
     // -----------------------------------------------------------------------
+
+    /* One volatile read per synthesis cycle — safe, relaxed ordering sufficient */
+    const float morph = g_waveform_morph;
     {
       float*      pre_wave_w = worker->precomputed_wave_data +
                                (size_t)local_note_idx * audio_buffer_size;
@@ -370,7 +375,14 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
         const int   i0   = (int)phase;
         const float frac = phase - (float)i0;
         const int   i1   = (i0 + 1) & SINE_TABLE_MASK;
-        pre_wave_w[s] = g_sine_table[i0] + frac * (g_sine_table[i1] - g_sine_table[i0]);
+        /* Waveform morph: lerp between sine and square at the same phase position.
+         * morph=0 → pure sine  |  morph=1 → pure square (bandlimited, WAVETABLE_HARMONICS odd harmonics)
+         * Linear interpolation inside each table preserves sub-sample accuracy. */
+        {
+            float sine_s   = g_sine_table[i0]   + frac * (g_sine_table[i1]   - g_sine_table[i0]);
+            float square_s = g_square_table[i0] + frac * (g_square_table[i1] - g_square_table[i0]);
+            pre_wave_w[s]  = sine_s + morph * (square_s - sine_s);
+        }
       }
       waves[note].phase_acc = phase;  /* safe: disjoint per-worker ranges */
     }

@@ -34,6 +34,16 @@
 /** Shared sine table — 4 KB, initialized once, read-only in RT path */
 float g_sine_table[SINE_TABLE_SIZE];
 
+/* Bandlimited square wave table — precomputed once at startup (see init_sine_table()) */
+float g_square_table[SINE_TABLE_SIZE];
+
+/*
+ * Waveform morph factor: 0.0 = pure sine, 1.0 = pure square.
+ * Written by StrokeForge preprocessor (non-RT), read by synthesis workers (RT).
+ * volatile + relaxed atomic semantics: single float, naturally atomic on ARM64/x86-64.
+ */
+volatile float g_waveform_morph = 0.0f;
+
 /** Legacy waveParams instance (kept for hot-reload compatibility) */
 volatile struct waveParams wavesGeneratorParams;
 
@@ -159,6 +169,23 @@ void init_sine_table(void)
     {
         g_sine_table[i] = sinf(2.0f * (float)PI * (float)i / (float)SINE_TABLE_SIZE)
                           * (float)WAVE_AMP_RESOLUTION;
+        /* Square wave: bandlimited sum of odd harmonics.
+         * Normalised so peak ≈ 1.0 (same scale as g_sine_table).
+         * 4/π × Σ_{n=0..WAVETABLE_HARMONICS-1} sin((2n+1)×θ)/(2n+1)
+         * At N=16 harmonics the Gibbs ripple is ~9 % but the waveform is clearly square.
+         */
+        {
+            double theta = 2.0 * 3.14159265358979323846 * i / SINE_TABLE_SIZE;
+            double sq = 0.0;
+            int n;
+            for (n = 0; n < WAVETABLE_HARMONICS; n++)
+            {
+                int h = 2 * n + 1;
+                sq += sin(h * theta) / h;
+            }
+            g_square_table[i] = (float)(sq * 4.0 / 3.14159265358979323846)
+                                 * (float)WAVE_AMP_RESOLUTION;
+        }
     }
     log_info("SYNTH", "Sine table initialized: %d entries, %.0f bytes, L1-resident",
              SINE_TABLE_SIZE, (float)(SINE_TABLE_SIZE * sizeof(float)));

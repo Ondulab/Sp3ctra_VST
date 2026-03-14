@@ -99,6 +99,28 @@ struct wave
 /* Global shared sine table (initialized once by init_sine_table()) */
 extern float g_sine_table[SINE_TABLE_SIZE];
 
+/*
+ * Waveform morphing tables — same layout as g_sine_table, precomputed once.
+ *
+ * g_square_table[k]   = bandlimited square wave at phase k/SINE_TABLE_SIZE
+ *                       4/π × Σ sin((2n+1)×2πk/N)/(2n+1), n=0..WAVETABLE_HARMONICS-1
+ *
+ * Blend at RT: sample = lerp(g_sine_table[idx], g_square_table[idx], g_waveform_morph)
+ * No wavetable rebuild needed — just change g_waveform_morph (written by preprocessor,
+ * read by RT workers with relaxed atomics; single float, ARM64-naturally-atomic).
+ */
+#define WAVETABLE_HARMONICS  16   /* number of odd harmonics for square wave */
+
+extern float g_square_table[SINE_TABLE_SIZE];
+
+/*
+ * Waveform morph factor — written by StrokeForge preprocessor, read by RT workers.
+ * 0.0f = pure sine  |  1.0f = pure square
+ * Updated non-RT (preprocessor thread) via __atomic_store_n / memory_order_relaxed.
+ * Read RT via  __atomic_load_n  / memory_order_relaxed (single float, coherent on ARM64).
+ */
+extern volatile float g_waveform_morph;
+
 /* Global wave array and waveParams (allocated in synth_luxstral_runtime.c) */
 extern volatile struct wave *waves;
 
