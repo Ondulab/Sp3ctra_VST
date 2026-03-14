@@ -326,6 +326,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         20.0f, "notes"
     ));
 
+    // Spectral width threshold (notes): blobs wider than this bypass Gaussian focus
+    // and revert to raw spectral passthrough (image pixel intensities unchanged).
+    // 0 = disabled (all blobs use Gaussian focus regardless of width)
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        "sfSpectralWidthThreshold",
+        "StrokeForge Spectral Width Threshold",
+        juce::NormalisableRange<float>(0.0f, 3456.0f, 1.0f),
+        200.0f, "notes"
+    ));
+
     return { params.begin(), params.end() };
 }
 
@@ -403,6 +413,7 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("sfMorphWidthScale", this);
     apvts.addParameterListener("sfWavetableMinWidth", this);
     apvts.addParameterListener("sfBlobFocusSigma", this);
+    apvts.addParameterListener("sfSpectralWidthThreshold", this);
     
     // Create Sp3ctra core (but do NOT initialize yet - lazy init)
     sp3ctraCore = std::make_unique<Sp3ctraCore>();
@@ -1277,6 +1288,8 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         apvts.getRawParameterValue("sfMorphWidthScale")->load();
     g_sp3ctra_config.strokeforge_blob_focus_sigma =
         apvts.getRawParameterValue("sfBlobFocusSigma")->load();
+    g_sp3ctra_config.strokeforge_spectral_width_threshold =
+        apvts.getRawParameterValue("sfSpectralWidthThreshold")->load();
 
     // Update logger level immediately
     logger_init((log_level_t)logLevel);

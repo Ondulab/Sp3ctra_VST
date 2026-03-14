@@ -156,8 +156,10 @@ static const sp3ctra_config_t DEFAULT_CONFIG = {
     .strokeforge_blob_min_width = 20,          /* 20 notes (~1.3mm @400DPI) — filters CIS noise        */
     .strokeforge_blob_merge_gap = 5,           /* Merge blobs separated by ≤5 note gap                 */
     .strokeforge_morph_width_scale = 400.0f,   /* 400 notes=25.4mm @400DPI → morph=1.0 (full square)  */
-    .strokeforge_blob_focus_sigma = 20.0f      /* Gaussian sigma in notes: 20 = ~20-note soft focus    */
+    .strokeforge_blob_focus_sigma = 20.0f,     /* Gaussian sigma in notes: 20 = ~20-note soft focus    */
                                                /* 5=pure tone, 20=a few notes, 100=spectral cloud      */
+    .strokeforge_spectral_width_threshold = 200.0f /* Blobs >= 200 notes → spectral passthrough        */
+                                               /* 200 notes ≈ 0.5 octave @400DPI; 0=disable passthrough */
                                                         //   ~92px / 5.8mm  → morph=0.23 (flute: h1,h2)
                                                         //  ~208px / 13.2mm → morph=0.52 (medium: h1..h4)
                                                         //  ~389px / 24.7mm → morph=0.97 (rich: h1..h8)

@@ -298,6 +298,8 @@ static const config_param_def_t CONFIG_PARAMS[] = {
                  strokeforge_morph_width_scale, 10.0f, 500.0f),
     CONFIG_PARAM("strokeforge", "blob_focus_sigma", PARAM_TYPE_FLOAT,
                  strokeforge_blob_focus_sigma, 0.5f, 100.0f),
+    CONFIG_PARAM("strokeforge", "spectral_width_threshold", PARAM_TYPE_FLOAT,
+                 strokeforge_spectral_width_threshold, 0.0f, 3456.0f),
 };
 
 #define CONFIG_PARAMS_COUNT (sizeof(CONFIG_PARAMS) / sizeof(CONFIG_PARAMS[0]))

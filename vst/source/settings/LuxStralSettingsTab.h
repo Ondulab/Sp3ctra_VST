@@ -135,6 +135,13 @@ private:
     juce::Slider sfFocusSigmaSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfFocusSigmaAttachment;
 
+    // Spectral width threshold: blobs wider than this value bypass Gaussian focus
+    // and let raw image pixel intensities pass through unchanged (spectral mode).
+    // 0 = disabled (all blobs use Gaussian focus regardless of width).
+    juce::Label  sfSpectralWidthThresholdLabel;
+    juce::Slider sfSpectralWidthThresholdSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfSpectralWidthThresholdAttachment;
+
     void layoutContentComponent();
 
     // Listener callbacks

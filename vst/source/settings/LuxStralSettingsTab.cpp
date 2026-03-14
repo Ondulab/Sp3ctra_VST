@@ -337,6 +337,24 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     sfFocusSigmaAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "sfBlobFocusSigma", sfFocusSigmaSlider);
 
+    // ── Spectral Width Threshold ──────────────────────────────────────────────
+    sfSpectralWidthThresholdLabel.setText("Spectral Threshold:", juce::dontSendNotification);
+    sfSpectralWidthThresholdLabel.setJustificationType(juce::Justification::centredRight);
+    sfSpectralWidthThresholdLabel.setTooltip(
+        "Width threshold (notes) above which a blob bypasses Gaussian focus\n"
+        "and lets raw pixel intensities flow through unchanged (spectral passthrough).\n"
+        "0 = disabled: all blobs always use Gaussian focus.");
+    contentComponent.addAndMakeVisible(sfSpectralWidthThresholdLabel);
+
+    sfSpectralWidthThresholdSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    sfSpectralWidthThresholdSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    sfSpectralWidthThresholdSlider.setTextValueSuffix(" notes");
+    sfSpectralWidthThresholdSlider.setTooltip(sfSpectralWidthThresholdLabel.getTooltip());
+    contentComponent.addAndMakeVisible(sfSpectralWidthThresholdSlider);
+
+    sfSpectralWidthThresholdAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfSpectralWidthThreshold", sfSpectralWidthThresholdSlider);
+
     // Add listeners for dynamic octave limitation
     rootNoteComboBox.addListener(this);
     tuningSlider.addListener(this);
@@ -516,6 +534,10 @@ void LuxStralSettingsTab::layoutContentComponent()
 
     sfFocusSigmaLabel.setBounds(padding, yPos, labelWidth, rowHeight);
     sfFocusSigmaSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + itemSpacing;
+
+    sfSpectralWidthThresholdLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    sfSpectralWidthThresholdSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
     yPos += rowHeight + padding;
 
     // Set content component size for scrolling
