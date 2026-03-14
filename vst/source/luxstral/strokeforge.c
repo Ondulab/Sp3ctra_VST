@@ -17,6 +17,14 @@
 #include "../config/config_loader.h"
 #include "../utils/logger.h"
 
+/*
+ * Waveform morph factor (defined in wave_generation.c).
+ * extern declaration avoids pulling the full wave_generation.h include chain
+ * (vst_adapters_c.h → doublebuffer.h) into this non-RT preprocessor module.
+ * 0.0 = pure sine | 1.0 = pure square.
+ */
+extern volatile float g_waveform_morph;
+
 #include <string.h>
 #include <math.h>
 
@@ -749,89 +757,48 @@ void strokeforge_analyze_frame(
      * ----------------------------------------------------------------------- */
     if (out->blob_count != 1)
     {
-        /* BYPASS: zero or multiple blobs → pure spectral passthrough */
+        /* BYPASS: zero or multiple blobs → pure spectral passthrough.
+         * Reset waveform morph to pure sine so the additive engine reverts to
+         * its default sound as soon as the blob disappears or splits. */
+        g_waveform_morph = 0.0f;
         out->frame_mode = STROKEFORGE_MODE_BYPASS;
-        for (int i = 0; i < num_notes && i < STROKEFORGE_MAX_NOTES; i++)
-        {
-            out->note_to_blob[i]             = STROKEFORGE_NO_BLOB;
-            out->note_is_harmonic_of_blob[i] = STROKEFORGE_NO_BLOB;
-            out->note_harmonic_rank[i]        = 0;
-            out->note_harmonic_amplitude[i]   = 0.0f;
-            out->note_target_phase[i]         = STROKEFORGE_PHASE_FREE;
-        }
         /* Reset smooth state: clean restart when single blob re-appears */
         s_smooth_state.valid = 0;
         s_smooth_state.count = 0;
         return;
     }
 
-    /* --- Single blob path ------------------------------------------------- */
+    /* -----------------------------------------------------------------------
+     * Single blob path — compute waveform morph factor.
+     *
+     * morph = blob_width / morph_width_scale
+     *   0.0 → pure sine  (narrow stroke, pen tip)
+     *   1.0 → pure square (wide stroke, full marker)
+     *
+     * The RT synthesis engine (synth_process_worker_range) reads g_waveform_morph
+     * once per cycle and applies a linear interpolation between g_sine_table and
+     * g_square_table.  No harmonic-recipe injection, no note_harmonic_amplitude
+     * tables — the waveform change is global and instantaneous.
+     * ----------------------------------------------------------------------- */
     {
         StrokeForgeBlob *blob = &out->blobs[0];
 
-        /* Step 2: Centroid, peak, gaussian-weighted amplitude */
+        /* Centroid + amplitude (used for logging) */
         compute_blob_amplitudes(notes, blob);
-
-        /* Step 3: Shape descriptors */
         extract_shape_descriptors(notes, blob);
-
-        /* Step 3b: Temporal smoothing (IIR on center_note + symmetry) */
         apply_temporal_smoothing(out->blobs, 1);
 
-        /* WAVETABLE threshold: use config value, fall back to compile-time default */
-        if ((int)blob->width_notes <
-            (g_sp3ctra_config.strokeforge_wavetable_min_width > 0
-                 ? g_sp3ctra_config.strokeforge_wavetable_min_width
-                 : STROKEFORGE_WAVETABLE_MIN_WIDTH))
-        {
-            /* ---------------------------------------------------------------
-             * PHASE_SMOOTH mode — thin blob.
-             * Gentle phase coherence between neighboring notes; no amplitude
-             * change so the spectral synthesis remains fully in control.
-             * --------------------------------------------------------------- */
-            out->frame_mode = STROKEFORGE_MODE_PHASE_SMOOTH;
+        /* Morph factor: linear map from width to [0, 1] */
+        float scale = g_sp3ctra_config.strokeforge_morph_width_scale;
+        if (scale <= 0.0f) scale = 400.0f;  /* safety fallback */
+        float morph = blob->width_notes / scale;
+        if (morph > 1.0f) morph = 1.0f;
 
-            /* Initialize all sentinels */
-            for (int i = 0; i < num_notes && i < STROKEFORGE_MAX_NOTES; i++)
-            {
-                out->note_to_blob[i]             = STROKEFORGE_NO_BLOB;
-                out->note_is_harmonic_of_blob[i] = STROKEFORGE_NO_BLOB;
-                out->note_harmonic_rank[i]        = 0;
-                out->note_harmonic_amplitude[i]   = 0.0f;
-                out->note_target_phase[i]         = STROKEFORGE_PHASE_FREE;
-            }
+        /* Atomic write — single float, ARM64/x86-64 naturally atomic */
+        g_waveform_morph = morph;
 
-            /* Phase hints: tag notes inside blob with a common target phase */
-            if (g_sp3ctra_config.strokeforge_phase_coherence_enabled)
-            {
-                for (int i = blob->start_note;
-                     i < blob->end_note && i < STROKEFORGE_MAX_NOTES; i++)
-                {
-                    out->note_to_blob[i]     = 0;   /* blob index 0 */
-                    out->note_target_phase[i] = 0.0f;
-                }
-            }
-        }
-        else
-        {
-            /* ---------------------------------------------------------------
-             * WAVETABLE mode — wide isolated blob.
-             * Pulse-wave harmonic recipe replaces spectral synthesis within
-             * the blob range.  RT engine will suppress spectral amplitude for
-             * all notes inside the blob (note_to_blob != STROKEFORGE_NO_BLOB)
-             * and use note_harmonic_amplitude for harmonic target notes.
-             * --------------------------------------------------------------- */
-            out->frame_mode = STROKEFORGE_MODE_WAVETABLE;
-
-            /* Step 4: Pulse-wave recipe (flatness + symmetry → waveform type) */
-            compute_harmonic_recipe_pulse_wave(blob);
-
-            /* Step 5: Map each harmonic to nearest CIS oscillator note index */
-            find_harmonic_note_indices(blob, num_notes);
-
-            /* Step 6: Full per-note lookup tables */
-            build_note_lookups(out, num_notes);
-        }
+        out->frame_mode = (morph >= 0.01f) ? STROKEFORGE_MODE_WAVETABLE
+                                            : STROKEFORGE_MODE_PHASE_SMOOTH;
     }
 
     /* ── DEBUG: Rate-limited logging of blob analysis results ── */

@@ -6,14 +6,15 @@
 //==============================================================================
 /**
  * @brief LuxStral Synthesis Settings Tab
- * 
+ *
  * Contains all parameters for the additive synthesis engine:
- * - Frequency Range
+ * - Musical Tuning
  * - Envelope Parameters
  * - Image Processing
  * - Stereo Processing
  * - Dynamics Processing
  * - Performance
+ * - StrokeForge (sine→square waveform morphing)
  */
 class LuxStralSettingsTab : public juce::Component,
                             public juce::ComboBox::Listener,
@@ -34,7 +35,7 @@ private:
     juce::Viewport viewport;
     juce::Component contentComponent;
 
-    // Section: Musical Tuning (replaces Low/High Frequency)
+    // Section: Musical Tuning
     juce::Label tuningRangeSectionLabel;
     juce::Label tuningLabel;
     juce::Slider tuningSlider;
@@ -45,7 +46,7 @@ private:
     juce::Label numOctavesLabel;
     juce::Slider numOctavesSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> numOctavesAttachment;
-    juce::Label freqRangeInfoLabel;  // Displays calculated frequency range
+    juce::Label freqRangeInfoLabel;
     juce::Label physiologicalFilterLabel;
     juce::ToggleButton physiologicalFilterToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> physiologicalFilterAttachment;
@@ -101,59 +102,44 @@ private:
     juce::Slider numWorkersSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> numWorkersAttachment;
 
-    // Section: StrokeForge — Harmonic Morphing
+    // ── StrokeForge — Sine → Square waveform morphing ────────────────────
+    // The waveform morph is controlled by stroke width:
+    //   narrow stroke → g_waveform_morph≈0 → pure sine
+    //   wide   stroke → g_waveform_morph≈1 → pure square (bandlimited)
+    // sfMorphWidthScale = blob width (in notes) that saturates morph to 1.0
     juce::Label sfSectionLabel;
-    juce::Label sfEnabledLabel;
+
+    juce::Label       sfEnabledLabel;
     juce::ToggleButton sfEnabledToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfEnabledAttachment;
-    juce::Label sfBlobThresholdLabel;
+
+    juce::Label  sfBlobThresholdLabel;
     juce::Slider sfBlobThresholdSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfBlobThresholdAttachment;
-    juce::Label sfContrastAdaptiveLabel;
-    juce::ToggleButton sfContrastAdaptiveToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfContrastAdaptiveAttachment;
-    juce::Label sfContrastSensLabel;
-    juce::Slider sfContrastSensSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfContrastSensAttachment;
-    juce::Label sfMinWidthLabel;
+
+    juce::Label  sfMinWidthLabel;
     juce::Slider sfMinWidthSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMinWidthAttachment;
-    juce::Label sfMergeGapLabel;
+
+    juce::Label  sfMergeGapLabel;
     juce::Slider sfMergeGapSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMergeGapAttachment;
-    juce::Label sfMaxHarmonicsLabel;
-    juce::Slider sfMaxHarmonicsSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMaxHarmonicsAttachment;
-    juce::Label sfAmpFloorLabel;
-    juce::Slider sfAmpFloorSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfAmpFloorAttachment;
-    juce::Label sfCenterSigmaLabel;
-    juce::Slider sfCenterSigmaSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfCenterSigmaAttachment;
-    juce::Label sfPhaseCoherenceLabel;
-    juce::ToggleButton sfPhaseCoherenceToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfPhaseCoherenceAttachment;
-    juce::Label sfPhaseSmoothLabel;
-    juce::Slider sfPhaseSmoothSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfPhaseSmoothAttachment;
-    juce::Label sfMorphWidthLabel;
+
+    juce::Label  sfMorphWidthLabel;
     juce::Slider sfMorphWidthSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMorphWidthAttachment;
-    juce::Label sfWavetableMinWidthLabel;
-    juce::Slider sfWavetableMinWidthSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfWavetableMinWidthAttachment;
 
     void layoutContentComponent();
-    
+
     // Listener callbacks
     void comboBoxChanged(juce::ComboBox* comboBoxThatHasChanged) override;
     void sliderValueChanged(juce::Slider* slider) override;
-    
+
     // Helper functions
-    float getRootNoteFrequency() const;  // Get frequency from root note selection
-    int getMaxOctavesForRootNote() const;  // Calculate max octaves to stay under 20kHz
-    void updateOctavesSliderRange();  // Update slider range based on root note
-    void updateFrequencyRangeInfo();  // Update info label
+    float getRootNoteFrequency() const;
+    int getMaxOctavesForRootNote() const;
+    void updateOctavesSliderRange();
+    void updateFrequencyRangeInfo();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxStralSettingsTab)
 };
