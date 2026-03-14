@@ -215,7 +215,108 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         0.5f,  // Default: 50% of full A-weighting inverse
         ""
     ));
-    
+
+    // ========================================================================
+    // StrokeForge — Blob-centric harmonic morphing
+    // ========================================================================
+
+    // Master enable/disable
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        "sfEnabled",
+        "StrokeForge Enable",
+        false  // Disabled by default
+    ));
+
+    // Blob detection: base threshold
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        "sfBlobBaseThreshold",
+        "StrokeForge Blob Threshold",
+        juce::NormalisableRange<float>(0.01f, 0.2f, 0.001f),
+        0.03f, ""
+    ));
+
+    // Blob detection: contrast-adaptive threshold
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        "sfBlobContrastAdaptive",
+        "StrokeForge Contrast-Adaptive",
+        true  // Enabled by default
+    ));
+
+    // Blob detection: contrast sensitivity
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        "sfBlobContrastSensitivity",
+        "StrokeForge Contrast Sensitivity",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f),
+        0.5f, ""
+    ));
+
+    // Blob detection: minimum width in notes (raised range to fight CIS noise)
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        "sfBlobMinWidth",
+        "StrokeForge Blob Min Width",
+        1, 50, 20
+    ));
+
+    // Blob detection: merge gap (raised range to bridge noise gaps)
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        "sfBlobMergeGap",
+        "StrokeForge Blob Merge Gap",
+        0, 20, 5
+    ));
+
+    // Harmonic generation: max harmonics per blob
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        "sfMaxHarmonics",
+        "StrokeForge Max Harmonics",
+        1, 16, 8
+    ));
+
+    // Harmonic generation: amplitude floor
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        "sfHarmonicAmpFloor",
+        "StrokeForge Harmonic Amp Floor",
+        juce::NormalisableRange<float>(0.001f, 0.1f, 0.001f),
+        0.01f, ""
+    ));
+
+    // Volume shaping: Gaussian center sigma
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        "sfVolumeCenterSigma",
+        "StrokeForge Volume Center Sigma",
+        juce::NormalisableRange<float>(0.1f, 2.0f, 0.01f),
+        0.4f, ""
+    ));
+
+    // Phase coherence: enable
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        "sfPhaseCoherence",
+        "StrokeForge Phase Coherence",
+        true  // Enabled by default
+    ));
+
+    // Phase coherence: smoothing alpha
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        "sfPhaseSmoothAlpha",
+        "StrokeForge Phase Smooth Alpha",
+        juce::NormalisableRange<float>(0.01f, 0.5f, 0.01f),
+        0.05f, ""
+    ));
+
+    // Morph width scale (notes of width for morph=1.0)
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        "sfMorphWidthScale",
+        "StrokeForge Morph Width Scale",
+        juce::NormalisableRange<float>(2.0f, 500.0f, 1.0f),
+        400.0f, ""
+    ));
+
+    // Wavetable mode: minimum blob width (in notes) to enter pulse-wave morphing
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        "sfWavetableMinWidth",
+        "StrokeForge Wavetable Min Width",
+        1, 200, 50
+    ));
+
     return { params.begin(), params.end() };
 }
 
@@ -277,6 +378,21 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("luxstralNumWorkers", this);
     apvts.addParameterListener("luxstralPhysiologicalFilter", this);
     apvts.addParameterListener("luxstralPhysiologicalDepth", this);
+    
+    // Register StrokeForge parameter listeners
+    apvts.addParameterListener("sfEnabled", this);
+    apvts.addParameterListener("sfBlobBaseThreshold", this);
+    apvts.addParameterListener("sfBlobContrastAdaptive", this);
+    apvts.addParameterListener("sfBlobContrastSensitivity", this);
+    apvts.addParameterListener("sfBlobMinWidth", this);
+    apvts.addParameterListener("sfBlobMergeGap", this);
+    apvts.addParameterListener("sfMaxHarmonics", this);
+    apvts.addParameterListener("sfHarmonicAmpFloor", this);
+    apvts.addParameterListener("sfVolumeCenterSigma", this);
+    apvts.addParameterListener("sfPhaseCoherence", this);
+    apvts.addParameterListener("sfPhaseSmoothAlpha", this);
+    apvts.addParameterListener("sfMorphWidthScale", this);
+    apvts.addParameterListener("sfWavetableMinWidth", this);
     
     // Create Sp3ctra core (but do NOT initialize yet - lazy init)
     sp3ctraCore = std::make_unique<Sp3ctraCore>();
@@ -899,6 +1015,13 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
     
     // 🔧 CRITICAL: LuxStral parameters are automatically synced to g_sp3ctra_config
     // They are read directly by the synthesis engine, NO restart needed!
+    // StrokeForge parameters — same hot-reload pattern as LuxStral
+    bool isStrokeForgeParam = parameterID.startsWith("sf");
+    if (isStrokeForgeParam) {
+        applyConfigurationToCore(false);
+        return;
+    }
+    
     bool isLuxStralParam = parameterID.startsWith("luxstral");
     if (isLuxStralParam) {
         // Just update g_sp3ctra_config silently (no restart)
@@ -1127,6 +1250,36 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     g_sp3ctra_config.physiological_correction_depth =
         apvts.getRawParameterValue("luxstralPhysiologicalDepth")->load();
     
+    // ========================================================================
+    // StrokeForge — Blob-centric harmonic morphing parameters
+    // ========================================================================
+    g_sp3ctra_config.strokeforge_enabled =
+        (int)apvts.getRawParameterValue("sfEnabled")->load();
+    g_sp3ctra_config.strokeforge_blob_base_threshold =
+        apvts.getRawParameterValue("sfBlobBaseThreshold")->load();
+    g_sp3ctra_config.strokeforge_blob_contrast_adaptive =
+        (int)apvts.getRawParameterValue("sfBlobContrastAdaptive")->load();
+    g_sp3ctra_config.strokeforge_blob_contrast_sensitivity =
+        apvts.getRawParameterValue("sfBlobContrastSensitivity")->load();
+    g_sp3ctra_config.strokeforge_blob_min_width =
+        (int)apvts.getRawParameterValue("sfBlobMinWidth")->load();
+    g_sp3ctra_config.strokeforge_blob_merge_gap =
+        (int)apvts.getRawParameterValue("sfBlobMergeGap")->load();
+    g_sp3ctra_config.strokeforge_max_harmonics =
+        (int)apvts.getRawParameterValue("sfMaxHarmonics")->load();
+    g_sp3ctra_config.strokeforge_harmonic_amplitude_floor =
+        apvts.getRawParameterValue("sfHarmonicAmpFloor")->load();
+    g_sp3ctra_config.strokeforge_volume_center_sigma =
+        apvts.getRawParameterValue("sfVolumeCenterSigma")->load();
+    g_sp3ctra_config.strokeforge_phase_coherence_enabled =
+        (int)apvts.getRawParameterValue("sfPhaseCoherence")->load();
+    g_sp3ctra_config.strokeforge_phase_smooth_alpha =
+        apvts.getRawParameterValue("sfPhaseSmoothAlpha")->load();
+    g_sp3ctra_config.strokeforge_morph_width_scale =
+        apvts.getRawParameterValue("sfMorphWidthScale")->load();
+    g_sp3ctra_config.strokeforge_wavetable_min_width =
+        (int)apvts.getRawParameterValue("sfWavetableMinWidth")->load();
+
     // Update logger level immediately
     logger_init((log_level_t)logLevel);
     

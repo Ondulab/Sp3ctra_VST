@@ -248,6 +248,142 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     numWorkersAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralNumWorkers", numWorkersSlider);
 
+    // ========================================================================
+    // Section: StrokeForge — Harmonic Morphing
+    // ========================================================================
+    sfSectionLabel.setText("StrokeForge — Harmonic Morphing", juce::dontSendNotification);
+    sfSectionLabel.setFont(juce::Font(juce::FontOptions(15.0f)).boldened());
+    sfSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightyellow);
+    contentComponent.addAndMakeVisible(sfSectionLabel);
+
+    // Enable toggle
+    sfEnabledLabel.setText("Enable:", juce::dontSendNotification);
+    sfEnabledLabel.setJustificationType(juce::Justification::centredRight);
+    contentComponent.addAndMakeVisible(sfEnabledLabel);
+    sfEnabledToggle.setButtonText("StrokeForge Active");
+    contentComponent.addAndMakeVisible(sfEnabledToggle);
+    sfEnabledAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "sfEnabled", sfEnabledToggle);
+
+    // Blob Threshold
+    sfBlobThresholdLabel.setText("Blob Threshold:", juce::dontSendNotification);
+    sfBlobThresholdLabel.setJustificationType(juce::Justification::centredRight);
+    contentComponent.addAndMakeVisible(sfBlobThresholdLabel);
+    sfBlobThresholdSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    sfBlobThresholdSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    contentComponent.addAndMakeVisible(sfBlobThresholdSlider);
+    sfBlobThresholdAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfBlobBaseThreshold", sfBlobThresholdSlider);
+
+    // Contrast-Adaptive
+    sfContrastAdaptiveLabel.setText("Contrast Adaptive:", juce::dontSendNotification);
+    sfContrastAdaptiveLabel.setJustificationType(juce::Justification::centredRight);
+    contentComponent.addAndMakeVisible(sfContrastAdaptiveLabel);
+    sfContrastAdaptiveToggle.setButtonText("Enable");
+    contentComponent.addAndMakeVisible(sfContrastAdaptiveToggle);
+    sfContrastAdaptiveAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "sfBlobContrastAdaptive", sfContrastAdaptiveToggle);
+
+    // Contrast Sensitivity
+    sfContrastSensLabel.setText("Contrast Sensitivity:", juce::dontSendNotification);
+    sfContrastSensLabel.setJustificationType(juce::Justification::centredRight);
+    contentComponent.addAndMakeVisible(sfContrastSensLabel);
+    sfContrastSensSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    sfContrastSensSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    contentComponent.addAndMakeVisible(sfContrastSensSlider);
+    sfContrastSensAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfBlobContrastSensitivity", sfContrastSensSlider);
+
+    // Min Width
+    sfMinWidthLabel.setText("Min Blob Width:", juce::dontSendNotification);
+    sfMinWidthLabel.setJustificationType(juce::Justification::centredRight);
+    contentComponent.addAndMakeVisible(sfMinWidthLabel);
+    sfMinWidthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    sfMinWidthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    contentComponent.addAndMakeVisible(sfMinWidthSlider);
+    sfMinWidthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfBlobMinWidth", sfMinWidthSlider);
+
+    // Merge Gap
+    sfMergeGapLabel.setText("Merge Gap:", juce::dontSendNotification);
+    sfMergeGapLabel.setJustificationType(juce::Justification::centredRight);
+    contentComponent.addAndMakeVisible(sfMergeGapLabel);
+    sfMergeGapSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    sfMergeGapSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    contentComponent.addAndMakeVisible(sfMergeGapSlider);
+    sfMergeGapAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfBlobMergeGap", sfMergeGapSlider);
+
+    // Max Harmonics
+    sfMaxHarmonicsLabel.setText("Max Harmonics:", juce::dontSendNotification);
+    sfMaxHarmonicsLabel.setJustificationType(juce::Justification::centredRight);
+    contentComponent.addAndMakeVisible(sfMaxHarmonicsLabel);
+    sfMaxHarmonicsSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    sfMaxHarmonicsSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    contentComponent.addAndMakeVisible(sfMaxHarmonicsSlider);
+    sfMaxHarmonicsAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfMaxHarmonics", sfMaxHarmonicsSlider);
+
+    // Harmonic Amp Floor
+    sfAmpFloorLabel.setText("Harmonic Floor:", juce::dontSendNotification);
+    sfAmpFloorLabel.setJustificationType(juce::Justification::centredRight);
+    contentComponent.addAndMakeVisible(sfAmpFloorLabel);
+    sfAmpFloorSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    sfAmpFloorSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    contentComponent.addAndMakeVisible(sfAmpFloorSlider);
+    sfAmpFloorAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfHarmonicAmpFloor", sfAmpFloorSlider);
+
+    // Volume Center Sigma
+    sfCenterSigmaLabel.setText("Center Sigma:", juce::dontSendNotification);
+    sfCenterSigmaLabel.setJustificationType(juce::Justification::centredRight);
+    contentComponent.addAndMakeVisible(sfCenterSigmaLabel);
+    sfCenterSigmaSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    sfCenterSigmaSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    contentComponent.addAndMakeVisible(sfCenterSigmaSlider);
+    sfCenterSigmaAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfVolumeCenterSigma", sfCenterSigmaSlider);
+
+    // Phase Coherence
+    sfPhaseCoherenceLabel.setText("Phase Coherence:", juce::dontSendNotification);
+    sfPhaseCoherenceLabel.setJustificationType(juce::Justification::centredRight);
+    contentComponent.addAndMakeVisible(sfPhaseCoherenceLabel);
+    sfPhaseCoherenceToggle.setButtonText("Lock phases");
+    contentComponent.addAndMakeVisible(sfPhaseCoherenceToggle);
+    sfPhaseCoherenceAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "sfPhaseCoherence", sfPhaseCoherenceToggle);
+
+    // Phase Smooth Alpha
+    sfPhaseSmoothLabel.setText("Phase Smoothing:", juce::dontSendNotification);
+    sfPhaseSmoothLabel.setJustificationType(juce::Justification::centredRight);
+    contentComponent.addAndMakeVisible(sfPhaseSmoothLabel);
+    sfPhaseSmoothSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    sfPhaseSmoothSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    contentComponent.addAndMakeVisible(sfPhaseSmoothSlider);
+    sfPhaseSmoothAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfPhaseSmoothAlpha", sfPhaseSmoothSlider);
+
+    // Morph Width Scale
+    sfMorphWidthLabel.setText("Morph Width:", juce::dontSendNotification);
+    sfMorphWidthLabel.setJustificationType(juce::Justification::centredRight);
+    contentComponent.addAndMakeVisible(sfMorphWidthLabel);
+    sfMorphWidthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    sfMorphWidthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    contentComponent.addAndMakeVisible(sfMorphWidthSlider);
+    sfMorphWidthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfMorphWidthScale", sfMorphWidthSlider);
+
+    sfWavetableMinWidthLabel.setText("Wavetable Min Width:", juce::dontSendNotification);
+    sfWavetableMinWidthLabel.setJustificationType(juce::Justification::centredRight);
+    sfWavetableMinWidthLabel.setTooltip("Minimum blob width (in notes) to activate WAVETABLE mode (pulse-wave morphing). Below this threshold = PHASE_SMOOTH mode only.");
+    contentComponent.addAndMakeVisible(sfWavetableMinWidthLabel);
+    sfWavetableMinWidthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    sfWavetableMinWidthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    sfWavetableMinWidthSlider.setTooltip("Narrow strokes (< value) = phase hints only. Wide strokes (>= value) = full pulse-wave morphing (square/triangle/sawtooth).");
+    contentComponent.addAndMakeVisible(sfWavetableMinWidthSlider);
+    sfWavetableMinWidthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfWavetableMinWidth", sfWavetableMinWidthSlider);
+
     // Add listeners for dynamic octave limitation
     rootNoteComboBox.addListener(this);
     tuningSlider.addListener(this);
@@ -397,6 +533,64 @@ void LuxStralSettingsTab::layoutContentComponent()
     
     numWorkersLabel.setBounds(padding, yPos, labelWidth, rowHeight);
     numWorkersSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + sectionSpacing;
+
+    // ========================================================================
+    // Section: StrokeForge — Harmonic Morphing
+    // ========================================================================
+    sfSectionLabel.setBounds(padding, yPos, contentWidth, 25);
+    yPos += 30;
+
+    sfEnabledLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    sfEnabledToggle.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + itemSpacing;
+
+    sfBlobThresholdLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    sfBlobThresholdSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + itemSpacing;
+
+    sfContrastAdaptiveLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    sfContrastAdaptiveToggle.setBounds(padding + labelWidth + 10, yPos, 100, rowHeight);
+    yPos += rowHeight + itemSpacing;
+
+    sfContrastSensLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    sfContrastSensSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + itemSpacing;
+
+    sfMinWidthLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    sfMinWidthSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + itemSpacing;
+
+    sfMergeGapLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    sfMergeGapSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + itemSpacing;
+
+    sfMaxHarmonicsLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    sfMaxHarmonicsSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + itemSpacing;
+
+    sfAmpFloorLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    sfAmpFloorSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + itemSpacing;
+
+    sfCenterSigmaLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    sfCenterSigmaSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + itemSpacing;
+
+    sfPhaseCoherenceLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    sfPhaseCoherenceToggle.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + itemSpacing;
+
+    sfPhaseSmoothLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    sfPhaseSmoothSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + itemSpacing;
+
+    sfMorphWidthLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    sfMorphWidthSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + padding;
+
+    sfWavetableMinWidthLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    sfWavetableMinWidthSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
     yPos += rowHeight + padding;
 
     // Set content component size for scrolling

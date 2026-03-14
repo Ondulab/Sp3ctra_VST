@@ -154,14 +154,15 @@ static const sp3ctra_config_t DEFAULT_CONFIG = {
     .strokeforge_blob_base_threshold = 0.03f,          // 3% — detects light pencil strokes, ignores noise
     .strokeforge_blob_contrast_adaptive = 1,           // Adaptive threshold based on image contrast
     .strokeforge_blob_contrast_sensitivity = 0.5f,     // 50% contrast influence on threshold
-    .strokeforge_blob_min_width = 2,                   // Min 2 notes — single pixels are noise
-    .strokeforge_blob_merge_gap = 1,                   // Merge blobs separated by 1 note gap (artifact)
+    .strokeforge_blob_min_width = 20,                  // Min 20 notes (~1.3mm @400DPI) — filters CIS noise
+    .strokeforge_blob_merge_gap = 5,                   // Merge blobs separated by 5 note gap (CIS noise gaps)
     .strokeforge_max_harmonics = 8,                    // 8 harmonics — rich timbre without CPU overload
     .strokeforge_harmonic_amplitude_floor = 0.01f,     // 1% — below is inaudible, save CPU
     .strokeforge_volume_center_sigma = 0.4f,           // Gaussian sigma: peak dominates, edges secondary
     .strokeforge_phase_coherence_enabled = 1,          // Phase lock within blobs (core feature)
     .strokeforge_phase_smooth_alpha = 0.05f,           // ~30-50ms transition — smooth, no clicks
-    .strokeforge_morph_width_scale = 400.0f            // 400 notes = 25.4mm @ 400DPI — full morph at thick marker stroke
+    .strokeforge_morph_width_scale = 400.0f,           // 400 notes = 25.4mm @ 400DPI — full morph at thick marker stroke
+    .strokeforge_wavetable_min_width = 50              // 50 notes (~3.2mm @400DPI) — min width for WAVETABLE mode
                                                         // Calibration: width/400 maps physical range [0..25mm] to [0..1]
                                                         //   ~92px / 5.8mm  → morph=0.23 (flute: h1,h2)
                                                         //  ~208px / 13.2mm → morph=0.52 (medium: h1..h4)

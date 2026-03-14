@@ -101,6 +101,48 @@ private:
     juce::Slider numWorkersSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> numWorkersAttachment;
 
+    // Section: StrokeForge — Harmonic Morphing
+    juce::Label sfSectionLabel;
+    juce::Label sfEnabledLabel;
+    juce::ToggleButton sfEnabledToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfEnabledAttachment;
+    juce::Label sfBlobThresholdLabel;
+    juce::Slider sfBlobThresholdSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfBlobThresholdAttachment;
+    juce::Label sfContrastAdaptiveLabel;
+    juce::ToggleButton sfContrastAdaptiveToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfContrastAdaptiveAttachment;
+    juce::Label sfContrastSensLabel;
+    juce::Slider sfContrastSensSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfContrastSensAttachment;
+    juce::Label sfMinWidthLabel;
+    juce::Slider sfMinWidthSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMinWidthAttachment;
+    juce::Label sfMergeGapLabel;
+    juce::Slider sfMergeGapSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMergeGapAttachment;
+    juce::Label sfMaxHarmonicsLabel;
+    juce::Slider sfMaxHarmonicsSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMaxHarmonicsAttachment;
+    juce::Label sfAmpFloorLabel;
+    juce::Slider sfAmpFloorSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfAmpFloorAttachment;
+    juce::Label sfCenterSigmaLabel;
+    juce::Slider sfCenterSigmaSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfCenterSigmaAttachment;
+    juce::Label sfPhaseCoherenceLabel;
+    juce::ToggleButton sfPhaseCoherenceToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfPhaseCoherenceAttachment;
+    juce::Label sfPhaseSmoothLabel;
+    juce::Slider sfPhaseSmoothSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfPhaseSmoothAttachment;
+    juce::Label sfMorphWidthLabel;
+    juce::Slider sfMorphWidthSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMorphWidthAttachment;
+    juce::Label sfWavetableMinWidthLabel;
+    juce::Slider sfWavetableMinWidthSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfWavetableMinWidthAttachment;
+
     void layoutContentComponent();
     
     // Listener callbacks
