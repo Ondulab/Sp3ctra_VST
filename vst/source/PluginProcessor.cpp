@@ -336,6 +336,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         200.0f, "notes"
     ));
 
+    // Focus-only mode: Gaussian focus without sine->square morph.
+    // Active when StrokeForge is OFF. Pure sine with pitch focus.
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        "sfFocusOnly",
+        "StrokeForge Focus Only (no morph)",
+        false
+    ));
+
     return { params.begin(), params.end() };
 }
 
@@ -414,6 +422,7 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("sfWavetableMinWidth", this);
     apvts.addParameterListener("sfBlobFocusSigma", this);
     apvts.addParameterListener("sfSpectralWidthThreshold", this);
+    apvts.addParameterListener("sfFocusOnly", this);
     
     // Create Sp3ctra core (but do NOT initialize yet - lazy init)
     sp3ctraCore = std::make_unique<Sp3ctraCore>();
@@ -1290,6 +1299,8 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         apvts.getRawParameterValue("sfBlobFocusSigma")->load();
     g_sp3ctra_config.strokeforge_spectral_width_threshold =
         apvts.getRawParameterValue("sfSpectralWidthThreshold")->load();
+    g_sp3ctra_config.strokeforge_focus_only =
+        (int)apvts.getRawParameterValue("sfFocusOnly")->load();
 
     // Update logger level immediately
     logger_init((log_level_t)logLevel);

@@ -542,7 +542,12 @@ void synth_precompute_wave_data(float *imageData, DoubleBuffer *db) {
     // This concentrates the energy at the drawn frequency; only the center
     // of each stroke plays at full volume.  The waveform morph (sine→square)
     // is controlled separately via g_waveform_morph (written by strokeforge.c).
-    if (g_sp3ctra_config.strokeforge_enabled) {
+    //
+    // Applies when either strokeforge_enabled OR strokeforge_focus_only is set:
+    //   strokeforge_enabled  = 1 → Gaussian focus + sine→square morph
+    //   strokeforge_focus_only = 1 → Gaussian focus only, pure sine (no morph)
+    if (g_sp3ctra_config.strokeforge_enabled
+        || g_sp3ctra_config.strokeforge_focus_only) {
       const StrokeForgeFrameData *sf = &db->preprocessed_data.strokeforge;
       if (sf->blob_count > 0) {
         for (int n = 0; n < notes_this_worker; n++) {

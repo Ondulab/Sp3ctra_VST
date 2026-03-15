@@ -193,8 +193,14 @@ typedef struct {
     // StrokeForge — Blob-centric harmonic morphing
     /* ── StrokeForge — Blob-to-note with waveform morphing ──────────────────
      * Blob width controls sine→square morphing; Gaussian focus concentrates
-     * energy on the blob center note (attenuates neighboring oscillators).     */
-    int   strokeforge_enabled;                 /* Master toggle                             */
+     * energy on the blob center note (attenuates neighboring oscillators).
+     *
+     * Two independent toggles:
+     *   strokeforge_enabled   = 1 → full StrokeForge: Gaussian focus + sine→square morph
+     *   strokeforge_focus_only = 1 → Gaussian focus only, no morph (pure sine in spectral mode)
+     * When both are 0 → pure spectral passthrough (legacy behaviour).          */
+    int   strokeforge_enabled;                 /* Master toggle (morph + focus)             */
+    int   strokeforge_focus_only;              /* Focus-only mode: Gaussian focus, no morph */
     float strokeforge_blob_base_threshold;     /* Min amplitude for blob detection [0.01-0.5] */
     int   strokeforge_blob_min_width;          /* Min blob width in notes [1-50]            */
     int   strokeforge_blob_merge_gap;          /* Max gap between sub-blobs to merge [0-20] */

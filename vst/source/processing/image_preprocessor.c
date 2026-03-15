@@ -118,6 +118,17 @@ int image_preprocess_frame(
     /* 1. Preprocess for additive synthesis (with gamma) */
     preprocess_luxstral(raw_r, raw_g, raw_b, out);
     
+    /* 1b. StrokeForge: blob detection + harmonic recipe (after additive notes) */
+    {
+        int sf_num_notes = get_cis_pixels_nb() / g_sp3ctra_config.pixels_per_note;
+        if (sf_num_notes > PREPROCESS_MAX_NOTES) sf_num_notes = PREPROCESS_MAX_NOTES;
+        strokeforge_analyze_frame(
+            out->additive.notes,
+            sf_num_notes,
+            out->additive.contrast_factor,
+            &out->strokeforge);
+    }
+    
     /* 2. Preprocess for polyphonic synthesis (without gamma) */
 #ifndef DISABLE_LUXSYNTH
     preprocess_luxsynth(raw_r, raw_g, raw_b, out);

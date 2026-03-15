@@ -355,6 +355,24 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     sfSpectralWidthThresholdAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "sfSpectralWidthThreshold", sfSpectralWidthThresholdSlider);
 
+    // ── Focus-Only Mode ───────────────────────────────────────────────────────
+    sfFocusOnlyLabel.setText("Focus Only (spectral):", juce::dontSendNotification);
+    sfFocusOnlyLabel.setJustificationType(juce::Justification::centredRight);
+    sfFocusOnlyLabel.setTooltip(
+        "Gaussian pitch focus without sine\xe2\x86\x92square morphing.\n"
+        "Enabled when StrokeForge is OFF:\n"
+        "  stroke drawn  \xe2\x86\x92 only the drawn frequency rings (Gaussian focus)\n"
+        "  waveform stays pure sine (no timbre change)\n\n"
+        "Tip: use with a tight sigma (1-5) for a focused sine instrument\n"
+        "that responds precisely to the drawn frequency.");
+    contentComponent.addAndMakeVisible(sfFocusOnlyLabel);
+
+    sfFocusOnlyToggle.setButtonText("Focus Without Morph");
+    sfFocusOnlyToggle.setTooltip(sfFocusOnlyLabel.getTooltip());
+    contentComponent.addAndMakeVisible(sfFocusOnlyToggle);
+    sfFocusOnlyAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "sfFocusOnly", sfFocusOnlyToggle);
+
     // Add listeners for dynamic octave limitation
     rootNoteComboBox.addListener(this);
     tuningSlider.addListener(this);
@@ -538,6 +556,10 @@ void LuxStralSettingsTab::layoutContentComponent()
 
     sfSpectralWidthThresholdLabel.setBounds(padding, yPos, labelWidth, rowHeight);
     sfSpectralWidthThresholdSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    yPos += rowHeight + itemSpacing;
+
+    sfFocusOnlyLabel.setBounds(padding, yPos, labelWidth, rowHeight);
+    sfFocusOnlyToggle.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
     yPos += rowHeight + padding;
 
     // Set content component size for scrolling

@@ -74,6 +74,8 @@ target_sources(Sp3ctraVST
         source/luxstral/wave_generation.h
         source/luxstral/pow_approx.c
         source/luxstral/pow_approx.h
+        source/luxstral/strokeforge.c
+        source/luxstral/strokeforge.h
 )
 
 # ✨ BRICK 1: UDP Reception - Add C sources

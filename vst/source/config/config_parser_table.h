@@ -288,6 +288,8 @@ static const config_param_def_t CONFIG_PARAMS[] = {
     /* StrokeForge — Blob-to-note with waveform morphing */
     CONFIG_PARAM("strokeforge", "enabled", PARAM_TYPE_BOOL,
                  strokeforge_enabled, 0, 1),
+    CONFIG_PARAM("strokeforge", "focus_only", PARAM_TYPE_BOOL,
+                 strokeforge_focus_only, 0, 1),
     CONFIG_PARAM("strokeforge", "blob_base_threshold", PARAM_TYPE_FLOAT,
                  strokeforge_blob_base_threshold, 0.01f, 0.5f),
     CONFIG_PARAM("strokeforge", "blob_min_width", PARAM_TYPE_INT,
