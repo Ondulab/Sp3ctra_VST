@@ -149,8 +149,10 @@ void strokeforge_analyze_frame(
     for (int i = 0; i < num_notes && i < STROKEFORGE_MAX_NOTES; i++)
         out->note_attenuation[i] = 1.0f;
 
-    /* Early exit if disabled */
-    if (!g_sp3ctra_config.strokeforge_enabled)
+    /* Early exit if both modes are disabled */
+    int do_focus = g_sp3ctra_config.strokeforge_enabled
+                   || g_sp3ctra_config.strokeforge_focus_only;
+    if (!do_focus)
     {
         g_waveform_morph = 0.0f;
         return;
@@ -174,7 +176,9 @@ void strokeforge_analyze_frame(
 
     /* Step 2: Waveform morph from the widest blob.
      * morph = width / morph_width_scale  (clamped to [0, 1])
-     * 0.0 = pure sine | 1.0 = pure square */
+     * 0.0 = pure sine | 1.0 = pure square
+     * In focus_only mode: morph stays 0.0 (pure sine), only Gaussian focus is active. */
+    if (g_sp3ctra_config.strokeforge_enabled)
     {
         float widest = 0.0f;
         for (int b = 0; b < out->blob_count; b++)
@@ -186,6 +190,11 @@ void strokeforge_analyze_frame(
         float morph = widest / scale;
         if (morph > 1.0f) morph = 1.0f;
         g_waveform_morph = morph;
+    }
+    else
+    {
+        /* focus_only mode: Gaussian focus active but waveform stays pure sine */
+        g_waveform_morph = 0.0f;
     }
 
     /* Step 3: Per-blob: Gaussian focus OR spectral passthrough.

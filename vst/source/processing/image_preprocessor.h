@@ -20,6 +20,7 @@
 #include "../../core/config.h"
 #include "../../config/config_instrument.h"
 #include "../../config/config_synth_luxstral.h"
+#include "../../luxstral/strokeforge.h"
 
 /* Maximum number of notes (static allocation) */
 /* Must handle worst case: 1 pixel per note = CIS_MAX_PIXELS_NB notes */
@@ -73,6 +74,9 @@ typedef struct {
         uint8_t zone_b[DMX_NUM_SPOTS];
     } dmx;
 #endif
+    
+    /* StrokeForge blob data (computed after additive preprocessing) */
+    StrokeForgeFrameData strokeforge;
     
     /* Timestamp for synchronization (microseconds) */
     uint64_t timestamp_us;

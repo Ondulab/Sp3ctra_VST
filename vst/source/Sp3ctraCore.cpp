@@ -220,6 +220,7 @@ bool Sp3ctraCore::initializeBuffers() {
         displayable_synth_buffers_init();
         synth_data_freeze_init();
         image_preprocess_init();
+        strokeforge_init();
         log_info("CORE", "Global display buffers initialized");
         
         // 🔧 CRITICAL: Expose buffers globally for processBlock to use
@@ -241,6 +242,7 @@ void Sp3ctraCore::shutdownBuffers() {
     // Cleanup global display buffers
     displayable_synth_buffers_cleanup();
     synth_data_freeze_cleanup();
+    strokeforge_cleanup();
     image_preprocess_cleanup();
     
     if (audioImageBuffers) {

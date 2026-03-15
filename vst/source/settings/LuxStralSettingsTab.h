@@ -142,6 +142,12 @@ private:
     juce::Slider sfSpectralWidthThresholdSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfSpectralWidthThresholdAttachment;
 
+    // Focus-only mode: Gaussian focus without sine→square morph.
+    // Allows pitch-focused spectral mode (pure sine) without StrokeForge waveform morphing.
+    juce::Label        sfFocusOnlyLabel;
+    juce::ToggleButton sfFocusOnlyToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfFocusOnlyAttachment;
+
     void layoutContentComponent();
 
     // Listener callbacks
