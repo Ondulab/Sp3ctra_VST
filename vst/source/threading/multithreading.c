@@ -22,6 +22,7 @@
 /* VST synchronization function declaration (defined in vst_adapters.cpp) */
 #ifdef VST_MODE
 extern void luxstral_wait_for_buffer_consumed(void);
+#include "../framesampler/frame_sampler_hooks.h"
 #endif
 
 /* External sequencer instance */
@@ -447,18 +448,33 @@ void *udpThread(void *arg) {
       memset(receivedFragments, 0, UDP_MAX_NB_PACKET_PER_LINE * sizeof(int));
       fragmentCount = 0;
 
-      // Start writing to audio buffers for new line
-      if (audio_image_buffers_start_write(audioBuffers, &audio_write_R,
-                                          &audio_write_G,
-                                          &audio_write_B) == 0) {
-        audio_write_started = 1;
-#ifdef DEBUG_UDP
-        log_debug("UDP", "Started audio buffer write for line_id=%u", packet.line_id);
+      // Start writing to audio buffers for new line.
+      // During FrameSampler playback, bypass live feed: FramePlayerThread is
+      // the sole writer. Skipping start_write here prevents overwriting
+      // injected playback frames.
+#ifdef VST_MODE
+      if (!frame_sampler_is_playing())
+      {
 #endif
-      } else {
-        audio_write_started = 0;
-        log_warning("THREAD", "Failed to start audio buffer write");
+        if (audio_image_buffers_start_write(audioBuffers, &audio_write_R,
+                                            &audio_write_G,
+                                            &audio_write_B) == 0) {
+          audio_write_started = 1;
+#ifdef DEBUG_UDP
+          log_debug("UDP", "Started audio buffer write for line_id=%u", packet.line_id);
+#endif
+        } else {
+          audio_write_started = 0;
+          log_warning("THREAD", "Failed to start audio buffer write");
+        }
+#ifdef VST_MODE
       }
+      else
+      {
+        /* Playback active: live write skipped for this line */
+        audio_write_started = 0;
+      }
+#endif
     }
 
     // Validate fragment_id to prevent buffer overflow
@@ -522,6 +538,13 @@ void *udpThread(void *arg) {
         audio_write_started = 0;
       }
 
+      /* FrameSampler hook: record assembled CIS line if a slot is RECORDING */
+#ifdef VST_MODE
+      frame_sampler_on_frame_assembled(
+          db->activeBuffer_R, db->activeBuffer_G, db->activeBuffer_B,
+          (uint16_t)nb_pixels, packet.line_id);
+#endif
+
       /* 🎬 NEW ARCHITECTURE: Sequencer BEFORE preprocessing
        * 1. Sequencer mixes RGB (live + sequences)
        * 2. Preprocessing calculates grayscale/pan/DMX from MIXED RGB
@@ -571,8 +594,20 @@ void *udpThread(void *arg) {
       
       swapBuffers(db);
       updateLastValidImage(db);
-      db->preprocessed_data = preprocessed_temp;
-      db->dataReady = 1;
+
+      /* During FrameSampler playback, FramePlayerThread owns preprocessed_data.
+       * Skipping the live update here prevents overwriting playback preprocessing
+       * that FramePlayerThread already wrote for the current synthesis cycle.
+       * synth_AudioProcess reads db->preprocessed_data directly for audio gen. */
+#ifdef VST_MODE
+      if (!frame_sampler_is_playing())
+      {
+#endif
+        db->preprocessed_data = preprocessed_temp;
+        db->dataReady = 1;
+#ifdef VST_MODE
+      }
+#endif
       pthread_cond_signal(&db->cond);
       pthread_mutex_unlock(&db->mutex);
       
