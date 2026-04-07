@@ -43,13 +43,19 @@ target_sources(Sp3ctraVST
         source/UdpReceiverThread.h
         source/global_stubs.c
         
-        # Settings tabs (Phase 1 - UI Architecture)
+        # Settings tabs
         source/settings/GeneralSettingsTab.cpp
         source/settings/GeneralSettingsTab.h
         source/settings/NetworkSettingsTab.cpp
         source/settings/NetworkSettingsTab.h
         source/settings/LuxStralSettingsTab.cpp
         source/settings/LuxStralSettingsTab.h
+        source/settings/FrameSamplerSettingsTab.cpp
+        source/settings/FrameSamplerSettingsTab.h
+
+        # FrameSampler subsystem
+        source/framesampler/FrameSampler.cpp
+        source/framesampler/FrameSampler.h
         
         # 🎵 PHASE 3: LuxStral Synthesis Engine (VST-adapted)
         source/luxstral/vst_adapters.cpp
@@ -130,6 +136,7 @@ target_include_directories(Sp3ctraVST
         ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/luxwave
         ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/luxsynth
         ${CMAKE_CURRENT_SOURCE_DIR}/source/luxstral
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/framesampler
 )
 
 # Compile definitions

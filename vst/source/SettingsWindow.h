@@ -5,6 +5,7 @@
 #include "settings/GeneralSettingsTab.h"
 #include "settings/NetworkSettingsTab.h"
 #include "settings/LuxStralSettingsTab.h"
+#include "settings/FrameSamplerSettingsTab.h"
 
 //==============================================================================
 /**
@@ -33,9 +34,10 @@ private:
     juce::TabbedComponent tabbedComponent;
     
     // Tab content (owned by TabbedComponent)
-    GeneralSettingsTab* generalTab;
-    NetworkSettingsTab* networkTab;
-    LuxStralSettingsTab* luxstralTab;
+    GeneralSettingsTab*        generalTab;
+    NetworkSettingsTab*        networkTab;
+    LuxStralSettingsTab*       luxstralTab;
+    FrameSamplerSettingsTab*   frameSamplerTab;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SettingsComponent)
 };
