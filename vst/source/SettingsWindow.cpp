@@ -10,17 +10,20 @@ SettingsComponent::SettingsComponent(Sp3ctraAudioProcessor& processor)
       tabbedComponent(juce::TabbedButtonBar::TabsAtTop)
 {
     // Create and add tabs
-    generalTab = new GeneralSettingsTab(processor);
-    networkTab = new NetworkSettingsTab(processor);
-    luxstralTab = new LuxStralSettingsTab(processor);
+    generalTab      = new GeneralSettingsTab(processor);
+    networkTab      = new NetworkSettingsTab(processor);
+    luxstralTab     = new LuxStralSettingsTab(processor);
+    frameSamplerTab = new FrameSamplerSettingsTab(processor);
     
-    tabbedComponent.addTab("General", juce::Colours::darkgrey, generalTab, false);
-    tabbedComponent.addTab("Network", juce::Colours::darkgrey, networkTab, false);
-    tabbedComponent.addTab("LuxStral", juce::Colours::darkgrey, luxstralTab, false);
+    tabbedComponent.addTab("General",      juce::Colours::darkgrey, generalTab,      false);
+    tabbedComponent.addTab("Network",      juce::Colours::darkgrey, networkTab,      false);
+    tabbedComponent.addTab("LuxStral",     juce::Colours::darkgrey, luxstralTab,     false);
+    tabbedComponent.addTab("FrameSampler", juce::Colours::darkgrey, frameSamplerTab, false);
     
     addAndMakeVisible(tabbedComponent);
     
-    setSize(550, 450);
+    // FrameSampler tab needs more height (12 slot rows + controls)
+    setSize(600, 650);
 }
 
 SettingsComponent::~SettingsComponent()

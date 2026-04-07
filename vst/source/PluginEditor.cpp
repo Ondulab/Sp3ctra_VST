@@ -2,34 +2,129 @@
 #include "PluginEditor.h"
 
 //==============================================================================
-Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor (Sp3ctraAudioProcessor& p)
-    : AudioProcessorEditor (&p), audioProcessor (p)
+// Static helper — configure a horizontal slider with an optional value suffix.
+static void initSlider(juce::Slider& s, const char* suffix = nullptr)
 {
-    // Settings Button (no emoji to avoid encoding issues)
-    settingsButton.setButtonText("Settings");
-    settingsButton.onClick = [this] { openSettings(); };
-    addAndMakeVisible(settingsButton);
+    s.setSliderStyle(juce::Slider::LinearHorizontal);
+    s.setTextBoxStyle(juce::Slider::TextBoxRight, false, 72, 20);
+    if (suffix)
+        s.setTextValueSuffix(suffix);
+}
 
-    // Status Label
-    statusLabel.setJustificationType(juce::Justification::centred);
-    statusLabel.setFont(juce::Font(juce::FontOptions(14.0f)).boldened());
-    addAndMakeVisible(statusLabel);
+//==============================================================================
+Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& p)
+    : AudioProcessorEditor(&p), audioProcessor(p)
+{
+    auto& apvts = audioProcessor.getAPVTS();
 
-    // Info Label
-    infoLabel.setText("Sp3ctra - Spectral Audio Synthesis\nUDP Receiver Active", 
-                     juce::dontSendNotification);
-    infoLabel.setJustificationType(juce::Justification::centred);
-    infoLabel.setFont(juce::FontOptions(12.0f));
-    addAndMakeVisible(infoLabel);
-
-    // CIS Visualizer
+    // ── CIS Visualizer ───────────────────────────────────────────────────────
     cisVisualizer = std::make_unique<CisVisualizerComponent>(audioProcessor);
     addAndMakeVisible(cisVisualizer.get());
 
-    // Start timer to update status (1 Hz)
+    // ── LuxStral — Device On ─────────────────────────────────────────────────
+    deviceOnToggle.setButtonText("Active");
+    addAndMakeVisible(deviceOnToggle);
+    deviceOnAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "deviceEnabled", deviceOnToggle);
+
+    // ── LuxStral — Master Volume ──────────────────────────────────────────────
+    initSlider(masterVolumeSlider);
+    addAndMakeVisible(masterVolumeSlider);
+    masterVolumeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "masterVolume", masterVolumeSlider);
+
+    // ── LuxStral — Gamma ─────────────────────────────────────────────────────
+    initSlider(gammaSlider);
+    addAndMakeVisible(gammaSlider);
+    gammaAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "luxstralGammaValue", gammaSlider);
+
+    // ── LuxStral — Attack ────────────────────────────────────────────────────
+    initSlider(attackSlider, " ms");
+    addAndMakeVisible(attackSlider);
+    attackAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "luxstralAttackMs", attackSlider);
+
+    // ── LuxStral — Release ───────────────────────────────────────────────────
+    initSlider(releaseSlider, " ms");
+    addAndMakeVisible(releaseSlider);
+    releaseAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "luxstralReleaseMs", releaseSlider);
+
+    // ── LuxStral — Contrast Min ───────────────────────────────────────────────
+    initSlider(contrastMinSlider);
+    addAndMakeVisible(contrastMinSlider);
+    contrastMinAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "luxstralContrastMin", contrastMinSlider);
+
+    // ── LuxStral — Stereo Temperature Amplification ──────────────────────────
+    initSlider(stereoTempSlider);
+    addAndMakeVisible(stereoTempSlider);
+    stereoTempAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "luxstralStereoTempAmp", stereoTempSlider);
+
+    // ── LuxStral — Summation Response Exponent ───────────────────────────────
+    initSlider(sumExpSlider);
+    addAndMakeVisible(sumExpSlider);
+    sumExpAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "luxstralSummationResponseExp", sumExpSlider);
+
+    // ── LuxStral — Noise Gate Threshold ──────────────────────────────────────
+    initSlider(noiseGateSlider);
+    addAndMakeVisible(noiseGateSlider);
+    noiseGateAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "luxstralNoiseGateThreshold", noiseGateSlider);
+
+    // ── StrokeForge — Enable ─────────────────────────────────────────────────
+    sfEnabledToggle.setButtonText("Active");
+    addAndMakeVisible(sfEnabledToggle);
+    sfEnabledAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "sfEnabled", sfEnabledToggle);
+
+    // ── StrokeForge — Blob Threshold ─────────────────────────────────────────
+    initSlider(sfBlobThreshSlider);
+    addAndMakeVisible(sfBlobThreshSlider);
+    sfBlobThreshAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfBlobBaseThreshold", sfBlobThreshSlider);
+
+    // ── StrokeForge — Merge Gap ───────────────────────────────────────────────
+    initSlider(sfMergeGapSlider, " pix");
+    addAndMakeVisible(sfMergeGapSlider);
+    sfMergeGapAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfBlobMergeGap", sfMergeGapSlider);
+
+    // ── StrokeForge — Focus Sigma ─────────────────────────────────────────────
+    initSlider(sfFocusSigmaSlider, " pix");
+    addAndMakeVisible(sfFocusSigmaSlider);
+    sfFocusSigmaAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfBlobFocusSigma", sfFocusSigmaSlider);
+
+    // ── StrokeForge — Spectral Width Threshold ────────────────────────────────
+    initSlider(sfSpectralWidthSlider, " pix");
+    addAndMakeVisible(sfSpectralWidthSlider);
+    sfSpectralWidthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfSpectralWidthThreshold", sfSpectralWidthSlider);
+
+    // ── StrokeForge — Focus Only (no morph) ──────────────────────────────────
+    sfFocusOnlyToggle.setButtonText("On (no morph)");
+    addAndMakeVisible(sfFocusOnlyToggle);
+    sfFocusOnlyAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "sfFocusOnly", sfFocusOnlyToggle);
+
+    // ── Footer ───────────────────────────────────────────────────────────────
+    settingsButton.setButtonText("Settings...");
+    settingsButton.onClick = [this] { openSettings(); };
+    addAndMakeVisible(settingsButton);
+
+    statusLabel.setJustificationType(juce::Justification::centredLeft);
+    statusLabel.setFont(juce::FontOptions(12.0f));
+    addAndMakeVisible(statusLabel);
+
     startTimer(1000);
 
-    setSize (400, 320);
+    // Window height: header + vis + section + 9 LuxStral rows + footer
+    // kContentY=134, rowsStartY=162, footerY=162+9*31+8=449, total=449+28+12=489+margin=496
+    setSize(740, 496);
 }
 
 Sp3ctraAudioProcessorEditor::~Sp3ctraAudioProcessorEditor()
@@ -39,72 +134,166 @@ Sp3ctraAudioProcessorEditor::~Sp3ctraAudioProcessorEditor()
 }
 
 //==============================================================================
-void Sp3ctraAudioProcessorEditor::paint (juce::Graphics& g)
+void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
 {
-    // Background gradient
-    g.fillAll(juce::Colour(0xff2a2a2a));
-    
-    auto bounds = getLocalBounds();
-    
-    // Header section
-    auto headerArea = bounds.removeFromTop(60);
-    g.setGradientFill(juce::ColourGradient(
-        juce::Colour(0xff404040), 0, 0,
-        juce::Colour(0xff2a2a2a), 0, (float)headerArea.getHeight(),
-        false));
-    g.fillRect(headerArea);
+    // ── Background ───────────────────────────────────────────────────────────
+    g.fillAll(juce::Colour(0xff1e1e1e));
 
-    // Title
-    g.setColour(juce::Colours::white);
-    g.setFont(juce::Font(juce::FontOptions(20.0f)).boldened());
-    g.drawText("Sp3ctra", headerArea.reduced(10), juce::Justification::centredLeft, true);
+    // ── Header ───────────────────────────────────────────────────────────────
+    {
+        const juce::Rectangle<float> hdr(0.0f, 0.0f, (float)getWidth(), (float)kHeaderH);
+        g.setGradientFill(juce::ColourGradient(
+            juce::Colour(0xff383838), 0.0f, 0.0f,
+            juce::Colour(0xff262626), 0.0f, (float)kHeaderH, false));
+        g.fillRect(hdr);
 
-    // Version
-    g.setFont(juce::FontOptions(11.0f));
-    g.setColour(juce::Colours::grey);
-    g.drawText("v0.0.1", headerArea.reduced(10), juce::Justification::centredRight, true);
+        g.setColour(juce::Colours::white);
+        g.setFont(juce::Font(juce::FontOptions(22.0f)).boldened());
+        g.drawText("Sp3ctra",
+                   juce::Rectangle<int>(12, 0, getWidth() - 24, kHeaderH),
+                   juce::Justification::centredLeft, true);
+
+        g.setFont(juce::FontOptions(11.0f));
+        g.setColour(juce::Colour(0xff888888));
+        g.drawText("v0.0.1",
+                   juce::Rectangle<int>(0, 0, getWidth() - 12, kHeaderH),
+                   juce::Justification::centredRight, true);
+    }
+
+    // Thin separator below header
+    g.setColour(juce::Colour(0xff444444));
+    g.fillRect(0, kHeaderH, getWidth(), 1);
+
+    // ── Column geometry ───────────────────────────────────────────────────────
+    const int cw  = colWidth();
+    const int lxp = colLX();
+    const int rxp = colRX();
+    const int rsy = rowsStartY();
+
+    // ── LuxStral section badge ────────────────────────────────────────────────
+    {
+        const juce::Rectangle<int> sh(lxp, kContentY, cw, kSectionH);
+        g.setColour(juce::Colour(0xff1c3755));
+        g.fillRoundedRectangle(sh.toFloat(), 3.0f);
+        g.setColour(juce::Colour(0xff7ab0f0));
+        g.setFont(juce::Font(juce::FontOptions(12.0f)).boldened());
+        g.drawText("LUXSTRAL", sh.reduced(6, 0), juce::Justification::centredLeft, true);
+    }
+
+    // ── StrokeForge section badge ─────────────────────────────────────────────
+    {
+        const juce::Rectangle<int> sh(rxp, kContentY, cw, kSectionH);
+        g.setColour(juce::Colour(0xff3d2e00));
+        g.fillRoundedRectangle(sh.toFloat(), 3.0f);
+        g.setColour(juce::Colour(0xffffc84a));
+        g.setFont(juce::Font(juce::FontOptions(12.0f)).boldened());
+        g.drawText("STROKEFORGE", sh.reduced(6, 0), juce::Justification::centredLeft, true);
+    }
+
+    // ── Row labels ────────────────────────────────────────────────────────────
+    g.setFont(juce::FontOptions(12.0f));
+    g.setColour(juce::Colour(0xffb8c4d0));
+
+    // LuxStral labels — order: Device On, Volume, Gamma, Contrast Min, Attack,
+    //                          Release, Stereo Temp., Sum. Exp., Noise Gate
+    static const char* const lsLabels[kLS_ROWS] = {
+        "Device On",
+        "Volume",
+        "Gamma",
+        "Contrast Min",
+        "Attack",
+        "Release",
+        "Stereo Temp.",
+        "Sum. Exp.",
+        "Noise Gate",
+    };
+    for (int i = 0; i < kLS_ROWS; ++i)
+    {
+        g.drawText(lsLabels[i],
+                   juce::Rectangle<int>(lxp, rsy + i * kRowStep, kLabelW, kRowH),
+                   juce::Justification::centredRight, true);
+    }
+
+    // StrokeForge labels — row 3 contains the UTF-8 sigma character (U+03C3)
+    static const char* const sfLabels[kSF_ROWS] = {
+        "SF Active",
+        "Blob Thr.",
+        "Merge Gap",
+        "Focus \xcf\x83",     // "Focus σ" in UTF-8
+        "Spectral Thr.",
+        "Focus Only",
+    };
+    for (int i = 0; i < kSF_ROWS; ++i)
+    {
+        g.drawText(juce::String::fromUTF8(sfLabels[i]),
+                   juce::Rectangle<int>(rxp, rsy + i * kRowStep, kLabelW, kRowH),
+                   juce::Justification::centredRight, true);
+    }
+
+    // ── Separator above footer ────────────────────────────────────────────────
+    g.setColour(juce::Colour(0xff3a3a3a));
+    g.fillRect(0, footerY() - 6, getWidth(), 1);
 }
 
+//==============================================================================
 void Sp3ctraAudioProcessorEditor::resized()
 {
-    auto bounds = getLocalBounds();
-    bounds.removeFromTop(70);  // Skip header
-    bounds.reduce(20, 10);
+    const int lxp = colLX();
+    const int rxp = colRX();
+    const int rsy = rowsStartY();
 
-    // CIS Visualizer (horizontal elongated format)
-    auto visualizerArea = bounds.removeFromTop(80);
-    cisVisualizer->setBounds(visualizerArea);
+    // ── CIS Visualizer ────────────────────────────────────────────────────────
+    cisVisualizer->setBounds(kHPad, kVisY, getWidth() - 2 * kHPad, kVisH);
 
-    bounds.removeFromTop(10);  // Spacing
+    // ── LuxStral controls — left column ──────────────────────────────────────
+    {
+        const int cx = lxp + kCtrlOffset;
+        int cy = rsy;
 
-    // Settings button
-    settingsButton.setBounds(bounds.removeFromTop(40).reduced(80, 0));
+        deviceOnToggle      .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        masterVolumeSlider  .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        gammaSlider         .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        contrastMinSlider   .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        attackSlider        .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        releaseSlider       .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        stereoTempSlider    .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        sumExpSlider        .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        noiseGateSlider     .setBounds(cx, cy, kCtrlW, kRowH);
+    }
 
-    bounds.removeFromTop(20);
+    // ── StrokeForge controls — right column ───────────────────────────────────
+    {
+        const int cx = rxp + kCtrlOffset;
+        int cy = rsy;
 
-    // Status label
-    statusLabel.setBounds(bounds.removeFromTop(30));
+        sfEnabledToggle      .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        sfBlobThreshSlider   .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        sfMergeGapSlider     .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        sfFocusSigmaSlider   .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        sfSpectralWidthSlider.setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        sfFocusOnlyToggle    .setBounds(cx, cy, kCtrlW, kRowH);
+    }
 
-    bounds.removeFromTop(10);
-
-    // Info label
-    infoLabel.setBounds(bounds.removeFromTop(60));
+    // ── Footer ────────────────────────────────────────────────────────────────
+    const int fy = footerY();
+    settingsButton.setBounds(kHPad,           fy, 92, 28);
+    statusLabel   .setBounds(kHPad + 100, fy, getWidth() - kHPad - 104, 28);
 }
 
+//==============================================================================
 void Sp3ctraAudioProcessorEditor::timerCallback()
 {
-    // Update status based on core state
     auto* core = audioProcessor.getSp3ctraCore();
-    
-    if (core && core->isInitialized()) {
-        auto& apvts = audioProcessor.getAPVTS();
-        int port = (int)apvts.getRawParameterValue("udpPort")->load();
-        juce::String address = audioProcessor.getUdpAddressString();
-        
-        statusLabel.setText("UDP Active: " + address + ":" + juce::String(port), 
-                           juce::dontSendNotification);
+    if (core && core->isInitialized())
+    {
+        const int  port    = (int)audioProcessor.getAPVTS().getRawParameterValue("udpPort")->load();
+        const auto address = audioProcessor.getUdpAddressString();
+        statusLabel.setText("UDP: " + address + ":" + juce::String(port),
+                            juce::dontSendNotification);
         statusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
-    } else {
+    }
+    else
+    {
         statusLabel.setText("Configuration Error", juce::dontSendNotification);
         statusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
     }
@@ -113,9 +302,7 @@ void Sp3ctraAudioProcessorEditor::timerCallback()
 void Sp3ctraAudioProcessorEditor::openSettings()
 {
     if (!settingsWindow)
-    {
         settingsWindow = std::make_unique<SettingsWindow>(audioProcessor);
-    }
     settingsWindow->setVisible(true);
     settingsWindow->toFront(true);
 }
@@ -124,15 +311,11 @@ void Sp3ctraAudioProcessorEditor::openSettings()
 void Sp3ctraAudioProcessorEditor::suspendVisualizer()
 {
     if (cisVisualizer)
-    {
         cisVisualizer->suspend();
-    }
 }
 
 void Sp3ctraAudioProcessorEditor::resumeVisualizer()
 {
     if (cisVisualizer)
-    {
         cisVisualizer->resume();
-    }
 }

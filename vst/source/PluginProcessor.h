@@ -5,6 +5,7 @@
 #include "UdpReceiverThread.h"
 #include "AudioProcessingThread.h"  // Thread for synth_AudioProcess()
 #include "Sp3ctraConstants.h"
+#include "framesampler/FrameSampler.h"
 
 // C headers for RT profiling
 extern "C" {
@@ -70,6 +71,7 @@ public:
     // Public accessors for UI
     juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
     Sp3ctraCore* getSp3ctraCore() { return sp3ctraCore.get(); }
+    FrameSampler* getFrameSampler() { return frameSampler.get(); }
     
     // Helper to build UDP address string from 4 bytes
     juce::String getUdpAddressString() const;
@@ -111,11 +113,13 @@ private:
     std::unique_ptr<Sp3ctraCore> sp3ctraCore;
     std::unique_ptr<UdpReceiverThread> udpThread;
     std::unique_ptr<AudioProcessingThread> audioProcessingThread;  // Calls synth_AudioProcess() in loop
+    std::unique_ptr<FrameSampler> frameSampler;
     
     // ✨ VST Parameters via AudioProcessorValueTreeState
     juce::AudioProcessorValueTreeState apvts;
     
     // Parameter IDs (for consistency)
+    static constexpr const char* PARAM_DEVICE_ENABLED = "deviceEnabled";
     static constexpr const char* PARAM_UDP_PORT = "udpPort";
     static constexpr const char* PARAM_UDP_BYTE1 = "udpByte1";
     static constexpr const char* PARAM_UDP_BYTE2 = "udpByte2";
@@ -124,6 +128,12 @@ private:
     static constexpr const char* PARAM_SENSOR_DPI = "sensorDpi";
     static constexpr const char* PARAM_LOG_LEVEL = "logLevel";
     static constexpr const char* PARAM_VISUALIZER_MODE = "visualizerMode";
+
+    // FrameSampler parameter IDs
+    static constexpr const char* PARAM_FS_ENABLED      = "frameSamplerEnabled";
+    static constexpr const char* PARAM_FS_MIDI_CH      = "frameSamplerMidiChannel";
+    static constexpr const char* PARAM_FS_OCT_OFFSET   = "frameSamplerOctaveOffset";
+    static constexpr const char* PARAM_FS_MAX_DUR      = "frameSamplerMaxDuration";
     
     // Quick access to parameters (cached, no atomic overhead)
     std::atomic<float>* udpPortParam = nullptr;
@@ -133,7 +143,9 @@ private:
     std::atomic<float>* udpByte4Param = nullptr;
     std::atomic<float>* sensorDpiParam = nullptr;
     std::atomic<float>* logLevelParam = nullptr;
+    std::atomic<float>* deviceEnabledParam  = nullptr;
     std::atomic<float>* visualizerModeParam = nullptr;
+    std::atomic<float>* masterVolumeParam   = nullptr;  // RT output gain
     
     // UDP Batch Update state (prevents multiple UDP restarts)
     std::atomic<bool> udpBatchUpdateActive{false};

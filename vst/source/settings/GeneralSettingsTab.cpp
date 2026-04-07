@@ -34,6 +34,19 @@ GeneralSettingsTab::GeneralSettingsTab(Sp3ctraAudioProcessor& processor)
 
     logLevelAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         apvts, "logLevel", logLevelCombo);
+
+    // Master Volume
+    volumeLabel.setText("Master Volume:", juce::dontSendNotification);
+    volumeLabel.setJustificationType(juce::Justification::centredRight);
+    volumeLabel.setFont(juce::FontOptions(14.0f));
+    addAndMakeVisible(volumeLabel);
+
+    volumeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    volumeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 72, 20);
+    addAndMakeVisible(volumeSlider);
+
+    volumeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "masterVolume", volumeSlider);
 }
 
 GeneralSettingsTab::~GeneralSettingsTab()
@@ -74,4 +87,12 @@ void GeneralSettingsTab::resized()
     logLevelLabel.setBounds(logRow.removeFromLeft(labelWidth));
     logRow.removeFromLeft(padding);
     logLevelCombo.setBounds(logRow);
+
+    bounds.removeFromTop(5);
+
+    // Master Volume
+    auto volRow = bounds.removeFromTop(rowHeight);
+    volumeLabel.setBounds(volRow.removeFromLeft(labelWidth));
+    volRow.removeFromLeft(padding);
+    volumeSlider.setBounds(volRow);
 }

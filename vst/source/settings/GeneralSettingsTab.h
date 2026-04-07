@@ -34,5 +34,10 @@ private:
     juce::ComboBox logLevelCombo;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> logLevelAttachment;
 
+    // Master Volume
+    juce::Label volumeLabel;
+    juce::Slider volumeSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> volumeAttachment;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(GeneralSettingsTab)
 };
