@@ -24,325 +24,212 @@ RTProfiler g_vst_rt_profiler = {0};
 juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
-    
-    // UDP Port (1024 - 65535)
+
+    // Attribute helpers: infrastructure params hidden from DAW automation lanes.
+    // They remain fully functional (saved in presets, accessible via APVTS).
+    const auto kHiddenInt    = juce::AudioParameterIntAttributes   {}.withAutomatable(false);
+    const auto kHiddenFloat  = juce::AudioParameterFloatAttributes {}.withAutomatable(false);
+    const auto kHiddenBool   = juce::AudioParameterBoolAttributes  {}.withAutomatable(false);
+    const auto kHiddenChoice = juce::AudioParameterChoiceAttributes{}.withAutomatable(false);
+
+    // ── Infrastructure — UDP ──────────────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterInt>(
-        PARAM_UDP_PORT,
-        "UDP Port",
-        1024, 65535,
-        Sp3ctraConstants::DEFAULT_UDP_PORT
-    ));
-    
-    // UDP Address - 4 separate bytes (0-255 each)
+        juce::ParameterID{PARAM_UDP_PORT, 1}, "UDP Port",
+        1024, 65535, Sp3ctraConstants::DEFAULT_UDP_PORT, kHiddenInt));
     params.push_back(std::make_unique<juce::AudioParameterInt>(
-        PARAM_UDP_BYTE1, "UDP Byte 1", 0, 255, 192));
+        juce::ParameterID{PARAM_UDP_BYTE1, 1}, "UDP Byte 1", 0, 255, 192, kHiddenInt));
     params.push_back(std::make_unique<juce::AudioParameterInt>(
-        PARAM_UDP_BYTE2, "UDP Byte 2", 0, 255, 168));
+        juce::ParameterID{PARAM_UDP_BYTE2, 1}, "UDP Byte 2", 0, 255, 168, kHiddenInt));
     params.push_back(std::make_unique<juce::AudioParameterInt>(
-        PARAM_UDP_BYTE3, "UDP Byte 3", 0, 255, 100));
+        juce::ParameterID{PARAM_UDP_BYTE3, 1}, "UDP Byte 3", 0, 255, 100, kHiddenInt));
     params.push_back(std::make_unique<juce::AudioParameterInt>(
-        PARAM_UDP_BYTE4, "UDP Byte 4", 0, 255, 10));
-    
-    // Sensor DPI (200 or 400)
+        juce::ParameterID{PARAM_UDP_BYTE4, 1}, "UDP Byte 4", 0, 255, 10, kHiddenInt));
+
+    // ── Infrastructure — Sensor / Log / Visualizer ───────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        PARAM_SENSOR_DPI,
-        "Sensor DPI",
-        juce::StringArray{"200 DPI", "400 DPI"},
-        1  // Default = 400 DPI
-    ));
-    
-    // Log Level
+        juce::ParameterID{PARAM_SENSOR_DPI, 1}, "Sensor DPI",
+        juce::StringArray{"200 DPI", "400 DPI"}, 1, kHiddenChoice));
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        PARAM_LOG_LEVEL,
-        "Log Level",
+        juce::ParameterID{PARAM_LOG_LEVEL, 1}, "Log Level",
         juce::StringArray{"Error", "Warning", "Info", "Debug"},
-        Sp3ctraConstants::DEFAULT_LOG_LEVEL  // Default = Info (2)
-    ));
-    
-    // Visualizer Mode (0 = Image, 1 = Waveform, 2 = Inverted Waveform)
+        Sp3ctraConstants::DEFAULT_LOG_LEVEL, kHiddenChoice));
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        PARAM_VISUALIZER_MODE,
-        "Visualizer Mode",
-        juce::StringArray{"Image", "Waveform", "Inverted Waveform"},
-        2  // Default = Inverted Waveform mode
-    ));
-    
-    // ========================================================================
-    // LUXSTRAL SYNTHESIS PARAMETERS
-    // Musical approach: Tuning + Root Note + Num Octaves
-    // This eliminates "jumps" when changing frequency range continuously
-    // ========================================================================
-    
-    // Tuning (A4 reference frequency, standard = 440 Hz)
+        juce::ParameterID{PARAM_VISUALIZER_MODE, 1}, "Visualizer Mode",
+        juce::StringArray{"Image", "Waveform", "Inverted Waveform"}, 2, kHiddenChoice));
+
+    // ── Infrastructure — Musical scale (Settings window) ─────────────────────
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "luxstralTuning",
-        "LuxStral Tuning (A4)",
-        juce::NormalisableRange<float>(415.0f, 466.0f, 0.1f),  // A4 baroque to A4 sharp
-        440.0f,  // Standard concert pitch
-        "Hz"
-    ));
-    
-    // Root Note (MIDI note number: C0=12, C1=24, C2=36, ..., C8=108)
-    // ComboBox with all chromatic notes from C1 to C6
+        juce::ParameterID{"luxstralTuning", 1}, "Tuning (A4)",
+        juce::NormalisableRange<float>(415.0f, 466.0f, 0.1f), 440.0f,
+        kHiddenFloat.withLabel("Hz")));
+
     juce::StringArray noteNames;
-    const char* noteLetters[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
-    for (int octave = 1; octave <= 6; octave++) {
-        for (int note = 0; note < 12; note++) {
+    const char* noteLetters[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+    for (int octave = 1; octave <= 6; ++octave)
+        for (int note = 0; note < 12; ++note)
             noteNames.add(juce::String(noteLetters[note]) + juce::String(octave));
-        }
-    }
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        "luxstralRootNote",
-        "LuxStral Root Note",
-        noteNames,
-        12  // Default: C2 (index 12 = C1 is 0, so C2 is index 12)
-    ));
-    
-    // Number of Octaves (integer, 1-10)
+        juce::ParameterID{"luxstralRootNote", 1}, "Root Note",
+        noteNames, 12, kHiddenChoice));
     params.push_back(std::make_unique<juce::AudioParameterInt>(
-        "luxstralNumOctaves",
-        "LuxStral Num Octaves",
-        1, 10,
-        8  // Default: 8 octaves
-    ));
-    
-    // Envelope Parameters (very fast response for LuxStral)
+        juce::ParameterID{"luxstralNumOctaves", 1}, "Octaves", 1, 10, 8, kHiddenInt));
+
+    // ── Gameplay — Envelope (ms) ─────────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "luxstralAttackMs",
-        "LuxStral Attack Time",
-        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f),  // Skewed, 0.5ms to 5000ms
-        0.5f,  // tau_up_base_ms = 0.5 (as specified in config)
-        "ms"
-    ));
-    
+        juce::ParameterID{"luxstralAttackMs", 1}, "Attack",
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 0.5f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "luxstralReleaseMs",
-        "LuxStral Release Time",
-        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f),  // Skewed, 0.5ms to 5000ms
-        0.5f,  // tau_down_base_ms = 0.5 (as specified in config)
-        "ms"
-    ));
-    
-    // Image Processing - LuxStral pipeline: RGB → Grayscale → Inversion → Gamma → Averaging → Contrast
+        juce::ParameterID{"luxstralReleaseMs", 1}, "Release",
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 0.5f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+
+    // ── Infrastructure — Image pipeline flags ────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterBool>(
-        "luxstralInvertIntensity",
-        "LuxStral Invert Intensity (dark pixels louder)",
-        true  // invert_intensity = 1 (as specified in config)
-    ));
-    
+        juce::ParameterID{"luxstralInvertIntensity", 1}, "Invert Intensity",
+        true, kHiddenBool));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
-        "luxstralGammaEnable",
-        "LuxStral Gamma Correction Enable",
-        true  // enable_non_linear_mapping = 1 (as specified in config)
-    ));
-    
+        juce::ParameterID{"luxstralGammaEnable", 1}, "Gamma Enable",
+        true, kHiddenBool));
+
+    // ── Gameplay — Gamma / Contrast ──────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "luxstralGammaValue",
-        "LuxStral Gamma Value",
-        juce::NormalisableRange<float>(0.1f, 10.0f, 0.01f),
-        4.8f,  // gamma_value = 4.8 (as specified in config)
-        ""
-    ));
-    
+        juce::ParameterID{"luxstralGammaValue", 1}, "Gamma",
+        juce::NormalisableRange<float>(0.1f, 10.0f, 0.01f), 4.8f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "luxstralContrastMin",
-        "LuxStral Contrast Min",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f),
-        0.21f,  // contrast_min = 0.21 (as specified in config)
-        ""
-    ));
-    
-    // Stereo Processing
+        juce::ParameterID{"luxstralContrastMin", 1}, "Contrast Min",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.21f));
+
+    // ── Infrastructure — Stereo enable ───────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterBool>(
-        "luxstralStereoEnable",
-        "LuxStral Stereo Mode Enable",
-        true  // stereo_mode_enabled = 1 (as specified in config)
-    ));
-    
+        juce::ParameterID{"luxstralStereoEnable", 1}, "Stereo Enable",
+        true, kHiddenBool));
+
+    // ── Gameplay — Stereo temperature ────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "luxstralStereoTempAmp",
-        "LuxStral Stereo Temperature Amplification",
-        juce::NormalisableRange<float>(0.0f, 5.0f, 0.01f),
-        2.5f,  // stereo_temperature_amplification = 2.5
-        ""
-    ));
-    
-    // Dynamics Processing (summation_normalization)
+        juce::ParameterID{"luxstralStereoTempAmp", 1}, "Stereo Temp.",
+        juce::NormalisableRange<float>(0.0f, 5.0f, 0.01f), 2.5f));
+
+    // ── Infrastructure — Volume weighting ────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "luxstralVolumeWeightingExp",
-        "LuxStral Volume Weighting Exponent",
-        juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f),
-        0.1f,  // volume_weighting_exponent = 0.1 (strong domination)
-        ""
-    ));
-    
+        juce::ParameterID{"luxstralVolumeWeightingExp", 1}, "Vol. Weight Exp.",
+        juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f), 0.1f, kHiddenFloat));
+
+    // ── Gameplay — Summation exponent / Noise gate ───────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "luxstralSummationResponseExp",
-        "LuxStral Summation Response Exponent",
-        juce::NormalisableRange<float>(0.1f, 3.0f, 0.1f),
-        2.0f,  // summation_response_exponent = 2.0
-        ""
-    ));
-    
+        juce::ParameterID{"luxstralSummationResponseExp", 1}, "Sum. Exp.",
+        juce::NormalisableRange<float>(0.1f, 3.0f, 0.1f), 2.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "luxstralNoiseGateThreshold",
-        "LuxStral Noise Gate Threshold",
-        juce::NormalisableRange<float>(0.0f, 0.1f, 0.001f),
-        0.005f,  // noise_gate_threshold = 0.005
-        ""
-    ));
-    
-    // Performance — up to 16 workers (parallelised precompute + process)
+        juce::ParameterID{"luxstralNoiseGateThreshold", 1}, "Noise Gate",
+        juce::NormalisableRange<float>(0.0f, 0.1f, 0.001f), 0.005f));
+
+    // ── Infrastructure — Worker Threads (Settings window only) ────────────────
     params.push_back(std::make_unique<juce::AudioParameterInt>(
-        "luxstralNumWorkers",
-        "LuxStral Worker Threads",
-        1, 16,
-        8  // default 8 — increase to 12–16 for 96 kHz / 3456 osc
-    ));
-    
-    // Physiological Filter (Equal-Loudness Compensation)
+        juce::ParameterID{"luxstralNumWorkers", 1}, "Workers", 1, 16, 8, kHiddenInt));
+
+    // ── Infrastructure — Physiological filter ────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterBool>(
-        "luxstralPhysiologicalFilter",
-        "LuxStral Equal-Loudness Compensation",
-        false  // Disabled by default (flat response)
-    ));
-
-    // Physiological correction depth (0.0 = no correction, 1.0 = full A-weighting inverse)
+        juce::ParameterID{"luxstralPhysiologicalFilter", 1}, "Equal-Loudness",
+        false, kHiddenBool));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "luxstralPhysiologicalDepth",
-        "LuxStral Equal-Loudness Depth",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f),
-        0.5f,  // Default: 50% of full A-weighting inverse
-        ""
-    ));
+        juce::ParameterID{"luxstralPhysiologicalDepth", 1}, "Equal-Loudness Depth",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, kHiddenFloat));
 
-    // ========================================================================
-    // StrokeForge — Blob-centric harmonic morphing
-    // ========================================================================
+    // ── Gameplay — Master Volume ──────────────────────────────────────────────
+    // Applied as output gain in processBlock() — RT-safe atomic read, no lock.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"masterVolume", 1}, "Volume",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
 
-    // Master enable/disable
+    // ── Gameplay — Device On ─────────────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterBool>(
-        "sfEnabled",
-        "StrokeForge Enable",  /* Keep ID for preset compat */
-        false  // Disabled by default
-    ));
+        juce::ParameterID{"deviceEnabled", 1}, "Device On", true));
 
-    // Blob detection: base threshold
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "sfBlobBaseThreshold",
-        "StrokeForge Blob Threshold",
-        juce::NormalisableRange<float>(0.01f, 0.2f, 0.001f),
-        0.03f, ""
-    ));
-
-    // Blob detection: contrast-adaptive threshold
+    // ── Gameplay — StrokeForge enable ────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterBool>(
-        "sfBlobContrastAdaptive",
-        "StrokeForge Contrast-Adaptive",
-        true  // Enabled by default
-    ));
+        juce::ParameterID{"sfEnabled", 1}, "SF Active", false));
 
-    // Blob detection: contrast sensitivity
+    // ── Gameplay — Blob Threshold ────────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "sfBlobContrastSensitivity",
-        "StrokeForge Contrast Sensitivity",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f),
-        0.5f, ""
-    ));
+        juce::ParameterID{"sfBlobBaseThreshold", 1}, "Blob Thr.",
+        juce::NormalisableRange<float>(0.01f, 0.2f, 0.001f), 0.03f));
 
-    // Blob detection: minimum width in notes (raised range to fight CIS noise)
+    // ── Infrastructure — SF internal parameters ───────────────────────────────
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"sfBlobContrastAdaptive", 1}, "SF Contrast Adaptive",
+        true, kHiddenBool));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"sfBlobContrastSensitivity", 1}, "SF Contrast Sensitivity",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, kHiddenFloat));
     params.push_back(std::make_unique<juce::AudioParameterInt>(
-        "sfBlobMinWidth",
-        "StrokeForge Blob Min Width",
-        1, 50, 20
-    ));
+        juce::ParameterID{"sfBlobMinWidth", 1}, "SF Blob Min Width",
+        1, 50, 20, kHiddenInt));
 
-    // Blob detection: merge gap (raised range to bridge noise gaps)
+    // ── Gameplay — Merge Gap ─────────────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterInt>(
-        "sfBlobMergeGap",
-        "StrokeForge Blob Merge Gap",
-        0, 20, 5
-    ));
+        juce::ParameterID{"sfBlobMergeGap", 1}, "Merge Gap", 0, 20, 5));
 
-    // Harmonic generation: max harmonics per blob
+    // ── Infrastructure — SF advanced ─────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterInt>(
-        "sfMaxHarmonics",
-        "StrokeForge Max Harmonics",
-        1, 16, 8
-    ));
-
-    // Harmonic generation: amplitude floor
+        juce::ParameterID{"sfMaxHarmonics", 1}, "SF Max Harmonics",
+        1, 16, 8, kHiddenInt));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "sfHarmonicAmpFloor",
-        "StrokeForge Harmonic Amp Floor",
-        juce::NormalisableRange<float>(0.001f, 0.1f, 0.001f),
-        0.01f, ""
-    ));
-
-    // Volume shaping: Gaussian center sigma
+        juce::ParameterID{"sfHarmonicAmpFloor", 1}, "SF Harmonic Floor",
+        juce::NormalisableRange<float>(0.001f, 0.1f, 0.001f), 0.01f, kHiddenFloat));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "sfVolumeCenterSigma",
-        "StrokeForge Volume Center Sigma",
-        juce::NormalisableRange<float>(0.1f, 2.0f, 0.01f),
-        0.4f, ""
-    ));
-
-    // Phase coherence: enable
+        juce::ParameterID{"sfVolumeCenterSigma", 1}, "SF Volume Sigma",
+        juce::NormalisableRange<float>(0.1f, 2.0f, 0.01f), 0.4f, kHiddenFloat));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
-        "sfPhaseCoherence",
-        "StrokeForge Phase Coherence",
-        true  // Enabled by default
-    ));
-
-    // Phase coherence: smoothing alpha
+        juce::ParameterID{"sfPhaseCoherence", 1}, "SF Phase Coherence",
+        true, kHiddenBool));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "sfPhaseSmoothAlpha",
-        "StrokeForge Phase Smooth Alpha",
-        juce::NormalisableRange<float>(0.01f, 0.5f, 0.01f),
-        0.05f, ""
-    ));
-
-    // Morph width scale (notes of width for morph=1.0)
+        juce::ParameterID{"sfPhaseSmoothAlpha", 1}, "SF Phase Alpha",
+        juce::NormalisableRange<float>(0.01f, 0.5f, 0.01f), 0.05f, kHiddenFloat));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "sfMorphWidthScale",
-        "StrokeForge Morph Width Scale",
-        juce::NormalisableRange<float>(2.0f, 500.0f, 1.0f),
-        400.0f, ""
-    ));
-
-    // Wavetable mode: minimum blob width (in notes) — kept for preset compat, unused
+        juce::ParameterID{"sfMorphWidthScale", 1}, "SF Morph Scale",
+        juce::NormalisableRange<float>(2.0f, 500.0f, 1.0f), 400.0f, kHiddenFloat));
     params.push_back(std::make_unique<juce::AudioParameterInt>(
-        "sfWavetableMinWidth",
-        "StrokeForge Wavetable Min Width",
-        1, 200, 50
-    ));
+        juce::ParameterID{"sfWavetableMinWidth", 1}, "SF WT Min Width",
+        1, 200, 50, kHiddenInt));
 
-    // Gaussian focus sigma (notes): controls how many oscillators are active per blob
-    // Small = pure tone (only center note), Large = spectral cloud (many notes)
+    // ── Gameplay — Focus Sigma / Spectral Threshold ───────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "sfBlobFocusSigma",
-        "StrokeForge Focus Sigma",
-        juce::NormalisableRange<float>(0.5f, 100.0f, 0.5f, 0.4f),  // skewed towards small values
-        20.0f, "notes"
-    ));
-
-    // Spectral width threshold (notes): blobs wider than this bypass Gaussian focus
-    // and revert to raw spectral passthrough (image pixel intensities unchanged).
-    // 0 = disabled (all blobs use Gaussian focus regardless of width)
+        juce::ParameterID{"sfBlobFocusSigma", 1}, "Focus Sigma",
+        juce::NormalisableRange<float>(0.5f, 100.0f, 0.5f, 0.4f), 20.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("notes")));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        "sfSpectralWidthThreshold",
-        "StrokeForge Spectral Width Threshold",
-        juce::NormalisableRange<float>(0.0f, 3456.0f, 1.0f),
-        200.0f, "notes"
-    ));
+        juce::ParameterID{"sfSpectralWidthThreshold", 1}, "Spectral Thr.",
+        juce::NormalisableRange<float>(0.0f, 3456.0f, 1.0f), 200.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("notes")));
 
-    // Focus-only mode: Gaussian focus without sine->square morph.
-    // Active when StrokeForge is OFF. Pure sine with pitch focus.
+    // ── Gameplay — Focus Only ─────────────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterBool>(
-        "sfFocusOnly",
-        "StrokeForge Focus Only (no morph)",
-        false
-    ));
+        juce::ParameterID{"sfFocusOnly", 1}, "Focus Only", false));
+
+    // ── FrameSampler ──────────────────────────────────────────────────────────
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"frameSamplerEnabled", 1}, "FrameSampler Enabled",
+        false, kHiddenBool));
+
+    {
+        juce::StringArray midiChannelNames;
+        for (int i = 1; i <= 16; ++i)
+            midiChannelNames.add("Channel " + juce::String(i));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"frameSamplerMidiChannel", 1}, "FrameSampler MIDI Channel",
+            midiChannelNames, 0, kHiddenChoice));  // default = Channel 1 (index 0)
+    }
+
+    {
+        juce::StringArray octaveNames { "-2", "-1", " 0", "+1", "+2" };
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"frameSamplerOctaveOffset", 1}, "FrameSampler Octave Offset",
+            octaveNames, 2, kHiddenChoice));  // default index 2 = 0
+    }
+
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"frameSamplerMaxDuration", 1}, "FrameSampler Max Duration",
+        juce::NormalisableRange<float>(1.0f, 10.0f, 0.1f), 10.0f, kHiddenFloat));
 
     return { params.begin(), params.end() };
 }
@@ -376,7 +263,9 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     udpByte4Param = apvts.getRawParameterValue(PARAM_UDP_BYTE4);
     sensorDpiParam = apvts.getRawParameterValue(PARAM_SENSOR_DPI);
     logLevelParam = apvts.getRawParameterValue(PARAM_LOG_LEVEL);
+    deviceEnabledParam  = apvts.getRawParameterValue(PARAM_DEVICE_ENABLED);
     visualizerModeParam = apvts.getRawParameterValue(PARAM_VISUALIZER_MODE);
+    masterVolumeParam   = apvts.getRawParameterValue("masterVolume");
     
     // Register as listener for parameter changes
     apvts.addParameterListener(PARAM_UDP_PORT, this);
@@ -424,6 +313,23 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("sfSpectralWidthThreshold", this);
     apvts.addParameterListener("sfFocusOnly", this);
     
+    // Create FrameSampler (always active, no lazy init needed)
+    frameSampler = std::make_unique<FrameSampler>();
+
+    // Register FrameSampler parameter listeners
+    apvts.addParameterListener(PARAM_FS_ENABLED,    this);
+    apvts.addParameterListener(PARAM_FS_MIDI_CH,    this);
+    apvts.addParameterListener(PARAM_FS_OCT_OFFSET, this);
+    apvts.addParameterListener(PARAM_FS_MAX_DUR,    this);
+
+    // Sync FrameSampler config with initial APVTS values
+    frameSampler->setEnabled(*apvts.getRawParameterValue(PARAM_FS_ENABLED) > 0.5f);
+    frameSampler->setMidiChannel(
+        static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_MIDI_CH)) + 1);
+    frameSampler->setOctaveOffset(
+        static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_OCT_OFFSET)) - 2);
+    frameSampler->setMaxDuration(*apvts.getRawParameterValue(PARAM_FS_MAX_DUR));
+
     // Create Sp3ctra core (but do NOT initialize yet - lazy init)
     sp3ctraCore = std::make_unique<Sp3ctraCore>();
     
@@ -465,6 +371,13 @@ Sp3ctraAudioProcessor::~Sp3ctraAudioProcessor()
         log_info("VST", "UDP thread stopped");
     }
     
+    // Stop FrameSampler player thread (writes to AudioImageBuffers)
+    if (frameSampler) {
+        log_info("VST", "Stopping FrameSampler player thread...");
+        frameSampler->stopPlayerThread();
+        frameSampler.reset();
+    }
+
     // Cleanup LuxStral engine (AFTER both threads are stopped!)
     if (luxstralInitialized) {
         log_info("VST", "Cleaning up LuxStral engine...");
@@ -805,6 +718,12 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     audioProcessingThread = std::make_unique<AudioProcessingThread>(sp3ctraCore.get());
     audioProcessingThread->startThread(juce::Thread::Priority::highest);
     log_info("VST", "AudioProcessingThread started - wavetable reinit will run on first cycle");
+
+    // Start FrameSampler player thread (Non-RT, injects recorded frames to
+    // AudioImageBuffers AND updates db->preprocessed_data for synth_AudioProcess)
+    if (frameSampler)
+        frameSampler->startPlayerThread(sp3ctraCore->getAudioImageBuffers(),
+                                        sp3ctraCore->getDoubleBuffer());
     
     log_info("VST", "=============================================================");
     
@@ -856,7 +775,18 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     
     // Clear output buffer first
     buffer.clear();
-    
+
+    // ── FrameSampler MIDI (RT-safe: atomics only, no alloc, no lock, no I/O) ──
+    if (frameSampler != nullptr)
+        frameSampler->processMidi(midiMessages);
+
+    // RT-safe early exit when device is switched off (atomic read, no lock)
+    if (deviceEnabledParam != nullptr && deviceEnabledParam->load() < 0.5f)
+    {
+        rt_profiler_callback_end(&g_vst_rt_profiler);
+        return;
+    }
+
     // ========================================================================
     // 🎯 LOCK-FREE DOUBLE-BUFFER CONSUMER (RT-SAFE)
     //
@@ -938,9 +868,15 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         }
     }
     
+    // Apply master volume — RT-safe: atomic read, O(N) multiply, no lock, no allocation
+    if (masterVolumeParam != nullptr)
+    {
+        const float gain = masterVolumeParam->load();
+        if (gain < 0.9999f)
+            buffer.applyGain(gain);
+    }
+
     rt_profiler_callback_end(&g_vst_rt_profiler);
-    
-    juce::ignoreUnused(midiMessages);
 }
 
 //==============================================================================
@@ -1046,6 +982,23 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
     // 🔧 CRITICAL: LuxStral parameters are automatically synced to g_sp3ctra_config
     // They are read directly by the synthesis engine, NO restart needed!
     // StrokeForge parameters — same hot-reload pattern as LuxStral
+    // FrameSampler parameters — update atomic config on FrameSampler
+    if (parameterID.startsWith("frameSampler"))
+    {
+        if (frameSampler != nullptr)
+        {
+            frameSampler->setEnabled(
+                *apvts.getRawParameterValue(PARAM_FS_ENABLED) > 0.5f);
+            frameSampler->setMidiChannel(
+                static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_MIDI_CH)) + 1);
+            frameSampler->setOctaveOffset(
+                static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_OCT_OFFSET)) - 2);
+            frameSampler->setMaxDuration(
+                *apvts.getRawParameterValue(PARAM_FS_MAX_DUR));
+        }
+        return;
+    }
+
     bool isStrokeForgeParam = parameterID.startsWith("sf");
     if (isStrokeForgeParam) {
         applyConfigurationToCore(false);
