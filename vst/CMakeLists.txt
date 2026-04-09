@@ -57,7 +57,9 @@ target_sources(Sp3ctraVST
 
         # FrameSampler subsystem
         source/framesampler/FrameSampler.cpp
+        source/framesequencer/FrameSequencer.cpp
         source/framesampler/FrameSampler.h
+        source/framesequencer/FrameSequencer.h
         
         # 🎵 PHASE 3: LuxStral Synthesis Engine (VST-adapted)
         source/luxstral/vst_adapters.cpp

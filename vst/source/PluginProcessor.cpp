@@ -230,6 +230,21 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"frameSamplerMaxDuration", 1}, "FrameSampler Max Duration",
         juce::NormalisableRange<float>(1.0f, 10.0f, 0.1f), 10.0f, kHiddenFloat));
 
+    // ── FrameSequencer parameters ─────────────────────────────────────────────
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"seqEnabled",  1}, "Sequencer Enabled", false, kHiddenBool));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"seqBpm",      1}, "Seq BPM",
+        juce::NormalisableRange<float>(40.0f, 240.0f, 0.5f), 120.0f));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"seqNumSteps", 1}, "Seq Steps", 1, 32, 16));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"seqLoop",     1}, "Seq Loop",    true));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"seqDawSync",  1}, "Seq DAW Sync", true));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"seqBeatsPerStep", 1}, "Seq Beats/Step", 1, 8, 1));
+
     return { params.begin(), params.end() };
 }
 
@@ -315,11 +330,22 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     // Create FrameSampler (always active, no lazy init needed)
     frameSampler = std::make_unique<FrameSampler>();
 
+    // Create FrameSequencer and wire it to the FrameSampler
+    frameSequencer = std::make_unique<FrameSequencer>();
+    frameSequencer->setFrameSampler(frameSampler.get());
+
     // Register FrameSampler parameter listeners
     apvts.addParameterListener(PARAM_FS_ENABLED,    this);
     apvts.addParameterListener(PARAM_FS_MIDI_CH,    this);
     apvts.addParameterListener(PARAM_FS_OCT_OFFSET, this);
     apvts.addParameterListener(PARAM_FS_MAX_DUR,    this);
+
+    apvts.addParameterListener(PARAM_SEQ_ENABLED,  this);
+    apvts.addParameterListener(PARAM_SEQ_BPM,      this);
+    apvts.addParameterListener(PARAM_SEQ_NSTEPS,   this);
+    apvts.addParameterListener(PARAM_SEQ_LOOP,     this);
+    apvts.addParameterListener(PARAM_SEQ_DAW_SYNC, this);
+    apvts.addParameterListener(PARAM_SEQ_BPS,      this);
 
     // Sync FrameSampler config with initial APVTS values
     frameSampler->setEnabled(*apvts.getRawParameterValue(PARAM_FS_ENABLED) > 0.5f);
@@ -602,6 +628,12 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     if (frameSampler != nullptr)
         frameSampler->processMidi(midiMessages);
 
+    // ── FrameSequencer: advance step if sequencer is running ─────────────────
+    if (frameSequencer != nullptr)
+        frameSequencer->processBlock(getPlayHead(),
+                                     buffer.getNumSamples(),
+                                     getSampleRate());
+
     // RT-safe early exit when device is switched off (atomic read, no lock)
     if (deviceEnabledParam != nullptr && deviceEnabledParam->load() < 0.5f)
     {
@@ -792,6 +824,24 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
             frameSampler->setMaxDuration(
                 *apvts.getRawParameterValue(PARAM_FS_MAX_DUR));
         }
+        return;
+    }
+
+    // ── FrameSequencer parameters ─────────────────────────────────────────────
+    if (parameterID.startsWith("seq") && frameSequencer != nullptr)
+    {
+        frameSequencer->setEnabled (
+            *apvts.getRawParameterValue(PARAM_SEQ_ENABLED)  > 0.5f);
+        frameSequencer->setBpm(
+            apvts.getRawParameterValue(PARAM_SEQ_BPM)->load());
+        frameSequencer->setNumSteps(
+            static_cast<int>(apvts.getRawParameterValue(PARAM_SEQ_NSTEPS)->load()));
+        frameSequencer->setLooping(
+            *apvts.getRawParameterValue(PARAM_SEQ_LOOP)     > 0.5f);
+        frameSequencer->setDawSync(
+            *apvts.getRawParameterValue(PARAM_SEQ_DAW_SYNC) > 0.5f);
+        frameSequencer->setBeatsPerStep(
+            static_cast<int>(apvts.getRawParameterValue(PARAM_SEQ_BPS)->load()));
         return;
     }
 
