@@ -111,6 +111,25 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     sfFocusOnlyAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "sfFocusOnly", sfFocusOnlyToggle);
 
+    // ── Frame Sampler — Enable toggle ────────────────────────────────────────
+    fsEnabledToggle.setButtonText("Active");
+    addAndMakeVisible(fsEnabledToggle);
+    fsEnabledAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "frameSamplerEnabled", fsEnabledToggle);
+
+    // ── Frame Sampler — Bank record buttons (12 slots, 6×2 grid) ─────────────
+    // Initial text: "Bank N\n—". Colors + state text are updated by timerCallback().
+    for (int i = 0; i < FrameSamplerConstants::NUM_SLOTS; ++i)
+    {
+        fsBankBtns[i].setButtonText("Bank " + juce::String(i + 1) + "\n\xe2\x80\x94");
+        fsBankBtns[i].onClick = [this, i]
+        {
+            if (auto* fs = audioProcessor.getFrameSampler())
+                fs->uiToggleRecord(i);
+        };
+        addAndMakeVisible(fsBankBtns[i]);
+    }
+
     // ── Footer ───────────────────────────────────────────────────────────────
     settingsButton.setButtonText("Settings...");
     settingsButton.onClick = [this] { openSettings(); };
@@ -120,11 +139,12 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     statusLabel.setFont(juce::FontOptions(12.0f));
     addAndMakeVisible(statusLabel);
 
-    startTimer(1000);
+    // 200 ms refresh: fast enough to animate the RECORDING blink (~2.5 Hz)
+    startTimer(200);
 
-    // Window height: header + vis + section + 9 LuxStral rows + footer
-    // kContentY=134, rowsStartY=162, footerY=162+9*31+8=449, total=449+28+12=489+margin=496
-    setSize(740, 496);
+    // Height: header(52) + vis(64+18) + controls(9×31=279) + FS section(24+4+96) + footer(38) + margins
+    // fsSectionY=451, fsBtnsY=479, footerY=585, window=628
+    setSize(740, 628);
 }
 
 Sp3ctraAudioProcessorEditor::~Sp3ctraAudioProcessorEditor()
@@ -230,6 +250,25 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
                    juce::Justification::centredRight, true);
     }
 
+    // ── Frame Sampler section badge ───────────────────────────────────────────
+    {
+        const int fsy = fsSectionY();
+        const juce::Rectangle<int> sh(kHPad, fsy, getWidth() - 2 * kHPad, kFS_SECT_H);
+        g.setColour(juce::Colour(0xff2a1a3a));
+        g.fillRoundedRectangle(sh.toFloat(), 3.0f);
+
+        // Left label "FRAME SAMPLER"
+        g.setColour(juce::Colour(0xffcc88ff));
+        g.setFont(juce::Font(juce::FontOptions(12.0f)).boldened());
+        g.drawText("FRAME SAMPLER", sh.reduced(6, 0), juce::Justification::centredLeft, true);
+
+        // Right hint — slot trigger info
+        g.setFont(juce::FontOptions(10.0f));
+        g.setColour(juce::Colour(0xff886699));
+        g.drawText("click = rec / stop", sh.reduced(6, 0),
+                   juce::Justification::centredRight, true);
+    }
+
     // ── Separator above footer ────────────────────────────────────────────────
     g.setColour(juce::Colour(0xff3a3a3a));
     g.fillRect(0, footerY() - 6, getWidth(), 1);
@@ -274,6 +313,32 @@ void Sp3ctraAudioProcessorEditor::resized()
         sfFocusOnlyToggle    .setBounds(cx, cy, kCtrlW, kRowH);
     }
 
+    // ── Frame Sampler — Enable toggle (right side of FS section badge) ────────
+    {
+        const int fsy      = fsSectionY();
+        const int toggleW  = 72;
+        const int toggleX  = getWidth() - kHPad - toggleW;
+        // Positioned inside the badge row, right-aligned
+        fsEnabledToggle.setBounds(toggleX, fsy + 2, toggleW, kFS_SECT_H - 4);
+    }
+
+    // ── Frame Sampler — Bank buttons (6 columns × 2 rows = 12 slots) ─────────
+    {
+        const int totalW    = getWidth() - 2 * kHPad;
+        const int gapBetween = 4;
+        const int bw        = (totalW - (kFS_BTN_COLS - 1) * gapBetween) / kFS_BTN_COLS;
+        const int by        = fsBtnsY();
+
+        for (int i = 0; i < FrameSamplerConstants::NUM_SLOTS; ++i)
+        {
+            const int col = i % kFS_BTN_COLS;
+            const int row = i / kFS_BTN_COLS;
+            const int bx  = kHPad + col * (bw + gapBetween);
+            const int ry  = by + row * (kFS_BTN_H + kFS_BTN_GAP);
+            fsBankBtns[i].setBounds(bx, ry, bw, kFS_BTN_H);
+        }
+    }
+
     // ── Footer ────────────────────────────────────────────────────────────────
     const int fy = footerY();
     settingsButton.setBounds(kHPad,           fy, 92, 28);
@@ -283,6 +348,7 @@ void Sp3ctraAudioProcessorEditor::resized()
 //==============================================================================
 void Sp3ctraAudioProcessorEditor::timerCallback()
 {
+    // ── UDP status label ──────────────────────────────────────────────────────
     auto* core = audioProcessor.getSp3ctraCore();
     if (core && core->isInitialized())
     {
@@ -294,8 +360,85 @@ void Sp3ctraAudioProcessorEditor::timerCallback()
     }
     else
     {
-        statusLabel.setText("Configuration Error", juce::dontSendNotification);
+        statusLabel.setText("waiting for CIS data...", juce::dontSendNotification);
         statusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+    }
+
+    // ── Frame Sampler bank buttons — refresh color + label every 200 ms ───────
+    // fsBlinkOn toggles each call → ~2.5 Hz blink for RECORDING state.
+    fsBlinkOn = !fsBlinkOn;
+
+    if (auto* fs = audioProcessor.getFrameSampler())
+    {
+        const bool fsActive = fs->isEnabled();
+
+        for (int i = 0; i < FrameSamplerConstants::NUM_SLOTS; ++i)
+        {
+            const SlotState st        = fs->getSlotState(i);
+            const bool      hasContent = fs->slotHasContent(i);
+            const uint64_t  durUs      = fs->getSlotDurationUs(i);
+
+            juce::String stateStr;
+            juce::Colour bgColour;
+            juce::Colour textColour;
+
+            switch (st)
+            {
+                case SlotState::RECORDING:
+                    // Alternate between bright and dim red for blink effect
+                    stateStr   = "\xe2\x97\x8f REC";         // ● REC  (U+25CF UTF-8)
+                    bgColour   = fsBlinkOn ? juce::Colour(0xffcc2222)
+                                           : juce::Colour(0xff7a1010);
+                    textColour = juce::Colours::white;
+                    break;
+
+                case SlotState::ARMED:
+                    stateStr   = "ARM";
+                    bgColour   = juce::Colour(0xff7a4a00);
+                    textColour = juce::Colour(0xffffcc66);
+                    break;
+
+                case SlotState::PLAYING:
+                    stateStr   = "\xe2\x96\xba PLAY";        // ► PLAY  (U+25BA UTF-8)
+                    bgColour   = juce::Colour(0xff1a5a1a);
+                    textColour = juce::Colour(0xff88ff88);
+                    break;
+
+                default: // IDLE
+                    if (hasContent)
+                    {
+                        const float durS = static_cast<float>(durUs) * 1e-6f;
+                        stateStr   = juce::String(durS, 1) + " s";
+                        bgColour   = juce::Colour(0xff1e3028);
+                        textColour = juce::Colour(0xff66cc88);
+                    }
+                    else
+                    {
+                        stateStr   = "\xe2\x80\x94";         // — em-dash (U+2014 UTF-8)
+                        bgColour   = juce::Colour(0xff2a2a2a);
+                        textColour = juce::Colour(0xff555555);
+                    }
+                    break;
+            }
+
+            // Grey out everything when FrameSampler is disabled
+            if (!fsActive)
+            {
+                bgColour   = bgColour  .withAlpha(0.35f);
+                textColour = textColour.withAlpha(0.35f);
+            }
+
+            const juce::String label = "Bank " + juce::String(i + 1)
+                                       + "\n" + stateStr;
+
+            fsBankBtns[i].setButtonText(label);
+            fsBankBtns[i].setColour(juce::TextButton::buttonColourId,   bgColour);
+            fsBankBtns[i].setColour(juce::TextButton::buttonOnColourId, bgColour.brighter(0.15f));
+            fsBankBtns[i].setColour(juce::TextButton::textColourOffId,  textColour);
+            fsBankBtns[i].setColour(juce::TextButton::textColourOnId,   textColour);
+            // Allow clicking even when disabled to show clear intent; guard in uiToggleRecord
+            fsBankBtns[i].setEnabled(true);
+        }
     }
 }
 

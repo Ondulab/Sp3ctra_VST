@@ -5,6 +5,7 @@
 #include "PluginProcessor.h"
 #include "SettingsWindow.h"
 #include "CisVisualizerComponent.h"
+#include "framesampler/FrameSampler.h"
 
 //==============================================================================
 /**
@@ -55,12 +56,22 @@ private:
     static constexpr int kLS_ROWS    = 9;            // LuxStral row count
     static constexpr int kSF_ROWS    = 6;            // StrokeForge row count
 
+    // ── Frame Sampler bank section (below main controls) ─────────────────
+    static constexpr int kFS_BTN_COLS = 6;   // 6 buttons per row (6×2 = 12 banks)
+    static constexpr int kFS_BTN_ROWS = 2;   // 2 rows
+    static constexpr int kFS_BTN_H    = 44;  // bank button height
+    static constexpr int kFS_BTN_GAP  = 4;   // vertical gap between rows
+    static constexpr int kFS_GAP_TOP  = 10;  // gap from last control row to FS badge
+    static constexpr int kFS_SECT_H   = 24;  // FS section badge height
+
     // Column geometry helpers (depend on runtime window width)
-    int  colWidth()   const noexcept { return (getWidth() - 2 * kHPad - kColGap) / 2; }
-    int  colLX()      const noexcept { return kHPad; }
-    int  colRX()      const noexcept { return kHPad + colWidth() + kColGap; }
-    int  rowsStartY() const noexcept { return kContentY + kSectionH + kSectionGap; }
-    int  footerY()    const noexcept { return rowsStartY() + kLS_ROWS * kRowStep + 8; }
+    int  colWidth()    const noexcept { return (getWidth() - 2 * kHPad - kColGap) / 2; }
+    int  colLX()       const noexcept { return kHPad; }
+    int  colRX()       const noexcept { return kHPad + colWidth() + kColGap; }
+    int  rowsStartY()  const noexcept { return kContentY + kSectionH + kSectionGap; }
+    int  fsSectionY()  const noexcept { return rowsStartY() + kLS_ROWS * kRowStep + kFS_GAP_TOP; }
+    int  fsBtnsY()     const noexcept { return fsSectionY() + kFS_SECT_H + kSectionGap; }
+    int  footerY()     const noexcept { return fsBtnsY() + kFS_BTN_ROWS * (kFS_BTN_H + kFS_BTN_GAP) + 10; }
 
     void timerCallback() override;
     void openSettings();
@@ -121,6 +132,16 @@ private:
     // ── StrokeForge — Focus Only toggle ──────────────────────────────────────
     juce::ToggleButton sfFocusOnlyToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfFocusOnlyAttachment;
+
+    // ── Frame Sampler — bank record buttons (6×2 grid = 12 slots) ────────────
+    juce::TextButton fsBankBtns[FrameSamplerConstants::NUM_SLOTS];
+
+    // ── Frame Sampler — Enable toggle (mirrors frameSamplerEnabled APVTS param) ─
+    juce::ToggleButton fsEnabledToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> fsEnabledAttachment;
+
+    // Blink flag for RECORDING indicator (flips each 200 ms timer tick)
+    bool fsBlinkOn = false;
 
     // ── Footer ───────────────────────────────────────────────────────────────
     juce::TextButton settingsButton;

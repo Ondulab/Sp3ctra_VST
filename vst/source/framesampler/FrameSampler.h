@@ -231,6 +231,16 @@ public:
     float getMaxDuration()  const noexcept { return maxDurationS.load(); }
 
     // =========================================================================
+    // Non-RT: UI-triggered commands (message/timer thread — atomics only)
+    // =========================================================================
+    /** Toggle record for slotIndex from the UI.
+     *  - If slot is RECORDING   → stop recording.
+     *  - If slot is IDLE/ARMED  → start recording immediately (bypass ARMED).
+     *  - If slot is PLAYING     → punch-in (stop playback, start recording).
+     *  Any ongoing recording on another slot is stopped first (only one at a time). */
+    void uiToggleRecord(int slotIndex) noexcept;
+
+    // =========================================================================
     // Slot management (Non-RT)
     // =========================================================================
     void clearSlot(int slotIndex);

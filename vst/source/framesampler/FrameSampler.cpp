@@ -329,6 +329,56 @@ bool FrameSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const ui
 }
 
 // ============================================================================
+// Non-RT: UI-triggered record toggle
+// ============================================================================
+
+void FrameSampler::uiToggleRecord(int slotIndex) noexcept
+{
+    using namespace FrameSamplerConstants;
+    if (slotIndex < 0 || slotIndex >= NUM_SLOTS) return;
+
+    const auto cur = static_cast<SlotState>(
+        atomicState.slotState[slotIndex].load(std::memory_order_acquire));
+
+    if (cur == SlotState::RECORDING)
+    {
+        // Toggle off → stop recording
+        atomicState.stopRecCmd[slotIndex].store(true, std::memory_order_release);
+        atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::IDLE),
+                                                std::memory_order_release);
+        log_info("FS", "Slot %d: UI stop record", slotIndex);
+        return;
+    }
+
+    // Stop any other ongoing recording first (only one slot records at a time)
+    const int curRec = activeRecSlot.load(std::memory_order_relaxed);
+    if (curRec >= 0 && curRec != slotIndex)
+    {
+        atomicState.stopRecCmd[curRec].store(true, std::memory_order_release);
+        atomicState.slotState[curRec].store(static_cast<int>(SlotState::IDLE),
+                                             std::memory_order_release);
+    }
+
+    // Stop playback if active (punch-in or silent start)
+    const int curPlay = atomicState.activePlaySlot.load(std::memory_order_relaxed);
+    if (curPlay >= 0)
+    {
+        atomicState.stopPlayCmd.store(true, std::memory_order_release);
+        atomicState.activePlaySlot.store(-1, std::memory_order_release);
+        atomicState.passthroughEnabled.store(true, std::memory_order_release);
+        if (curPlay != slotIndex)
+            atomicState.slotState[curPlay].store(static_cast<int>(SlotState::IDLE),
+                                                  std::memory_order_release);
+    }
+
+    // Start recording immediately (bypass ARMED state — UI one-click record)
+    atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::RECORDING),
+                                            std::memory_order_release);
+    atomicState.startRecCmd[slotIndex].store(true, std::memory_order_release);
+    log_info("FS", "Slot %d: UI start record", slotIndex);
+}
+
+// ============================================================================
 // Thread lifecycle
 // ============================================================================
 
