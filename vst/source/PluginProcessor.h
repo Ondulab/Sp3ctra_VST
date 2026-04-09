@@ -1,9 +1,7 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
-#include "Sp3ctraCore.h"
-#include "UdpReceiverThread.h"
-#include "AudioProcessingThread.h"  // Thread for synth_AudioProcess()
+#include "Sp3ctraSharedCore.h"  // Process-wide singleton (UDP + image pipeline + LuxStral)
 #include "Sp3ctraConstants.h"
 #include "framesampler/FrameSampler.h"
 
@@ -70,7 +68,11 @@ public:
     //==============================================================================
     // Public accessors for UI
     juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
-    Sp3ctraCore* getSp3ctraCore() { return sp3ctraCore.get(); }
+    /** Returns the inner Sp3ctraCore owned by the process-wide singleton. */
+    Sp3ctraCore* getSp3ctraCore()
+    {
+        return sharedCore ? sharedCore->getCore() : nullptr;
+    }
     FrameSampler* getFrameSampler() { return frameSampler.get(); }
     
     // Helper to build UDP address string from 4 bytes
@@ -91,7 +93,8 @@ private:
     
     //==============================================================================
     // Initialization state flags
-    bool luxstralInitialized = false;
+    // luxstralInitialized is now queried via sharedCore->isReady() — kept locally
+    // only to mirror the old pixel-per-note change detection logic.
     bool coreNeedsInit = true;  // Lazy init: wait for setStateInformation() before starting UDP
     
     // 🔧 DOUBLE-BUFFER CONSUMER TRACKING:
@@ -109,10 +112,10 @@ private:
     // Test tone phase accumulator (fallback if LuxStral not working)
     // Note: testTonePhase removed - no longer using 440Hz fallback tone
     
-    // ✨ Sp3ctra Core Integration
-    std::unique_ptr<Sp3ctraCore> sp3ctraCore;
-    std::unique_ptr<UdpReceiverThread> udpThread;
-    std::unique_ptr<AudioProcessingThread> audioProcessingThread;  // Calls synth_AudioProcess() in loop
+    // ✨ Sp3ctra Shared Core Integration
+    // The shared_ptr keeps the singleton alive as long as this instance exists.
+    // The last instance to be destroyed will tear down UDP + synthesis threads.
+    std::shared_ptr<Sp3ctraSharedCore> sharedCore;
     std::unique_ptr<FrameSampler> frameSampler;
     
     // ✨ VST Parameters via AudioProcessorValueTreeState
