@@ -118,14 +118,39 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         apvts, "frameSamplerEnabled", fsEnabledToggle);
 
     // ── Frame Sampler — Bank record buttons (12 slots, 6×2 grid) ─────────────
-    // Initial text: "Bank N\n—". Colors + state text are updated by timerCallback().
+    // Single click = context-sensitive (play/rec/stop).
+    // Double-click (< 400 ms) = clear slot.
     for (int i = 0; i < FrameSamplerConstants::NUM_SLOTS; ++i)
     {
-        fsBankBtns[i].setButtonText("Bank " + juce::String(i + 1) + "\n\xe2\x80\x94");
+        fsBankBtns[i].setButtonText("Bank " + juce::String(i + 1) + "\n-");
         fsBankBtns[i].onClick = [this, i]
         {
-            if (auto* fs = audioProcessor.getFrameSampler())
-                fs->uiToggleRecord(i);
+            const auto now = juce::Time::getCurrentTime();
+            const juce::int64 ms = (now - fsBankLastClickTime[i]).inMilliseconds();
+            fsBankLastClickTime[i] = now;
+
+            auto* fs = audioProcessor.getFrameSampler();
+            if (fs == nullptr) return;
+
+            // Double-click → clear
+            if (ms < 400 && ms >= 0)
+            {
+                fs->uiClearSlot(i);
+                return;
+            }
+
+            // Single click: context-sensitive
+            const SlotState st         = fs->getSlotState(i);
+            const bool       hasContent = fs->slotHasContent(i);
+
+            if (st == SlotState::RECORDING || st == SlotState::ARMED)
+                fs->uiToggleRecord(i);   // stop recording / cancel arm
+            else if (st == SlotState::PLAYING)
+                fs->uiPlaySlot(i);       // stop playback
+            else if (hasContent)
+                fs->uiPlaySlot(i);       // start playback
+            else
+                fs->uiToggleRecord(i);   // start recording
         };
         addAndMakeVisible(fsBankBtns[i]);
     }
@@ -201,7 +226,10 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         apvts, "seqLoop", seqLoopToggle);
 
     // ── Sequencer — DAW sync toggle ───────────────────────────────────────────
-    seqDawSyncToggle.setButtonText("DAW");
+    seqDawSyncToggle.setButtonText("DAW sync");
+    seqDawSyncToggle.setTooltip(
+        "DAW sync: step timing follows Ableton/Live PPQ transport.\n"
+        "Uncheck = internal BPM clock (standalone use).");
     addAndMakeVisible(seqDawSyncToggle);
     seqDawSyncAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "seqDawSync", seqDawSyncToggle);
@@ -209,7 +237,7 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     // ── Sequencer — Step grid (32 cells) ─────────────────────────────────────
     for (int i = 0; i < FrameSequencer::MAX_STEPS; ++i)
     {
-        seqStepBtns[i].setButtonText("\xe2\x80\x94");  // em-dash = empty
+        seqStepBtns[i].setButtonText("-");   // "-" = empty step
         seqStepBtns[i].onClick = [this, i]
         {
             if (auto* seq = audioProcessor.getFrameSequencer())
@@ -354,11 +382,16 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
         g.setFont(juce::Font(juce::FontOptions(12.0f)).boldened());
         g.drawText("FRAME SAMPLER", sh.reduced(6, 0), juce::Justification::centredLeft, true);
 
-        // Right hint — slot trigger info
+        // Right hint — leave 78 px for the Active toggle on the right
         g.setFont(juce::FontOptions(10.0f));
         g.setColour(juce::Colour(0xff886699));
-        g.drawText("click = rec / stop", sh.reduced(6, 0),
-                   juce::Justification::centredRight, true);
+        const juce::Rectangle<int> fsHintR(
+            sh.getX() + 100,
+            sh.getY(),
+            sh.getWidth() - 100 - 78,
+            sh.getHeight());
+        g.drawText("click = play/rec  |  dbl-click = clear", fsHintR,
+                   juce::Justification::centred, true);
     }
 
     // ── Sequencer section badge ───────────────────────────────────────────────
@@ -370,10 +403,16 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
         g.setColour(juce::Colour(0xff66cc88));
         g.setFont(juce::Font(juce::FontOptions(12.0f)).boldened());
         g.drawText("STEP SEQUENCER", sh.reduced(6, 0), juce::Justification::centredLeft, true);
+        // Hint text — must not overlap the Active toggle (72 px from right)
         g.setFont(juce::FontOptions(10.0f));
         g.setColour(juce::Colour(0xff447755));
-        g.drawText("click cell = cycle bank | empty = passthrough",
-                   sh.reduced(6, 0), juce::Justification::centredRight, true);
+        const juce::Rectangle<int> hintR(
+            sh.getX() + 120,        // start after "STEP SEQUENCER" label
+            sh.getY(),
+            sh.getWidth() - 120 - 78,  // leave 78 px for Active toggle
+            sh.getHeight());
+        g.drawText("click = cycle bank  |  empty = pass",
+                   hintR, juce::Justification::centred, true);
     }
 
     // ── Separator above footer ────────────────────────────────────────────────
@@ -542,8 +581,7 @@ void Sp3ctraAudioProcessorEditor::timerCallback()
             switch (st)
             {
                 case SlotState::RECORDING:
-                    // Alternate between bright and dim red for blink effect
-                    stateStr   = "\xe2\x97\x8f REC";         // ● REC  (U+25CF UTF-8)
+                    stateStr   = "* REC";  // ASCII: bullet + REC
                     bgColour   = fsBlinkOn ? juce::Colour(0xffcc2222)
                                            : juce::Colour(0xff7a1010);
                     textColour = juce::Colours::white;
@@ -556,7 +594,7 @@ void Sp3ctraAudioProcessorEditor::timerCallback()
                     break;
 
                 case SlotState::PLAYING:
-                    stateStr   = "\xe2\x96\xba PLAY";        // ► PLAY  (U+25BA UTF-8)
+                    stateStr   = "> PLAY"; // ASCII: arrow + PLAY
                     bgColour   = juce::Colour(0xff1a5a1a);
                     textColour = juce::Colour(0xff88ff88);
                     break;
@@ -571,7 +609,7 @@ void Sp3ctraAudioProcessorEditor::timerCallback()
                     }
                     else
                     {
-                        stateStr   = "\xe2\x80\x94";         // — em-dash (U+2014 UTF-8)
+                        stateStr   = "--";  // ASCII: empty slot
                         bgColour   = juce::Colour(0xff2a2a2a);
                         textColour = juce::Colour(0xff555555);
                     }
@@ -618,14 +656,14 @@ void Sp3ctraAudioProcessorEditor::timerCallback()
             if (beyondActive)
             {
                 // Greyed out — outside active step count
-                cellText = "\xe2\x80\x94";
+                cellText = "-";
                 bgCol    = juce::Colour(0xff1a1a1a);
                 textCol  = juce::Colour(0xff303030);
             }
             else if (bankIdx < 0)
             {
                 // Empty (passthrough)
-                cellText = "\xe2\x80\x94";
+                cellText = "-";
                 bgCol    = isCurrent ? juce::Colour(0xff2a4a2a)
                                      : juce::Colour(0xff2a2a2a);
                 textCol  = isCurrent ? juce::Colour(0xff88ffaa)

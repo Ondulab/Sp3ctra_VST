@@ -240,6 +240,15 @@ public:
      *  Any ongoing recording on another slot is stopped first (only one at a time). */
     void uiToggleRecord(int slotIndex) noexcept;
 
+    /** Play a slot if it has content and is IDLE.
+     *  If the slot is already PLAYING, stop it (restore passthrough).
+     *  No-op if the slot is empty or currently recording. */
+    void uiPlaySlot(int slotIndex) noexcept;
+
+    /** Clear all recorded frames from a slot and reset it to IDLE.
+     *  Stops any ongoing recording or playback on that slot first. */
+    void uiClearSlot(int slotIndex) noexcept;
+
     // =========================================================================
     // Slot management (Non-RT)
     // =========================================================================
