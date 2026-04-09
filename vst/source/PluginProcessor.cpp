@@ -1,19 +1,18 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
-#include "AudioProcessingThread.h"  // Separate thread for synth_AudioProcess
 
-// Include C headers for global config access
+// C headers still used directly by this file
 extern "C" {
     #include "core/context.h"
+    #include "config/config_loader.h"
     #include "utils/logger.h"
     #include "utils/rt_profiler.h"
-    #include "luxstral/synth_luxstral.h"           // LuxStral synthesis engine
-    #include "luxstral/synth_luxstral_algorithms.h" // Envelope coefficient update
-    #include "luxstral/synth_luxstral_threading.h" // synth_shutdown_thread_pool()
-    #include "luxstral/synth_luxstral_runtime.h"   // synth_runtime_free_buffers()
-    #include "luxstral/vst_adapters.h"             // Audio buffer init functions
-    #include "luxstral/wave_generation.h"          // Hot-reload frequency API
+    #include "luxstral/synth_luxstral_algorithms.h" // update_gap_limiter_coefficients()
+    #include "luxstral/vst_adapters.h"              // luxstral_are_audio_buffers_ready(), buffers
+    #include "luxstral/wave_generation.h"           // request_frequency_reinit() hot-reload
 }
+// Note: synth_luxstral_threading.h / synth_luxstral_runtime.h / AudioProcessingThread.h
+// are now included transitively via Sp3ctraSharedCore.h and handled by Sp3ctraSharedCore.
 
 // Global RT Profiler accessible from C threads (audioProcessingThread)
 // This must be declared here (not in header) to avoid multiple definition errors
@@ -330,20 +329,25 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
         static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_OCT_OFFSET)) - 2);
     frameSampler->setMaxDuration(*apvts.getRawParameterValue(PARAM_FS_MAX_DUR));
 
-    // Create Sp3ctra core (but do NOT initialize yet - lazy init)
-    sp3ctraCore = std::make_unique<Sp3ctraCore>();
+    // ── Acquire the process-wide shared core ─────────────────────────────────
+    // If this is the FIRST plugin instance in this DAW process → creates the
+    // singleton (UDP socket, image pipeline, synthesis engine not yet started).
+    // If a SECOND instance is being created → returns the existing singleton.
+    // The shared_ptr keeps the singleton alive for this instance's lifetime.
+    sharedCore = Sp3ctraSharedCore::acquire();
     
-    // 🔧 LAZY INITIALIZATION: Do NOT start UDP here!
-    // The DAW will call setStateInformation() with saved parameters BEFORE prepareToPlay().
-    // If we init now with default params, we'd have to shutdown and reinit when state is restored.
-    // Instead, we defer initialization to setStateInformation() or prepareToPlay() (whichever comes first).
+    // 🔧 LAZY INITIALIZATION: Do NOT start the shared pipeline here.
+    // The DAW calls setStateInformation() with saved parameters BEFORE prepareToPlay().
+    // We defer startWithConfig() to prepareToPlay() so we have the correct
+    // sample rate and buffer size when initializing LuxStral.
     
-    // Just update g_sp3ctra_config with APVTS values (no socket/buffer creation)
-    applyConfigurationToCore(false);  // false = don't call sp3ctraCore->initialize()
+    // Just update g_sp3ctra_config with current APVTS defaults (no socket/buffer creation)
+    applyConfigurationToCore(false);
     
     log_info("VST", "Sp3ctraAudioProcessor: Constructor complete (deferred init)");
-    log_info("VST", "  - Waiting for DAW state restoration or prepareToPlay()");
-    log_info("VST", "  - Parameters managed by APVTS (saved in DAW project)");
+    log_info("VST", "  - Shared core acquired (ref-count now %ld)",
+             sharedCore.use_count());
+    log_info("VST", "  - Pipeline start deferred to prepareToPlay()");
 }
 
 Sp3ctraAudioProcessor::~Sp3ctraAudioProcessor()
@@ -351,49 +355,34 @@ Sp3ctraAudioProcessor::~Sp3ctraAudioProcessor()
     log_info("VST", "=============================================================");
     log_info("VST", "Sp3ctraAudioProcessor: Destructor - Shutting down");
     log_info("VST", "=============================================================");
-    
-    // 🎵 CRITICAL: Stop audio processing thread FIRST (before UDP and LuxStral cleanup)
-    // This thread calls synth_AudioProcess() which accesses audio buffers
-    if (audioProcessingThread) {
-        log_info("VST", "Stopping AudioProcessingThread...");
-        audioProcessingThread->requestStop();
-        audioProcessingThread->stopThread(2000);  // 2 second timeout
-        audioProcessingThread.reset();
-        log_info("VST", "AudioProcessingThread stopped");
-    }
-    
-    // Stop UDP thread (blocks until thread exits)
-    if (udpThread) {
-        log_info("VST", "Stopping UDP thread...");
-        udpThread->requestStop();
-        udpThread->stopThread(2000);  // 2 second timeout
-        udpThread.reset();
-        log_info("VST", "UDP thread stopped");
-    }
-    
-    // Stop FrameSampler player thread (writes to AudioImageBuffers)
-    if (frameSampler) {
+
+    // ── FrameSampler FIRST (uses AudioImageBuffers / DoubleBuffer owned by sharedCore) ──
+    // Must stop before releasing sharedCore to avoid use-after-free.
+    if (frameSampler)
+    {
         log_info("VST", "Stopping FrameSampler player thread...");
         frameSampler->stopPlayerThread();
         frameSampler.reset();
+        log_info("VST", "FrameSampler stopped");
     }
 
-    // Cleanup LuxStral engine (AFTER both threads are stopped!)
-    if (luxstralInitialized) {
-        log_info("VST", "Cleaning up LuxStral engine...");
-        synth_luxstral_cleanup();
-        luxstralInitialized = false;
-        log_info("VST", "LuxStral cleanup complete");
+    // ── Release the shared core ──────────────────────────────────────────────
+    // Decrements the ref-count. If this is the last plugin instance in the DAW
+    // process (ref-count → 0), Sp3ctraSharedCore::~Sp3ctraSharedCore() fires and:
+    //   1. Stops AudioProcessingThread
+    //   2. Calls synth_luxstral_cleanup()
+    //   3. Stops UdpReceiverThread
+    //   4. Calls sp3ctraCore->shutdown() (frees buffers)
+    //
+    // If another instance is still alive (ref-count ≥ 1), the singleton keeps
+    // running — the other instance continues producing audio normally.
+    if (sharedCore)
+    {
+        log_info("VST", "Releasing shared core (remaining ref-count will be %ld)...",
+                 static_cast<long>(sharedCore.use_count()) - 1);
+        sharedCore.reset();
     }
-    
-    // Cleanup core (closes socket, frees buffers)
-    if (sp3ctraCore) {
-        log_info("VST", "Shutting down core...");
-        sp3ctraCore->shutdown();
-        sp3ctraCore.reset();
-        log_info("VST", "Core shutdown complete");
-    }
-    
+
     log_info("VST", "=============================================================");
     log_info("VST", "Sp3ctraAudioProcessor: Destructor complete");
     log_info("VST", "=============================================================");
@@ -468,269 +457,102 @@ void Sp3ctraAudioProcessor::changeProgramName (int index, const juce::String& ne
 void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     // 🛡️ PROTECTION: Suspend visualizer to prevent Metal/CoreGraphics race
-    // CRITICAL: Do NOT disable entire editor - it breaks Metal shader compilation!
-    if (auto* editor = dynamic_cast<Sp3ctraAudioProcessorEditor*>(getActiveEditor())) {
+    if (auto* editor = dynamic_cast<Sp3ctraAudioProcessorEditor*>(getActiveEditor()))
         editor->suspendVisualizer();
-    }
-    
+
     log_info("VST", "=============================================================");
     log_info("VST", "prepareToPlay - SR=%.1f Hz, BS=%d samples", sampleRate, samplesPerBlock);
-    
-    // 🔧 LAZY INIT: If Core not yet initialized (new plugin, no saved state),
-    // initialize now with default APVTS parameters
-    if (coreNeedsInit) {
-        log_info("VST", "First-time Core initialization (new plugin, no saved state)...");
-        
-        // Initialize Core with default parameters (creates buffers + UDP socket)
-        applyConfigurationToCore(true);  // true = full init
-        
-        // Start UDP receiver thread (socket already created by applyConfigurationToCore)
-        udpThread = std::make_unique<UdpReceiverThread>(sp3ctraCore.get());
-        udpThread->startThread();
-        
-        coreNeedsInit = false;
-        
-        log_info("VST", "Core initialized - UDP listening on %s:%d",
-            getUdpAddressString().toRawUTF8(),
-            (int)udpPortParam->load());
-    }
-    
-    // Update global config with audio parameters
+
+    // ── Update global audio parameters (needed by startWithConfig) ───────────
     extern sp3ctra_config_t g_sp3ctra_config;
-    
-    // Check if sample rate changed (important for Nyquist frequency clamp)
     int oldSampleRate = g_sp3ctra_config.sampling_frequency;
-    
-    // Set audio parameters
-    g_sp3ctra_config.sampling_frequency = (int)sampleRate;
-    g_sp3ctra_config.audio_buffer_size = samplesPerBlock;
-    
-    // ========================================================================
-    // 🔧 ADAPTIVE PERFORMANCE FIX: Detect sample rate / buffer size issues
-    // ========================================================================
-    // Calculate available time budget per buffer (in microseconds)
+    g_sp3ctra_config.sampling_frequency = static_cast<int>(sampleRate);
+    g_sp3ctra_config.audio_buffer_size   = samplesPerBlock;
+    g_sp3ctra_config.semitone_per_octave = 12;
+    g_sp3ctra_config.comma_per_semitone  = 36;
+
+    // ── Performance budget warning ───────────────────────────────────────────
     double bufferDurationUs = (samplesPerBlock / sampleRate) * 1000000.0;
-    
-    // Empirical threshold: synthesis takes ~2200µs per buffer with 8 workers
-    // This is safe at 48kHz (2667µs budget) but overloaded at 96kHz (1333µs budget)
     const double SYNTHESIS_TIME_ESTIMATE_US = 2200.0;
     double loadRatio = SYNTHESIS_TIME_ESTIMATE_US / bufferDurationUs;
-    
-    if (loadRatio > 1.0) {
-        log_warning("VST", "⚠️  PERFORMANCE WARNING: Sample rate too high for current buffer size!");
-        log_warning("VST", "    Sample Rate: %.0f Hz, Buffer Size: %d samples", sampleRate, samplesPerBlock);
-        log_warning("VST", "    Budget per buffer: %.0f µs, Estimated synthesis time: %.0f µs", 
-                    bufferDurationUs, SYNTHESIS_TIME_ESTIMATE_US);
-        log_warning("VST", "    Load ratio: %.1f%% (synthesis takes %.1fx available time)", 
-                    loadRatio * 100.0, loadRatio);
-        log_warning("VST", "");
-        log_warning("VST", "🔧 RECOMMENDED FIXES:");
-        log_warning("VST", "    1. Increase DAW buffer size to %.0f samples or more", 
-                    SYNTHESIS_TIME_ESTIMATE_US * sampleRate / 1000000.0);
-        log_warning("VST", "    2. Or reduce sample rate to 48 kHz");
-        log_warning("VST", "    3. Or reduce LuxStral worker threads from 8 to 4-6");
-        log_warning("VST", "");
-    } else {
-        log_info("VST", "✅ Performance headroom: %.0f µs budget, ~%.0f µs synthesis (%.1f%% load)", 
+    if (loadRatio > 1.0)
+    {
+        log_warning("VST", "⚠️  PERFORMANCE WARNING: SR too high for buffer size!");
+        log_warning("VST", "    SR=%.0f Hz, BS=%d, budget=%.0f µs, estimate=%.0f µs",
+                    sampleRate, samplesPerBlock, bufferDurationUs, SYNTHESIS_TIME_ESTIMATE_US);
+    }
+    else
+    {
+        log_info("VST", "✅ Headroom: %.0f µs budget, ~%.0f µs synthesis (%.1f%% load)",
                  bufferDurationUs, SYNTHESIS_TIME_ESTIMATE_US, loadRatio * 100.0);
     }
-    
-    // Initialize RT profiler for performance monitoring
-    rt_profiler_init(&g_vst_rt_profiler, (int)sampleRate, samplesPerBlock);
-    
-    // RT Profiler is ALWAYS enabled — summary printed at INFO level every 500 callbacks.
-    // This allows diagnosing crackling / producer-overload at any log level.
-    // Set log level to Debug for the verbose per-metric breakdown.
+
+    // ── RT Profiler ──────────────────────────────────────────────────────────
+    rt_profiler_init(&g_vst_rt_profiler, static_cast<int>(sampleRate), samplesPerBlock);
     rt_profiler_set_enabled(&g_vst_rt_profiler, 1);
-    log_info("VST", "RT Profiler active - reporting every %d frames (log_info summary always visible)",
-             RT_PROFILER_REPORT_INTERVAL_FRAMES);
-    
-    // Musical scale parameters (required for wave generation)
-    g_sp3ctra_config.semitone_per_octave = 12;  // Standard musical scale
-    g_sp3ctra_config.comma_per_semitone = 36;   // Default granularity
-    
-    // 🔧 CRITICAL: Recalculate frequencies with new sample rate (Nyquist clamp)
-    if (oldSampleRate != (int)sampleRate) {
-        log_info("VST", "Sample rate changed from %d to %d Hz - recalculating frequencies", 
-                 oldSampleRate, (int)sampleRate);
-        applyConfigurationToCore(false);  // Recalculate with new Nyquist limit
-    }
-    
-    // 🛑 Stop AudioProcessingThread cleanly.
-    // We MUST know whether it stopped before deciding to call synth_luxstral_cleanup().
-    // Calling cleanup while the thread is still running causes use-after-free (SIGSEGV).
-    bool audioThreadStoppedCleanly = true;  // assume no thread → clean by default
-    if (audioProcessingThread) {
-        log_info("VST", "Stopping AudioProcessingThread for buffer reallocation...");
-        audioProcessingThread->requestStop();
-        audioProcessingThread->stopThread(5000);  // 5 second timeout
+    log_info("VST", "RT Profiler active (interval=%d frames)", RT_PROFILER_REPORT_INTERVAL_FRAMES);
 
-        if (!audioProcessingThread->isThreadRunning()) {
-            audioProcessingThread.reset();
-            log_info("VST", "AudioProcessingThread stopped cleanly");
-            audioThreadStoppedCleanly = true;
-        } else {
-            // 🔧 CRITICAL: Do NOT call synth_luxstral_cleanup() if the thread is still
-            // running. Cleanup frees waves[] while the thread accesses it → SIGSEGV.
-            // Leak the thread object instead of risking a PAC failure on ARM64.
-            log_error("VST", "AudioProcessingThread did NOT exit within timeout!");
-            log_error("VST", "Leaking thread object to avoid use-after-free / PAC crash");
-            audioProcessingThread.release();
-            audioThreadStoppedCleanly = false;
-        }
+    // ── Recalculate Nyquist-clamped frequencies if SR changed ────────────────
+    if (oldSampleRate != static_cast<int>(sampleRate))
+    {
+        log_info("VST", "SR changed %d → %d Hz — recalculating frequencies",
+                 oldSampleRate, static_cast<int>(sampleRate));
+        applyConfigurationToCore(false);
     }
-    
-    // 🔧 CRITICAL: Reset consumer tracking state before restarting the thread.
-    // If lastConsumedReadIdx holds a stale value (e.g. 0) from the previous session,
-    // and the new thread writes to buffer[0] first, processBlock would see readIdx=0
-    // matching lastConsumedReadIdx=0 → "SAME DATA" branch → never signals consumed
-    // → producer spin-waits 85ms → 85ms silence gap at startup.
+
+    // ── Reset consumer tracking (prevent stale buffer re-output at startup) ──
     lastConsumedReadIdx = -1;
-    
-    // STATIC ALLOCATION: Buffers are pre-allocated for MAX_BUFFER_SIZE (4096)
-    // NO cleanup/reinit needed! Buffers already exist and are large enough
-    // This prevents crashes when DAW changes buffer size (256 → 512 → 1024, etc.)
-    
-    // Always (re)initialize audio buffers if buffer size changed
-    if (luxstral_init_audio_buffers(samplesPerBlock) != 0) {
-        log_error("VST", "Failed to initialize audio buffers");
-        return;
-    }
 
-    // ========================================================================
-    // 🔧 SIGBUS+SIGSEGV FIX: pixels_per_note change requires full runtime realloc.
-    //
-    // The waves[] array is sized at synth_IfftInit() time for:
-    //   num_notes = cis_pixels / pixels_per_note_AT_INIT
-    //
-    // If pixels_per_note changes between prepareToPlay() calls, two bugs occur:
-    //
-    //   BUG 1 — HIGHER SR (SIGSEGV / crash):
-    //     ppn increases (e.g. 2→4): waves[] shrinks (1728→864 entries).
-    //     Old pool workers have end_note=1728. synth_precompute_wave_data()
-    //     accesses waves[864..1727] → OUT OF BOUNDS → NULL start_ptr → SIGSEGV.
-    //
-    //   BUG 2 — LOWER SR (pitch appears to drop):
-    //     ppn decreases (e.g. 4→2): waves[] grows (864→1728 entries).
-    //     Old pool workers only cover notes 0..863. Notes 864..1727 are never
-    //     synthesized → only the lower half of the frequency range is output
-    //     → perceived pitch drop. Correct on restart because pool is rebuilt.
-    //
-    // Root cause: synth_pool_initialized stays 1 after synth_luxstral_cleanup(),
-    // so synth_IfftMode() reuses stale worker note ranges for the new waves[].
-    //
-    // Fix: call synth_shutdown_thread_pool() BEFORE synth_luxstral_cleanup() so
-    // synth_pool_initialized is reset to 0. synth_IfftMode() will then call
-    // synth_init_thread_pool() with the correct new note count on first cycle.
-    //
-    // Also call synth_runtime_free_buffers() to release the old waves[] and
-    // unitary_waveform[] allocations and prevent ~40 MB leaks per SR change.
-    // ========================================================================
-    // 🔧 SIGBUS+SIGSEGV guard: only cleanup if thread stopped cleanly.
-    // Calling synth_luxstral_cleanup() while the thread still runs → use-after-free.
-    if (audioThreadStoppedCleanly &&
-        luxstralInitialized &&
-        g_sp3ctra_config.pixels_per_note != lastInitPixelsPerNote) {
-        log_info("VST",
-            "pixels_per_note changed (%d → %d): shutting down pool + full LuxStral reinit",
-            lastInitPixelsPerNote, g_sp3ctra_config.pixels_per_note);
+    // ── Start the shared pipeline (idempotent: no-op if already running) ─────
+    if (coreNeedsInit)
+    {
+        log_info("VST", "Starting shared pipeline (first call or new plugin)...");
 
-        // STEP 1: Shut down worker pool FIRST (resets synth_pool_initialized = 0).
-        // Workers are still alive and blocking on g_worker_start_barrier.
-        // synth_shutdown_thread_pool() performs the barrier dance to unblock them,
-        // then joins all threads and frees their per-note buffers.
-        synth_shutdown_thread_pool();
+        // Ensure g_sp3ctra_config is fully populated before startWithConfig()
+        applyConfigurationToCore(false);
 
-        // STEP 2: Release old waves[] and unitary_waveform[] to prevent memory leaks.
-        // synth_IfftInit() will call synth_runtime_allocate_buffers() to rebuild them.
-        synth_runtime_free_buffers();
+        Sp3ctraCore::ActiveConfig udpCfg;
+        udpCfg.udpPort           = static_cast<int>(udpPortParam->load());
+        udpCfg.udpAddress        = getUdpAddressString().toStdString();
+        udpCfg.multicastInterface = "";
+        udpCfg.logLevel          = static_cast<int>(logLevelParam->load());
 
-        // STEP 3: Release the remaining LuxStral working buffers (additiveBuffer, etc.)
-        synth_luxstral_cleanup();
-        luxstralInitialized = false;
-    }
-
-    // Track whether synth_IfftInit() was called this cycle (waves[] freshly calloc'd)
-    bool synthJustInitialized = false;
-
-    // Initialize LuxStral on first call only
-    if (!luxstralInitialized) {
-        log_info("VST", "First-time initialization of LuxStral...");
-        
-        // Initialize callback synchronization system
-        luxstral_init_callback_sync();
-        
-        // Initialize LuxStral synthesis engine
-        int result = synth_IfftInit();
-        
-        if (result == 0) {
-            luxstralInitialized = true;
-            synthJustInitialized = true;  // waves[] calloc'd — start_ptrs = NULL until init_waves()
-            // Record ppn used — detect change on next prepareToPlay() to avoid SIGBUS
-            lastInitPixelsPerNote = g_sp3ctra_config.pixels_per_note;
-            log_info("VST", "LuxStral initialized successfully (pixels_per_note=%d, notes=%d)",
-                     lastInitPixelsPerNote, get_cis_pixels_nb() / lastInitPixelsPerNote);
-        } else {
-            log_error("VST", "LuxStral initialization FAILED");
+        if (!sharedCore->startWithConfig(udpCfg,
+                                          g_sp3ctra_config.pixels_per_note,
+                                          sampleRate, samplesPerBlock))
+        {
+            log_error("VST", "prepareToPlay — sharedCore->startWithConfig() FAILED");
+            if (auto* ed = dynamic_cast<Sp3ctraAudioProcessorEditor*>(getActiveEditor()))
+                ed->resumeVisualizer();
             return;
         }
-    } else {
-        log_info("VST", "LuxStral already initialized");
+
+        lastInitPixelsPerNote = g_sp3ctra_config.pixels_per_note;
+        coreNeedsInit = false;
+
+        log_info("VST", "Shared pipeline started — UDP on %s:%d",
+                 getUdpAddressString().toRawUTF8(),
+                 static_cast<int>(udpPortParam->load()));
+    }
+    else
+    {
+        // Second instance, or subsequent prepareToPlay on the same instance.
+        // The shared pipeline (UDP + synthesis thread) is already running.
+        // This instance simply reads from the same luxstral_buffers_L/R globals.
+        log_info("VST", "Shared pipeline already running — connecting as additional consumer");
     }
 
-    // ========================================================================
-    // 🔧 CRITICAL FIX (SIGSEGV A): Request wavetable reinit BEFORE startThread().
-    //
-    // synth_IfftInit() allocates waves[] via calloc → ALL start_ptr fields = NULL.
-    // init_waves() fills them in — it is called by check_and_process_frequency_reinit()
-    // inside synth_IfftMode(), which runs at the TOP of each synthesis cycle.
-    //
-    // Race condition (original code): if request_frequency_reinit() was called AFTER
-    // startThread(), the thread could call synth_precompute_wave_data() (which reads
-    // waves[].start_ptr) BEFORE check_and_process_frequency_reinit() processed the
-    // pending reinit → NULL dereference → SIGSEGV.
-    //
-    // Fix: set FREQ_REINIT_PENDING BEFORE startThread().  The thread's very first
-    // check_and_process_frequency_reinit() call will then always run init_waves()
-    // before synth_precompute_wave_data().
-    //
-    // This covers three cases that leave waves[].start_ptr == NULL:
-    //   1. First-ever init (first synth_IfftInit())
-    //   2. SR change (old SR → new SR baked into area_size)
-    //   3. ppn change → cleanup → synth_IfftInit() → new calloc'd waves[]
-    // ========================================================================
-    bool needsWavetableReinit = synthJustInitialized || (oldSampleRate != (int)sampleRate);
-
-    if (luxstralInitialized && needsWavetableReinit) {
-        if (oldSampleRate != (int)sampleRate) {
-            log_info("VST", "🎵 Queuing wavetable reinit BEFORE thread start (SR %d→%d Hz)",
-                     oldSampleRate, (int)sampleRate);
-        } else {
-            log_info("VST", "🎵 Queuing wavetable reinit BEFORE thread start (fresh synth_IfftInit)");
-        }
-        // Reset stale state first (thread was stopped — safe to force IDLE)
-        reset_frequency_reinit_state();
-        request_frequency_reinit();   // sets PENDING before thread starts
+    // ── FrameSampler player thread (per-instance, non-RT) ────────────────────
+    if (frameSampler && sharedCore && sharedCore->getCore())
+    {
+        frameSampler->startPlayerThread(sharedCore->getCore()->getAudioImageBuffers(),
+                                        sharedCore->getCore()->getDoubleBuffer());
     }
 
-    // ── Start thread AFTER reinit is queued ───────────────────────────────
-    log_info("VST", "Starting AudioProcessingThread with RT priority...");
-    audioProcessingThread = std::make_unique<AudioProcessingThread>(sp3ctraCore.get());
-    audioProcessingThread->startThread(juce::Thread::Priority::highest);
-    log_info("VST", "AudioProcessingThread started - wavetable reinit will run on first cycle");
-
-    // Start FrameSampler player thread (Non-RT, injects recorded frames to
-    // AudioImageBuffers AND updates db->preprocessed_data for synth_AudioProcess)
-    if (frameSampler)
-        frameSampler->startPlayerThread(sp3ctraCore->getAudioImageBuffers(),
-                                        sp3ctraCore->getDoubleBuffer());
-    
     log_info("VST", "=============================================================");
-    
-    // 🛡️ PROTECTION: Resume visualizer now that reconfiguration is complete
-    if (auto* editor = dynamic_cast<Sp3ctraAudioProcessorEditor*>(getActiveEditor())) {
+
+    if (auto* editor = dynamic_cast<Sp3ctraAudioProcessorEditor*>(getActiveEditor()))
         editor->resumeVisualizer();
-    }
 }
 
 void Sp3ctraAudioProcessor::releaseResources()
@@ -800,7 +622,7 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // Only signal "consumed" ONCE per new buffer (avoids double-triggering).
     // DO NOT set ready=0 in the consumer — let the producer manage ready flags.
     // ========================================================================
-    if (luxstralInitialized && sp3ctraCore && luxstral_are_audio_buffers_ready()) {
+    if (sharedCore && sharedCore->isReady() && luxstral_are_audio_buffers_ready()) {
         extern AudioImageBuffer luxstral_buffers_L[2];
         extern AudioImageBuffer luxstral_buffers_R[2];
         extern volatile int luxstral_buffer_index;
@@ -912,51 +734,25 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
             apvts.replaceState(juce::ValueTree::fromXml(*xmlState));
             log_info("VST", "State restored from DAW project");
             
-            // 🔧 LAZY INIT: First-time initialization with restored parameters
-            if (coreNeedsInit) {
-                log_info("VST", "First-time Core initialization with restored settings...");
-                
-                // Initialize Core with restored parameters (creates buffers + UDP socket)
-                applyConfigurationToCore(true);  // true = full init
-                
-                // Start UDP receiver thread
-                udpThread = std::make_unique<UdpReceiverThread>(sp3ctraCore.get());
-                udpThread->startThread();
-                
-                coreNeedsInit = false;
-                
-                log_info("VST", "Core initialized - UDP listening on %s:%d",
-                    getUdpAddressString().toRawUTF8(),
-                    (int)udpPortParam->load());
-            } else {
-                // Already initialized - just restart UDP if config changed
-                if (udpThread) {
-                    log_info("VST", "Restarting UDP with restored settings...");
-                    udpThread->requestStop();
-                    udpThread->stopThread(2000);
-                    udpThread.reset();
-                }
-                
-                // Update config (no buffer reinit needed)
-                applyConfigurationToCore(false);
-                
-                // 🔧 FIX: Restart UDP socket with restored config (buffers untouched)
-                if (!sp3ctraCore->restartUdp(
-                        (int)udpPortParam->load(),
-                        getUdpAddressString().toStdString(),
-                        ""  // multicast interface - auto-detect
-                    )) {
+            // On state restore, just update g_sp3ctra_config.
+            // The actual pipeline start (if needed) happens in prepareToPlay().
+            applyConfigurationToCore(false);
+
+            if (!coreNeedsInit && sharedCore && sharedCore->isReady())
+            {
+                // Pipeline already running: hot-reload UDP with restored config.
+                log_info("VST", "Restarting UDP with restored settings...");
+                if (!sharedCore->restartUdp(
+                        static_cast<int>(udpPortParam->load()),
+                        getUdpAddressString().toStdString(), ""))
+                {
                     log_error("VST", "Failed to restart UDP with restored config!");
                 }
-                
-                // Restart UDP thread AFTER socket is created
-                udpThread = std::make_unique<UdpReceiverThread>(sp3ctraCore.get());
-                udpThread->startThread();
-                
-                log_info("VST", "UDP restarted with %s:%d",
-                    getUdpAddressString().toRawUTF8(),
-                    (int)udpPortParam->load());
+                log_info("VST", "UDP restarted → %s:%d",
+                         getUdpAddressString().toRawUTF8(),
+                         static_cast<int>(udpPortParam->load()));
             }
+            // else: coreNeedsInit == true → prepareToPlay() will call startWithConfig()
         }
     }
 }
@@ -1067,44 +863,24 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
             return;  // Don't restart now, wait for batch completion
         }
         
-        log_info("VST", "UDP parameter changed - restarting socket...");
-        
-        // 🔧 CRITICAL FIX: requestStop() FIRST, then close socket to unblock recvfrom()
-        if (udpThread) {
-            udpThread->requestStop();  // Sets ctx->running = 0
-        }
+        log_info("VST", "UDP parameter changed — restarting shared socket...");
+        applyConfigurationToCore(false);  // update g_sp3ctra_config first
 
-        // Close socket completely (not just shutdown) to force recvfrom() exit
-        if (sp3ctraCore) {
-            sp3ctraCore->closeUdpSocket();
+        if (sharedCore && sharedCore->isReady())
+        {
+            if (!sharedCore->restartUdp(
+                    static_cast<int>(udpPortParam->load()),
+                    getUdpAddressString().toStdString(), ""))
+            {
+                log_error("VST", "Failed to restart UDP with new config!");
+            }
+            else
+            {
+                log_info("VST", "UDP restarted → %s:%d",
+                         getUdpAddressString().toRawUTF8(),
+                         static_cast<int>(udpPortParam->load()));
+            }
         }
-
-        // Wait for thread to exit
-        if (udpThread) {
-            udpThread->stopThread(1500);
-            udpThread.reset();
-        }
-        
-        // Update g_sp3ctra_config with new UDP parameters
-        applyConfigurationToCore(false);
-        
-        // 🔧 FIX: Restart UDP socket with new config (buffers untouched)
-        // This closes the old socket and creates a new one with updated port/address
-        if (!sp3ctraCore->restartUdp(
-                (int)udpPortParam->load(),
-                getUdpAddressString().toStdString(),
-                ""  // multicast interface - auto-detect
-            )) {
-            log_error("VST", "Failed to restart UDP with new config!");
-        }
-        
-        // Restart UDP thread AFTER socket is created
-        udpThread = std::make_unique<UdpReceiverThread>(sp3ctraCore.get());
-        udpThread->startThread();
-        
-        log_info("VST", "UDP restarted with %s:%d (buffers untouched)",
-            getUdpAddressString().toRawUTF8(),
-            (int)udpPortParam->load());
     } else {
         // For other non-UDP, non-LuxStral parameters (sensor DPI, log level, visualizer mode)
         applyConfigurationToCore(false);  // needsSocketRestart = false
@@ -1258,28 +1034,11 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     // Update logger level immediately
     logger_init((log_level_t)logLevel);
     
-    // 🔧 CRITICAL: Only initialize Sp3ctraCore if socket restart is needed
-    // This prevents destroying buffers while UDP thread is using them!
-    if (needsSocketRestart && sp3ctraCore) {
-        // Create ActiveConfig for Sp3ctraCore
-        Sp3ctraCore::ActiveConfig config;
-        config.udpPort = udpPort;
-        config.udpAddress = udpAddress.toStdString();
-        config.multicastInterface = "";  // Auto-detect
-        config.logLevel = logLevel;
-        
-        // Apply to core (this will restart UDP socket and reinit buffers)
-        if (!sp3ctraCore->initialize(config)) {
-            log_warning("VST", "Failed to apply configuration");
-        } else {
-            log_info("VST", "Configuration applied (full init) - %s:%d, %d DPI, log level %d",
-                udpAddress.toRawUTF8(), udpPort, sensorDpi, logLevel);
-        }
-    } else {
-        // Just update config - NO buffer reinit
-        log_debug("VST", "Config updated (no buffer reinit) - %d DPI, log level %d",
-            sensorDpi, logLevel);
-    }
+    // In the shared-core design, the needsSocketRestart path is handled by
+    // sharedCore->startWithConfig() (first time) or sharedCore->restartUdp()
+    // (hot-reload). applyConfigurationToCore() is now a pure config updater.
+    juce::ignoreUnused(needsSocketRestart);
+    log_debug("VST", "Config updated — %d DPI, log level %d", sensorDpi, logLevel);
 }
 
 //==============================================================================
@@ -1294,45 +1053,23 @@ void Sp3ctraAudioProcessor::beginUdpBatchUpdate()
 void Sp3ctraAudioProcessor::endUdpBatchUpdate()
 {
     udpBatchUpdateActive.store(false);
-    
-    // 🔧 DEBUG: Always force restart to expose the bug
-    // (Skip comparison - always restart even if config unchanged)
-    int newPort = (int)udpPortParam->load();
+
+    int newPort = static_cast<int>(udpPortParam->load());
     juce::String newAddress = getUdpAddressString();
-    
-    log_info("VST", "UDP batch update - FORCING restart to %s:%d",
-        newAddress.toRawUTF8(), newPort);
-    
-    // 🔧 CRITICAL FIX: Set ctx->running=0 FIRST, then close socket
-    if (udpThread) {
-        udpThread->requestStop();  // Sets ctx->running = 0
+
+    log_info("VST", "UDP batch update — restarting shared socket → %s:%d",
+             newAddress.toRawUTF8(), newPort);
+
+    applyConfigurationToCore(false);  // update g_sp3ctra_config
+
+    if (sharedCore && sharedCore->isReady())
+    {
+        if (!sharedCore->restartUdp(newPort, newAddress.toStdString(), ""))
+            log_error("VST", "Failed to restart UDP after batch update!");
+        else
+            log_info("VST", "UDP restarted → %s:%d", newAddress.toRawUTF8(), newPort);
     }
 
-    // Close socket completely (not just shutdown) to force recvfrom() exit
-    if (sp3ctraCore) {
-        sp3ctraCore->closeUdpSocket();
-    }
-
-    // Wait for thread to exit
-    if (udpThread) {
-        udpThread->stopThread(1500);
-        udpThread.reset();
-    }
-    
-    // Update g_sp3ctra_config with current UDP parameters
-    applyConfigurationToCore(false);
-    
-    // Restart UDP socket with new config (buffers untouched)
-    if (!sp3ctraCore->restartUdp(newPort, newAddress.toStdString(), "")) {
-        log_error("VST", "Failed to restart UDP after batch update!");
-    }
-    
-    // Restart UDP thread AFTER socket is created
-    udpThread = std::make_unique<UdpReceiverThread>(sp3ctraCore.get());
-    udpThread->startThread();
-    
-    log_info("VST", "UDP restarted with %s:%d (FORCED)", newAddress.toRawUTF8(), newPort);
-    
     udpNeedsRestart.store(false);
 }
 

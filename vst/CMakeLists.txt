@@ -39,6 +39,8 @@ target_sources(Sp3ctraVST
         source/CisVisualizerComponent.h
         source/Sp3ctraCore.cpp
         source/Sp3ctraCore.h
+        source/Sp3ctraSharedCore.cpp
+        source/Sp3ctraSharedCore.h
         source/Sp3ctraConstants.h
         source/UdpReceiverThread.h
         source/global_stubs.c
