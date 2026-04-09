@@ -4,6 +4,7 @@
 #include "Sp3ctraSharedCore.h"  // Process-wide singleton (UDP + image pipeline + LuxStral)
 #include "Sp3ctraConstants.h"
 #include "framesampler/FrameSampler.h"
+#include "framesequencer/FrameSequencer.h"
 
 // C headers for RT profiling
 extern "C" {
@@ -73,7 +74,8 @@ public:
     {
         return sharedCore ? sharedCore->getCore() : nullptr;
     }
-    FrameSampler* getFrameSampler() { return frameSampler.get(); }
+    FrameSampler*    getFrameSampler()    { return frameSampler.get();    }
+    FrameSequencer*  getFrameSequencer()  { return frameSequencer.get();  }
     
     // Helper to build UDP address string from 4 bytes
     juce::String getUdpAddressString() const;
@@ -116,7 +118,8 @@ private:
     // The shared_ptr keeps the singleton alive as long as this instance exists.
     // The last instance to be destroyed will tear down UDP + synthesis threads.
     std::shared_ptr<Sp3ctraSharedCore> sharedCore;
-    std::unique_ptr<FrameSampler> frameSampler;
+    std::unique_ptr<FrameSampler>   frameSampler;
+    std::unique_ptr<FrameSequencer> frameSequencer;
     
     // ✨ VST Parameters via AudioProcessorValueTreeState
     juce::AudioProcessorValueTreeState apvts;
@@ -137,6 +140,14 @@ private:
     static constexpr const char* PARAM_FS_MIDI_CH      = "frameSamplerMidiChannel";
     static constexpr const char* PARAM_FS_OCT_OFFSET   = "frameSamplerOctaveOffset";
     static constexpr const char* PARAM_FS_MAX_DUR      = "frameSamplerMaxDuration";
+
+    // FrameSequencer parameter IDs
+    static constexpr const char* PARAM_SEQ_ENABLED  = "seqEnabled";
+    static constexpr const char* PARAM_SEQ_BPM      = "seqBpm";
+    static constexpr const char* PARAM_SEQ_NSTEPS   = "seqNumSteps";
+    static constexpr const char* PARAM_SEQ_LOOP     = "seqLoop";
+    static constexpr const char* PARAM_SEQ_DAW_SYNC = "seqDawSync";
+    static constexpr const char* PARAM_SEQ_BPS      = "seqBeatsPerStep";
     
     // Quick access to parameters (cached, no atomic overhead)
     std::atomic<float>* udpPortParam = nullptr;

@@ -130,6 +130,99 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         addAndMakeVisible(fsBankBtns[i]);
     }
 
+    // ── Sequencer — Enable toggle ─────────────────────────────────────────────
+    seqEnabledToggle.setButtonText("Active");
+    addAndMakeVisible(seqEnabledToggle);
+    seqEnabledAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "seqEnabled", seqEnabledToggle);
+
+    // ── Sequencer — Play / Stop buttons ──────────────────────────────────────
+    seqPlayBtn.onClick = [this]
+    {
+        if (auto* seq = audioProcessor.getFrameSequencer())
+            seq->uiPlay();
+    };
+    addAndMakeVisible(seqPlayBtn);
+
+    seqStopBtn.onClick = [this]
+    {
+        if (auto* seq = audioProcessor.getFrameSequencer())
+            seq->uiStop();
+    };
+    addAndMakeVisible(seqStopBtn);
+
+    // ── Sequencer — BPM slider ────────────────────────────────────────────────
+    seqBpmSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    seqBpmSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 56, 20);
+    seqBpmSlider.setTextValueSuffix(" BPM");
+    addAndMakeVisible(seqBpmSlider);
+    seqBpmAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "seqBpm", seqBpmSlider);
+
+    seqBpmLabel.setText("BPM", juce::dontSendNotification);
+    seqBpmLabel.setFont(juce::FontOptions(11.0f));
+    addAndMakeVisible(seqBpmLabel);
+
+    // ── Sequencer — Steps combo ───────────────────────────────────────────────
+    seqStepsCombo.addItemList({"4", "8", "12", "16", "24", "32"}, 1);
+    // Sync initial selection from APVTS
+    {
+        const int cur = static_cast<int>(apvts.getRawParameterValue("seqNumSteps")->load());
+        const int choices[] = { 4, 8, 12, 16, 24, 32 };
+        int selected = 4; // default item ID
+        for (int k = 0; k < 6; ++k)
+            if (choices[k] == cur) { selected = k + 1; break; }
+        seqStepsCombo.setSelectedId(selected, juce::dontSendNotification);
+    }
+    seqStepsCombo.onChange = [this]
+    {
+        const int choices[] = { 4, 8, 12, 16, 24, 32 };
+        const int id = seqStepsCombo.getSelectedId();
+        if (id >= 1 && id <= 6)
+        {
+            const int nSteps = choices[id - 1];
+            auto& apvts2 = audioProcessor.getAPVTS();
+            if (auto* param = apvts2.getParameter("seqNumSteps"))
+                param->setValueNotifyingHost(
+                    param->convertTo0to1(static_cast<float>(nSteps)));
+            if (auto* seq = audioProcessor.getFrameSequencer())
+                seq->setNumSteps(nSteps);
+        }
+    };
+    seqStepsLabel.setText("Steps", juce::dontSendNotification);
+    seqStepsLabel.setFont(juce::FontOptions(11.0f));
+    addAndMakeVisible(seqStepsCombo);
+    addAndMakeVisible(seqStepsLabel);
+
+    // ── Sequencer — Loop toggle ───────────────────────────────────────────────
+    seqLoopToggle.setButtonText("Loop");
+    addAndMakeVisible(seqLoopToggle);
+    seqLoopAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "seqLoop", seqLoopToggle);
+
+    // ── Sequencer — DAW sync toggle ───────────────────────────────────────────
+    seqDawSyncToggle.setButtonText("DAW");
+    addAndMakeVisible(seqDawSyncToggle);
+    seqDawSyncAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "seqDawSync", seqDawSyncToggle);
+
+    // ── Sequencer — Step grid (32 cells) ─────────────────────────────────────
+    for (int i = 0; i < FrameSequencer::MAX_STEPS; ++i)
+    {
+        seqStepBtns[i].setButtonText("\xe2\x80\x94");  // em-dash = empty
+        seqStepBtns[i].onClick = [this, i]
+        {
+            if (auto* seq = audioProcessor.getFrameSequencer())
+            {
+                const int cur  = seq->getStep(i);
+                const int next = (cur < 0) ? 0 : (cur + 1) % FrameSamplerConstants::NUM_SLOTS;
+                // After bank 11 (0-indexed), wrap to empty (-1)
+                seq->setStep(i, (cur >= FrameSamplerConstants::NUM_SLOTS - 1) ? -1 : next);
+            }
+        };
+        addAndMakeVisible(seqStepBtns[i]);
+    }
+
     // ── Footer ───────────────────────────────────────────────────────────────
     settingsButton.setButtonText("Settings...");
     settingsButton.onClick = [this] { openSettings(); };
@@ -142,9 +235,8 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     // 200 ms refresh: fast enough to animate the RECORDING blink (~2.5 Hz)
     startTimer(200);
 
-    // Height: header(52) + vis(64+18) + controls(9×31=279) + FS section(24+4+96) + footer(38) + margins
-    // fsSectionY=451, fsBtnsY=479, footerY=585, window=628
-    setSize(740, 628);
+    // Height: seqGridY=643, footerY=717, window=760
+    setSize(740, 760);
 }
 
 Sp3ctraAudioProcessorEditor::~Sp3ctraAudioProcessorEditor()
@@ -269,6 +361,21 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
                    juce::Justification::centredRight, true);
     }
 
+    // ── Sequencer section badge ───────────────────────────────────────────────
+    {
+        const juce::Rectangle<int> sh(kHPad, seqSectionY(),
+                                       getWidth() - 2 * kHPad, kSeqSectH);
+        g.setColour(juce::Colour(0xff1a2a1a));
+        g.fillRoundedRectangle(sh.toFloat(), 3.0f);
+        g.setColour(juce::Colour(0xff66cc88));
+        g.setFont(juce::Font(juce::FontOptions(12.0f)).boldened());
+        g.drawText("STEP SEQUENCER", sh.reduced(6, 0), juce::Justification::centredLeft, true);
+        g.setFont(juce::FontOptions(10.0f));
+        g.setColour(juce::Colour(0xff447755));
+        g.drawText("click cell = cycle bank | empty = passthrough",
+                   sh.reduced(6, 0), juce::Justification::centredRight, true);
+    }
+
     // ── Separator above footer ────────────────────────────────────────────────
     g.setColour(juce::Colour(0xff3a3a3a));
     g.fillRect(0, footerY() - 6, getWidth(), 1);
@@ -336,6 +443,56 @@ void Sp3ctraAudioProcessorEditor::resized()
             const int bx  = kHPad + col * (bw + gapBetween);
             const int ry  = by + row * (kFS_BTN_H + kFS_BTN_GAP);
             fsBankBtns[i].setBounds(bx, ry, bw, kFS_BTN_H);
+        }
+    }
+
+    // ── Sequencer — Enable toggle (right of badge) ────────────────────────────
+    {
+        const int sy     = seqSectionY();
+        const int toggleW = 72;
+        seqEnabledToggle.setBounds(getWidth() - kHPad - toggleW, sy + 2, toggleW, kSeqSectH - 4);
+    }
+
+    // ── Sequencer — Transport row ─────────────────────────────────────────────
+    {
+        const int ty      = seqTransY();
+        const int totalW  = getWidth() - 2 * kHPad;
+        int       cx      = kHPad;
+        const int btnW    = 32;
+        const int gap     = 4;
+        const int bpmLW   = 30;  // "BPM" label width
+        const int bpmSlW  = 150; // BPM slider width
+        const int stpLW   = 38;  // "Steps" label width
+        const int stpCW   = 56;  // steps combo width
+        const int togW    = 54;  // toggle width (loop/daw)
+
+        seqPlayBtn  .setBounds(cx, ty, btnW, kSeqTransH);     cx += btnW + gap;
+        seqStopBtn  .setBounds(cx, ty, btnW, kSeqTransH);     cx += btnW + gap * 3;
+        seqBpmLabel .setBounds(cx, ty, bpmLW, kSeqTransH);    cx += bpmLW + 2;
+        seqBpmSlider.setBounds(cx, ty, bpmSlW, kSeqTransH);   cx += bpmSlW + gap * 3;
+        seqStepsLabel.setBounds(cx, ty, stpLW, kSeqTransH);   cx += stpLW + 2;
+        seqStepsCombo.setBounds(cx, ty, stpCW, kSeqTransH);   cx += stpCW + gap * 3;
+        seqLoopToggle.setBounds(cx, ty, togW, kSeqTransH);    cx += togW + gap;
+        seqDawSyncToggle.setBounds(cx, ty, togW, kSeqTransH);
+
+        juce::ignoreUnused(totalW);
+    }
+
+    // ── Sequencer — Step grid (2 rows × 16 cells) ─────────────────────────────
+    {
+        const int totalW   = getWidth() - 2 * kHPad;
+        const int cols     = 16;
+        const int cellGap  = 2;
+        const int cellW    = (totalW - (cols - 1) * cellGap) / cols;
+        const int gy       = seqGridY();
+
+        for (int i = 0; i < FrameSequencer::MAX_STEPS; ++i)
+        {
+            const int col = i % cols;
+            const int row = i / cols;
+            const int cx2 = kHPad + col * (cellW + cellGap);
+            const int cy2 = gy   + row * (kSeqCellH + kSeqCellGap);
+            seqStepBtns[i].setBounds(cx2, cy2, cellW, kSeqCellH);
         }
     }
 
@@ -438,6 +595,62 @@ void Sp3ctraAudioProcessorEditor::timerCallback()
             fsBankBtns[i].setColour(juce::TextButton::textColourOnId,   textColour);
             // Allow clicking even when disabled to show clear intent; guard in uiToggleRecord
             fsBankBtns[i].setEnabled(true);
+        }
+    }
+
+    // ── Sequencer step cells — refresh bank label + active highlight ──────────
+    if (auto* seq = audioProcessor.getFrameSequencer())
+    {
+        const bool seqActive  = seq->isEnabled();
+        const int  curStep    = seq->getCurrentStep();
+        const int  nSteps     = seq->getNumSteps();
+
+        for (int i = 0; i < FrameSequencer::MAX_STEPS; ++i)
+        {
+            const bool beyondActive = (i >= nSteps);
+            const int  bankIdx      = seq->getStep(i);
+            const bool isCurrent    = (i == curStep);
+
+            juce::String cellText;
+            juce::Colour bgCol;
+            juce::Colour textCol;
+
+            if (beyondActive)
+            {
+                // Greyed out — outside active step count
+                cellText = "\xe2\x80\x94";
+                bgCol    = juce::Colour(0xff1a1a1a);
+                textCol  = juce::Colour(0xff303030);
+            }
+            else if (bankIdx < 0)
+            {
+                // Empty (passthrough)
+                cellText = "\xe2\x80\x94";
+                bgCol    = isCurrent ? juce::Colour(0xff2a4a2a)
+                                     : juce::Colour(0xff2a2a2a);
+                textCol  = isCurrent ? juce::Colour(0xff88ffaa)
+                                     : juce::Colour(0xff555555);
+            }
+            else
+            {
+                // Assigned to bank N
+                cellText = juce::String(bankIdx + 1);
+                bgCol    = isCurrent ? juce::Colour(0xff1a6a1a)
+                                     : juce::Colour(0xff1e3028);
+                textCol  = isCurrent ? juce::Colours::white
+                                     : juce::Colour(0xff66cc88);
+            }
+
+            if (!seqActive)
+            {
+                bgCol   = bgCol  .withAlpha(0.35f);
+                textCol = textCol.withAlpha(0.35f);
+            }
+
+            seqStepBtns[i].setButtonText(cellText);
+            seqStepBtns[i].setColour(juce::TextButton::buttonColourId,  bgCol);
+            seqStepBtns[i].setColour(juce::TextButton::textColourOffId, textCol);
+            seqStepBtns[i].setEnabled(!beyondActive);
         }
     }
 }

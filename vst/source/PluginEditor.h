@@ -6,6 +6,7 @@
 #include "SettingsWindow.h"
 #include "CisVisualizerComponent.h"
 #include "framesampler/FrameSampler.h"
+#include "framesequencer/FrameSequencer.h"
 
 //==============================================================================
 /**
@@ -64,6 +65,13 @@ private:
     static constexpr int kFS_GAP_TOP  = 10;  // gap from last control row to FS badge
     static constexpr int kFS_SECT_H   = 24;  // FS section badge height
 
+    // ── Sequencer section (below bank buttons) ─────────────────────────────
+    static constexpr int kSeqGapTop  = 10;  // gap between bank buttons and seq badge
+    static constexpr int kSeqSectH   = 22;  // sequencer section badge height
+    static constexpr int kSeqTransH  = 28;  // transport row height
+    static constexpr int kSeqCellH   = 30;  // step cell height
+    static constexpr int kSeqCellGap = 2;   // gap between step cells
+
     // Column geometry helpers (depend on runtime window width)
     int  colWidth()    const noexcept { return (getWidth() - 2 * kHPad - kColGap) / 2; }
     int  colLX()       const noexcept { return kHPad; }
@@ -71,7 +79,11 @@ private:
     int  rowsStartY()  const noexcept { return kContentY + kSectionH + kSectionGap; }
     int  fsSectionY()  const noexcept { return rowsStartY() + kLS_ROWS * kRowStep + kFS_GAP_TOP; }
     int  fsBtnsY()     const noexcept { return fsSectionY() + kFS_SECT_H + kSectionGap; }
-    int  footerY()     const noexcept { return fsBtnsY() + kFS_BTN_ROWS * (kFS_BTN_H + kFS_BTN_GAP) + 10; }
+    int  fsBankEnd()   const noexcept { return fsBtnsY() + kFS_BTN_ROWS * (kFS_BTN_H + kFS_BTN_GAP); }
+    int  seqSectionY() const noexcept { return fsBankEnd() + kSeqGapTop; }
+    int  seqTransY()   const noexcept { return seqSectionY() + kSeqSectH + kSectionGap; }
+    int  seqGridY()    const noexcept { return seqTransY() + kSeqTransH + 4; }
+    int  footerY()     const noexcept { return seqGridY() + 2 * (kSeqCellH + kSeqCellGap) + 10; }
 
     void timerCallback() override;
     void openSettings();
@@ -142,6 +154,24 @@ private:
 
     // Blink flag for RECORDING indicator (flips each 200 ms timer tick)
     bool fsBlinkOn = false;
+
+    // ── Sequencer — transport controls ───────────────────────────────────────
+    juce::TextButton   seqPlayBtn     { "\xe2\x96\xba" };   // ► (UTF-8 U+25BA)
+    juce::TextButton   seqStopBtn     { "\xe2\x96\xa0" };   // ■ (UTF-8 U+25A0)
+    juce::ToggleButton seqEnabledToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> seqEnabledAttachment;
+    juce::Slider       seqBpmSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> seqBpmAttachment;
+    juce::ComboBox     seqStepsCombo;
+    juce::Label        seqBpmLabel;
+    juce::Label        seqStepsLabel;
+    juce::ToggleButton seqLoopToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> seqLoopAttachment;
+    juce::ToggleButton seqDawSyncToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> seqDawSyncAttachment;
+
+    // ── Sequencer — step grid (32 cells) ─────────────────────────────────────
+    juce::TextButton seqStepBtns[FrameSequencer::MAX_STEPS];
 
     // ── Footer ───────────────────────────────────────────────────────────────
     juce::TextButton settingsButton;
