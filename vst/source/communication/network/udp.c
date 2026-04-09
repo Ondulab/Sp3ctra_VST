@@ -74,30 +74,38 @@ int udp_Init(struct sockaddr_in *si_other, struct sockaddr_in *si_me) {
 
   log_info("UDP", "Creating UDP socket for %s:%d", udp_address, udp_port);
 
-  // Enable socket address reuse to prevent "Address already in use" errors
+  // ── SO_REUSEADDR: allow rapid socket restart without EADDRINUSE on TIME_WAIT ──
   int reuse = 1;
   if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) == -1) {
     log_warning("UDP", "Failed to set SO_REUSEADDR: %s", strerror(errno));
-    // Continue anyway, this is not critical
   }
 
-  // 🔧 CRITICAL FIX: SO_REUSEPORT DISABLED
-  // SO_REUSEPORT causes packets to be lost after socket restart because the kernel
-  // keeps routing packets to the old (closed) socket for an indeterminate time.
-  // SO_REUSEADDR alone is sufficient to prevent "Address already in use" errors
-  // and allows clean socket restart without packet loss.
+  // ── SO_REUSEPORT: required for multi-process UDP fanout ──────────────────
   //
-  // NOTE: This means only ONE process can listen on port 55151 at a time.
-  // If you need multiple processes, use different ports or multicast with IGMP.
-#ifdef SO_REUSEPORT_DISABLED_DUE_TO_RESTART_BUG
+  // MULTICAST mode (default: 239.x.x.x):
+  //   Each process that calls bind() + IP_ADD_MEMBERSHIP gets its own copy of
+  //   every incoming multicast packet → correct multi-instance behaviour.
+  //   SO_REUSEPORT is required on macOS so that the second bind() does not
+  //   fail with EADDRINUSE.
+  //
+  // UNICAST mode:
+  //   SO_REUSEPORT activates kernel-level load-balancing (one packet →
+  //   one socket in round-robin). This is NOT appropriate for multi-instance
+  //   audio (each instance would only receive ~50 % of frames). In unicast
+  //   mode, use different ports per instance.
+  //
+  // Restart-packet-loss note (why it was previously disabled):
+  //   When a socket is closed and a new one is immediately opened on the same
+  //   port, the kernel may briefly continue routing a few packets to the
+  //   closed file descriptor. The 100 ms recvfrom() timeout means at most one
+  //   partially-missed poll cycle → negligible for audio synthesis.
+  //   This trade-off is acceptable given the multi-process requirement.
   if (setsockopt(s, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse)) == -1) {
     log_warning("UDP", "Failed to set SO_REUSEPORT: %s", strerror(errno));
+    log_warning("UDP", "Multiple standalone instances on the same port may not work");
   } else {
-    log_info("UDP", "SO_REUSEPORT enabled");
+    log_info("UDP", "SO_REUSEPORT enabled (multi-process fanout for multicast)");
   }
-#else
-  log_info("UDP", "SO_REUSEPORT disabled (prevents packet loss on restart)");
-#endif
 
   // Set socket timeout so recvfrom() can be interrupted for clean shutdown
   struct timeval timeout;
