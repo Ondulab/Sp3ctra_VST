@@ -155,9 +155,12 @@ private:
     // Blink flag for RECORDING indicator (flips each 200 ms timer tick)
     bool fsBlinkOn = false;
 
+    // ── FS — double-click tracking (clear bank on dbl-click) ─────────────────
+    juce::Time fsBankLastClickTime[FrameSamplerConstants::NUM_SLOTS];
+
     // ── Sequencer — transport controls ───────────────────────────────────────
-    juce::TextButton   seqPlayBtn     { "\xe2\x96\xba" };   // ► (UTF-8 U+25BA)
-    juce::TextButton   seqStopBtn     { "\xe2\x96\xa0" };   // ■ (UTF-8 U+25A0)
+    juce::TextButton   seqPlayBtn     { ">" };   // play
+    juce::TextButton   seqStopBtn     { "[ ]" }; // stop
     juce::ToggleButton seqEnabledToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> seqEnabledAttachment;
     juce::Slider       seqBpmSlider;

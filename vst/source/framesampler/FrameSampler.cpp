@@ -379,6 +379,75 @@ void FrameSampler::uiToggleRecord(int slotIndex) noexcept
 }
 
 // ============================================================================
+// Non-RT: UI-triggered play / clear
+// ============================================================================
+
+void FrameSampler::uiPlaySlot(int slotIndex) noexcept
+{
+    if (slotIndex < 0 || slotIndex >= FrameSamplerConstants::NUM_SLOTS) return;
+
+    const auto st = static_cast<SlotState>(
+        atomicState.slotState[slotIndex].load(std::memory_order_relaxed));
+
+    if (st == SlotState::PLAYING)
+    {
+        // Stop playback → restore passthrough
+        atomicState.stopPlayCmd.store(true, std::memory_order_release);
+        atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::IDLE),
+                                                std::memory_order_release);
+        atomicState.activePlaySlot.store(-1,   std::memory_order_release);
+        atomicState.passthroughEnabled.store(true, std::memory_order_release);
+        return;
+    }
+
+    if (st == SlotState::RECORDING || st == SlotState::ARMED) return; // busy
+
+    if (!slots[slotIndex].has_content) return; // nothing recorded yet
+
+    // Stop any other slot that is currently playing
+    const int curPlay = atomicState.activePlaySlot.load(std::memory_order_relaxed);
+    if (curPlay >= 0 && curPlay != slotIndex)
+    {
+        atomicState.stopPlayCmd.store(true, std::memory_order_release);
+        atomicState.slotState[curPlay].store(static_cast<int>(SlotState::IDLE),
+                                              std::memory_order_release);
+    }
+
+    // Trigger playback
+    atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::PLAYING),
+                                            std::memory_order_release);
+    atomicState.activePlaySlot.store(slotIndex,  std::memory_order_release);
+    atomicState.startPlayCmd.store(slotIndex,    std::memory_order_release);
+    atomicState.passthroughEnabled.store(false,  std::memory_order_release);
+}
+
+void FrameSampler::uiClearSlot(int slotIndex) noexcept
+{
+    if (slotIndex < 0 || slotIndex >= FrameSamplerConstants::NUM_SLOTS) return;
+
+    // Stop recording / playback first
+    const auto st = static_cast<SlotState>(
+        atomicState.slotState[slotIndex].load(std::memory_order_relaxed));
+
+    if (st == SlotState::RECORDING || st == SlotState::ARMED)
+    {
+        atomicState.stopRecCmd[slotIndex].store(true, std::memory_order_release);
+    }
+    if (st == SlotState::PLAYING)
+    {
+        atomicState.stopPlayCmd.store(true, std::memory_order_release);
+        atomicState.activePlaySlot.store(-1, std::memory_order_release);
+        atomicState.passthroughEnabled.store(true, std::memory_order_release);
+    }
+
+    atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::IDLE),
+                                            std::memory_order_release);
+
+    // Clear the slot data (Non-RT: heap free allowed here)
+    slots[slotIndex].clear();
+}
+
+// ============================================================================
 // Thread lifecycle
 // ============================================================================
 
