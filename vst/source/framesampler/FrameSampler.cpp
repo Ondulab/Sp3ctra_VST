@@ -834,46 +834,85 @@ void FramePlayerThread::run()
                  slotToPlay, slot.frame_count,
                  static_cast<double>(slot.duration_us) / 1e6);
 
-        slot.play_head       = 0;
+        // ── Read per-slot play parameters (atomics — Non-RT safe) ──────────
+        const float    p_start = sampler.getSlotStartFrac(slotToPlay);
+        const float    p_end   = sampler.getSlotEndFrac(slotToPlay);
+        const float    p_speed = juce::jlimit(0.1f, 8.0f, sampler.getSlotSpeed(slotToPlay));
+        const LoopMode p_loop  = sampler.getSlotLoopMode(slotToPlay);
+
+        const int startFrame = juce::jlimit(0, slot.frame_count - 1,
+            static_cast<int>(p_start * static_cast<float>(slot.frame_count)));
+        const int endFrame   = juce::jlimit(startFrame + 1, slot.frame_count,
+            static_cast<int>(p_end * static_cast<float>(slot.frame_count)));
+
+        // Reference timestamps for correct t=0 scheduling per direction.
+        const uint64_t fwdRefTs = slot.frames[startFrame].timestamp_us;
+        const uint64_t bwdRefTs = slot.frames[endFrame - 1].timestamp_us;
+
+        slot.play_head       = startFrame;
+        int      direction   = 1; // +1 = forward, -1 = backward (INVERSE / PINGPONG)
         uint64_t loopStartUs = currentTimeUs();
 
         // ── Inner playback loop ───────────────────────────────────────────
         while (!threadShouldExit())
         {
-            // Stop command?
+            // External stop commands
             if (state.stopPlayCmd.exchange(false, std::memory_order_acq_rel))
                 break;
-
-            // State changed externally?
             if (static_cast<SlotState>(state.slotState[slotToPlay].load(
                     std::memory_order_relaxed)) != SlotState::PLAYING)
                 break;
-
-            // Higher-priority slot wants to play?
             const int pending = state.startPlayCmd.load(std::memory_order_relaxed);
             if (pending >= 0 && pending != slotToPlay)
                 break;
 
-            // Seamless loop: reset head when buffer ends
-            if (slot.play_head >= slot.frame_count)
+            // ── Boundary / loop-mode handling ─────────────────────────────
+            const bool fwdBound = (direction > 0 && slot.play_head >= endFrame);
+            const bool bwdBound = (direction < 0 && slot.play_head <  startFrame);
+            if (fwdBound || bwdBound)
             {
-                slot.play_head = 0;
-                loopStartUs    = currentTimeUs();
-                log_debug("FS", "Slot %d: loop", slotToPlay);
+                bool stop = false;
+                switch (p_loop)
+                {
+                    case LoopMode::NONE:
+                        stop = true;
+                        break;
+                    case LoopMode::LOOP:
+                        slot.play_head = startFrame;
+                        loopStartUs    = currentTimeUs();
+                        log_debug("FS", "Slot %d: loop", slotToPlay);
+                        break;
+                    case LoopMode::INVERSE:
+                        direction      = -1;
+                        slot.play_head = endFrame - 1;
+                        loopStartUs    = currentTimeUs();
+                        break;
+                    case LoopMode::PINGPONG:
+                        direction      = -direction;
+                        slot.play_head = (direction > 0) ? startFrame : endFrame - 1;
+                        loopStartUs    = currentTimeUs();
+                        break;
+                }
+                if (stop) break;
                 continue;
             }
 
-            const CapturedFrame& frame   = slot.frames[slot.play_head];
-            const uint64_t       elapsed = currentTimeUs() - loopStartUs;
+            const CapturedFrame& frame = slot.frames[slot.play_head];
 
-            // Wait until it is time to inject this frame
-            if (elapsed < frame.timestamp_us)
+            // ── Timestamp scheduling with speed + direction ───────────────
+            // Normalise timestamp so the first played frame is always at t=0.
+            const uint64_t rawTs = (direction > 0)
+                ? (frame.timestamp_us > fwdRefTs ? frame.timestamp_us - fwdRefTs : 0ULL)
+                : (bwdRefTs > frame.timestamp_us ? bwdRefTs - frame.timestamp_us : 0ULL);
+            const uint64_t scaledTs = static_cast<uint64_t>(
+                static_cast<float>(rawTs) / p_speed);
+            const uint64_t elapsed = currentTimeUs() - loopStartUs;
+
+            if (elapsed < scaledTs)
             {
-                const uint64_t wait = frame.timestamp_us - elapsed;
-                if (wait > 2000)
-                    Thread::sleep(1);
-                else
-                    Thread::yield();
+                const uint64_t wait = scaledTs - elapsed;
+                if (wait > 2000) Thread::sleep(1);
+                else             Thread::yield();
                 continue;
             }
 
@@ -925,7 +964,7 @@ void FramePlayerThread::run()
                 }
             }
 
-            ++slot.play_head;
+            slot.play_head += direction;
         }
 
         log_info("FS", "Slot %d: playback stopped (head=%d/%d)",
