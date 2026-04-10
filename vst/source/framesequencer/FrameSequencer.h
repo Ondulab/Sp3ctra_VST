@@ -97,6 +97,11 @@ private:
     int    rtLastTriggeredStep   = -1;
     double rtInternalPhaseBeats  = 0.0;   // accumulated beats (internal BPM)
     double rtLastPpqPosition     = -1.0;
+    /** Bank index (-1..11) that was LAST triggered (playing OR recording).
+     *  Used by triggerStep() to stop/finalise the previous bank before
+     *  activating the next one — regardless of whether it was playing or
+     *  recording (activePlaySlot is -1 during recording). */
+    int    rtPrevActiveBank      = -1;
 
     // ── RT helper (atomics only) ──────────────────────────────────────────────
     void triggerStep (int stepIdx) noexcept;
