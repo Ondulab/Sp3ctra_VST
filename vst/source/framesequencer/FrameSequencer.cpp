@@ -95,8 +95,11 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
     // ── 2. Handle the new step ────────────────────────────────────────────────
     if (bankIdx < 0)
     {
-        // Empty step → restore passthrough, stop any ongoing play
-        as.stopPlayCmd.store(true,  std::memory_order_release);
+        // Empty step → restore passthrough.
+        // Only send stopPlayCmd if something was actually playing; otherwise the
+        // flag would stay set and kill the NEXT startPlayCmd (stale-stop bug).
+        if (as.activePlaySlot.load(std::memory_order_relaxed) >= 0)
+            as.stopPlayCmd.store(true, std::memory_order_release);
         as.activePlaySlot.store(-1, std::memory_order_release);
         as.passthroughEnabled.store(true, std::memory_order_release);
         rtPrevActiveBank = -1;
@@ -120,8 +123,13 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
     else
     {
         // ── Normal bank playback ───────────────────────────────────────────────
-        // IDLE (with or without content) → FramePlayerThread will revert to IDLE
-        // if has_content == false (silent trigger is harmless).
+        // Clear any stale stopPlayCmd BEFORE posting startPlayCmd.
+        // A stale stop (from a previous empty-step passthrough) would otherwise
+        // immediately kill FramePlayerThread's inner playback loop.
+        // RT-safe: FramePlayerThread exits its inner loop via slotState!=PLAYING
+        // (set in §1 above) before we reach here, so there is no live consumer
+        // of stopPlayCmd that we could pre-empt.
+        as.stopPlayCmd.store(false, std::memory_order_release);
         as.slotState[bankIdx].store(static_cast<int>(SlotState::PLAYING),
                                      std::memory_order_release);
         as.activePlaySlot.store(bankIdx, std::memory_order_release);
