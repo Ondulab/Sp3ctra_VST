@@ -74,6 +74,17 @@ enum class SlotState : int
 };
 
 // ============================================================================
+// LoopMode — per-slot playback loop behaviour
+// ============================================================================
+enum class LoopMode : int
+{
+    NONE     = 0, // Play once, then stop and restore passthrough
+    LOOP     = 1, // Loop forward: wrap play_head back to startFrame on overflow
+    INVERSE  = 2, // Loop backward: play in reverse, wrap back to endFrame
+    PINGPONG = 3  // Alternate forward / backward each time a boundary is reached
+};
+
+// ============================================================================
 // FrameSlot — storage for one recording slot (lazy heap allocation)
 // ============================================================================
 struct FrameSlot
@@ -217,6 +228,11 @@ public:
     {
         return enabled.load(std::memory_order_relaxed);
     }
+    /** Index of the slot currently active in playback (-1 = none). Non-RT safe. */
+    int getActivePlaySlot() const noexcept
+    {
+        return atomicState.activePlaySlot.load(std::memory_order_acquire);
+    }
 
     // =========================================================================
     // Configuration (message thread / APVTS listener)
@@ -241,6 +257,66 @@ public:
     int   getMidiChannel()  const noexcept { return midiChannel.load(); }
     int   getOctaveOffset() const noexcept { return octaveOffset.load(); }
     float getMaxDuration()  const noexcept { return maxDurationS.load(); }
+
+    // =========================================================================
+    // Per-slot play parameters (message/timer thread — Non-RT)
+    // Written by UI controls; read by FramePlayerThread for playback behaviour.
+    // =========================================================================
+    void setSlotStartFrac(int i, float v) noexcept
+    {
+        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+            slotParams[i].startFrac.store(juce::jlimit(0.0f, 1.0f, v),
+                                          std::memory_order_relaxed);
+    }
+    void setSlotEndFrac(int i, float v) noexcept
+    {
+        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+            slotParams[i].endFrac.store(juce::jlimit(0.0f, 1.0f, v),
+                                        std::memory_order_relaxed);
+    }
+    void setSlotSpeed(int i, float v) noexcept
+    {
+        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+            slotParams[i].speed.store(juce::jlimit(0.01f, 32.0f, v),
+                                      std::memory_order_relaxed);
+    }
+    void setSlotLoopMode(int i, LoopMode m) noexcept
+    {
+        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+            slotParams[i].loopMode.store(static_cast<int>(m),
+                                         std::memory_order_relaxed);
+    }
+    void setSlotPriority(int i, bool p) noexcept
+    {
+        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+            slotParams[i].priority.store(p, std::memory_order_relaxed);
+    }
+
+    float    getSlotStartFrac(int i) const noexcept
+    {
+        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0.0f;
+        return slotParams[i].startFrac.load(std::memory_order_relaxed);
+    }
+    float    getSlotEndFrac(int i) const noexcept
+    {
+        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 1.0f;
+        return slotParams[i].endFrac.load(std::memory_order_relaxed);
+    }
+    float    getSlotSpeed(int i) const noexcept
+    {
+        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 1.0f;
+        return slotParams[i].speed.load(std::memory_order_relaxed);
+    }
+    LoopMode getSlotLoopMode(int i) const noexcept
+    {
+        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return LoopMode::LOOP;
+        return static_cast<LoopMode>(slotParams[i].loopMode.load(std::memory_order_relaxed));
+    }
+    bool     getSlotPriority(int i) const noexcept
+    {
+        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return false;
+        return slotParams[i].priority.load(std::memory_order_relaxed);
+    }
 
     // =========================================================================
     // Non-RT: UI-triggered commands (message/timer thread — atomics only)
@@ -321,6 +397,25 @@ private:
     // Player thread
     // -------------------------------------------------------------------------
     std::unique_ptr<FramePlayerThread> playerThread;
+
+    // -------------------------------------------------------------------------
+    // Per-slot play parameters — parallel to slots[], owned by FrameSampler.
+    // Written by UI (Non-RT); read by FramePlayerThread (Non-RT).
+    // -------------------------------------------------------------------------
+    struct SlotPlayParams
+    {
+        std::atomic<float> startFrac { 0.0f }; // Normalised playback start [0..1]
+        std::atomic<float> endFrac   { 1.0f }; // Normalised playback end   [0..1]
+        std::atomic<float> speed     { 1.0f }; // Playback speed multiplier [0.1..8]
+        std::atomic<int>   loopMode  { static_cast<int>(LoopMode::LOOP) };
+        std::atomic<bool>  priority  { false }; // Priority for late-read handling
+
+        SlotPlayParams() = default;
+        SlotPlayParams(const SlotPlayParams&)            = delete;
+        SlotPlayParams& operator=(const SlotPlayParams&) = delete;
+    };
+
+    SlotPlayParams slotParams[FrameSamplerConstants::NUM_SLOTS];
 
     // -------------------------------------------------------------------------
     // Helpers
