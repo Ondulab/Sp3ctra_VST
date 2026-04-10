@@ -5,23 +5,22 @@
 #include "PluginProcessor.h"
 #include "SettingsWindow.h"
 #include "CisVisualizerComponent.h"
-#include "framesampler/FrameSampler.h"
-#include "framesequencer/FrameSequencer.h"
+#include "sampler/SamplerPageComponent.h"
 
 //==============================================================================
 /**
- * @brief Main VST editor — synthesis parameters exposed directly in two columns.
+ * @brief Main VST editor with tab navigation (SYNTH / SAMPLER).
  *
- * Left column  — LuxStral:
- *   Device On, Gamma, Attack (ms), Release (ms), Contrast Min,
- *   Stereo Temp., Sum. Exp., Noise Gate, Workers
+ * SYNTH tab — two-column layout:
+ *   Left  : LuxStral params (Device On, Volume, Gamma, Contrast, Attack,
+ *            Release, Stereo Temp., Sum. Exp., Noise Gate)
+ *   Right : StrokeForge params (Active, Blob Thr., Merge Gap, Focus σ,
+ *            Spectral Thr., Focus Only)
  *
- * Right column — StrokeForge:
- *   SF Active, Blob Thr., Merge Gap (pix), Focus σ (pix),
- *   Spectral Thr. (pix), Focus Only
+ * SAMPLER tab — SamplerPageComponent:
+ *   SlotGrid + SlotEditor + Sequencer + Transport bar
  *
- * A "Settings..." button still gives access to the full settings window
- * for advanced parameters (network, tuning, physiological filter, etc.).
+ * A "Settings..." button at the bottom opens the full settings window.
  */
 class Sp3ctraAudioProcessorEditor : public juce::AudioProcessorEditor,
                                     private juce::Timer
@@ -30,79 +29,59 @@ public:
     Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor&);
     ~Sp3ctraAudioProcessorEditor() override;
 
-    //==========================================================================
     void paint(juce::Graphics&) override;
     void resized() override;
 
-    // Called by PluginProcessor::prepareToPlay() to avoid Metal/CoreGraphics races
     void suspendVisualizer();
     void resumeVisualizer();
 
 private:
-    // ── Layout constants (shared between paint() and resized()) ────────────
-    // All values in pixels, at 1:1 display scale.
-    static constexpr int kHeaderH    = 52;          // painted header height
-    static constexpr int kVisY       = kHeaderH + 8; // top of CIS visualizer
-    static constexpr int kVisH       = 64;           // CIS visualizer height
-    static constexpr int kContentY   = kVisY + kVisH + 10; // top of param area
-    static constexpr int kHPad       = 10;           // horizontal outer padding
-    static constexpr int kColGap     = 18;           // gap between columns
-    static constexpr int kSectionH   = 24;           // section label height
-    static constexpr int kSectionGap = 4;            // gap section → first row
-    static constexpr int kRowH       = 27;           // row (control) height
-    static constexpr int kRowStep    = kRowH + 4;    // row pitch (= 31 px)
-    static constexpr int kLabelW     = 110;          // width of row labels
-    static constexpr int kCtrlOffset = kLabelW + 8;  // col-relative x of control
-    static constexpr int kCtrlW      = 210;          // width of controls
-    static constexpr int kLS_ROWS    = 9;            // LuxStral row count
-    static constexpr int kSF_ROWS    = 6;            // StrokeForge row count
+    // ── Layout constants ─────────────────────────────────────────────────────
+    static constexpr int kHeaderH    = 52;
+    static constexpr int kVisY       = kHeaderH + 8;
+    static constexpr int kVisH       = 64;
+    static constexpr int kTabsY      = kVisY + kVisH + 6;   // = 130
+    static constexpr int kTabsH      = 26;
+    static constexpr int kPageTop    = kTabsY + kTabsH + 6; // = 162
+    static constexpr int kHPad       = 10;
+    static constexpr int kColGap     = 18;
+    static constexpr int kSectionH   = 24;
+    static constexpr int kSectionGap = 4;
+    static constexpr int kRowH       = 27;
+    static constexpr int kRowStep    = kRowH + 4;  // = 31
+    static constexpr int kLabelW     = 110;
+    static constexpr int kCtrlOffset = kLabelW + 8;
+    static constexpr int kCtrlW      = 210;
+    static constexpr int kLS_ROWS    = 9;
+    static constexpr int kSF_ROWS    = 6;
 
-    // ── Frame Sampler bank section (below main controls) ─────────────────
-    static constexpr int kFS_BTN_COLS = 6;   // 6 buttons per row (6×2 = 12 banks)
-    static constexpr int kFS_BTN_ROWS = 2;   // 2 rows
-    static constexpr int kFS_BTN_H    = 44;  // bank button height
-    static constexpr int kFS_BTN_GAP  = 4;   // vertical gap between rows
-    static constexpr int kFS_GAP_TOP  = 10;  // gap from last control row to FS badge
-    static constexpr int kFS_SECT_H   = 24;  // FS section badge height
-
-    // ── Sequencer section (below bank buttons) ─────────────────────────────
-    static constexpr int kSeqGapTop  = 10;  // gap between bank buttons and seq badge
-    static constexpr int kSeqSectH   = 22;  // sequencer section badge height
-    static constexpr int kSeqTransH  = 28;  // transport row height
-    static constexpr int kSeqCellH   = 30;  // step cell height
-    static constexpr int kSeqCellGap = 2;   // gap between step cells
-
-    // Column geometry helpers (depend on runtime window width)
-    int  colWidth()    const noexcept { return (getWidth() - 2 * kHPad - kColGap) / 2; }
-    int  colLX()       const noexcept { return kHPad; }
-    int  colRX()       const noexcept { return kHPad + colWidth() + kColGap; }
-    int  rowsStartY()  const noexcept { return kContentY + kSectionH + kSectionGap; }
-    int  fsSectionY()  const noexcept { return rowsStartY() + kLS_ROWS * kRowStep + kFS_GAP_TOP; }
-    int  fsBtnsY()     const noexcept { return fsSectionY() + kFS_SECT_H + kSectionGap; }
-    int  fsBankEnd()   const noexcept { return fsBtnsY() + kFS_BTN_ROWS * (kFS_BTN_H + kFS_BTN_GAP); }
-    int  seqSectionY() const noexcept { return fsBankEnd() + kSeqGapTop; }
-    int  seqTransY()   const noexcept { return seqSectionY() + kSeqSectH + kSectionGap; }
-    int  seqGridY()    const noexcept { return seqTransY() + kSeqTransH + 4; }
-    int  footerY()     const noexcept { return seqGridY() + 2 * (kSeqCellH + kSeqCellGap) + 10; }
+    int colWidth()   const noexcept { return (getWidth() - 2*kHPad - kColGap) / 2; }
+    int colLX()      const noexcept { return kHPad; }
+    int colRX()      const noexcept { return kHPad + colWidth() + kColGap; }
+    int rowsStartY() const noexcept { return kPageTop + kSectionH + kSectionGap; }
+    int footerY()    const noexcept { return getHeight() - 42; }
 
     void timerCallback() override;
     void openSettings();
+    void switchToPage(bool showSampler);
 
-    // ── Processor reference ──────────────────────────────────────────────────
     Sp3ctraAudioProcessor& audioProcessor;
 
-    // ── CIS Visualizer ───────────────────────────────────────────────────────
+    // ── Tab navigation ────────────────────────────────────────────────────────
+    bool showingSamplerPage = false;
+    juce::TextButton synthTabBtn   { "SYNTH" };
+    juce::TextButton samplerTabBtn { "SAMPLER" };
+
+    // ── CIS Visualizer ────────────────────────────────────────────────────────
     std::unique_ptr<CisVisualizerComponent> cisVisualizer;
 
-    // ── LuxStral — Device On toggle ──────────────────────────────────────────
+    // ── SYNTH page — LuxStral ─────────────────────────────────────────────────
     juce::ToggleButton deviceOnToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> deviceOnAttachment;
 
-    // ── LuxStral — Master Volume ──────────────────────────────────────────────
     juce::Slider masterVolumeSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> masterVolumeAttachment;
 
-    // ── LuxStral — Synthesis sliders ─────────────────────────────────────────
     juce::Slider gammaSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> gammaAttachment;
 
@@ -124,11 +103,10 @@ private:
     juce::Slider noiseGateSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> noiseGateAttachment;
 
-    // ── StrokeForge — Enable toggle ───────────────────────────────────────────
+    // ── SYNTH page — StrokeForge ──────────────────────────────────────────────
     juce::ToggleButton sfEnabledToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfEnabledAttachment;
 
-    // ── StrokeForge — Sliders ────────────────────────────────────────────────
     juce::Slider sfBlobThreshSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfBlobThreshAttachment;
 
@@ -141,46 +119,15 @@ private:
     juce::Slider sfSpectralWidthSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfSpectralWidthAttachment;
 
-    // ── StrokeForge — Focus Only toggle ──────────────────────────────────────
     juce::ToggleButton sfFocusOnlyToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfFocusOnlyAttachment;
 
-    // ── Frame Sampler — bank record buttons (6×2 grid = 12 slots) ────────────
-    juce::TextButton fsBankBtns[FrameSamplerConstants::NUM_SLOTS];
+    // ── SAMPLER page ──────────────────────────────────────────────────────────
+    std::unique_ptr<SamplerPageComponent> samplerPage;
 
-    // ── Frame Sampler — Enable toggle (mirrors frameSamplerEnabled APVTS param) ─
-    juce::ToggleButton fsEnabledToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> fsEnabledAttachment;
-
-    // Blink flag for RECORDING indicator (flips each 200 ms timer tick)
-    bool fsBlinkOn = false;
-
-    // ── FS — double-click tracking (clear bank on dbl-click) ─────────────────
-    juce::Time fsBankLastClickTime[FrameSamplerConstants::NUM_SLOTS];
-
-    // ── Sequencer — transport controls ───────────────────────────────────────
-    juce::TextButton   seqPlayBtn     { ">" };   // play
-    juce::TextButton   seqStopBtn     { "[ ]" }; // stop
-    juce::ToggleButton seqEnabledToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> seqEnabledAttachment;
-    juce::Slider       seqBpmSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> seqBpmAttachment;
-    juce::ComboBox     seqStepsCombo;
-    juce::Label        seqBpmLabel;
-    juce::Label        seqStepsLabel;
-    juce::ToggleButton seqLoopToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> seqLoopAttachment;
-    juce::ToggleButton seqDawSyncToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> seqDawSyncAttachment;
-
-    // ── Sequencer — step grid (32 cells) ─────────────────────────────────────
-    juce::TextButton seqStepBtns[FrameSequencer::MAX_STEPS];
-
-    // ── Footer ───────────────────────────────────────────────────────────────
+    // ── Footer ────────────────────────────────────────────────────────────────
     juce::TextButton settingsButton;
     juce::Label      statusLabel;
-
-    // Settings window (created on demand)
     std::unique_ptr<SettingsWindow> settingsWindow;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Sp3ctraAudioProcessorEditor)
