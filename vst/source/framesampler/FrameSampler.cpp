@@ -291,6 +291,13 @@ bool FrameSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const ui
     const int recSlot = activeRecSlot.load(std::memory_order_relaxed);
     if (recSlot < 0) return false;
 
+    // ── Sequencer-gated recording ─────────────────────────────────────────
+    // If seqGateSlot >= 0, the sequencer is enabled + playing and the frame
+    // must only be captured when the sequencer's current step points at recSlot.
+    // seqGateSlot == -1 means no gating (sequencer off or passthrough step).
+    const int gate = seqGateSlot.load(std::memory_order_relaxed);
+    if (gate >= 0 && gate != recSlot) return false; // gated out — wrong step
+
     FrameSlot& slot = slots[recSlot];
     if (!slot.isAllocated()) return false;
 
