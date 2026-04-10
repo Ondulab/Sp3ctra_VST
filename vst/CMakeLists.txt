@@ -60,6 +60,18 @@ target_sources(Sp3ctraVST
         source/framesequencer/FrameSequencer.cpp
         source/framesampler/FrameSampler.h
         source/framesequencer/FrameSequencer.h
+
+        # Sampler UI components
+        source/sampler/SlotGridComponent.cpp
+        source/sampler/SlotGridComponent.h
+        source/sampler/SlotEditorComponent.cpp
+        source/sampler/SlotEditorComponent.h
+        source/sampler/SequencerComponent.cpp
+        source/sampler/SequencerComponent.h
+        source/sampler/TransportBarComponent.cpp
+        source/sampler/TransportBarComponent.h
+        source/sampler/SamplerPageComponent.cpp
+        source/sampler/SamplerPageComponent.h
         
         # 🎵 PHASE 3: LuxStral Synthesis Engine (VST-adapted)
         source/luxstral/vst_adapters.cpp
@@ -141,6 +153,7 @@ target_include_directories(Sp3ctraVST
         ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/luxsynth
         ${CMAKE_CURRENT_SOURCE_DIR}/source/luxstral
         ${CMAKE_CURRENT_SOURCE_DIR}/source/framesampler
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/sampler
 )
 
 # Compile definitions
@@ -186,25 +199,30 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     endif()
 endif()
 
-# ===== PROFIL DEBUG (WITH SANITIZERS) =====
-# Enable memory and undefined behavior detection
+# ===== PROFIL DEBUG =====
+# ASan/UBSan are opt-in via -DUSE_ASAN=ON because VST3 CFBundle link does not
+# automatically pull in the sanitizer runtime (JUCE multi-target CMake layout).
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     if(MSVC)
         target_compile_options(Sp3ctraVST PRIVATE /W4)
     else()
         target_compile_options(Sp3ctraVST PRIVATE
-            -O0                        # No optimization
-            -g                         # Full debug symbols
+            -O0                      # No optimization
+            -g                       # Full debug symbols
             -Wall
             -Wextra
             -Wno-unused-parameter
-            -fsanitize=address         # AddressSanitizer (memory errors)
-            -fsanitize=undefined       # UndefinedBehaviorSanitizer
-            -fno-omit-frame-pointer    # Better stack traces
+            -fno-omit-frame-pointer  # Better stack traces
         )
-        target_link_options(Sp3ctraVST PRIVATE
-            -fsanitize=address
-            -fsanitize=undefined
-        )
+        if(USE_ASAN)
+            target_compile_options(Sp3ctraVST PRIVATE
+                -fsanitize=address
+                -fsanitize=undefined
+            )
+            target_link_options(Sp3ctraVST PRIVATE
+                -fsanitize=address
+                -fsanitize=undefined
+            )
+        endif()
     endif()
 endif()
