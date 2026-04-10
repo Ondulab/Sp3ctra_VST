@@ -61,7 +61,30 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
     const int bankIdx = steps[stepIdx].load(std::memory_order_relaxed);
     auto& as = frameSampler->getAtomicState();
 
-    // Stop previously playing slot (if different)
+    // ── 1. Finalise the PREVIOUS active bank (playing OR recording) ───────────
+    // activePlaySlot only tracks PLAYING banks; rtPrevActiveBank covers RECORDING
+    // banks too (activePlaySlot is -1 while a bank is recording).
+    if (rtPrevActiveBank >= 0 && rtPrevActiveBank != bankIdx)
+    {
+        const auto prevSt = static_cast<SlotState>(
+            as.slotState[rtPrevActiveBank].load(std::memory_order_relaxed));
+
+        if (prevSt == SlotState::RECORDING)
+        {
+            // Stop recording: onFrameAssembled() will finalise the slot.
+            as.stopRecCmd[rtPrevActiveBank].store(true, std::memory_order_release);
+            as.slotState[rtPrevActiveBank].store(static_cast<int>(SlotState::IDLE),
+                                                  std::memory_order_release);
+        }
+        else if (prevSt == SlotState::PLAYING)
+        {
+            as.slotState[rtPrevActiveBank].store(static_cast<int>(SlotState::IDLE),
+                                                  std::memory_order_release);
+        }
+        // ARMED / IDLE → no action required
+    }
+
+    // Also stop any other slot that happens to be playing (safety net).
     const int curPlay = as.activePlaySlot.load(std::memory_order_relaxed);
     if (curPlay >= 0 && curPlay != bankIdx)
     {
@@ -69,22 +92,44 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
                                     std::memory_order_release);
     }
 
+    // ── 2. Handle the new step ────────────────────────────────────────────────
     if (bankIdx < 0)
     {
-        // Empty step → restore passthrough (stop playback)
-        as.stopPlayCmd.store(true, std::memory_order_release);
+        // Empty step → restore passthrough, stop any ongoing play
+        as.stopPlayCmd.store(true,  std::memory_order_release);
         as.activePlaySlot.store(-1, std::memory_order_release);
         as.passthroughEnabled.store(true, std::memory_order_release);
+        rtPrevActiveBank = -1;
+        return;
+    }
+
+    const auto curSt = static_cast<SlotState>(
+        as.slotState[bankIdx].load(std::memory_order_relaxed));
+
+    if (curSt == SlotState::ARMED || curSt == SlotState::RECORDING)
+    {
+        // ── Sequencer-triggered recording ─────────────────────────────────────
+        // Bank was armed (user pressed REC) → start capturing frames now.
+        // Post startRecCmd so onFrameAssembled() sets activeRecSlot and resets
+        // the slot buffer.  Passthrough remains ON during recording.
+        as.slotState[bankIdx].store(static_cast<int>(SlotState::RECORDING),
+                                     std::memory_order_release);
+        as.startRecCmd[bankIdx].store(true, std::memory_order_release);
+        // Do NOT modify activePlaySlot / passthroughEnabled during recording.
     }
     else
     {
-        // Trigger bank playback (FramePlayerThread picks up startPlayCmd)
+        // ── Normal bank playback ───────────────────────────────────────────────
+        // IDLE (with or without content) → FramePlayerThread will revert to IDLE
+        // if has_content == false (silent trigger is harmless).
         as.slotState[bankIdx].store(static_cast<int>(SlotState::PLAYING),
                                      std::memory_order_release);
         as.activePlaySlot.store(bankIdx, std::memory_order_release);
-        as.startPlayCmd.store(bankIdx,  std::memory_order_release);
+        as.startPlayCmd.store(bankIdx,   std::memory_order_release);
         as.passthroughEnabled.store(false, std::memory_order_release);
     }
+
+    rtPrevActiveBank = bankIdx;
 }
 
 void FrameSequencer::rtStop() noexcept
@@ -94,6 +139,7 @@ void FrameSequencer::rtStop() noexcept
     rtLastTriggeredStep  = -1;
     rtInternalPhaseBeats = 0.0;
     rtLastPpqPosition    = -1.0;
+    rtPrevActiveBank     = -1;
 
     if (frameSampler != nullptr)
     {
