@@ -634,6 +634,23 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                                      buffer.getNumSamples(),
                                      getSampleRate());
 
+    // ── Sequencer-gated recording: update FrameSampler gate slot ─────────────
+    // seqGateSlot = bank the sequencer is currently playing, or -1 (no gate).
+    // Runs every audio block; onFrameAssembled() reads it atomically.
+    if (frameSampler != nullptr)
+    {
+        int gateSlot = -1; // no gate: sequencer off / stopped / passthrough step
+        if (frameSequencer != nullptr
+            && frameSequencer->isEnabled()
+            && frameSequencer->isPlaying())
+        {
+            const int curStep = frameSequencer->getCurrentStep();
+            if (curStep >= 0)
+                gateSlot = frameSequencer->getStep(curStep); // -1 = passthrough step
+        }
+        frameSampler->setSeqGateSlot(gateSlot);
+    }
+
     // RT-safe early exit when device is switched off (atomic read, no lock)
     if (deviceEnabledParam != nullptr && deviceEnabledParam->load() < 0.5f)
     {

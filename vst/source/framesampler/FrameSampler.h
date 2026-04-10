@@ -226,6 +226,18 @@ public:
     void setOctaveOffset(int off)    noexcept { octaveOffset.store(off); } // -2..+2
     void setMaxDuration(float secs)  noexcept { maxDurationS.store(secs); }// 1..10
 
+    /** Sequencer-gated recording.
+     *  Called from processBlock (RT) every audio block.
+     *  - gateSlot >= 0 : only capture frames when activeRecSlot == gateSlot
+     *                    (sequencer is enabled + playing + step points at that bank)
+     *  - gateSlot == -1 : no gating — frames are always captured (sequencer disabled
+     *                     or current step is a passthrough/empty step)
+     *  RT-safe: single atomic store, read only in onFrameAssembled (Non-RT). */
+    void setSeqGateSlot(int gateSlot) noexcept
+    {
+        seqGateSlot.store(gateSlot, std::memory_order_relaxed);
+    }
+
     int   getMidiChannel()  const noexcept { return midiChannel.load(); }
     int   getOctaveOffset() const noexcept { return octaveOffset.load(); }
     float getMaxDuration()  const noexcept { return maxDurationS.load(); }
@@ -294,6 +306,8 @@ private:
     std::atomic<int>   midiChannel { 1 };
     std::atomic<int>   octaveOffset{ 0 };
     std::atomic<float> maxDurationS{ 10.0f };
+    // -1 = no gating; 0-11 = only record frames while sequencer step == this bank
+    std::atomic<int>   seqGateSlot { -1 };
 
     // -------------------------------------------------------------------------
     // Non-RT state
