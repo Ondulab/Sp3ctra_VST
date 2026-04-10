@@ -66,7 +66,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     };
     addAndMakeVisible(endSlider);
 
-    initSl(speedSlider, 0.1, 8.0, 0.01, "x");
+    initSl(speedSlider, 0.01, 32.0, 0.01, "x");
     speedSlider.setValue(1.0, juce::dontSendNotification);
     speedSlider.onValueChange = [this]
     {

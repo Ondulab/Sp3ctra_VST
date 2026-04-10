@@ -834,23 +834,17 @@ void FramePlayerThread::run()
                  slotToPlay, slot.frame_count,
                  static_cast<double>(slot.duration_us) / 1e6);
 
-        // ── Read per-slot play parameters (atomics — Non-RT safe) ──────────
-        const float    p_start = sampler.getSlotStartFrac(slotToPlay);
-        const float    p_end   = sampler.getSlotEndFrac(slotToPlay);
-        const float    p_speed = juce::jlimit(0.1f, 8.0f, sampler.getSlotSpeed(slotToPlay));
-        const LoopMode p_loop  = sampler.getSlotLoopMode(slotToPlay);
+        // Per-slot play parameters are re-read every iteration so changes
+        // made via the UI sliders take effect immediately (on-the-fly).
+        // We track prevStartFrame/prevEndFrame to detect range changes and
+        // re-anchor the reference timestamps + loopStartUs accordingly.
+        int      prevStartFrame = -1;
+        int      prevEndFrame   = -1;
+        uint64_t fwdRefTs       = 0;
+        uint64_t bwdRefTs       = 0;
 
-        const int startFrame = juce::jlimit(0, slot.frame_count - 1,
-            static_cast<int>(p_start * static_cast<float>(slot.frame_count)));
-        const int endFrame   = juce::jlimit(startFrame + 1, slot.frame_count,
-            static_cast<int>(p_end * static_cast<float>(slot.frame_count)));
-
-        // Reference timestamps for correct t=0 scheduling per direction.
-        const uint64_t fwdRefTs = slot.frames[startFrame].timestamp_us;
-        const uint64_t bwdRefTs = slot.frames[endFrame - 1].timestamp_us;
-
-        slot.play_head       = startFrame;
-        int      direction   = 1; // +1 = forward, -1 = backward (INVERSE / PINGPONG)
+        slot.play_head       = 0; // set on first range initialisation below
+        int      direction   = 1; // +1 = forward, -1 = backward
         uint64_t loopStartUs = currentTimeUs();
 
         // ── Inner playback loop ───────────────────────────────────────────
@@ -865,6 +859,30 @@ void FramePlayerThread::run()
             const int pending = state.startPlayCmd.load(std::memory_order_relaxed);
             if (pending >= 0 && pending != slotToPlay)
                 break;
+
+            // ── Re-read play params every iteration (on-the-fly) ─────────
+            const float    p_start = sampler.getSlotStartFrac(slotToPlay);
+            const float    p_end   = sampler.getSlotEndFrac(slotToPlay);
+            const float    p_speed = juce::jlimit(0.01f, 32.0f,
+                                         sampler.getSlotSpeed(slotToPlay));
+            const LoopMode p_loop  = sampler.getSlotLoopMode(slotToPlay);
+
+            const int startFrame = juce::jlimit(0, slot.frame_count - 1,
+                static_cast<int>(p_start * static_cast<float>(slot.frame_count)));
+            const int endFrame   = juce::jlimit(startFrame + 1, slot.frame_count,
+                static_cast<int>(p_end * static_cast<float>(slot.frame_count)));
+
+            // Detect range change → re-anchor ref timestamps, clamp play_head
+            if (startFrame != prevStartFrame || endFrame != prevEndFrame)
+            {
+                prevStartFrame = startFrame;
+                prevEndFrame   = endFrame;
+                fwdRefTs       = slot.frames[startFrame].timestamp_us;
+                bwdRefTs       = slot.frames[endFrame - 1].timestamp_us;
+                if (slot.play_head < startFrame || slot.play_head >= endFrame)
+                    slot.play_head = (direction > 0) ? startFrame : endFrame - 1;
+                loopStartUs = currentTimeUs();
+            }
 
             // ── Boundary / loop-mode handling ─────────────────────────────
             const bool fwdBound = (direction > 0 && slot.play_head >= endFrame);
@@ -900,7 +918,6 @@ void FramePlayerThread::run()
             const CapturedFrame& frame = slot.frames[slot.play_head];
 
             // ── Timestamp scheduling with speed + direction ───────────────
-            // Normalise timestamp so the first played frame is always at t=0.
             const uint64_t rawTs = (direction > 0)
                 ? (frame.timestamp_us > fwdRefTs ? frame.timestamp_us - fwdRefTs : 0ULL)
                 : (bwdRefTs > frame.timestamp_us ? bwdRefTs - frame.timestamp_us : 0ULL);
