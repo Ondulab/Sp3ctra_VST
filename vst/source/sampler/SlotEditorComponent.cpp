@@ -159,7 +159,7 @@ void SlotEditorComponent::paint(juce::Graphics& g)
 
     g.setColour(juce::Colour(0xffcc88ff));
     g.setFont(juce::Font(juce::FontOptions(12.0f)).boldened());
-    g.drawText(juce::String("SLOT — ") + kNoteNamesEd[selectedSlot],
+    g.drawText(juce::String("SLOT > ") + kNoteNamesEd[selectedSlot],
                juce::Rectangle<int>(8, 4, getWidth() - 16, 22),
                juce::Justification::centredLeft, false);
 
@@ -171,7 +171,7 @@ void SlotEditorComponent::paint(juce::Graphics& g)
     switch (st)
     {
         case SlotState::RECORDING:
-            stateStr = blinkOn ? "● REC" : "  REC";
+            stateStr = blinkOn ? "* REC" : "  REC";
             stateCol = juce::Colour(0xffff4444); break;
         case SlotState::ARMED:
             stateStr = "ARM";
@@ -225,10 +225,11 @@ void SlotEditorComponent::resized()
     {
         const int loopY = 66 + 3 * step;
         const int gap   = 3;
-        const int bW    = (getWidth() - 2 * pad - 3 * gap) / 4;
+        const int availW = getWidth() - 2*pad - lW - 4;
+        const int bW     = (availW - 3*gap) / 4;
         loopLabel.setBounds(pad, loopY, lW, rowH);
         for (int k = 0; k < 4; ++k)
-            loopBtns[k].setBounds(pad + lW + 4 + k * (bW + gap), loopY, bW, rowH);
+            loopBtns[k].setBounds(pad + lW + 4 + k*(bW + gap), loopY, bW, rowH);
     }
 
     // Priority: y=66+4*31=190
@@ -252,7 +253,7 @@ void SlotEditorComponent::timerCallback()
     switch (st)
     {
         case SlotState::RECORDING:
-            recBtn.setButtonText("■ REC");
+            recBtn.setButtonText("STOP");
             recBtn.setColour(juce::TextButton::buttonColourId,
                              blinkOn ? juce::Colour(0xffcc2222) : juce::Colour(0xff7a1010));
             recBtn.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
@@ -271,7 +272,7 @@ void SlotEditorComponent::timerCallback()
 
     // PLAY button
     const bool isPlaying = (st == SlotState::PLAYING);
-    playBtn.setButtonText(isPlaying ? "■ STOP" : "PLAY");
+    playBtn.setButtonText(isPlaying ? "STOP" : "PLAY");
     playBtn.setEnabled(hasContent || isPlaying);
     playBtn.setColour(juce::TextButton::buttonColourId,
                       isPlaying ? juce::Colour(0xff1a5a1a) : juce::Colour(0xff3a3a3a));
