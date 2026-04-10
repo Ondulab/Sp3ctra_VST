@@ -840,11 +840,15 @@ void FramePlayerThread::run()
         // re-anchor the reference timestamps + loopStartUs accordingly.
         int      prevStartFrame = -1;
         int      prevEndFrame   = -1;
-        uint64_t fwdRefTs       = 0;
-        uint64_t bwdRefTs       = 0;
+        // Initialise prevLoopMode from current atomic so the first iteration
+        // does NOT trigger a spurious mode-change reset.
+        LoopMode prevLoopMode = sampler.getSlotLoopMode(slotToPlay);
+        uint64_t fwdRefTs     = 0;
+        uint64_t bwdRefTs     = 0;
 
+        // Initial direction derives from the starting loop mode.
+        int direction = (prevLoopMode == LoopMode::INVERSE) ? -1 : 1;
         slot.play_head       = 0; // set on first range initialisation below
-        int      direction   = 1; // +1 = forward, -1 = backward
         uint64_t loopStartUs = currentTimeUs();
 
         // ── Inner playback loop ───────────────────────────────────────────
@@ -872,6 +876,27 @@ void FramePlayerThread::run()
             const int endFrame   = juce::jlimit(startFrame + 1, slot.frame_count,
                 static_cast<int>(p_end * static_cast<float>(slot.frame_count)));
 
+            // ── Detect loop-mode change → reset direction immediately ─────
+            // Without this, switching INV→LOOP leaves direction=-1, causing
+            // play_head to oscillate at startFrame-1 (tight boundary loop).
+            if (p_loop != prevLoopMode)
+            {
+                prevLoopMode = p_loop;
+                switch (p_loop)
+                {
+                    case LoopMode::LOOP:
+                    case LoopMode::NONE:
+                        direction = 1;                          // always forward
+                        break;
+                    case LoopMode::INVERSE:
+                        direction = -1;                         // always backward
+                        break;
+                    case LoopMode::PINGPONG:
+                        break;                                  // keep current direction
+                }
+                loopStartUs = currentTimeUs();                  // re-anchor timing
+            }
+
             // Detect range change → re-anchor ref timestamps, clamp play_head
             if (startFrame != prevStartFrame || endFrame != prevEndFrame)
             {
@@ -896,6 +921,7 @@ void FramePlayerThread::run()
                         stop = true;
                         break;
                     case LoopMode::LOOP:
+                        direction      = 1;          // guard: ensure forward after INV/PING
                         slot.play_head = startFrame;
                         loopStartUs    = currentTimeUs();
                         log_debug("FS", "Slot %d: loop", slotToPlay);
