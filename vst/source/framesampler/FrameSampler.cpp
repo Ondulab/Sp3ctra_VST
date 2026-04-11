@@ -79,6 +79,11 @@ uint64_t FrameSampler::currentTimeUs() noexcept
 FrameSampler::FrameSampler()
 {
     s_instance = this;
+    for (int i = 0; i < FrameSamplerConstants::NUM_SLOTS; ++i)
+    {
+        currentPlayHead[i].store(0, std::memory_order_relaxed);
+        lastPlayHead[i].store(0,    std::memory_order_relaxed);
+    }
     log_info("FS", "FrameSampler initialised — %d slots, %d frames/slot max, %.1f s/slot max",
              FrameSamplerConstants::NUM_SLOTS,
              FrameSamplerConstants::MAX_FRAMES_PER_SLOT,
@@ -838,8 +843,9 @@ void FramePlayerThread::run()
         // made via the UI sliders take effect immediately (on-the-fly).
         // We track prevStartFrame/prevEndFrame to detect range changes and
         // re-anchor the reference timestamps + loopStartUs accordingly.
-        int      prevStartFrame = -1;
-        int      prevEndFrame   = -1;
+        int      prevStartFrame  = -1;
+        int      prevEndFrame    = -1;
+        bool     firstRangeInit  = true; // true until first range is established
         // Initialise prevLoopMode from current atomic so the first iteration
         // does NOT trigger a spurious mode-change reset.
         LoopMode prevLoopMode = sampler.getSlotLoopMode(slotToPlay);
@@ -900,12 +906,27 @@ void FramePlayerThread::run()
             // Detect range change → re-anchor ref timestamps, clamp play_head
             if (startFrame != prevStartFrame || endFrame != prevEndFrame)
             {
+                const bool wasFirst = firstRangeInit;
+                firstRangeInit = false;
                 prevStartFrame = startFrame;
                 prevEndFrame   = endFrame;
                 fwdRefTs       = slot.frames[startFrame].timestamp_us;
                 bwdRefTs       = slot.frames[endFrame - 1].timestamp_us;
-                if (slot.play_head < startFrame || slot.play_head >= endFrame)
+
+                if (wasFirst && sampler.getSlotResumeMode(slotToPlay))
+                {
+                    // Resume mode: restore last stopped position if it is within
+                    // the current [startFrame, endFrame) range.
+                    const int saved = sampler.getLastPlayHead(slotToPlay);
+                    if (saved >= startFrame && saved < endFrame)
+                        slot.play_head = saved;
+                    else
+                        slot.play_head = (direction > 0) ? startFrame : endFrame - 1;
+                }
+                else if (slot.play_head < startFrame || slot.play_head >= endFrame)
+                {
                     slot.play_head = (direction > 0) ? startFrame : endFrame - 1;
+                }
                 loopStartUs = currentTimeUs();
             }
 
@@ -1007,8 +1028,14 @@ void FramePlayerThread::run()
                 }
             }
 
+            // Update UI playhead cursor (atomic write — Non-RT safe)
+            sampler.notifyPlayHead(slotToPlay, slot.play_head);
+
             slot.play_head += direction;
         }
+
+        // Save last play position for resume mode
+        sampler.saveLastPlayHead(slotToPlay, slot.play_head);
 
         log_info("FS", "Slot %d: playback stopped (head=%d/%d)",
                  slotToPlay, slot.play_head, slot.frame_count);
@@ -1027,4 +1054,52 @@ void FramePlayerThread::run()
     // Final safety: always restore passthrough on thread exit
     state.passthroughEnabled.store(true, std::memory_order_release);
     log_info("FS", "FramePlayerThread exiting");
+}
+
+// ============================================================================
+// FrameSampler::sampleBrightnessForTimeline — Non-RT only
+// ============================================================================
+
+void FrameSampler::sampleBrightnessForTimeline(int    slotIdx,
+                                                float* outBrightness,
+                                                int    count) const noexcept
+{
+    if (slotIdx < 0 || slotIdx >= FrameSamplerConstants::NUM_SLOTS
+        || outBrightness == nullptr || count <= 0)
+        return;
+
+    const FrameSlot& slot = slots[slotIdx];
+    if (!slot.has_content || slot.frame_count == 0 || !slot.isAllocated())
+    {
+        for (int k = 0; k < count; ++k)
+            outBrightness[k] = 0.0f;
+        return;
+    }
+
+    // For each timeline column, pick one frame and average 8 evenly-spaced
+    // pixels.  Total cost: O(8 * count) — safe from the message thread.
+    for (int k = 0; k < count; ++k)
+    {
+        const int frameIdx = juce::jlimit(0, slot.frame_count - 1,
+                                          k * slot.frame_count / count);
+        const CapturedFrame& f = slot.frames[frameIdx];
+
+        const int pc   = juce::jlimit(1, FrameSamplerConstants::MAX_PIXELS,
+                                      static_cast<int>(f.pixel_count));
+        const int step = std::max(1, pc / 8);
+
+        uint32_t sum      = 0;
+        int      nSamples = 0;
+        for (int p = 0; p < pc; p += step, ++nSamples)
+            sum += static_cast<uint32_t>(f.R[p])
+                 + static_cast<uint32_t>(f.G[p])
+                 + static_cast<uint32_t>(f.B[p]);
+
+        // Invert: more black (low luminance) → higher bar on the timeline.
+        const float rawBri = (nSamples > 0)
+            ? juce::jlimit(0.0f, 1.0f,
+                           static_cast<float>(sum) / (nSamples * 3.0f * 255.0f))
+            : 0.0f;
+        outBrightness[k] = 1.0f - rawBri;
+    }
 }

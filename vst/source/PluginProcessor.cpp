@@ -16,7 +16,7 @@ extern "C" {
 
 // Global RT Profiler accessible from C threads (audioProcessingThread)
 // This must be declared here (not in header) to avoid multiple definition errors
-RTProfiler g_vst_rt_profiler = {0};
+RTProfiler g_vst_rt_profiler = {};
 
 //==============================================================================
 // Create parameter layout (called once during construction)

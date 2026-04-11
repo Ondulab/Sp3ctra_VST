@@ -286,10 +286,13 @@ public:
             slotParams[i].loopMode.store(static_cast<int>(m),
                                          std::memory_order_relaxed);
     }
-    void setSlotPriority(int i, bool p) noexcept
+    /** Resume mode: when true, playback resumes from the last stopped position
+     *  instead of restarting from startFrame on each Play press.
+     *  Replaces the unimplemented 'priority' field. */
+    void setSlotResumeMode(int i, bool r) noexcept
     {
         if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
-            slotParams[i].priority.store(p, std::memory_order_relaxed);
+            slotParams[i].resumeMode.store(r, std::memory_order_relaxed);
     }
 
     float    getSlotStartFrac(int i) const noexcept
@@ -312,10 +315,10 @@ public:
         if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return LoopMode::LOOP;
         return static_cast<LoopMode>(slotParams[i].loopMode.load(std::memory_order_relaxed));
     }
-    bool     getSlotPriority(int i) const noexcept
+    bool     getSlotResumeMode(int i) const noexcept
     {
         if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return false;
-        return slotParams[i].priority.load(std::memory_order_relaxed);
+        return slotParams[i].resumeMode.load(std::memory_order_relaxed);
     }
 
     // =========================================================================
@@ -332,6 +335,42 @@ public:
      *  If the slot is already PLAYING, stop it (restore passthrough).
      *  No-op if the slot is empty or currently recording. */
     void uiPlaySlot(int slotIndex) noexcept;
+
+    // =========================================================================
+    // Timeline / playhead queries (Non-RT, for UI display)
+    // =========================================================================
+    /** Returns the current frame index being played (updated by FramePlayerThread).
+     *  Safe to read from the message thread — atomic relaxed load. */
+    int getSlotPlayHead(int i) const noexcept
+    {
+        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0;
+        return currentPlayHead[i].load(std::memory_order_relaxed);
+    }
+
+    /** Sample normalised brightness [0..1] for each of the 'count' timeline columns.
+     *  Non-RT only — do NOT call from processBlock. */
+    void sampleBrightnessForTimeline(int slotIdx,
+                                     float* outBrightness,
+                                     int    count) const noexcept;
+
+    // =========================================================================
+    // Internal: called by FramePlayerThread (Non-RT) to update playhead atomic
+    // =========================================================================
+    void notifyPlayHead(int i, int head) noexcept
+    {
+        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+            currentPlayHead[i].store(head, std::memory_order_relaxed);
+    }
+    void saveLastPlayHead(int i, int head) noexcept
+    {
+        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+            lastPlayHead[i].store(head, std::memory_order_relaxed);
+    }
+    int getLastPlayHead(int i) const noexcept
+    {
+        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0;
+        return lastPlayHead[i].load(std::memory_order_relaxed);
+    }
 
     /** Clear all recorded frames from a slot and reset it to IDLE.
      *  Stops any ongoing recording or playback on that slot first. */
@@ -408,7 +447,7 @@ private:
         std::atomic<float> endFrac   { 1.0f }; // Normalised playback end   [0..1]
         std::atomic<float> speed     { 1.0f }; // Playback speed multiplier [0.1..8]
         std::atomic<int>   loopMode  { static_cast<int>(LoopMode::LOOP) };
-        std::atomic<bool>  priority  { false }; // Priority for late-read handling
+        std::atomic<bool>  resumeMode { false }; // Resume from last stop position
 
         SlotPlayParams() = default;
         SlotPlayParams(const SlotPlayParams&)            = delete;
@@ -416,6 +455,10 @@ private:
     };
 
     SlotPlayParams slotParams[FrameSamplerConstants::NUM_SLOTS];
+
+    // Per-slot playhead atomics — written by FramePlayerThread, read by UI.
+    std::atomic<int> currentPlayHead[FrameSamplerConstants::NUM_SLOTS];
+    std::atomic<int> lastPlayHead[FrameSamplerConstants::NUM_SLOTS];
 
     // -------------------------------------------------------------------------
     // Helpers

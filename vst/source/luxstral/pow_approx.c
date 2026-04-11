@@ -18,7 +18,7 @@ static inline float clampf(float x, float lo, float hi) {
   return (x < lo) ? lo : (x > hi) ? hi : x;
 }
 
-static inline int approx_eq(float a, float b, float eps) {
+static inline __attribute__((unused)) int approx_eq(float a, float b, float eps) {
   float d = a - b;
   return (d < 0.0f ? -d : d) <= eps;
 }
@@ -40,7 +40,7 @@ static _Thread_local unit_cache_t g_unit_cache;
 static unit_cache_t g_unit_cache;
 #endif
 
-static void build_unit_lut(float expo) {
+static __attribute__((unused)) void build_unit_lut(float expo) {
   const int N = POW_LUT_SIZE;
   const float invN = 1.0f / (float)(N - 1);
   for (int i = 0; i < N; ++i) {
@@ -192,7 +192,7 @@ static _Thread_local shifted_cache_t g_shifted_cache;
 static shifted_cache_t g_shifted_cache;
 #endif
 
-static void build_shifted_lut(float base, float expo) {
+static __attribute__((unused)) void build_shifted_lut(float base, float expo) {
   const int N = POW_LUT_SIZE;
   const float invN = 1.0f / (float)(N - 1);
   for (int i = 0; i < N; ++i) {
