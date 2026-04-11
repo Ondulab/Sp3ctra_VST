@@ -44,7 +44,7 @@ extern "C" {
 }
 
 // Global instance (disabled)
-RTProfiler g_rt_profiler = {0};
+RTProfiler g_rt_profiler = {};
 
 /* Logging Functions Implementation ------------------------------*/
 

@@ -23,7 +23,6 @@
 
 AudioImageBuffers *g_audioImageBuffers = NULL;
 DoubleBuffer *g_doubleBuffer = NULL;
-static DoubleBuffer g_doubleBuffer_instance;  // Static instance for VST
 
 // Configuration globale - Now initialized from APVTS (AudioProcessorValueTreeState)
 // These values will be set by PluginProcessor based on user preferences

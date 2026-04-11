@@ -316,8 +316,6 @@ void *udpThread(void *arg) {
   log_info("THREAD", "UDP thread started with dual buffer system");
   log_info("THREAD", "Listening for packets on socket %d, expecting IMAGE_DATA_HEADER (0x%02X)", s, IMAGE_DATA_HEADER);
 
-  // 🔧 DEBUG: Packet counter for logging (reset for each thread instance)
-  int packet_counter = 0;
   int first_packet_logged = 0;  // Log very first packet after restart
 
   while (ctx->running) {
@@ -346,7 +344,6 @@ void *udpThread(void *arg) {
     }
 
     // Log very first packet (to confirm reception restarted)
-    packet_counter++;
     if (!first_packet_logged) {
       log_info("THREAD", "🟢 FIRST PACKET after restart! type=0x%02X size=%zd socket=%d",
                packet.type, recv_len, s);
