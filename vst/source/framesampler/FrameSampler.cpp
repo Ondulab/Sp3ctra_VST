@@ -40,9 +40,16 @@ extern "C"
 
     int frame_sampler_is_playing(void)
     {
-        if (FrameSampler::s_instance != nullptr)
-            return FrameSampler::s_instance->isAnySlotPlaying() ? 1 : 0;
-        return 0;
+        if (FrameSampler::s_instance == nullptr)
+            return 0;
+        if (!FrameSampler::s_instance->isAnySlotPlaying())
+            return 0;
+        // When sampler transport is STOP (sampler_freeze_mode==2), the sampler
+        // must NOT gate the live audio/visual path even if a slot is scheduled.
+        // Returning 0 allows the UDP thread to keep writing to AudioImageBuffers
+        // and updating db->preprocessed_data with live data uninterrupted.
+        extern sp3ctra_config_t g_sp3ctra_config;
+        return (g_sp3ctra_config.sampler_freeze_mode != 2) ? 1 : 0;
     }
 }
 
@@ -81,8 +88,9 @@ FrameSampler::FrameSampler()
     s_instance = this;
     for (int i = 0; i < FrameSamplerConstants::NUM_SLOTS; ++i)
     {
-        currentPlayHead[i].store(0, std::memory_order_relaxed);
-        lastPlayHead[i].store(0,    std::memory_order_relaxed);
+        currentPlayHead[i].store(0,  std::memory_order_relaxed);
+        lastPlayHead[i].store(0,     std::memory_order_relaxed);
+        lastDirection[i].store(1,    std::memory_order_relaxed); // forward by default
     }
     log_info("FS", "FrameSampler initialised — %d slots, %d frames/slot max, %.1f s/slot max",
              FrameSamplerConstants::NUM_SLOTS,
@@ -292,6 +300,18 @@ bool FrameSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const ui
         }
     }
 
+    // ── Cache latest live frame (used by FramePlayerThread for darken-blend) ──
+    // Written here (UDP thread, Non-RT) → read by FramePlayerThread (Non-RT).
+    // Cached regardless of recording state so blend always has the freshest frame.
+    {
+        std::lock_guard<std::mutex> lk(liveMutex_);
+        livePixelCount_ = std::min(static_cast<int>(pixel_count),
+                                   FrameSamplerConstants::MAX_PIXELS);
+        std::memcpy(liveR_, R, static_cast<size_t>(livePixelCount_));
+        std::memcpy(liveG_, G, static_cast<size_t>(livePixelCount_));
+        std::memcpy(liveB_, B, static_cast<size_t>(livePixelCount_));
+    }
+
     // ── Write frame if recording is active ───────────────────────────────
     const int recSlot = activeRecSlot.load(std::memory_order_relaxed);
     if (recSlot < 0) return false;
@@ -338,6 +358,22 @@ bool FrameSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const ui
 
     ++slot.frame_count;
     return true;
+}
+
+// ============================================================================
+// FrameSampler::getLiveFrame — Non-RT (called by FramePlayerThread)
+// ============================================================================
+void FrameSampler::getLiveFrame(uint8_t* outR, uint8_t* outG, uint8_t* outB,
+                                 int maxPixels, int& outCount) noexcept
+{
+    std::lock_guard<std::mutex> lk(liveMutex_);
+    outCount = std::min(livePixelCount_, maxPixels);
+    if (outCount > 0)
+    {
+        std::memcpy(outR, liveR_, static_cast<size_t>(outCount));
+        std::memcpy(outG, liveG_, static_cast<size_t>(outCount));
+        std::memcpy(outB, liveB_, static_cast<size_t>(outCount));
+    }
 }
 
 // ============================================================================
@@ -520,6 +556,53 @@ void FrameSampler::clearAllSlots()
     for (int i = 0; i < FrameSamplerConstants::NUM_SLOTS; ++i)
         clearSlot(i);
     log_info("FS", "All slots cleared");
+}
+
+// ============================================================================
+// copySlotTo — Non-RT slot duplication (message thread only)
+// Deep-copies frame_count frames + play parameters from src to dst.
+// Stops any ongoing activity on the destination slot first.
+// ============================================================================
+void FrameSampler::copySlotTo(int srcIdx, int dstIdx)
+{
+    if (srcIdx < 0 || srcIdx >= FrameSamplerConstants::NUM_SLOTS) return;
+    if (dstIdx < 0 || dstIdx >= FrameSamplerConstants::NUM_SLOTS) return;
+    if (srcIdx == dstIdx) return;
+
+    const FrameSlot& src = slots[srcIdx];
+    if (!src.has_content || src.frame_count == 0)
+    {
+        log_warning("FS", "copySlotTo: source slot %d has no content", srcIdx);
+        return;
+    }
+
+    // Stop any ongoing activity on the destination
+    atomicState.slotState[dstIdx].store(static_cast<int>(SlotState::IDLE),
+                                        std::memory_order_release);
+    if (atomicState.activePlaySlot.load(std::memory_order_acquire) == dstIdx)
+        atomicState.activePlaySlot.store(-1, std::memory_order_release);
+
+    FrameSlot& dst = slots[dstIdx];
+    dst.allocate(); // resets dst.frame_count to 0, keeps existing heap if already allocated
+
+    // Copy only the recorded frames (not the full capacity)
+    const int count = juce::jmin(src.frame_count, dst.capacity);
+    std::memcpy(dst.frames.get(), src.frames.get(),
+                static_cast<size_t>(count) * sizeof(CapturedFrame));
+    dst.frame_count = count;
+    dst.duration_us = src.duration_us;
+    dst.has_content = true;
+    std::strncpy(dst.label, src.label, sizeof(dst.label) - 1);
+    dst.label[sizeof(dst.label) - 1] = '\0';
+
+    // Copy play parameters
+    setSlotStartFrac (dstIdx, getSlotStartFrac (srcIdx));
+    setSlotEndFrac   (dstIdx, getSlotEndFrac   (srcIdx));
+    setSlotSpeed     (dstIdx, getSlotSpeed      (srcIdx));
+    setSlotLoopMode  (dstIdx, getSlotLoopMode   (srcIdx));
+    setSlotResumeMode(dstIdx, getSlotResumeMode (srcIdx));
+
+    log_info("FS", "copySlotTo: slot %d → %d (%d frames)", srcIdx, dstIdx, count);
 }
 
 // ============================================================================
@@ -882,9 +965,17 @@ void FramePlayerThread::run()
             const int endFrame   = juce::jlimit(startFrame + 1, slot.frame_count,
                 static_cast<int>(p_end * static_cast<float>(slot.frame_count)));
 
-            // ── Detect loop-mode change → reset direction immediately ─────
-            // Without this, switching INV→LOOP leaves direction=-1, causing
-            // play_head to oscillate at startFrame-1 (tight boundary loop).
+            // ── Detect loop-mode change → update direction + re-anchor timing ──
+            // Two bugs fixed here:
+            //  1. INV→LOOP left direction=-1 → play_head would oscillate at
+            //     startFrame-1 (tight boundary loop).
+            //  2. LOOP→INV (or any mode change) reset loopStartUs to now() but
+            //     did NOT account for where play_head currently is.  When
+            //     play_head is near startFrame, rawTs(backward) ≈ full_duration,
+            //     so elapsed(0) < scaledTs(huge) → thread keeps sleeping for
+            //     the full duration → appears frozen.
+            //  Fix: set loopStartUs so that the current frame's scheduled offset
+            //  has already elapsed, making the transition seamless.
             if (p_loop != prevLoopMode)
             {
                 prevLoopMode = p_loop;
@@ -900,7 +991,27 @@ void FramePlayerThread::run()
                     case LoopMode::PINGPONG:
                         break;                                  // keep current direction
                 }
-                loopStartUs = currentTimeUs();                  // re-anchor timing
+
+                // Re-anchor loopStartUs relative to the current play_head in
+                // the new direction so the first frame plays without delay.
+                // Guard: prevStartFrame >= 0 ensures fwdRefTs/bwdRefTs are valid.
+                if (prevStartFrame >= 0 &&
+                    slot.play_head >= 0 && slot.play_head < slot.frame_count)
+                {
+                    const uint64_t curTs  = slot.frames[slot.play_head].timestamp_us;
+                    const uint64_t rawTs  = (direction > 0)
+                        ? (curTs > fwdRefTs ? curTs - fwdRefTs : 0ULL)
+                        : (bwdRefTs > curTs ? bwdRefTs - curTs : 0ULL);
+                    const float    spd    = juce::jlimit(0.01f, 32.0f,
+                                               sampler.getSlotSpeed(slotToPlay));
+                    const uint64_t scaled = static_cast<uint64_t>(
+                                               static_cast<float>(rawTs) / spd);
+                    loopStartUs = currentTimeUs() - scaled; // current frame is "due now"
+                }
+                else
+                {
+                    loopStartUs = currentTimeUs();
+                }
             }
 
             // Detect range change → re-anchor ref timestamps, clamp play_head
@@ -919,15 +1030,42 @@ void FramePlayerThread::run()
                     // the current [startFrame, endFrame) range.
                     const int saved = sampler.getLastPlayHead(slotToPlay);
                     if (saved >= startFrame && saved < endFrame)
+                    {
                         slot.play_head = saved;
+                        // For PINGPONG, also restore the last direction so the
+                        // playback resumes in the same sense it was going when
+                        // it stopped — not always restarting forward.
+                        if (prevLoopMode == LoopMode::PINGPONG)
+                            direction = sampler.getLastDirection(slotToPlay);
+                    }
                     else
+                    {
                         slot.play_head = (direction > 0) ? startFrame : endFrame - 1;
+                    }
                 }
                 else if (slot.play_head < startFrame || slot.play_head >= endFrame)
                 {
                     slot.play_head = (direction > 0) ? startFrame : endFrame - 1;
                 }
-                loopStartUs = currentTimeUs();
+
+                // Re-anchor loopStartUs relative to the current play_head
+                // timestamp so the first frame at the new position is due
+                // immediately.
+                // Without this, starting at a mid-recording position (e.g.
+                // Resume mode with play_head at T=5 s) would set elapsed=0
+                // while scaledTs=5 s/speed → the thread would wait that full
+                // duration before injecting the first frame (= audible latency).
+                {
+                    const uint64_t curTs  = slot.frames[slot.play_head].timestamp_us;
+                    const uint64_t rawTs  = (direction > 0)
+                        ? (curTs > fwdRefTs ? curTs - fwdRefTs : 0ULL)
+                        : (bwdRefTs > curTs ? bwdRefTs - curTs : 0ULL);
+                    const float    spd    = juce::jlimit(0.01f, 32.0f,
+                                               sampler.getSlotSpeed(slotToPlay));
+                    const uint64_t scaled = static_cast<uint64_t>(
+                                               static_cast<float>(rawTs) / spd);
+                    loopStartUs = currentTimeUs() - scaled; // frame is "due now"
+                }
             }
 
             // ── Boundary / loop-mode handling ─────────────────────────────
@@ -980,51 +1118,303 @@ void FramePlayerThread::run()
                 continue;
             }
 
-            // Inject frame into AudioImageBuffers (replaces live UDP feed)
-            uint8_t* wR = nullptr;
-            uint8_t* wG = nullptr;
-            uint8_t* wB = nullptr;
+            // ── Working buffers — attack + blend applied before BOTH outputs ──────
+            // Zero-filled so pixels beyond pixel_count are silent (black = 0).
+            const int nb = std::min(static_cast<int>(frame.pixel_count),
+                                    FrameSamplerConstants::MAX_PIXELS);
+            uint8_t workR[FrameSamplerConstants::MAX_PIXELS] {};
+            uint8_t workG[FrameSamplerConstants::MAX_PIXELS] {};
+            uint8_t workB[FrameSamplerConstants::MAX_PIXELS] {};
+            std::memcpy(workR, frame.R, static_cast<size_t>(nb));
+            std::memcpy(workG, frame.G, static_cast<size_t>(nb));
+            std::memcpy(workB, frame.B, static_cast<size_t>(nb));
 
-            if (audio_image_buffers_start_write(audioBuffers, &wR, &wG, &wB) == 0)
+            // ── Attack fade-in (exposure ramp): white at start → normal ─────────
+            // attackLen is normalised over [startFrame, endFrame).
+            // At headOffset=0 ramp=1 (fully white/silent); at attackLen ramp=0.
             {
-                const int n = std::min(static_cast<int>(frame.pixel_count),
-                                       FrameSamplerConstants::MAX_PIXELS);
-                std::memcpy(wR, frame.R, static_cast<size_t>(n));
-                std::memcpy(wG, frame.G, static_cast<size_t>(n));
-                std::memcpy(wB, frame.B, static_cast<size_t>(n));
-                audio_image_buffers_complete_write(audioBuffers);
+                const float p_attack = sampler.getSlotAttackLen(slotToPlay);
+                if (p_attack > 0.001f)
+                {
+                    const int   totalFrames  = endFrame - startFrame;
+                    const float attackFrames = p_attack * static_cast<float>(totalFrames);
+                    const int   headOffset   = (direction > 0)
+                        ? (slot.play_head - startFrame)
+                        : (endFrame - 1 - slot.play_head);
+                    if (attackFrames > 0.5f &&
+                        headOffset < static_cast<int>(attackFrames + 0.5f))
+                    {
+                        const float ramp = 1.0f -
+                            static_cast<float>(headOffset) / attackFrames;
+                        for (int px = 0; px < nb; ++px)
+                        {
+                            workR[px] = static_cast<uint8_t>(
+                                workR[px] + ramp * (255.0f - (float)workR[px]));
+                            workG[px] = static_cast<uint8_t>(
+                                workG[px] + ramp * (255.0f - (float)workG[px]));
+                            workB[px] = static_cast<uint8_t>(
+                                workB[px] + ramp * (255.0f - (float)workB[px]));
+                        }
+                    }
+                }
+            }
+
+            // ── Decay fade-out (exposure ramp): normal → white at end ─────────────
+            // Mirrors attack but measured from the end bound.
+            // At tailOffset=0 (end bound) ramp=1 (white); at decayLen ramp=0 (normal).
+            {
+                const float p_decay = sampler.getSlotDecayLen(slotToPlay);
+                if (p_decay > 0.001f)
+                {
+                    const int   totalFrames = endFrame - startFrame;
+                    const float decayFrames = p_decay * static_cast<float>(totalFrames);
+                    // tailOffset: distance from the active end bound (direction-aware)
+                    const int   tailOffset  = (direction > 0)
+                        ? (endFrame - 1 - slot.play_head)
+                        : (slot.play_head - startFrame);
+                    if (decayFrames > 0.5f &&
+                        tailOffset < static_cast<int>(decayFrames + 0.5f))
+                    {
+                        const float ramp = 1.0f -
+                            static_cast<float>(tailOffset) / decayFrames;
+                        for (int px = 0; px < nb; ++px)
+                        {
+                            workR[px] = static_cast<uint8_t>(
+                                workR[px] + ramp * (255.0f - (float)workR[px]));
+                            workG[px] = static_cast<uint8_t>(
+                                workG[px] + ramp * (255.0f - (float)workG[px]));
+                            workB[px] = static_cast<uint8_t>(
+                                workB[px] + ramp * (255.0f - (float)workB[px]));
+                        }
+                    }
+                }
+            }
+
+            // ── Global brightness lift (uniform exposure) ─────────────────────────────
+            // brightnessLift=0 → no change; brightnessLift=1 → all pixels → white.
+            {
+                const float p_lift = sampler.getSlotBrightnessLift(slotToPlay);
+                if (p_lift > 0.001f)
+                {
+                    for (int px = 0; px < nb; ++px)
+                    {
+                        workR[px] = static_cast<uint8_t>(
+                            workR[px] + p_lift * (255.0f - (float)workR[px]));
+                        workG[px] = static_cast<uint8_t>(
+                            workG[px] + p_lift * (255.0f - (float)workG[px]));
+                        workB[px] = static_cast<uint8_t>(
+                            workB[px] + p_lift * (255.0f - (float)workB[px]));
+                    }
+                }
+            }
+
+            // ── Treble cut: fade right-half pixels toward white ─────────────────────
+            // Right-half pixels = high-frequency content (closer to the far edge
+            // of the illuminated strip).
+            {
+                const float p_tc = sampler.getSlotTrebleCut(slotToPlay);
+                if (p_tc > 0.001f)
+                {
+                    const int halfPx = nb / 2;
+                    for (int px = halfPx; px < nb; ++px)
+                    {
+                        // Linear taper: no lift at halfPx, full lift at nb-1
+                        const float t = p_tc * static_cast<float>(px - halfPx)
+                                        / static_cast<float>(std::max(1, nb - 1 - halfPx));
+                        workR[px] = static_cast<uint8_t>(
+                            workR[px] + t * (255.0f - (float)workR[px]));
+                        workG[px] = static_cast<uint8_t>(
+                            workG[px] + t * (255.0f - (float)workG[px]));
+                        workB[px] = static_cast<uint8_t>(
+                            workB[px] + t * (255.0f - (float)workB[px]));
+                    }
+                }
+            }
+
+            // ── Bass cut: fade left-half pixels toward white ──────────────────────────
+            // Left-half pixels = low-frequency content (closer to the sensor edge).
+            {
+                const float p_bc = sampler.getSlotBassCut(slotToPlay);
+                if (p_bc > 0.001f)
+                {
+                    const int halfPx = nb / 2;
+                    for (int px = 0; px < halfPx; ++px)
+                    {
+                        // Linear taper: full lift at px=0, no lift at halfPx-1
+                        const float t = p_bc * static_cast<float>(halfPx - 1 - px)
+                                        / static_cast<float>(std::max(1, halfPx - 1));
+                        workR[px] = static_cast<uint8_t>(
+                            workR[px] + t * (255.0f - (float)workR[px]));
+                        workG[px] = static_cast<uint8_t>(
+                            workG[px] + t * (255.0f - (float)workG[px]));
+                        workB[px] = static_cast<uint8_t>(
+                            workB[px] + t * (255.0f - (float)workB[px]));
+                    }
+                }
+            }
+
+            // ── Live darken-blend: min(sample, live) weighted by blendAmount ─────
+            // blendAmount=0 → pure playback; blendAmount=1 → full darken blend.
+            // Applied AFTER attack/decay/lift so the blend sees the fully
+            // processed sample rather than the raw captured frame.
+            {
+                const float p_blend = sampler.getSlotBlendAmount(slotToPlay);
+                if (p_blend > 0.001f)
+                {
+                    uint8_t lvR[FrameSamplerConstants::MAX_PIXELS] {};
+                    uint8_t lvG[FrameSamplerConstants::MAX_PIXELS] {};
+                    uint8_t lvB[FrameSamplerConstants::MAX_PIXELS] {};
+                    int liveN = 0;
+                    sampler.getLiveFrame(lvR, lvG, lvB, nb, liveN);
+                    const int blendN = std::min(liveN, nb);
+                    for (int px = 0; px < blendN; ++px)
+                    {
+                        const auto dR = (uint8_t)std::min((int)workR[px], (int)lvR[px]);
+                        const auto dG = (uint8_t)std::min((int)workG[px], (int)lvG[px]);
+                        const auto dB = (uint8_t)std::min((int)workB[px], (int)lvB[px]);
+                        workR[px] = static_cast<uint8_t>(
+                            (float)workR[px] + p_blend * ((float)dR - (float)workR[px]));
+                        workG[px] = static_cast<uint8_t>(
+                            (float)workG[px] + p_blend * ((float)dG - (float)workG[px]));
+                        workB[px] = static_cast<uint8_t>(
+                            (float)workB[px] + p_blend * ((float)dB - (float)workB[px]));
+                    }
+                }
+            }
+
+                        // ── Mix sampler + live before visual injection ────────────────────────────
+            // Blend rule: darken (min per channel). White (255) is the identity element
+            // so sources with opacity=0 become white and do not affect the result.
+            //
+            // When sampler_freeze_mode == 2 (STOP transport): skip injection entirely
+            // so the live UDP thread regains exclusive control of AudioImageBuffers.
+            {
+                extern sp3ctra_config_t g_sp3ctra_config;
+                const int   smpFreeze  = g_sp3ctra_config.sampler_freeze_mode;
+                const int   liveFreeze = g_sp3ctra_config.image_freeze_mode;
+                const float liveOp     = g_sp3ctra_config.image_live_opacity;
+                const float smpOp      = g_sp3ctra_config.image_sampler_opacity;
+                const int   fadeInMs   = g_sp3ctra_config.sampler_fade_in_ms;
+
+                // ── Transport fade-in: HOLD/STOP → PLAY ───────────────────────────
+                // Linear ramp [0→1] over sampler_fade_in_ms ms.
+                // Uses FramePlayerThread member state for cross-iteration tracking.
+                {
+                    const uint64_t nowUs = currentTimeUs();
+                    if (smpFreeze == 0)  // PLAY
+                    {
+                        if (transportPrevFreeze_ != 0 && fadeInMs > 0)
+                        {
+                            // Transition detected (HOLD/STOP → PLAY): reset to silence.
+                            transportFadeStartUs_ = nowUs;
+                            transportFadeRamp_    = 0.0f;
+                        }
+                        if (fadeInMs > 0 && transportFadeRamp_ < 1.0f)
+                        {
+                            const float elapsedMs = static_cast<float>(
+                                nowUs - transportFadeStartUs_) / 1000.0f;
+                            transportFadeRamp_ = juce::jlimit(
+                                0.0f, 1.0f,
+                                elapsedMs / static_cast<float>(fadeInMs));
+                        }
+                        else if (fadeInMs == 0)
+                        {
+                            transportFadeRamp_ = 1.0f; // no fade configured
+                        }
+                    }
+                    else
+                    {
+                        // HOLD (1) or STOP (2): reset ramp so the next PLAY triggers fade.
+                        transportFadeRamp_ = 0.0f;
+                    }
+                    transportPrevFreeze_ = smpFreeze;
+                }
+
+                // Effective sampler opacity = user opacity × fade ramp.
+                // At ramp=0 → effectiveSmpOp=0 → frame=white (silence).
+                // At ramp=1 → effectiveSmpOp=smpOp → normal brightness.
+                const float effectiveSmpOp = smpOp * transportFadeRamp_;
+
+                if (smpFreeze != 2) // Do not inject when sampler transport is STOP
+                {
+                    // 1. Apply sampler opacity + transport fade-in ramp
+                    if (effectiveSmpOp < 0.999f)
+                    {
+                        const float inv = 1.0f - effectiveSmpOp;
+                        for (int px = 0; px < nb; ++px)
+                        {
+                            workR[px] = static_cast<uint8_t>(workR[px] * effectiveSmpOp + 255.f * inv);
+                            workG[px] = static_cast<uint8_t>(workG[px] * effectiveSmpOp + 255.f * inv);
+                            workB[px] = static_cast<uint8_t>(workB[px] * effectiveSmpOp + 255.f * inv);
+                        }
+                    }
+
+                    // 2. Darken-blend with live when live transport is active
+                    if (liveFreeze != 2 && liveOp > 0.001f)
+                    {
+                        uint8_t lvR[FrameSamplerConstants::MAX_PIXELS] {};
+                        uint8_t lvG[FrameSamplerConstants::MAX_PIXELS] {};
+                        uint8_t lvB[FrameSamplerConstants::MAX_PIXELS] {};
+                        int liveN = 0;
+                        sampler.getLiveFrame(lvR, lvG, lvB, nb, liveN);
+                        const int blendN = std::min(liveN, nb);
+                        const float liveInv = 1.0f - liveOp;
+                        for (int px = 0; px < blendN; ++px)
+                        {
+                            // Apply live opacity: fade live frame toward white
+                            const auto lR = static_cast<uint8_t>(
+                                lvR[px] * liveOp + 255.f * liveInv);
+                            const auto lG = static_cast<uint8_t>(
+                                lvG[px] * liveOp + 255.f * liveInv);
+                            const auto lB = static_cast<uint8_t>(
+                                lvB[px] * liveOp + 255.f * liveInv);
+                            // Darken blend: darkest pixel wins
+                            workR[px] = std::min(workR[px], lR);
+                            workG[px] = std::min(workG[px], lG);
+                            workB[px] = std::min(workB[px], lB);
+                        }
+                    }
+
+                    // 3. Write mixed frame to AudioImageBuffers (the visual mix bus)
+                    uint8_t* wR = nullptr;
+                    uint8_t* wG = nullptr;
+                    uint8_t* wB = nullptr;
+                    if (audio_image_buffers_start_write(audioBuffers, &wR, &wG, &wB) == 0)
+                    {
+                        std::memcpy(wR, workR, static_cast<size_t>(nb));
+                        std::memcpy(wG, workG, static_cast<size_t>(nb));
+                        std::memcpy(wB, workB, static_cast<size_t>(nb));
+                        audio_image_buffers_complete_write(audioBuffers);
+                    }
+                }
             }
 
             // ---------------------------------------------------------------
-            // CRITICAL: update db->preprocessed_data from the playback frame.
+            // CRITICAL: update db->preprocessed_data from the (modified) frame.
             // synth_AudioProcess uses db->preprocessed_data for audio generation
-            // (not the raw RGB buffers). Without this, the audio engine keeps
-            // using the live-stream preprocessing computed by the UDP thread.
+            // (not the raw RGB buffers). attack + blend are applied to workR/G/B
+            // before preprocessing so they affect the synthesised sound.
+            //
+            // Guard: skip when sampler transport is STOP (sampler_freeze_mode==2).
+            // In that state the UDP thread owns db->preprocessed_data (live
+            // preprocessing).  Writing here with notes=0 would silence the live
+            // audio in bursts synchronised with the step sequencer — the audible
+            // "rhythmic impact in the live" bug.
             // ---------------------------------------------------------------
-            if (doubleBuffer != nullptr)
             {
-                // Prepare full-size buffers (zero-fill if pixel_count < MAX_PIXELS)
-                uint8_t tmpR[FrameSamplerConstants::MAX_PIXELS] {};
-                uint8_t tmpG[FrameSamplerConstants::MAX_PIXELS] {};
-                uint8_t tmpB[FrameSamplerConstants::MAX_PIXELS] {};
-
-                const int nb = std::min(static_cast<int>(frame.pixel_count),
-                                        FrameSamplerConstants::MAX_PIXELS);
-                std::memcpy(tmpR, frame.R, static_cast<size_t>(nb));
-                std::memcpy(tmpG, frame.G, static_cast<size_t>(nb));
-                std::memcpy(tmpB, frame.B, static_cast<size_t>(nb));
-
-                PreprocessedImageData ppData {};
-                if (image_preprocess_frame(tmpR, tmpG, tmpB, &ppData) == 0)
+                extern sp3ctra_config_t g_sp3ctra_config;
+                if (doubleBuffer != nullptr
+                    && g_sp3ctra_config.sampler_freeze_mode != 2)
                 {
-                    // Ensure timestamp is non-zero so synth_AudioProcess
-                    // takes the has_preprocessed branch.
-                    ppData.timestamp_us = static_cast<uint64_t>(currentTimeUs());
-
-                    pthread_mutex_lock(&doubleBuffer->mutex);
-                    doubleBuffer->preprocessed_data = ppData;
-                    doubleBuffer->dataReady = 1;
-                    pthread_mutex_unlock(&doubleBuffer->mutex);
+                    PreprocessedImageData ppData {};
+                    if (image_preprocess_frame_sampler(workR, workG, workB, &ppData) == 0)
+                    {
+                        ppData.timestamp_us = static_cast<uint64_t>(currentTimeUs());
+                        pthread_mutex_lock(&doubleBuffer->mutex);
+                        doubleBuffer->preprocessed_data = ppData;
+                        doubleBuffer->dataReady = 1;
+                        pthread_mutex_unlock(&doubleBuffer->mutex);
+                    }
                 }
             }
 
@@ -1034,20 +1424,32 @@ void FramePlayerThread::run()
             slot.play_head += direction;
         }
 
-        // Save last play position for resume mode
+        // Save last play position and direction for resume mode.
+        // Saving direction allows PINGPONG to resume in the correct sense.
         sampler.saveLastPlayHead(slotToPlay, slot.play_head);
+        sampler.saveLastDirection(slotToPlay, direction);
 
         log_info("FS", "Slot %d: playback stopped (head=%d/%d)",
                  slotToPlay, slot.play_head, slot.frame_count);
 
-        // Restore state (in case RT did not do it already)
-        if (static_cast<SlotState>(state.slotState[slotToPlay].load()) ==
-            SlotState::PLAYING)
+        // Restore state only if no new play command is already pending for this
+        // slot.  Without this guard, a rapid stop+play from uiPlaySlot() can
+        // set slotState=PLAYING and startPlayCmd=slotToPlay while this thread is
+        // still in the tail of the inner loop; the thread would then overwrite
+        // the PLAYING state with IDLE and the subsequent startPlayCmd would be
+        // consumed with no active playback — the "resume cursor stays but play
+        // does not start" bug.
         {
-            state.slotState[slotToPlay].store(static_cast<int>(SlotState::IDLE),
-                                              std::memory_order_release);
-            state.activePlaySlot.store(-1, std::memory_order_release);
-            state.passthroughEnabled.store(true, std::memory_order_release);
+            const int pendingCmd = state.startPlayCmd.load(std::memory_order_acquire);
+            if (pendingCmd != slotToPlay &&
+                static_cast<SlotState>(state.slotState[slotToPlay].load(
+                    std::memory_order_acquire)) == SlotState::PLAYING)
+            {
+                state.slotState[slotToPlay].store(static_cast<int>(SlotState::IDLE),
+                                                  std::memory_order_release);
+                state.activePlaySlot.store(-1, std::memory_order_release);
+                state.passthroughEnabled.store(true, std::memory_order_release);
+            }
         }
     }
 
@@ -1101,5 +1503,58 @@ void FrameSampler::sampleBrightnessForTimeline(int    slotIdx,
                            static_cast<float>(sum) / (nSamples * 3.0f * 255.0f))
             : 0.0f;
         outBrightness[k] = 1.0f - rawBri;
+    }
+}
+
+// ============================================================================
+// FrameSampler::sampleSpectralForTimeline — Non-RT only
+// ============================================================================
+void FrameSampler::sampleSpectralForTimeline(int    slotIdx,
+                                              float* outBass,
+                                              float* outTreble,
+                                              int    count) const noexcept
+{
+    if (slotIdx < 0 || slotIdx >= FrameSamplerConstants::NUM_SLOTS
+        || outBass == nullptr || outTreble == nullptr || count <= 0)
+        return;
+
+    const FrameSlot& slot = slots[slotIdx];
+    if (!slot.has_content || slot.frame_count == 0 || !slot.isAllocated())
+    {
+        for (int k = 0; k < count; ++k)
+            outBass[k] = outTreble[k] = 0.0f;
+        return;
+    }
+
+    // For each column pick one representative frame and sample 4 pixels
+    // from each half.  O(8 * count) — safe on the message thread.
+    for (int k = 0; k < count; ++k)
+    {
+        const int frameIdx = juce::jlimit(0, slot.frame_count - 1,
+                                          k * slot.frame_count / count);
+        const CapturedFrame& f = slot.frames[frameIdx];
+        const int pc   = juce::jlimit(2, FrameSamplerConstants::MAX_PIXELS,
+                                      static_cast<int>(f.pixel_count));
+        const int half = pc / 2;
+
+        // Bass: dense sampling of left half (low frequencies → gravity → down).
+        // Step ≤ 4 px ensures narrow features (e.g. a 20-px black line) are
+        // reliably captured and discontinuities are avoided.
+        const int bassStep = std::max(1, half / 256);
+        uint32_t bassSum = 0; int nBass = 0;
+        for (int p = 0; p < half; p += bassStep, ++nBass)
+            bassSum += (uint32_t)f.R[p] + f.G[p] + f.B[p];
+
+        // Treble: dense sampling of right half (high frequencies → air → up).
+        const int treStep = std::max(1, (pc - half) / 256);
+        uint32_t treSum = 0; int nTre = 0;
+        for (int p = half; p < pc; p += treStep, ++nTre)
+            treSum += (uint32_t)f.R[p] + f.G[p] + f.B[p];
+
+        // Darkness = 1 − brightness  (dark pixels = spectral energy)
+        outBass[k] = (nBass > 0) ? juce::jlimit(0.0f, 1.0f,
+            1.0f - (float)bassSum / (nBass * 3.0f * 255.0f)) : 0.0f;
+        outTreble[k] = (nTre > 0) ? juce::jlimit(0.0f, 1.0f,
+            1.0f - (float)treSum  / (nTre  * 3.0f * 255.0f)) : 0.0f;
     }
 }

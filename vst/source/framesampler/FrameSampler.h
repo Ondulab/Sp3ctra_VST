@@ -17,6 +17,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
@@ -182,6 +183,14 @@ private:
 
     static uint64_t currentTimeUs() noexcept;
 
+    // ── Transport fade-in state ────────────────────────────────────────────────
+    // Tracks transitions of sampler_freeze_mode so that pressing PLAY after
+    // HOLD (1) or STOP (2) produces a linear fade-in over sampler_fade_in_ms ms.
+    // Members are written/read exclusively on the FramePlayerThread → no sync needed.
+    int      transportPrevFreeze_  = 2;    // previous sampler_freeze_mode value
+    uint64_t transportFadeStartUs_ = 0;    // µs timestamp when last PLAY was pressed
+    float    transportFadeRamp_    = 1.0f; // current ramp multiplier [0..1]
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FramePlayerThread)
 };
 
@@ -254,6 +263,34 @@ public:
         seqGateSlot.store(gateSlot, std::memory_order_relaxed);
     }
 
+    /** Sequencer silent-step flag.
+     *  Set by FrameSequencer::triggerStep() (RT) when a STEP_EMPTY (-1) step
+     *  is triggered.  CisVisualizerComponent (message thread) reads this to
+     *  force the visual display to white (silence) for that step.
+     *  Also read by BlobVisualizerComponent to suppress blob detection.
+     *  RT-safe: single atomic store (RT) / relaxed load (message thread). */
+    void setSeqSilentStep(bool s) noexcept
+    {
+        seqSilentStepActive.store(s, std::memory_order_relaxed);
+    }
+    bool isSeqSilentStepActive() const noexcept
+    {
+        return seqSilentStepActive.load(std::memory_order_relaxed);
+    }
+
+    /** Shared final-gray buffer — written by CisVisualizerComponent after
+     *  computing localDataGray, read by BlobVisualizerComponent.
+     *  Both callers run exclusively on the JUCE message/timer thread so no
+     *  locking is required. */
+    void setFinalGrayBuffer(const std::vector<uint8_t>& data)
+    {
+        finalGrayBuffer_ = data;
+    }
+    const std::vector<uint8_t>& getFinalGrayBuffer() const noexcept
+    {
+        return finalGrayBuffer_;
+    }
+
     int   getMidiChannel()  const noexcept { return midiChannel.load(); }
     int   getOctaveOffset() const noexcept { return octaveOffset.load(); }
     float getMaxDuration()  const noexcept { return maxDurationS.load(); }
@@ -295,6 +332,57 @@ public:
             slotParams[i].resumeMode.store(r, std::memory_order_relaxed);
     }
 
+    /** Live darken-blend mix amount [0..1]: 0=pure playback, 1=darken(sample,live). */
+    void setSlotBlendAmount(int i, float v) noexcept
+    {
+        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+            slotParams[i].blendAmount.store(juce::jlimit(0.0f, 1.0f, v),
+                                            std::memory_order_relaxed);
+    }
+
+    /** Attack fade-in length [0..1], normalised over the active region.
+     *  At the start bound the frame is fully white (silent); by attackLen
+     *  fraction of the active region it is back to normal brightness. */
+    void setSlotAttackLen(int i, float v) noexcept
+    {
+        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+            slotParams[i].attackLen.store(juce::jlimit(0.0f, 1.0f, v),
+                                          std::memory_order_relaxed);
+    }
+    /** Decay fade-out length [0..1], normalised over the active region.
+     *  Mirrors attackLen: at the end bound the frame is fully white (silent);
+     *  decayLen frames before that it is back to normal brightness. */
+    void setSlotDecayLen(int i, float v) noexcept
+    {
+        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+            slotParams[i].decayLen.store(juce::jlimit(0.0f, 1.0f, v),
+                                         std::memory_order_relaxed);
+    }
+    /** Global brightness lift [0..1]: 0=normal, 1=fully white (silent).
+     *  Applied uniformly to every pixel of the playback frame. */
+    void setSlotBrightnessLift(int i, float v) noexcept
+    {
+        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+            slotParams[i].brightnessLift.store(juce::jlimit(0.0f, 1.0f, v),
+                                               std::memory_order_relaxed);
+    }
+    /** Treble (right-half pixels) fade to white [0..1].
+     *  0=no change, 1=all right-half pixels → white (silence). */
+    void setSlotTrebleCut(int i, float v) noexcept
+    {
+        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+            slotParams[i].trebleCut.store(juce::jlimit(0.0f, 1.0f, v),
+                                          std::memory_order_relaxed);
+    }
+    /** Bass (left-half pixels) fade to white [0..1].
+     *  0=no change, 1=all left-half pixels → white (silence). */
+    void setSlotBassCut(int i, float v) noexcept
+    {
+        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+            slotParams[i].bassCut.store(juce::jlimit(0.0f, 1.0f, v),
+                                        std::memory_order_relaxed);
+    }
+
     float    getSlotStartFrac(int i) const noexcept
     {
         if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0.0f;
@@ -320,6 +408,47 @@ public:
         if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return false;
         return slotParams[i].resumeMode.load(std::memory_order_relaxed);
     }
+    float    getSlotBlendAmount(int i) const noexcept
+    {
+        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0.0f;
+        return slotParams[i].blendAmount.load(std::memory_order_relaxed);
+    }
+    float    getSlotAttackLen(int i) const noexcept
+    {
+        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0.0f;
+        return slotParams[i].attackLen.load(std::memory_order_relaxed);
+    }
+    float    getSlotDecayLen(int i) const noexcept
+    {
+        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0.0f;
+        return slotParams[i].decayLen.load(std::memory_order_relaxed);
+    }
+    float    getSlotBrightnessLift(int i) const noexcept
+    {
+        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0.0f;
+        return slotParams[i].brightnessLift.load(std::memory_order_relaxed);
+    }
+    float    getSlotTrebleCut(int i) const noexcept
+    {
+        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0.0f;
+        return slotParams[i].trebleCut.load(std::memory_order_relaxed);
+    }
+    float    getSlotBassCut(int i) const noexcept
+    {
+        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0.0f;
+        return slotParams[i].bassCut.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * Copy the most recent live frame into caller-supplied buffers.
+     * Called by FramePlayerThread (Non-RT) for darken-blend.
+     * Thread-safe: protected by liveMutex_.
+     *
+     * @param maxPixels  Maximum number of pixels to copy (must be ≤ MAX_PIXELS).
+     * @param outCount   Set to the number of pixels actually copied (0 if no frame yet).
+     */
+    void getLiveFrame(uint8_t* outR, uint8_t* outG, uint8_t* outB,
+                      int maxPixels, int& outCount) noexcept;
 
     // =========================================================================
     // Non-RT: UI-triggered commands (message/timer thread — atomics only)
@@ -353,6 +482,14 @@ public:
                                      float* outBrightness,
                                      int    count) const noexcept;
 
+    /** Non-RT only. Sample bass (left pixels = low freq) and treble
+     *  (right pixels = high freq) darkness for timeline spectral display.
+     *  bass[k] / treble[k] ∈ [0..1] where 1 = max contrast (dark = sound). */
+    void sampleSpectralForTimeline(int    slotIdx,
+                                    float* outBass,
+                                    float* outTreble,
+                                    int    count) const noexcept;
+
     // =========================================================================
     // Internal: called by FramePlayerThread (Non-RT) to update playhead atomic
     // =========================================================================
@@ -371,6 +508,19 @@ public:
         if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0;
         return lastPlayHead[i].load(std::memory_order_relaxed);
     }
+    /** Save the direction (+1 or -1) when playback stops.
+     *  Used to restore the PINGPONG sense when Resume mode is active. */
+    void saveLastDirection(int i, int dir) noexcept
+    {
+        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+            lastDirection[i].store((dir < 0) ? -1 : 1, std::memory_order_relaxed);
+    }
+    int getLastDirection(int i) const noexcept
+    {
+        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 1;
+        const int d = lastDirection[i].load(std::memory_order_relaxed);
+        return (d < 0) ? -1 : 1;
+    }
 
     /** Clear all recorded frames from a slot and reset it to IDLE.
      *  Stops any ongoing recording or playback on that slot first. */
@@ -381,6 +531,11 @@ public:
     // =========================================================================
     void clearSlot(int slotIndex);
     void clearAllSlots();
+
+    /** Deep-copy all recorded frames and play parameters from srcIdx to dstIdx.
+     *  Non-RT only — stops any ongoing activity on the destination slot first.
+     *  No-op if srcIdx == dstIdx or srcIdx has no content. */
+    void copySlotTo(int srcIdx, int dstIdx);
 
     // =========================================================================
     // Slot info queries (Non-RT, for UI polling)
@@ -423,6 +578,9 @@ private:
     std::atomic<float> maxDurationS{ 10.0f };
     // -1 = no gating; 0-11 = only record frames while sequencer step == this bank
     std::atomic<int>   seqGateSlot { -1 };
+    // Set by FrameSequencer::triggerStep() when STEP_EMPTY is triggered;
+    // cleared when a slot starts playing or STEP_LIVE is triggered.
+    std::atomic<bool>  seqSilentStepActive { false };
 
     // -------------------------------------------------------------------------
     // Non-RT state
@@ -447,7 +605,13 @@ private:
         std::atomic<float> endFrac   { 1.0f }; // Normalised playback end   [0..1]
         std::atomic<float> speed     { 1.0f }; // Playback speed multiplier [0.1..8]
         std::atomic<int>   loopMode  { static_cast<int>(LoopMode::LOOP) };
-        std::atomic<bool>  resumeMode { false }; // Resume from last stop position
+        std::atomic<bool>  resumeMode  { false }; // Resume from last stop position
+        std::atomic<float> blendAmount { 0.0f };  // Live darken-blend [0=sample, 1=full]
+        std::atomic<float> attackLen      { 0.0f };  // Attack fade-in  [0=none, 1=full region]
+        std::atomic<float> decayLen       { 0.0f };  // Decay fade-out  [0=none, 1=full region]
+        std::atomic<float> brightnessLift { 0.0f };  // Global brightness lift [0=normal, 1=white]
+        std::atomic<float> trebleCut      { 0.0f };  // High-freq fade [0=none, 1=full treble silence]
+        std::atomic<float> bassCut        { 0.0f };  // Low-freq  fade [0=none, 1=full bass  silence]
 
         SlotPlayParams() = default;
         SlotPlayParams(const SlotPlayParams&)            = delete;
@@ -457,8 +621,33 @@ private:
     SlotPlayParams slotParams[FrameSamplerConstants::NUM_SLOTS];
 
     // Per-slot playhead atomics — written by FramePlayerThread, read by UI.
+    // Per-slot playhead atomics — written by FramePlayerThread, read by UI.
     std::atomic<int> currentPlayHead[FrameSamplerConstants::NUM_SLOTS];
     std::atomic<int> lastPlayHead[FrameSamplerConstants::NUM_SLOTS];
+    // Last playback direction (+1 / -1) — used to restore PINGPONG sense on resume.
+    std::atomic<int> lastDirection[FrameSamplerConstants::NUM_SLOTS];
+
+    // -------------------------------------------------------------------------
+    // Live frame cache — updated by UDP thread (onFrameAssembled), read by
+    // FramePlayerThread for the darken-blend feature.
+    // Protected by liveMutex_ (both writers/readers are Non-RT).
+    // -------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Shared final-gray buffer — message-thread-only (no locking required).
+    // Written by CisVisualizerComponent::timerCallback(), read by
+    // BlobVisualizerComponent::timerCallback().  Both run on the JUCE message
+    // thread so sequential access is guaranteed.
+    // -------------------------------------------------------------------------
+    std::vector<uint8_t> finalGrayBuffer_;
+
+    // -------------------------------------------------------------------------
+    // Live frame cache
+    // -------------------------------------------------------------------------
+    std::mutex liveMutex_;
+    uint8_t    liveR_[FrameSamplerConstants::MAX_PIXELS] {};
+    uint8_t    liveG_[FrameSamplerConstants::MAX_PIXELS] {};
+    uint8_t    liveB_[FrameSamplerConstants::MAX_PIXELS] {};
+    int        livePixelCount_ = 0;
 
     // -------------------------------------------------------------------------
     // Helpers
