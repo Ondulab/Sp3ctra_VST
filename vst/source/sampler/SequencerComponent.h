@@ -76,7 +76,12 @@ private:
         }
 
     private:
-        /** Draw the spectral waveform of the bank's active zone into this cell. */
+        /** Draw the spectral waveform of the bank's active zone into this cell.
+         *
+         *  Uses anti-aliased filled paths (no per-pixel bars) to avoid jaggedness.
+         *  Samples at native pixel resolution, averages per-column to prevent
+         *  aliasing when the zone is narrower than the cell width.
+         */
         void paintSlotThumbnail(juce::Graphics& g)
         {
             if (!frameSampler) return;
@@ -89,42 +94,79 @@ private:
             const int th = h - ty - margin;
             if (tw <= 0 || th <= 0) return;
 
-            // Sample spectral data for the whole slot (bass & treble columns)
-            constexpr int kCols = 64;
-            float bass  [kCols] {};
-            float treble[kCols] {};
+            // Sample at native pixel resolution (up to 512 cols)
+            constexpr int kMaxCols = 512;
+            const int kCols = juce::jmin(tw, kMaxCols);
+            float bass  [kMaxCols] {};
+            float treble[kMaxCols] {};
             frameSampler->sampleSpectralForTimeline(bankSlot, bass, treble, kCols);
 
-            // Restrict to the active zone [startFrac, endFrac]
+            // Active zone [startFrac, endFrac] mapped to sample indices
             const float sf      = frameSampler->getSlotStartFrac(bankSlot);
             const float ef      = frameSampler->getSlotEndFrac(bankSlot);
             const int   startI  = juce::jlimit(0, kCols - 1, (int)(sf * (float)kCols));
             const int   endI    = juce::jlimit(startI + 1, kCols, (int)(ef * (float)kCols));
-            const int   zoneLen = endI - startI;
+            const int   zoneLen = juce::jmax(1, endI - startI);
 
-            const int cy = ty + th / 2;
+            const float cy    = (float)(ty + th / 2);
+            const float halfH = (float)(th / 2);
+
+            // ── Build bass and treble area paths ──────────────────────────────
+            juce::Path bassPath, treblePath;
+            bassPath  .startNewSubPath((float)tx, cy);
+            treblePath.startNewSubPath((float)tx, cy);
 
             for (int col = 0; col < tw; ++col)
             {
-                const int si = startI + juce::jlimit(0, zoneLen - 1,
-                                                      col * zoneLen / juce::jmax(1, tw));
-                const float bv = std::pow(bass  [si], 0.4f);
-                const float tv = std::pow(treble[si], 0.4f);
-
-                // Bass — downward from centre
-                const int bH = juce::jmax(1, (int)(bv * (float)(th / 2)));
-                g.setColour(juce::Colour(0xff003355).brighter(bv * 1.6f));
-                g.fillRect(tx + col, cy, 1, bH);
-
-                // Treble — upward from centre
-                const int tH = juce::jmax(1, (int)(tv * (float)(th / 2)));
-                g.setColour(juce::Colour(0xff005544).brighter(tv * 1.6f));
-                g.fillRect(tx + col, cy - tH, 1, tH);
+                // Average samples over this column's zone range (anti-alias)
+                const int s0 = startI + col       * zoneLen / tw;
+                const int s1 = startI + (col + 1) * zoneLen / tw;
+                float bSum = 0.f, tSum = 0.f;
+                int   cnt  = 0;
+                for (int s = s0; s <= s1 && s < endI; ++s)
+                {
+                    bSum += bass  [s];
+                    tSum += treble[s];
+                    ++cnt;
+                }
+                if (cnt == 0)
+                {
+                    const int sc = juce::jlimit(0, kCols - 1, s0);
+                    bSum = bass[sc]; tSum = treble[sc]; cnt = 1;
+                }
+                const float bv = std::pow(bSum / (float)cnt, 0.4f);
+                const float tv = std::pow(tSum / (float)cnt, 0.4f);
+                const float x  = (float)(tx + col) + 0.5f;
+                bassPath  .lineTo(x, cy + bv * halfH);
+                treblePath.lineTo(x, cy - tv * halfH);
             }
 
-            // Subtle centre line
+            bassPath  .lineTo((float)(tx + tw), cy);
+            treblePath.lineTo((float)(tx + tw), cy);
+            bassPath  .closeSubPath();
+            treblePath.closeSubPath();
+
+            // ── Fill areas (anti-aliased by JUCE path renderer) ───────────────
+            g.setColour(juce::Colour(0xff1a4466).withAlpha(0.80f));
+            g.fillPath(bassPath);
+            g.setColour(juce::Colour(0xff1a5544).withAlpha(0.80f));
+            g.fillPath(treblePath);
+
+            // ── Bright edge strokes along the waveform outlines ───────────────
+            // Re-use the same paths: stroke only the "top" portion.
+            // Easiest: stroke the full closed path at 0.8 px — visually reads
+            // as a bright contour on the open face of the waveform.
+            const juce::PathStrokeType thin(0.8f,
+                juce::PathStrokeType::curved,
+                juce::PathStrokeType::rounded);
+            g.setColour(juce::Colour(0xff55bbdd).withAlpha(0.55f));
+            g.strokePath(bassPath,   thin);
+            g.setColour(juce::Colour(0xff55ddbb).withAlpha(0.55f));
+            g.strokePath(treblePath, thin);
+
+            // ── Centre axis ───────────────────────────────────────────────────
             g.setColour(juce::Colour(0x18ffffff));
-            g.fillRect(tx, cy, tw, 1);
+            g.drawHorizontalLine(juce::roundToInt(cy), (float)tx, (float)(tx + tw));
         }
 
         // ── Interaction ───────────────────────────────────────────────────────
