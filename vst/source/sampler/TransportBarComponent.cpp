@@ -131,19 +131,20 @@ TransportBarComponent::TransportBarComponent(Sp3ctraAudioProcessor& proc)
     addAndMakeVisible(bpmLabel);
 
     // ── Steps ─────────────────────────────────────────────────────────────────
-    stepsCombo.addItemList({"4","8","12","16","24","32"}, 1);
+    // Max 16 steps — matches the 8×2 display grid in SequencerComponent.
+    stepsCombo.addItemList({"4","8","12","16"}, 1);
     {
-        static const int choices[] = { 4, 8, 12, 16, 24, 32 };
-        const int cur = static_cast<int>(
-            apvts.getRawParameterValue("seqNumSteps")->load());
-        for (int k = 0; k < 6; ++k)
+        static const int choices[] = { 4, 8, 12, 16 };
+        const int cur = juce::jmin(16, static_cast<int>(
+            apvts.getRawParameterValue("seqNumSteps")->load()));
+        for (int k = 0; k < 4; ++k)
             if (choices[k] == cur) { stepsCombo.setSelectedId(k+1, juce::dontSendNotification); break; }
     }
     stepsCombo.onChange = [this]
     {
-        static const int choices[] = { 4, 8, 12, 16, 24, 32 };
+        static const int choices[] = { 4, 8, 12, 16 };
         const int id = stepsCombo.getSelectedId();
-        if (id >= 1 && id <= 6)
+        if (id >= 1 && id <= 4)
         {
             const int n = choices[id-1];
             if (auto* p = processor.getAPVTS().getParameter("seqNumSteps"))
