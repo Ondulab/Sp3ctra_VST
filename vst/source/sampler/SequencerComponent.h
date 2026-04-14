@@ -10,8 +10,9 @@ class Sp3ctraAudioProcessor;
 /**
  * @brief Step sequencer grid — 16 steps in 2 rows of 8, square cells.
  *
- * Above the grid a mini spectral timeline shows the selected slot's
- * content, active zone (start/end bars) and playhead.
+ * Each cell displays a mini spectral thumbnail of its assigned bank's
+ * ACTIVE zone (content between start and end bounds), so the user can
+ * identify which sample is where at a glance.
  *
  * Interaction model:
  *   Left click   → increment bank (+1)
@@ -28,9 +29,6 @@ public:
     void paint  (juce::Graphics& g) override;
     void resized() override;
 
-    /** Wired by SamplerPageComponent — returns the currently selected slot index. */
-    std::function<int()> getSelectedSlot;
-
     // Display constants
     static constexpr int kDisplayCols  = 8;
     static constexpr int kDisplayRows  = 2;
@@ -43,21 +41,93 @@ private:
         /** Called with delta = +1 or -1. */
         std::function<void(int delta)> onStep;
 
-        // Flat fill, no border/outline
+        /** Bank slot index assigned to this step (>=0), or STEP_EMPTY/LIVE. */
+        int          bankSlot    = FrameSequencer::STEP_EMPTY;
+        FrameSampler* frameSampler = nullptr;
+
+        // ── Rendering ────────────────────────────────────────────────────────
         void paintButton(juce::Graphics& g, bool isHighlighted, bool isDown) override
         {
+            // Background fill — no border/outline
             auto bg = findColour(juce::TextButton::buttonColourId);
             if (isHighlighted) bg = bg.brighter(0.08f);
             if (isDown)        bg = bg.darker(0.12f);
             g.setColour(bg);
             g.fillRoundedRectangle(getLocalBounds().toFloat(), 4.0f);
-            // No border
-            g.setColour(findColour(juce::TextButton::textColourOffId));
-            g.setFont(juce::FontOptions(11.0f));
-            g.drawText(getButtonText(), getLocalBounds(),
-                       juce::Justification::centred, false);
+
+            // Mini spectral thumbnail of the bank's active zone [start, end]
+            if (bankSlot >= 0
+                && frameSampler != nullptr
+                && frameSampler->slotHasContent(bankSlot))
+            {
+                paintSlotThumbnail(g);
+            }
+
+            // Bank label — top-left corner, small font
+            const auto lbl = getButtonText();
+            if (lbl.isNotEmpty())
+            {
+                g.setColour(findColour(juce::TextButton::textColourOffId));
+                g.setFont(juce::FontOptions(10.0f));
+                g.drawText(lbl,
+                           juce::Rectangle<int>(4, 3, getWidth() - 8, 14),
+                           juce::Justification::centredLeft, false);
+            }
         }
 
+    private:
+        /** Draw the spectral waveform of the bank's active zone into this cell. */
+        void paintSlotThumbnail(juce::Graphics& g)
+        {
+            if (!frameSampler) return;
+            const int w = getWidth();
+            const int h = getHeight();
+            constexpr int margin = 3;
+            const int tx = margin;
+            const int ty = margin + 14; // leave room for label at top
+            const int tw = w - 2 * margin;
+            const int th = h - ty - margin;
+            if (tw <= 0 || th <= 0) return;
+
+            // Sample spectral data for the whole slot (bass & treble columns)
+            constexpr int kCols = 64;
+            float bass  [kCols] {};
+            float treble[kCols] {};
+            frameSampler->sampleSpectralForTimeline(bankSlot, bass, treble, kCols);
+
+            // Restrict to the active zone [startFrac, endFrac]
+            const float sf      = frameSampler->getSlotStartFrac(bankSlot);
+            const float ef      = frameSampler->getSlotEndFrac(bankSlot);
+            const int   startI  = juce::jlimit(0, kCols - 1, (int)(sf * (float)kCols));
+            const int   endI    = juce::jlimit(startI + 1, kCols, (int)(ef * (float)kCols));
+            const int   zoneLen = endI - startI;
+
+            const int cy = ty + th / 2;
+
+            for (int col = 0; col < tw; ++col)
+            {
+                const int si = startI + juce::jlimit(0, zoneLen - 1,
+                                                      col * zoneLen / juce::jmax(1, tw));
+                const float bv = std::pow(bass  [si], 0.4f);
+                const float tv = std::pow(treble[si], 0.4f);
+
+                // Bass — downward from centre
+                const int bH = juce::jmax(1, (int)(bv * (float)(th / 2)));
+                g.setColour(juce::Colour(0xff003355).brighter(bv * 1.6f));
+                g.fillRect(tx + col, cy, 1, bH);
+
+                // Treble — upward from centre
+                const int tH = juce::jmax(1, (int)(tv * (float)(th / 2)));
+                g.setColour(juce::Colour(0xff005544).brighter(tv * 1.6f));
+                g.fillRect(tx + col, cy - tH, 1, tH);
+            }
+
+            // Subtle centre line
+            g.setColour(juce::Colour(0x18ffffff));
+            g.fillRect(tx, cy, tw, 1);
+        }
+
+        // ── Interaction ───────────────────────────────────────────────────────
         void mouseDown(const juce::MouseEvent& e) override
         {
             dragStartY_   = e.position.y;
@@ -96,7 +166,6 @@ private:
             juce::TextButton::mouseUp(e);
         }
 
-    private:
         float dragStartY_   = 0.f;
         int   dragAccSteps_ = 0;
         bool  isDrag_       = false;
@@ -105,16 +174,10 @@ private:
     // ── Helpers ──────────────────────────────────────────────────────────────
     void timerCallback() override;
     void updateButton(int i);
-    void paintMiniTimeline(juce::Graphics& g) const;
 
     Sp3ctraAudioProcessor& processor;
     StepCell stepBtns[FrameSequencer::MAX_STEPS];
     int cachedNumSteps = -1;
-
-    // Layout geometry — set in resized(), consumed in paint()
-    int cachedCellH_       = 0;
-    int cachedTimelineH_   = 60;
-    int cachedCellsStartY_ = 30;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SequencerComponent)
 };
