@@ -932,23 +932,23 @@ void FramePlayerThread::run()
                  slotToPlay, slot.frame_count,
                  static_cast<double>(slot.duration_us) / 1e6);
 
-        // Per-slot play parameters are re-read every iteration so changes
-        // made via the UI sliders take effect immediately (on-the-fly).
-        // We track prevStartFrame/prevEndFrame to detect range changes and
-        // re-anchor the reference timestamps + loopStartUs accordingly.
-        int      prevStartFrame  = -1;
-        int      prevEndFrame    = -1;
-        bool     firstRangeInit  = true; // true until first range is established
-        // Initialise prevLoopMode from current atomic so the first iteration
-        // does NOT trigger a spurious mode-change reset.
-        LoopMode prevLoopMode = sampler.getSlotLoopMode(slotToPlay);
-        uint64_t fwdRefTs     = 0;
-        uint64_t bwdRefTs     = 0;
+        // ── Fixed-rate injection: 1000 lines/sec regardless of speed ─────
+        // speed = frame-skip factor per 1ms tick:
+        //   x1   → advance play_head by 1  every 1ms → 1000 lps
+        //   x32  → advance play_head by 32 every 1ms → still 1000 lps output
+        //           but timeline traversed 32× faster
+        //   x0.5 → advance play_head by 0 or 1 alternating → 500 lps effective,
+        //           1000 lps output (frame repetition = slow-motion)
+        constexpr uint64_t kPeriodUs = 1000; // 1 ms = 1000 lines/sec
+        uint64_t lastInjectUs = currentTimeUs();
+        float    frameAcc     = 0.0f;       // sub-frame accumulator
 
-        // Initial direction derives from the starting loop mode.
-        int direction = (prevLoopMode == LoopMode::INVERSE) ? -1 : 1;
-        slot.play_head       = 0; // set on first range initialisation below
-        uint64_t loopStartUs = currentTimeUs();
+        int      prevStartFrame = -1;
+        int      prevEndFrame   = -1;
+        bool     firstRangeInit = true;
+        LoopMode prevLoopMode   = sampler.getSlotLoopMode(slotToPlay);
+        int      direction      = (prevLoopMode == LoopMode::INVERSE) ? -1 : 1;
+        slot.play_head          = 0; // set on first range init below
 
         // ── Inner playback loop ───────────────────────────────────────────
         while (!threadShouldExit())
@@ -963,12 +963,10 @@ void FramePlayerThread::run()
             if (pending >= 0 && pending != slotToPlay)
                 break;
 
-            // ── Pause / hold: freeze play_head, keep current frame visible ─
-            // Re-anchor loopStartUs each held iteration so that resuming does
-            // not produce a burst of back-to-back injections (no time debt).
+            // ── Pause / hold: freeze play_head, re-anchor injection timer ─
             if (sampler.isSeqPlayerHeld())
             {
-                loopStartUs = currentTimeUs();
+                lastInjectUs = currentTimeUs(); // no burst on resume
                 Thread::sleep(2);
                 continue;
             }
@@ -984,18 +982,9 @@ void FramePlayerThread::run()
                 static_cast<int>(p_start * static_cast<float>(slot.frame_count)));
             const int endFrame   = juce::jlimit(startFrame + 1, slot.frame_count,
                 static_cast<int>(p_end * static_cast<float>(slot.frame_count)));
+            const int zoneLen    = endFrame - startFrame;
 
-            // ── Detect loop-mode change → update direction + re-anchor timing ──
-            // Two bugs fixed here:
-            //  1. INV→LOOP left direction=-1 → play_head would oscillate at
-            //     startFrame-1 (tight boundary loop).
-            //  2. LOOP→INV (or any mode change) reset loopStartUs to now() but
-            //     did NOT account for where play_head currently is.  When
-            //     play_head is near startFrame, rawTs(backward) ≈ full_duration,
-            //     so elapsed(0) < scaledTs(huge) → thread keeps sleeping for
-            //     the full duration → appears frozen.
-            //  Fix: set loopStartUs so that the current frame's scheduled offset
-            //  has already elapsed, making the transition seamless.
+            // ── Loop-mode change → update direction ───────────────────────
             if (p_loop != prevLoopMode)
             {
                 prevLoopMode = p_loop;
@@ -1003,58 +992,30 @@ void FramePlayerThread::run()
                 {
                     case LoopMode::LOOP:
                     case LoopMode::NONE:
-                        direction = 1;                          // always forward
+                        direction = 1;
                         break;
                     case LoopMode::INVERSE:
-                        direction = -1;                         // always backward
+                        direction = -1;
                         break;
                     case LoopMode::PINGPONG:
-                        break;                                  // keep current direction
-                }
-
-                // Re-anchor loopStartUs relative to the current play_head in
-                // the new direction so the first frame plays without delay.
-                // Guard: prevStartFrame >= 0 ensures fwdRefTs/bwdRefTs are valid.
-                if (prevStartFrame >= 0 &&
-                    slot.play_head >= 0 && slot.play_head < slot.frame_count)
-                {
-                    const uint64_t curTs  = slot.frames[slot.play_head].timestamp_us;
-                    const uint64_t rawTs  = (direction > 0)
-                        ? (curTs > fwdRefTs ? curTs - fwdRefTs : 0ULL)
-                        : (bwdRefTs > curTs ? bwdRefTs - curTs : 0ULL);
-                    const float    spd    = juce::jlimit(0.01f, 32.0f,
-                                               sampler.getSlotSpeed(slotToPlay));
-                    const uint64_t scaled = static_cast<uint64_t>(
-                                               static_cast<float>(rawTs) / spd);
-                    loopStartUs = currentTimeUs() - scaled; // current frame is "due now"
-                }
-                else
-                {
-                    loopStartUs = currentTimeUs();
+                        break; // keep current direction
                 }
             }
 
-            // Detect range change → re-anchor ref timestamps, clamp play_head
+            // ── Range change → clamp play_head, reset accumulator ─────────
             if (startFrame != prevStartFrame || endFrame != prevEndFrame)
             {
                 const bool wasFirst = firstRangeInit;
                 firstRangeInit = false;
                 prevStartFrame = startFrame;
                 prevEndFrame   = endFrame;
-                fwdRefTs       = slot.frames[startFrame].timestamp_us;
-                bwdRefTs       = slot.frames[endFrame - 1].timestamp_us;
 
                 if (wasFirst && sampler.getSlotResumeMode(slotToPlay))
                 {
-                    // Resume mode: restore last stopped position if it is within
-                    // the current [startFrame, endFrame) range.
                     const int saved = sampler.getLastPlayHead(slotToPlay);
                     if (saved >= startFrame && saved < endFrame)
                     {
                         slot.play_head = saved;
-                        // For PINGPONG, also restore the last direction so the
-                        // playback resumes in the same sense it was going when
-                        // it stopped — not always restarting forward.
                         if (prevLoopMode == LoopMode::PINGPONG)
                             direction = sampler.getLastDirection(slotToPlay);
                     }
@@ -1068,75 +1029,78 @@ void FramePlayerThread::run()
                     slot.play_head = (direction > 0) ? startFrame : endFrame - 1;
                 }
 
-                // Re-anchor loopStartUs relative to the current play_head
-                // timestamp so the first frame at the new position is due
-                // immediately.
-                // Without this, starting at a mid-recording position (e.g.
-                // Resume mode with play_head at T=5 s) would set elapsed=0
-                // while scaledTs=5 s/speed → the thread would wait that full
-                // duration before injecting the first frame (= audible latency).
+                // First frame of new range is due immediately
+                lastInjectUs = currentTimeUs();
+                frameAcc     = 0.0f;
+            }
+
+            // ── Wait for next 1ms injection tick ─────────────────────────
+            const uint64_t now             = currentTimeUs();
+            const uint64_t sinceLastInject = now - lastInjectUs;
+            if (sinceLastInject < kPeriodUs)
+            {
+                const uint64_t remaining = kPeriodUs - sinceLastInject;
+                if (remaining > 2000) Thread::sleep(1);
+                else                  Thread::yield();
+                continue;
+            }
+            // Lock-step advance — avoid drift accumulation
+            lastInjectUs += kPeriodUs;
+            if (lastInjectUs > now) lastInjectUs = now; // catch-up safety
+
+            // ── Advance play_head by fractional speed per tick ────────────
+            // Integer step: 0 is allowed for speed<1 (repeats current frame).
+            frameAcc    += p_speed;
+            const int step = static_cast<int>(frameAcc);
+            frameAcc    -= static_cast<float>(step);
+
+            if (step > 0 && zoneLen > 0)
+            {
+                slot.play_head += step * direction;
+
+                // ── Boundary / loop-mode handling ─────────────────────────
+                const bool fwdBound = (direction > 0 && slot.play_head >= endFrame);
+                const bool bwdBound = (direction < 0 && slot.play_head <  startFrame);
+                if (fwdBound || bwdBound)
                 {
-                    const uint64_t curTs  = slot.frames[slot.play_head].timestamp_us;
-                    const uint64_t rawTs  = (direction > 0)
-                        ? (curTs > fwdRefTs ? curTs - fwdRefTs : 0ULL)
-                        : (bwdRefTs > curTs ? bwdRefTs - curTs : 0ULL);
-                    const float    spd    = juce::jlimit(0.01f, 32.0f,
-                                               sampler.getSlotSpeed(slotToPlay));
-                    const uint64_t scaled = static_cast<uint64_t>(
-                                               static_cast<float>(rawTs) / spd);
-                    loopStartUs = currentTimeUs() - scaled; // frame is "due now"
+                    bool stop = false;
+                    switch (p_loop)
+                    {
+                        case LoopMode::NONE:
+                            stop = true;
+                            break;
+                        case LoopMode::LOOP:
+                            direction      = 1;
+                            // Wrap within zone, accounting for possible overshoot
+                            slot.play_head = startFrame
+                                + ((slot.play_head - startFrame) % zoneLen
+                                   + zoneLen) % zoneLen;
+                            frameAcc = 0.0f;
+                            log_debug("FS", "Slot %d: loop", slotToPlay);
+                            break;
+                        case LoopMode::INVERSE:
+                            direction      = -1;
+                            slot.play_head = (endFrame - 1)
+                                - (((endFrame - 1) - slot.play_head) % zoneLen
+                                   + zoneLen) % zoneLen;
+                            frameAcc = 0.0f;
+                            break;
+                        case LoopMode::PINGPONG:
+                            direction      = -direction;
+                            slot.play_head = juce::jlimit(startFrame,
+                                                          endFrame - 1,
+                                                          slot.play_head);
+                            frameAcc = 0.0f;
+                            break;
+                    }
+                    if (stop) break;
                 }
             }
 
-            // ── Boundary / loop-mode handling ─────────────────────────────
-            const bool fwdBound = (direction > 0 && slot.play_head >= endFrame);
-            const bool bwdBound = (direction < 0 && slot.play_head <  startFrame);
-            if (fwdBound || bwdBound)
-            {
-                bool stop = false;
-                switch (p_loop)
-                {
-                    case LoopMode::NONE:
-                        stop = true;
-                        break;
-                    case LoopMode::LOOP:
-                        direction      = 1;          // guard: ensure forward after INV/PING
-                        slot.play_head = startFrame;
-                        loopStartUs    = currentTimeUs();
-                        log_debug("FS", "Slot %d: loop", slotToPlay);
-                        break;
-                    case LoopMode::INVERSE:
-                        direction      = -1;
-                        slot.play_head = endFrame - 1;
-                        loopStartUs    = currentTimeUs();
-                        break;
-                    case LoopMode::PINGPONG:
-                        direction      = -direction;
-                        slot.play_head = (direction > 0) ? startFrame : endFrame - 1;
-                        loopStartUs    = currentTimeUs();
-                        break;
-                }
-                if (stop) break;
-                continue;
-            }
+            // Safety clamp — prevents out-of-bounds access
+            slot.play_head = juce::jlimit(startFrame, endFrame - 1, slot.play_head);
 
             const CapturedFrame& frame = slot.frames[slot.play_head];
-
-            // ── Timestamp scheduling with speed + direction ───────────────
-            const uint64_t rawTs = (direction > 0)
-                ? (frame.timestamp_us > fwdRefTs ? frame.timestamp_us - fwdRefTs : 0ULL)
-                : (bwdRefTs > frame.timestamp_us ? bwdRefTs - frame.timestamp_us : 0ULL);
-            const uint64_t scaledTs = static_cast<uint64_t>(
-                static_cast<float>(rawTs) / p_speed);
-            const uint64_t elapsed = currentTimeUs() - loopStartUs;
-
-            if (elapsed < scaledTs)
-            {
-                const uint64_t wait = scaledTs - elapsed;
-                if (wait > 2000) Thread::sleep(1);
-                else             Thread::yield();
-                continue;
-            }
 
             // ── Working buffers — attack + blend applied before BOTH outputs ──────
             // Zero-filled so pixels beyond pixel_count are silent (black = 0).
@@ -1440,8 +1404,6 @@ void FramePlayerThread::run()
 
             // Update UI playhead cursor (atomic write — Non-RT safe)
             sampler.notifyPlayHead(slotToPlay, slot.play_head);
-
-            slot.play_head += direction;
         }
 
         // Save last play position and direction for resume mode.
