@@ -205,6 +205,47 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"sfFocusOnly", 1}, "Focus Only", false));
 
+    // ── Image Pipeline ────────────────────────────────────────────────────────
+    // imageFreezeMode: 0 = PLAY (live frames flow)
+    //                  1 = HOLD (freeze last captured frame)
+    //                  2 = WHITE (force all pixels → 255, silences synthesis)
+    // Stored as int [0..2].  Backend effect is in CisVisualizerComponent::updateCisData().
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"imageFreezeMode", 1}, "Freeze Mode", 0, 2, 0, kHiddenInt));
+
+    // Live stream opacity [0..1] — darken-blend weight applied to the live CIS frame.
+    // Blend mode: min(live_pixel, sampler_pixel) per channel (ImageChops.darker equivalent).
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"imageLiveOpacity", 1}, "Live Opacity",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f, kHiddenFloat));
+
+    // Sampler stream opacity [0..1] — darken-blend weight for the FrameSampler playback frame.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"imageSamplerOpacity", 1}, "Sampler Opacity",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, kHiddenFloat));
+
+    // Fade-in duration [ms] — applied when restarting the live stream after Stop.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"imageFadeInMs", 1}, "Fade-In",
+        juce::NormalisableRange<float>(0.0f, 2000.0f, 10.0f), 100.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+
+    // ── Sampler stream preprocessing (mirroring live params independently) ────
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"samplerGamma", 1}, "Sampler Gamma",
+        juce::NormalisableRange<float>(0.1f, 10.0f, 0.01f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"samplerContrastMin", 1}, "Sampler Contrast Min",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
+    // samplerFreezeMode: 0=PLAY, 1=HOLD (freeze last sampler frame), 2=STOP (silence)
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"samplerFreezeMode", 1}, "Sampler Freeze Mode",
+        0, 2, 0, kHiddenInt));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"samplerFadeInMs", 1}, "Sampler Fade-In",
+        juce::NormalisableRange<float>(0.0f, 2000.0f, 10.0f), 100.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+
     // ── FrameSampler ──────────────────────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"frameSamplerEnabled", 1}, "FrameSampler Enabled",
@@ -326,7 +367,18 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("sfBlobFocusSigma", this);
     apvts.addParameterListener("sfSpectralWidthThreshold", this);
     apvts.addParameterListener("sfFocusOnly", this);
-    
+
+    // Image pipeline parameters (live transport + opacity + fade-in)
+    apvts.addParameterListener("imageFreezeMode",      this);
+    apvts.addParameterListener("imageLiveOpacity",     this);
+    apvts.addParameterListener("imageSamplerOpacity",  this);
+    apvts.addParameterListener("imageFadeInMs",        this);
+    // Sampler-specific preprocessing parameters
+    apvts.addParameterListener("samplerGamma",         this);
+    apvts.addParameterListener("samplerContrastMin",   this);
+    apvts.addParameterListener("samplerFreezeMode",    this);
+    apvts.addParameterListener("samplerFadeInMs",      this);
+
     // Create FrameSampler (always active, no lazy init needed)
     frameSampler = std::make_unique<FrameSampler>();
 
@@ -765,11 +817,13 @@ juce::AudioProcessorEditor* Sp3ctraAudioProcessor::createEditor()
 // APVTS State Management (automatic save/restore in DAW projects)
 void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    // APVTS handles serialization automatically via ValueTree
     auto state = apvts.copyState();
+    // Persist the last session path so it survives DAW project reloads
+    // and Standalone restarts (setStateInformation restores it).
+    if (lastSessionPath.isNotEmpty())
+        state.setProperty("lastSessionPath", lastSessionPath, nullptr);
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
     copyXmlToBinary(*xml, destData);
-    
     log_info("VST", "State saved to DAW project");
 }
 
@@ -781,6 +835,10 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
     if (xmlState.get() != nullptr) {
         if (xmlState->hasTagName(apvts.state.getType())) {
             apvts.replaceState(juce::ValueTree::fromXml(*xmlState));
+            // Restore last session path — SamplerPageComponent reads this
+            // on construction to auto-reload the session.
+            lastSessionPath = apvts.state
+                .getProperty("lastSessionPath", "").toString();
             log_info("VST", "State restored from DAW project");
             
             // On state restore, just update g_sp3ctra_config.
@@ -1097,6 +1155,26 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         apvts.getRawParameterValue("sfSpectralWidthThreshold")->load();
     g_sp3ctra_config.strokeforge_focus_only =
         (int)apvts.getRawParameterValue("sfFocusOnly")->load();
+
+    /* ── Image Pipeline live controls ──────────────────────────────────────── */
+    /* Always enable blob detection so the BlobVisualizerComponent gets data.   */
+    /* sfEnabled controls only the StrokeForge synthesis application.            */
+    g_sp3ctra_config.image_live_opacity  =
+        apvts.getRawParameterValue("imageLiveOpacity")->load();
+    g_sp3ctra_config.image_sampler_opacity =
+        apvts.getRawParameterValue("imageSamplerOpacity")->load();
+    g_sp3ctra_config.image_freeze_mode   =
+        static_cast<int>(apvts.getRawParameterValue("imageFreezeMode")->load());
+    g_sp3ctra_config.image_fade_in_ms    =
+        static_cast<int>(apvts.getRawParameterValue("imageFadeInMs")->load());
+    g_sp3ctra_config.sampler_gamma        =
+        apvts.getRawParameterValue("samplerGamma")->load();
+    g_sp3ctra_config.sampler_contrast_min =
+        apvts.getRawParameterValue("samplerContrastMin")->load();
+    g_sp3ctra_config.sampler_freeze_mode  =
+        static_cast<int>(apvts.getRawParameterValue("samplerFreezeMode")->load());
+    g_sp3ctra_config.sampler_fade_in_ms   =
+        static_cast<int>(apvts.getRawParameterValue("samplerFadeInMs")->load());
 
     // Update logger level immediately
     logger_init((log_level_t)logLevel);

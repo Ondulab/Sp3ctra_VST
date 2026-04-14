@@ -69,6 +69,12 @@ public:
     //==============================================================================
     // Public accessors for UI
     juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
+
+    /** Path of the last session saved or loaded by SamplerPageComponent.
+     *  Persisted inside the APVTS state blob so the DAW project and
+     *  the Standalone app both restore the session on next launch. */
+    void           setLastSessionPath(const juce::String& p) { lastSessionPath = p; }
+    juce::String   getLastSessionPath()                const { return lastSessionPath; }
     /** Returns the inner Sp3ctraCore owned by the process-wide singleton. */
     Sp3ctraCore* getSp3ctraCore()
     {
@@ -164,6 +170,12 @@ private:
     // UDP Batch Update state (prevents multiple UDP restarts)
     std::atomic<bool> udpBatchUpdateActive{false};
     std::atomic<bool> udpNeedsRestart{false};
+
+    /** Full path of the last .sp3s session saved or loaded.
+     *  Serialised inside the APVTS state blob (getStateInformation /
+     *  setStateInformation) so it survives DAW project reloads and
+     *  Standalone restarts. */
+    juce::String lastSessionPath;
     
     // Note: RT Profiler is now global (g_vst_rt_profiler) to be accessible from C threads
     
