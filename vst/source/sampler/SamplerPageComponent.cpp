@@ -333,6 +333,24 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
     addAndMakeVisible(newSessionBtn);
     addAndMakeVisible(saveSessionBtn);
     addAndMakeVisible(loadSessionBtn);
+
+    // ── Auto-restore last session on startup ──────────────────────────────────
+    // lastSessionPath is restored from DAW state (setStateInformation) before
+    // the editor is created, so it is already available here.
+    // Deferred via callAsync so the component is fully laid out and the
+    // FrameSampler player thread is started (prepareToPlay) before file I/O.
+    const auto lastPath = processor.getLastSessionPath();
+    if (lastPath.isNotEmpty())
+    {
+        const juce::File f(lastPath);
+        if (f.existsAsFile())
+        {
+            juce::MessageManager::callAsync([this, f]
+            {
+                doLoadSession(f);
+            });
+        }
+    }
 }
 
 SamplerPageComponent::~SamplerPageComponent() = default;
@@ -499,7 +517,11 @@ void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
         juce::AlertWindow::showMessageBoxAsync(
             juce::MessageBoxIconType::WarningIcon,
             "Save Session", "Write error — session may be incomplete.");
+        return;
     }
+    // Persist path so the DAW project and Standalone reload this session on
+    // the next launch (stored in getStateInformation via processor.lastSessionPath).
+    processor.setLastSessionPath(sessionFile.getFullPathName());
 }
 
 // -----------------------------------------------------------------------------
@@ -629,8 +651,9 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile)
         return;
     }
 
-    // ── Memorise path for auto-save (SAVE SESSION without dialog) ─────────────
+    // ── Memorise path — auto-save + DAW/Standalone auto-reload ───────────────
     currentSessionFile = sessionFile;
+    processor.setLastSessionPath(sessionFile.getFullPathName());
 
     // ── Refresh UI ────────────────────────────────────────────────────────────
     slotGrid  .repaint();
