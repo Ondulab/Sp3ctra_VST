@@ -10,11 +10,14 @@ class Sp3ctraAudioProcessor;
 /**
  * @brief Master container for the FrameSampler sampler page.
  *
- * Layout (top → bottom):
- *   1. SlotGridComponent     (h=66)  — 12 horizontal slot cells (MIDI C1..B1)
- *   2. SlotEditorComponent   (40% W) — edit panel for the selected slot
- *      SequencerComponent    (60% W) — step sequencer grid  (side by side)
- *   3. TransportBarComponent (h=44)  — transport + global controls
+ * Layout — four full-width zones stacked vertically:
+ *   1. SlotGridComponent     (h=66,  fixed)  — 12 slot cells (sample bank)
+ *   2. SlotEditorComponent   (h=210, fixed)  — edit panel:
+ *        left  (~63 %) : REC/PLAY/CLEAR buttons + large timeline
+ *        right (~37 %) : Speed / Loop / Resume controls
+ *   3. SequencerComponent    (remaining)     — step-sequencer grid
+ *   4. Bank toolbar (h=36)                  — Save Bank / Load Bank / Clear All
+ *      TransportBarComponent (h=44, bottom) — BPM / Steps / global controls
  *
  * Manages selectedSlot state shared between SlotGrid and SlotEditor.
  */
@@ -30,10 +33,28 @@ public:
 private:
     void onSlotSelected(int idx);
 
+    Sp3ctraAudioProcessor& processor;
+
     SlotGridComponent     slotGrid;
     SlotEditorComponent   slotEditor;
     SequencerComponent    sequencer;
     TransportBarComponent transport;
+
+    // ── Bank toolbar ──────────────────────────────────────────────────────────
+    juce::TextButton saveBankBtn    { "SAVE BANK" };
+    juce::TextButton loadBankBtn    { "LOAD BANK" };
+    juce::TextButton clearAllBtn    { "CLEAR ALL" };
+
+    // ── Session toolbar ───────────────────────────────────────────────────────
+    juce::TextButton newSessionBtn  { "NEW SESSION"  };
+    juce::TextButton saveSessionBtn { "SAVE SESSION" };
+    juce::TextButton loadSessionBtn { "LOAD SESSION" };
+
+    std::unique_ptr<juce::FileChooser> fileChooser;
+
+    // ── Session helpers (Non-RT, message thread only) ─────────────────────────
+    void doSaveSession(const juce::File& sessionFile);
+    void doLoadSession(const juce::File& sessionFile);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SamplerPageComponent)
 };
