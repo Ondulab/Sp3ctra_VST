@@ -75,12 +75,12 @@ void FrameSequencer::uiStop() noexcept
 void FrameSequencer::uiResume() noexcept
 {
     // Resume from the current step after a hold (pause).
-    // We only clear the held flag — no phase or step-counter reset.
-    // The audio thread reads held directly (no command pulse needed):
-    // on the very next processBlock call it will see held==false and
-    // continue the internal phase accumulation (or DAW-sync tracking)
-    // exactly where it left off.
+    // Clear held so processBlock resumes step-advance logic.
+    // Also post resumeCmd so processBlock re-anchors rtLastTriggeredStep
+    // to the current DAW ppq — prevents skipping to the next step when
+    // the DAW timeline advanced during the pause (DAW sync mode).
     held.store(false, std::memory_order_release);
+    resumeCmd.store(true, std::memory_order_release);
     // Unfreeze FramePlayerThread: play_head resumes from where it stopped.
     if (frameSampler) frameSampler->setSeqPlayerHeld(false);
 }
@@ -246,6 +246,33 @@ void FrameSequencer::processBlock(juce::AudioPlayHead* playHead,
     // ── 2. Handle hold command (freeze step advancement, keep slot playing) ───
     if (holdCmd.exchange(false, std::memory_order_acq_rel))
         held.store(true, std::memory_order_release);
+
+    // ── 2.5. Handle resume command: re-anchor without triggering a new step ───
+    if (resumeCmd.exchange(false, std::memory_order_acq_rel))
+    {
+        // In DAW sync mode the DAW's ppq kept advancing during the hold.
+        // Re-anchor rtLastTriggeredStep so the first unpaused processBlock
+        // does NOT see a stale step index and trigger an unwanted step.
+        if (dawSync.load(std::memory_order_relaxed) && playHead != nullptr)
+        {
+            const auto posInfo = playHead->getPosition();
+            if (posInfo.hasValue())
+            {
+                const auto ppqOpt = posInfo->getPpqPosition();
+                if (ppqOpt.hasValue() && *ppqOpt >= 0.0)
+                {
+                    const int nS   = numSteps.load(std::memory_order_relaxed);
+                    const int bps  = beatsPerStep.load(std::memory_order_relaxed);
+                    const double d = static_cast<double>(bps > 0 ? bps : 1);
+                    const int abs  = static_cast<int>(*ppqOpt / d);
+                    if (nS > 0) rtLastTriggeredStep = abs % nS;
+                }
+            }
+        }
+        // Internal BPM mode: rtInternalPhaseBeats was frozen during hold
+        // (processBlock returned early), so it continues from the exact
+        // position where it stopped — no re-anchoring needed.
+    }
 
     // ── 3. Handle start command ───────────────────────────────────────────────
     if (startCmd.exchange(false, std::memory_order_acq_rel))
