@@ -58,7 +58,12 @@ void FrameSequencer::uiPlay() noexcept
 
 void FrameSequencer::uiHold() noexcept
 {
-    // Only meaningful while playing; silently ignored when stopped.
+    // Set held immediately on the message thread so that isHeld() returns true
+    // before processBlock has a chance to consume holdCmd.  Without this there
+    // is a race window: if PLAY is pressed before the next processBlock cycle,
+    // isHeld() == false → uiPlay() is called → sequence resets to step 0.
+    held.store(true, std::memory_order_release);
+    // holdCmd signals the audio thread (belt-and-suspenders + future RT side-effects).
     holdCmd.store(true, std::memory_order_release);
     // Freeze FramePlayerThread on the current frame until uiResume().
     if (frameSampler) frameSampler->setSeqPlayerHeld(true);
