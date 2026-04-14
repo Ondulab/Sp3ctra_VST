@@ -116,15 +116,14 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
     // NEW SESSION — stop + clear all with confirmation
     newSessionBtn.onClick = [this]
     {
-        juce::AlertWindow::showOkCancelBox(
-            juce::MessageBoxIconType::WarningIcon,
-            "New Session",
-            "This will stop the sequencer and erase all recorded slots.\n"
-            "Are you sure?",
-            "Yes, start fresh",
-            "Cancel",
-            nullptr,
-            juce::ModalCallbackFunction::create([this](int result)
+        juce::AlertWindow::showAsync(
+            juce::MessageBoxOptions{}
+                .withIconType(juce::MessageBoxIconType::NoIcon)
+                .withTitle("Nouvelle session")
+                .withMessage("Effacer tous les slots et repartir de zéro ?")
+                .withButton("Oui, tout effacer")
+                .withButton("Annuler"),
+            [this](int result)
             {
                 if (result != 1) return; // user pressed Cancel
 
@@ -166,11 +165,19 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
                 slotGrid  .repaint();
                 slotEditor.setSelectedSlot(0);
                 sequencer .repaint();
-            }));
+            });
     };
 
     saveSessionBtn.onClick = [this]
     {
+        // If a session was previously loaded/saved, overwrite it directly.
+        if (currentSessionFile.getFullPathName().isNotEmpty()
+            && currentSessionFile.existsAsFile())
+        {
+            doSaveSession(currentSessionFile);
+            return;
+        }
+        // No known path yet → show file dialog.
         fileChooser = std::make_unique<juce::FileChooser>(
             "Save Complete Session",
             juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
@@ -183,7 +190,11 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
             {
                 const auto result = fc.getResult();
                 if (result.getFullPathName().isNotEmpty())
-                    doSaveSession(result.withFileExtension("sp3s"));
+                {
+                    const auto target = result.withFileExtension("sp3s");
+                    doSaveSession(target);
+                    currentSessionFile = target; // remember for next save
+                }
             });
     };
 
@@ -310,9 +321,15 @@ void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
         s->setAttribute("startFrac",  static_cast<double>(fs->getSlotStartFrac(i)));
         s->setAttribute("endFrac",    static_cast<double>(fs->getSlotEndFrac(i)));
         s->setAttribute("speed",      static_cast<double>(fs->getSlotSpeed(i)));
-        s->setAttribute("loopMode",   static_cast<int>(fs->getSlotLoopMode(i)));
-        s->setAttribute("resumeMode", static_cast<int>(fs->getSlotResumeMode(i)));
-        s->setAttribute("label",      juce::String(fs->getSlotLabel(i)));
+        s->setAttribute("loopMode",      static_cast<int>(fs->getSlotLoopMode(i)));
+        s->setAttribute("resumeMode",    static_cast<int>(fs->getSlotResumeMode(i)));
+        s->setAttribute("label",         juce::String(fs->getSlotLabel(i)));
+        s->setAttribute("blendAmount",   static_cast<double>(fs->getSlotBlendAmount(i)));
+        s->setAttribute("attackLen",     static_cast<double>(fs->getSlotAttackLen(i)));
+        s->setAttribute("decayLen",      static_cast<double>(fs->getSlotDecayLen(i)));
+        s->setAttribute("brightnessLift",static_cast<double>(fs->getSlotBrightnessLift(i)));
+        s->setAttribute("trebleCut",     static_cast<double>(fs->getSlotTrebleCut(i)));
+        s->setAttribute("bassCut",       static_cast<double>(fs->getSlotBassCut(i)));
     }
 
     // Sequencer state (uses FrameSequencer's own serialisation)
@@ -442,6 +459,12 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile)
             fs->setSlotLoopMode  (i, static_cast<LoopMode>(s->getIntAttribute("loopMode",   1)));
             fs->setSlotResumeMode(i, s->getIntAttribute("resumeMode", 0) != 0);
             fs->setSlotLabel     (i, s->getStringAttribute("label", "").toRawUTF8());
+            fs->setSlotBlendAmount    (i, static_cast<float>(s->getDoubleAttribute("blendAmount",    0.0)));
+            fs->setSlotAttackLen      (i, static_cast<float>(s->getDoubleAttribute("attackLen",      0.0)));
+            fs->setSlotDecayLen       (i, static_cast<float>(s->getDoubleAttribute("decayLen",       0.0)));
+            fs->setSlotBrightnessLift (i, static_cast<float>(s->getDoubleAttribute("brightnessLift", 0.0)));
+            fs->setSlotTrebleCut      (i, static_cast<float>(s->getDoubleAttribute("trebleCut",      0.0)));
+            fs->setSlotBassCut        (i, static_cast<float>(s->getDoubleAttribute("bassCut",        0.0)));
         }
     }
 
@@ -490,6 +513,9 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile)
             "Load Session", "Failed to load sample bank from session.");
         return;
     }
+
+    // ── Memorise path for auto-save (SAVE SESSION without dialog) ─────────────
+    currentSessionFile = sessionFile;
 
     // ── Refresh UI ────────────────────────────────────────────────────────────
     slotGrid  .repaint();

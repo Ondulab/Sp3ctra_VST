@@ -52,18 +52,24 @@ void FrameSequencer::uiPlay() noexcept
     // whether the sequencer was held mid-sequence or fully stopped.
     held.store(false, std::memory_order_release);
     startCmd.store(true, std::memory_order_release);
+    // Release FramePlayerThread: play_head may advance again.
+    if (frameSampler) frameSampler->setSeqPlayerHeld(false);
 }
 
 void FrameSequencer::uiHold() noexcept
 {
     // Only meaningful while playing; silently ignored when stopped.
     holdCmd.store(true, std::memory_order_release);
+    // Freeze FramePlayerThread on the current frame until uiResume().
+    if (frameSampler) frameSampler->setSeqPlayerHeld(true);
 }
 
 void FrameSequencer::uiStop() noexcept
 {
     held.store(false, std::memory_order_release);
     stopCmd.store(true, std::memory_order_release);
+    // Ensure FramePlayerThread is not left in a frozen state after stop.
+    if (frameSampler) frameSampler->setSeqPlayerHeld(false);
 }
 
 void FrameSequencer::uiResume() noexcept
@@ -75,6 +81,8 @@ void FrameSequencer::uiResume() noexcept
     // continue the internal phase accumulation (or DAW-sync tracking)
     // exactly where it left off.
     held.store(false, std::memory_order_release);
+    // Unfreeze FramePlayerThread: play_head resumes from where it stopped.
+    if (frameSampler) frameSampler->setSeqPlayerHeld(false);
 }
 
 // ============================================================================

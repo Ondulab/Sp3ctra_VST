@@ -56,5 +56,9 @@ private:
     void doSaveSession(const juce::File& sessionFile);
     void doLoadSession(const juce::File& sessionFile);
 
+    /** Path of the last loaded or saved session.
+     *  When set, SAVE SESSION writes directly to this file (no file dialog). */
+    juce::File currentSessionFile;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SamplerPageComponent)
 };
