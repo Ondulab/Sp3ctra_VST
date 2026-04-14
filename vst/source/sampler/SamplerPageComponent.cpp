@@ -234,10 +234,10 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
     {
         ConfirmDialog::show(
             this,
-            "Nouvelle session",
-            "Effacer tous les slots et repartir de zero ?",
-            "Oui, tout effacer",
-            "Annuler",
+            "New session",
+            "Clear all slots and start from scratch?",
+            "Yes, clear all",
+            "Cancel",
             [this](bool confirmed)
             {
                 if (!confirmed) return;

@@ -156,17 +156,19 @@ void SlotTimelineComponent::paint(juce::Graphics& g)
             g.fillRect(sx, bcY, span, 1);
         }
 
-        // Handle tab — upward-pointing triangle (▲) at bottom right
-        const float tabX = (float)(ex - 14);
-        const float tabY = (float)std::min(h, h - static_cast<int>(bc * (float)cy));
+        // Handle tab — upward-pointing triangle (▲), centred between Start and End
+        // (same horizontal centering logic as the HF tab above)
+        const float tabBCx = (float)((sx + ex) / 2);
+        const float tabBX  = tabBCx - 7.0f;
+        const float tabY   = (float)std::min(h, h - static_cast<int>(bc * (float)cy));
         juce::Path tab;
-        tab.addTriangle(tabX, tabY, tabX + 14.0f, tabY, tabX + 7.0f, tabY - 9.0f);
+        tab.addTriangle(tabBX, tabY, tabBX + 14.0f, tabY, tabBCx, tabY - 9.0f);
         g.setColour(juce::Colour(0xff4488dd).withAlpha(0.85f));
         g.fillPath(tab);
         // Label
         g.setColour(juce::Colour(0xff4488dd).withAlpha(0.6f));
         g.setFont(juce::FontOptions(7.0f));
-        g.drawText("LF", ex - 14, h - 9, 14, 8, juce::Justification::centred);
+        g.drawText("LF", (int)tabBX, h - 9, 14, 8, juce::Justification::centred);
     }
 
     // ── Dim zones outside [start, end] ────────────────────────────────────────
@@ -301,16 +303,16 @@ void SlotTimelineComponent::updateCursor(const juce::MouseEvent& e)
 
     // Same priority as mouseDown — triangles first, then bars.
 
-    // ── Attack triangle ───────────────────────────────────────────────────────
+    // ── Attack triangle (handle centred at h/2 — detect anywhere vertically) ──
     const float atkLen = fs->getSlotAttackLen(selectedSlot);
     const int   atkX   = sx + static_cast<int>(atkLen * (float)(ex - sx));
-    if (e.y <= kAtkH && e.x >= sx && std::abs(e.x - atkX) <= kSnap)
+    if (e.x >= sx && std::abs(e.x - atkX) <= kSnap)
         { setMouseCursor(juce::MouseCursor::PointingHandCursor); return; }
 
-    // ── Decay triangle ────────────────────────────────────────────────────────
+    // ── Decay triangle (handle centred at h/2 — detect anywhere vertically) ───
     const float decLen = fs->getSlotDecayLen(selectedSlot);
     const int   decX   = ex - static_cast<int>(decLen * (float)(ex - sx));
-    if (e.y <= kAtkH && e.x <= ex && std::abs(e.x - decX) <= kSnap)
+    if (e.x <= ex && std::abs(e.x - decX) <= kSnap)
         { setMouseCursor(juce::MouseCursor::PointingHandCursor); return; }
 
     // ── TrebleCut tab (upper half, near HF cutoff line) ──────────────────────
@@ -352,16 +354,16 @@ void SlotTimelineComponent::mouseDown(const juce::MouseEvent& e)
     const int   startX = fracToX(sf);
     const int   endX   = fracToX(ef);
 
-    // ── Attack (top strip, near atkX) ────────────────────────────────────────
+    // ── Attack (handle centred at h/2 — detect anywhere vertically near atkX) ─
     const float atkLen = fs->getSlotAttackLen(selectedSlot);
     const int   atkX   = startX + static_cast<int>(atkLen * (float)(endX - startX));
-    if (e.y <= kAtkH && e.x >= startX && std::abs(e.x - atkX) <= kSnap)
+    if (e.x >= startX && std::abs(e.x - atkX) <= kSnap)
         { dragging = DragTarget::Attack; return; }
 
-    // ── Decay (top strip, near decX) ─────────────────────────────────────────
+    // ── Decay (handle centred at h/2 — detect anywhere vertically near decX) ──
     const float decLen = fs->getSlotDecayLen(selectedSlot);
     const int   decX   = endX - static_cast<int>(decLen * (float)(endX - startX));
-    if (e.y <= kAtkH && e.x <= endX && std::abs(e.x - decX) <= kSnap)
+    if (e.x <= endX && std::abs(e.x - decX) <= kSnap)
         { dragging = DragTarget::Decay; return; }
 
     // ── TrebleCut (near the horizontal cut line in upper half) ───────────────
