@@ -18,7 +18,123 @@ namespace
     constexpr uint32_t kSessionMagic   = 0x53503353u; // "SP3S"
     constexpr uint16_t kSessionVersion = 0x0001u;
     constexpr uint32_t kSessionEof     = 0xDEADBEEFu;
-}
+
+    // ── Inline confirmation dialog — JUCE dark theme, small buttons ──────────
+    // Used instead of juce::AlertWindow::showAsync to avoid:
+    //   • macOS native chrome
+    //   • oversized system buttons
+    //   • UTF-8 encoding artefacts in juce::String literals
+    class ConfirmDialog final : public juce::Component
+    {
+    public:
+        std::function<void(bool confirmed)> onResult;
+
+        ConfirmDialog(const char* title, const char* msg,
+                      const char* confirmLabel, const char* cancelLabel)
+        {
+            confirmBtn_.setButtonText(confirmLabel);
+            cancelBtn_ .setButtonText(cancelLabel);
+            using B = juce::TextButton;
+            confirmBtn_.setColour(B::buttonColourId,  juce::Colour(0xff3a1a1a));
+            confirmBtn_.setColour(B::textColourOffId, juce::Colour(0xffff6644));
+            cancelBtn_ .setColour(B::buttonColourId,  juce::Colour(0xff242424));
+            cancelBtn_ .setColour(B::textColourOffId, juce::Colour(0xff999999));
+            confirmBtn_.onClick = [this] { if (onResult) onResult(true);  dismiss(); };
+            cancelBtn_ .onClick = [this] { if (onResult) onResult(false); dismiss(); };
+            addAndMakeVisible(confirmBtn_);
+            addAndMakeVisible(cancelBtn_);
+            title_ = title;
+            msg_   = msg;
+        }
+
+        void paint(juce::Graphics& g) override
+        {
+            const auto b = getLocalBounds().toFloat();
+            // Panel background + border
+            g.setColour(juce::Colour(0xf21e1e1e));
+            g.fillRoundedRectangle(b, 5.0f);
+            g.setColour(juce::Colour(0xff663322));
+            g.drawRoundedRectangle(b.reduced(0.5f), 5.0f, 1.0f);
+
+            // Red warning triangle ▲ (hand-drawn — no OS icon)
+            constexpr float tw = 18.0f, th = 16.0f;
+            constexpr float tx = 14.0f, ty = 12.0f;
+            juce::Path tri;
+            tri.addTriangle(tx + tw * 0.5f, ty,
+                            tx,             ty + th,
+                            tx + tw,        ty + th);
+            g.setColour(juce::Colour(0xffcc3311));
+            g.fillPath(tri);
+            g.setColour(juce::Colour(0xffffeeaa));
+            g.setFont(juce::FontOptions(9.0f));
+            g.drawText("!", (int)tx, (int)(ty + 3), (int)tw, (int)(th - 3),
+                       juce::Justification::centred);
+
+            // Title
+            g.setColour(juce::Colour(0xffdde3e8));
+            g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+            g.drawText(title_,
+                       getLocalBounds().withY(10).withHeight(20),
+                       juce::Justification::centredTop);
+
+            // Message
+            g.setColour(juce::Colour(0xff8a9aaa));
+            g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
+            g.drawText(msg_,
+                       getLocalBounds().reduced(12, 0).withY(32).withHeight(20),
+                       juce::Justification::centredTop);
+        }
+
+        void resized() override
+        {
+            constexpr int pad  = 12;
+            constexpr int gap  = 6;
+            constexpr int btnH = Sp3ctraTheme::kControlH; // 22 px
+            const int bw  = (getWidth() - 2 * pad - gap) / 2;
+            const int by  = getHeight() - pad - btnH;
+            confirmBtn_.setBounds(pad,            by, bw, btnH);
+            cancelBtn_ .setBounds(pad + bw + gap, by, bw, btnH);
+        }
+
+        static void show(juce::Component*          parent,
+                         const char*               title,
+                         const char*               msg,
+                         const char*               confirmLabel,
+                         const char*               cancelLabel,
+                         std::function<void(bool)> cb)
+        {
+            constexpr int dw = 310, dh = 110;
+            auto* dlg = new ConfirmDialog(title, msg, confirmLabel, cancelLabel);
+            dlg->onResult = std::move(cb);
+            parent->addAndMakeVisible(dlg);
+            dlg->setBounds((parent->getWidth()  - dw) / 2,
+                           (parent->getHeight() - dh) / 2,
+                           dw, dh);
+            dlg->toFront(true);
+        }
+
+    private:
+        void dismiss()
+        {
+            // Defer removal so the button's onClick finishes before we delete.
+            juce::MessageManager::callAsync(
+                [sp = juce::Component::SafePointer<ConfirmDialog>(this)]
+                {
+                    if (sp != nullptr)
+                    {
+                        if (auto* p = sp->getParentComponent())
+                            p->removeChildComponent(sp.getComponent());
+                        delete sp.getComponent();
+                    }
+                });
+        }
+
+        juce::String     title_, msg_;
+        juce::TextButton confirmBtn_, cancelBtn_;
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConfirmDialog)
+    };
+
+} // namespace
 
 // =============================================================================
 // Constructor
@@ -116,16 +232,15 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
     // NEW SESSION — stop + clear all with confirmation
     newSessionBtn.onClick = [this]
     {
-        juce::AlertWindow::showAsync(
-            juce::MessageBoxOptions{}
-                .withIconType(juce::MessageBoxIconType::NoIcon)
-                .withTitle("Nouvelle session")
-                .withMessage("Effacer tous les slots et repartir de zéro ?")
-                .withButton("Oui, tout effacer")
-                .withButton("Annuler"),
-            [this](int result)
+        ConfirmDialog::show(
+            this,
+            "Nouvelle session",
+            "Effacer tous les slots et repartir de zero ?",
+            "Oui, tout effacer",
+            "Annuler",
+            [this](bool confirmed)
             {
-                if (result != 1) return; // user pressed Cancel
+                if (!confirmed) return;
 
                 // Stop the sequencer first (message thread → atomic command)
                 if (auto* seq = processor.getFrameSequencer())
