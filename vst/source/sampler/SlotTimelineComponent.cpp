@@ -97,12 +97,12 @@ void SlotTimelineComponent::paint(juce::Graphics& g)
     const int   sx = fracToX(sf);
     const int   ex = fracToX(ef);
 
-    // ── TrebleCut overlay + handle (drag from top → fade upper bars) ─────────
-    // trebleCut=0 → no fade; trebleCut=1 → upper half fully white.
-    // The fade covers y=0 → trebleCut*cy.  Handle line at y=trebleCut*cy.
+    // ── TrebleCut overlay + handle (drag over full height) ───────────────────
+    // trebleCut=0 → no fade; trebleCut=1 → full component height.
+    // The fade covers y=0 → trebleCut*h.  Handle tab at y=trebleCut*h.
     {
         const float tc   = fs->getSlotTrebleCut(selectedSlot);
-        const int   tcY  = static_cast<int>(tc * (float)cy);  // cutoff y from top
+        const int   tcY  = static_cast<int>(tc * (float)h);  // cutoff y from top
         const int   span = ex - sx;
 
         // Gradient overlay (only when tc > 0)
@@ -135,12 +135,12 @@ void SlotTimelineComponent::paint(juce::Graphics& g)
                    juce::Justification::centred);
     }
 
-    // ── BassCut overlay + handle (drag from bottom → fade lower bars) ────────
-    // bassCut=0 → no fade; bassCut=1 → lower half fully white.
-    // Fade covers y=(h-bassCut*cy) → h.  Handle line at y=h-bassCut*cy.
+    // ── BassCut overlay + handle (drag over full height) ─────────────────────
+    // bassCut=0 → no fade; bassCut=1 → full component height from bottom.
+    // Fade covers y=(h-bassCut*h) → h.  Handle tab at y=h-bassCut*h.
     {
         const float bc   = fs->getSlotBassCut(selectedSlot);
-        const int   bcY  = h - static_cast<int>(bc * (float)cy); // cutoff y from bottom
+        const int   bcY  = h - static_cast<int>(bc * (float)h); // cutoff y from bottom
         const int   span = ex - sx;
 
         if (bc > 0.001f && span > 0)
@@ -157,10 +157,9 @@ void SlotTimelineComponent::paint(juce::Graphics& g)
         }
 
         // Handle tab — upward-pointing triangle (▲), centred between Start and End
-        // (same horizontal centering logic as the HF tab above)
         const float tabBCx = (float)((sx + ex) / 2);
         const float tabBX  = tabBCx - 7.0f;
-        const float tabY   = (float)std::min(h, h - static_cast<int>(bc * (float)cy));
+        const float tabY   = (float)std::min(h, h - static_cast<int>(bc * (float)h));
         juce::Path tab;
         tab.addTriangle(tabBX, tabY, tabBX + 14.0f, tabY, tabBCx, tabY - 9.0f);
         g.setColour(juce::Colour(0xff4488dd).withAlpha(0.85f));
@@ -297,7 +296,6 @@ void SlotTimelineComponent::updateCursor(const juce::MouseEvent& e)
     }
 
     const int   h  = getHeight();
-    const int   cy = h / 2;
     const int   sx = fracToX(fs->getSlotStartFrac(selectedSlot));
     const int   ex = fracToX(fs->getSlotEndFrac(selectedSlot));
 
@@ -315,17 +313,17 @@ void SlotTimelineComponent::updateCursor(const juce::MouseEvent& e)
     if (e.x <= ex && std::abs(e.x - decX) <= kSnap)
         { setMouseCursor(juce::MouseCursor::PointingHandCursor); return; }
 
-    // ── TrebleCut tab (upper half, near HF cutoff line) ──────────────────────
+    // ── TrebleCut tab (full height — drag line at tc*h from top) ─────────────
     const float tc  = fs->getSlotTrebleCut(selectedSlot);
-    const int   tcY = static_cast<int>(tc * (float)cy);
-    if (e.x >= sx && e.x <= ex && e.y < cy
+    const int   tcY = static_cast<int>(tc * (float)h);
+    if (e.x >= sx && e.x <= ex
         && (std::abs(e.y - tcY) <= kEdge || (tc < 0.01f && e.y <= kEdge)))
         { setMouseCursor(juce::MouseCursor::PointingHandCursor); return; }
 
-    // ── BassCut tab (lower half, near LF cutoff line) ────────────────────────
+    // ── BassCut tab (full height — drag line at h-bc*h from top) ─────────────
     const float bc  = fs->getSlotBassCut(selectedSlot);
-    const int   bcY = h - static_cast<int>(bc * (float)cy);
-    if (e.x >= sx && e.x <= ex && e.y >= cy
+    const int   bcY = h - static_cast<int>(bc * (float)h);
+    if (e.x >= sx && e.x <= ex
         && (std::abs(e.y - bcY) <= kEdge || (bc < 0.01f && e.y >= h - kEdge)))
         { setMouseCursor(juce::MouseCursor::PointingHandCursor); return; }
 
@@ -348,7 +346,6 @@ void SlotTimelineComponent::mouseDown(const juce::MouseEvent& e)
     if (!fs || !fs->slotHasContent(selectedSlot)) return;
 
     const int   h      = getHeight();
-    const int   cy     = h / 2;
     const float sf     = fs->getSlotStartFrac(selectedSlot);
     const float ef     = fs->getSlotEndFrac(selectedSlot);
     const int   startX = fracToX(sf);
@@ -366,19 +363,19 @@ void SlotTimelineComponent::mouseDown(const juce::MouseEvent& e)
     if (e.x <= endX && std::abs(e.x - decX) <= kSnap)
         { dragging = DragTarget::Decay; return; }
 
-    // ── TrebleCut (near the horizontal cut line in upper half) ───────────────
+    // ── TrebleCut (full height — drag line at tc*h from top) ─────────────────
     const float tc  = fs->getSlotTrebleCut(selectedSlot);
-    const int   tcY = static_cast<int>(tc * (float)cy);
-    if (e.x >= startX && e.x <= endX && e.y < cy)
+    const int   tcY = static_cast<int>(tc * (float)h);
+    if (e.x >= startX && e.x <= endX)
     {
         if (std::abs(e.y - tcY) <= kEdge || (tc < 0.01f && e.y <= kEdge))
             { dragging = DragTarget::TrebleCut; return; }
     }
 
-    // ── BassCut (near the horizontal cut line in lower half) ──────────────────
+    // ── BassCut (full height — drag line at h-bc*h from top) ──────────────────
     const float bc  = fs->getSlotBassCut(selectedSlot);
-    const int   bcY = h - static_cast<int>(bc * (float)cy);
-    if (e.x >= startX && e.x <= endX && e.y >= cy)
+    const int   bcY = h - static_cast<int>(bc * (float)h);
+    if (e.x >= startX && e.x <= endX)
     {
         if (std::abs(e.y - bcY) <= kEdge || (bc < 0.01f && e.y >= h - kEdge))
             { dragging = DragTarget::BassCut; return; }
@@ -402,7 +399,6 @@ void SlotTimelineComponent::mouseDrag(const juce::MouseEvent& e)
     if (!fs) return;
 
     const int   h  = getHeight();
-    const int   cy = h / 2;
 
     if (dragging == DragTarget::Attack)
     {
@@ -432,17 +428,17 @@ void SlotTimelineComponent::mouseDrag(const juce::MouseEvent& e)
     }
     if (dragging == DragTarget::TrebleCut)
     {
-        // e.y in [0..cy] → trebleCut in [0..1]
-        const float tc = juce::jlimit(0.0f, 1.0f, (float)e.y / (float)std::max(1, cy));
+        // e.y in [0..h] → trebleCut in [0..1] — full component height
+        const float tc = juce::jlimit(0.0f, 1.0f, (float)e.y / (float)std::max(1, h));
         fs->setSlotTrebleCut(selectedSlot, tc);
         repaint();
         return;
     }
     if (dragging == DragTarget::BassCut)
     {
-        // e.y in [cy..h] → bassCut: 0 when e.y=h, 1 when e.y=cy
+        // e.y in [0..h] → bassCut: 0 when e.y=h, 1 when e.y=0 — full component height
         const float bc = juce::jlimit(0.0f, 1.0f,
-            (float)(h - e.y) / (float)std::max(1, h - cy));
+            (float)(h - e.y) / (float)std::max(1, h));
         fs->setSlotBassCut(selectedSlot, bc);
         repaint();
         return;
