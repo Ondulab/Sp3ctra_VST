@@ -135,8 +135,14 @@ struct FrameSlot
 struct FrameSamplerAtomicState
 {
     std::atomic<int>  slotState[FrameSamplerConstants::NUM_SLOTS];
-    std::atomic<int>  activePlaySlot    { -1 };   // -1 = none playing
-    std::atomic<bool> passthroughEnabled { true }; // false during PLAYING
+    std::atomic<int>  activePlaySlot     { -1 };   // -1 = none playing
+    std::atomic<bool> passthroughEnabled { true };  // false during PLAYING
+    /** Set by FrameSequencer::triggerStep() before posting startPlayCmd so that
+     *  FramePlayerThread does NOT restore passthroughEnabled when the sample
+     *  finishes or the slot has no content.  The sequencer is the only authority
+     *  that decides when live resumes (STEP_LIVE or rtStop).
+     *  Cleared by: rtStop(), handleNoteOn() play path, uiPlaySlot(). */
+    std::atomic<bool> seqControlledPlay { false };
 
     // Command pulses: set by RT, cleared (exchange) by Non-RT threads
     std::atomic<bool> startRecCmd[FrameSamplerConstants::NUM_SLOTS];
@@ -276,6 +282,18 @@ public:
     bool isSeqSilentStepActive() const noexcept
     {
         return seqSilentStepActive.load(std::memory_order_relaxed);
+    }
+
+    /** Freeze the FramePlayerThread on the current frame (sequencer hold/pause).
+     *  When true: play_head does not advance, last injected frame stays visible.
+     *  RT-safe: atomic store (message thread) / relaxed load (FramePlayerThread). */
+    void setSeqPlayerHeld(bool h) noexcept
+    {
+        seqPlayerHeld_.store(h, std::memory_order_release);
+    }
+    bool isSeqPlayerHeld() const noexcept
+    {
+        return seqPlayerHeld_.load(std::memory_order_relaxed);
     }
 
     /** Shared final-gray buffer — written by CisVisualizerComponent after
@@ -581,6 +599,9 @@ private:
     // Set by FrameSequencer::triggerStep() when STEP_EMPTY is triggered;
     // cleared when a slot starts playing or STEP_LIVE is triggered.
     std::atomic<bool>  seqSilentStepActive { false };
+    // true while the sequencer is in hold/pause — FramePlayerThread freezes
+    // play_head and keeps re-outputting the current frame.
+    std::atomic<bool>  seqPlayerHeld_      { false };
 
     // -------------------------------------------------------------------------
     // Non-RT state

@@ -191,8 +191,11 @@ void FrameSampler::handleNoteOn(int note, int velocity) noexcept
         }
         else
         {
-            // IDLE (or other) + NoteOn PLAY → PLAYING
-            // FramePlayerThread checks has_content; reverts to IDLE if empty
+            // IDLE (or other) + NoteOn PLAY → PLAYING (MIDI/UI-driven, not sequencer).
+            // FramePlayerThread checks has_content; reverts to IDLE if empty.
+            // Clear seqControlledPlay so the player thread is allowed to
+            // restore live passthrough when playback ends.
+            atomicState.seqControlledPlay.store(false, std::memory_order_release);
             atomicState.slotState[i].store(static_cast<int>(SlotState::PLAYING),
                                             std::memory_order_release);
             atomicState.activePlaySlot.store(i, std::memory_order_release);
@@ -461,7 +464,9 @@ void FrameSampler::uiPlaySlot(int slotIndex) noexcept
                                               std::memory_order_release);
     }
 
-    // Trigger playback
+    // Trigger playback (UI-driven: FramePlayerThread is allowed to restore
+    // live passthrough when playback ends — clear sequencer ownership flag).
+    atomicState.seqControlledPlay.store(false, std::memory_order_release);
     atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::PLAYING),
                                             std::memory_order_release);
     atomicState.activePlaySlot.store(slotIndex,  std::memory_order_release);
@@ -914,7 +919,12 @@ void FramePlayerThread::run()
             state.slotState[slotToPlay].store(static_cast<int>(SlotState::IDLE),
                                               std::memory_order_release);
             state.activePlaySlot.store(-1, std::memory_order_release);
-            state.passthroughEnabled.store(true, std::memory_order_release);
+            // Only restore live passthrough when the play was NOT triggered by
+            // the sequencer.  When the sequencer drives playback and the slot
+            // is empty, the live UDP stream must stay suppressed — only an
+            // explicit STEP_LIVE step or rtStop() may re-enable it.
+            if (!state.seqControlledPlay.load(std::memory_order_relaxed))
+                state.passthroughEnabled.store(true, std::memory_order_release);
             continue;
         }
 
@@ -952,6 +962,16 @@ void FramePlayerThread::run()
             const int pending = state.startPlayCmd.load(std::memory_order_relaxed);
             if (pending >= 0 && pending != slotToPlay)
                 break;
+
+            // ── Pause / hold: freeze play_head, keep current frame visible ─
+            // Re-anchor loopStartUs each held iteration so that resuming does
+            // not produce a burst of back-to-back injections (no time debt).
+            if (sampler.isSeqPlayerHeld())
+            {
+                loopStartUs = currentTimeUs();
+                Thread::sleep(2);
+                continue;
+            }
 
             // ── Re-read play params every iteration (on-the-fly) ─────────
             const float    p_start = sampler.getSlotStartFrac(slotToPlay);
@@ -1448,13 +1468,23 @@ void FramePlayerThread::run()
                 state.slotState[slotToPlay].store(static_cast<int>(SlotState::IDLE),
                                                   std::memory_order_release);
                 state.activePlaySlot.store(-1, std::memory_order_release);
-                state.passthroughEnabled.store(true, std::memory_order_release);
+                // When the sequencer owns the play session (seqControlledPlay),
+                // do NOT restore live passthrough here — the sequencer (STEP_LIVE
+                // or rtStop) is the only authority that re-enables the live UDP
+                // stream.  This prevents LoopMode::NONE from leaking live audio
+                // between the sample end and the next sequencer step boundary.
+                if (!state.seqControlledPlay.load(std::memory_order_relaxed))
+                    state.passthroughEnabled.store(true, std::memory_order_release);
             }
         }
     }
 
-    // Final safety: always restore passthrough on thread exit
-    state.passthroughEnabled.store(true, std::memory_order_release);
+    // Final safety: restore passthrough on thread exit only when not under
+    // sequencer control.  stopPlayerThread() already writes passthroughEnabled=true
+    // before signalling threadShouldExit(), so this is a belt-and-suspenders
+    // guard for edge cases (non-sequencer-driven exit paths).
+    if (!state.seqControlledPlay.load(std::memory_order_relaxed))
+        state.passthroughEnabled.store(true, std::memory_order_release);
     log_info("FS", "FramePlayerThread exiting");
 }
 
