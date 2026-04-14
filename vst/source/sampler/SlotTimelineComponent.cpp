@@ -202,11 +202,12 @@ void SlotTimelineComponent::paint(juce::Graphics& g)
             g.drawVerticalLine(ax, 0.0f, (float)h);
         }
 
-        // Handle triangle — always visible ▷ at top
+        // Handle triangle — centred at h/2 → ▷ pointing right
+        const float cy_f = (float)(h / 2);
         juce::Path p;
-        p.addTriangle((float)ax, 0.0f,
-                      (float)(ax + 10), 0.0f,
-                      (float)ax, 10.0f);
+        p.addTriangle((float)ax,        cy_f - 6.0f,
+                      (float)(ax + 10), cy_f,
+                      (float)ax,        cy_f + 6.0f);
         g.setColour(juce::Colours::white.withAlpha(0.85f));
         g.fillPath(p);
     }
@@ -228,11 +229,12 @@ void SlotTimelineComponent::paint(juce::Graphics& g)
             g.drawVerticalLine(dx, 0.0f, (float)h);
         }
 
-        // Handle triangle — always visible ◁ at top
+        // Handle triangle — centred at h/2 → ◁ pointing left
+        const float cy_f = (float)(h / 2);
         juce::Path p;
-        p.addTriangle((float)dx, 0.0f,
-                      (float)(dx - 10), 0.0f,
-                      (float)dx, 10.0f);
+        p.addTriangle((float)dx,         cy_f - 6.0f,
+                      (float)(dx - 10),  cy_f,
+                      (float)dx,         cy_f + 6.0f);
         g.setColour(juce::Colours::white.withAlpha(0.85f));
         g.fillPath(p);
     }

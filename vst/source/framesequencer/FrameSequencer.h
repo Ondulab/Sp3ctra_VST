@@ -104,9 +104,13 @@ private:
     std::atomic<int>  currentStep { -1 };
 
     // ── RT command pulses (one-shot: UI writes, audio thread consumes) ────────
-    std::atomic<bool> startCmd { false };
-    std::atomic<bool> stopCmd  { false };
-    std::atomic<bool> holdCmd  { false };   ///< Set by uiHold(); cleared on first RT check.
+    std::atomic<bool> startCmd  { false };
+    std::atomic<bool> stopCmd   { false };
+    std::atomic<bool> holdCmd   { false };  ///< Set by uiHold(); cleared on first RT check.
+    /** Set by uiResume(). Consumed once by processBlock to re-anchor
+     *  rtLastTriggeredStep to the current ppq/phase WITHOUT triggering
+     *  a new step — prevents skipping to the next cell after a pause. */
+    std::atomic<bool> resumeCmd { false };
 
     // ── Hold state: sequencer stays playing but does not advance the step ─────
     std::atomic<bool> held     { false };
