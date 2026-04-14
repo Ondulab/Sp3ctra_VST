@@ -16,7 +16,6 @@ class Sp3ctraAudioProcessor;
  *        left  (~63 %) : REC/PLAY/CLEAR buttons + large timeline
  *        right (~37 %) : Speed / Loop / Resume controls
  *   3. SequencerComponent    (remaining)     — step-sequencer grid
- *   4. Bank toolbar (h=36)                  — Save Bank / Load Bank / Clear All
  *      TransportBarComponent (h=44, bottom) — BPM / Steps / global controls
  *
  * Manages selectedSlot state shared between SlotGrid and SlotEditor.
@@ -39,11 +38,6 @@ private:
     SlotEditorComponent   slotEditor;
     SequencerComponent    sequencer;
     TransportBarComponent transport;
-
-    // ── Bank toolbar ──────────────────────────────────────────────────────────
-    juce::TextButton saveBankBtn    { "SAVE BANK" };
-    juce::TextButton loadBankBtn    { "LOAD BANK" };
-    juce::TextButton clearAllBtn    { "CLEAR ALL" };
 
     // ── Session toolbar ───────────────────────────────────────────────────────
     juce::TextButton newSessionBtn  { "NEW SESSION"  };

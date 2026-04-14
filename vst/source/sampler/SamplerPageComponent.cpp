@@ -163,67 +163,6 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
         btn.setColour(juce::TextButton::textColourOffId, fg);
     };
 
-    // ── Bank toolbar ──────────────────────────────────────────────────────────
-    styleBtn(saveBankBtn, juce::Colour(0xff1a3a2a), juce::Colour(0xff55cc88));
-    styleBtn(loadBankBtn, juce::Colour(0xff1a2a3a), juce::Colour(0xff5588cc));
-    styleBtn(clearAllBtn, juce::Colour(0xff3a1a1a), juce::Colour(0xffcc5555));
-
-    saveBankBtn.onClick = [this]
-    {
-        fileChooser = std::make_unique<juce::FileChooser>(
-            "Save Sample Bank",
-            juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
-            "*.fsmp");
-        fileChooser->launchAsync(
-            juce::FileBrowserComponent::saveMode |
-            juce::FileBrowserComponent::canSelectFiles,
-            [this](const juce::FileChooser& fc)
-            {
-                const auto result = fc.getResult();
-                if (result.getFullPathName().isNotEmpty())
-                    if (auto* fs = processor.getFrameSampler())
-                        fs->saveToFile(result.withFileExtension("fsmp"));
-            });
-    };
-
-    loadBankBtn.onClick = [this]
-    {
-        fileChooser = std::make_unique<juce::FileChooser>(
-            "Load Sample Bank",
-            juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
-            "*.fsmp");
-        fileChooser->launchAsync(
-            juce::FileBrowserComponent::openMode |
-            juce::FileBrowserComponent::canSelectFiles,
-            [this](const juce::FileChooser& fc)
-            {
-                const auto result = fc.getResult();
-                if (result.getFullPathName().isNotEmpty())
-                {
-                    if (auto* fs = processor.getFrameSampler())
-                    {
-                        fs->loadFromFile(result);
-                        slotGrid  .repaint();
-                        slotEditor.setSelectedSlot(0);
-                    }
-                }
-            });
-    };
-
-    clearAllBtn.onClick = [this]
-    {
-        if (auto* fs = processor.getFrameSampler())
-        {
-            fs->clearAllSlots();
-            slotGrid  .repaint();
-            slotEditor.setSelectedSlot(0);
-        }
-    };
-
-    addAndMakeVisible(saveBankBtn);
-    addAndMakeVisible(loadBankBtn);
-    addAndMakeVisible(clearAllBtn);
-
     // ── Session toolbar ───────────────────────────────────────────────────────
     styleBtn(newSessionBtn,  juce::Colour(0xff2a1a1a), juce::Colour(0xffff8866));
     styleBtn(saveSessionBtn, juce::Colour(0xff1e2a1e), juce::Colour(0xff88ffaa));
@@ -372,19 +311,6 @@ void SamplerPageComponent::onSlotSelected(int idx)
 void SamplerPageComponent::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colour(0xff1e1e1e));
-
-    // Subtle separator between bank toolbar and session toolbar
-    const int w      = getWidth();
-    constexpr int pad    = Sp3ctraTheme::kPad;
-    constexpr int gap    = Sp3ctraTheme::kGap;
-    constexpr int gridH  = 66;
-    constexpr int editH  = 210;
-    constexpr int bankH  = Sp3ctraTheme::kControlH;
-    const int bankY  = pad + gridH + gap + editH + gap;
-    const int sessY  = bankY + bankH + 2;
-
-    g.setColour(juce::Colour(0xff303030));
-    g.fillRect(pad, sessY, w - 2 * pad, 1);
 }
 
 void SamplerPageComponent::resized()
@@ -409,17 +335,10 @@ void SamplerPageComponent::resized()
     const int transY = h - pad - transH;
     transport.setBounds(pad, transY, w - 2 * pad, transH);
 
-    // ── Bank toolbar (SAVE BANK / LOAD BANK / CLEAR ALL) ──────────────────────
-    const int bankY  = editY + editH + gap;
+    // ── Session toolbar (NEW SESSION / SAVE SESSION / LOAD SESSION) ───────────
+    const int sessY  = editY + editH + gap;
     const int btnGap = 4;
     const int bW3    = (w - 2 * pad - 2 * btnGap) / 3;
-    saveBankBtn.setBounds(pad,                     bankY, bW3, bankH);
-    loadBankBtn.setBounds(pad + bW3 + btnGap,      bankY, bW3, bankH);
-    clearAllBtn.setBounds(pad + 2 * (bW3 + btnGap),bankY, bW3, bankH);
-
-    // ── Session toolbar (NEW SESSION / SAVE SESSION / LOAD SESSION) ───────────
-    const int sessY = bankY + bankH + 3;
-    // Reuse bW3 / btnGap — same 3-column split as bank toolbar
     newSessionBtn .setBounds(pad,                      sessY, bW3, bankH);
     saveSessionBtn.setBounds(pad + bW3 + btnGap,       sessY, bW3, bankH);
     loadSessionBtn.setBounds(pad + 2 * (bW3 + btnGap), sessY, bW3, bankH);
