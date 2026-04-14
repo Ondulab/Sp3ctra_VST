@@ -26,6 +26,15 @@ class FrameSequencer
 public:
     static constexpr int MAX_STEPS = 32;
 
+    // ── Step sentinel values ──────────────────────────────────────────────────
+    /** Step is empty: silence — no slot plays, no live passthrough.
+     *  The visual display goes white and blob detection is suppressed. */
+    static constexpr int STEP_EMPTY = -1;
+    /** Step is an explicit live passthrough: the CIS live signal flows through
+     *  as if no sequencer were active.  Assign this value deliberately to a
+     *  step cell — it is NOT the default for un-configured steps. */
+    static constexpr int STEP_LIVE  = -2;
+
     FrameSequencer();
 
     // ── Wiring ───────────────────────────────────────────────────────────────
@@ -54,8 +63,14 @@ public:
 
     // ── Transport (message thread — converted to RT-safe atomic commands) ─────
     void uiPlay  () noexcept;
+    void uiHold  () noexcept;   ///< Freeze on the current step indefinitely.
     void uiStop  () noexcept;
+    /** Resume from the current step after a hold (pause).
+     *  Clears the held flag without resetting phase or step counter,
+     *  so playback continues exactly where it was paused. */
+    void uiResume() noexcept;
     bool isPlaying() const noexcept { return playing.load(std::memory_order_relaxed); }
+    bool isHeld()   const noexcept { return held.load(std::memory_order_relaxed); }
 
     // ── RT state queries (safe from any thread) ───────────────────────────────
     /** Currently active step index, or -1 when stopped. */
@@ -91,6 +106,10 @@ private:
     // ── RT command pulses (one-shot: UI writes, audio thread consumes) ────────
     std::atomic<bool> startCmd { false };
     std::atomic<bool> stopCmd  { false };
+    std::atomic<bool> holdCmd  { false };   ///< Set by uiHold(); cleared on first RT check.
+
+    // ── Hold state: sequencer stays playing but does not advance the step ─────
+    std::atomic<bool> held     { false };
 
     // ── RT-only mutable state (accessed exclusively from the audio thread) ────
     // No synchronisation needed — single writer/reader.
