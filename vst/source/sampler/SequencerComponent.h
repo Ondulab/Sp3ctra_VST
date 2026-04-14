@@ -158,20 +158,45 @@ private:
             treblePath.closeSubPath();
 
             // ── Single-colour fill (no bass/treble colour split) ──────────────
-            const juce::Colour fillCol  = juce::Colour(0xff1e4055).withAlpha(0.85f);
-            const juce::Colour edgeCol  = juce::Colour(0xff66bbcc).withAlpha(0.65f);
+            const juce::Colour fillCol = juce::Colour(0xff1e4055).withAlpha(0.85f);
+            const juce::Colour edgeCol = juce::Colour(0xff66bbcc).withAlpha(0.65f);
             g.setColour(fillCol);
             g.fillPath(bassPath);
             g.fillPath(treblePath);
 
-            // Smooth contour stroke
+            // Stroke only the outer waveform edge — NOT the horizontal closing
+            // segment at cy (which would produce the unwanted centre line).
+            // Open paths = same points as fill paths but without closeSubPath().
+            juce::Path bassEdge, trebleEdge;
+            bassEdge  .startNewSubPath((float)tx, cy);
+            trebleEdge.startNewSubPath((float)tx, cy);
+            for (int col = 0; col < tw; ++col)
+            {
+                const int s0 = startI + col       * zoneLen / tw;
+                const int s1 = startI + (col + 1) * zoneLen / tw;
+                float bS = 0.f, tS = 0.f;
+                int   c  = 0;
+                for (int s = s0; s <= s1 && s < endI; ++s)
+                    { bS += bass[s]; tS += treble[s]; ++c; }
+                if (c == 0)
+                    { const int sc = juce::jlimit(0, kCols - 1, s0);
+                      bS = bass[sc]; tS = treble[sc]; c = 1; }
+                const float bv = std::pow(bS / (float)c, 0.4f);
+                const float tv = std::pow(tS / (float)c, 0.4f);
+                const float x  = (float)(tx + col) + 0.5f;
+                bassEdge  .lineTo(x, cy + bv * halfH);
+                trebleEdge.lineTo(x, cy - tv * halfH);
+            }
+            // End at (tx+tw, cy) without closing — no horizontal line drawn
+            bassEdge  .lineTo((float)(tx + tw), cy);
+            trebleEdge.lineTo((float)(tx + tw), cy);
+
             const juce::PathStrokeType thin(0.8f,
                 juce::PathStrokeType::curved,
                 juce::PathStrokeType::rounded);
             g.setColour(edgeCol);
-            g.strokePath(bassPath,   thin);
-            g.strokePath(treblePath, thin);
-            // No centre axis line
+            g.strokePath(bassEdge,   thin);
+            g.strokePath(trebleEdge, thin);
         }
 
         // ── Interaction ───────────────────────────────────────────────────────
