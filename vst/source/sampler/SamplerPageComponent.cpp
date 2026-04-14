@@ -151,6 +151,10 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
     slotGrid  .setSelectedSlot(0);
     slotEditor.setSelectedSlot(0);
 
+    // Wire selected-slot query so the mini-timeline in SequencerComponent
+    // always reflects the slot currently selected in SlotGridComponent.
+    sequencer.getSelectedSlot = [this]() -> int { return slotGrid.getSelectedSlot(); };
+
     addAndMakeVisible(slotGrid);
     addAndMakeVisible(slotEditor);
     addAndMakeVisible(sequencer);

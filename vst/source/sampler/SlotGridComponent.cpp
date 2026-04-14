@@ -1,5 +1,6 @@
 #include "SlotGridComponent.h"
 #include "../PluginProcessor.h"
+#include "../UITheme.h"
 
 const char* const SlotGridComponent::kNoteNames[FrameSamplerConstants::NUM_SLOTS] = {
     "C1", "C#1", "D1", "D#1", "E1", "F1", "F#1", "G1", "G#1", "A1", "A#1", "B1"
@@ -81,19 +82,13 @@ void SlotGridComponent::paint(juce::Graphics& g)
                 break;
         }
 
-        g.setColour(bgCol);
+        // Brighten selected slot slightly (no hard border)
+        g.setColour(isSelected ? bgCol.brighter(0.35f) : bgCol);
         g.fillRoundedRectangle(cell.toFloat(), 3.0f);
-
-        // ── Selection border ──────────────────────────────────────────────────
-        if (isSelected)
-        {
-            g.setColour(juce::Colours::white);
-            g.drawRoundedRectangle(cell.toFloat().reduced(1.0f), 3.0f, 2.0f);
-        }
 
         // ── Note name (top half) ──────────────────────────────────────────────
         g.setColour(textCol.withAlpha(0.75f));
-        g.setFont(juce::FontOptions(9.0f));
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontMicro));
         g.drawText(kNoteNames[i],
                    cell.withHeight(cell.getHeight() / 2),
                    juce::Justification::centredBottom, false);
@@ -116,7 +111,7 @@ void SlotGridComponent::paint(juce::Graphics& g)
                 break;
         }
         g.setColour(textCol);
-        g.setFont(juce::FontOptions(10.0f));
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
         g.drawText(stateStr,
                    cell.withTrimmedTop(cell.getHeight() / 2),
                    juce::Justification::centredTop, false);
@@ -132,14 +127,73 @@ void SlotGridComponent::paint(juce::Graphics& g)
 
 void SlotGridComponent::mouseDown(const juce::MouseEvent& e)
 {
-    constexpr int kGap    = 3;
-    const int totalGaps   = (FrameSamplerConstants::NUM_SLOTS - 1) * kGap;
-    const int cellW       = (getWidth() - totalGaps) / FrameSamplerConstants::NUM_SLOTS;
+    constexpr int kGap  = 3;
+    const int totalGaps = (FrameSamplerConstants::NUM_SLOTS - 1) * kGap;
+    const int cellW     = (getWidth() - totalGaps) / FrameSamplerConstants::NUM_SLOTS;
     if (cellW <= 0) return;
 
     const int idx = e.x / (cellW + kGap);
     if (idx < 0 || idx >= FrameSamplerConstants::NUM_SLOTS) return;
 
+    if (e.mods.isRightButtonDown())
+    {
+        // ── Right-click context menu: Copy / Paste bank ───────────────────
+        auto* fs = processor.getFrameSampler();
+        const bool hasContent    = fs != nullptr && fs->slotHasContent(idx);
+        const bool clipboardFull = clipboardSlot >= 0
+                                   && fs != nullptr
+                                   && fs->slotHasContent(clipboardSlot)
+                                   && clipboardSlot != idx;
+
+        juce::PopupMenu menu;
+        menu.addSectionHeader("Bank " + juce::String(idx + 1) + "  (" + kNoteNames[idx] + ")");
+        menu.addItem(1, "Copy bank",
+                     hasContent,    // enabled only when slot has audio
+                     clipboardSlot == idx); // ticked when this slot is already in clipboard
+        menu.addItem(2, "Paste here",
+                     clipboardFull, // enabled only when clipboard has a valid different slot
+                     false);
+
+        // showMenuAsync is correct here: the lambda is called on the message thread
+        menu.showMenuAsync(juce::PopupMenu::Options()
+                               .withTargetComponent(this)
+                               .withTargetScreenArea(cellBounds(idx).translated(
+                                   getScreenX(), getScreenY()).toFloat().toNearestInt()),
+            [this, idx](int result)
+            {
+                auto* fs2 = processor.getFrameSampler();
+                if (fs2 == nullptr) return;
+
+                switch (result)
+                {
+                    case 1: // Copy
+                        clipboardSlot = idx;
+                        break;
+
+                    case 2: // Paste
+                        if (clipboardSlot >= 0 && clipboardSlot != idx)
+                        {
+                            fs2->copySlotTo(clipboardSlot, idx);
+                            // Select and refresh the destination slot
+                            selectedSlot = idx;
+                            repaint();
+                            if (onSlotSelected) onSlotSelected(idx);
+                        }
+                        break;
+
+                    case 3: // Clear
+                        fs2->uiClearSlot(idx);
+                        repaint();
+                        break;
+
+                    default:
+                        break;
+                }
+            });
+        return;
+    }
+
+    // ── Left-click: select slot ───────────────────────────────────────────
     selectedSlot = idx;
     repaint();
     if (onSlotSelected)
