@@ -76,11 +76,14 @@ private:
         }
 
     private:
-        /** Draw the spectral waveform of the bank's active zone into this cell.
+        /** Draw the spectral waveform of the bank's ACTIVE zone [start, end].
          *
-         *  Uses anti-aliased filled paths (no per-pixel bars) to avoid jaggedness.
-         *  Samples at native pixel resolution, averages per-column to prevent
-         *  aliasing when the zone is narrower than the cell width.
+         *  Matches SlotTimelineComponent rendering: bass bars down / treble bars
+         *  up from the vertical centre, same γ=0.4 compression, single colour.
+         *
+         *  Temporal resolution improvement: the number of samples requested is
+         *  scaled up so the active zone always has ~tw samples — preventing the
+         *  "blocky" look when the zone is a small fraction of the full slot.
          */
         void paintSlotThumbnail(juce::Graphics& g)
         {
@@ -89,36 +92,43 @@ private:
             const int h = getHeight();
             constexpr int margin = 3;
             const int tx = margin;
-            const int ty = margin + 14; // leave room for label at top
+            const int ty = margin;      // waveform uses full height (label overlaid)
             const int tw = w - 2 * margin;
-            const int th = h - ty - margin;
+            const int th = h - 2 * margin;
             if (tw <= 0 || th <= 0) return;
 
-            // Sample at native pixel resolution (up to 512 cols)
+            // Active zone
+            const float sf       = frameSampler->getSlotStartFrac(bankSlot);
+            const float ef       = frameSampler->getSlotEndFrac(bankSlot);
+            const float zoneFrac = juce::jmax(0.01f, ef - sf);
+
+            // Request enough samples so the active zone has ~tw bins
+            // (same approach as SlotTimelineComponent: N ≥ tw / zoneFrac, capped)
             constexpr int kMaxCols = 512;
-            const int kCols = juce::jmin(tw, kMaxCols);
+            const int kCols = juce::jmin(kMaxCols,
+                                          juce::jmax(tw,
+                                                      (int)((float)tw / zoneFrac)));
             float bass  [kMaxCols] {};
             float treble[kMaxCols] {};
             frameSampler->sampleSpectralForTimeline(bankSlot, bass, treble, kCols);
 
-            // Active zone [startFrac, endFrac] mapped to sample indices
-            const float sf      = frameSampler->getSlotStartFrac(bankSlot);
-            const float ef      = frameSampler->getSlotEndFrac(bankSlot);
-            const int   startI  = juce::jlimit(0, kCols - 1, (int)(sf * (float)kCols));
-            const int   endI    = juce::jlimit(startI + 1, kCols, (int)(ef * (float)kCols));
-            const int   zoneLen = juce::jmax(1, endI - startI);
+            // Map active zone to sample indices
+            const int startI  = juce::jlimit(0, kCols - 1, (int)(sf * (float)kCols));
+            const int endI    = juce::jlimit(startI + 1, kCols, (int)(ef * (float)kCols));
+            const int zoneLen = juce::jmax(1, endI - startI);
 
+            // Centre y and half-amplitude (same ratio as SlotTimelineComponent: cy=h/2)
             const float cy    = (float)(ty + th / 2);
             const float halfH = (float)(th / 2);
 
-            // ── Build bass and treble area paths ──────────────────────────────
+            // ── Build bass (below cy) and treble (above cy) paths ─────────────
             juce::Path bassPath, treblePath;
             bassPath  .startNewSubPath((float)tx, cy);
             treblePath.startNewSubPath((float)tx, cy);
 
             for (int col = 0; col < tw; ++col)
             {
-                // Average samples over this column's zone range (anti-alias)
+                // Box-average over the bin range for this pixel (anti-alias)
                 const int s0 = startI + col       * zoneLen / tw;
                 const int s1 = startI + (col + 1) * zoneLen / tw;
                 float bSum = 0.f, tSum = 0.f;
@@ -134,6 +144,7 @@ private:
                     const int sc = juce::jlimit(0, kCols - 1, s0);
                     bSum = bass[sc]; tSum = treble[sc]; cnt = 1;
                 }
+                // γ=0.4 — identical to SlotTimelineComponent
                 const float bv = std::pow(bSum / (float)cnt, 0.4f);
                 const float tv = std::pow(tSum / (float)cnt, 0.4f);
                 const float x  = (float)(tx + col) + 0.5f;
@@ -146,27 +157,21 @@ private:
             bassPath  .closeSubPath();
             treblePath.closeSubPath();
 
-            // ── Fill areas (anti-aliased by JUCE path renderer) ───────────────
-            g.setColour(juce::Colour(0xff1a4466).withAlpha(0.80f));
+            // ── Single-colour fill (no bass/treble colour split) ──────────────
+            const juce::Colour fillCol  = juce::Colour(0xff1e4055).withAlpha(0.85f);
+            const juce::Colour edgeCol  = juce::Colour(0xff66bbcc).withAlpha(0.65f);
+            g.setColour(fillCol);
             g.fillPath(bassPath);
-            g.setColour(juce::Colour(0xff1a5544).withAlpha(0.80f));
             g.fillPath(treblePath);
 
-            // ── Bright edge strokes along the waveform outlines ───────────────
-            // Re-use the same paths: stroke only the "top" portion.
-            // Easiest: stroke the full closed path at 0.8 px — visually reads
-            // as a bright contour on the open face of the waveform.
+            // Smooth contour stroke
             const juce::PathStrokeType thin(0.8f,
                 juce::PathStrokeType::curved,
                 juce::PathStrokeType::rounded);
-            g.setColour(juce::Colour(0xff55bbdd).withAlpha(0.55f));
+            g.setColour(edgeCol);
             g.strokePath(bassPath,   thin);
-            g.setColour(juce::Colour(0xff55ddbb).withAlpha(0.55f));
             g.strokePath(treblePath, thin);
-
-            // ── Centre axis ───────────────────────────────────────────────────
-            g.setColour(juce::Colour(0x18ffffff));
-            g.drawHorizontalLine(juce::roundToInt(cy), (float)tx, (float)(tx + tw));
+            // No centre axis line
         }
 
         // ── Interaction ───────────────────────────────────────────────────────
