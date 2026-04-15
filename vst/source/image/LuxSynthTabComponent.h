@@ -82,7 +82,7 @@ public:
 
         // Row 5: Pixel threshold — minimum blob span in CIS pixels.
         // Acts as a width filter: blobs narrower than this value are discarded.
-        initLabel(blobMinWidthLabel, "Pix Thr");
+        initLabel(blobMinWidthLabel, "Pix. Thr.");
         blobMinWidthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
         blobMinWidthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
                                            50, Sp3ctraTheme::kControlH);
@@ -99,9 +99,11 @@ public:
         blobMergeGapAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
             apvts, "lxBlobMergeGap", blobMergeGapSlider));
 
-        // Row 7: Color Merge — max RGB distance [0..1] for merging across a gap.
-        // 0 = strict (only identical colors merge); 1 = ignore color (gap only).
-        initLabel(blobColorSplitLabel, "Color Merge");
+        // Row 7: Color Split — how aggressively color differences cause splits.
+        // 0% = no color-based split (pure gap-based merge, color ignored).
+        // 100% = maximum split: any color divergence breaks a blob, even within
+        //        a continuous active region (independent of Merge Gap).
+        initLabel(blobColorSplitLabel, "Color Split");
         blobColorSplitSlider.setSliderStyle(juce::Slider::LinearHorizontal);
         blobColorSplitSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
                                               50, Sp3ctraTheme::kControlH);

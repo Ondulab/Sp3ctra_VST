@@ -852,12 +852,16 @@ void CisVisualizerComponent::detectSynthBlobs()
     const float threshold     = g_sp3ctra_config.luxsynth_blob_threshold;
     const int   minWidth      = juce::jmax(1, g_sp3ctra_config.luxsynth_blob_min_width);
     const int   mergeGap      = juce::jmax(0, g_sp3ctra_config.luxsynth_blob_merge_gap);
-    // Color Merge threshold — maximum normalised Euclidean RGB distance [0..1]
-    // that still allows merging two active regions separated by a gap.
-    // 0 = only nearly-identical colors merge (strict)
-    // 1 = any colors merge (color completely ignored, purely gap-based)
-    const float colorMergeThr = juce::jlimit(0.0f, 1.0f,
-                                    g_sp3ctra_config.luxsynth_blob_color_split);
+    // Color Split parameter [0..1]:
+    //   0% → no color-based split (color completely ignored, pure gap merge)
+    //   100% → maximum split (any color divergence breaks a blob, including
+    //           within continuous active regions — independent of Merge Gap)
+    // Internally converted to a merge threshold:
+    //   colorMergeThr = 1 - colorSplitParam
+    //   dist > colorMergeThr → split
+    const float colorSplitParam = juce::jlimit(0.0f, 1.0f,
+                                      g_sp3ctra_config.luxsynth_blob_color_split);
+    const float colorMergeThr   = 1.0f - colorSplitParam;
 
     // ── Pre-compute locally smoothed normalised RGB per CIS pixel ─────────────
     // Box average ±kSmoothRadius represents the "local color identity" of each
@@ -994,7 +998,31 @@ void CisVisualizerComponent::detectSynthBlobs()
             }
             else
             {
-                // Continuing within an active region
+                // ── Within continuous active region: color split check ────────
+                // Fires even with no gap — independent of Merge Gap.
+                // Only active when colorSplitParam > 0 (i.e. user wants splitting).
+                // At 0% the threshold = 1.0 so dist never exceeds it → no split.
+                if (colorSplitParam > 0.001f && blobLen > 0)
+                {
+                    const float meanR = blobRSum / static_cast<float>(blobLen);
+                    const float meanG = blobGSum / static_cast<float>(blobLen);
+                    const float meanB = blobBSum / static_cast<float>(blobLen);
+                    const float dr    = smR[static_cast<size_t>(i)] - meanR;
+                    const float dg    = smG[static_cast<size_t>(i)] - meanG;
+                    const float db    = smB[static_cast<size_t>(i)] - meanB;
+                    const float dist  = std::sqrt(dr*dr + dg*dg + db*db) * 0.5774f;
+
+                    if (dist > colorMergeThr
+                        && static_cast<int>(synthBlobs_.size()) < kMaxSynthBlobs - 1)
+                    {
+                        // Color divergence → close current blob, start new one at i.
+                        // startNewBlob already initialises blobLen=1 with pixel i.
+                        finishBlob(i);
+                        startNewBlob(i);
+                        continue; // pixel i already consumed by startNewBlob
+                    }
+                }
+                // Extend current blob
                 if (act > blobPeak) blobPeak = act;
                 blobSum  += act;
                 blobLen++;
