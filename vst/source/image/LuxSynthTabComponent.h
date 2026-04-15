@@ -80,8 +80,9 @@ public:
         blobThreshAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
             apvts, "lxBlobThreshold", blobThreshSlider));
 
-        // Row 5: Min Pixel Width — minimum blob width in CIS pixels
-        initLabel(blobMinWidthLabel, "Min Px W.");
+        // Row 5: Pixel threshold — minimum blob span in CIS pixels.
+        // Acts as a width filter: blobs narrower than this value are discarded.
+        initLabel(blobMinWidthLabel, "Pix Thr");
         blobMinWidthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
         blobMinWidthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
                                            50, Sp3ctraTheme::kControlH);
