@@ -31,7 +31,14 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     playBtn.onClick = [this]
     {
         if (auto* fs = processor.getFrameSampler())
+        {
             fs->uiPlaySlot(selectedSlot);
+            // Auto-activate sampler transport PLAY so the pipeline processes
+            // the injected frames.  Without this, the user would have to
+            // manually set the IMAGE S–Sampler transport to PLAY first.
+            if (auto* p = processor.getAPVTS().getParameter("samplerFreezeMode"))
+                p->setValueNotifyingHost(0.0f); // 0 = PLAY
+        }
     };
     addAndMakeVisible(playBtn);
 
