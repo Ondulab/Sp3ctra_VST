@@ -852,65 +852,74 @@ void CisVisualizerComponent::detectSynthBlobs()
     const float threshold     = g_sp3ctra_config.luxsynth_blob_threshold;
     const int   minWidth      = juce::jmax(1, g_sp3ctra_config.luxsynth_blob_min_width);
     const int   mergeGap      = juce::jmax(0, g_sp3ctra_config.luxsynth_blob_merge_gap);
-    // Color split threshold — same unit as the SYNTH COLOR display (post-DC-removal, gain=8).
-    // Reads the lxBlobColorSplit APVTS param; default 0.20 means a jump of
-    // ~51 amplitude units (after gain and DC removal) splits the running blob.
-    const float colorSplitThr = juce::jmax(0.001f, g_sp3ctra_config.luxsynth_blob_color_split);
+    // Color Merge threshold — maximum normalised Euclidean RGB distance [0..1]
+    // that still allows merging two active regions separated by a gap.
+    // 0 = only nearly-identical colors merge (strict)
+    // 1 = any colors merge (color completely ignored, purely gap-based)
+    const float colorMergeThr = juce::jlimit(0.0f, 1.0f,
+                                    g_sp3ctra_config.luxsynth_blob_color_split);
 
-    // ── Pre-compute SYNTH COLOR temperature curve ─────────────────────────────
-    // Matches paintColorTemperatureMode() exactly so that the color split sees
-    // the same signal the user sees in SYNTH COLOR:
-    //   1. Box-smooth R and B (±8 px) — removes per-photosite fixed-pattern noise
-    //   2. Compute raw temperature  = (smoothR - smoothB) / 255
-    //   3. Subtract global mean     — DC removal (sensor warm bias)
-    //   4. Apply gain kTempGain     — matches the visual scale
-    // The resulting curve spans approximately [-1, +1] for strongly coloured CIS frames.
-    constexpr int   kSmoothRadius = 8;
-    constexpr float kTempGain     = 8.0f;
+    // ── Pre-compute locally smoothed normalised RGB per CIS pixel ─────────────
+    // Box average ±kSmoothRadius represents the "local color identity" of each
+    // pixel, independent of single-photosite noise. Used to decide whether two
+    // active regions separated by an inactive gap should be merged (same color
+    // neighbourhood) or kept separate (different color neighbourhood).
+    constexpr int kSmoothRadius = 8;
 
-    thread_local std::vector<float> ctCurve;
-    ctCurve.resize(static_cast<size_t>(cisPixelsCount));
+    thread_local std::vector<float> smR, smG, smB;
+    smR.resize(static_cast<size_t>(cisPixelsCount));
+    smG.resize(static_cast<size_t>(cisPixelsCount));
+    smB.resize(static_cast<size_t>(cisPixelsCount));
 
-    // Pass 1: smoothed (R-B)/255 — no mean removal yet
+    for (int i = 0; i < cisPixelsCount; ++i)
     {
-        float meanTemp = 0.0f;
-        for (int i = 0; i < cisPixelsCount; ++i)
+        const int   lo = std::max(0, i - kSmoothRadius);
+        const int   hi = std::min(cisPixelsCount - 1, i + kSmoothRadius);
+        const float n  = static_cast<float>(hi - lo + 1);
+        float sr = 0.f, sg = 0.f, sb = 0.f;
+        for (int k = lo; k <= hi; ++k)
         {
-            const int lo = std::max(0, i - kSmoothRadius);
-            const int hi = std::min(cisPixelsCount - 1, i + kSmoothRadius);
-            const float n = static_cast<float>(hi - lo + 1);
-            float sumR = 0.0f, sumB = 0.0f;
-            for (int k = lo; k <= hi; ++k)
-            {
-                sumR += static_cast<float>(localDataR[k]);
-                sumB += static_cast<float>(localDataB[k]);
-            }
-            const float t = (sumR / n - sumB / n) / 255.0f;
-            ctCurve[static_cast<size_t>(i)] = t;
-            meanTemp += t;
+            sr += static_cast<float>(localDataR[k]);
+            sg += static_cast<float>(localDataG[k]);
+            sb += static_cast<float>(localDataB[k]);
         }
-        // Pass 2: DC removal + gain (clamped)
-        meanTemp /= static_cast<float>(cisPixelsCount);
-        for (int i = 0; i < cisPixelsCount; ++i)
-        {
-            float v = (ctCurve[static_cast<size_t>(i)] - meanTemp) * kTempGain;
-            if (v < -1.0f) v = -1.0f;
-            if (v >  1.0f) v =  1.0f;
-            ctCurve[static_cast<size_t>(i)] = v;
-        }
+        smR[static_cast<size_t>(i)] = sr / (n * 255.f);
+        smG[static_cast<size_t>(i)] = sg / (n * 255.f);
+        smB[static_cast<size_t>(i)] = sb / (n * 255.f);
     }
 
-    // ── 1-D connected-component scan with color-continuity splitting ──────────
-    bool  inBlob        = false;
-    int   blobStart     = 0;
-    int   gapCount      = 0;
-    float blobPeak      = 0.0f;
-    float blobSum       = 0.0f;
-    int   blobLen       = 0;
-    float blobCtSum     = 0.0f;
-    float prevColorTemp = 0.0f;
+    // ── 1-D scan — gap-based merge with colorimetric proximity check ──────────
+    //
+    // Logic:
+    //  - Active pixel (act ≥ threshold): extend or start blob
+    //  - Inactive pixel: count gap; if gap > mergeGap → close blob
+    //  - On gap resume (active after inactive, gap ≤ mergeGap):
+    //      compute Euclidean RGB distance between new pixel's local color and
+    //      running blob's accumulated mean local color.
+    //      dist ≤ colorMergeThr → merge (continue blob)
+    //      dist >  colorMergeThr → don't merge (close and start new blob)
+    //
+    bool  inBlob    = false;
+    int   blobStart = 0;
+    int   gapCount  = 0;
+    float blobPeak  = 0.f;
+    float blobSum   = 0.f;
+    int   blobLen   = 0;
+    float blobRSum  = 0.f, blobGSum = 0.f, blobBSum = 0.f;
 
-    // Lambda: close the running blob and push it if it passes size filter
+    auto startNewBlob = [&](int px)
+    {
+        blobStart = px;
+        inBlob    = true;
+        blobPeak  = localDataGray[px] / 255.f;
+        blobSum   = blobPeak;
+        blobLen   = 1;
+        blobRSum  = smR[static_cast<size_t>(px)];
+        blobGSum  = smG[static_cast<size_t>(px)];
+        blobBSum  = smB[static_cast<size_t>(px)];
+        gapCount  = 0;
+    };
+
     auto finishBlob = [&](int endPx)
     {
         const int width = endPx - blobStart;
@@ -918,74 +927,80 @@ void CisVisualizerComponent::detectSynthBlobs()
             && static_cast<int>(synthBlobs_.size()) < kMaxSynthBlobs)
         {
             SynthBlob b;
-            b.startPx      = blobStart;
-            b.endPx        = endPx;
+            b.startPx       = blobStart;
+            b.endPx         = endPx;
             b.peakIntensity = blobPeak;
             b.avgIntensity  = blobSum / static_cast<float>(blobLen);
-            b.avgColorTemp  = blobCtSum / static_cast<float>(blobLen);
-            b.color         = juce::Colours::white; // assigned after scan
+            const float mr  = juce::jlimit(0.f, 1.f, blobRSum / static_cast<float>(blobLen));
+            const float mg  = juce::jlimit(0.f, 1.f, blobGSum / static_cast<float>(blobLen));
+            const float mb  = juce::jlimit(0.f, 1.f, blobBSum / static_cast<float>(blobLen));
+            b.avgColorTemp  = mr - mb; // warm/cool approximation for tooltip
+            b.avgLocalColor = juce::Colour(static_cast<uint8_t>(mr * 255.f),
+                                           static_cast<uint8_t>(mg * 255.f),
+                                           static_cast<uint8_t>(mb * 255.f));
+            b.color         = juce::Colours::white; // hue assigned after scan
             synthBlobs_.push_back(b);
         }
-        inBlob       = false;
-        gapCount     = 0;
-        blobPeak     = 0.0f;
-        blobSum      = 0.0f;
-        blobLen      = 0;
-        blobCtSum    = 0.0f;
-        prevColorTemp = 0.0f;
+        inBlob   = false;
+        gapCount = 0;
+        blobPeak = blobSum = 0.f;
+        blobLen  = 0;
+        blobRSum = blobGSum = blobBSum = 0.f;
     };
 
     for (int i = 0; i < cisPixelsCount; ++i)
     {
-        const float act = localDataGray[i] / 255.0f;
-        // Use the SYNTH COLOR temperature curve — smoothed, DC-removed, gain ×8.
-        // This is the same signal the user sees in SYNTH COLOR mode, so the
-        // color split fires on the same transitions visible in that view.
-        const float ct  = ctCurve[static_cast<size_t>(i)];
+        const float act    = localDataGray[i] / 255.f;
         const bool  active = (act >= threshold);
 
         if (active)
         {
             if (!inBlob)
             {
-                // Start new blob
-                blobStart     = i;
-                inBlob        = true;
-                blobPeak      = act;
-                blobSum       = act;
-                blobLen       = 1;
-                blobCtSum     = ct;
-                prevColorTemp = ct;
-                gapCount      = 0;
+                startNewBlob(i);
             }
-            else
+            else if (gapCount > 0)
             {
-                // Color-continuity check: abrupt color shift → split
-                // colorSplitThr reads lxBlobColorSplit APVTS param (same scale as SYNTH COLOR)
-                const float colorJump = std::abs(ct - prevColorTemp);
-                if (colorJump > colorSplitThr
+                // ── Gap resume: color proximity check ────────────────────────
+                // gapCount ≤ mergeGap (otherwise blob was already closed).
+                // Decide whether to merge based on colorimetric distance.
+                const float meanR = blobRSum / static_cast<float>(blobLen);
+                const float meanG = blobGSum / static_cast<float>(blobLen);
+                const float meanB = blobBSum / static_cast<float>(blobLen);
+                const float dr    = smR[static_cast<size_t>(i)] - meanR;
+                const float dg    = smG[static_cast<size_t>(i)] - meanG;
+                const float db    = smB[static_cast<size_t>(i)] - meanB;
+                // Euclidean distance in normalised RGB, range [0..sqrt(3)] → /sqrt(3) → [0..1]
+                const float dist  = std::sqrt(dr*dr + dg*dg + db*db) * 0.5774f;
+
+                if (dist > colorMergeThr
                     && static_cast<int>(synthBlobs_.size()) < kMaxSynthBlobs - 1)
                 {
-                    finishBlob(i);
-                    // Immediately start a new blob at this pixel
-                    blobStart     = i;
-                    inBlob        = true;
-                    blobPeak      = act;
-                    blobSum       = act;
-                    blobLen       = 1;
-                    blobCtSum     = ct;
-                    prevColorTemp = ct;
+                    // Colors too different → close running blob, start a new one
+                    finishBlob(i - gapCount);
+                    startNewBlob(i);
                 }
                 else
                 {
-                    // Extend current blob
+                    // Colors close → merge: continue extending the blob
                     if (act > blobPeak) blobPeak = act;
-                    blobSum      += act;
+                    blobSum  += act;
                     blobLen++;
-                    blobCtSum    += ct;
-                    prevColorTemp = ct;
-                    gapCount      = 0;
+                    blobRSum += smR[static_cast<size_t>(i)];
+                    blobGSum += smG[static_cast<size_t>(i)];
+                    blobBSum += smB[static_cast<size_t>(i)];
+                    gapCount  = 0;
                 }
+            }
+            else
+            {
+                // Continuing within an active region
+                if (act > blobPeak) blobPeak = act;
+                blobSum  += act;
+                blobLen++;
+                blobRSum += smR[static_cast<size_t>(i)];
+                blobGSum += smG[static_cast<size_t>(i)];
+                blobBSum += smB[static_cast<size_t>(i)];
             }
         }
         else // inactive pixel
@@ -999,20 +1014,16 @@ void CisVisualizerComponent::detectSynthBlobs()
         }
     }
 
-    // Close blob that runs to the last pixel
     if (inBlob)
         finishBlob(cisPixelsCount - gapCount);
 
-    // ── Assign unique hues (evenly spaced on HSV wheel) ───────────────────────
-    // Saturation is boosted slightly for warm/cold blobs (high |colorTemp|).
+    // ── Assign unique hues — evenly spaced on HSV wheel ───────────────────────
     const int nb = static_cast<int>(synthBlobs_.size());
     for (int b = 0; b < nb; ++b)
     {
         const float hue = (nb > 1) ? static_cast<float>(b) / static_cast<float>(nb)
                                    : 0.0f;
-        const float ctAbs = std::abs(synthBlobs_[b].avgColorTemp);
-        const float sat   = juce::jlimit(0.60f, 1.0f, 0.70f + 0.30f * ctAbs);
-        synthBlobs_[b].color = juce::Colour::fromHSV(hue, sat, 0.90f, 1.0f);
+        synthBlobs_[b].color = juce::Colour::fromHSV(hue, 0.85f, 0.90f, 1.0f);
     }
 }
 
