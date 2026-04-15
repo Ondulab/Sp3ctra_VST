@@ -634,6 +634,43 @@ void *udpThread(void *arg) {
         if (pipeline_process_frame(src_R, src_G, src_B, &live_cfg, &preprocessed_temp) != 0) {
           log_error("THREAD", "Pipeline processing failed");
         }
+
+        /* FIX(routing): LuxSynth polyphonic independent source path.
+         * pipeline_process_frame() computed polyphonic.* from LuxStral's source.
+         * When luxsynth_source_type differs from luxstral_source_type (e.g.
+         * LuxSynth=L while LuxStral=S), recompute polyphonic.* from LuxSynth's
+         * own designated source using preprocess_luxsynth().
+         * db->activeBuffer_R/G/B still holds the pure live UDP frame at this
+         * point — it is overwritten with mixed_R only at the swapBuffers step. */
+#ifdef VST_MODE
+        {
+          int luxsynth_src = g_sp3ctra_config.luxsynth_source_type;
+          int luxstral_src = (int)live_cfg.luxstral_path.source;
+          if (luxsynth_src != luxstral_src)
+          {
+            const uint8_t *syn_R, *syn_G, *syn_B;
+            uint8_t *tmp_R, *tmp_G, *tmp_B;
+            if (luxsynth_src == 1 /* IMAGE_SOURCE_LIVE */)
+            {
+              /* Pure live UDP — db->activeBuffer_R not yet overwritten with mixed */
+              syn_R = db->activeBuffer_R;
+              syn_G = db->activeBuffer_G;
+              syn_B = db->activeBuffer_B;
+            }
+            else if (luxsynth_src == 0 /* IMAGE_SOURCE_SAMPLER */)
+            {
+              audio_image_buffers_get_sampler_pointers(audioBuffers, &tmp_R, &tmp_G, &tmp_B);
+              syn_R = tmp_R; syn_G = tmp_G; syn_B = tmp_B;
+            }
+            else /* IMAGE_SOURCE_MIX */
+            {
+              audio_image_buffers_get_read_pointers(audioBuffers, &tmp_R, &tmp_G, &tmp_B);
+              syn_R = tmp_R; syn_G = tmp_G; syn_B = tmp_B;
+            }
+            preprocess_luxsynth(syn_R, syn_G, syn_B, &preprocessed_temp);
+          }
+        }
+#endif
       }
 
       /* 🎵 LUXWAVE FIX: Pass grayscale image data to LuxWave synthesis thread
@@ -707,6 +744,32 @@ void *udpThread(void *arg) {
 #else
         db->preprocessed_data = preprocessed_temp;
         db->dataReady = 1;
+#endif
+
+      /* FIX(routing): LuxSynth polyphonic independent write path.
+       * The LuxStral routing block above is gated entirely by luxstral_source_type.
+       * When LuxStral=S and frame_sampler_is_playing(), the ENTIRE block is skipped,
+       * leaving polyphonic.* (LuxSynth input) frozen on its last written value.
+       * This causes the LuxSynth "Synth Grey" visualisation to freeze whenever
+       * the sampler is playing, regardless of LuxSynth's own source setting.
+       *
+       * Fix: always update polyphonic.* from preprocessed_temp when
+       * luxsynth_source_type is LIVE or MIX.  This write is independent of
+       * LuxStral's transport state and of frame_sampler_is_playing().
+       * preprocessed_temp.polyphonic was already recomputed from LuxSynth's
+       * designated source (live UDP / sampler / mix) by preprocess_luxsynth()
+       * in the pipeline processing block above (Change A). */
+#ifdef VST_MODE
+      {
+        int luxsynth_src = g_sp3ctra_config.luxsynth_source_type;
+        if (luxsynth_src == 1 /* IMAGE_SOURCE_LIVE */ ||
+            luxsynth_src == 2 /* IMAGE_SOURCE_MIX  */)
+        {
+          db->preprocessed_data.polyphonic = preprocessed_temp.polyphonic;
+          if (db->dataReady == 0)
+            db->dataReady = 1; /* polyphonic data is now valid */
+        }
+      }
 #endif
       pthread_cond_signal(&db->cond);
       pthread_mutex_unlock(&db->mutex);
