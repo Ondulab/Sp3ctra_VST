@@ -1095,8 +1095,18 @@ void FramePlayerThread::run()
             // or rtStop() when the sequencer was idle).
             if (state.injectSilenceCmd.exchange(false, std::memory_order_acq_rel))
             {
-                log_info("FS", "FramePlayerThread: idle — injecting white frame (silence)");
-                injectWhiteFrame();
+                // FIX(live): When passthrough is active (STEP_LIVE or rtStop),
+                // the live UDP stream is the sole authority — NEVER inject white.
+                // Consume the flag but skip the white frame injection.
+                if (state.passthroughEnabled.load(std::memory_order_relaxed))
+                {
+                    log_info("FS", "FramePlayerThread: idle — passthrough active, skipping white frame");
+                }
+                else
+                {
+                    log_info("FS", "FramePlayerThread: idle — injecting white frame (silence)");
+                    injectWhiteFrame();
+                }
             }
             Thread::sleep(1);
             continue;
@@ -1670,7 +1680,12 @@ void FramePlayerThread::run()
                 || sampler.isSeqSilentStepActive()
                 || state.injectSilenceCmd.exchange(false, std::memory_order_acq_rel);
 
-            if (doSilence)
+            // FIX(live): When passthrough is active (STEP_LIVE), the live UDP
+            // stream is the intended content — NEVER overwrite with white.
+            // This is a hard bypass: passthrough trumps all silence rules.
+            const bool passthrough = state.passthroughEnabled.load(std::memory_order_relaxed);
+
+            if (doSilence && !passthrough)
             {
                 if (stoppedByNoneMode)
                     log_info("FS", "Slot %d: NONE mode end — injecting white frame (silence)",
@@ -1679,6 +1694,11 @@ void FramePlayerThread::run()
                     log_info("FS", "Slot %d: stop/empty step — injecting white frame (silence)",
                              slotToPlay);
                 injectWhiteFrame();
+            }
+            else if (doSilence && passthrough)
+            {
+                log_info("FS", "Slot %d: passthrough active — skipping white frame",
+                         slotToPlay);
             }
         }
 
