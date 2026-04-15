@@ -847,9 +847,11 @@ void CisVisualizerComponent::detectSynthBlobs()
         return;
 
     extern sp3ctra_config_t g_sp3ctra_config;
-    const float threshold = g_sp3ctra_config.strokeforge_blob_base_threshold;
-    const int   minWidth  = juce::jmax(1, g_sp3ctra_config.strokeforge_blob_min_width);
-    const int   mergeGap  = juce::jmax(0, g_sp3ctra_config.strokeforge_blob_merge_gap);
+    // Use LuxSynth-dedicated blob params — fully isolated from StrokeForge/LuxStral.
+    // Configured via lxBlob* APVTS params in the LUXSYNTH tab → BLOB DETECTION section.
+    const float threshold = g_sp3ctra_config.luxsynth_blob_threshold;
+    const int   minWidth  = juce::jmax(1, g_sp3ctra_config.luxsynth_blob_min_width);
+    const int   mergeGap  = juce::jmax(0, g_sp3ctra_config.luxsynth_blob_merge_gap);
 
     // Color-temperature jump (R-B)/255 that causes the current blob to be split.
     // 0.20 = ~51/255 — noticeable hue shift (e.g. neutral → warm) creates a
