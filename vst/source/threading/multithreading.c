@@ -763,18 +763,16 @@ void *udpThread(void *arg) {
               db->preprocessed_data = preprocessed_temp;
               db->dataReady = 2;
             }
-            else
+            else if (frame_sampler_is_passthrough())
             {
-              /* STEP_EMPTY or passthroughEnabled=false: inject silence.
-               * Without this, preprocessed_data stays frozen on the last
-               * recorded frame — the synthesis engine keeps producing sound
-               * from stale data. */
+              /* Truly idle: no slot active, not STEP_EMPTY, not STEP_LIVE.
+               * Inject silence so preprocessed_data does not freeze on the
+               * last recorded/played frame. */
               memset(db->preprocessed_data.additive.notes, 0,
                      sizeof(db->preprocessed_data.additive.notes));
               memset(db->preprocessed_data.additive.grayscale, 0,
                      sizeof(db->preprocessed_data.additive.grayscale));
               db->preprocessed_data.additive.contrast_factor = 0.0f;
-              /* FIX(silence): Also zero polyphonic.* when LuxSynth=SAMPLER. */
               if (g_sp3ctra_config.luxsynth_source_type == 0 /* IMAGE_SOURCE_SAMPLER */)
               {
                 memset(db->preprocessed_data.polyphonic.grayscale, 0,
@@ -785,6 +783,10 @@ void *udpThread(void *arg) {
               }
               db->dataReady = 2; /* tag=2: sampler slot — consumer gating intact */
             }
+            /* else: passthroughEnabled=false → a slot is physically active
+             * (e.g. UI play with sampler_freeze_mode≠0) or STEP_EMPTY.
+             * FramePlayerThread / injectSilenceCmd handles these cases.
+             * Do NOT overwrite preprocessed_data here. */
           }
           /* else frame_sampler_is_playing(): FramePlayerThread is the sole
            * writer of preprocessed_data for Source=S during playback. */
