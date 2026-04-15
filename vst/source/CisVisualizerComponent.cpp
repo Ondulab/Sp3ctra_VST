@@ -524,17 +524,24 @@ void CisVisualizerComponent::updateCisData()
                             : (isSpctrView ? g_sp3ctra_config.luxstral_ac_removal
                                            : g_sp3ctra_config.luxsynth_ac_removal);
 
-        /* Gamma: SPCTR_* only (SYNTH_* has no gamma by design) */
-        const float gammaVal = isSourceView ? 0.0f
-                               : (!isSpctrView ? 0.0f
-                                  : (samplerWriting
-                                     ? g_sp3ctra_config.sampler_gamma
-                                     : g_sp3ctra_config.additive_gamma_value));
-        const int gammaOn = isSourceView ? 0
-                            : (!isSpctrView ? 0
-                               : (samplerWriting
-                                  ? (gammaVal > 0.0f ? 1 : 0)
-                                  : g_sp3ctra_config.additive_enable_non_linear_mapping));
+        /* Gamma: per-path.
+         *  SPCTR_* (LUXSTRAL): additive_gamma_value, guarded by additive_enable_non_linear_mapping
+         *  SYNTH_*  (LUXSYNTH): luxsynth_gamma_value, always active (no enable flag; 1.0 = no-op) */
+        float gammaVal;
+        int   gammaOn;
+        if (isSourceView) {
+            gammaVal = 0.0f;
+            gammaOn  = 0;
+        } else if (isSpctrView) {
+            gammaVal = samplerWriting ? g_sp3ctra_config.sampler_gamma
+                                      : g_sp3ctra_config.additive_gamma_value;
+            gammaOn  = samplerWriting ? (gammaVal > 0.0f ? 1 : 0)
+                                      : g_sp3ctra_config.additive_enable_non_linear_mapping;
+        } else {
+            /* SYNTH_* — gamma always active; 1.0 is a mathematical no-op */
+            gammaVal = g_sp3ctra_config.luxsynth_gamma_value;
+            gammaOn  = (gammaVal > 0.0f && gammaVal != 1.0f) ? 1 : 0;
+        }
 
         localDataGray.resize(cisPixelsCount);
 

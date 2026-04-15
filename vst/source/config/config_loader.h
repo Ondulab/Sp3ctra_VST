@@ -238,6 +238,7 @@ typedef struct {
     int luxsynth_source_type;              /* Which source feeds the LuxSynth+LuxWave path */
     int luxsynth_inversion;                /* Per-path inversion toggle (0=off, 1=on) */
     int luxsynth_ac_removal;               /* Per-path AC removal toggle (0=off, 1=on) */
+    float luxsynth_gamma_value;             /* Gamma value for LUXSYNTH image preprocessing (photo conv.: pow(x, 1/gamma)); 1.0=no-op */
 
     /* image_freeze_mode : transport state for the live image stream           */
     /*   0 = PLAY  — normal frame update                                       */
