@@ -251,6 +251,13 @@ private:
     // Index of the blob currently under the mouse cursor (-1 = none).
     // Updated by mouseMove() / mouseExit(); read by paintSynthBlobMode().
     // Both methods run on the UI/message thread — no synchronisation needed.
+    // ── Hover tooltip overlay (desktop-level component, never clipped) ─────────
+    // Forward-declared here; defined in CisVisualizerComponent.cpp.
+    // Added to the desktop via addToDesktop() so it appears above ALL UI elements
+    // regardless of parent component bounds.
+    class CisHoverTooltip;
+    std::unique_ptr<CisHoverTooltip> hoverTooltip_;
+
     int              hoverBlobIdx_ { -1 };
     juce::Point<int> hoverPos_     {};
 
