@@ -609,12 +609,27 @@ void *udpThread(void *arg) {
         }
         else if (live_cfg.luxstral_path.source == IMAGE_SOURCE_SAMPLER)
         {
-            /* S — Last sampler frame written by FramePlayerThread */
-            uint8_t *smpR, *smpG, *smpB;
-            audio_image_buffers_get_sampler_pointers(audioBuffers, &smpR, &smpG, &smpB);
-            src_R = smpR;
-            src_G = smpG;
-            src_B = smpB;
+#ifdef VST_MODE
+            /* FIX(live): When passthrough is active (STEP_LIVE / rtStop),
+             * no slot is playing — sampler_pointers still hold the old frame.
+             * Use the live UDP data instead so the pipeline processes the
+             * actual CIS stream, not stale sampler data. */
+            if (frame_sampler_is_passthrough() && !frame_sampler_is_playing())
+            {
+                src_R = db->activeBuffer_R;
+                src_G = db->activeBuffer_G;
+                src_B = db->activeBuffer_B;
+            }
+            else
+#endif
+            {
+                /* S — Last sampler frame written by FramePlayerThread */
+                uint8_t *smpR, *smpG, *smpB;
+                audio_image_buffers_get_sampler_pointers(audioBuffers, &smpR, &smpG, &smpB);
+                src_R = smpR;
+                src_G = smpG;
+                src_B = smpB;
+            }
         }
         else
         {
@@ -738,9 +753,15 @@ void *udpThread(void *arg) {
               /* FIX(live): STEP_LIVE or rtStop with passthrough enabled.
                * Source=S but no slot is playing — the live CIS stream IS the
                * intended content.  Write the full preprocessed_temp (computed
-               * from the live UDP frame) so synthesis uses live data. */
+               * from the live UDP frame) so synthesis uses live data.
+               *
+               * CRITICAL: use dataReady=2 (sampler tag), NOT 1 (live tag).
+               * synth_AudioProcess source-tag gating rejects tag=1 when
+               * Source=S.  Tag=2 passes the gate and is semantically correct:
+               * STEP_LIVE is a sequencer override that deliberately routes
+               * live data through the Source=S consumer path. */
               db->preprocessed_data = preprocessed_temp;
-              db->dataReady = 1;
+              db->dataReady = 2;
             }
             else
             {
