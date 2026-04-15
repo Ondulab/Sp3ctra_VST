@@ -148,25 +148,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"sfEnabled", 1}, "SF Active", false));
 
-    // ── Gameplay — Blob Threshold ────────────────────────────────────────────
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"sfBlobBaseThreshold", 1}, "Blob Thr.",
-        juce::NormalisableRange<float>(0.01f, 0.2f, 0.001f), 0.03f));
-
     // ── Infrastructure — SF internal parameters ───────────────────────────────
+    // sfBlobBaseThreshold / sfBlobMinWidth / sfBlobMergeGap removed:
+    // these are now exclusively controlled by spctrBlob* (IMAGE LUXSTRAL tab).
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"sfBlobContrastAdaptive", 1}, "SF Contrast Adaptive",
         true, kHiddenBool));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"sfBlobContrastSensitivity", 1}, "SF Contrast Sensitivity",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, kHiddenFloat));
-    params.push_back(std::make_unique<juce::AudioParameterInt>(
-        juce::ParameterID{"sfBlobMinWidth", 1}, "SF Blob Min Width",
-        1, 50, 20, kHiddenInt));
-
-    // ── Gameplay — Merge Gap ─────────────────────────────────────────────────
-    params.push_back(std::make_unique<juce::AudioParameterInt>(
-        juce::ParameterID{"sfBlobMergeGap", 1}, "Merge Gap", 0, 20, 5));
 
     // ── Infrastructure — SF advanced ─────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterInt>(
@@ -439,11 +429,8 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     
     // Register StrokeForge parameter listeners
     apvts.addParameterListener("sfEnabled", this);
-    apvts.addParameterListener("sfBlobBaseThreshold", this);
     apvts.addParameterListener("sfBlobContrastAdaptive", this);
     apvts.addParameterListener("sfBlobContrastSensitivity", this);
-    apvts.addParameterListener("sfBlobMinWidth", this);
-    apvts.addParameterListener("sfBlobMergeGap", this);
     apvts.addParameterListener("sfMaxHarmonics", this);
     apvts.addParameterListener("sfHarmonicAmpFloor", this);
     apvts.addParameterListener("sfVolumeCenterSigma", this);
@@ -1294,17 +1281,11 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     
     // ========================================================================
     // StrokeForge — Blob-to-note mapping with waveform morphing
-    // 6 active parameters; legacy IDs kept in APVTS for preset compatibility
-    // but no longer mapped to g_sp3ctra_config.
+    // Blob detection params (threshold, min width, merge gap) are now set
+    // exclusively by spctrBlob* (IMAGE LUXSTRAL tab) in the block below.
     // ========================================================================
     g_sp3ctra_config.strokeforge_enabled =
         (int)apvts.getRawParameterValue("sfEnabled")->load();
-    g_sp3ctra_config.strokeforge_blob_base_threshold =
-        apvts.getRawParameterValue("sfBlobBaseThreshold")->load();
-    g_sp3ctra_config.strokeforge_blob_min_width =
-        (int)apvts.getRawParameterValue("sfBlobMinWidth")->load();
-    g_sp3ctra_config.strokeforge_blob_merge_gap =
-        (int)apvts.getRawParameterValue("sfBlobMergeGap")->load();
     g_sp3ctra_config.strokeforge_morph_width_scale =
         apvts.getRawParameterValue("sfMorphWidthScale")->load();
     g_sp3ctra_config.strokeforge_blob_focus_sigma =
@@ -1402,10 +1383,8 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         apvts.getRawParameterValue("lxBlobColorSplit")->load();
 
     // ========================================================================
-    // SPCTR blob detection — IMAGE LUXSTRAL tab params (override sfBlob*)
-    // spctrBlob* have wider ranges (same as lxBlob*) and are the primary
-    // controls for both detectSpctrBlobs() (visualizer) and StrokeForge audio.
-    // Written AFTER the sfBlob* block so spctrBlob* values always win.
+    // SPCTR blob detection — IMAGE LUXSTRAL tab (spctrBlob* params)
+    // Single source of truth for detectSpctrBlobs() + StrokeForge audio.
     // spctrBlobColorSplit is visualizer-only (no StrokeForge audio equivalent).
     // ========================================================================
     g_sp3ctra_config.strokeforge_blob_base_threshold =
