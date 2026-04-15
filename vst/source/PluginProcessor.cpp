@@ -254,9 +254,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     // These parameters are owned exclusively by the SYNTH_BLOB visualizer
     // (CisVisualizerComponent::detectSynthBlobs). They have NO effect on the
     // LuxStral audio synthesis path (which uses the sf* parameters).
+    // Amplitude threshold: normalised CIS brightness [0..1].
+    // Wide range [0.001..1.0] to accommodate both high-contrast and low-contrast sources.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"lxBlobThreshold", 1}, "LX Blob Thr.",
-        juce::NormalisableRange<float>(0.01f, 0.30f, 0.001f), 0.05f,
+        juce::NormalisableRange<float>(0.001f, 1.0f, 0.001f, 0.35f), 0.05f,
         juce::AudioParameterFloatAttributes{}.withLabel("")));
     params.push_back(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID{"lxBlobMinWidth", 1}, "LX Blob Min W",

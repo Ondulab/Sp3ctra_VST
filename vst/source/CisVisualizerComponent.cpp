@@ -1065,30 +1065,6 @@ void CisVisualizerComponent::paintSynthBlobMode(juce::Graphics& g, int W, int H)
             g.fillRect(x0, lineY, bw, 2);
         }
 
-        // ── Blob label: index + width + intensity ─────────────────────────────
-        if (bw >= 20)
-        {
-            // Full label: "#N  w:WWW  i:II%"
-            const juce::String info =
-                "#" + juce::String(b + 1)
-                + "  w:" + juce::String(blob.endPx - blob.startPx)
-                + "  i:" + juce::String(static_cast<int>(blob.avgIntensity * 100.f)) + "%";
-            g.setFont(juce::FontOptions(7.5f));
-            g.setColour(juce::Colours::white.withAlpha(0.80f));
-            g.drawText(info,
-                       juce::Rectangle<int>(x0 + 2, 3, bw - 4, 10),
-                       juce::Justification::centredLeft, false);
-        }
-        else if (bw >= 8)
-        {
-            // Compact label: just the index
-            g.setFont(juce::FontOptions(7.0f));
-            g.setColour(juce::Colours::white.withAlpha(0.75f));
-            g.drawText(juce::String(b + 1),
-                       juce::Rectangle<int>(x0, 3, bw, 10),
-                       juce::Justification::centred, false);
-        }
-
         // ── Width indicator bar (bottom of component, 3 px) ──────────────────
         // Fills the full width of the blob at the very bottom — quick visual
         // for comparing relative blob widths.
@@ -1118,4 +1094,98 @@ void CisVisualizerComponent::paintSynthBlobMode(juce::Graphics& g, int W, int H)
                    static_cast<int>(bw), static_cast<int>(bh),
                    juce::Justification::centred, false);
     }
+
+    // ── Hover tooltip — drawn last so it always appears on top ────────────────
+    // Shown when the mouse is over a blob in SYNTH_BLOB mode.
+    // hoverBlobIdx_ is kept up-to-date by mouseMove() / mouseExit().
+    if (hoverBlobIdx_ >= 0 && hoverBlobIdx_ < static_cast<int>(synthBlobs_.size()))
+    {
+        const auto& blob = synthBlobs_[hoverBlobIdx_];
+
+        // ── Build info lines ────────────────────────────────────────────────
+        const juce::String line1 =
+            "Blob #" + juce::String(hoverBlobIdx_ + 1);
+        const juce::String line2 =
+            "Width:  " + juce::String(blob.endPx - blob.startPx) + " px";
+        const juce::String line3 =
+            "Peak:   " + juce::String(static_cast<int>(blob.peakIntensity * 100.f)) + "%"
+            + "  avg: " + juce::String(static_cast<int>(blob.avgIntensity * 100.f)) + "%";
+        const juce::String tempStr =
+            (blob.avgColorTemp >  0.08f) ? "Warm" :
+            (blob.avgColorTemp < -0.08f) ? "Cool" : "Neutral";
+        const juce::String line4 = "Temp:   " + tempStr;
+
+        // ── Tooltip box geometry ─────────────────────────────────────────────
+        constexpr float kTW = 148.f, kTH = 70.f, kTR = 4.f;
+        float tx = static_cast<float>(hoverPos_.x) + 14.f;
+        float ty = static_cast<float>(hoverPos_.y) - kTH * 0.5f;
+
+        // Clamp inside component bounds
+        if (tx + kTW > static_cast<float>(W)) tx = static_cast<float>(hoverPos_.x) - kTW - 10.f;
+        if (ty < 2.f)                          ty = 2.f;
+        if (ty + kTH > static_cast<float>(H)) ty = static_cast<float>(H) - kTH - 2.f;
+
+        // Background + border
+        g.setColour(juce::Colour(0xee0d0d0d));
+        g.fillRoundedRectangle(tx, ty, kTW, kTH, kTR);
+        g.setColour(blob.color.withAlpha(0.90f));
+        g.drawRoundedRectangle(tx, ty, kTW, kTH, kTR, 1.2f);
+
+        // ── Text ─────────────────────────────────────────────────────────────
+        const auto ti = [&](int lineIdx) {
+            return static_cast<int>(ty + 4.f + static_cast<float>(lineIdx) * 16.f);
+        };
+        const int lw = static_cast<int>(kTW) - 8;
+        const int lx = static_cast<int>(tx) + 4;
+
+        g.setFont(juce::FontOptions(9.5f));
+        g.setColour(blob.color.brighter(0.25f));
+        g.drawText(line1, lx, ti(0), lw, 14, juce::Justification::centredLeft, false);
+        g.setColour(juce::Colours::white.withAlpha(0.85f));
+        g.setFont(juce::FontOptions(8.5f));
+        g.drawText(line2, lx, ti(1), lw, 13, juce::Justification::centredLeft, false);
+        g.drawText(line3, lx, ti(2), lw, 13, juce::Justification::centredLeft, false);
+        g.drawText(line4, lx, ti(3), lw, 13, juce::Justification::centredLeft, false);
+    }
+}
+
+//==============================================================================
+void CisVisualizerComponent::mouseMove(const juce::MouseEvent& event)
+{
+    if (getActiveSource() != VisualizerMode::SYNTH_BLOB)
+    {
+        hoverBlobIdx_ = -1;
+        return;
+    }
+
+    hoverPos_ = event.getPosition();
+
+    const int W = getWidth();
+    if (W <= 1 || cisPixelsCount <= 0)
+    {
+        hoverBlobIdx_ = -1;
+        return;
+    }
+
+    // Convert display X to CIS pixel index
+    const float pos = static_cast<float>(hoverPos_.x)
+                    / static_cast<float>(W - 1);
+    const int ci = juce::jlimit(0, cisPixelsCount - 1,
+        static_cast<int>(pos * static_cast<float>(cisPixelsCount - 1) + 0.5f));
+
+    hoverBlobIdx_ = -1;
+    for (int b = 0; b < static_cast<int>(synthBlobs_.size()); ++b)
+    {
+        if (ci >= synthBlobs_[b].startPx && ci < synthBlobs_[b].endPx)
+        {
+            hoverBlobIdx_ = b;
+            break;
+        }
+    }
+}
+
+//==============================================================================
+void CisVisualizerComponent::mouseExit(const juce::MouseEvent&)
+{
+    hoverBlobIdx_ = -1;
 }

@@ -41,6 +41,8 @@ public:
     void paint(juce::Graphics& g) override;
     void resized() override;
     void mouseDown(const juce::MouseEvent& event) override;
+    void mouseMove(const juce::MouseEvent& event) override;
+    void mouseExit(const juce::MouseEvent& event) override;
 
     // ── Suspend / resume (call during prepareToPlay to avoid CoreGraphics crash) ──
     void suspend();
@@ -180,6 +182,13 @@ private:
     bool blobOverlayVisible = false;
     // Double-buffer for lock-free UI updates (both buffers UI-thread-only here)
     std::vector<std::pair<float, float>> blobRegions; // normalised x0, x1 ∈ [0..1]
+
+    // ── SYNTH_BLOB hover tooltip ───────────────────────────────────────────────
+    // Index of the blob currently under the mouse cursor (-1 = none).
+    // Updated by mouseMove() / mouseExit(); read by paintSynthBlobMode().
+    // Both methods run on the UI/message thread — no synchronisation needed.
+    int              hoverBlobIdx_ { -1 };
+    juce::Point<int> hoverPos_     {};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CisVisualizerComponent)
 };
