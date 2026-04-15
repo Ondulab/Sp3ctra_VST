@@ -71,6 +71,14 @@ extern "C"
             return 0;
         return FrameSampler::s_instance->isAnySlotRecording() ? 1 : 0;
     }
+
+    int frame_sampler_is_passthrough(void)
+    {
+        if (FrameSampler::s_instance == nullptr)
+            return 1; // No sampler → default passthrough
+        return FrameSampler::s_instance->getAtomicState()
+                   .passthroughEnabled.load(std::memory_order_relaxed) ? 1 : 0;
+    }
 }
 
 // ============================================================================

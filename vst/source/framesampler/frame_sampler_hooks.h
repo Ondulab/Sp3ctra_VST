@@ -66,6 +66,19 @@ int frame_sampler_is_playing(void);
  */
 int frame_sampler_is_recording(void);
 
+/**
+ * @brief Returns non-zero if the FrameSampler passthrough flag is active.
+ *
+ * Passthrough is enabled during STEP_LIVE sequencer steps and after rtStop().
+ * When active, the live CIS stream should flow through all synthesis paths
+ * (including Source=S) because no sampler slot is providing content.
+ *
+ * Thread: UDP receiver thread (Non-RT). Must be fast (atomic read only).
+ *
+ * @return 1 if passthrough enabled, 0 otherwise
+ */
+int frame_sampler_is_passthrough(void);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
