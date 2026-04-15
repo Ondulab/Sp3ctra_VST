@@ -20,7 +20,7 @@
 #include "../../core/config.h"
 #include "../../config/config_instrument.h"
 #include "../../config/config_synth_luxstral.h"
-#include "../../luxstral/strokeforge.h"
+#include "../synthesis/luxstral/strokeforge.h"
 
 /* Maximum number of notes (static allocation) */
 /* Must handle worst case: 1 pixel per note = CIS_MAX_PIXELS_NB notes */

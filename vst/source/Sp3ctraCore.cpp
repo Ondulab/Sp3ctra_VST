@@ -12,7 +12,7 @@ extern "C" {
     #include "threading/multithreading.h"
     #include "processing/image_preprocessor.h"
     #include "processing/image_pipeline.h"
-    #include "luxstral/synth_luxstral_state.h"
+    #include "synthesis/luxstral/synth_luxstral_state.h"
     #include <arpa/inet.h>
     #include <sys/socket.h>
     #include <netinet/in.h>

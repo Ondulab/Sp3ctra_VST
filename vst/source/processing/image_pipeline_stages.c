@@ -9,8 +9,8 @@
  */
 
 #include "image_pipeline_stages.h"
-#include "luxstral/synth_luxstral_stereo.h"
-#include "luxstral/synth_luxstral_math.h"
+#include "../synthesis/luxstral/synth_luxstral_stereo.h"
+#include "../synthesis/luxstral/synth_luxstral_math.h"
 #include <math.h>
 #include <string.h>
 #include <stddef.h>

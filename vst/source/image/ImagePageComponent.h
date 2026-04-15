@@ -46,7 +46,7 @@ private:
     void switchSubTab(SubTab tab);
     void handleNodeClicked(VisualizerMode m);
 
-    Sp3ctraAudioProcessor& processor;
+    [[maybe_unused]] Sp3ctraAudioProcessor& processor;
 
     // ── Sub-tab state ─────────────────────────────────────────────────────────
     SubTab currentSubTab { SubTab::Sources };

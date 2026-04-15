@@ -100,7 +100,6 @@ public:
     void resized() override
     {
         const int w   = getWidth();
-        const int ch  = Sp3ctraTheme::kControlH;
         const int nw  = stdNodeW();   // same width as Sources tab
         const int x0  = w / 2 - nw / 2;  // centred start X
 
@@ -126,7 +125,7 @@ public:
     }
 
 private:
-    Sp3ctraAudioProcessor& processor;
+    [[maybe_unused]] Sp3ctraAudioProcessor& processor;
 
     // Labels (Synth-page charter: kFontSettings, centredRight)
     juce::Label sourceLabel, negativeLabel, dcBlockLabel, gammaLabel;

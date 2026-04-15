@@ -139,7 +139,7 @@ public:
         const int w = getWidth();
 
         // ── Zone labels ──────────────────────────────────────────────────────
-        g.setFont(juce::Font(Sp3ctraTheme::kFontSmall));
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
 
         // Zone 1 header — centred over full width
         g.setColour(juce::Colour(0xff68788f));
@@ -155,13 +155,13 @@ public:
         // Zone 3 header
         const int z3Y = zone3Y();
         g.setColour(juce::Colour(0xffa87ae0));
-        g.setFont(juce::Font(Sp3ctraTheme::kFontBadge));
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
         g.drawText("M - Mix (darken-blend)", w / 4, z3Y, w / 2, 14,
                    juce::Justification::centred);
 
         // Mix crossfader labels: S ◄──────── ► L
         g.setColour(juce::Colour(0xffd2d8e8));
-        g.setFont(juce::Font(Sp3ctraTheme::kFontSmall));
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
         const int mixSlY = z3Y + 18;
         const int nw = stdNodeW();
         const int crossX = w / 2 - nw / 2;
@@ -189,7 +189,6 @@ public:
 
         // ── Standard node width: all nodes same size ─────────────────────────
         const int stdNodeW = juce::jmin(w * 2 / 5, 360);
-        const int margin   = 12;
 
         // ── Zone 1: RAW (centred) ────────────────────────────────────────────
         const int rawX = w / 2 - stdNodeW / 2;
