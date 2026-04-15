@@ -41,6 +41,8 @@ public:
     void paint(juce::Graphics& g) override;
     void resized() override;
     void mouseDown(const juce::MouseEvent& event) override;
+    void mouseMove(const juce::MouseEvent& event) override;
+    void mouseExit(const juce::MouseEvent& event) override;
 
     // ── Suspend / resume (call during prepareToPlay to avoid CoreGraphics crash) ──
     void suspend();
@@ -87,6 +89,27 @@ private:
     void paintBlobOverlay        (juce::Graphics& g, int W, int H) const;
     void paintSourceLabel        (juce::Graphics& g, int W, int H) const;
 
+    // ── FFT spectrum visualization ────────────────────────────────────────────
+    /**
+     * @brief Compute FFT magnitude spectrum from localDataGray.
+     *
+     * Uses KissFFT real FFT (kiss_fftr) with a Hann window to reduce spectral
+     * leakage.  Results are stored in fftMagnitudesSmoothed_ (exponential
+     * moving average: fast attack α=0.40, slow release α=0.08).
+     *
+     * DC bin (k=0) is suppressed.  Magnitudes are peak-normalised to [0..1].
+     * The KissFFT config is cached in fftCfg_ and only reallocated when
+     * cisPixelsCount changes.
+     *
+     * Called at most once per timer tick (30 fps) from paintFftColorMode()
+     * — always on the UI/message thread.
+     */
+    void computeFftMagnitudes();
+
+    /** Render the FFT spectrum with per-bin HSV colour mapping
+     *  (blue = low frequency, red = high frequency). */
+    void paintFftColorMode(juce::Graphics& g, int W, int H);
+
     // ── Mode helpers ──────────────────────────────────────────────────────────
     /** Returns true when the active source is a COLOR (temperature map) view. */
     bool isColorSource(VisualizerMode m) const noexcept;
@@ -105,12 +128,13 @@ private:
      */
     struct SynthBlob
     {
-        int          startPx;       ///< First CIS pixel index (inclusive)
-        int          endPx;         ///< Last  CIS pixel index (exclusive)
-        float        peakIntensity; ///< Max  brightness within blob [0..1]
-        float        avgIntensity;  ///< Mean brightness within blob [0..1]
-        float        avgColorTemp;  ///< Mean color temperature [-1..1]
-        juce::Colour color;         ///< Unique display colour (hue-wheel)
+        int          startPx;        ///< First CIS pixel index (inclusive)
+        int          endPx;          ///< Last  CIS pixel index (exclusive)
+        float        peakIntensity;  ///< Max  brightness within blob [0..1]
+        float        avgIntensity;   ///< Mean brightness within blob [0..1]
+        float        avgColorTemp;   ///< Mean (R-B)/255 — kept for tooltip warm/cool display
+        juce::Colour color;          ///< Unique display colour (hue-wheel)
+        juce::Colour avgLocalColor;  ///< Mean locally-smoothed RGB (used by color-merge logic)
     };
 
     /** Max blobs for SYNTH_BLOB mode — matches piano keyboard range. */
@@ -149,6 +173,27 @@ private:
     /** Cache of detected blobs — rebuilt every paint call in SYNTH_BLOB mode. */
     std::vector<SynthBlob> synthBlobs_;
 
+    // ── FFT state (UI thread only, owned by computeFftMagnitudes) ────────────
+    /** Raw per-bin FFT magnitudes after peak normalisation.
+     *  Size = cisPixelsCount / 2 + 1.  DC bin (index 0) is always 0. */
+    std::vector<float> fftMagnitudes_;
+    /** Exponentially smoothed version of fftMagnitudes_ for display.
+     *  Same size as fftMagnitudes_. */
+    std::vector<float> fftMagnitudesSmoothed_;
+    /** Per-harmonic harmonicity derived from CIS colour temperature.
+     *  harmonicity[k] ∈ [0..1]:  1.0 = warm (R>B) → harmonic timbre,
+     *                             0.0 = cool (R<B) → inharmonic timbre.
+     *  Same size as fftMagnitudes_.  Updated by computeFftMagnitudes(). */
+    std::vector<float> fftHarmonicity_;
+    /** Number of harmonics extracted in the last computeFftMagnitudes() call.
+     *  Set from the lxFftBins APVTS parameter.  Used by both paint helpers. */
+    int                fftNumHarmonics_ { 128 };
+    /** cisPixelsCount value used for the last kiss_fftr_alloc call. */
+    int                fftSize_ { 0 };
+    /** Opaque pointer to a kiss_fftr_cfg.
+     *  Cast to kiss_fftr_cfg inside CisVisualizerComponent.cpp only. */
+    void*              fftCfg_  { nullptr };
+
     // ── Right-click context menu ──────────────────────────────────────────────
     void showDisplayModeMenu();
 
@@ -180,6 +225,13 @@ private:
     bool blobOverlayVisible = false;
     // Double-buffer for lock-free UI updates (both buffers UI-thread-only here)
     std::vector<std::pair<float, float>> blobRegions; // normalised x0, x1 ∈ [0..1]
+
+    // ── SYNTH_BLOB hover tooltip ───────────────────────────────────────────────
+    // Index of the blob currently under the mouse cursor (-1 = none).
+    // Updated by mouseMove() / mouseExit(); read by paintSynthBlobMode().
+    // Both methods run on the UI/message thread — no synchronisation needed.
+    int              hoverBlobIdx_ { -1 };
+    juce::Point<int> hoverPos_     {};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CisVisualizerComponent)
 };

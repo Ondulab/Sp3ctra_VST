@@ -208,6 +208,31 @@ typedef struct {
     float strokeforge_blob_focus_sigma;        /* Gaussian sigma in notes [0.5-100]; small=pure tone, large=spectral cloud */
     float strokeforge_spectral_width_threshold; /* Blob width (notes) >= this → raw spectral passthrough (no Gaussian); 0=disabled [0-3456] */
 
+    /* ── LuxSynth blob detection — fully independent of StrokeForge/LuxStral ─
+     *
+     * These parameters control blob detection only for the SYNTH_BLOB
+     * visualizer (CisVisualizerComponent::detectSynthBlobs).
+     * They are completely separate from the StrokeForge parameters
+     * (strokeforge_blob_*) which belong exclusively to the LuxStral path.
+     *
+     * luxsynth_blob_threshold  : brightness threshold in [0,1].
+     *   A pixel whose localDataGray / 255 >= threshold is considered active.
+     *   0.05 is a good default for an inverted CIS image.
+     *
+     * luxsynth_blob_min_width  : reject blobs narrower than this (pixels).
+     *
+     * luxsynth_blob_merge_gap  : active pixels separated by at most this many
+     *   inactive pixels are merged into the same blob.
+     *
+     * luxsynth_blob_color_split : color-temperature jump (|(R-B)/255| between
+     *   adjacent pixels) that terminates the running blob and starts a new one.
+     *   0.20 ≈ a noticeable hue shift (e.g. neutral paper → warm ink edge).
+     */
+    float luxsynth_blob_threshold;    /* Min brightness [0.01-0.30], default 0.05 */
+    int   luxsynth_blob_min_width;    /* Min blob width in pixels [1-200], default 10 */
+    int   luxsynth_blob_merge_gap;    /* Max gap to merge [0-100], default 3       */
+    float luxsynth_blob_color_split;  /* Color-temp jump to split blob [0.01-1.0], default 0.20 */
+
     /* ── Image Pipeline — live controls ──────────────────────────────────── */
     /* image_live_opacity : scale factor applied to out->additive.notes[]     */
     /*   1.0 = full amplitude   0.0 = complete silence (all notes → 0)        */

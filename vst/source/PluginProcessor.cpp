@@ -250,6 +250,42 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"luxsynthGammaValue", 1}, "LuxSynth Gamma",
         juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f, 0.30f), 1.0f));
 
+    // ── LuxSynth blob detection — independent of StrokeForge/LuxStral ────────
+    // These parameters are owned exclusively by the SYNTH_BLOB visualizer
+    // (CisVisualizerComponent::detectSynthBlobs). They have NO effect on the
+    // LuxStral audio synthesis path (which uses the sf* parameters).
+    // Amplitude threshold: normalised CIS brightness [0..1].
+    // Wide range [0.001..1.0] to accommodate both high-contrast and low-contrast sources.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"lxBlobThreshold", 1}, "LX Blob Thr.",
+        juce::NormalisableRange<float>(0.001f, 1.0f, 0.001f, 0.35f), 0.05f,
+        juce::AudioParameterFloatAttributes{}.withLabel("")));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"lxBlobMinWidth", 1}, "LX Blob Min W",
+        1, 200, 10));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"lxBlobMergeGap", 1}, "LX Merge Gap",
+        0, 100, 3));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"lxBlobColorSplit", 1}, "LX Color Split",
+        juce::NormalisableRange<float>(0.01f, 1.0f, 0.01f), 0.20f,
+        juce::AudioParameterFloatAttributes{}.withLabel("")));
+
+    // ── LuxSynth FFT quality / synthesis-data parameters ─────────────────────
+    // lxFftBins: number of harmonics extracted from the spatial FFT.
+    // Each bin maps to one oscillator in the LuxSynth additive synthesis engine.
+    // 32 = fast / low quality, 256 = slow / high quality (default 128).
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"lxFftBins", 1}, "LX FFT Bins",
+        juce::StringArray{"32", "64", "128", "256"}, 2));
+
+    // lxFftSmoothing: temporal smoothing for FFT magnitudes [0..1].
+    // 0 = very fast / reactive (alpha_attack≈0.80, alpha_release≈0.50).
+    // 1 = very slow / smooth   (alpha_attack≈0.05, alpha_release≈0.02).
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"lxFftSmoothing", 1}, "LX FFT Smoothing",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.3f));
+
     // Fade-in duration [ms] — applied when restarting the live stream after Stop.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"imageFadeInMs", 1}, "Fade-In",
@@ -402,6 +438,12 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("sfBlobFocusSigma", this);
     apvts.addParameterListener("sfSpectralWidthThreshold", this);
     apvts.addParameterListener("sfFocusOnly", this);
+
+    // LuxSynth blob detection (independent of StrokeForge)
+    apvts.addParameterListener("lxBlobThreshold",  this);
+    apvts.addParameterListener("lxBlobMinWidth",   this);
+    apvts.addParameterListener("lxBlobMergeGap",   this);
+    apvts.addParameterListener("lxBlobColorSplit", this);
 
     // Per-path pipeline routing (source selector, inversion, AC removal)
     apvts.addParameterListener("luxstralSource",       this);
@@ -972,6 +1014,12 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
         applyConfigurationToCore(false);
         return;
     }
+
+    // LuxSynth blob detection — independent of StrokeForge (visualizer-only params)
+    if (parameterID.startsWith("lxBlob")) {
+        applyConfigurationToCore(false);
+        return;
+    }
     
     bool isLuxStralParam = parameterID.startsWith("luxstral");
     if (isLuxStralParam) {
@@ -1310,6 +1358,20 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
                   g_sp3ctra_config.luxsynth_ac_removal,
                   (double)g_sp3ctra_config.luxsynth_gamma_value);
     }
+
+    // ========================================================================
+    // LuxSynth blob detection — FULLY ISOLATED from StrokeForge (lxBlob*)
+    // These fields feed detectSynthBlobs() in CisVisualizerComponent ONLY.
+    // They have zero effect on LuxStral audio synthesis.
+    // ========================================================================
+    g_sp3ctra_config.luxsynth_blob_threshold  =
+        apvts.getRawParameterValue("lxBlobThreshold")->load();
+    g_sp3ctra_config.luxsynth_blob_min_width  =
+        static_cast<int>(apvts.getRawParameterValue("lxBlobMinWidth")->load());
+    g_sp3ctra_config.luxsynth_blob_merge_gap  =
+        static_cast<int>(apvts.getRawParameterValue("lxBlobMergeGap")->load());
+    g_sp3ctra_config.luxsynth_blob_color_split =
+        apvts.getRawParameterValue("lxBlobColorSplit")->load();
 
     // Update logger level immediately
     logger_init((log_level_t)logLevel);
