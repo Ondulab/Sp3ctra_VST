@@ -95,6 +95,60 @@ private:
      *  (Image / Waveform / Inverted Waveform).  COLOR and BLOB do not. */
     bool supportsDisplayModes(VisualizerMode m) const noexcept;
 
+    // ── SYNTH_BLOB mode: coloured blob visualizer ─────────────────────────────
+    /**
+     * @brief One detected blob on the LuxSynth path.
+     *
+     * Detected from localDataGray (activity = brightness after LuxSynth pipeline)
+     * AND from localDataR/G/B (color temperature used to split blobs at
+     * color-temperature discontinuities → color + continuity detection).
+     */
+    struct SynthBlob
+    {
+        int          startPx;       ///< First CIS pixel index (inclusive)
+        int          endPx;         ///< Last  CIS pixel index (exclusive)
+        float        peakIntensity; ///< Max  brightness within blob [0..1]
+        float        avgIntensity;  ///< Mean brightness within blob [0..1]
+        float        avgColorTemp;  ///< Mean color temperature [-1..1]
+        juce::Colour color;         ///< Unique display colour (hue-wheel)
+    };
+
+    /** Max blobs for SYNTH_BLOB mode — matches piano keyboard range. */
+    static constexpr int kMaxSynthBlobs = 88;
+
+    /**
+     * @brief Detect blobs from localDataGray + localDataR/G/B.
+     *
+     * Algorithm:
+     *  1. Activity = localDataGray / 255 (bright ≥ threshold → active pixel)
+     *  2. 1-D connected-component scan with gap tolerance (strokeforge_blob_merge_gap)
+     *  3. Color-temperature jump > kColorSplitThreshold → split running blob
+     *  4. Blobs narrower than strokeforge_blob_min_width are discarded
+     *  5. At most kMaxSynthBlobs (88) blobs kept
+     *  6. Each blob gets a unique hue (evenly spaced on the HSV wheel)
+     *
+     * Results written to synthBlobs_ (cleared on each call).
+     * Called from paintSynthBlobMode() at 30 fps — the 1-D scan is O(N) and
+     * fast enough for the UI thread.
+     */
+    void detectSynthBlobs();
+
+    /**
+     * @brief Render the SYNTH_BLOB visualizer.
+     *
+     * Displays:
+     *  - Dark background
+     *  - Per-pixel waveform fill, coloured by blob membership
+     *  - Blob outlines with unique colours
+     *  - Peak-intensity horizontal marker per blob
+     *  - Blob number + width + intensity label (when space allows)
+     *  - "N/88 blobs" count badge
+     */
+    void paintSynthBlobMode(juce::Graphics& g, int W, int H);
+
+    /** Cache of detected blobs — rebuilt every paint call in SYNTH_BLOB mode. */
+    std::vector<SynthBlob> synthBlobs_;
+
     // ── Right-click context menu ──────────────────────────────────────────────
     void showDisplayModeMenu();
 

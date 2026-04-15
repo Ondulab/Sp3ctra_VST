@@ -72,6 +72,15 @@ void CisVisualizerComponent::paint(juce::Graphics& g)
     // ── Active pipeline source (selected via pipeline node click) ─────────────
     const auto source = getActiveSource();
 
+    // ── SYNTH_BLOB: dedicated coloured blob visualizer ────────────────────────
+    // Intercept before the generic rendering path; has its own full renderer.
+    if (source == VisualizerMode::SYNTH_BLOB)
+    {
+        paintSynthBlobMode(g, W, H);
+        paintSourceLabel(g, W, H);
+        return;
+    }
+
     // ── COLOR sources always use the colour-temperature renderer ──────────────
     if (isColorSource(source))
     {
@@ -824,4 +833,287 @@ uint8_t CisVisualizerComponent::interpolateCisPixel(
         return static_cast<uint8_t>(buffer[idx] * (1.f - frac) + buffer[idx+1] * frac);
 
     return buffer[idx];
+}
+
+//==============================================================================
+// SYNTH_BLOB — blob detection (color + continuity, max 88 blobs)
+//==============================================================================
+void CisVisualizerComponent::detectSynthBlobs()
+{
+    synthBlobs_.clear();
+
+    if (localDataGray.empty() || cisPixelsCount == 0
+        || localDataR.empty() || localDataB.empty())
+        return;
+
+    extern sp3ctra_config_t g_sp3ctra_config;
+    const float threshold = g_sp3ctra_config.strokeforge_blob_base_threshold;
+    const int   minWidth  = juce::jmax(1, g_sp3ctra_config.strokeforge_blob_min_width);
+    const int   mergeGap  = juce::jmax(0, g_sp3ctra_config.strokeforge_blob_merge_gap);
+
+    // Color-temperature jump (R-B)/255 that causes the current blob to be split.
+    // 0.20 = ~51/255 — noticeable hue shift (e.g. neutral → warm) creates a
+    // new blob even when pixel activity is continuous.
+    constexpr float kColorSplitThreshold = 0.20f;
+
+    // ── Per-pixel quantities (computed inline — avoid heap alloc) ─────────────
+    // activity[i]  = localDataGray[i] / 255   ∈ [0, 1]
+    //               bright pixel = significant amplitude in LuxSynth pipeline
+    //               (after inversion the dark ink → bright → active)
+    // colorTemp[i] = (R[i] - B[i]) / 255      ∈ [-1, +1]
+    //               warm (red dominant) = +1, cold (blue dominant) = -1
+
+    // ── 1-D connected-component scan with color-continuity splitting ──────────
+    bool  inBlob       = false;
+    int   blobStart    = 0;
+    int   gapCount     = 0;
+    float blobPeak     = 0.0f;
+    float blobSum      = 0.0f;
+    int   blobLen      = 0;
+    float blobCtSum    = 0.0f;
+    float prevColorTemp = 0.0f;
+
+    // Lambda: close the running blob and push it if it passes size filter
+    auto finishBlob = [&](int endPx)
+    {
+        const int width = endPx - blobStart;
+        if (width >= minWidth && blobLen > 0
+            && static_cast<int>(synthBlobs_.size()) < kMaxSynthBlobs)
+        {
+            SynthBlob b;
+            b.startPx      = blobStart;
+            b.endPx        = endPx;
+            b.peakIntensity = blobPeak;
+            b.avgIntensity  = blobSum / static_cast<float>(blobLen);
+            b.avgColorTemp  = blobCtSum / static_cast<float>(blobLen);
+            b.color         = juce::Colours::white; // assigned after scan
+            synthBlobs_.push_back(b);
+        }
+        inBlob       = false;
+        gapCount     = 0;
+        blobPeak     = 0.0f;
+        blobSum      = 0.0f;
+        blobLen      = 0;
+        blobCtSum    = 0.0f;
+        prevColorTemp = 0.0f;
+    };
+
+    for (int i = 0; i < cisPixelsCount; ++i)
+    {
+        const float act = localDataGray[i] / 255.0f;
+        const float ct  = (static_cast<float>(localDataR[i])
+                         - static_cast<float>(localDataB[i])) / 255.0f;
+        const bool  active = (act >= threshold);
+
+        if (active)
+        {
+            if (!inBlob)
+            {
+                // Start new blob
+                blobStart     = i;
+                inBlob        = true;
+                blobPeak      = act;
+                blobSum       = act;
+                blobLen       = 1;
+                blobCtSum     = ct;
+                prevColorTemp = ct;
+                gapCount      = 0;
+            }
+            else
+            {
+                // Color-continuity check: abrupt color shift → split
+                const float colorJump = std::abs(ct - prevColorTemp);
+                if (colorJump > kColorSplitThreshold
+                    && static_cast<int>(synthBlobs_.size()) < kMaxSynthBlobs - 1)
+                {
+                    finishBlob(i);
+                    // Immediately start a new blob at this pixel
+                    blobStart     = i;
+                    inBlob        = true;
+                    blobPeak      = act;
+                    blobSum       = act;
+                    blobLen       = 1;
+                    blobCtSum     = ct;
+                    prevColorTemp = ct;
+                }
+                else
+                {
+                    // Extend current blob
+                    if (act > blobPeak) blobPeak = act;
+                    blobSum      += act;
+                    blobLen++;
+                    blobCtSum    += ct;
+                    prevColorTemp = ct;
+                    gapCount      = 0;
+                }
+            }
+        }
+        else // inactive pixel
+        {
+            if (inBlob)
+            {
+                ++gapCount;
+                if (gapCount > mergeGap)
+                    finishBlob(i - gapCount);
+            }
+        }
+    }
+
+    // Close blob that runs to the last pixel
+    if (inBlob)
+        finishBlob(cisPixelsCount - gapCount);
+
+    // ── Assign unique hues (evenly spaced on HSV wheel) ───────────────────────
+    // Saturation is boosted slightly for warm/cold blobs (high |colorTemp|).
+    const int nb = static_cast<int>(synthBlobs_.size());
+    for (int b = 0; b < nb; ++b)
+    {
+        const float hue = (nb > 1) ? static_cast<float>(b) / static_cast<float>(nb)
+                                   : 0.0f;
+        const float ctAbs = std::abs(synthBlobs_[b].avgColorTemp);
+        const float sat   = juce::jlimit(0.60f, 1.0f, 0.70f + 0.30f * ctAbs);
+        synthBlobs_[b].color = juce::Colour::fromHSV(hue, sat, 0.90f, 1.0f);
+    }
+}
+
+//==============================================================================
+// SYNTH_BLOB — full coloured visualizer
+//==============================================================================
+void CisVisualizerComponent::paintSynthBlobMode(juce::Graphics& g, int W, int H)
+{
+    // ── Background ────────────────────────────────────────────────────────────
+    g.fillAll(juce::Colour(0xff080808));
+
+    if (cisPixelsCount == 0 || localDataGray.empty())
+        return;
+
+    // ── Run blob detection (30 fps, O(N) 1-D scan — fast) ────────────────────
+    detectSynthBlobs();
+
+    // ── Build pixel-to-blob-index lookup (thread-local to avoid alloc) ────────
+    thread_local std::vector<int> pixelBlobIdx;
+    pixelBlobIdx.assign(cisPixelsCount, -1);
+    for (int b = 0; b < static_cast<int>(synthBlobs_.size()); ++b)
+    {
+        const auto& blob = synthBlobs_[b];
+        for (int i = blob.startPx; i < blob.endPx && i < cisPixelsCount; ++i)
+            pixelBlobIdx[i] = b;
+    }
+
+    // ── Render column by column ───────────────────────────────────────────────
+    // For each display column we find the corresponding CIS pixel and decide
+    // whether it belongs to a blob or is background.
+    //
+    // Blob columns: bottom-anchored waveform bar (height ∝ activity), coloured.
+    // Background  : very dim grayscale texture (shows the raw signal level).
+    for (int x = 0; x < W; ++x)
+    {
+        const float pos = static_cast<float>(x) / static_cast<float>(juce::jmax(1, W - 1));
+        const int   ci  = juce::jlimit(0, cisPixelsCount - 1,
+                              static_cast<int>(pos * static_cast<float>(cisPixelsCount - 1) + 0.5f));
+
+        const float act  = localDataGray[ci] / 255.0f;
+        const int   bIdx = pixelBlobIdx[ci];
+
+        if (bIdx < 0)
+        {
+            // Background — very dim grayscale texture
+            const uint8_t v = static_cast<uint8_t>(act * 22.0f);
+            g.setColour(juce::Colour(v, v, v));
+            g.fillRect(x, 0, 1, H);
+        }
+        else
+        {
+            const auto& blob = synthBlobs_[bIdx];
+
+            // Bottom-anchored waveform bar
+            const int barH = juce::jmax(1, static_cast<int>(act * static_cast<float>(H)));
+
+            // Upper (inactive) region — dim blob colour
+            g.setColour(blob.color.withAlpha(0.10f));
+            g.fillRect(x, 0, 1, H - barH);
+
+            // Lower (active) waveform — bright blob colour
+            const float alpha = 0.40f + 0.60f * act;
+            g.setColour(blob.color.withAlpha(alpha));
+            g.fillRect(x, H - barH, 1, barH);
+        }
+    }
+
+    // ── Draw blob outlines, peak markers, and labels ──────────────────────────
+    const float cisScale = static_cast<float>(W - 1)
+                         / static_cast<float>(juce::jmax(1, cisPixelsCount - 1));
+
+    for (int b = 0; b < static_cast<int>(synthBlobs_.size()); ++b)
+    {
+        const auto& blob = synthBlobs_[b];
+        const int x0 = static_cast<int>(static_cast<float>(blob.startPx)  * cisScale);
+        const int x1 = static_cast<int>(static_cast<float>(blob.endPx - 1) * cisScale);
+        const int bw = juce::jmax(1, x1 - x0 + 1);
+
+        // Blob bounding-box outline
+        g.setColour(blob.color.withAlpha(0.85f));
+        g.drawRect(x0, 0, bw, H, 1);
+
+        // Peak-intensity horizontal line (bottom-anchored)
+        {
+            const int peakH  = juce::jmax(2, static_cast<int>(blob.peakIntensity * static_cast<float>(H)));
+            const int lineY  = H - peakH;
+            g.setColour(blob.color.brighter(0.4f));
+            g.fillRect(x0, lineY, bw, 2);
+        }
+
+        // ── Blob label: index + width + intensity ─────────────────────────────
+        if (bw >= 20)
+        {
+            // Full label: "#N  w:WWW  i:II%"
+            const juce::String info =
+                "#" + juce::String(b + 1)
+                + "  w:" + juce::String(blob.endPx - blob.startPx)
+                + "  i:" + juce::String(static_cast<int>(blob.avgIntensity * 100.f)) + "%";
+            g.setFont(juce::FontOptions(7.5f));
+            g.setColour(juce::Colours::white.withAlpha(0.80f));
+            g.drawText(info,
+                       juce::Rectangle<int>(x0 + 2, 3, bw - 4, 10),
+                       juce::Justification::centredLeft, false);
+        }
+        else if (bw >= 8)
+        {
+            // Compact label: just the index
+            g.setFont(juce::FontOptions(7.0f));
+            g.setColour(juce::Colours::white.withAlpha(0.75f));
+            g.drawText(juce::String(b + 1),
+                       juce::Rectangle<int>(x0, 3, bw, 10),
+                       juce::Justification::centred, false);
+        }
+
+        // ── Width indicator bar (bottom of component, 3 px) ──────────────────
+        // Fills the full width of the blob at the very bottom — quick visual
+        // for comparing relative blob widths.
+        g.setColour(blob.color.withAlpha(0.60f));
+        g.fillRect(x0, H - 3, bw, 3);
+    }
+
+    // ── Summary badge: "N/88 blobs" + color key ───────────────────────────────
+    {
+        const int nb = static_cast<int>(synthBlobs_.size());
+        const juce::String badge =
+            juce::String(nb) + "/" + juce::String(kMaxSynthBlobs) + " blobs";
+
+        constexpr float bw = 100.f, bh = 16.f;
+        const float bx = static_cast<float>(W) - bw - 4.f;
+        constexpr float by = 4.f;
+
+        g.setColour(juce::Colour(0xb0000000));
+        g.fillRoundedRectangle(bx, by, bw, bh, 3.f);
+        g.setColour(juce::Colour(0xffd07040)); // SYNTH_BLOB accent
+        g.drawRoundedRectangle(bx, by, bw, bh, 3.f, 1.f);
+
+        g.setColour(juce::Colours::white.withAlpha(0.90f));
+        g.setFont(juce::FontOptions(9.f));
+        g.drawText(badge,
+                   static_cast<int>(bx), static_cast<int>(by),
+                   static_cast<int>(bw), static_cast<int>(bh),
+                   juce::Justification::centred, false);
+    }
 }
