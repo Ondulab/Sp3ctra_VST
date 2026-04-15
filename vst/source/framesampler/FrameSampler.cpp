@@ -1610,7 +1610,18 @@ void FramePlayerThread::run()
                     {
                         ppData.timestamp_us = static_cast<uint64_t>(currentTimeUs());
                         pthread_mutex_lock(&doubleBuffer->mutex);
-                        doubleBuffer->preprocessed_data = ppData;
+                        // FIX(routing): Do NOT overwrite the entire preprocessed_data struct.
+                        // polyphonic.* (LuxSynth) may be fed by a different source (e.g. Live)
+                        // and must not be clobbered with sampler-derived data.
+                        // Only copy sections owned by the sampler/LuxStral path.
+                        doubleBuffer->preprocessed_data.additive    = ppData.additive;
+                        doubleBuffer->preprocessed_data.photowave   = ppData.photowave;
+                        doubleBuffer->preprocessed_data.stereo      = ppData.stereo;
+                        doubleBuffer->preprocessed_data.strokeforge = ppData.strokeforge;
+                        doubleBuffer->preprocessed_data.timestamp_us = ppData.timestamp_us;
+                        // Only update polyphonic if LuxSynth source is also SAMPLER.
+                        if (g_sp3ctra_config.luxsynth_source_type == 0 /* IMAGE_SOURCE_SAMPLER */)
+                            doubleBuffer->preprocessed_data.polyphonic = ppData.polyphonic;
                         doubleBuffer->dataReady = 2; /* 2 = sampler source tag */
                         pthread_mutex_unlock(&doubleBuffer->mutex);
                     }
