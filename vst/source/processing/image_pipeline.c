@@ -359,19 +359,30 @@ void pipeline_path_luxstral(
 
     /* Stage 7: Freeze / Opacity / Fade envelope
      *
-     * RAW upstream gate: raw_freeze_mode overrides per-stream freeze
-     * when it is more restrictive (HOLD > PLAY, STOP > HOLD).
-     * When the RAW gate triggers, use raw_fade_in_ms for the ramp.
+     * RAW upstream gate: raw_freeze_mode overrides per-stream freeze when more
+     * restrictive (HOLD > PLAY, STOP > HOLD), but ONLY for LIVE and MIX sources.
+     *
+     * FIX(routing): SAMPLER and SEQUENCER transports are independent of the
+     * RAW/Live transport.  Applying raw_freeze_mode to IMAGE_SOURCE_SAMPLER would
+     * silence sequencer and sampler playback whenever the RAW input is on STOP —
+     * exactly the bug described (sequencer running + RAW stopped → no sound).
+     * The sampler's own freeze_mode (set by pipeline_build_config_sampler() from
+     * sampler_freeze_mode, or overridden to 0 by FramePlayerThread when seqDriven)
+     * is the sole authority for the SAMPLER envelope.
      */
     {
         int effective_freeze = config->freeze_mode;
         int effective_fade   = config->fade_in_ms;
-        int raw_freeze       = g_sp3ctra_config.raw_freeze_mode;
 
-        if (raw_freeze > effective_freeze)
+        /* Apply RAW upstream gate only for non-SAMPLER sources */
+        if (config->luxstral_path.source != IMAGE_SOURCE_SAMPLER)
         {
-            effective_freeze = raw_freeze;
-            effective_fade   = g_sp3ctra_config.raw_fade_in_ms;
+            int raw_freeze = g_sp3ctra_config.raw_freeze_mode;
+            if (raw_freeze > effective_freeze)
+            {
+                effective_freeze = raw_freeze;
+                effective_fade   = g_sp3ctra_config.raw_fade_in_ms;
+            }
         }
 
         /* Use caller-provided envelope_id — NOT derived from source routing.

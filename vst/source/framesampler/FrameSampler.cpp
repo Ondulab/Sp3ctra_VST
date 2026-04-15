@@ -50,9 +50,17 @@ extern "C"
         // live stream must pass through so audio/visual remain alive.
         if (FrameSampler::s_instance->isSeqPlayerHeld())
             return 0;
-        // When sampler transport is paused (HOLD=1) or stopped (STOP=2),
-        // allow the RAW live stream to pass through.  Only block when
-        // the transport is actively playing (sampler_freeze_mode==0).
+        // FIX(routing): When the sequencer drives playback (seqControlledPlay=true),
+        // FramePlayerThread is always the sole writer of AudioImageBuffers regardless
+        // of the sampler Transport UI state (sampler_freeze_mode).
+        // sampler_freeze_mode controls the manual Play/Hold/Stop transport ONLY —
+        // it must not gate AudioImageBuffers access when the sequencer is running.
+        if (FrameSampler::s_instance->getAtomicState().seqControlledPlay.load(
+                std::memory_order_relaxed))
+            return 1;
+
+        // Non-sequencer playback: only block the live UDP stream when the sampler
+        // transport is actively playing (sampler_freeze_mode==0).
         extern sp3ctra_config_t g_sp3ctra_config;
         return (g_sp3ctra_config.sampler_freeze_mode == 0) ? 1 : 0;
     }
@@ -969,6 +977,70 @@ uint64_t FramePlayerThread::currentTimeUs() noexcept
            static_cast<uint64_t>(tv.tv_usec);
 }
 
+// ============================================================================
+// FramePlayerThread::injectWhiteFrame — inject silence into all output paths
+// Non-RT only (FramePlayerThread context).
+//
+// Writes a full-white (255) frame to:
+//   1. AudioImageBuffers sampler snapshot (sampler_R/G/B)
+//   2. AudioImageBuffers main read/write buffer (visual mix bus)
+//   3. DoubleBuffer.preprocessed_data (audio synthesis, Source=S only)
+//
+// Called when playback stops to prevent the last sampler frame from being
+// heard/seen as a frozen artefact (STEP_EMPTY, rtStop, LoopMode::NONE end).
+// ============================================================================
+void FramePlayerThread::injectWhiteFrame() noexcept
+{
+    if (audioBuffers == nullptr) return;
+
+    // White = 255 on all channels = silence in Sp3ctra's image-to-sound mapping.
+    uint8_t whiteR[FrameSamplerConstants::MAX_PIXELS];
+    uint8_t whiteG[FrameSamplerConstants::MAX_PIXELS];
+    uint8_t whiteB[FrameSamplerConstants::MAX_PIXELS];
+    std::memset(whiteR, 255, sizeof(whiteR));
+    std::memset(whiteG, 255, sizeof(whiteG));
+    std::memset(whiteB, 255, sizeof(whiteB));
+    const int nbPx = FrameSamplerConstants::MAX_PIXELS;
+
+    // 1. Clear sampler snapshot so the visualizer shows white immediately.
+    audio_image_buffers_snapshot_sampler(audioBuffers, whiteR, whiteG, whiteB, nbPx);
+
+    // 2. Clear the main AudioImageBuffers (visual mix bus / LuxStral source).
+    {
+        uint8_t* wR = nullptr;
+        uint8_t* wG = nullptr;
+        uint8_t* wB = nullptr;
+        if (audio_image_buffers_start_write(audioBuffers, &wR, &wG, &wB) == 0)
+        {
+            std::memset(wR, 255, static_cast<size_t>(nbPx));
+            std::memset(wG, 255, static_cast<size_t>(nbPx));
+            std::memset(wB, 255, static_cast<size_t>(nbPx));
+            audio_image_buffers_complete_write(audioBuffers);
+        }
+    }
+
+    // 3. Clear preprocessed_data for Source=S (pure sampler — no UDP writer).
+    //    In Source=M or Source=L modes the UDP thread owns preprocessed_data
+    //    and will overwrite it naturally; no action is needed here.
+    if (doubleBuffer != nullptr)
+    {
+        extern sp3ctra_config_t g_sp3ctra_config;
+        if (g_sp3ctra_config.luxstral_source_type == 0 /* IMAGE_SOURCE_SAMPLER */)
+        {
+            PreprocessedImageData ppSilence {};
+            PipelineConfig sampler_cfg = pipeline_build_config_sampler();
+            if (pipeline_process_frame(whiteR, whiteG, whiteB, &sampler_cfg, &ppSilence) == 0)
+            {
+                ppSilence.timestamp_us = static_cast<uint64_t>(currentTimeUs());
+                pthread_mutex_lock(&doubleBuffer->mutex);
+                doubleBuffer->preprocessed_data = ppSilence;
+                doubleBuffer->dataReady = 2; /* 2 = sampler source tag */
+                pthread_mutex_unlock(&doubleBuffer->mutex);
+            }
+        }
+    }
+}
+
 void FramePlayerThread::run()
 {
     auto& state = sampler.getAtomicState();
@@ -981,6 +1053,16 @@ void FramePlayerThread::run()
                                                             std::memory_order_acq_rel);
         if (slotToPlay < 0)
         {
+            // No play command pending.  Check for a pending silence-injection
+            // request (posted by triggerStep(STEP_EMPTY) or rtStop() from the
+            // sequencer).  This handles the case where no slot was playing when
+            // the silence command was issued (e.g. STEP_EMPTY after STEP_LIVE,
+            // or rtStop() when the sequencer was idle).
+            if (state.injectSilenceCmd.exchange(false, std::memory_order_acq_rel))
+            {
+                log_info("FS", "FramePlayerThread: idle — injecting white frame (silence)");
+                injectWhiteFrame();
+            }
             Thread::sleep(1);
             continue;
         }
@@ -1354,7 +1436,13 @@ void FramePlayerThread::run()
             // so the live UDP thread regains exclusive control of AudioImageBuffers.
             {
                 extern sp3ctra_config_t g_sp3ctra_config;
-                const int   smpFreeze  = g_sp3ctra_config.sampler_freeze_mode;
+                // FIX(routing): When the sequencer drives playback, treat the transport
+                // as PLAY (0) regardless of the sampler_freeze_mode UI state.
+                // The sequencer (FrameSequencer::playing) is the authoritative transport;
+                // sampler_freeze_mode only controls the manual Play/Hold/Stop Transport UI
+                // and must not gate injection into AudioImageBuffers during sequencer play.
+                const bool seqDriven  = state.seqControlledPlay.load(std::memory_order_relaxed);
+                const int   smpFreeze  = seqDriven ? 0 : g_sp3ctra_config.sampler_freeze_mode;
                 const int   liveFreeze = g_sp3ctra_config.image_freeze_mode;
                 const float liveOp     = g_sp3ctra_config.image_live_opacity;
                 const float smpOp      = g_sp3ctra_config.image_sampler_opacity;
@@ -1365,7 +1453,15 @@ void FramePlayerThread::run()
                 // Uses FramePlayerThread member state for cross-iteration tracking.
                 {
                     const uint64_t nowUs = currentTimeUs();
-                    if (smpFreeze == 0)  // PLAY
+                    if (seqDriven)
+                    {
+                        // Sequencer-driven: always full gain, no UI transport fade management.
+                        // The sequencer step advance is the only gating authority; the
+                        // sampler Transport UI must not attenuate the injected frames.
+                        transportFadeRamp_   = 1.0f;
+                        transportPrevFreeze_ = 0; /* record as PLAY for next iteration */
+                    }
+                    else if (smpFreeze == 0)  // PLAY
                     {
                         if (transportPrevFreeze_ != 0 && fadeInMs > 0)
                         {
@@ -1488,6 +1584,12 @@ void FramePlayerThread::run()
                 {
                     PreprocessedImageData ppData {};
                     PipelineConfig sampler_cfg = pipeline_build_config_sampler();
+                    // FIX(routing): Sequencer-driven playback must not be silenced
+                    // by the pipeline envelope when sampler_freeze_mode=STOP (2).
+                    // Override freeze_mode to PLAY so ENVELOPE_SAMPLER processes
+                    // the frame normally regardless of the Transport UI state.
+                    if (state.seqControlledPlay.load(std::memory_order_relaxed))
+                        sampler_cfg.freeze_mode = 0; /* force PLAY — sequencer active */
                     if (pipeline_process_frame(workR, workG, workB, &sampler_cfg, &ppData) == 0)
                     {
                         ppData.timestamp_us = static_cast<uint64_t>(currentTimeUs());
@@ -1508,55 +1610,29 @@ void FramePlayerThread::run()
         sampler.saveLastPlayHead(slotToPlay, slot.play_head);
         sampler.saveLastDirection(slotToPlay, direction);
 
-        // ── NONE loop mode: inject white (silence) frame on end ───────────
-        // When the playhead reaches the end in NONE mode the output must cut
-        // to blank immediately.  Without this, the last frame stays frozen in
-        // AudioImageBuffers / sampler snapshot / preprocessed_data until the
-        // next UDP frame arrives or another slot starts playing.
-        if (stoppedByNoneMode)
+        // ── Inject white (silence) frame when playback ends ───────────────
+        // Triggered by any of:
+        //   • LoopMode::NONE reached end of play zone          (stoppedByNoneMode)
+        //   • A STEP_EMPTY sequencer step is now active        (seqSilentStepActive)
+        //   • An explicit silence command from rtStop() or
+        //     triggerStep(STEP_EMPTY) when no slot was playing (injectSilenceCmd)
+        // Normal bank→bank transitions satisfy none of these conditions, so the
+        // cut between consecutive banks remains seamless (no white-frame gap).
         {
-            log_info("FS", "Slot %d: NONE mode end — injecting white frame (silence)",
-                     slotToPlay);
+            const bool doSilence =
+                stoppedByNoneMode
+                || sampler.isSeqSilentStepActive()
+                || state.injectSilenceCmd.exchange(false, std::memory_order_acq_rel);
 
-            // White = 255 on all channels = silence in Sp3ctra's image-to-sound mapping.
-            uint8_t whiteR[FrameSamplerConstants::MAX_PIXELS];
-            uint8_t whiteG[FrameSamplerConstants::MAX_PIXELS];
-            uint8_t whiteB[FrameSamplerConstants::MAX_PIXELS];
-            std::memset(whiteR, 255, sizeof(whiteR));
-            std::memset(whiteG, 255, sizeof(whiteG));
-            std::memset(whiteB, 255, sizeof(whiteB));
-            const int nbPx = FrameSamplerConstants::MAX_PIXELS;
-
-            // 1. Clear sampler snapshot
-            audio_image_buffers_snapshot_sampler(audioBuffers, whiteR, whiteG, whiteB, nbPx);
-
-            // 2. Clear main AudioImageBuffers
+            if (doSilence)
             {
-                uint8_t* wR = nullptr;
-                uint8_t* wG = nullptr;
-                uint8_t* wB = nullptr;
-                if (audio_image_buffers_start_write(audioBuffers, &wR, &wG, &wB) == 0)
-                {
-                    std::memset(wR, 255, static_cast<size_t>(nbPx));
-                    std::memset(wG, 255, static_cast<size_t>(nbPx));
-                    std::memset(wB, 255, static_cast<size_t>(nbPx));
-                    audio_image_buffers_complete_write(audioBuffers);
-                }
-            }
-
-            // 3. Clear preprocessed_data (silence) for Source=S
-            if (doubleBuffer != nullptr)
-            {
-                PreprocessedImageData ppSilence {};
-                PipelineConfig sampler_cfg = pipeline_build_config_sampler();
-                if (pipeline_process_frame(whiteR, whiteG, whiteB, &sampler_cfg, &ppSilence) == 0)
-                {
-                    ppSilence.timestamp_us = static_cast<uint64_t>(currentTimeUs());
-                    pthread_mutex_lock(&doubleBuffer->mutex);
-                    doubleBuffer->preprocessed_data = ppSilence;
-                    doubleBuffer->dataReady = 2;
-                    pthread_mutex_unlock(&doubleBuffer->mutex);
-                }
+                if (stoppedByNoneMode)
+                    log_info("FS", "Slot %d: NONE mode end — injecting white frame (silence)",
+                             slotToPlay);
+                else
+                    log_info("FS", "Slot %d: stop/empty step — injecting white frame (silence)",
+                             slotToPlay);
+                injectWhiteFrame();
             }
         }
 

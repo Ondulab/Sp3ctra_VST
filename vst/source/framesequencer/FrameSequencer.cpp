@@ -156,6 +156,16 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
         as.activePlaySlot.store(-1,    std::memory_order_release);
         as.passthroughEnabled.store(false, std::memory_order_release); // suppress live
         frameSampler->setSeqSilentStep(true); // tell visualizer to show white
+        // FIX(silence): Signal FramePlayerThread to inject a full-white (255) frame
+        // immediately into AudioImageBuffers and preprocessed_data.
+        // Without this, the last sampler frame stays frozen in both buffers causing
+        // the synthesis engine to keep producing sound during a STEP_EMPTY step.
+        // Covers both cases:
+        //   • A slot was playing  — FramePlayerThread detects this after its inner
+        //     loop exits via stopPlayCmd (seqSilentStepActive check in run()).
+        //   • Nothing was playing — FramePlayerThread idle loop consumes this flag
+        //     (e.g. STEP_EMPTY immediately after a STEP_LIVE step).
+        as.injectSilenceCmd.store(true, std::memory_order_release);
         rtPrevActiveBank = STEP_EMPTY;
         return;
     }
@@ -227,6 +237,14 @@ void FrameSequencer::rtStop() noexcept
         // Release sequencer ownership so FramePlayerThread's tail cleanup
         // can safely restore passthrough if it is still running.
         as.seqControlledPlay.store(false, std::memory_order_release);
+        // FIX(silence): Signal FramePlayerThread to inject a white (silence) frame
+        // so the last sampler frame does not freeze in AudioImageBuffers and
+        // preprocessed_data after the sequencer stops.
+        // FramePlayerThread will write 255 to all channels on its next idle tick
+        // (or immediately after its inner playback loop exits if a slot was playing).
+        // passthroughEnabled is set to true below so the live UDP stream will
+        // naturally overwrite AudioImageBuffers once the next UDP frame arrives.
+        as.injectSilenceCmd.store(true, std::memory_order_release);
         as.passthroughEnabled.store(true, std::memory_order_release);
     }
 }

@@ -150,6 +150,18 @@ struct FrameSamplerAtomicState
     std::atomic<int>  startPlayCmd { -1 };   // slot index, -1 = no command
     std::atomic<bool> stopPlayCmd  { false };
 
+    /** Silence-injection command — posted from RT (triggerStep(STEP_EMPTY) or
+     *  rtStop()) and consumed by FramePlayerThread (Non-RT).
+     *  When set, FramePlayerThread writes a full-white (255) frame to
+     *  AudioImageBuffers, the sampler snapshot, and preprocessed_data so that
+     *  the synthesis engine produces no sound instead of freezing on the last
+     *  played frame.
+     *  Covers two cases:
+     *    • A slot was playing  → checked after the inner playback loop exits.
+     *    • Nothing was playing → checked in the outer idle loop (e.g. STEP_EMPTY
+     *      after STEP_LIVE, or as the very first step of a sequence). */
+    std::atomic<bool> injectSilenceCmd { false };
+
     FrameSamplerAtomicState() noexcept
     {
         for (int i = 0; i < FrameSamplerConstants::NUM_SLOTS; ++i)
@@ -188,6 +200,12 @@ private:
     DoubleBuffer*      doubleBuffer; // for updating preprocessed_data during playback
 
     static uint64_t currentTimeUs() noexcept;
+
+    /** Inject a full-white (255) frame into AudioImageBuffers, sampler snapshot,
+     *  and preprocessed_data.  Called from the FramePlayerThread (Non-RT) when
+     *  playback stops due to STEP_EMPTY, rtStop(), or LoopMode::NONE reaching end.
+     *  Prevents the last played frame from freezing in the synthesis pipeline. */
+    void injectWhiteFrame() noexcept;
 
     // ── Transport fade-in state ────────────────────────────────────────────────
     // Tracks transitions of sampler_freeze_mode so that pressing PLAY after
