@@ -1415,6 +1415,24 @@ void CisVisualizerComponent::computeFftMagnitudes()
     // Light temporal smoothing (τ ≈ 10 frames at 30 fps) avoids flicker.
     if (!localDataR.empty() && !localDataB.empty())
     {
+        // ── Subtract global CIS sensor R-B bias ───────────────────────────────
+        // The CIS sensor has a fixed warm bias (R > B globally on white surfaces).
+        // Subtracting the per-frame global mean centres harmonicity around 0.5 so
+        // that only *local* colour variations drive the per-bin values.
+        float globalR = 0.0f, globalB = 0.0f;
+        for (int i = 0; i < cisPixelsCount; ++i)
+        {
+            globalR += static_cast<float>(localDataR[static_cast<size_t>(i)]);
+            globalB += static_cast<float>(localDataB[static_cast<size_t>(i)]);
+        }
+        const float globalBias = (globalR - globalB)
+                                 / (static_cast<float>(cisPixelsCount) * 255.0f);
+
+        // Amplification: the per-bin R-B delta is typically small after bias removal;
+        // multiply by kHarmGain so that even moderate colour variations push the
+        // harmonicity toward 0 or 1 rather than hovering near 0.5.
+        constexpr float kHarmGain = 4.0f;
+
         const int regionW = juce::jmax(1, cisPixelsCount / juce::jmax(1, nDisplay));
         for (int k = 1; k <= nDisplay; ++k)
         {
@@ -1426,12 +1444,14 @@ void CisVisualizerComponent::computeFftMagnitudes()
                 sumR += static_cast<float>(localDataR[static_cast<size_t>(i)]);
                 sumB += static_cast<float>(localDataB[static_cast<size_t>(i)]);
             }
-            const float n    = static_cast<float>(posEnd - posStart);
-            const float temp = (sumR - sumB) / (n * 255.0f);   // [-1..1]
-            const float newH = juce::jlimit(0.0f, 1.0f, (temp + 1.0f) * 0.5f);
-            // Light 10-frame smoothing (τ ≈ 0.33 s at 30 fps)
+            const float n        = static_cast<float>(posEnd - posStart);
+            // Bias-corrected, amplified temperature [-1..1]
+            const float tempRaw  = (sumR - sumB) / (n * 255.0f) - globalBias;
+            const float tempAmp  = juce::jlimit(-1.0f, 1.0f, tempRaw * kHarmGain);
+            const float newH     = (tempAmp + 1.0f) * 0.5f;  // [0..1]
+            // Faster smoothing (τ ≈ 3 frames) so the cursor reacts quickly
             fftHarmonicity_[static_cast<size_t>(k)] =
-                0.10f * newH + 0.90f * fftHarmonicity_[static_cast<size_t>(k)];
+                0.40f * newH + 0.60f * fftHarmonicity_[static_cast<size_t>(k)];
         }
     }
 }
@@ -1531,11 +1551,21 @@ void CisVisualizerComponent::paintFftColorMode(juce::Graphics& g, int W, int H)
     // showing the mean harmonicity of the current frame.
     // Left = harmonic (warm/orange), Right = inharmonic (cool/blue).
     {
-        float sumH = 0.0f;
+        // Magnitude-weighted mean harmonicity:
+        // Silent bins (near-zero magnitude) don't drag the cursor to mid-position.
+        // Only bins with actual energy determine where the cursor sits.
+        float sumH = 0.0f, sumMag = 0.0f;
         const int nH = fftNumHarmonics_;
+        const size_t nbSize = fftMagnitudesSmoothed_.size();
         for (int k = 1; k <= nH; ++k)
-            sumH += fftHarmonicity_[static_cast<size_t>(k)];
-        const float avgH = (nH > 0) ? (sumH / static_cast<float>(nH)) : 0.5f;
+        {
+            const float mag = (static_cast<size_t>(k) < nbSize)
+                              ? fftMagnitudesSmoothed_[static_cast<size_t>(k)]
+                              : 0.0f;
+            sumH   += fftHarmonicity_[static_cast<size_t>(k)] * mag;
+            sumMag += mag;
+        }
+        const float avgH = (sumMag > 1e-6f) ? (sumH / sumMag) : 0.5f;
 
         // Map: harm=1 → x=0 (left), harm=0 → x=W-1 (right)
         const int ix = juce::jlimit(4, W - 5,
