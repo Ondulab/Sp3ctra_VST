@@ -9,6 +9,7 @@ extern "C" {
     #include "config/config_instrument.h"
     #include "config/config_loader.h"
     #include "processing/image_pipeline_types.h"
+    #include "synthesis/luxsynth/kissfft/kiss_fftr.h"
 }
 
 // Forward-declare the C hook defined in FrameSampler.cpp.
@@ -26,6 +27,12 @@ CisVisualizerComponent::CisVisualizerComponent(Sp3ctraAudioProcessor& proc)
 CisVisualizerComponent::~CisVisualizerComponent()
 {
     stopTimer();
+    // Release the cached KissFFT config (allocated on heap by kiss_fftr_alloc)
+    if (fftCfg_)
+    {
+        kiss_fft_free(reinterpret_cast<kiss_fftr_cfg>(fftCfg_));
+        fftCfg_ = nullptr;
+    }
 }
 
 //==============================================================================
@@ -77,6 +84,23 @@ void CisVisualizerComponent::paint(juce::Graphics& g)
     if (source == VisualizerMode::SYNTH_BLOB)
     {
         paintSynthBlobMode(g, W, H);
+        paintSourceLabel(g, W, H);
+        return;
+    }
+
+    // ── FFT modes: dedicated spectrum renderers ──────────────────────────────
+    // Intercepted before both the color and generic paths — each has its own
+    // full renderer (computeFftMagnitudes + bar chart).
+    if (source == VisualizerMode::SYNTH_FFT_GRAY)
+    {
+        paintFftGrayMode(g, W, H);
+        paintSourceLabel(g, W, H);
+        return;
+    }
+
+    if (source == VisualizerMode::SYNTH_FFT_COLOR)
+    {
+        paintFftColorMode(g, W, H);
         paintSourceLabel(g, W, H);
         return;
     }
@@ -738,9 +762,10 @@ void CisVisualizerComponent::paintColorTemperatureMode(
 //==============================================================================
 bool CisVisualizerComponent::isColorSource(VisualizerMode m) const noexcept
 {
+    // Note: SYNTH_FFT_COLOR is intercepted before this call in paint() and
+    // handled by its own dedicated renderer — do NOT include it here.
     return m == VisualizerMode::SPCTR_COLOR
-        || m == VisualizerMode::SYNTH_COLOR
-        || m == VisualizerMode::SYNTH_FFT_COLOR;
+        || m == VisualizerMode::SYNTH_COLOR;
 }
 
 //==============================================================================
@@ -748,7 +773,8 @@ bool CisVisualizerComponent::supportsDisplayModes(VisualizerMode m) const noexce
 {
     // Display mode switching (Image / Waveform / Inverted) is only relevant
     // for RAW data, Live, Sampler, Mix, and grayscale pipeline views.
-    // COLOR and BLOB have their own dedicated renderers.
+    // COLOR, BLOB, and FFT modes have their own dedicated renderers and are
+    // intercepted in paint() before this function is ever consulted.
     switch (m)
     {
         case VisualizerMode::RAW:
@@ -757,7 +783,6 @@ bool CisVisualizerComponent::supportsDisplayModes(VisualizerMode m) const noexce
         case VisualizerMode::MIX:
         case VisualizerMode::SPCTR_GRAY:
         case VisualizerMode::SYNTH_GRAY:
-        case VisualizerMode::SYNTH_FFT_GRAY:
             return true;
         default:
             return false;
@@ -1284,4 +1309,254 @@ void CisVisualizerComponent::mouseMove(const juce::MouseEvent& event)
 void CisVisualizerComponent::mouseExit(const juce::MouseEvent&)
 {
     hoverBlobIdx_ = -1;
+}
+
+//==============================================================================
+// FFT — computeFftMagnitudes
+// Computes a Hann-windowed real FFT on localDataGray using KissFFT.
+// Results are stored in fftMagnitudesSmoothed_ with exponential smoothing.
+// The KissFFT config is cached in fftCfg_ and reallocated only when
+// cisPixelsCount changes.  All work is O(N log N) on the UI thread at 30 fps.
+//==============================================================================
+void CisVisualizerComponent::computeFftMagnitudes()
+{
+    if (localDataGray.empty() || cisPixelsCount == 0)
+    {
+        fftMagnitudes_.clear();
+        fftMagnitudesSmoothed_.clear();
+        return;
+    }
+
+    const int N     = cisPixelsCount;
+    const int nBins = N / 2 + 1;
+
+    // ── Reallocate KissFFT config when the signal size changes ────────────────
+    if (fftSize_ != N)
+    {
+        if (fftCfg_)
+        {
+            kiss_fft_free(reinterpret_cast<kiss_fftr_cfg>(fftCfg_));
+            fftCfg_ = nullptr;
+        }
+        fftCfg_  = static_cast<void*>(kiss_fftr_alloc(N, 0, nullptr, nullptr));
+        fftSize_ = N;
+        fftMagnitudes_.assign(static_cast<size_t>(nBins), 0.0f);
+        fftMagnitudesSmoothed_.assign(static_cast<size_t>(nBins), 0.0f);
+    }
+
+    auto* cfg = reinterpret_cast<kiss_fftr_cfg>(fftCfg_);
+    if (!cfg) return;
+
+    // Thread-local staging buffers — no heap alloc at 30 fps
+    thread_local std::vector<kiss_fft_scalar> inBuf;
+    thread_local std::vector<kiss_fft_cpx>    outBuf;
+    inBuf.resize(static_cast<size_t>(N));
+    outBuf.resize(static_cast<size_t>(nBins));
+
+    // ── Apply Hann window to localDataGray ────────────────────────────────────
+    // Hann window: w(i) = 0.5 * (1 - cos(2π·i / (N-1)))
+    // Reduces spectral leakage by tapering the signal to zero at both ends.
+    const float kTwoPiOverN =
+        2.0f * static_cast<float>(M_PI) / static_cast<float>(juce::jmax(1, N - 1));
+
+    for (int i = 0; i < N; ++i)
+    {
+        const float hann = 0.5f * (1.0f - std::cos(kTwoPiOverN * static_cast<float>(i)));
+        inBuf[static_cast<size_t>(i)] =
+            (static_cast<float>(localDataGray[static_cast<size_t>(i)]) / 255.0f) * hann;
+    }
+
+    // ── Real FFT (N points → N/2+1 complex bins) ─────────────────────────────
+    kiss_fftr(cfg, inBuf.data(), outBuf.data());
+
+    // ── Compute magnitudes — suppress DC (bin 0) ─────────────────────────────
+    fftMagnitudes_[0] = 0.0f;
+    float maxMag = 1e-12f; // guard against all-silence frames
+    for (int k = 1; k < nBins; ++k)
+    {
+        const float re  = outBuf[static_cast<size_t>(k)].r;
+        const float im  = outBuf[static_cast<size_t>(k)].i;
+        const float mag = std::sqrt(re * re + im * im);
+        fftMagnitudes_[static_cast<size_t>(k)] = mag;
+        if (mag > maxMag) maxMag = mag;
+    }
+
+    // ── Peak-normalise to [0..1] ──────────────────────────────────────────────
+    const float invMax = 1.0f / maxMag;
+    for (int k = 1; k < nBins; ++k)
+        fftMagnitudes_[static_cast<size_t>(k)] *= invMax;
+
+    // ── Temporal smoothing: fast attack, slow release ─────────────────────────
+    // alpha_attack  = 0.40  → bars rise to 40% of new value in one frame
+    // alpha_release = 0.08  → bars decay to 92% of previous value per frame
+    // This gives the classic "fast rise, slow fall" VU-meter behaviour.
+    for (int k = 0; k < nBins; ++k)
+    {
+        const float cur  = fftMagnitudes_[static_cast<size_t>(k)];
+        const float prev = fftMagnitudesSmoothed_[static_cast<size_t>(k)];
+        const float a    = (cur >= prev) ? 0.40f : 0.08f;
+        fftMagnitudesSmoothed_[static_cast<size_t>(k)] =
+            a * cur + (1.0f - a) * prev;
+    }
+}
+
+//==============================================================================
+// FFT GRAY — monochromatic spectrum bar chart
+//==============================================================================
+void CisVisualizerComponent::paintFftGrayMode(juce::Graphics& g, int W, int H)
+{
+    g.fillAll(juce::Colour(0xff080808));
+
+    if (cisPixelsCount == 0 || localDataGray.empty()) return;
+
+    computeFftMagnitudes();
+
+    const int nBins = static_cast<int>(fftMagnitudesSmoothed_.size());
+    if (nBins < 2) return;
+
+    // Display only the lower half of the positive spectrum — the upper half
+    // contains very high spatial frequencies that are below the noise floor
+    // for a CIS sensor; cutting at N/4 keeps the interesting content visible.
+    const int displayBins = juce::jmax(1, nBins / 2);
+
+    // Logarithmic magnitude scale: log10(1 + 9·x) → maps [0,1] to [0,1]
+    // with the curve lifting low-amplitude bins more than a linear scale.
+    auto logScale = [](float x) -> float
+    {
+        return std::log10(1.0f + 9.0f * juce::jlimit(0.0f, 1.0f, x));
+    };
+
+    for (int x = 0; x < W; ++x)
+    {
+        // Map display column linearly to FFT bin index
+        const int bin = 1 + static_cast<int>(
+            static_cast<float>(x) / static_cast<float>(juce::jmax(1, W - 1))
+            * static_cast<float>(displayBins - 1));
+        const int binIdx = juce::jlimit(1, nBins - 1, bin);
+
+        const float mag    = fftMagnitudesSmoothed_[static_cast<size_t>(binIdx)];
+        const float logMag = logScale(mag);
+        const int   barH   = juce::jmax(1, static_cast<int>(logMag * static_cast<float>(H)));
+
+        // Background column — very dark
+        g.setColour(juce::Colour(0xff0d0d0d));
+        g.fillRect(x, 0, 1, H - barH);
+
+        // Active bar — brightness proportional to magnitude
+        const uint8_t v = static_cast<uint8_t>(
+            juce::jlimit(0.0f, 255.0f, (0.35f + 0.65f * logMag) * 255.0f));
+        g.setColour(juce::Colour(v, v, v));
+        g.fillRect(x, H - barH, 1, barH);
+
+        // Bright 2-px peak cap for VU-meter feel
+        if (barH > 2)
+        {
+            g.setColour(juce::Colours::white.withAlpha(0.60f));
+            g.fillRect(x, H - barH, 1, 2);
+        }
+    }
+
+    // ── Reference grid (10 %, 30 %, 70 %, 90 % log-magnitude) ───────────────
+    g.setColour(juce::Colour(0x16ffffff));
+    for (float ref : {0.1f, 0.3f, 0.7f, 0.9f})
+    {
+        const int refY = H - static_cast<int>(logScale(ref) * static_cast<float>(H));
+        g.fillRect(0, refY, W, 1);
+    }
+
+    // ── Footer label ──────────────────────────────────────────────────────────
+    g.setColour(juce::Colour(0x50ffffff));
+    g.setFont(juce::FontOptions(9.0f));
+    g.drawText("FFT spectrum  (spatial frequencies)",
+               juce::Rectangle<int>(4, H - 16, W - 8, 13),
+               juce::Justification::centredLeft, false);
+}
+
+//==============================================================================
+// FFT COLOR — HSV-mapped spectrum bar chart
+// Low-frequency bins → blue (hue ≈ 240°)
+// High-frequency bins → red (hue ≈ 0°)
+//==============================================================================
+void CisVisualizerComponent::paintFftColorMode(juce::Graphics& g, int W, int H)
+{
+    g.fillAll(juce::Colour(0xff080808));
+
+    if (cisPixelsCount == 0 || localDataGray.empty()) return;
+
+    computeFftMagnitudes();
+
+    const int nBins = static_cast<int>(fftMagnitudesSmoothed_.size());
+    if (nBins < 2) return;
+
+    const int displayBins = juce::jmax(1, nBins / 2);
+
+    auto logScale = [](float x) -> float
+    {
+        return std::log10(1.0f + 9.0f * juce::jlimit(0.0f, 1.0f, x));
+    };
+
+    for (int x = 0; x < W; ++x)
+    {
+        const float t = static_cast<float>(x) / static_cast<float>(juce::jmax(1, W - 1));
+
+        const int bin = 1 + static_cast<int>(t * static_cast<float>(displayBins - 1));
+        const int binIdx = juce::jlimit(1, nBins - 1, bin);
+
+        const float mag    = fftMagnitudesSmoothed_[static_cast<size_t>(binIdx)];
+        const float logMag = logScale(mag);
+        const int   barH   = juce::jmax(1, static_cast<int>(logMag * static_cast<float>(H)));
+
+        // HSV hue: 0.667 (blue) at low freq → 0.0 (red) at high freq
+        const float hue = (1.0f - t) * 0.667f;
+        const float val = 0.18f + 0.82f * logMag;
+
+        // Background — very dim tinted
+        g.setColour(juce::Colour::fromHSV(hue, 0.80f, 0.05f + 0.05f * logMag, 1.0f));
+        g.fillRect(x, 0, 1, H - barH);
+
+        // Active bar
+        g.setColour(juce::Colour::fromHSV(hue, 0.90f, val, 1.0f));
+        g.fillRect(x, H - barH, 1, barH);
+
+        // Bright 2-px peak cap
+        if (barH > 2)
+        {
+            g.setColour(juce::Colour::fromHSV(hue, 0.40f, 1.0f, 0.65f));
+            g.fillRect(x, H - barH, 1, 2);
+        }
+    }
+
+    // ── Reference grid ────────────────────────────────────────────────────────
+    g.setColour(juce::Colour(0x16ffffff));
+    for (float ref : {0.1f, 0.3f, 0.7f, 0.9f})
+    {
+        const int refY = H - static_cast<int>(logScale(ref) * static_cast<float>(H));
+        g.fillRect(0, refY, W, 1);
+    }
+
+    // ── Rainbow frequency legend (4 px strip at top) ─────────────────────────
+    for (int x2 = 0; x2 < W; ++x2)
+    {
+        const float t2   = static_cast<float>(x2) / static_cast<float>(juce::jmax(1, W - 1));
+        const float hue2 = (1.0f - t2) * 0.667f;
+        g.setColour(juce::Colour::fromHSV(hue2, 0.90f, 0.70f, 0.60f));
+        g.fillRect(x2, 0, 1, 4);
+    }
+
+    // "Low / High" axis labels
+    g.setColour(juce::Colour(0x60ffffff));
+    g.setFont(juce::FontOptions(9.0f));
+    g.drawText("Low",
+               juce::Rectangle<int>(4, 5, 28, 12),
+               juce::Justification::centredLeft, false);
+    g.drawText("High",
+               juce::Rectangle<int>(W - 34, 5, 30, 12),
+               juce::Justification::centredRight, false);
+
+    // ── Footer label ──────────────────────────────────────────────────────────
+    g.setColour(juce::Colour(0x50ffffff));
+    g.setFont(juce::FontOptions(9.0f));
+    g.drawText("FFT color spectrum",
+               juce::Rectangle<int>(4, H - 16, W - 8, 13),
+               juce::Justification::centredLeft, false);
 }
