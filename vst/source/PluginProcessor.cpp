@@ -271,6 +271,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::NormalisableRange<float>(0.01f, 1.0f, 0.01f), 0.20f,
         juce::AudioParameterFloatAttributes{}.withLabel("")));
 
+    // ── SPCTR (LuxStral) blob detection — identical ranges to lxBlob* ────────
+    // These params drive both the IMAGE LUXSTRAL visualizer (detectSpctrBlobs)
+    // and the StrokeForge audio synthesis engine (via g_sp3ctra_config).
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"spctrBlobThreshold", 1}, "SPCTR Blob Thr.",
+        juce::NormalisableRange<float>(0.001f, 1.0f, 0.001f, 0.35f), 0.05f));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"spctrBlobMinWidth", 1}, "SPCTR Blob Min W",
+        1, 200, 10));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"spctrBlobMergeGap", 1}, "SPCTR Merge Gap",
+        0, 100, 3));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"spctrBlobColorSplit", 1}, "SPCTR Color Split",
+        juce::NormalisableRange<float>(0.01f, 1.0f, 0.01f), 0.20f));
+
     // ── LuxSynth FFT quality / synthesis-data parameters ─────────────────────
     // lxFftBins: number of harmonics extracted from the spatial FFT.
     // Each bin maps to one oscillator in the LuxSynth additive synthesis engine.
@@ -444,6 +460,12 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("lxBlobMinWidth",   this);
     apvts.addParameterListener("lxBlobMergeGap",   this);
     apvts.addParameterListener("lxBlobColorSplit", this);
+
+    // SPCTR blob detection — IMAGE LUXSTRAL tab (drives both visualizer + StrokeForge audio)
+    apvts.addParameterListener("spctrBlobThreshold",  this);
+    apvts.addParameterListener("spctrBlobMinWidth",   this);
+    apvts.addParameterListener("spctrBlobMergeGap",   this);
+    apvts.addParameterListener("spctrBlobColorSplit", this);
 
     // Per-path pipeline routing (source selector, inversion, AC removal)
     apvts.addParameterListener("luxstralSource",       this);
@@ -1020,6 +1042,12 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
         applyConfigurationToCore(false);
         return;
     }
+
+    // SPCTR blob detection — IMAGE LUXSTRAL tab (drives visualizer + StrokeForge audio)
+    if (parameterID.startsWith("spctrBlob")) {
+        applyConfigurationToCore(false);
+        return;
+    }
     
     bool isLuxStralParam = parameterID.startsWith("luxstral");
     if (isLuxStralParam) {
@@ -1372,6 +1400,20 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         static_cast<int>(apvts.getRawParameterValue("lxBlobMergeGap")->load());
     g_sp3ctra_config.luxsynth_blob_color_split =
         apvts.getRawParameterValue("lxBlobColorSplit")->load();
+
+    // ========================================================================
+    // SPCTR blob detection — IMAGE LUXSTRAL tab params (override sfBlob*)
+    // spctrBlob* have wider ranges (same as lxBlob*) and are the primary
+    // controls for both detectSpctrBlobs() (visualizer) and StrokeForge audio.
+    // Written AFTER the sfBlob* block so spctrBlob* values always win.
+    // spctrBlobColorSplit is visualizer-only (no StrokeForge audio equivalent).
+    // ========================================================================
+    g_sp3ctra_config.strokeforge_blob_base_threshold =
+        apvts.getRawParameterValue("spctrBlobThreshold")->load();
+    g_sp3ctra_config.strokeforge_blob_min_width =
+        static_cast<int>(apvts.getRawParameterValue("spctrBlobMinWidth")->load());
+    g_sp3ctra_config.strokeforge_blob_merge_gap =
+        static_cast<int>(apvts.getRawParameterValue("spctrBlobMergeGap")->load());
 
     // Update logger level immediately
     logger_init((log_level_t)logLevel);

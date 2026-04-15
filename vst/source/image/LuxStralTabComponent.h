@@ -9,11 +9,12 @@
  *   Left  — image pipeline controls + blob detection parameters
  *   Right — pipeline output nodes
  *
- * Blob detection controls are wired to StrokeForge APVTS parameters
- * (sfBlobBaseThreshold / sfBlobMinWidth / sfBlobMergeGap) which are also
- * read by the StrokeForge audio synthesis engine.
- * Image analysis (SPCTR_BLOB renderer) and audio synthesis share the same
- * parameters deliberately: tuning one tunes both.
+ * Blob detection controls are wired to spctrBlob* APVTS parameters:
+ *   spctrBlobThreshold / spctrBlobMinWidth / spctrBlobMergeGap / spctrBlobColorSplit
+ * These have IDENTICAL labels, ranges and semantics as the lxBlob* params
+ * used in IMAGE LUXSYNTH, ensuring a consistent cross-path UX.
+ * They also drive the StrokeForge audio synthesis engine (via g_sp3ctra_config)
+ * through PluginProcessor::applyConfigurationToCore().
  */
 #pragma once
 
@@ -69,14 +70,12 @@ public:
         gammaAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
             apvts, "luxstralGammaValue", gammaSlider));
 
-        // ── BLOB DETECTION — StrokeForge params ───────────────────────────
-        // These parameters are shared between:
-        //   1. Image analysis: detectSpctrBlobs() reads g_sp3ctra_config.strokeforge_blob_*
-        //      (updated from APVTS by PluginProcessor::parameterChanged)
-        //   2. Audio synthesis: StrokeForge engine reads the same config fields
-        // Tuning here affects both the visualizer and the synthesis simultaneously.
+        // ── BLOB DETECTION — spctrBlob* params ────────────────────────────
+        // Identical labels, ranges and semantics as lxBlob* (IMAGE LUXSYNTH).
+        // Also drives StrokeForge audio synthesis via g_sp3ctra_config.
+        // spctrBlobColorSplit is visualizer-only (no StrokeForge equivalent).
 
-        // Row 4: Amplitude threshold — normalised brightness [0..0.2].
+        // Row 4: Amplitude threshold — normalised CIS brightness [0..1].
         // Pixels brighter than this value are considered active strokes.
         initLabel(blobThreshLabel, "Ampl. Thr.");
         blobThreshSlider.setSliderStyle(juce::Slider::LinearHorizontal);
@@ -84,7 +83,7 @@ public:
                                          50, Sp3ctraTheme::kControlH);
         addAndMakeVisible(blobThreshSlider);
         blobThreshAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "sfBlobBaseThreshold", blobThreshSlider));
+            apvts, "spctrBlobThreshold", blobThreshSlider));
 
         // Row 5: Pixel threshold — minimum blob span in CIS pixels.
         // Blobs narrower than this value are discarded.
@@ -94,7 +93,7 @@ public:
                                            50, Sp3ctraTheme::kControlH);
         addAndMakeVisible(blobMinWidthSlider);
         blobMinWidthAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "sfBlobMinWidth", blobMinWidthSlider));
+            apvts, "spctrBlobMinWidth", blobMinWidthSlider));
 
         // Row 6: Merge Gap — maximum inactive-pixel gap that keeps two sub-blobs merged.
         // 0 = strict (every gap splits), higher = more tolerant merging.
@@ -104,7 +103,19 @@ public:
                                             50, Sp3ctraTheme::kControlH);
         addAndMakeVisible(blobMergeGapSlider);
         blobMergeGapAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "sfBlobMergeGap", blobMergeGapSlider));
+            apvts, "spctrBlobMergeGap", blobMergeGapSlider));
+
+        // Row 7: Color Split — how aggressively color differences cause splits.
+        // 0% = no color-based split (pure gap-based merge, color ignored).
+        // 100% = maximum split: any color divergence breaks a blob, even within
+        //        a continuous active region (independent of Merge Gap).
+        initLabel(blobColorSplitLabel, "Color Split");
+        blobColorSplitSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        blobColorSplitSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                              50, Sp3ctraTheme::kControlH);
+        addAndMakeVisible(blobColorSplitSlider);
+        blobColorSplitAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, "spctrBlobColorSplit", blobColorSplitSlider));
 
         // ── Pipeline output nodes ─────────────────────────────────────────
         for (auto* n : { &nodeGray, &nodeColor, &nodeBlob })
@@ -191,10 +202,11 @@ public:
         gammaLabel.setBounds(lb(3));
         gammaSlider.setBounds(cb(3));
         // [blobSectionY header drawn in paint() between row 3 and 4]
-        // Rows 4-6: Blob Detection
-        blobThreshLabel.setBounds(lb(4));     blobThreshSlider.setBounds(cb(4));
-        blobMinWidthLabel.setBounds(lb(5));   blobMinWidthSlider.setBounds(cb(5));
-        blobMergeGapLabel.setBounds(lb(6));   blobMergeGapSlider.setBounds(cb(6));
+        // Rows 4-7: Blob Detection (same layout as LuxSynthTabComponent rows 4-7)
+        blobThreshLabel.setBounds(lb(4));      blobThreshSlider.setBounds(cb(4));
+        blobMinWidthLabel.setBounds(lb(5));    blobMinWidthSlider.setBounds(cb(5));
+        blobMergeGapLabel.setBounds(lb(6));    blobMergeGapSlider.setBounds(cb(6));
+        blobColorSplitLabel.setBounds(lb(7));  blobColorSplitSlider.setBounds(cb(7));
 
         // ── Right column: 3 output nodes, vertically centred ─────────────
         constexpr int kNH = 28;   // node height
@@ -214,25 +226,27 @@ private:
 
     // Labels — image pipeline
     juce::Label sourceLabel, negativeLabel, dcBlockLabel, gammaLabel;
-    // Labels — blob detection
-    juce::Label blobThreshLabel, blobMinWidthLabel, blobMergeGapLabel;
+    // Labels — blob detection (same names as LuxSynthTabComponent for UX consistency)
+    juce::Label blobThreshLabel, blobMinWidthLabel, blobMergeGapLabel, blobColorSplitLabel;
 
     // Controls — image pipeline
     juce::ComboBox     sourceCombo;
     juce::ToggleButton negativeToggle, dcBlockToggle;
     juce::Slider       gammaSlider;
     // Controls — blob detection
-    juce::Slider blobThreshSlider, blobMinWidthSlider, blobMergeGapSlider;
+    juce::Slider blobThreshSlider, blobMinWidthSlider,
+                 blobMergeGapSlider, blobColorSplitSlider;
 
     // Attachments — image pipeline
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> sourceAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   negativeAttach,
                                                                              dcBlockAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   gammaAttach;
-    // Attachments — blob detection (StrokeForge APVTS params)
+    // Attachments — blob detection (spctrBlob* APVTS params)
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   blobThreshAttach,
                                                                              blobMinWidthAttach,
-                                                                             blobMergeGapAttach;
+                                                                             blobMergeGapAttach,
+                                                                             blobColorSplitAttach;
 
     // Pipeline output nodes
     PipelineNodeComponent nodeGray, nodeColor, nodeBlob;
