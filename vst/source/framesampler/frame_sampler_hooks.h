@@ -79,6 +79,23 @@ int frame_sampler_is_recording(void);
  */
 int frame_sampler_is_passthrough(void);
 
+/**
+ * @brief Returns non-zero ONLY when the sequencer is running and the current
+ *        step is STEP_LIVE.
+ *
+ * Unlike frame_sampler_is_passthrough() (which is also true during normal
+ * idle/stop), this flag is set exclusively by triggerStep(STEP_LIVE) and
+ * cleared by triggerStep(anything_else) and rtStop().
+ *
+ * Used by udpThread() to route live CIS data through the Source=S path
+ * ONLY when the sequencer explicitly requests it.
+ *
+ * Thread: UDP receiver thread (Non-RT). Must be fast (atomic read only).
+ *
+ * @return 1 if sequencer STEP_LIVE is active, 0 otherwise
+ */
+int frame_sampler_is_seq_live_step(void);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
