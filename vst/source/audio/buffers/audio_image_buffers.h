@@ -39,6 +39,18 @@ typedef struct AudioImageBuffers {
   // Write protection mutex (only for UDP thread)
   pthread_mutex_t write_mutex;
 
+  // ── Raw UDP snapshot (written only by UDP thread, never by sampler) ──────
+  // These hold the last pure UDP frame before any sampler mixing.
+  uint8_t *raw_R;
+  uint8_t *raw_G;
+  uint8_t *raw_B;
+
+  // ── Sampler snapshot (written only by FramePlayerThread) ─────────────────
+  // These hold the last pure sampler frame before any live mixing.
+  uint8_t *sampler_R;
+  uint8_t *sampler_G;
+  uint8_t *sampler_B;
+
   // Statistics and monitoring
   uint64_t lines_received;
   uint64_t lines_processed;
@@ -62,6 +74,30 @@ void audio_image_buffers_complete_write(AudioImageBuffers *buffers);
 void audio_image_buffers_get_read_pointers(AudioImageBuffers *buffers,
                                            uint8_t **out_R, uint8_t **out_G,
                                            uint8_t **out_B);
+
+// ── Raw UDP snapshot (written only by UDP thread, never by sampler) ────────
+// Call snapshot_raw() from the UDP receive path AFTER complete_write()
+// to capture the pure UDP frame before the sampler can overwrite it.
+void audio_image_buffers_snapshot_raw(AudioImageBuffers *buffers);
+
+// Lock-free read of the last pure UDP frame (no sampler contamination).
+void audio_image_buffers_get_raw_pointers(const AudioImageBuffers *buffers,
+                                          uint8_t **out_R, uint8_t **out_G,
+                                          uint8_t **out_B);
+
+// ── Sampler snapshot (written only by FramePlayerThread) ──────────────────
+// Call snapshot_sampler() from FramePlayerThread BEFORE blending with live
+// to capture the pure sampler frame.
+void audio_image_buffers_snapshot_sampler(AudioImageBuffers *buffers,
+                                          const uint8_t *srcR,
+                                          const uint8_t *srcG,
+                                          const uint8_t *srcB,
+                                          int nb_pixels);
+
+// Lock-free read of the last pure sampler frame (no live contamination).
+void audio_image_buffers_get_sampler_pointers(const AudioImageBuffers *buffers,
+                                              uint8_t **out_R, uint8_t **out_G,
+                                              uint8_t **out_B);
 
 // Utility functions
 void audio_image_buffers_get_stats(AudioImageBuffers *buffers,

@@ -239,6 +239,10 @@ public:
     {
         return atomicState.passthroughEnabled.load(std::memory_order_acquire);
     }
+    bool isAnySlotRecording() const noexcept
+    {
+        return activeRecSlot.load(std::memory_order_relaxed) >= 0;
+    }
     bool isEnabled() const noexcept
     {
         return enabled.load(std::memory_order_relaxed);
@@ -612,9 +616,11 @@ private:
     uint64_t         recStartTimeUs = 0;   // set when recording starts
 
     // -------------------------------------------------------------------------
-    // Player thread
+    // Player thread + shared buffer pointers
     // -------------------------------------------------------------------------
     std::unique_ptr<FramePlayerThread> playerThread;
+    AudioImageBuffers* audioBuffers_ = nullptr; // stored by startPlayerThread()
+    DoubleBuffer*      doubleBuffer_ = nullptr; // stored by startPlayerThread()
 
     // -------------------------------------------------------------------------
     // Per-slot play parameters — parallel to slots[], owned by FrameSampler.

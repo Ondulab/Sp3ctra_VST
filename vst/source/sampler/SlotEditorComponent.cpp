@@ -1,5 +1,6 @@
 #include "SlotEditorComponent.h"
 #include "../PluginProcessor.h"
+#include "../UITheme.h"
 
 static const char* kLoopLabels[4] = { "NONE", "LOOP", "INV", "PING" };
 static const char* kNoteNamesEd[FrameSamplerConstants::NUM_SLOTS] = {
@@ -11,16 +12,9 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
       timeline(proc) // SlotTimelineComponent ctor
 {
     // ── Timeline ──────────────────────────────────────────────────────────────
-    // Bidirectional sync: dragging timeline handles updates sliders, and sliders
-    // update FrameSampler atomics (which the timeline reads back via poll).
-    timeline.onStartChanged = [this](float v)
-    {
-        startSlider.setValue(static_cast<double>(v), juce::dontSendNotification);
-    };
-    timeline.onEndChanged = [this](float v)
-    {
-        endSlider.setValue(static_cast<double>(v), juce::dontSendNotification);
-    };
+    // Start/End handles are dragged directly on the timeline and update
+    // FrameSampler atomics in SlotTimelineComponent::mouseDrag() — no sliders.
+    // The onStartChanged / onEndChanged callbacks are not used here.
     addAndMakeVisible(timeline);
 
     // ── Action buttons ────────────────────────────────────────────────────────
@@ -52,47 +46,51 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     addAndMakeVisible(clearBtn);
 
     // ── Labels ────────────────────────────────────────────────────────────────
-    for (auto* lbl : { &startLabel, &endLabel, &speedLabel, &loopLabel })
+    for (auto* lbl : { &speedLabel, &loopLabel })
     {
-        lbl->setFont(juce::FontOptions(11.0f));
+        lbl->setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
         lbl->setColour(juce::Label::textColourId, juce::Colour(0xffb0b0c0));
         lbl->setJustificationType(juce::Justification::centredRight);
         addAndMakeVisible(lbl);
     }
 
-    // ── Sliders ───────────────────────────────────────────────────────────────
-    auto initSl = [](juce::Slider& s, double lo, double hi,
-                     double step, const char* suf)
-    {
-        s.setSliderStyle(juce::Slider::LinearHorizontal);
-        s.setTextBoxStyle(juce::Slider::TextBoxRight, false, 52, 20);
-        s.setRange(lo, hi, step);
-        if (suf) s.setTextValueSuffix(suf);
-    };
+    // NOTE: MIX (blend) slider removed. Live/sampler opacity is now managed from
+    // the IMAGE tab's opacity controls (darken-blend, see ImagePageComponent).
 
-    initSl(startSlider, 0.0, 1.0, 0.001, nullptr);
-    startSlider.onValueChange = [this]
+    // ── Brightness lift slider ───────────────────────────────────────────────
+    // 0% = normal, 100% = fully white (all pixels → 255, silence).
+    brightnessLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
+    brightnessLabel.setColour(juce::Label::textColourId, juce::Colour(0xffb0b0c0));
+    brightnessLabel.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(brightnessLabel);
+
+    brightnessSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    brightnessSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                      Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
+    brightnessSlider.setRange(0.0, 100.0, 1.0);
+    brightnessSlider.setTextValueSuffix("%");
+    brightnessSlider.setValue(100.0, juce::dontSendNotification); // 100 = full image
+    brightnessSlider.onValueChange = [this]
     {
-        const float v = static_cast<float>(startSlider.getValue());
+        // Slider 100% = full image (lift=0), 0% = white silence (lift=1)
         if (auto* fs = processor.getFrameSampler())
-            fs->setSlotStartFrac(selectedSlot, v);
-        // Redraw timeline so the start marker follows the slider immediately
-        timeline.repaint();
+            fs->setSlotBrightnessLift(selectedSlot,
+                1.0f - static_cast<float>(brightnessSlider.getValue()) * 0.01f);
     };
-    addAndMakeVisible(startSlider);
+    addAndMakeVisible(brightnessSlider);
 
-    initSl(endSlider, 0.0, 1.0, 0.001, nullptr);
-    endSlider.setValue(1.0, juce::dontSendNotification);
-    endSlider.onValueChange = [this]
-    {
-        const float v = static_cast<float>(endSlider.getValue());
-        if (auto* fs = processor.getFrameSampler())
-            fs->setSlotEndFrac(selectedSlot, v);
-        timeline.repaint();
-    };
-    addAndMakeVisible(endSlider);
-
-    initSl(speedSlider, 0.01, 32.0, 0.01, "x");
+    // ── Speed slider ──────────────────────────────────────────────────────────
+    // Range 0.01–32.0×; skewed so that 1.0× sits at the physical centre.
+    speedSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    speedSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                 Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
+    // Step 0.001 gives 10× finer resolution than 0.01 — especially important
+    // at slow playback rates (0.01–0.10×) where the skewed slider compresses
+    // the physical space. Display is clamped to 2 decimal places.
+    speedSlider.setRange(0.01, 32.0, 0.001);
+    speedSlider.setNumDecimalPlacesToDisplay(2);
+    speedSlider.setTextValueSuffix("x");
+    speedSlider.setSkewFactorFromMidPoint(1.0); // 1.0× at slider centre
     speedSlider.setValue(1.0, juce::dontSendNotification);
     speedSlider.onValueChange = [this]
     {
@@ -144,14 +142,15 @@ void SlotEditorComponent::refreshSliderValues()
     auto* fs = processor.getFrameSampler();
     if (fs == nullptr) return;
 
-    startSlider.setValue(
-        static_cast<double>(fs->getSlotStartFrac(selectedSlot)),
-        juce::dontSendNotification);
-    endSlider.setValue(
-        static_cast<double>(fs->getSlotEndFrac(selectedSlot)),
-        juce::dontSendNotification);
+    // Start/End are no longer exposed as sliders — they are edited directly
+    // on the timeline. Only Speed and Resume need refreshing here.
     speedSlider.setValue(
         static_cast<double>(fs->getSlotSpeed(selectedSlot)),
+        juce::dontSendNotification);
+    // Blend (MIX) removed — opacity managed from IMAGE tab.
+    // Invert: slider shows image intensity (100=full, 0=white)
+    brightnessSlider.setValue(
+        (1.0 - static_cast<double>(fs->getSlotBrightnessLift(selectedSlot))) * 100.0,
         juce::dontSendNotification);
     resumeToggle.setToggleState(fs->getSlotResumeMode(selectedSlot),
                                 juce::dontSendNotification);
@@ -185,25 +184,35 @@ void SlotEditorComponent::applyLoopMode(LoopMode m)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // paint
+//
+// Full-width zone: title badge (top) then two columns side by side.
+//   Left  (~63 %): REC/PLAY/CLEAR buttons + large timeline
+//   Right (~37 %): Speed / Loop / Resume controls
+// A subtle vertical separator is drawn between the two panels.
 // ─────────────────────────────────────────────────────────────────────────────
 void SlotEditorComponent::paint(juce::Graphics& g)
 {
-    // Background
+    const int W   = getWidth();
+    const int H   = getHeight();
+    const int pad = 4;
+    const int gap = 6;
+
+    // ── Background ───────────────────────────────────────────────────────────
     g.setColour(juce::Colour(0xff1a1a2a));
     g.fillRoundedRectangle(getLocalBounds().toFloat(), 4.0f);
 
-    // Title badge
+    // ── Title badge (full width) ──────────────────────────────────────────────
     g.setColour(juce::Colour(0xff2a1a3a));
     g.fillRoundedRectangle(
-        juce::Rectangle<float>(4.0f, 4.0f, (float)(getWidth() - 8), 22.0f), 3.0f);
+        juce::Rectangle<float>(4.0f, 4.0f, (float)(W - 8), 22.0f), 3.0f);
 
     g.setColour(juce::Colour(0xffcc88ff));
-    g.setFont(juce::Font(juce::FontOptions(12.0f)).boldened());
+    g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
     g.drawText(juce::String("SLOT > ") + kNoteNamesEd[selectedSlot],
-               juce::Rectangle<int>(8, 4, getWidth() - 16, 22),
+               juce::Rectangle<int>(8, 4, W - 16, 22),
                juce::Justification::centredLeft, false);
 
-    // State indicator (right side of title)
+    // State indicator (right side of title badge)
     auto* fs = processor.getFrameSampler();
     const SlotState st = (fs != nullptr) ? fs->getSlotState(selectedSlot)
                                          : SlotState::IDLE;
@@ -213,85 +222,116 @@ void SlotEditorComponent::paint(juce::Graphics& g)
     {
         case SlotState::RECORDING:
             stateStr = blinkOn ? "* REC" : "  REC";
-            stateCol = juce::Colour(0xffff4444); break;
+            stateCol = juce::Colour(0xffff4444);
+            break;
         case SlotState::ARMED:
             stateStr = "ARM";
-            stateCol = juce::Colour(0xffffcc00); break;
+            stateCol = juce::Colour(0xffffcc00);
+            break;
         case SlotState::PLAYING:
             stateStr = "PLAY";
-            stateCol = juce::Colour(0xff44ff44); break;
+            stateCol = juce::Colour(0xff44ff44);
+            break;
         default:
             stateStr = (fs && fs->slotHasContent(selectedSlot)) ? "IDLE" : "EMPTY";
             break;
     }
     g.setColour(stateCol);
-    g.setFont(juce::FontOptions(11.0f));
-    g.drawText(stateStr, juce::Rectangle<int>(8, 4, getWidth() - 16, 22),
+    g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
+    g.drawText(stateStr, juce::Rectangle<int>(8, 4, W - 16, 22),
                juce::Justification::centredRight, false);
+
+    // ── Vertical separator between left and right panels ─────────────────────
+    const int leftW  = (W - 3 * pad - gap) * 63 / 100;
+    const int sepX   = pad + leftW + gap / 2;
+    g.setColour(juce::Colour(0xff2a2a3a));
+    g.fillRect(sepX, 30, 1, H - 34);
+
+    // ── Right panel subtle background ─────────────────────────────────────────
+    const int rightX = pad + leftW + gap + pad;
+    g.setColour(juce::Colour(0xff141422));
+    g.fillRoundedRectangle(
+        juce::Rectangle<float>((float)rightX - 2.0f, 28.0f,
+                                (float)(W - rightX - pad + 2), (float)(H - 32)),
+        3.0f);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Layout
+// resized
 //
-//   y=4    Title badge (h=22)
-//   y=30   Buttons REC / PLAY / CLEAR (h=30)
-//   y=64   Timeline (h=54)
-//   y=122  Sliders Start/End/Speed  (step=31, 3 rows → h=93)
-//   y=219  Loop buttons             (h=27)
-//   y=250  Resume toggle            (h=26)
-//   Total minimum height: ~280
+// Two-column layout below the title badge (y=30 downward):
+//
+//   Left  (~63 %):
+//     y=30 : [REC] [PLAY] [CLEAR]       (h=30)
+//     y=64 : Timeline                   (fills remaining height)
+//
+//   Right (~37 %):
+//     y=30 : Speed  label + slider      (rowH=27)
+//     y=61 : Loop   label + 4 buttons   (rowH=27)
+//     y=92 : Resume toggle              (h=26)
 // ─────────────────────────────────────────────────────────────────────────────
 void SlotEditorComponent::resized()
 {
-    const int pad  = 4;
-    const int lW   = 52; // label width
-    const int ctrlX = pad + lW + 4;
-    const int ctrlW = getWidth() - ctrlX - pad;
-    const int rowH  = 27;
-    const int step  = rowH + 4;
+    const int W   = getWidth();
+    const int H   = getHeight();
+    const int pad = 4;
+    const int gap = 6;
 
-    // ── Buttons (y=30) ───────────────────────────────────────────────────────
+    // Column split
+    const int leftW  = (W - 3 * pad - gap) * 63 / 100;
+    const int rightW = W - 3 * pad - gap - leftW;
+    const int leftX  = pad;
+    const int rightX = leftX + leftW + gap + pad;
+
+    // ── Left: REC / PLAY / CLEAR (y=30) ──────────────────────────────────────
     {
-        const int btnY = 30;
-        const int btnH = 30;
-        const int gap  = 4;
-        const int bW   = (getWidth() - 2 * pad - 2 * gap) / 3;
-        recBtn  .setBounds(pad,              btnY, bW, btnH);
-        playBtn .setBounds(pad + bW + gap,   btnY, bW, btnH);
-        clearBtn.setBounds(pad + 2*(bW+gap), btnY, bW, btnH);
+        const int btnY   = 30;
+        constexpr int btnH   = Sp3ctraTheme::kControlH;
+        const int btnGap = Sp3ctraTheme::kGap;
+        const int bW     = (leftW - 2 * btnGap) / 3;
+        recBtn  .setBounds(leftX,                       btnY, bW, btnH);
+        playBtn .setBounds(leftX + bW + btnGap,         btnY, bW, btnH);
+        clearBtn.setBounds(leftX + 2 * (bW + btnGap),   btnY, bW, btnH);
     }
 
-    // ── Timeline (y=64) ──────────────────────────────────────────────────────
-    timeline.setBounds(pad, 64, getWidth() - 2*pad, 54);
-
-    // ── Sliders (y=122) ──────────────────────────────────────────────────────
+    // ── Left: Timeline (y=64, fills remaining height) ─────────────────────────
     {
-        const int y0 = 122;
-        startLabel .setBounds(pad, y0 + 0*step, lW, rowH);
-        endLabel   .setBounds(pad, y0 + 1*step, lW, rowH);
-        speedLabel .setBounds(pad, y0 + 2*step, lW, rowH);
-
-        startSlider.setBounds(ctrlX, y0 + 0*step, ctrlW, rowH);
-        endSlider  .setBounds(ctrlX, y0 + 1*step, ctrlW, rowH);
-        speedSlider.setBounds(ctrlX, y0 + 2*step, ctrlW, rowH);
+        const int tlY = 64;
+        const int tlH = H - tlY - pad;
+        timeline.setBounds(leftX, tlY, leftW, juce::jmax(40, tlH));
     }
 
-    // ── Loop buttons (y=122+3*31=215) ────────────────────────────────────────
+    // ── Right panel controls ─────────────────────────────────────────────────
+    constexpr int rowH = Sp3ctraTheme::kControlH; // unified control height
+    const int step = rowH + 4;
+    const int lW   = 46; // label column width
+    const int ctrlX = rightX + lW + 4;
+    const int ctrlW = rightW - lW - 4;
+    int ry = 32; // slight top padding inside right panel
+
+    // Brightness lift
+    brightnessLabel .setBounds(rightX, ry, lW, rowH);
+    brightnessSlider.setBounds(ctrlX,   ry, ctrlW, rowH);
+    ry += step;
+
+    // Speed
+    speedLabel .setBounds(rightX, ry, lW, rowH);
+    speedSlider.setBounds(ctrlX,   ry, ctrlW, rowH);
+    ry += step;
+
+    // Loop
     {
-        const int loopY  = 122 + 3 * step;
-        const int gap    = 3;
-        const int availW = getWidth() - 2*pad - lW - 4;
-        const int bW     = (availW - 3*gap) / 4;
-        loopLabel.setBounds(pad, loopY, lW, rowH);
+        const int bGap   = 3;
+        const int availW = rightW - lW - 4;
+        const int bW     = (availW - 3 * bGap) / 4;
+        loopLabel.setBounds(rightX, ry, lW, rowH);
         for (int k = 0; k < 4; ++k)
-            loopBtns[k].setBounds(pad + lW + 4 + k*(bW + gap), loopY, bW, rowH);
+            loopBtns[k].setBounds(ctrlX + k * (bW + bGap), ry, bW, rowH);
     }
+    ry += step;
 
-    // ── Resume toggle (y=122+4*31=246) ───────────────────────────────────────
-    {
-        const int priY = 122 + 4 * step;
-        resumeToggle.setBounds(pad, priY, getWidth() - 2*pad, 26);
-    }
+    // Resume toggle
+    resumeToggle.setBounds(rightX, ry, rightW, 26);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

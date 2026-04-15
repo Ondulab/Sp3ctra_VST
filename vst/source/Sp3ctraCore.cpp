@@ -11,6 +11,7 @@ extern "C" {
     #include "utils/logger.h"
     #include "threading/multithreading.h"
     #include "processing/image_preprocessor.h"
+    #include "processing/image_pipeline.h"
     #include "luxstral/synth_luxstral_state.h"
     #include <arpa/inet.h>
     #include <sys/socket.h>
@@ -219,7 +220,7 @@ bool Sp3ctraCore::initializeBuffers() {
         // Without this initialization, the app crashes with NULL pointer dereference
         displayable_synth_buffers_init();
         synth_data_freeze_init();
-        image_preprocess_init();
+        pipeline_init();
         strokeforge_init();
         log_info("CORE", "Global display buffers initialized");
         
@@ -243,6 +244,7 @@ void Sp3ctraCore::shutdownBuffers() {
     displayable_synth_buffers_cleanup();
     synth_data_freeze_cleanup();
     strokeforge_cleanup();
+    pipeline_cleanup();
     image_preprocess_cleanup();
     
     if (audioImageBuffers) {

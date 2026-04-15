@@ -63,13 +63,6 @@ private:
     juce::Label slotDurLabel   [NUM_SLOTS];
     juce::TextButton slotClearBtn[NUM_SLOTS];
 
-    // Action buttons
-    juce::TextButton saveButton     { "Save Preset..." };
-    juce::TextButton loadButton     { "Load Preset..." };
-    juce::TextButton clearAllButton { "Clear All" };
-
-    // FileChooser must outlive the async lambda
-    std::unique_ptr<juce::FileChooser> fileChooser;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FrameSamplerSettingsTab)
 };

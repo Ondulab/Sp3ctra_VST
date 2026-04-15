@@ -9,18 +9,18 @@ class Sp3ctraAudioProcessor;
 /**
  * @brief Edit panel for the currently selected FrameSampler slot.
  *
- * Controls:
- *   REC / PLAY-STOP / CLEAR   — state-aware action buttons
- *   Timeline                  — brightness waveform with draggable Start/End handles
- *   Start / End               — normalised playback position sliders [0..1]
- *                               (bidirectionally synced with the timeline)
- *   Speed                     — playback speed multiplier [0.01..32.0×]
- *   Loop mode                 — four radio-style buttons (NONE/LOOP/INV/PING)
- *   Resume                    — toggle: resume from last stopped position instead
- *                               of restarting at startFrame on each Play press
+ * Layout — two vertical columns inside a full-width zone:
+ *   Left  (~63 %):
+ *     REC / PLAY-STOP / CLEAR   — state-aware action buttons
+ *     Timeline                  — brightness waveform; drag handles set Start/End
+ *                                 (Start/End sliders removed — edited directly on timeline)
+ *   Right (~37 %):
+ *     Speed    — playback speed multiplier [0.01..32.0×]; skewed so 1.0× is at centre
+ *     Loop     — four radio-style buttons (NONE / LOOP / INV / PING)
+ *     Resume   — toggle: resume from last stopped position
  *
- * Slider values are written directly to FrameSampler per-slot play params (Non-RT).
- * Slider values are refreshed from FrameSampler on slot switch (setSelectedSlot).
+ * Control values are written directly to FrameSampler per-slot play params (Non-RT).
+ * Values are refreshed from FrameSampler on slot switch (setSelectedSlot).
  * Button states are refreshed at ~5 Hz via internal Timer.
  */
 class SlotEditorComponent : public juce::Component,
@@ -62,15 +62,13 @@ private:
     juce::TextButton clearBtn { "CLEAR" };
 
     // ── Labels ────────────────────────────────────────────────────────────────
-    juce::Label startLabel  { {}, "Start" };
-    juce::Label endLabel    { {}, "End" };
-    juce::Label speedLabel  { {}, "Speed" };
-    juce::Label loopLabel   { {}, "Loop" };
+    juce::Label  brightnessLabel { {}, "IMG" };
+    juce::Slider brightnessSlider;
+    juce::Label speedLabel { {}, "Speed" };
+    juce::Label loopLabel  { {}, "Loop" };
 
     // ── Sliders ───────────────────────────────────────────────────────────────
-    juce::Slider startSlider; // 0.0–1.0 normalised
-    juce::Slider endSlider;   // 0.0–1.0 normalised
-    juce::Slider speedSlider; // 0.01–32.0 speed multiplier
+    juce::Slider speedSlider; // 0.01–32.0×; skewed so 1.0× sits at centre position
 
     // ── Loop mode (4 radio-style buttons: NONE / LOOP / INVERSE / PINGPONG) ──
     juce::TextButton loopBtns[4];

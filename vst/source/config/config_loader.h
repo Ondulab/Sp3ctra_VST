@@ -207,6 +207,50 @@ typedef struct {
     float strokeforge_morph_width_scale;       /* Width (notes) where morph reaches 1.0 (square) [10-500] */
     float strokeforge_blob_focus_sigma;        /* Gaussian sigma in notes [0.5-100]; small=pure tone, large=spectral cloud */
     float strokeforge_spectral_width_threshold; /* Blob width (notes) >= this → raw spectral passthrough (no Gaussian); 0=disabled [0-3456] */
+
+    /* ── Image Pipeline — live controls ──────────────────────────────────── */
+    /* image_live_opacity : scale factor applied to out->additive.notes[]     */
+    /*   1.0 = full amplitude   0.0 = complete silence (all notes → 0)        */
+    float image_live_opacity;
+
+    /* sampler_gamma : gamma applied to FrameSampler playback frames (1.0=off)  */
+    float sampler_gamma;
+    /* sampler_contrast_min : min intensity floor for sampler frames            */
+    float sampler_contrast_min;
+    /* sampler_freeze_mode : 0=PLAY, 1=PAUSE (freeze sampler last frame)        */
+    int sampler_freeze_mode;
+    /* sampler_fade_in_ms : fade-in on sampler (re)start (0-2000 ms)            */
+    int sampler_fade_in_ms;
+
+    /* raw_freeze_mode : upstream gate — controls data flow from UDP/conversion */
+    /*   0 = PLAY  — data flows to Sampler and Live                            */
+    /*   1 = HOLD  — freeze last raw frame (both S and L freeze)               */
+    /*   2 = STOP  — force silence on all downstream paths                     */
+    int raw_freeze_mode;
+    /* raw_fade_in_ms : fade-in/out when RAW transport changes (0-2000 ms)     */
+    int raw_fade_in_ms;
+
+    /* ── Per-path pipeline routing (set from APVTS, read by pipeline config builders) */
+    /* Source type mapping: 0=IMAGE_SOURCE_SAMPLER, 1=IMAGE_SOURCE_LIVE, 2=IMAGE_SOURCE_MIX */
+    int luxstral_source_type;              /* Which source feeds the LuxStral path */
+    int luxstral_inversion;                /* Per-path inversion toggle (0=off, 1=on) */
+    int luxstral_ac_removal;               /* Per-path AC removal toggle (0=off, 1=on) */
+    int luxsynth_source_type;              /* Which source feeds the LuxSynth+LuxWave path */
+    int luxsynth_inversion;                /* Per-path inversion toggle (0=off, 1=on) */
+    int luxsynth_ac_removal;               /* Per-path AC removal toggle (0=off, 1=on) */
+
+    /* image_freeze_mode : transport state for the live image stream           */
+    /*   0 = PLAY  — normal frame update                                       */
+    /*   1 = HOLD  — freeze last captured frame (skip update)                  */
+    /*   2 = WHITE — force all notes to 0.0 (silence)                         */
+    int image_freeze_mode;
+
+    /* image_sampler_opacity : opacity scale applied to the FrameSampler stream */
+    /*   1.0 = full signal   0.0 = complete silence                            */
+    float image_sampler_opacity;
+
+    /* image_fade_in_ms : fade-in/out duration for the live stream (0-2000 ms) */
+    int image_fade_in_ms;
 } sp3ctra_config_t;
 
 /**************************************************************************************

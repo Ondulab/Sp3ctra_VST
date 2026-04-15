@@ -53,6 +53,19 @@ void frame_sampler_on_frame_assembled(const uint8_t* R,
  */
 int frame_sampler_is_playing(void);
 
+/**
+ * @brief Returns non-zero if any FrameSampler slot is currently RECORDING.
+ *
+ * Used by udpThread() to allow preprocessed_data writes for Source=Sampler
+ * during recording.  The sampler snapshot is updated by onFrameAssembled()
+ * so the pipeline can read from it even while recording.
+ *
+ * Thread: UDP receiver thread (Non-RT). Must be fast (atomic read only).
+ *
+ * @return 1 if recording active, 0 otherwise
+ */
+int frame_sampler_is_recording(void);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

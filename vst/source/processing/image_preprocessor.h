@@ -137,6 +137,28 @@ void preprocess_luxwave(
     PreprocessedImageData *out
 );
 
+/* Sampler-specific variant of image_preprocess_frame.
+ * Identical pipeline to image_preprocess_frame() but uses sampler parameters
+ * (sampler_gamma, sampler_contrast_min, sampler_freeze_mode, sampler_fade_in_ms,
+ * image_sampler_opacity) instead of the live-stream parameters.
+ * Called exclusively from FramePlayerThread to process captured slot frames.
+ */
+int image_preprocess_frame_sampler(
+    const uint8_t *raw_r,
+    const uint8_t *raw_g,
+    const uint8_t *raw_b,
+    PreprocessedImageData *out
+);
+
+/* LuxStral sampler preprocessing — mirrors preprocess_luxstral() but with
+ * sampler-specific gamma, contrast_min, opacity, freeze mode, and fade-in. */
+void preprocess_luxstral_sampler(
+    const uint8_t *raw_r,
+    const uint8_t *raw_g,
+    const uint8_t *raw_b,
+    PreprocessedImageData *out
+);
+
 /* FFT preprocessing function for polyphonic synthesis
  * Computes FFT magnitudes from grayscale data with temporal smoothing
  * 

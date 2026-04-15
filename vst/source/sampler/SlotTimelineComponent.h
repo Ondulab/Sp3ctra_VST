@@ -6,20 +6,28 @@
 class Sp3ctraAudioProcessor;
 
 /**
- * @brief Horizontal timeline / waveform visualizer for a FrameSampler slot.
+ * @brief Horizontal spectral-timeline for a FrameSampler slot.
  *
- * Displays a brightness thumbnail computed from the recorded frames.
- * Two draggable handles let the user set the playback Start and End points
- * directly on the timeline, updating FrameSampler slotParams atomics on
- * the fly (reflected immediately in the SlotEditorComponent sliders via
- * the onStartChanged / onEndChanged callbacks).
+ * Visualization (symmetric around the horizontal centre line):
+ *   Upper half  — treble energy (right-pixel half, high freq) rising upward.
+ *   Lower half  — bass energy  (left-pixel half, low  freq) falling downward.
+ *   Gamma γ=0.4 compresses the scale so fine patterns are as visible as masses.
  *
- * A white playhead cursor tracks the current read position while PLAYING.
+ * Draggable handles (all kept at the top or bottom edge to avoid overlap):
  *
- * Non-RT safety:
- *   - rebuildThumbnail() reads slot frames from the message thread while
- *     the slot is not recording (safe — only FramePlayerThread reads them).
- *   - getSlotPlayHead() reads a per-slot atomic updated by FramePlayerThread.
+ *   ── Time handles (horizontal drag) ──────────────────────────────────────
+ *   Start bar  — green vertical bar, drag anywhere on the bar.
+ *   End   bar  — orange vertical bar, same.
+ *   Attack ▷  — white triangle at top (y ≤ 16), drags right from Start.
+ *   Decay  ◁  — white triangle at top (y ≤ 16), drags left  from End.
+ *
+ *   ── Frequency-cut handles (vertical drag) ───────────────────────────────
+ *   TrebleCut ▼ — small tab at the TOP edge (y ≤ kEdge) right side.
+ *                  Drag downward → fade the treble (upper) bars toward white.
+ *   BassCut   ▲ — small tab at the BOTTOM edge (y ≥ h-kEdge) right side.
+ *                  Drag upward  → fade the bass  (lower) bars toward white.
+ *
+ * Cursor feedback on hover (LeftRight for time handles, UpDown for freq cuts).
  */
 class SlotTimelineComponent : public juce::Component,
                                private juce::Timer
@@ -28,43 +36,44 @@ public:
     explicit SlotTimelineComponent(Sp3ctraAudioProcessor& proc);
     ~SlotTimelineComponent() override;
 
-    /** Switch to displaying a different slot (0–11). Invalidates thumbnail. */
     void setSelectedSlot(int idx);
-
-    /** Invalidate the cached thumbnail (call after a new recording). */
     void markDirty() noexcept { thumbnailDirty = true; repaint(); }
 
-    // Fired when the user drags Start / End handles on the timeline.
-    // Caller (SlotEditorComponent) uses these to sync the sliders.
     std::function<void(float)> onStartChanged;
     std::function<void(float)> onEndChanged;
 
-    void paint(juce::Graphics& g) override;
+    void paint    (juce::Graphics& g)         override;
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseDrag(const juce::MouseEvent& e) override;
-    void mouseUp(const juce::MouseEvent& e) override;
+    void mouseMove(const juce::MouseEvent& e) override;
+    void mouseUp  (const juce::MouseEvent& e) override;
 
 private:
     Sp3ctraAudioProcessor& processor;
-    int selectedSlot  = 0;
+    int selectedSlot = 0;
 
-    // Cached brightness waveform (computed lazily in paint())
+    // Spectral thumbnail — bass [0..1] (lower half) and treble [0..1] (upper half).
     static constexpr int kMaxSamples = 512;
-    float brightness[kMaxSamples] {};
-    int   numSamples    = 0;
+    float bass[kMaxSamples]   {};
+    float treble[kMaxSamples] {};
+    int   numSamples     = 0;
     bool  thumbnailDirty = true;
+    void  rebuildThumbnail();
 
-    void rebuildThumbnail();
-
-    // Drag state
-    enum class DragTarget { None, Start, End };
+    enum class DragTarget { None, Start, End, Attack, Decay, TrebleCut, BassCut };
     DragTarget dragging = DragTarget::None;
 
-    // Coordinate helpers
-    float xToFrac(int x)    const noexcept;
-    int   fracToX(float f)  const noexcept;
+    // Hit-test zones
+    static constexpr int kEdge   = 8;   // px from top/bottom for freq-cut tabs
+    static constexpr int kSnap   = 12;  // px tolerance for time handles
+    static constexpr int kAtkH   = 16;  // y zone height for attack/decay handles
 
-    void timerCallback() override; // repaint when playing (playhead moves)
+    void updateCursor(const juce::MouseEvent& e);
+
+    float xToFrac(int x)   const noexcept;
+    int   fracToX(float f) const noexcept;
+
+    void timerCallback() override;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SlotTimelineComponent)
 };

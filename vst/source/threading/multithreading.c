@@ -14,6 +14,7 @@
 #include "../utils/image_debug_stubs.h"
 #include "../utils/rt_profiler.h"
 #include "../processing/image_preprocessor.h"
+#include "../processing/image_pipeline.h"
 #include "../processing/image_sequencer.h"
 #include "../synthesis/luxwave/synth_luxwave.h"
 #include <time.h>
@@ -337,6 +338,7 @@ void *udpThread(void *arg) {
       // 🔧 BUGFIX: Release write_mutex if held (prevents deadlock on restart)
       if (audio_write_started) {
         audio_image_buffers_complete_write(audioBuffers);
+        audio_image_buffers_snapshot_raw(audioBuffers);
         audio_write_started = 0;
         log_info("THREAD", "Released write_mutex before exit (incomplete line)");
       }
@@ -433,6 +435,7 @@ void *udpThread(void *arg) {
         // Complete the incomplete audio buffer write if it was started
         if (audio_write_started) {
           audio_image_buffers_complete_write(audioBuffers);
+        audio_image_buffers_snapshot_raw(audioBuffers);
           audio_write_started = 0;
 #ifdef DEBUG_UDP
           log_debug("UDP", "Completed partial audio buffer write for incomplete line");
@@ -518,6 +521,7 @@ void *udpThread(void *arg) {
         // 🔧 BUGFIX: Release write_mutex if held (prevents deadlock on restart)
         if (audio_write_started) {
           audio_image_buffers_complete_write(audioBuffers);
+        audio_image_buffers_snapshot_raw(audioBuffers);
           audio_write_started = 0;
           log_info("THREAD", "Released write_mutex before exit (incomplete line)");
         }
@@ -532,6 +536,7 @@ void *udpThread(void *arg) {
       /* Complete audio buffer write and swap */
       if (audio_write_started) {
         audio_image_buffers_complete_write(audioBuffers);
+        audio_image_buffers_snapshot_raw(audioBuffers);
         audio_write_started = 0;
       }
 
@@ -565,13 +570,51 @@ void *udpThread(void *arg) {
         memcpy(mixed_B, db->activeBuffer_B, nb_pixels);
       }
       
-      /* Step 2: Preprocess the MIXED RGB (pan calculated from mixed color temperature) */
-      if (image_preprocess_frame(mixed_R, mixed_G, mixed_B, &preprocessed_temp) != 0) {
-        log_error("THREAD", "Image preprocessing failed");
+      /* Step 2: Preprocess via pipeline — source routing selects the correct
+       * input (S/L/M) for each synthesis path based on per-path config.
+       *
+       * Available sources in this thread:
+       *   LIVE    (L) = db->activeBuffer_R/G/B   (raw UDP, pre-blend)
+       *   MIX     (M) = mixed_R/G/B              (darken-blended live+sampler)
+       *   SAMPLER (S) = audioBuffers sampler slot (last frame written by FramePlayerThread)
+       */
+      {
+        PipelineConfig live_cfg = pipeline_build_config_live();
+
+        const uint8_t *src_R;
+        const uint8_t *src_G;
+        const uint8_t *src_B;
+
+        if (live_cfg.luxstral_path.source == IMAGE_SOURCE_LIVE)
+        {
+            /* L — Raw UDP data (pre-blend, pre-sequencer) */
+            src_R = db->activeBuffer_R;
+            src_G = db->activeBuffer_G;
+            src_B = db->activeBuffer_B;
+        }
+        else if (live_cfg.luxstral_path.source == IMAGE_SOURCE_SAMPLER)
+        {
+            /* S — Last sampler frame written by FramePlayerThread */
+            uint8_t *smpR, *smpG, *smpB;
+            audio_image_buffers_get_sampler_pointers(audioBuffers, &smpR, &smpG, &smpB);
+            src_R = smpR;
+            src_G = smpG;
+            src_B = smpB;
+        }
+        else
+        {
+            /* M — AudioImageBuffers read bus = darken-blend of Live + Sampler */
+            uint8_t *mixR, *mixG, *mixB;
+            audio_image_buffers_get_read_pointers(audioBuffers, &mixR, &mixG, &mixB);
+            src_R = mixR;
+            src_G = mixG;
+            src_B = mixB;
+        }
+
+        if (pipeline_process_frame(src_R, src_G, src_B, &live_cfg, &preprocessed_temp) != 0) {
+          log_error("THREAD", "Pipeline processing failed");
+        }
       }
-      
-      /* Step 2.5: FFT is already calculated in preprocess_luxsynth() */
-      /* No additional action needed - FFT data is in preprocessed_temp.polyphonic */
 
       /* 🎵 LUXWAVE FIX: Pass grayscale image data to LuxWave synthesis thread
        * This connects the scanner data pipeline to LuxWave for audio generation
@@ -597,17 +640,37 @@ void *udpThread(void *arg) {
        * that FramePlayerThread already wrote for the current synthesis cycle.
        * synth_AudioProcess reads db->preprocessed_data directly for audio gen. */
 #ifdef VST_MODE
-      if (!frame_sampler_is_playing())
+      /* Source routing: allow live preprocessed data to flow based on
+       * luxstral_source_type.
+       * Source=S(0): UDP thread writes ONLY while recording (the RAW incoming
+       *   stream must drive the synth during rec; FramePlayerThread is idle).
+       *   During playback, FramePlayerThread is the sole writer.
+       * Source=L(1): UDP thread always writes (live data).
+       * Source=M(2): UDP thread always writes (live component of mix). */
       {
-#endif
+        int src = g_sp3ctra_config.luxstral_source_type;
+        if (src == 1 /* IMAGE_SOURCE_LIVE */ ||
+            src == 2 /* IMAGE_SOURCE_MIX  */)
+        {
+          db->preprocessed_data = preprocessed_temp;
+          db->dataReady = 1;
+        }
+        else if (src == 0 /* IMAGE_SOURCE_SAMPLER */ && frame_sampler_is_recording())
+        {
+          /* During recording the live incoming stream feeds the sampler path.
+           * Use tag=2 (sampler) so synth_AudioProcess source-tag gating
+           * accepts the data when Source=S is selected. */
+          db->preprocessed_data = preprocessed_temp;
+          db->dataReady = 2;
+        }
+      }
+#else
         db->preprocessed_data = preprocessed_temp;
         db->dataReady = 1;
-#ifdef VST_MODE
-      }
 #endif
       pthread_cond_signal(&db->cond);
       pthread_mutex_unlock(&db->mutex);
-      
+
       /* 🎨 DISPLAY FIX: Update global display buffers with MIXED RGB colors
        * This replaces the grayscale→RGB conversion in synth_luxstral.c
        */
@@ -646,6 +709,7 @@ void *udpThread(void *arg) {
       // 🔧 BUGFIX: Release write_mutex if held (prevents deadlock on restart)
       if (audio_write_started) {
         audio_image_buffers_complete_write(audioBuffers);
+        audio_image_buffers_snapshot_raw(audioBuffers);
         audio_write_started = 0;
         log_info("THREAD", "Released write_mutex before exit (incomplete line)");
       }
@@ -657,6 +721,7 @@ void *udpThread(void *arg) {
   // This handles the case where the while(ctx->running) condition fails
   if (audio_write_started) {
     audio_image_buffers_complete_write(audioBuffers);
+        audio_image_buffers_snapshot_raw(audioBuffers);
     audio_write_started = 0;
     log_info("THREAD", "Released write_mutex at thread exit (safety cleanup)");
   }

@@ -1,5 +1,6 @@
 #include "LuxStralSettingsTab.h"
 #include "../Sp3ctraConstants.h"
+#include "../UITheme.h"
 #include <cmath>
 
 //==============================================================================
@@ -16,17 +17,18 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     // Section: Musical Tuning (eliminates frequency jumps)
     // ========================================================================
     tuningRangeSectionLabel.setText("Musical Tuning", juce::dontSendNotification);
-    tuningRangeSectionLabel.setFont(juce::Font(juce::FontOptions(15.0f)).boldened());
+    tuningRangeSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
     tuningRangeSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
     contentComponent.addAndMakeVisible(tuningRangeSectionLabel);
 
     // Tuning (A4 reference)
     tuningLabel.setText("Tuning (A4):", juce::dontSendNotification);
     tuningLabel.setJustificationType(juce::Justification::centredRight);
+    tuningLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     contentComponent.addAndMakeVisible(tuningLabel);
     
     tuningSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    tuningSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    tuningSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     tuningSlider.setTextValueSuffix(" Hz");
     contentComponent.addAndMakeVisible(tuningSlider);
     tuningAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -35,6 +37,7 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     // Root Note (ComboBox)
     rootNoteLabel.setText("Root Note:", juce::dontSendNotification);
     rootNoteLabel.setJustificationType(juce::Justification::centredRight);
+    rootNoteLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     contentComponent.addAndMakeVisible(rootNoteLabel);
     
     // Populate ComboBox with note names (C1 to B6)
@@ -52,10 +55,11 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     // Number of Octaves
     numOctavesLabel.setText("Octaves:", juce::dontSendNotification);
     numOctavesLabel.setJustificationType(juce::Justification::centredRight);
+    numOctavesLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     contentComponent.addAndMakeVisible(numOctavesLabel);
     
     numOctavesSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    numOctavesSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+    numOctavesSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
     numOctavesSlider.setRange(1, 10, 1);  // Integer steps
     contentComponent.addAndMakeVisible(numOctavesSlider);
     numOctavesAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -63,13 +67,14 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
 
     // Frequency Range Info Label (read-only, displays calculated range)
     freqRangeInfoLabel.setText("Range: -- Hz to -- Hz", juce::dontSendNotification);
-    freqRangeInfoLabel.setFont(juce::Font(juce::FontOptions(12.0f)).italicised());
+    freqRangeInfoLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).italicised());
     freqRangeInfoLabel.setColour(juce::Label::textColourId, juce::Colours::grey);
     contentComponent.addAndMakeVisible(freqRangeInfoLabel);
 
     // Equal-Loudness Compensation (Physiological Filter)
     physiologicalFilterLabel.setText("Equal-Loudness:", juce::dontSendNotification);
     physiologicalFilterLabel.setJustificationType(juce::Justification::centredRight);
+    physiologicalFilterLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     contentComponent.addAndMakeVisible(physiologicalFilterLabel);
     
     physiologicalFilterToggle.setButtonText("Compensate (A-weighting)");
@@ -92,7 +97,7 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     contentComponent.addAndMakeVisible(physiologicalDepthLabel);
 
     physiologicalDepthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    physiologicalDepthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 20);
+    physiologicalDepthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbXNarrow, Sp3ctraTheme::kTextBoxH);
     physiologicalDepthSlider.setTooltip(physiologicalDepthLabel.getTooltip());
     contentComponent.addAndMakeVisible(physiologicalDepthSlider);
     physiologicalDepthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -102,16 +107,17 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     // Section: Envelope Parameters
     // ========================================================================
     envelopeSectionLabel.setText("Envelope Parameters", juce::dontSendNotification);
-    envelopeSectionLabel.setFont(juce::Font(juce::FontOptions(15.0f)).boldened());
+    envelopeSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
     envelopeSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
     contentComponent.addAndMakeVisible(envelopeSectionLabel);
 
     attackLabel.setText("Attack Time:", juce::dontSendNotification);
     attackLabel.setJustificationType(juce::Justification::centredRight);
+    attackLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     contentComponent.addAndMakeVisible(attackLabel);
     
     attackSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    attackSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    attackSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     attackSlider.setTextValueSuffix(" ms");
     contentComponent.addAndMakeVisible(attackSlider);
     attackAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -119,10 +125,11 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
 
     releaseLabel.setText("Release Time:", juce::dontSendNotification);
     releaseLabel.setJustificationType(juce::Justification::centredRight);
+    releaseLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     contentComponent.addAndMakeVisible(releaseLabel);
     
     releaseSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    releaseSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    releaseSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     releaseSlider.setTextValueSuffix(" ms");
     contentComponent.addAndMakeVisible(releaseSlider);
     releaseAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -132,12 +139,13 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     // Section: Image Processing
     // ========================================================================
     imageProcSectionLabel.setText("Image Processing", juce::dontSendNotification);
-    imageProcSectionLabel.setFont(juce::Font(juce::FontOptions(15.0f)).boldened());
+    imageProcSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
     imageProcSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
     contentComponent.addAndMakeVisible(imageProcSectionLabel);
 
     gammaEnableLabel.setText("Gamma Correction:", juce::dontSendNotification);
     gammaEnableLabel.setJustificationType(juce::Justification::centredRight);
+    gammaEnableLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     contentComponent.addAndMakeVisible(gammaEnableLabel);
     
     gammaEnableToggle.setButtonText("Enable");
@@ -147,20 +155,22 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
 
     gammaValueLabel.setText("Gamma Value:", juce::dontSendNotification);
     gammaValueLabel.setJustificationType(juce::Justification::centredRight);
+    gammaValueLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     contentComponent.addAndMakeVisible(gammaValueLabel);
     
     gammaValueSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    gammaValueSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    gammaValueSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     contentComponent.addAndMakeVisible(gammaValueSlider);
     gammaValueAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralGammaValue", gammaValueSlider);
 
     contrastMinLabel.setText("Contrast Min:", juce::dontSendNotification);
     contrastMinLabel.setJustificationType(juce::Justification::centredRight);
+    contrastMinLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     contentComponent.addAndMakeVisible(contrastMinLabel);
     
     contrastMinSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    contrastMinSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    contrastMinSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     contentComponent.addAndMakeVisible(contrastMinSlider);
     contrastMinAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralContrastMin", contrastMinSlider);
@@ -169,12 +179,13 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     // Section: Stereo Processing
     // ========================================================================
     stereoSectionLabel.setText("Stereo Processing", juce::dontSendNotification);
-    stereoSectionLabel.setFont(juce::Font(juce::FontOptions(15.0f)).boldened());
+    stereoSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
     stereoSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
     contentComponent.addAndMakeVisible(stereoSectionLabel);
 
     stereoEnableLabel.setText("Stereo Mode:", juce::dontSendNotification);
     stereoEnableLabel.setJustificationType(juce::Justification::centredRight);
+    stereoEnableLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     contentComponent.addAndMakeVisible(stereoEnableLabel);
     
     stereoEnableToggle.setButtonText("Enable");
@@ -184,10 +195,11 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
 
     stereoTempAmpLabel.setText("Temperature Amp:", juce::dontSendNotification);
     stereoTempAmpLabel.setJustificationType(juce::Justification::centredRight);
+    stereoTempAmpLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     contentComponent.addAndMakeVisible(stereoTempAmpLabel);
     
     stereoTempAmpSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    stereoTempAmpSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    stereoTempAmpSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     contentComponent.addAndMakeVisible(stereoTempAmpSlider);
     stereoTempAmpAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralStereoTempAmp", stereoTempAmpSlider);
@@ -196,36 +208,39 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     // Section: Dynamics Processing
     // ========================================================================
     dynamicsSectionLabel.setText("Dynamics Processing", juce::dontSendNotification);
-    dynamicsSectionLabel.setFont(juce::Font(juce::FontOptions(15.0f)).boldened());
+    dynamicsSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
     dynamicsSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
     contentComponent.addAndMakeVisible(dynamicsSectionLabel);
 
     volumeWeightingLabel.setText("Volume Weighting:", juce::dontSendNotification);
     volumeWeightingLabel.setJustificationType(juce::Justification::centredRight);
+    volumeWeightingLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     contentComponent.addAndMakeVisible(volumeWeightingLabel);
     
     volumeWeightingSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    volumeWeightingSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    volumeWeightingSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     contentComponent.addAndMakeVisible(volumeWeightingSlider);
     volumeWeightingAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralVolumeWeightingExp", volumeWeightingSlider);
 
     softLimitThresholdLabel.setText("Soft Limit Threshold:", juce::dontSendNotification);
     softLimitThresholdLabel.setJustificationType(juce::Justification::centredRight);
+    softLimitThresholdLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     contentComponent.addAndMakeVisible(softLimitThresholdLabel);
     
     softLimitThresholdSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    softLimitThresholdSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    softLimitThresholdSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     contentComponent.addAndMakeVisible(softLimitThresholdSlider);
     softLimitThresholdAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralSoftLimitThreshold", softLimitThresholdSlider);
 
     softLimitKneeLabel.setText("Soft Limit Knee:", juce::dontSendNotification);
     softLimitKneeLabel.setJustificationType(juce::Justification::centredRight);
+    softLimitKneeLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     contentComponent.addAndMakeVisible(softLimitKneeLabel);
     
     softLimitKneeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    softLimitKneeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    softLimitKneeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     contentComponent.addAndMakeVisible(softLimitKneeSlider);
     softLimitKneeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralSoftLimitKnee", softLimitKneeSlider);
@@ -234,16 +249,17 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     // Section: Performance
     // ========================================================================
     performanceSectionLabel.setText("Performance", juce::dontSendNotification);
-    performanceSectionLabel.setFont(juce::Font(juce::FontOptions(15.0f)).boldened());
+    performanceSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
     performanceSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
     contentComponent.addAndMakeVisible(performanceSectionLabel);
 
     numWorkersLabel.setText("Worker Threads:", juce::dontSendNotification);
     numWorkersLabel.setJustificationType(juce::Justification::centredRight);
+    numWorkersLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     contentComponent.addAndMakeVisible(numWorkersLabel);
     
     numWorkersSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    numWorkersSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    numWorkersSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     contentComponent.addAndMakeVisible(numWorkersSlider);
     numWorkersAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralNumWorkers", numWorkersSlider);
@@ -252,13 +268,14 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     // Section: StrokeForge — Sine → Square Waveform Morphing
     // ========================================================================
     sfSectionLabel.setText("StrokeForge — Waveform Morphing (Sine \xe2\x86\x92 Square)", juce::dontSendNotification);
-    sfSectionLabel.setFont(juce::Font(juce::FontOptions(15.0f)).boldened());
+    sfSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
     sfSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightyellow);
     contentComponent.addAndMakeVisible(sfSectionLabel);
 
     // Enable
     sfEnabledLabel.setText("Enable:", juce::dontSendNotification);
     sfEnabledLabel.setJustificationType(juce::Justification::centredRight);
+    sfEnabledLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     contentComponent.addAndMakeVisible(sfEnabledLabel);
     sfEnabledToggle.setButtonText("StrokeForge Active");
     sfEnabledToggle.setTooltip("When enabled, stroke width controls waveform morphing:\n"
@@ -274,7 +291,7 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     sfBlobThresholdLabel.setTooltip("Minimum brightness to consider a region as a stroke.");
     contentComponent.addAndMakeVisible(sfBlobThresholdLabel);
     sfBlobThresholdSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    sfBlobThresholdSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    sfBlobThresholdSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     sfBlobThresholdSlider.setTooltip(sfBlobThresholdLabel.getTooltip());
     contentComponent.addAndMakeVisible(sfBlobThresholdSlider);
     sfBlobThresholdAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -287,7 +304,7 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
                                "Increase to reject sensor noise.");
     contentComponent.addAndMakeVisible(sfMinWidthLabel);
     sfMinWidthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    sfMinWidthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    sfMinWidthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     sfMinWidthSlider.setTooltip(sfMinWidthLabel.getTooltip());
     contentComponent.addAndMakeVisible(sfMinWidthSlider);
     sfMinWidthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -299,7 +316,7 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     sfMergeGapLabel.setTooltip("Maximum gap (notes) between two segments to merge them into one stroke.");
     contentComponent.addAndMakeVisible(sfMergeGapLabel);
     sfMergeGapSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    sfMergeGapSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    sfMergeGapSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     sfMergeGapSlider.setTooltip(sfMergeGapLabel.getTooltip());
     contentComponent.addAndMakeVisible(sfMergeGapSlider);
     sfMergeGapAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -313,7 +330,7 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
                                  "morph = stroke_width / this_value  (clamped to 1.0)");
     contentComponent.addAndMakeVisible(sfMorphWidthLabel);
     sfMorphWidthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    sfMorphWidthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    sfMorphWidthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     sfMorphWidthSlider.setTooltip(sfMorphWidthLabel.getTooltip());
     contentComponent.addAndMakeVisible(sfMorphWidthSlider);
     sfMorphWidthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -330,7 +347,7 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
         "Tip: set 1-5 to get a precise-pitch square wave.");
     contentComponent.addAndMakeVisible(sfFocusSigmaLabel);
     sfFocusSigmaSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    sfFocusSigmaSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    sfFocusSigmaSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     sfFocusSigmaSlider.setTextValueSuffix(" notes");
     sfFocusSigmaSlider.setTooltip(sfFocusSigmaLabel.getTooltip());
     contentComponent.addAndMakeVisible(sfFocusSigmaSlider);
@@ -347,7 +364,7 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     contentComponent.addAndMakeVisible(sfSpectralWidthThresholdLabel);
 
     sfSpectralWidthThresholdSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    sfSpectralWidthThresholdSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 20);
+    sfSpectralWidthThresholdSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     sfSpectralWidthThresholdSlider.setTextValueSuffix(" notes");
     sfSpectralWidthThresholdSlider.setTooltip(sfSpectralWidthThresholdLabel.getTooltip());
     contentComponent.addAndMakeVisible(sfSpectralWidthThresholdSlider);
@@ -395,7 +412,7 @@ void LuxStralSettingsTab::paint(juce::Graphics& g)
 
     // Section title
     g.setColour(juce::Colours::white);
-    g.setFont(juce::Font(juce::FontOptions(16.0f)).boldened());
+    g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
     g.drawText("LuxStral Additive Synthesis", getLocalBounds().removeFromTop(30),
                juce::Justification::centred, true);
 }
@@ -411,12 +428,14 @@ void LuxStralSettingsTab::resized()
 
 void LuxStralSettingsTab::layoutContentComponent()
 {
-    const int labelWidth = 140;
+    constexpr int labelWidth = Sp3ctraTheme::kLabelWide;
     const int sliderWidth = 200;
-    const int rowHeight = 30;
+    constexpr int rowHeight = Sp3ctraTheme::kRowStep;
     const int sectionSpacing = 15;
-    const int itemSpacing = 5;
-    const int padding = 20;
+    constexpr int itemSpacing = Sp3ctraTheme::kRowGap;
+    constexpr int padding = Sp3ctraTheme::kHPad;
+    constexpr int ctrlH = Sp3ctraTheme::kControlH;
+    constexpr int vc = (rowHeight - ctrlH) / 2;
 
     int yPos = padding;
     int contentWidth = viewport.getWidth() - 40;
@@ -427,27 +446,27 @@ void LuxStralSettingsTab::layoutContentComponent()
     tuningRangeSectionLabel.setBounds(padding, yPos, contentWidth, 25);
     yPos += 30;
     
-    tuningLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    tuningSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    tuningLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    tuningSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + itemSpacing;
     
-    rootNoteLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    rootNoteComboBox.setBounds(padding + labelWidth + 10, yPos, 100, rowHeight);
+    rootNoteLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    rootNoteComboBox.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, 70, ctrlH);
     yPos += rowHeight + itemSpacing;
     
-    numOctavesLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    numOctavesSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    numOctavesLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    numOctavesSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + itemSpacing;
     
     freqRangeInfoLabel.setBounds(padding, yPos, contentWidth, 20);
     yPos += 25 + itemSpacing;
     
-    physiologicalFilterLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    physiologicalFilterToggle.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    physiologicalFilterLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    physiologicalFilterToggle.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + itemSpacing;
 
-    physiologicalDepthLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    physiologicalDepthSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    physiologicalDepthLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    physiologicalDepthSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + sectionSpacing;
 
     // ========================================================================
@@ -456,12 +475,12 @@ void LuxStralSettingsTab::layoutContentComponent()
     envelopeSectionLabel.setBounds(padding, yPos, contentWidth, 25);
     yPos += 30;
     
-    attackLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    attackSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    attackLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    attackSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + itemSpacing;
     
-    releaseLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    releaseSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    releaseLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    releaseSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + sectionSpacing;
 
     // ========================================================================
@@ -470,16 +489,16 @@ void LuxStralSettingsTab::layoutContentComponent()
     imageProcSectionLabel.setBounds(padding, yPos, contentWidth, 25);
     yPos += 30;
     
-    gammaEnableLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    gammaEnableToggle.setBounds(padding + labelWidth + 10, yPos, 100, rowHeight);
+    gammaEnableLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    gammaEnableToggle.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, 100, ctrlH);
     yPos += rowHeight + itemSpacing;
     
-    gammaValueLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    gammaValueSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    gammaValueLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    gammaValueSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + itemSpacing;
     
-    contrastMinLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    contrastMinSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    contrastMinLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    contrastMinSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + sectionSpacing;
 
     // ========================================================================
@@ -488,12 +507,12 @@ void LuxStralSettingsTab::layoutContentComponent()
     stereoSectionLabel.setBounds(padding, yPos, contentWidth, 25);
     yPos += 30;
     
-    stereoEnableLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    stereoEnableToggle.setBounds(padding + labelWidth + 10, yPos, 100, rowHeight);
+    stereoEnableLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    stereoEnableToggle.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, 100, ctrlH);
     yPos += rowHeight + itemSpacing;
     
-    stereoTempAmpLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    stereoTempAmpSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    stereoTempAmpLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    stereoTempAmpSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + sectionSpacing;
 
     // ========================================================================
@@ -502,16 +521,16 @@ void LuxStralSettingsTab::layoutContentComponent()
     dynamicsSectionLabel.setBounds(padding, yPos, contentWidth, 25);
     yPos += 30;
     
-    volumeWeightingLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    volumeWeightingSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    volumeWeightingLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    volumeWeightingSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + itemSpacing;
     
-    softLimitThresholdLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    softLimitThresholdSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    softLimitThresholdLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    softLimitThresholdSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + itemSpacing;
     
-    softLimitKneeLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    softLimitKneeSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    softLimitKneeLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    softLimitKneeSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + sectionSpacing;
 
     // ========================================================================
@@ -520,8 +539,8 @@ void LuxStralSettingsTab::layoutContentComponent()
     performanceSectionLabel.setBounds(padding, yPos, contentWidth, 25);
     yPos += 30;
     
-    numWorkersLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    numWorkersSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    numWorkersLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    numWorkersSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + sectionSpacing;
 
     // ========================================================================
@@ -530,36 +549,36 @@ void LuxStralSettingsTab::layoutContentComponent()
     sfSectionLabel.setBounds(padding, yPos, contentWidth, 25);
     yPos += 30;
 
-    sfEnabledLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    sfEnabledToggle.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    sfEnabledLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    sfEnabledToggle.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + itemSpacing;
 
-    sfBlobThresholdLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    sfBlobThresholdSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    sfBlobThresholdLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    sfBlobThresholdSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + itemSpacing;
 
-    sfMinWidthLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    sfMinWidthSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    sfMinWidthLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    sfMinWidthSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + itemSpacing;
 
-    sfMergeGapLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    sfMergeGapSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    sfMergeGapLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    sfMergeGapSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + itemSpacing;
 
-    sfMorphWidthLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    sfMorphWidthSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    sfMorphWidthLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    sfMorphWidthSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + itemSpacing;
 
-    sfFocusSigmaLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    sfFocusSigmaSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    sfFocusSigmaLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    sfFocusSigmaSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + itemSpacing;
 
-    sfSpectralWidthThresholdLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    sfSpectralWidthThresholdSlider.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    sfSpectralWidthThresholdLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    sfSpectralWidthThresholdSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + itemSpacing;
 
-    sfFocusOnlyLabel.setBounds(padding, yPos, labelWidth, rowHeight);
-    sfFocusOnlyToggle.setBounds(padding + labelWidth + 10, yPos, sliderWidth, rowHeight);
+    sfFocusOnlyLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    sfFocusOnlyToggle.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + padding;
 
     // Set content component size for scrolling

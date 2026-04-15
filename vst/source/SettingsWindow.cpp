@@ -1,5 +1,6 @@
 #include "SettingsWindow.h"
 #include "Sp3ctraConstants.h"
+#include "UITheme.h"
 
 //==============================================================================
 // SettingsComponent Implementation
@@ -9,20 +10,21 @@ SettingsComponent::SettingsComponent(Sp3ctraAudioProcessor& processor)
     : audioProcessor(processor),
       tabbedComponent(juce::TabbedButtonBar::TabsAtTop)
 {
-    // Create and add tabs
+    // Create and add tabs — ordered by pipeline stage (sensor → image → audio → playback)
     generalTab      = new GeneralSettingsTab(processor);
     networkTab      = new NetworkSettingsTab(processor);
+    imageTab        = new ImageSettingsTab(processor);
     luxstralTab     = new LuxStralSettingsTab(processor);
     frameSamplerTab = new FrameSamplerSettingsTab(processor);
-    
+
     tabbedComponent.addTab("General",      juce::Colours::darkgrey, generalTab,      false);
     tabbedComponent.addTab("Network",      juce::Colours::darkgrey, networkTab,      false);
+    tabbedComponent.addTab("Image",        juce::Colours::darkgrey, imageTab,        false);
     tabbedComponent.addTab("LuxStral",     juce::Colours::darkgrey, luxstralTab,     false);
     tabbedComponent.addTab("FrameSampler", juce::Colours::darkgrey, frameSamplerTab, false);
-    
+
     addAndMakeVisible(tabbedComponent);
-    
-    // FrameSampler tab needs more height (12 slot rows + controls)
+
     setSize(600, 650);
 }
 
@@ -47,7 +49,7 @@ void SettingsComponent::resized()
     auto bounds = getLocalBounds();
     bounds.removeFromTop(40);  // Skip title area
     bounds.reduce(10, 5);
-    
+
     tabbedComponent.setBounds(bounds);
 }
 

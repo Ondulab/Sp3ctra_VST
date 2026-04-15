@@ -65,10 +65,18 @@ target_sources(Sp3ctraVST
         source/settings/GeneralSettingsTab.h
         source/settings/NetworkSettingsTab.cpp
         source/settings/NetworkSettingsTab.h
+        source/settings/ImageSettingsTab.cpp
+        source/settings/ImageSettingsTab.h
         source/settings/LuxStralSettingsTab.cpp
         source/settings/LuxStralSettingsTab.h
         source/settings/FrameSamplerSettingsTab.cpp
         source/settings/FrameSamplerSettingsTab.h
+
+        # Image pipeline UI
+        source/image/ImagePageComponent.cpp
+        source/image/ImagePageComponent.h
+        source/image/BlobVisualizerComponent.cpp
+        source/image/BlobVisualizerComponent.h
 
         # FrameSampler subsystem
         source/framesampler/FrameSampler.cpp
@@ -137,6 +145,12 @@ target_sources(Sp3ctraVST
 
         # Image preprocessing (required for VST path)
         source/processing/image_preprocessor.c
+
+        # Image pipeline refactoring (Phase 1+2)
+        source/processing/image_source_router.c
+        source/processing/image_blend.c
+        source/processing/image_pipeline_stages.c
+        source/processing/image_pipeline.c
 
         # Pan system (required for stereo mode)
         source/audio/pan/lock_free_pan.c

@@ -1,98 +1,81 @@
 #include "GeneralSettingsTab.h"
 #include "../Sp3ctraConstants.h"
+#include "../UITheme.h"
 
 //==============================================================================
 GeneralSettingsTab::GeneralSettingsTab(Sp3ctraAudioProcessor& processor)
     : audioProcessor(processor),
       apvts(processor.getAPVTS())
 {
-    // Visualizer Mode
+    // ── Visualizer Mode ───────────────────────────────────────────────────────
     visualizerModeLabel.setText("Visualizer Mode:", juce::dontSendNotification);
     visualizerModeLabel.setJustificationType(juce::Justification::centredRight);
-    visualizerModeLabel.setFont(juce::FontOptions(14.0f));
+    visualizerModeLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(visualizerModeLabel);
 
-    visualizerModeCombo.addItem("Image", 1);
-    visualizerModeCombo.addItem("Waveform", 2);
-    visualizerModeCombo.addItem("Inverted Waveform", 3);
+    visualizerModeCombo.addItem("Image",            1);
+    visualizerModeCombo.addItem("Waveform",         2);
+    visualizerModeCombo.addItem("Inverted Waveform",3);
     addAndMakeVisible(visualizerModeCombo);
 
-    visualizerModeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-        apvts, "visualizerMode", visualizerModeCombo);
+    visualizerModeAttachment =
+        std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "visualizerMode", visualizerModeCombo);
 
-    // Log Level
+    // ── Log Level ─────────────────────────────────────────────────────────────
     logLevelLabel.setText("Log Level:", juce::dontSendNotification);
     logLevelLabel.setJustificationType(juce::Justification::centredRight);
-    logLevelLabel.setFont(juce::FontOptions(14.0f));
+    logLevelLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(logLevelLabel);
 
-    logLevelCombo.addItem("Error", 1);
+    logLevelCombo.addItem("Error",   1);
     logLevelCombo.addItem("Warning", 2);
-    logLevelCombo.addItem("Info", 3);
-    logLevelCombo.addItem("Debug", 4);
+    logLevelCombo.addItem("Info",    3);
+    logLevelCombo.addItem("Debug",   4);
     addAndMakeVisible(logLevelCombo);
 
-    logLevelAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-        apvts, "logLevel", logLevelCombo);
+    logLevelAttachment =
+        std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, "logLevel", logLevelCombo);
 
-    // Master Volume
-    volumeLabel.setText("Master Volume:", juce::dontSendNotification);
-    volumeLabel.setJustificationType(juce::Justification::centredRight);
-    volumeLabel.setFont(juce::FontOptions(14.0f));
-    addAndMakeVisible(volumeLabel);
-
-    volumeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    volumeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 72, 20);
-    addAndMakeVisible(volumeSlider);
-
-    volumeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "masterVolume", volumeSlider);
 }
 
-GeneralSettingsTab::~GeneralSettingsTab()
-{
-}
+GeneralSettingsTab::~GeneralSettingsTab() = default;
 
+//==============================================================================
 void GeneralSettingsTab::paint(juce::Graphics& g)
 {
     g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
 
     // Section title
     g.setColour(juce::Colours::white);
-    g.setFont(juce::Font(juce::FontOptions(16.0f)).boldened());
-    g.drawText("General Configuration", getLocalBounds().removeFromTop(30),
+    g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
+    g.drawText("General Configuration",
+               getLocalBounds().removeFromTop(30),
                juce::Justification::centred, true);
 }
 
+//==============================================================================
 void GeneralSettingsTab::resized()
 {
     auto bounds = getLocalBounds();
-    bounds.removeFromTop(40);  // Skip title area
+    bounds.removeFromTop(40); // skip title
     bounds.reduce(20, 10);
 
-    const int labelWidth = 120;
-    const int rowHeight = 35;
-    const int padding = 10;
+    constexpr int labelW  = Sp3ctraTheme::kLabelW;      // 110
+    constexpr int rowH    = Sp3ctraTheme::kRowStep;      // 32
+    constexpr int ctrlH   = Sp3ctraTheme::kControlH;     // 28
+    constexpr int padding = Sp3ctraTheme::kGap;          // 6
 
-    // Visualizer Mode
-    auto vizRow = bounds.removeFromTop(rowHeight);
-    visualizerModeLabel.setBounds(vizRow.removeFromLeft(labelWidth));
-    vizRow.removeFromLeft(padding);
-    visualizerModeCombo.setBounds(vizRow);
+    auto placeRow = [&](juce::Label& lbl, juce::Component& ctrl)
+    {
+        auto row = bounds.removeFromTop(rowH);
+        lbl .setBounds(row.removeFromLeft(labelW).withSizeKeepingCentre(labelW, ctrlH));
+        row .removeFromLeft(padding);
+        ctrl.setBounds(row.withSizeKeepingCentre(row.getWidth(), ctrlH));
+    };
 
-    bounds.removeFromTop(5);
-
-    // Log Level
-    auto logRow = bounds.removeFromTop(rowHeight);
-    logLevelLabel.setBounds(logRow.removeFromLeft(labelWidth));
-    logRow.removeFromLeft(padding);
-    logLevelCombo.setBounds(logRow);
-
-    bounds.removeFromTop(5);
-
-    // Master Volume
-    auto volRow = bounds.removeFromTop(rowHeight);
-    volumeLabel.setBounds(volRow.removeFromLeft(labelWidth));
-    volRow.removeFromLeft(padding);
-    volumeSlider.setBounds(volRow);
+    placeRow(visualizerModeLabel, visualizerModeCombo);
+    bounds.removeFromTop(Sp3ctraTheme::kSectionGap);
+    placeRow(logLevelLabel,       logLevelCombo);
 }

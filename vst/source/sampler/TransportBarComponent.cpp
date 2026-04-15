@@ -1,47 +1,7 @@
 #include "TransportBarComponent.h"
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Icon paths — normalised [0,1] square coordinates
-// ─────────────────────────────────────────────────────────────────────────────
-namespace Icons
-{
-    // Filled right-pointing triangle (play)
-    static juce::Path play()
-    {
-        juce::Path p;
-        p.addTriangle(0.12f, 0.04f,  0.12f, 0.96f,  0.92f, 0.50f);
-        return p;
-    }
-
-    // Two vertical bars (pause / hold)
-    static juce::Path pause()
-    {
-        juce::Path p;
-        p.addRectangle(0.15f, 0.10f, 0.28f, 0.80f); // left bar
-        p.addRectangle(0.57f, 0.10f, 0.28f, 0.80f); // right bar
-        return p;
-    }
-
-    // Filled square (stop)
-    static juce::Path stop()
-    {
-        juce::Path p;
-        p.addRectangle(0.10f, 0.10f, 0.80f, 0.80f);
-        return p;
-    }
-
-    // Scale-to-fit helper
-    static void fillPath(juce::Graphics& g, const juce::Path& src,
-                          juce::Rectangle<float> area, juce::Colour col)
-    {
-        juce::Path scaled = src;
-        scaled.applyTransform(src.getTransformToScaleToFit(area, true));
-        g.setColour(col);
-        g.fillPath(scaled);
-    }
-} // namespace Icons
+#include "../IconPaths.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // IconTextButton::paintButton
