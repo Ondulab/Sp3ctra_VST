@@ -434,8 +434,9 @@ void *udpThread(void *arg) {
 
         // Complete the incomplete audio buffer write if it was started
         if (audio_write_started) {
+          /* Snapshot raw BEFORE complete_write to avoid sampler contamination */
+          audio_image_buffers_snapshot_raw_before_swap(audioBuffers);
           audio_image_buffers_complete_write(audioBuffers);
-        audio_image_buffers_snapshot_raw(audioBuffers);
           audio_write_started = 0;
 #ifdef DEBUG_UDP
           log_debug("UDP", "Completed partial audio buffer write for incomplete line");
@@ -533,10 +534,15 @@ void *udpThread(void *arg) {
 #endif
       /* Complete line received */
 
-      /* Complete audio buffer write and swap */
+      /* Complete audio buffer write and swap.
+       * FIX(routing): Snapshot raw BEFORE complete_write so that raw_R/G/B
+       * always contains pure UDP data.  If snapshot_raw() were called AFTER
+       * complete_write(), FramePlayerThread could race and swap the buffer
+       * between the two calls, causing sampler data to contaminate raw_R/G/B
+       * (and therefore the LIVE visualizer / Source=L pipeline path). */
       if (audio_write_started) {
+        audio_image_buffers_snapshot_raw_before_swap(audioBuffers);
         audio_image_buffers_complete_write(audioBuffers);
-        audio_image_buffers_snapshot_raw(audioBuffers);
         audio_write_started = 0;
       }
 
@@ -611,6 +617,20 @@ void *udpThread(void *arg) {
             src_B = mixB;
         }
 
+        /* FIX(routing): When the sequencer is driving playback (frame_sampler_is_playing)
+         * and Source=MIX, the sampler contribution must not be silenced by the
+         * live transport freeze (image_freeze_mode / raw_freeze_mode).
+         * The visualizer already bypasses the freeze gate for MIX when samplerWriting
+         * is true — the audio pipeline must follow the same logic.
+         * Override freeze_mode to PLAY so ENVELOPE_LIVE does not silence the output. */
+#ifdef VST_MODE
+        if (live_cfg.luxstral_path.source == IMAGE_SOURCE_MIX
+            && frame_sampler_is_playing())
+        {
+            live_cfg.freeze_mode = 0; /* PLAY — sequencer keeps MIX audio alive */
+        }
+#endif
+
         if (pipeline_process_frame(src_R, src_G, src_B, &live_cfg, &preprocessed_temp) != 0) {
           log_error("THREAD", "Pipeline processing failed");
         }
@@ -655,13 +675,33 @@ void *udpThread(void *arg) {
           db->preprocessed_data = preprocessed_temp;
           db->dataReady = 1;
         }
-        else if (src == 0 /* IMAGE_SOURCE_SAMPLER */ && frame_sampler_is_recording())
+        else if (src == 0 /* IMAGE_SOURCE_SAMPLER */)
         {
-          /* During recording the live incoming stream feeds the sampler path.
-           * Use tag=2 (sampler) so synth_AudioProcess source-tag gating
-           * accepts the data when Source=S is selected. */
-          db->preprocessed_data = preprocessed_temp;
-          db->dataReady = 2;
+          if (frame_sampler_is_recording())
+          {
+            /* Recording: live UDP stream feeds the sampler path.
+             * Use tag=2 so synth_AudioProcess source-tag gating accepts
+             * the data when Source=S is selected. */
+            db->preprocessed_data = preprocessed_temp;
+            db->dataReady = 2;
+          }
+          else if (!frame_sampler_is_playing())
+          {
+            /* FIX(routing): Source=S, not recording, not playing.
+             * Without this branch, preprocessed_data stays frozen on the
+             * last recorded frame after the user stops recording — the
+             * synthesis engine keeps generating audio from stale data.
+             * Inject silence (zeroed notes + grayscale) so the output
+             * goes quiet until a slot is explicitly played. */
+            memset(db->preprocessed_data.additive.notes, 0,
+                   sizeof(db->preprocessed_data.additive.notes));
+            memset(db->preprocessed_data.additive.grayscale, 0,
+                   sizeof(db->preprocessed_data.additive.grayscale));
+            db->preprocessed_data.additive.contrast_factor = 0.0f;
+            db->dataReady = 2; /* tag=2: sampler slot — consumer gating intact */
+          }
+          /* else frame_sampler_is_playing(): FramePlayerThread is the sole
+           * writer of preprocessed_data for Source=S during playback. */
         }
       }
 #else

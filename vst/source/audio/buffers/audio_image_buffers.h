@@ -76,9 +76,17 @@ void audio_image_buffers_get_read_pointers(AudioImageBuffers *buffers,
                                            uint8_t **out_B);
 
 // ── Raw UDP snapshot (written only by UDP thread, never by sampler) ────────
-// Call snapshot_raw() from the UDP receive path AFTER complete_write()
-// to capture the pure UDP frame before the sampler can overwrite it.
+// DEPRECATED: snapshot_raw() reads from the read buffer AFTER complete_write(),
+// which is racy — FramePlayerThread may swap the buffer between complete_write()
+// and snapshot_raw(), writing sampler data into raw_R/G/B.
+// Use snapshot_raw_before_swap() instead (see below).
 void audio_image_buffers_snapshot_raw(AudioImageBuffers *buffers);
+
+// FIX(routing): Snapshot raw from the WRITE buffer, BEFORE complete_write().
+// Must be called while write_mutex is still held (between start_write and
+// complete_write).  This guarantees raw_R/G/B always contains pure UDP data —
+// immune to FramePlayerThread's buffer swaps.
+void audio_image_buffers_snapshot_raw_before_swap(AudioImageBuffers *buffers);
 
 // Lock-free read of the last pure UDP frame (no sampler contamination).
 void audio_image_buffers_get_raw_pointers(const AudioImageBuffers *buffers,

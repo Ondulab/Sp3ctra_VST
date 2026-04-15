@@ -338,9 +338,10 @@ void audio_image_buffers_get_stats(AudioImageBuffers *buffers,
 /**
  * @brief Capture a snapshot of the current read buffer into the raw buffers.
  *
- * Must be called ONLY from the UDP receive path (after complete_write())
- * so that raw_R/G/B always contain the last pure UDP frame — never
- * data written by the FramePlayerThread (sampler).
+ * DEPRECATED: reads from the read buffer AFTER complete_write() which is
+ * racy — FramePlayerThread may swap the buffer between complete_write() and
+ * snapshot_raw(), corrupting raw_R/G/B with sampler data.
+ * Use audio_image_buffers_snapshot_raw_before_swap() instead.
  *
  * @param buffers Pointer to AudioImageBuffers structure
  */
@@ -350,10 +351,45 @@ void audio_image_buffers_snapshot_raw(AudioImageBuffers *buffers) {
 
   int nb_pixels = get_cis_pixels_nb();
 
-  // The read buffer was just swapped in by complete_write() and contains
-  // the frame the UDP thread wrote — copy it to the raw snapshot.
   int read_idx = atomic_load(&buffers->read_buffer_index);
   if (read_idx == 0) {
+    memcpy(buffers->raw_R, buffers->buffer0_R, nb_pixels);
+    memcpy(buffers->raw_G, buffers->buffer0_G, nb_pixels);
+    memcpy(buffers->raw_B, buffers->buffer0_B, nb_pixels);
+  } else {
+    memcpy(buffers->raw_R, buffers->buffer1_R, nb_pixels);
+    memcpy(buffers->raw_G, buffers->buffer1_G, nb_pixels);
+    memcpy(buffers->raw_B, buffers->buffer1_B, nb_pixels);
+  }
+}
+
+/**
+ * @brief Snapshot raw UDP data from the WRITE buffer BEFORE complete_write().
+ *
+ * FIX(routing): The original snapshot_raw() read from the read buffer AFTER
+ * the buffer swap.  Between complete_write() and snapshot_raw(), FramePlayerThread
+ * could call its own complete_write(), making the read buffer point to sampler
+ * data — corrupting raw_R/G/B.
+ *
+ * This variant reads from the WRITE buffer (which holds the freshly assembled
+ * UDP frame) while write_mutex is still held, guaranteeing that raw_R/G/B
+ * is always pure UDP data — never contaminated by the sampler.
+ *
+ * Must be called BETWEEN start_write() and complete_write() (write_mutex held).
+ *
+ * @param buffers Pointer to AudioImageBuffers structure
+ */
+void audio_image_buffers_snapshot_raw_before_swap(AudioImageBuffers *buffers) {
+  if (!buffers || !buffers->initialized)
+    return;
+
+  int nb_pixels = get_cis_pixels_nb();
+
+  /* Read from the WRITE buffer — this is the buffer the UDP thread just filled.
+   * write_mutex is currently held by the caller so no other thread can swap
+   * or modify this buffer until complete_write() releases the mutex. */
+  int write_idx = atomic_load(&buffers->write_buffer_index);
+  if (write_idx == 0) {
     memcpy(buffers->raw_R, buffers->buffer0_R, nb_pixels);
     memcpy(buffers->raw_G, buffers->buffer0_G, nb_pixels);
     memcpy(buffers->raw_B, buffers->buffer0_B, nb_pixels);
