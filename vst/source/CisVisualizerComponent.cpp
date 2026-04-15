@@ -849,30 +849,65 @@ void CisVisualizerComponent::detectSynthBlobs()
     extern sp3ctra_config_t g_sp3ctra_config;
     // Use LuxSynth-dedicated blob params — fully isolated from StrokeForge/LuxStral.
     // Configured via lxBlob* APVTS params in the LUXSYNTH tab → BLOB DETECTION section.
-    const float threshold = g_sp3ctra_config.luxsynth_blob_threshold;
-    const int   minWidth  = juce::jmax(1, g_sp3ctra_config.luxsynth_blob_min_width);
-    const int   mergeGap  = juce::jmax(0, g_sp3ctra_config.luxsynth_blob_merge_gap);
+    const float threshold     = g_sp3ctra_config.luxsynth_blob_threshold;
+    const int   minWidth      = juce::jmax(1, g_sp3ctra_config.luxsynth_blob_min_width);
+    const int   mergeGap      = juce::jmax(0, g_sp3ctra_config.luxsynth_blob_merge_gap);
+    // Color split threshold — same unit as the SYNTH COLOR display (post-DC-removal, gain=8).
+    // Reads the lxBlobColorSplit APVTS param; default 0.20 means a jump of
+    // ~51 amplitude units (after gain and DC removal) splits the running blob.
+    const float colorSplitThr = juce::jmax(0.001f, g_sp3ctra_config.luxsynth_blob_color_split);
 
-    // Color-temperature jump (R-B)/255 that causes the current blob to be split.
-    // 0.20 = ~51/255 — noticeable hue shift (e.g. neutral → warm) creates a
-    // new blob even when pixel activity is continuous.
-    constexpr float kColorSplitThreshold = 0.20f;
+    // ── Pre-compute SYNTH COLOR temperature curve ─────────────────────────────
+    // Matches paintColorTemperatureMode() exactly so that the color split sees
+    // the same signal the user sees in SYNTH COLOR:
+    //   1. Box-smooth R and B (±8 px) — removes per-photosite fixed-pattern noise
+    //   2. Compute raw temperature  = (smoothR - smoothB) / 255
+    //   3. Subtract global mean     — DC removal (sensor warm bias)
+    //   4. Apply gain kTempGain     — matches the visual scale
+    // The resulting curve spans approximately [-1, +1] for strongly coloured CIS frames.
+    constexpr int   kSmoothRadius = 8;
+    constexpr float kTempGain     = 8.0f;
 
-    // ── Per-pixel quantities (computed inline — avoid heap alloc) ─────────────
-    // activity[i]  = localDataGray[i] / 255   ∈ [0, 1]
-    //               bright pixel = significant amplitude in LuxSynth pipeline
-    //               (after inversion the dark ink → bright → active)
-    // colorTemp[i] = (R[i] - B[i]) / 255      ∈ [-1, +1]
-    //               warm (red dominant) = +1, cold (blue dominant) = -1
+    thread_local std::vector<float> ctCurve;
+    ctCurve.resize(static_cast<size_t>(cisPixelsCount));
+
+    // Pass 1: smoothed (R-B)/255 — no mean removal yet
+    {
+        float meanTemp = 0.0f;
+        for (int i = 0; i < cisPixelsCount; ++i)
+        {
+            const int lo = std::max(0, i - kSmoothRadius);
+            const int hi = std::min(cisPixelsCount - 1, i + kSmoothRadius);
+            const float n = static_cast<float>(hi - lo + 1);
+            float sumR = 0.0f, sumB = 0.0f;
+            for (int k = lo; k <= hi; ++k)
+            {
+                sumR += static_cast<float>(localDataR[k]);
+                sumB += static_cast<float>(localDataB[k]);
+            }
+            const float t = (sumR / n - sumB / n) / 255.0f;
+            ctCurve[static_cast<size_t>(i)] = t;
+            meanTemp += t;
+        }
+        // Pass 2: DC removal + gain (clamped)
+        meanTemp /= static_cast<float>(cisPixelsCount);
+        for (int i = 0; i < cisPixelsCount; ++i)
+        {
+            float v = (ctCurve[static_cast<size_t>(i)] - meanTemp) * kTempGain;
+            if (v < -1.0f) v = -1.0f;
+            if (v >  1.0f) v =  1.0f;
+            ctCurve[static_cast<size_t>(i)] = v;
+        }
+    }
 
     // ── 1-D connected-component scan with color-continuity splitting ──────────
-    bool  inBlob       = false;
-    int   blobStart    = 0;
-    int   gapCount     = 0;
-    float blobPeak     = 0.0f;
-    float blobSum      = 0.0f;
-    int   blobLen      = 0;
-    float blobCtSum    = 0.0f;
+    bool  inBlob        = false;
+    int   blobStart     = 0;
+    int   gapCount      = 0;
+    float blobPeak      = 0.0f;
+    float blobSum       = 0.0f;
+    int   blobLen       = 0;
+    float blobCtSum     = 0.0f;
     float prevColorTemp = 0.0f;
 
     // Lambda: close the running blob and push it if it passes size filter
@@ -903,8 +938,10 @@ void CisVisualizerComponent::detectSynthBlobs()
     for (int i = 0; i < cisPixelsCount; ++i)
     {
         const float act = localDataGray[i] / 255.0f;
-        const float ct  = (static_cast<float>(localDataR[i])
-                         - static_cast<float>(localDataB[i])) / 255.0f;
+        // Use the SYNTH COLOR temperature curve — smoothed, DC-removed, gain ×8.
+        // This is the same signal the user sees in SYNTH COLOR mode, so the
+        // color split fires on the same transitions visible in that view.
+        const float ct  = ctCurve[static_cast<size_t>(i)];
         const bool  active = (act >= threshold);
 
         if (active)
@@ -924,8 +961,9 @@ void CisVisualizerComponent::detectSynthBlobs()
             else
             {
                 // Color-continuity check: abrupt color shift → split
+                // colorSplitThr reads lxBlobColorSplit APVTS param (same scale as SYNTH COLOR)
                 const float colorJump = std::abs(ct - prevColorTemp);
-                if (colorJump > kColorSplitThreshold
+                if (colorJump > colorSplitThr
                     && static_cast<int>(synthBlobs_.size()) < kMaxSynthBlobs - 1)
                 {
                     finishBlob(i);
