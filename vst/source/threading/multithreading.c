@@ -733,29 +733,37 @@ void *udpThread(void *arg) {
           }
           else if (!frame_sampler_is_playing())
           {
-            /* FIX(routing): Source=S, not recording, not playing.
-             * Without this branch, preprocessed_data stays frozen on the
-             * last recorded frame after the user stops recording — the
-             * synthesis engine keeps generating audio from stale data.
-             * Inject silence (zeroed notes + grayscale) so the output
-             * goes quiet until a slot is explicitly played. */
-            memset(db->preprocessed_data.additive.notes, 0,
-                   sizeof(db->preprocessed_data.additive.notes));
-            memset(db->preprocessed_data.additive.grayscale, 0,
-                   sizeof(db->preprocessed_data.additive.grayscale));
-            db->preprocessed_data.additive.contrast_factor = 0.0f;
-            /* FIX(silence): Also zero polyphonic.* when LuxSynth source is SAMPLER.
-             * Without this, LuxSynth keeps generating audio from the last frame
-             * after recording stops or when no slot is playing. */
-            if (g_sp3ctra_config.luxsynth_source_type == 0 /* IMAGE_SOURCE_SAMPLER */)
+            if (frame_sampler_is_passthrough())
             {
-              memset(db->preprocessed_data.polyphonic.grayscale, 0,
-                     sizeof(db->preprocessed_data.polyphonic.grayscale));
-              memset(db->preprocessed_data.polyphonic.magnitudes, 0,
-                     sizeof(db->preprocessed_data.polyphonic.magnitudes));
-              db->preprocessed_data.polyphonic.valid = 0;
+              /* FIX(live): STEP_LIVE or rtStop with passthrough enabled.
+               * Source=S but no slot is playing — the live CIS stream IS the
+               * intended content.  Write the full preprocessed_temp (computed
+               * from the live UDP frame) so synthesis uses live data. */
+              db->preprocessed_data = preprocessed_temp;
+              db->dataReady = 1;
             }
-            db->dataReady = 2; /* tag=2: sampler slot — consumer gating intact */
+            else
+            {
+              /* STEP_EMPTY or passthroughEnabled=false: inject silence.
+               * Without this, preprocessed_data stays frozen on the last
+               * recorded frame — the synthesis engine keeps producing sound
+               * from stale data. */
+              memset(db->preprocessed_data.additive.notes, 0,
+                     sizeof(db->preprocessed_data.additive.notes));
+              memset(db->preprocessed_data.additive.grayscale, 0,
+                     sizeof(db->preprocessed_data.additive.grayscale));
+              db->preprocessed_data.additive.contrast_factor = 0.0f;
+              /* FIX(silence): Also zero polyphonic.* when LuxSynth=SAMPLER. */
+              if (g_sp3ctra_config.luxsynth_source_type == 0 /* IMAGE_SOURCE_SAMPLER */)
+              {
+                memset(db->preprocessed_data.polyphonic.grayscale, 0,
+                       sizeof(db->preprocessed_data.polyphonic.grayscale));
+                memset(db->preprocessed_data.polyphonic.magnitudes, 0,
+                       sizeof(db->preprocessed_data.polyphonic.magnitudes));
+                db->preprocessed_data.polyphonic.valid = 0;
+              }
+              db->dataReady = 2; /* tag=2: sampler slot — consumer gating intact */
+            }
           }
           /* else frame_sampler_is_playing(): FramePlayerThread is the sole
            * writer of preprocessed_data for Source=S during playback. */
