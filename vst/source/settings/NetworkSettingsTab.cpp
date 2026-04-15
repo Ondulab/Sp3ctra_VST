@@ -1,5 +1,6 @@
 #include "NetworkSettingsTab.h"
 #include "../Sp3ctraConstants.h"
+#include "../UITheme.h"
 
 //==============================================================================
 NetworkSettingsTab::NetworkSettingsTab(Sp3ctraAudioProcessor& processor)
@@ -9,7 +10,7 @@ NetworkSettingsTab::NetworkSettingsTab(Sp3ctraAudioProcessor& processor)
     // UDP Port
     udpPortLabel.setText("UDP Port:", juce::dontSendNotification);
     udpPortLabel.setJustificationType(juce::Justification::centredRight);
-    udpPortLabel.setFont(juce::FontOptions(14.0f));
+    udpPortLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(udpPortLabel);
 
     udpPortEditor.setMultiLine(false);
@@ -18,7 +19,7 @@ NetworkSettingsTab::NetworkSettingsTab(Sp3ctraAudioProcessor& processor)
     udpPortEditor.setScrollbarsShown(false);
     udpPortEditor.setCaretVisible(true);
     udpPortEditor.setPopupMenuEnabled(true);
-    udpPortEditor.setFont(juce::FontOptions(14.0f));
+    udpPortEditor.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     udpPortEditor.setJustification(juce::Justification::centred);
     udpPortEditor.setInputRestrictions(5, "0123456789");
     
@@ -32,7 +33,7 @@ NetworkSettingsTab::NetworkSettingsTab(Sp3ctraAudioProcessor& processor)
     // UDP Address
     udpAddressLabel.setText("UDP Address:", juce::dontSendNotification);
     udpAddressLabel.setJustificationType(juce::Justification::centredRight);
-    udpAddressLabel.setFont(juce::FontOptions(14.0f));
+    udpAddressLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(udpAddressLabel);
 
     // Helper lambda to configure IP byte editor
@@ -43,7 +44,7 @@ NetworkSettingsTab::NetworkSettingsTab(Sp3ctraAudioProcessor& processor)
         editor.setScrollbarsShown(false);
         editor.setCaretVisible(true);
         editor.setPopupMenuEnabled(true);
-        editor.setFont(juce::FontOptions(14.0f));
+        editor.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
         editor.setJustification(juce::Justification::centred);
         editor.setInputRestrictions(3, "0123456789");
         
@@ -63,23 +64,23 @@ NetworkSettingsTab::NetworkSettingsTab(Sp3ctraAudioProcessor& processor)
     // Dot labels
     dot1Label.setText(".", juce::dontSendNotification);
     dot1Label.setJustificationType(juce::Justification::centred);
-    dot1Label.setFont(juce::Font(juce::FontOptions(16.0f)).boldened());
+    dot1Label.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
     addAndMakeVisible(dot1Label);
-    
+
     dot2Label.setText(".", juce::dontSendNotification);
     dot2Label.setJustificationType(juce::Justification::centred);
-    dot2Label.setFont(juce::Font(juce::FontOptions(16.0f)).boldened());
+    dot2Label.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
     addAndMakeVisible(dot2Label);
-    
+
     dot3Label.setText(".", juce::dontSendNotification);
     dot3Label.setJustificationType(juce::Justification::centred);
-    dot3Label.setFont(juce::Font(juce::FontOptions(16.0f)).boldened());
+    dot3Label.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
     addAndMakeVisible(dot3Label);
 
     // Sensor DPI
     sensorDpiLabel.setText("Sensor DPI:", juce::dontSendNotification);
     sensorDpiLabel.setJustificationType(juce::Justification::centredRight);
-    sensorDpiLabel.setFont(juce::FontOptions(14.0f));
+    sensorDpiLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(sensorDpiLabel);
 
     sensorDpiCombo.addItem("200 DPI (1728 pixels)", 1);
@@ -99,7 +100,7 @@ NetworkSettingsTab::NetworkSettingsTab(Sp3ctraAudioProcessor& processor)
     statusLabel.setText("Settings are saved automatically", 
                        juce::dontSendNotification);
     statusLabel.setJustificationType(juce::Justification::centred);
-    statusLabel.setFont(juce::Font(juce::FontOptions(12.0f)).italicised());
+    statusLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontTiny)).italicised());
     addAndMakeVisible(statusLabel);
 }
 
@@ -113,7 +114,7 @@ void NetworkSettingsTab::paint(juce::Graphics& g)
 
     // Section title
     g.setColour(juce::Colours::white);
-    g.setFont(juce::Font(juce::FontOptions(16.0f)).boldened());
+    g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
     g.drawText("Network Configuration", getLocalBounds().removeFromTop(30),
                juce::Justification::centred, true);
 }
@@ -124,49 +125,53 @@ void NetworkSettingsTab::resized()
     bounds.removeFromTop(40);  // Skip title area
     bounds.reduce(20, 10);
 
-    const int labelWidth = 120;
-    const int rowHeight = 35;
-    const int padding = 10;
+    constexpr int labelWidth = Sp3ctraTheme::kLabelW;
+    constexpr int rowHeight  = Sp3ctraTheme::kRowStep;
+    constexpr int ctrlH      = Sp3ctraTheme::kControlH;
+    constexpr int padding    = Sp3ctraTheme::kGap;
 
     // UDP Port
-    auto portRow = bounds.removeFromTop(rowHeight);
-    udpPortLabel.setBounds(portRow.removeFromLeft(labelWidth));
-    portRow.removeFromLeft(padding);
-    udpPortEditor.setBounds(portRow);
+    {
+        auto row = bounds.removeFromTop(rowHeight);
+        udpPortLabel.setBounds(row.removeFromLeft(labelWidth).withSizeKeepingCentre(labelWidth, ctrlH));
+        row.removeFromLeft(padding);
+        udpPortEditor.setBounds(row.withSizeKeepingCentre(row.getWidth(), ctrlH));
+    }
+    bounds.removeFromTop(Sp3ctraTheme::kRowGap);
 
-    bounds.removeFromTop(5);
-
-    // UDP Address - 4 fields with dots
-    auto addressRow = bounds.removeFromTop(rowHeight);
-    udpAddressLabel.setBounds(addressRow.removeFromLeft(labelWidth));
-    addressRow.removeFromLeft(padding);
-    
-    int byteWidth = (addressRow.getWidth() - 30) / 4;  // Space for 3 dots
-    udpByte1Editor.setBounds(addressRow.removeFromLeft(byteWidth));
-    dot1Label.setBounds(addressRow.removeFromLeft(10));
-    udpByte2Editor.setBounds(addressRow.removeFromLeft(byteWidth));
-    dot2Label.setBounds(addressRow.removeFromLeft(10));
-    udpByte3Editor.setBounds(addressRow.removeFromLeft(byteWidth));
-    dot3Label.setBounds(addressRow.removeFromLeft(10));
-    udpByte4Editor.setBounds(addressRow.removeFromLeft(byteWidth));
-
-    bounds.removeFromTop(5);
+    // UDP Address
+    {
+        auto row = bounds.removeFromTop(rowHeight);
+        udpAddressLabel.setBounds(row.removeFromLeft(labelWidth).withSizeKeepingCentre(labelWidth, ctrlH));
+        row.removeFromLeft(padding);
+        const int bw = (row.getWidth() - 24) / 4;
+        udpByte1Editor.setBounds(row.removeFromLeft(bw).withSizeKeepingCentre(bw, ctrlH));
+        dot1Label.setBounds(row.removeFromLeft(8));
+        udpByte2Editor.setBounds(row.removeFromLeft(bw).withSizeKeepingCentre(bw, ctrlH));
+        dot2Label.setBounds(row.removeFromLeft(8));
+        udpByte3Editor.setBounds(row.removeFromLeft(bw).withSizeKeepingCentre(bw, ctrlH));
+        dot3Label.setBounds(row.removeFromLeft(8));
+        udpByte4Editor.setBounds(row.withSizeKeepingCentre(bw, ctrlH));
+    }
+    bounds.removeFromTop(Sp3ctraTheme::kRowGap);
 
     // Sensor DPI
-    auto dpiRow = bounds.removeFromTop(rowHeight);
-    sensorDpiLabel.setBounds(dpiRow.removeFromLeft(labelWidth));
-    dpiRow.removeFromLeft(padding);
-    sensorDpiCombo.setBounds(dpiRow);
+    {
+        auto row = bounds.removeFromTop(rowHeight);
+        sensorDpiLabel.setBounds(row.removeFromLeft(labelWidth).withSizeKeepingCentre(labelWidth, ctrlH));
+        row.removeFromLeft(padding);
+        sensorDpiCombo.setBounds(row.withSizeKeepingCentre(row.getWidth(), ctrlH));
+    }
+    bounds.removeFromTop(Sp3ctraTheme::kSectionGap + Sp3ctraTheme::kRowGap);
 
-    bounds.removeFromTop(15);
+    // Apply Button — standard control height, centred
+    applyButton.setBounds(bounds.removeFromTop(Sp3ctraTheme::kRowStep)
+                              .withSizeKeepingCentre(120, ctrlH));
+    bounds.removeFromTop(Sp3ctraTheme::kRowGap);
 
-    // Apply Button
-    applyButton.setBounds(bounds.removeFromTop(30).reduced(50, 0));
-
-    bounds.removeFromTop(10);
-
-    // Status Label
-    statusLabel.setBounds(bounds.removeFromTop(20));
+    // Status label
+    statusLabel.setBounds(bounds.removeFromTop(Sp3ctraTheme::kRowStep)
+                              .withSizeKeepingCentre(bounds.getWidth(), ctrlH));
 }
 
 void NetworkSettingsTab::applyChanges()

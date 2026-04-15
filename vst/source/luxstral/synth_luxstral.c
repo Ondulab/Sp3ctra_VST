@@ -34,6 +34,7 @@
 
 // Image preprocessing (fallback when no UDP data yet)
 #include "../processing/image_preprocessor.h"
+#include "../processing/image_pipeline.h"
 
 #ifdef __APPLE__
 #include <stdlib.h>
@@ -350,9 +351,8 @@ void synth_IfftMode(float *imageData, float *audioDataLeft, float *audioDataRigh
       }
     }
 
-    // SATURATION PREVENTION: Apply moderate pre-scaling to prevent overflow
-    // Fixed conservative factor that maintains good volume while preventing saturation
-    const float safety_scale = 0.35f;  // Conservative but not excessive
+    // SATURATION PREVENTION: Apply pre-scaling to keep headroom before normalization
+    const float safety_scale = 0.35f;
     scale_float(additiveBuffer, safety_scale, g_sp3ctra_config.audio_buffer_size);
 
     // CORRECTION: Conditional normalization by platform
@@ -384,19 +384,35 @@ void synth_IfftMode(float *imageData, float *audioDataLeft, float *audioDataRigh
     
     // DISABLED: Anti-tac fade-in temporarily for debugging
     float fade_in_factor = 1.0f;  // Force full volume immediately
+
+    // Summation normalization exponent (hoisted for mono + stereo paths)
+    const float norm_expo = 1.0f / g_sp3ctra_config.summation_response_exponent;
+    const float norm_base = (float)SUMMATION_BASE_LEVEL / (float)VOLUME_AMP_RESOLUTION;
+
+    // Peak compensation: calibrate so that at a MODERATE content level (~500
+    // active oscillators), the output matches the reference at sum_exp=2.
+    // N_cal=500 maximizes dynamic range while keeping worst-case (black image
+    // at sum_exp=10) right at the soft_limit_threshold (0.8):
+    //   - Few strokes (N≈50) at sum_exp=10 → 0.15 (clearly quieter)
+    //   - Moderate content (N≈500) → 0.39 (same as sum_exp=2)
+    //   - Full black (N≈3456) at sum_exp=10 → ~0.80 (soft limiter threshold)
+    // Dynamic range at sum_exp=10: ~15 dB (5.5:1) vs ~0 dB at sum_exp=2.
+    const float ref_expo = 0.5f;
+    const float n_cal    = 500.0f + norm_base;
+    const float peak_compensation = powf(n_cal, norm_expo - ref_expo);
     
     for (buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
         // Compression applied to all signals
         if (sumVolumeBuffer[buff_idx] > SUM_EPS_FLOAT) {
           // Apply exponential response curve to reduce compression effects
           float sum_normalized = sumVolumeBuffer[buff_idx] / (float)VOLUME_AMP_RESOLUTION;
-          float base_level = (float)SUMMATION_BASE_LEVEL / (float)VOLUME_AMP_RESOLUTION;
+          float base_level = norm_base;
           // CORRECTED: Proper exponent logic for compression reduction with normalized waveforms
-          float expo = 1.0f / g_sp3ctra_config.summation_response_exponent;
+          float expo = norm_expo;
           float x = sum_normalized + base_level;
           float response_curve = (fabsf(expo - 0.5f) <= 1e-3f) ? sqrtf(x < 0.0f ? 0.0f : x)
                                   : pow_shifted_fast(x, base_level, expo);
-          float ratio = additiveBuffer[buff_idx] / (response_curve * (float)VOLUME_AMP_RESOLUTION);
+          float ratio = additiveBuffer[buff_idx] * peak_compensation / (response_curve * (float)VOLUME_AMP_RESOLUTION);
           tmp_audioData[buff_idx] = ratio * fade_in_factor; // Apply anti-tac fade-in
         } else {
           tmp_audioData[buff_idx] = 0.0f;
@@ -471,14 +487,14 @@ void synth_IfftMode(float *imageData, float *audioDataLeft, float *audioDataRigh
         if (sumVolumeBuffer[buff_idx] > SUM_EPS_FLOAT) {
           // Apply exponential response curve to reduce compression effects (stereo mode)
           float sum_normalized = sumVolumeBuffer[buff_idx] / (float)VOLUME_AMP_RESOLUTION;
-          float base_level = (float)SUMMATION_BASE_LEVEL / (float)VOLUME_AMP_RESOLUTION;
+          float base_level = norm_base;
           // CORRECTED: Proper exponent logic for compression reduction with normalized waveforms
-          float expo = 1.0f / g_sp3ctra_config.summation_response_exponent;
+          float expo = norm_expo;
           float x = sum_normalized + base_level;
           float response_curve = (fabsf(expo - 0.5f) <= 1e-3f) ? sqrtf(x < 0.0f ? 0.0f : x)
                                   : pow_shifted_fast(x, base_level, expo);
-          left_signal  = stereoBuffer_L[buff_idx] / (response_curve * (float)VOLUME_AMP_RESOLUTION);
-          right_signal = stereoBuffer_R[buff_idx] / (response_curve * (float)VOLUME_AMP_RESOLUTION);
+          left_signal  = stereoBuffer_L[buff_idx] * peak_compensation / (response_curve * (float)VOLUME_AMP_RESOLUTION);
+          right_signal = stereoBuffer_R[buff_idx] * peak_compensation / (response_curve * (float)VOLUME_AMP_RESOLUTION);
           
           // Apply same anti-tac fade-in as mono mode
           left_signal *= fade_in_factor;
@@ -631,6 +647,43 @@ void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
 
   pthread_mutex_lock(&db->mutex);
   has_preprocessed = (db->dataReady != 0) && (db->preprocessed_data.timestamp_us != 0);
+#ifdef VST_MODE
+  {
+    /* Source-tag gating: dataReady=1 means live, dataReady=2 means sampler.
+     * Reject preprocessed data that came from the wrong source.
+     *   Source=S (0): accept only tag 2 (sampler)
+     *   Source=L (1): accept only tag 1 (live)
+     *   Source=M (2): accept either tag */
+    int src = g_sp3ctra_config.luxstral_source_type;
+    int tag = db->dataReady;
+
+    /* Diagnostic: print source routing state every ~500 synth calls (~0.5s) */
+    static int _diag_ctr = 0;
+    int _diag_print = ((_diag_ctr++ % 500) == 0);
+
+    if (has_preprocessed) {
+      if ((src == 0 && tag != 2) || (src == 1 && tag != 1)) {
+        has_preprocessed = 0;
+      }
+    }
+
+    if (_diag_print) {
+      /* Compute energy of the preprocessed grayscale + notes for debugging */
+      float gray_sum = 0.0f, notes_sum = 0.0f;
+      if (has_preprocessed) {
+        for (int _d = 0; _d < nb_pixels && _d < 3456; _d++)
+          gray_sum += db->preprocessed_data.additive.grayscale[_d];
+        for (int _d = 0; _d < 3456; _d++)
+          notes_sum += db->preprocessed_data.additive.notes[_d];
+      }
+      log_info("SRC-GATE", "src=%d tag=%d has_pre=%d cf=%.4f gray_sum=%.2f notes_sum=%.2f ts=%llu",
+               src, tag, has_preprocessed,
+               has_preprocessed ? db->preprocessed_data.additive.contrast_factor : 0.0f,
+               gray_sum, notes_sum,
+               (unsigned long long)db->preprocessed_data.timestamp_us);
+    }
+  }
+#endif
   if (has_preprocessed) {
     memcpy(g_grayScale_live, db->preprocessed_data.additive.grayscale,
            nb_pixels * sizeof(float));
@@ -639,19 +692,34 @@ void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
   pthread_mutex_unlock(&db->mutex);
 
   if (!has_preprocessed) {
-    PreprocessedImageData preprocessed_temp;
-    if (image_preprocess_frame(buffer_R, buffer_G, buffer_B, &preprocessed_temp) == 0) {
-      memcpy(g_grayScale_live, preprocessed_temp.additive.grayscale,
-             nb_pixels * sizeof(float));
-      contrast_factor = preprocessed_temp.additive.contrast_factor;
-
-      pthread_mutex_lock(&db->mutex);
-      db->preprocessed_data = preprocessed_temp;
-      db->dataReady = 1;
-      pthread_mutex_unlock(&db->mutex);
-    } else {
+#ifdef VST_MODE
+    /* Source-aware fallback: buffer_R/G/B comes from AudioImageBuffers which
+     * always contains LIVE data.  Only use this fallback when the selected
+     * source includes live (L or M).  For Source=S, produce silence and wait
+     * for FramePlayerThread to provide sampler preprocessed data. */
+    int fallback_src = g_sp3ctra_config.luxstral_source_type;
+    if (fallback_src == 0 /* IMAGE_SOURCE_SAMPLER */) {
+      /* Source=S: silence until sampler data arrives */
       memset(g_grayScale_live, 0, nb_pixels * sizeof(float));
       contrast_factor = 0.0f;
+    } else
+#endif
+    {
+      PreprocessedImageData preprocessed_temp;
+      PipelineConfig fallback_cfg = pipeline_build_config_live();
+      if (pipeline_process_frame(buffer_R, buffer_G, buffer_B, &fallback_cfg, &preprocessed_temp) == 0) {
+        memcpy(g_grayScale_live, preprocessed_temp.additive.grayscale,
+               nb_pixels * sizeof(float));
+        contrast_factor = preprocessed_temp.additive.contrast_factor;
+
+        pthread_mutex_lock(&db->mutex);
+        db->preprocessed_data = preprocessed_temp;
+        db->dataReady = 1;
+        pthread_mutex_unlock(&db->mutex);
+      } else {
+        memset(g_grayScale_live, 0, nb_pixels * sizeof(float));
+        contrast_factor = 0.0f;
+      }
     }
   }
 

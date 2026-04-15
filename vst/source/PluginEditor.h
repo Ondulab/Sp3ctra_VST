@@ -5,25 +5,91 @@
 #include "PluginProcessor.h"
 #include "SettingsWindow.h"
 #include "CisVisualizerComponent.h"
+#include "image/ImagePageComponent.h"
 #include "sampler/SamplerPageComponent.h"
+#include "UITheme.h"
+#include "Sp3ctraLookAndFeel.h"
+
+// ============================================================================
+// GearButton — settings icon rendered as a yellow cogwheel.
+// Self-contained: painting logic lives in the header to avoid a separate TU.
+// ============================================================================
+class GearButton : public juce::Button
+{
+public:
+    GearButton() : juce::Button("settings") {}
+
+    void paintButton(juce::Graphics& g, bool isMouseOver, bool isButtonDown) override
+    {
+        const auto b  = getLocalBounds().toFloat().reduced(3.f);
+        const float cx = b.getCentreX();
+        const float cy = b.getCentreY();
+        const float r  = juce::jmin(b.getWidth(), b.getHeight()) * 0.5f;
+
+        // Background
+        const juce::Colour bg(0xff2a2a2a);
+        g.setColour(isButtonDown ? bg.brighter(0.3f)
+                  : isMouseOver  ? bg.brighter(0.12f)
+                  :                bg);
+        g.fillRoundedRectangle(b, 4.f);
+
+        // Cogwheel (yellow)
+        const juce::Colour gear = isButtonDown ? juce::Colour(0xffffe066)
+                                : isMouseOver  ? juce::Colour(0xffffcc00)
+                                :                juce::Colour(0xffc89600);
+        g.setColour(gear);
+        g.fillPath(makeGearPath(cx, cy, r * 0.82f, 8));
+
+        // Centre hole — punched out with background colour
+        g.setColour(bg);
+        g.fillEllipse(cx - r * 0.23f, cy - r * 0.23f, r * 0.46f, r * 0.46f);
+    }
+
+private:
+    static juce::Path makeGearPath(float cx, float cy, float r, int teeth)
+    {
+        const float outer = r;
+        const float inner = r * 0.68f;
+        const float arc   = juce::MathConstants<float>::twoPi / (float)(teeth * 2);
+        const float half  = arc * 0.36f;
+        juce::Path p;
+        bool first = true;
+        for (int i = 0; i < teeth * 2; ++i)
+        {
+            const float ri = (i % 2 == 0) ? outer : inner;
+            const float a0 = arc * (float)i - half;
+            const float a1 = arc * (float)i + half;
+            if (first) { p.startNewSubPath(cx + ri * std::cos(a0), cy + ri * std::sin(a0)); first = false; }
+            else         p.lineTo         (cx + ri * std::cos(a0), cy + ri * std::sin(a0));
+            p.lineTo(cx + ri * std::cos(a1), cy + ri * std::sin(a1));
+        }
+        p.closeSubPath();
+        return p;
+    }
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(GearButton)
+};
 
 //==============================================================================
 /**
- * @brief Main VST editor with tab navigation (SYNTH / SAMPLER).
+ * @brief Main VST editor with three-tab navigation (IMAGE / SYNTH / SAMPLER).
  *
- * SYNTH tab — two-column layout:
- *   Left  : LuxStral params (Device On, Volume, Gamma, Contrast, Attack,
- *            Release, Stereo Temp., Sum. Exp., Noise Gate)
- *   Right : StrokeForge params (Active, Blob Thr., Merge Gap, Focus σ,
- *            Spectral Thr., Focus Only)
+ * Header bar:
+ *   Left  : "Sp3ctra" logo
+ *   Centre: version string (v0.1.5)
+ *   Right : GearButton — opens the full settings window
  *
- * SAMPLER tab — SamplerPageComponent:
- *   SlotGrid + SlotEditor + Sequencer + Transport bar
+ * IMAGE tab — ImagePageComponent (two-column layout):
+ *   Left  : Image processing (Gamma, Contrast Min, Opacities, Transport)
+ *   Right : Blob detection (StrokeForge detection params — moved from Synth)
  *
- * A "Settings..." button at the bottom opens the full settings window.
+ * SYNTH tab — single left column (audio-only params):
+ *   Device On, Volume, Attack, Release, Stereo Temp., Sum. Exp., Noise Gate
+ *   No image pre-processing parameters in this tab.
+ *
+ * SAMPLER tab — SamplerPageComponent
  */
-class Sp3ctraAudioProcessorEditor : public juce::AudioProcessorEditor,
-                                    private juce::Timer
+class Sp3ctraAudioProcessorEditor : public juce::AudioProcessorEditor
 {
 public:
     Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor&);
@@ -36,63 +102,67 @@ public:
     void resumeVisualizer();
 
 private:
-    // ── Layout constants ─────────────────────────────────────────────────────
+    // ── Active tab ────────────────────────────────────────────────────────────
+    enum class Tab { Image, Synth, Sampler };
+
+    // ── Layout constants ──────────────────────────────────────────────────────
     static constexpr int kHeaderH    = 52;
     static constexpr int kVisY       = kHeaderH + 8;
     static constexpr int kVisH       = 64;
-    static constexpr int kTabsY      = kVisY + kVisH + 6;   // = 130
+    static constexpr int kTabsY      = kVisY + kVisH + 6;
     static constexpr int kTabsH      = 26;
-    static constexpr int kPageTop    = kTabsY + kTabsH + 6; // = 162
-    static constexpr int kHPad       = 10;
+    static constexpr int kPageTop    = kTabsY + kTabsH + 6;
     static constexpr int kColGap     = 18;
-    static constexpr int kSectionH   = 24;
-    static constexpr int kSectionGap = 4;
-    static constexpr int kRowH       = 27;
-    static constexpr int kRowStep    = kRowH + 4;  // = 31
-    static constexpr int kLabelW     = 110;
-    static constexpr int kCtrlOffset = kLabelW + 8;
     static constexpr int kCtrlW      = 210;
-    static constexpr int kLS_ROWS    = 9;
-    static constexpr int kSF_ROWS    = 6;
+    // SYNTH tab left col: 7 audio-only rows
+    static constexpr int kLS_ROWS    = 7;
+    // SYNTH tab right col: 8 StrokeForge rows
+    static constexpr int kSF_ROWS    = 8;
+
+    static constexpr int kHPad       = Sp3ctraTheme::kHPad;
+    static constexpr int kSectionH   = Sp3ctraTheme::kSectionH;
+    static constexpr int kSectionGap = Sp3ctraTheme::kSectionGap;
+    static constexpr int kRowH       = Sp3ctraTheme::kControlH;
+    static constexpr int kRowStep    = Sp3ctraTheme::kRowStep;
+    static constexpr int kLabelW     = Sp3ctraTheme::kLabelW;
+    static constexpr int kCtrlOffset = kLabelW + 8;
 
     int colWidth()   const noexcept { return (getWidth() - 2*kHPad - kColGap) / 2; }
     int colLX()      const noexcept { return kHPad; }
     int colRX()      const noexcept { return kHPad + colWidth() + kColGap; }
     int rowsStartY() const noexcept { return kPageTop + kSectionH + kSectionGap; }
-    int footerY()    const noexcept { return getHeight() - 42; }
 
-    void timerCallback() override;
     void openSettings();
-    void switchToPage(bool showSampler);
+    void switchToTab(Tab tab);
 
     Sp3ctraAudioProcessor& audioProcessor;
 
-    // ── Tab navigation ────────────────────────────────────────────────────────
-    bool showingSamplerPage = false;
+    // ── State ─────────────────────────────────────────────────────────────────
+    Tab currentTab { Tab::Image };
+
+    // ── Tab navigation (3 tabs: IMAGE | SYNTH | SAMPLER) ──────────────────────
+    juce::TextButton imageTabBtn   { "IMAGE" };
     juce::TextButton synthTabBtn   { "SYNTH" };
     juce::TextButton samplerTabBtn { "SAMPLER" };
 
     // ── CIS Visualizer ────────────────────────────────────────────────────────
     std::unique_ptr<CisVisualizerComponent> cisVisualizer;
 
-    // ── SYNTH page — LuxStral ─────────────────────────────────────────────────
+    // ── IMAGE page — delegated to ImagePageComponent ───────────────────────────
+    std::unique_ptr<ImagePageComponent> imagePage;
+
+    // ── SYNTH page — LuxStral audio params (image params removed) ─────────────
     juce::ToggleButton deviceOnToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> deviceOnAttachment;
 
     juce::Slider masterVolumeSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> masterVolumeAttachment;
 
-    juce::Slider gammaSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> gammaAttachment;
-
     juce::Slider attackSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attackAttachment;
 
     juce::Slider releaseSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> releaseAttachment;
-
-    juce::Slider contrastMinSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> contrastMinAttachment;
 
     juce::Slider stereoTempSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> stereoTempAttachment;
@@ -103,21 +173,27 @@ private:
     juce::Slider noiseGateSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> noiseGateAttachment;
 
-    // ── SYNTH page — StrokeForge ──────────────────────────────────────────────
+    // ── SYNTH right column — StrokeForge synthesis controls ───────────────────
     juce::ToggleButton sfEnabledToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfEnabledAttachment;
 
     juce::Slider sfBlobThreshSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfBlobThreshAttachment;
 
+    juce::Slider sfMinWidthSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMinWidthAttachment;
+
     juce::Slider sfMergeGapSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMergeGapAttachment;
+
+    juce::Slider sfMorphWidthSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMorphWidthAttachment;
 
     juce::Slider sfFocusSigmaSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfFocusSigmaAttachment;
 
-    juce::Slider sfSpectralWidthSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfSpectralWidthAttachment;
+    juce::Slider sfSpectralThreshSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfSpectralThreshAttachment;
 
     juce::ToggleButton sfFocusOnlyToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfFocusOnlyAttachment;
@@ -125,9 +201,11 @@ private:
     // ── SAMPLER page ──────────────────────────────────────────────────────────
     std::unique_ptr<SamplerPageComponent> samplerPage;
 
-    // ── Footer ────────────────────────────────────────────────────────────────
-    juce::TextButton settingsButton;
-    juce::Label      statusLabel;
+    // ── LookAndFeel (declared before all JUCE components that use it) ─────────
+    Sp3ctraLookAndFeel sp3ctraLaf;
+
+    // ── Header: gear settings button ──────────────────────────────────────────
+    GearButton settingsButton;
     std::unique_ptr<SettingsWindow> settingsWindow;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Sp3ctraAudioProcessorEditor)

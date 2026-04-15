@@ -45,8 +45,9 @@ private:
     juce::Rectangle<int> cellBounds(int i) const noexcept;
 
     Sp3ctraAudioProcessor& processor;
-    int  selectedSlot = 0;
-    bool blinkOn      = false;
+    int  selectedSlot  = 0;
+    bool blinkOn       = false;
+    int  clipboardSlot = -1; // index of the slot last copied, -1 = empty
 
     // MIDI note names displayed inside each cell (C1..B1)
     static const char* const kNoteNames[FrameSamplerConstants::NUM_SLOTS];

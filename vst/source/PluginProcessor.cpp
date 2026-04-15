@@ -94,7 +94,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     // ── Gameplay — Gamma / Contrast ──────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxstralGammaValue", 1}, "Gamma",
-        juce::NormalisableRange<float>(0.1f, 10.0f, 0.01f), 4.8f));
+        juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f, 0.30f), 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxstralContrastMin", 1}, "Contrast Min",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.21f));
@@ -117,7 +117,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     // ── Gameplay — Summation exponent / Noise gate ───────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxstralSummationResponseExp", 1}, "Sum. Exp.",
-        juce::NormalisableRange<float>(0.1f, 3.0f, 0.1f), 2.0f));
+        juce::NormalisableRange<float>(2.0f, 10.0f, 0.1f), 2.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxstralNoiseGateThreshold", 1}, "Noise Gate",
         juce::NormalisableRange<float>(0.0f, 0.1f, 0.001f), 0.005f));
@@ -219,10 +219,33 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"imageLiveOpacity", 1}, "Live Opacity",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f, kHiddenFloat));
 
-    // Sampler stream opacity [0..1] — darken-blend weight for the FrameSampler playback frame.
+    // Sampler stream opacity [0..1] — driven by imageMixBalance crossfader.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"imageSamplerOpacity", 1}, "Sampler Opacity",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f, kHiddenFloat));
+
+    // Mix balance crossfader: 0.0=full Sampler, 0.5=equal, 1.0=full Live.
+    // Drives imageLiveOpacity and imageSamplerOpacity via parameterChanged.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"imageMixBalance", 1}, "Mix Balance",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, kHiddenFloat));
+
+    // ── Pipeline routing — per-path source selection & toggles ────────────────
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"luxstralSource", 1}, "LuxStral Source",
+        juce::StringArray{"S - Sampler", "M - Mix", "L - Live"}, 1));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"luxstralInversion", 1}, "LuxStral Inversion", true));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"luxstralAcRemoval", 1}, "LuxStral DC Blocking", true));
+
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"luxsynthSource", 1}, "LuxSynth Source",
+        juce::StringArray{"S - Sampler", "M - Mix", "L - Live"}, 1));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"luxsynthInversion", 1}, "LuxSynth Inversion", true));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"luxsynthAcRemoval", 1}, "LuxSynth DC Blocking", true));
 
     // Fade-in duration [ms] — applied when restarting the live stream after Stop.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -233,7 +256,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     // ── Sampler stream preprocessing (mirroring live params independently) ────
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"samplerGamma", 1}, "Sampler Gamma",
-        juce::NormalisableRange<float>(0.1f, 10.0f, 0.01f), 1.0f));
+        juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f, 0.30f), 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"samplerContrastMin", 1}, "Sampler Contrast Min",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
@@ -244,6 +267,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"samplerFadeInMs", 1}, "Sampler Fade-In",
         juce::NormalisableRange<float>(0.0f, 2000.0f, 10.0f), 100.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+
+    // rawFreezeMode: 0=PLAY, 1=HOLD (freeze last raw frame), 2=STOP (white)
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"rawFreezeMode", 1}, "RAW Freeze Mode",
+        0, 2, 0, kHiddenInt));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"rawFadeInMs", 1}, "RAW Fade-In",
+        juce::NormalisableRange<float>(0.0f, 2000.0f, 10.0f), 0.0f,
         juce::AudioParameterFloatAttributes{}.withLabel("ms")));
 
     // ── FrameSampler ──────────────────────────────────────────────────────────
@@ -368,16 +400,27 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("sfSpectralWidthThreshold", this);
     apvts.addParameterListener("sfFocusOnly", this);
 
+    // Per-path pipeline routing (source selector, inversion, AC removal)
+    apvts.addParameterListener("luxstralSource",       this);
+    apvts.addParameterListener("luxstralInversion",    this);
+    apvts.addParameterListener("luxstralAcRemoval",    this);
+    apvts.addParameterListener("luxsynthSource",       this);
+    apvts.addParameterListener("luxsynthInversion",    this);
+    apvts.addParameterListener("luxsynthAcRemoval",    this);
+
     // Image pipeline parameters (live transport + opacity + fade-in)
     apvts.addParameterListener("imageFreezeMode",      this);
     apvts.addParameterListener("imageLiveOpacity",     this);
     apvts.addParameterListener("imageSamplerOpacity",  this);
+    apvts.addParameterListener("imageMixBalance",      this);
     apvts.addParameterListener("imageFadeInMs",        this);
     // Sampler-specific preprocessing parameters
     apvts.addParameterListener("samplerGamma",         this);
     apvts.addParameterListener("samplerContrastMin",   this);
     apvts.addParameterListener("samplerFreezeMode",    this);
     apvts.addParameterListener("samplerFadeInMs",      this);
+    apvts.addParameterListener("rawFreezeMode",        this);
+    apvts.addParameterListener("rawFadeInMs",          this);
 
     // Create FrameSampler (always active, no lazy init needed)
     frameSampler = std::make_unique<FrameSampler>();
@@ -930,7 +973,23 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
     if (isLuxStralParam) {
         // Just update g_sp3ctra_config silently (no restart)
         applyConfigurationToCore(false);
-        
+
+        // 🔧 SOURCE SWITCH: Reset preprocessed data so stale data from the
+        // previous source doesn't persist.  The correct thread (UDP or
+        // FramePlayerThread) will write fresh data for the new source.
+        if (parameterID == "luxstralSource") {
+            if (sharedCore && sharedCore->getCore()) {
+                auto* db = sharedCore->getCore()->getDoubleBuffer();
+                if (db) {
+                    pthread_mutex_lock(&db->mutex);
+                    db->dataReady = 0;
+                    db->preprocessed_data.timestamp_us = 0;
+                    pthread_mutex_unlock(&db->mutex);
+                    log_info("VST", "Source changed — preprocessed data reset");
+                }
+            }
+        }
+
         // 🔧 HOT-RELOAD: Musical parameters (tuning, root note, octaves) change frequency range
         // This triggers fade-out → regenerate → fade-in for smooth transition
         if (parameterID == "luxstralTuning" || 
@@ -1006,7 +1065,26 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
                          static_cast<int>(udpPortParam->load()));
             }
         }
-    } else {
+    }
+    // ── Mix balance crossfader: push derived opacities into APVTS ─────────────
+    // This ensures CisVisualizerComponent (which reads APVTS directly) and the
+    // C pipeline (which reads g_sp3ctra_config) both stay in sync.
+    else if (parameterID == "imageMixBalance")
+    {
+        const float bal = newValue;
+        const float liveOp = std::min(1.0f, 2.0f * bal);
+        const float smpOp  = std::min(1.0f, 2.0f * (1.0f - bal));
+
+        if (auto* p = apvts.getParameter("imageLiveOpacity"))
+            p->setValueNotifyingHost(p->convertTo0to1(liveOp));
+        if (auto* p = apvts.getParameter("imageSamplerOpacity"))
+            p->setValueNotifyingHost(p->convertTo0to1(smpOp));
+
+        applyConfigurationToCore(false);
+        return;
+    }
+    else
+    {
         // For other non-UDP, non-LuxStral parameters (sensor DPI, log level, visualizer mode)
         applyConfigurationToCore(false);  // needsSocketRestart = false
         
@@ -1159,10 +1237,17 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     /* ── Image Pipeline live controls ──────────────────────────────────────── */
     /* Always enable blob detection so the BlobVisualizerComponent gets data.   */
     /* sfEnabled controls only the StrokeForge synthesis application.            */
-    g_sp3ctra_config.image_live_opacity  =
-        apvts.getRawParameterValue("imageLiveOpacity")->load();
-    g_sp3ctra_config.image_sampler_opacity =
-        apvts.getRawParameterValue("imageSamplerOpacity")->load();
+    // ── Mix balance crossfader → derived live/sampler opacities ───────────────
+    // balance=0.0 → smpOp=1.0, liveOp=0.0 (full Sampler)
+    // balance=0.5 → smpOp=1.0, liveOp=1.0 (equal, full darken blend)
+    // balance=1.0 → smpOp=0.0, liveOp=1.0 (full Live)
+    {
+        const float bal = apvts.getRawParameterValue("imageMixBalance")->load();
+        const float liveOp = std::min(1.0f, 2.0f * bal);
+        const float smpOp  = std::min(1.0f, 2.0f * (1.0f - bal));
+        g_sp3ctra_config.image_live_opacity    = liveOp;
+        g_sp3ctra_config.image_sampler_opacity = smpOp;
+    }
     g_sp3ctra_config.image_freeze_mode   =
         static_cast<int>(apvts.getRawParameterValue("imageFreezeMode")->load());
     g_sp3ctra_config.image_fade_in_ms    =
@@ -1175,6 +1260,47 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         static_cast<int>(apvts.getRawParameterValue("samplerFreezeMode")->load());
     g_sp3ctra_config.sampler_fade_in_ms   =
         static_cast<int>(apvts.getRawParameterValue("samplerFadeInMs")->load());
+    g_sp3ctra_config.raw_freeze_mode      =
+        static_cast<int>(apvts.getRawParameterValue("rawFreezeMode")->load());
+    g_sp3ctra_config.raw_fade_in_ms       =
+        static_cast<int>(apvts.getRawParameterValue("rawFadeInMs")->load());
+
+    // ========================================================================
+    // Per-path pipeline routing — source selection, inversion, AC removal
+    //
+    // APVTS choice indices:  0 = "S - Sampler",  1 = "M - Mix",  2 = "L - Live"
+    // ImageSourceType enum:  SAMPLER=0, LIVE=1, MIX=2
+    // Mapping table: choice → enum
+    // ========================================================================
+    {
+        static const int kChoiceToSource[3] = { 0, 2, 1 }; // S→0, M→2, L→1
+
+        int lsChoice = static_cast<int>(
+            apvts.getRawParameterValue("luxstralSource")->load());
+        if (lsChoice < 0 || lsChoice > 2) lsChoice = 1; // default M
+        g_sp3ctra_config.luxstral_source_type = kChoiceToSource[lsChoice];
+        g_sp3ctra_config.luxstral_inversion   =
+            static_cast<int>(apvts.getRawParameterValue("luxstralInversion")->load());
+        g_sp3ctra_config.luxstral_ac_removal  =
+            static_cast<int>(apvts.getRawParameterValue("luxstralAcRemoval")->load());
+
+        int lxChoice = static_cast<int>(
+            apvts.getRawParameterValue("luxsynthSource")->load());
+        if (lxChoice < 0 || lxChoice > 2) lxChoice = 1;
+        g_sp3ctra_config.luxsynth_source_type = kChoiceToSource[lxChoice];
+        g_sp3ctra_config.luxsynth_inversion   =
+            static_cast<int>(apvts.getRawParameterValue("luxsynthInversion")->load());
+        g_sp3ctra_config.luxsynth_ac_removal  =
+            static_cast<int>(apvts.getRawParameterValue("luxsynthAcRemoval")->load());
+
+        log_debug("VST", "Per-path routing: LS source=%d inv=%d ac=%d  |  LX source=%d inv=%d ac=%d",
+                  g_sp3ctra_config.luxstral_source_type,
+                  g_sp3ctra_config.luxstral_inversion,
+                  g_sp3ctra_config.luxstral_ac_removal,
+                  g_sp3ctra_config.luxsynth_source_type,
+                  g_sp3ctra_config.luxsynth_inversion,
+                  g_sp3ctra_config.luxsynth_ac_removal);
+    }
 
     // Update logger level immediately
     logger_init((log_level_t)logLevel);

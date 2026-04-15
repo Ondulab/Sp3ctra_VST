@@ -10,7 +10,8 @@
 extern "C" {
     #include "audio_image_buffers.h"
     #include "multithreading.h"         // DoubleBuffer + pthread mutex
-    #include "../processing/image_preprocessor.h" // image_preprocess_frame, PreprocessedImageData
+    #include "../processing/image_preprocessor.h" // PreprocessedImageData
+#include "../processing/image_pipeline.h"     // pipeline_process_frame, pipeline_build_config_sampler
     #include "logger.h"
 }
 
@@ -44,12 +45,23 @@ extern "C"
             return 0;
         if (!FrameSampler::s_instance->isAnySlotPlaying())
             return 0;
-        // When sampler transport is STOP (sampler_freeze_mode==2), the sampler
-        // must NOT gate the live audio/visual path even if a slot is scheduled.
-        // Returning 0 allows the UDP thread to keep writing to AudioImageBuffers
-        // and updating db->preprocessed_data with live data uninterrupted.
+        // When the sequencer holds the player (seqPlayerHeld), the
+        // FramePlayerThread sleeps and does not inject frames.  The RAW
+        // live stream must pass through so audio/visual remain alive.
+        if (FrameSampler::s_instance->isSeqPlayerHeld())
+            return 0;
+        // When sampler transport is paused (HOLD=1) or stopped (STOP=2),
+        // allow the RAW live stream to pass through.  Only block when
+        // the transport is actively playing (sampler_freeze_mode==0).
         extern sp3ctra_config_t g_sp3ctra_config;
-        return (g_sp3ctra_config.sampler_freeze_mode != 2) ? 1 : 0;
+        return (g_sp3ctra_config.sampler_freeze_mode == 0) ? 1 : 0;
+    }
+
+    int frame_sampler_is_recording(void)
+    {
+        if (FrameSampler::s_instance == nullptr)
+            return 0;
+        return FrameSampler::s_instance->isAnySlotRecording() ? 1 : 0;
     }
 }
 
@@ -360,6 +372,15 @@ bool FrameSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const ui
     std::memcpy(frame.B, B, static_cast<size_t>(bytes));
 
     ++slot.frame_count;
+
+    // ── Write RAW incoming frame to sampler snapshot during recording ─────
+    // This ensures Source=Sampler mode can read the live incoming data while
+    // a slot is recording (the sampler output reflects the incoming stream).
+    if (audioBuffers_ != nullptr)
+    {
+        audio_image_buffers_snapshot_sampler(audioBuffers_, R, G, B, bytes);
+    }
+
     return true;
 }
 
@@ -515,6 +536,10 @@ void FrameSampler::startPlayerThread(AudioImageBuffers* audioBuffers,
     }
     if (doubleBuffer == nullptr)
         log_warning("FS", "startPlayerThread: doubleBuffer is null — preprocessed_data bypass inactive");
+
+    // Store pointers so onFrameAssembled() can write sampler snapshot during recording
+    audioBuffers_ = audioBuffers;
+    doubleBuffer_ = doubleBuffer;
 
     playerThread = std::make_unique<FramePlayerThread>(*this, audioBuffers, doubleBuffer);
     playerThread->startThread(juce::Thread::Priority::normal);
@@ -949,6 +974,7 @@ void FramePlayerThread::run()
         LoopMode prevLoopMode   = sampler.getSlotLoopMode(slotToPlay);
         int      direction      = (prevLoopMode == LoopMode::INVERSE) ? -1 : 1;
         slot.play_head          = 0; // set on first range init below
+        bool stoppedByNoneMode  = false; // tracks if NONE loop reached end
 
         // ── Inner playback loop ───────────────────────────────────────────
         while (!threadShouldExit())
@@ -1068,6 +1094,7 @@ void FramePlayerThread::run()
                     {
                         case LoopMode::NONE:
                             stop = true;
+                            stoppedByNoneMode = true;
                             break;
                         case LoopMode::LOOP:
                             direction      = 1;
@@ -1237,6 +1264,10 @@ void FramePlayerThread::run()
                 }
             }
 
+            // ── Snapshot pure sampler frame BEFORE live blend ─────────────────
+            // So the visualizer can show the sampler output in isolation.
+            audio_image_buffers_snapshot_sampler(audioBuffers, workR, workG, workB, nb);
+
             // ── Live darken-blend: min(sample, live) weighted by blendAmount ─────
             // blendAmount=0 → pure playback; blendAmount=1 → full darken blend.
             // Applied AFTER attack/decay/lift so the blend sees the fully
@@ -1317,7 +1348,14 @@ void FramePlayerThread::run()
                 // Effective sampler opacity = user opacity × fade ramp.
                 // At ramp=0 → effectiveSmpOp=0 → frame=white (silence).
                 // At ramp=1 → effectiveSmpOp=smpOp → normal brightness.
-                const float effectiveSmpOp = smpOp * transportFadeRamp_;
+                //
+                // Source-aware: when Source=S (pure sampler), bypass the MIX
+                // crossfader opacity — only the transport fade ramp applies.
+                // The crossfader balance (smpOp) is only meaningful in MIX mode.
+                const int srcType = g_sp3ctra_config.luxstral_source_type;
+                const float effectiveSmpOp = (srcType == 0 /* IMAGE_SOURCE_SAMPLER */)
+                    ? transportFadeRamp_               // Source=S: full opacity, fade only
+                    : smpOp * transportFadeRamp_;      // Source=M: crossfader × fade
 
                 if (smpFreeze != 2) // Do not inject when sampler transport is STOP
                 {
@@ -1334,7 +1372,9 @@ void FramePlayerThread::run()
                     }
 
                     // 2. Darken-blend with live when live transport is active
-                    if (liveFreeze != 2 && liveOp > 0.001f)
+                    //    Skip entirely for Source=S (pure sampler — no live contribution).
+                    if (srcType != 0 /* not IMAGE_SOURCE_SAMPLER */
+                        && liveFreeze != 2 && liveOp > 0.001f)
                     {
                         uint8_t lvR[FrameSamplerConstants::MAX_PIXELS] {};
                         uint8_t lvG[FrameSamplerConstants::MAX_PIXELS] {};
@@ -1379,24 +1419,32 @@ void FramePlayerThread::run()
             // (not the raw RGB buffers). attack + blend are applied to workR/G/B
             // before preprocessing so they affect the synthesised sound.
             //
-            // Guard: skip when sampler transport is STOP (sampler_freeze_mode==2).
-            // In that state the UDP thread owns db->preprocessed_data (live
-            // preprocessing).  Writing here with notes=0 would silence the live
-            // audio in bursts synchronised with the step sequencer — the audible
-            // "rhythmic impact in the live" bug.
+            // Source routing: sampler thread only writes preprocessed_data
+            // when Source=S (IMAGE_SOURCE_SAMPLER=0).
+            // Source=L(1) or M(2): the live UDP thread is the sole writer.
+            //
+            // NOTE: sampler_freeze_mode is NOT checked here.  The pipeline's
+            // envelope (ENVELOPE_SAMPLER) already handles PLAY/HOLD/STOP via
+            // config->freeze_mode.  For Source=S the UDP thread never writes
+            // preprocessed_data during playback, so there is no ownership
+            // conflict.  The previous guard (freeze_mode != 2) prevented
+            // preprocessed_data updates when the transport was in STOP,
+            // causing stale audio while the visual animated correctly.
             // ---------------------------------------------------------------
             {
                 extern sp3ctra_config_t g_sp3ctra_config;
+                const int src = g_sp3ctra_config.luxstral_source_type;
                 if (doubleBuffer != nullptr
-                    && g_sp3ctra_config.sampler_freeze_mode != 2)
+                    && src == 0 /* IMAGE_SOURCE_SAMPLER */)
                 {
                     PreprocessedImageData ppData {};
-                    if (image_preprocess_frame_sampler(workR, workG, workB, &ppData) == 0)
+                    PipelineConfig sampler_cfg = pipeline_build_config_sampler();
+                    if (pipeline_process_frame(workR, workG, workB, &sampler_cfg, &ppData) == 0)
                     {
                         ppData.timestamp_us = static_cast<uint64_t>(currentTimeUs());
                         pthread_mutex_lock(&doubleBuffer->mutex);
                         doubleBuffer->preprocessed_data = ppData;
-                        doubleBuffer->dataReady = 1;
+                        doubleBuffer->dataReady = 2; /* 2 = sampler source tag */
                         pthread_mutex_unlock(&doubleBuffer->mutex);
                     }
                 }
@@ -1410,6 +1458,58 @@ void FramePlayerThread::run()
         // Saving direction allows PINGPONG to resume in the correct sense.
         sampler.saveLastPlayHead(slotToPlay, slot.play_head);
         sampler.saveLastDirection(slotToPlay, direction);
+
+        // ── NONE loop mode: inject white (silence) frame on end ───────────
+        // When the playhead reaches the end in NONE mode the output must cut
+        // to blank immediately.  Without this, the last frame stays frozen in
+        // AudioImageBuffers / sampler snapshot / preprocessed_data until the
+        // next UDP frame arrives or another slot starts playing.
+        if (stoppedByNoneMode)
+        {
+            log_info("FS", "Slot %d: NONE mode end — injecting white frame (silence)",
+                     slotToPlay);
+
+            // White = 255 on all channels = silence in Sp3ctra's image-to-sound mapping.
+            uint8_t whiteR[FrameSamplerConstants::MAX_PIXELS];
+            uint8_t whiteG[FrameSamplerConstants::MAX_PIXELS];
+            uint8_t whiteB[FrameSamplerConstants::MAX_PIXELS];
+            std::memset(whiteR, 255, sizeof(whiteR));
+            std::memset(whiteG, 255, sizeof(whiteG));
+            std::memset(whiteB, 255, sizeof(whiteB));
+            const int nbPx = FrameSamplerConstants::MAX_PIXELS;
+
+            // 1. Clear sampler snapshot
+            audio_image_buffers_snapshot_sampler(audioBuffers, whiteR, whiteG, whiteB, nbPx);
+
+            // 2. Clear main AudioImageBuffers
+            {
+                uint8_t* wR = nullptr;
+                uint8_t* wG = nullptr;
+                uint8_t* wB = nullptr;
+                if (audio_image_buffers_start_write(audioBuffers, &wR, &wG, &wB) == 0)
+                {
+                    std::memset(wR, 255, static_cast<size_t>(nbPx));
+                    std::memset(wG, 255, static_cast<size_t>(nbPx));
+                    std::memset(wB, 255, static_cast<size_t>(nbPx));
+                    audio_image_buffers_complete_write(audioBuffers);
+                }
+            }
+
+            // 3. Clear preprocessed_data (silence) for Source=S
+            if (doubleBuffer != nullptr)
+            {
+                PreprocessedImageData ppSilence {};
+                PipelineConfig sampler_cfg = pipeline_build_config_sampler();
+                if (pipeline_process_frame(whiteR, whiteG, whiteB, &sampler_cfg, &ppSilence) == 0)
+                {
+                    ppSilence.timestamp_us = static_cast<uint64_t>(currentTimeUs());
+                    pthread_mutex_lock(&doubleBuffer->mutex);
+                    doubleBuffer->preprocessed_data = ppSilence;
+                    doubleBuffer->dataReady = 2;
+                    pthread_mutex_unlock(&doubleBuffer->mutex);
+                }
+            }
+        }
 
         log_info("FS", "Slot %d: playback stopped (head=%d/%d)",
                  slotToPlay, slot.play_head, slot.frame_count);

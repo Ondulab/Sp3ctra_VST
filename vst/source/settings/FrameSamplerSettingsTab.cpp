@@ -1,5 +1,6 @@
 #include "FrameSamplerSettingsTab.h"
 #include "../Sp3ctraConstants.h"
+#include "../UITheme.h"
 #include "../framesampler/FrameSampler.h"
 
 // Note names for slot index labels (C0..B0 for REC, C1..B1 for PLAY)
@@ -24,8 +25,8 @@ static const char* stateText(SlotState s)
     switch (s)
     {
         case SlotState::ARMED:     return "ARMED";
-        case SlotState::RECORDING: return "REC ●";
-        case SlotState::PLAYING:   return "PLAY ▶";
+        case SlotState::RECORDING: return "REC *";
+        case SlotState::PLAYING:   return "PLAY >";
         default:                   return "idle";
     }
 }
@@ -41,7 +42,7 @@ FrameSamplerSettingsTab::FrameSamplerSettingsTab(Sp3ctraAudioProcessor& processo
     // ── Enable toggle ─────────────────────────────────────────────────────
     enableLabel.setText("FrameSampler:", juce::dontSendNotification);
     enableLabel.setJustificationType(juce::Justification::centredRight);
-    enableLabel.setFont(juce::FontOptions(14.0f));
+    enableLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(enableLabel);
 
     enableToggle.setButtonText("Enabled");
@@ -53,7 +54,7 @@ FrameSamplerSettingsTab::FrameSamplerSettingsTab(Sp3ctraAudioProcessor& processo
     // ── MIDI Channel ──────────────────────────────────────────────────────
     midiChannelLabel.setText("MIDI Channel:", juce::dontSendNotification);
     midiChannelLabel.setJustificationType(juce::Justification::centredRight);
-    midiChannelLabel.setFont(juce::FontOptions(14.0f));
+    midiChannelLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(midiChannelLabel);
 
     for (int i = 1; i <= 16; ++i)
@@ -66,7 +67,7 @@ FrameSamplerSettingsTab::FrameSamplerSettingsTab(Sp3ctraAudioProcessor& processo
     // ── Octave Offset ─────────────────────────────────────────────────────
     octaveOffsetLabel.setText("Octave Offset:", juce::dontSendNotification);
     octaveOffsetLabel.setJustificationType(juce::Justification::centredRight);
-    octaveOffsetLabel.setFont(juce::FontOptions(14.0f));
+    octaveOffsetLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(octaveOffsetLabel);
 
     octaveOffsetCombo.addItem("-2", 1);
@@ -82,11 +83,12 @@ FrameSamplerSettingsTab::FrameSamplerSettingsTab(Sp3ctraAudioProcessor& processo
     // ── Max Duration ──────────────────────────────────────────────────────
     maxDurationLabel.setText("Max Duration:", juce::dontSendNotification);
     maxDurationLabel.setJustificationType(juce::Justification::centredRight);
-    maxDurationLabel.setFont(juce::FontOptions(14.0f));
+    maxDurationLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(maxDurationLabel);
 
     maxDurationSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    maxDurationSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 20);
+    maxDurationSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                       Sp3ctraTheme::kTbXNarrow, Sp3ctraTheme::kTextBoxH);
     maxDurationSlider.setTextValueSuffix(" s");
     addAndMakeVisible(maxDurationSlider);
     maxDurationAttachment = std::make_unique<
@@ -100,20 +102,20 @@ FrameSamplerSettingsTab::FrameSamplerSettingsTab(Sp3ctraAudioProcessor& processo
         juce::String idxText = juce::String(kNoteNames[i]) + "0 / "
                              + juce::String(kNoteNames[i]) + "1";
         slotIndexLabel[i].setText(idxText, juce::dontSendNotification);
-        slotIndexLabel[i].setFont(juce::FontOptions(11.0f));
+        slotIndexLabel[i].setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
         slotIndexLabel[i].setJustificationType(juce::Justification::centredLeft);
         addAndMakeVisible(slotIndexLabel[i]);
 
         // State label
         slotStateLabel[i].setText("idle", juce::dontSendNotification);
-        slotStateLabel[i].setFont(juce::FontOptions(11.0f));
+        slotStateLabel[i].setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
         slotStateLabel[i].setJustificationType(juce::Justification::centred);
         slotStateLabel[i].setColour(juce::Label::textColourId, juce::Colours::grey);
         addAndMakeVisible(slotStateLabel[i]);
 
         // Duration label
         slotDurLabel[i].setText("0.0 s", juce::dontSendNotification);
-        slotDurLabel[i].setFont(juce::FontOptions(11.0f));
+        slotDurLabel[i].setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
         slotDurLabel[i].setJustificationType(juce::Justification::centred);
         addAndMakeVisible(slotDurLabel[i]);
 
@@ -126,59 +128,6 @@ FrameSamplerSettingsTab::FrameSamplerSettingsTab(Sp3ctraAudioProcessor& processo
         };
         addAndMakeVisible(slotClearBtn[i]);
     }
-
-    // ── Action buttons ────────────────────────────────────────────────────
-    saveButton.onClick = [this]()
-    {
-        fileChooser = std::make_unique<juce::FileChooser>(
-            "Save FrameSampler Preset",
-            juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
-            "*.fsmp");
-
-        fileChooser->launchAsync(
-            juce::FileBrowserComponent::saveMode
-            | juce::FileBrowserComponent::canSelectFiles
-            | juce::FileBrowserComponent::warnAboutOverwriting,
-            [this](const juce::FileChooser& fc)
-            {
-                juce::File result = fc.getResult();
-                if (result != juce::File())
-                {
-                    if (!result.hasFileExtension("fsmp"))
-                        result = result.withFileExtension("fsmp");
-                    if (auto* fs = audioProcessor.getFrameSampler())
-                        fs->saveToFile(result);
-                }
-            });
-    };
-    addAndMakeVisible(saveButton);
-
-    loadButton.onClick = [this]()
-    {
-        fileChooser = std::make_unique<juce::FileChooser>(
-            "Load FrameSampler Preset",
-            juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
-            "*.fsmp");
-
-        fileChooser->launchAsync(
-            juce::FileBrowserComponent::openMode
-            | juce::FileBrowserComponent::canSelectFiles,
-            [this](const juce::FileChooser& fc)
-            {
-                const juce::File result = fc.getResult();
-                if (result != juce::File())
-                    if (auto* fs = audioProcessor.getFrameSampler())
-                        fs->loadFromFile(result);
-            });
-    };
-    addAndMakeVisible(loadButton);
-
-    clearAllButton.onClick = [this]()
-    {
-        if (auto* fs = audioProcessor.getFrameSampler())
-            fs->clearAllSlots();
-    };
-    addAndMakeVisible(clearAllButton);
 
     startTimerHz(10); // Refresh at 10 Hz
 }
@@ -225,7 +174,7 @@ void FrameSamplerSettingsTab::updateSlotDisplays()
         }
         else
         {
-            slotDurLabel[i].setText("—", juce::dontSendNotification);
+            slotDurLabel[i].setText("-", juce::dontSendNotification);
         }
 
         // Enable/disable clear button
@@ -244,17 +193,17 @@ void FrameSamplerSettingsTab::paint(juce::Graphics& g)
 
     // Title
     g.setColour(juce::Colours::white);
-    g.setFont(juce::Font(juce::FontOptions(16.0f)).boldened());
+    g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
     g.drawText("FrameSampler", getLocalBounds().removeFromTop(30),
                juce::Justification::centred, true);
 
-    // Column headers for slot grid
-    const int titleH      = 30;
-    const int controlsH   = 4 * 32 + 8; // 4 rows + some padding
-    const int headerY     = titleH + controlsH + 8;
-    const int headerH     = 20;
+    // Column headers for slot grid — position must match resized() exactly:
+    //   titleH(30) + 5 + 4*kRowStep + kHPad = 30+5+104+10 = 149
+    const int titleH  = 30;
+    const int headerY = titleH + 5 + 4 * Sp3ctraTheme::kRowStep + Sp3ctraTheme::kHPad;
+    const int headerH = 20;
 
-    g.setFont(juce::Font(juce::FontOptions(11.0f)).boldened());
+    g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
     g.setColour(juce::Colours::lightgrey);
 
     auto headerBounds = juce::Rectangle<int>(10, headerY, getWidth() - 20, headerH);
@@ -277,19 +226,21 @@ void FrameSamplerSettingsTab::resized()
 {
     const int w        = getWidth();
     const int titleH   = 30;
-    const int rowH     = 32;
-    const int pad      = 8;
-    const int labelW   = 110;
+    constexpr int rowH   = Sp3ctraTheme::kRowStep;   // 32
+    constexpr int pad    = Sp3ctraTheme::kHPad;       // 10
+    constexpr int labelW = Sp3ctraTheme::kLabelW;     // 110
     const int ctrlX    = 20 + labelW;
     const int ctrlW    = w - ctrlX - 20;
 
     int y = titleH + 5;
 
     // ── Controls ──────────────────────────────────────────────────────────
+    constexpr int ctrlH = Sp3ctraTheme::kControlH;
     auto row = [&](juce::Label& lbl, juce::Component& ctrl)
     {
-        lbl .setBounds(20, y, labelW, rowH);
-        ctrl.setBounds(ctrlX, y + 6, ctrlW, rowH - 8);
+        const int vc = (rowH - ctrlH) / 2; // vertical centre offset
+        lbl .setBounds(20,    y + vc, labelW, ctrlH);
+        ctrl.setBounds(ctrlX, y + vc, ctrlW,  ctrlH);
         y += rowH;
     };
 
@@ -318,12 +269,4 @@ void FrameSamplerSettingsTab::resized()
         y += slotRowH;
     }
 
-    y += pad;
-
-    // ── Action buttons ────────────────────────────────────────────────────
-    const int btnH = 30;
-    const int btnW = (w - 40) / 3;
-    saveButton     .setBounds(10,           y, btnW, btnH);
-    loadButton     .setBounds(10 + btnW + 5,y, btnW, btnH);
-    clearAllButton .setBounds(10 + (btnW + 5) * 2, y, btnW, btnH);
 }

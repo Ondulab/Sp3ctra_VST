@@ -5,7 +5,8 @@
 static void initSlider(juce::Slider& s, const char* suffix = nullptr)
 {
     s.setSliderStyle(juce::Slider::LinearHorizontal);
-    s.setTextBoxStyle(juce::Slider::TextBoxRight, false, 72, 20);
+    s.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                      Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     if (suffix) s.setTextValueSuffix(suffix);
 }
 
@@ -19,13 +20,19 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     cisVisualizer = std::make_unique<CisVisualizerComponent>(audioProcessor);
     addAndMakeVisible(cisVisualizer.get());
 
-    // ── Tab buttons ───────────────────────────────────────────────────────────
-    synthTabBtn.onClick   = [this] { switchToPage(false); };
-    samplerTabBtn.onClick = [this] { switchToPage(true);  };
+    // ── Tab buttons (IMAGE | SYNTH | SAMPLER) ─────────────────────────────────
+    imageTabBtn.onClick   = [this] { switchToTab(Tab::Image);   };
+    synthTabBtn.onClick   = [this] { switchToTab(Tab::Synth);   };
+    samplerTabBtn.onClick = [this] { switchToTab(Tab::Sampler); };
+    // Mark as tab buttons so LookAndFeel skips default background painting
+    imageTabBtn.getProperties().set("isTab", true);
+    synthTabBtn.getProperties().set("isTab", true);
+    samplerTabBtn.getProperties().set("isTab", true);
+    addAndMakeVisible(imageTabBtn);
     addAndMakeVisible(synthTabBtn);
     addAndMakeVisible(samplerTabBtn);
 
-    // ── LuxStral controls ─────────────────────────────────────────────────────
+    // ── LuxStral controls (audio only — no image pre-processing params) ────────
     deviceOnToggle.setButtonText("Active");
     addAndMakeVisible(deviceOnToggle);
     deviceOnAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
@@ -35,16 +42,6 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     addAndMakeVisible(masterVolumeSlider);
     masterVolumeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "masterVolume", masterVolumeSlider);
-
-    initSlider(gammaSlider);
-    addAndMakeVisible(gammaSlider);
-    gammaAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "luxstralGammaValue", gammaSlider);
-
-    initSlider(contrastMinSlider);
-    addAndMakeVisible(contrastMinSlider);
-    contrastMinAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "luxstralContrastMin", contrastMinSlider);
 
     initSlider(attackSlider, " ms");
     addAndMakeVisible(attackSlider);
@@ -71,90 +68,118 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     noiseGateAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralNoiseGateThreshold", noiseGateSlider);
 
-    // ── StrokeForge controls ──────────────────────────────────────────────────
-    sfEnabledToggle.setButtonText("Active");
-    addAndMakeVisible(sfEnabledToggle);
+    // ── StrokeForge controls (right column, SYNTH tab) ────────────────────────
+    sfEnabledToggle.setButtonText("StrokeForge Active");
+    addChildComponent(sfEnabledToggle);
     sfEnabledAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "sfEnabled", sfEnabledToggle);
 
     initSlider(sfBlobThreshSlider);
-    addAndMakeVisible(sfBlobThreshSlider);
+    addChildComponent(sfBlobThreshSlider);
     sfBlobThreshAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "sfBlobBaseThreshold", sfBlobThreshSlider);
 
-    initSlider(sfMergeGapSlider, " pix");
-    addAndMakeVisible(sfMergeGapSlider);
+    initSlider(sfMinWidthSlider);
+    addChildComponent(sfMinWidthSlider);
+    sfMinWidthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfBlobMinWidth", sfMinWidthSlider);
+
+    initSlider(sfMergeGapSlider);
+    addChildComponent(sfMergeGapSlider);
     sfMergeGapAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "sfBlobMergeGap", sfMergeGapSlider);
 
-    initSlider(sfFocusSigmaSlider, " pix");
-    addAndMakeVisible(sfFocusSigmaSlider);
+    initSlider(sfMorphWidthSlider);
+    addChildComponent(sfMorphWidthSlider);
+    sfMorphWidthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfMorphWidthScale", sfMorphWidthSlider);
+
+    initSlider(sfFocusSigmaSlider, " notes");
+    addChildComponent(sfFocusSigmaSlider);
     sfFocusSigmaAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "sfBlobFocusSigma", sfFocusSigmaSlider);
 
-    initSlider(sfSpectralWidthSlider, " pix");
-    addAndMakeVisible(sfSpectralWidthSlider);
-    sfSpectralWidthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "sfSpectralWidthThreshold", sfSpectralWidthSlider);
+    initSlider(sfSpectralThreshSlider, " notes");
+    addChildComponent(sfSpectralThreshSlider);
+    sfSpectralThreshAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "sfSpectralWidthThreshold", sfSpectralThreshSlider);
 
-    sfFocusOnlyToggle.setButtonText("On (no morph)");
-    addAndMakeVisible(sfFocusOnlyToggle);
+    sfFocusOnlyToggle.setButtonText("Focus Without Morph");
+    addChildComponent(sfFocusOnlyToggle);
     sfFocusOnlyAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "sfFocusOnly", sfFocusOnlyToggle);
+
+    // ── IMAGE page ────────────────────────────────────────────────────────────
+    imagePage = std::make_unique<ImagePageComponent>(audioProcessor);
+    addChildComponent(imagePage.get());
+
+    // Wire visualizer source selection:
+    // When the user clicks a pipeline node (RAW / S / L / M / SPCTR_* / SYNTH_*),
+    // propagate the selected mode to the CIS visualizer.
+    imagePage->onVisualizerModeChanged = [this](VisualizerMode mode)
+    {
+        if (cisVisualizer)
+            cisVisualizer->setActiveSource(mode);
+    };
 
     // ── Sampler page (hidden by default) ──────────────────────────────────────
     samplerPage = std::make_unique<SamplerPageComponent>(audioProcessor);
     addChildComponent(samplerPage.get());
 
-    // ── Footer ────────────────────────────────────────────────────────────────
-    settingsButton.setButtonText("Settings...");
+    // ── Header gear button ────────────────────────────────────────────────────
     settingsButton.onClick = [this] { openSettings(); };
     addAndMakeVisible(settingsButton);
 
-    statusLabel.setJustificationType(juce::Justification::centredLeft);
-    statusLabel.setFont(juce::FontOptions(12.f));
-    addAndMakeVisible(statusLabel);
-
-    // Start on SYNTH tab
-    switchToPage(false);
-    startTimer(200);
+    // Start on IMAGE tab
+    switchToTab(Tab::Image);
+    juce::LookAndFeel::setDefaultLookAndFeel(&sp3ctraLaf);
     setSize(740, 760);
 }
 
 Sp3ctraAudioProcessorEditor::~Sp3ctraAudioProcessorEditor()
 {
-    stopTimer();
+    juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
     settingsWindow.reset();
 }
 
 //==============================================================================
-void Sp3ctraAudioProcessorEditor::switchToPage(bool showSampler)
+void Sp3ctraAudioProcessorEditor::switchToTab(Tab tab)
 {
-    showingSamplerPage = showSampler;
+    currentTab = tab;
 
-    // Toggle SYNTH controls visibility
-    const bool synthVis = !showSampler;
+    // SYNTH controls (audio-only params + StrokeForge right column)
+    const bool synthVis = (tab == Tab::Synth);
     std::array<juce::Component*, 15> synthCtrls = {
-        &deviceOnToggle,    &masterVolumeSlider,   &gammaSlider,
-        &contrastMinSlider, &attackSlider,         &releaseSlider,
-        &stereoTempSlider,  &sumExpSlider,         &noiseGateSlider,
-        &sfEnabledToggle,   &sfBlobThreshSlider,   &sfMergeGapSlider,
-        &sfFocusSigmaSlider,&sfSpectralWidthSlider, &sfFocusOnlyToggle
+        &deviceOnToggle,   &masterVolumeSlider,
+        &attackSlider,     &releaseSlider,
+        &stereoTempSlider, &sumExpSlider, &noiseGateSlider,
+        &sfEnabledToggle,  &sfBlobThreshSlider,
+        &sfMinWidthSlider, &sfMergeGapSlider,
+        &sfMorphWidthSlider, &sfFocusSigmaSlider,
+        &sfSpectralThreshSlider, &sfFocusOnlyToggle
     };
     for (auto* c : synthCtrls) c->setVisible(synthVis);
 
-    if (samplerPage) samplerPage->setVisible(showSampler);
+    // Page components
+    if (imagePage)   imagePage->setVisible(tab == Tab::Image);
+    if (samplerPage) samplerPage->setVisible(tab == Tab::Sampler);
 
-    // Tab button colours
+    // Blob overlay: visible only when IMAGE tab is active
+    if (cisVisualizer) cisVisualizer->setBlobOverlayVisible(tab == Tab::Image);
+
+    // Tab button colours — use theme tokens
     auto styleTab = [](juce::TextButton& btn, bool active)
     {
         btn.setColour(juce::TextButton::buttonColourId,
-                      active ? juce::Colour(0xff3a3a3a) : juce::Colour(0xff222222));
+                      juce::Colour(active ? Sp3ctraTheme::kColTabActiveBg
+                                          : Sp3ctraTheme::kColTabInactiveBg));
         btn.setColour(juce::TextButton::textColourOffId,
-                      active ? juce::Colours::white : juce::Colour(0xff888888));
+                      juce::Colour(active ? Sp3ctraTheme::kColTabActiveText
+                                          : Sp3ctraTheme::kColTabInactiveText));
     };
-    styleTab(synthTabBtn,   !showSampler);
-    styleTab(samplerTabBtn,  showSampler);
+    styleTab(imageTabBtn,   tab == Tab::Image);
+    styleTab(synthTabBtn,   tab == Tab::Synth);
+    styleTab(samplerTabBtn, tab == Tab::Sampler);
 
     repaint();
 }
@@ -171,101 +196,158 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
     g.fillRect(0, 0, getWidth(), kHeaderH);
 
     g.setColour(juce::Colours::white);
-    g.setFont(juce::Font(juce::FontOptions(22.f)).boldened());
+    g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontTitle)).boldened());
     g.drawText("Sp3ctra", juce::Rectangle<int>(12, 0, getWidth()-24, kHeaderH),
                juce::Justification::centredLeft, true);
 
-    g.setFont(juce::FontOptions(11.f));
-    g.setColour(juce::Colour(0xff888888));
-    g.drawText("v0.0.1", juce::Rectangle<int>(0, 0, getWidth()-12, kHeaderH),
-               juce::Justification::centredRight, true);
+    // Version — centred between logo and gear button
+    g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
+    g.setColour(juce::Colour(0xff777777));
+    g.drawText("v0.1.5", juce::Rectangle<int>(0, 0, getWidth(), kHeaderH),
+               juce::Justification::centred, true);
 
     g.setColour(juce::Colour(0xff444444));
     g.fillRect(0, kHeaderH, getWidth(), 1);
 
-    // ── Tab bar borders ───────────────────────────────────────────────────────
-    g.setColour(juce::Colour(0xff2a2a2a));
-    g.fillRect(0, kTabsY, getWidth(), kTabsH);
-    g.setColour(juce::Colour(0xff444444));
-    g.fillRect(0, kTabsY - 1, getWidth(), 1);
-    g.fillRect(0, kTabsY + kTabsH, getWidth(), 1);
+    // ── Tab bar — proper tab styling ──────────────────────────────────────────
+    {
+        // Full bar background
+        g.setColour(juce::Colour(Sp3ctraTheme::kColTabBarBg));
+        g.fillRect(0, kTabsY, getWidth(), kTabsH);
 
-    // ── SYNTH page labels ─────────────────────────────────────────────────────
-    if (!showingSamplerPage)
+        // Bottom separator line (below entire tab bar)
+        g.setColour(juce::Colour(Sp3ctraTheme::kColBorder));
+        g.fillRect(0, kTabsY + kTabsH, getWidth(), 1);
+
+        // Draw each tab background + accent
+        const juce::TextButton* tabs[]  = { &imageTabBtn, &synthTabBtn, &samplerTabBtn };
+        const Tab               tabIds[] = { Tab::Image,   Tab::Synth,   Tab::Sampler };
+
+        for (int i = 0; i < 3; ++i)
+        {
+            const bool active = (currentTab == tabIds[i]);
+            const auto tbr = tabs[i]->getBounds().toFloat();
+
+            if (active)
+            {
+                // Active tab background — rounded top, flat bottom
+                juce::Path tabPath;
+                const float r = Sp3ctraTheme::kTabCornerR;
+                tabPath.addRoundedRectangle(tbr.getX(), tbr.getY(),
+                                            tbr.getWidth(), tbr.getHeight() + r,
+                                            r, r, true, true, false, false);
+                g.setColour(juce::Colour(Sp3ctraTheme::kColTabActiveBg));
+                g.fillPath(tabPath);
+
+                // Subtle border on active tab (top + sides only)
+                g.setColour(juce::Colour(Sp3ctraTheme::kColTabBorderActive));
+                g.strokePath(tabPath, juce::PathStrokeType(1.0f));
+
+                // Accent underline at the bottom of the active tab
+                g.setColour(juce::Colour(Sp3ctraTheme::kColTabAccent));
+                g.fillRect(tbr.getX(), tbr.getBottom() - (float)Sp3ctraTheme::kTabUnderlineH,
+                           tbr.getWidth(), (float)Sp3ctraTheme::kTabUnderlineH);
+            }
+            else
+            {
+                // Inactive tab — flat, subtle
+                g.setColour(juce::Colour(Sp3ctraTheme::kColTabInactiveBg));
+                g.fillRect(tbr);
+
+                // Very subtle bottom border for separation
+                g.setColour(juce::Colour(Sp3ctraTheme::kColTabBorderInactive));
+                g.fillRect(tbr.getX(), tbr.getBottom() - 1.f, tbr.getWidth(), 1.f);
+            }
+        }
+    }
+
+    // ── SYNTH page labels (drawn inline — ImagePage draws itself) ─────────────
+    if (currentTab == Tab::Synth)
     {
         const int cw  = colWidth();
         const int lxp = colLX();
-        const int rxp = colRX();
         const int rsy = rowsStartY();
 
-        // LuxStral section badge
+        // LuxStral section badge (audio-only, no image pipeline params)
         g.setColour(juce::Colour(0xff1c3755));
         g.fillRoundedRectangle(juce::Rectangle<int>(lxp, kPageTop, cw, kSectionH).toFloat(), 3.f);
         g.setColour(juce::Colour(0xff7ab0f0));
-        g.setFont(juce::Font(juce::FontOptions(12.f)).boldened());
+        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
         g.drawText("LUXSTRAL",
                    juce::Rectangle<int>(lxp+6, kPageTop, cw-12, kSectionH),
                    juce::Justification::centredLeft, true);
 
-        // StrokeForge section badge
-        g.setColour(juce::Colour(0xff3d2e00));
-        g.fillRoundedRectangle(juce::Rectangle<int>(rxp, kPageTop, cw, kSectionH).toFloat(), 3.f);
-        g.setColour(juce::Colour(0xffffc84a));
-        g.setFont(juce::Font(juce::FontOptions(12.f)).boldened());
-        g.drawText("STROKEFORGE",
-                   juce::Rectangle<int>(rxp+6, kPageTop, cw-12, kSectionH),
-                   juce::Justification::centredLeft, true);
-
-        // Row labels
-        g.setFont(juce::FontOptions(12.f));
+        // Row labels — 7 audio-only rows (left col)
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
         g.setColour(juce::Colour(0xffb8c4d0));
 
         static const char* const lsLbls[kLS_ROWS] = {
-            "Device On", "Volume", "Gamma", "Contrast Min", "Attack",
-            "Release", "Stereo Temp.", "Sum. Exp.", "Noise Gate"
+            "Device On", "Volume", "Attack", "Release",
+            "Stereo Temp.", "Sum. Exp.", "Noise Gate"
         };
         for (int i = 0; i < kLS_ROWS; ++i)
             g.drawText(lsLbls[i],
                        juce::Rectangle<int>(lxp, rsy + i*kRowStep, kLabelW, kRowH),
                        juce::Justification::centredRight, true);
 
+        // ── StrokeForge section (right column) ────────────────────────────────
+        const int rxp = colRX();
+
+        // Slot-style background for SF panel
+        g.setColour(juce::Colour(0xff131320));
+        g.fillRoundedRectangle(
+            juce::Rectangle<int>(rxp, kPageTop, cw, kSectionH + kSectionGap +
+                                 kSF_ROWS * kRowStep + kSectionGap).toFloat(), 4.f);
+        g.setColour(juce::Colour(0xff2a2a40));
+        g.drawRoundedRectangle(
+            juce::Rectangle<int>(rxp, kPageTop, cw, kSectionH + kSectionGap +
+                                 kSF_ROWS * kRowStep + kSectionGap).toFloat(), 4.f, 1.f);
+
+        // SF badge (purple)
+        g.setColour(juce::Colour(0xff2c1f4a));
+        g.fillRoundedRectangle(
+            juce::Rectangle<int>(rxp+4, kPageTop+4, cw-8, kSectionH-2).toFloat(), 3.f);
+        g.setColour(juce::Colour(0xffb07af0));
+        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
+        g.drawText("STROKEFORGE  --  Waveform Morphing  (Sine -> Square)",
+                   juce::Rectangle<int>(rxp+10, kPageTop+4, cw-20, kSectionH-2),
+                   juce::Justification::centredLeft, true);
+
+        // SF row labels
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
+        g.setColour(juce::Colour(0xffb8c4d0));
+
         static const char* const sfLbls[kSF_ROWS] = {
-            "SF Active", "Blob Thr.", "Merge Gap",
-            "Focus \xcf\x83", "Spectral Thr.", "Focus Only"
+            "Enable", "Detect Threshold", "Min Stroke Width", "Merge Gap",
+            "Square at Width", "Focus Sigma", "Spectral Threshold", "Focus Only (spectral)"
         };
         for (int i = 0; i < kSF_ROWS; ++i)
-            g.drawText(juce::String::fromUTF8(sfLbls[i]),
-                       juce::Rectangle<int>(rxp, rsy + i*kRowStep, kLabelW, kRowH),
+            g.drawText(sfLbls[i],
+                       juce::Rectangle<int>(rxp+4, rsy + i*kRowStep, kLabelW, kRowH),
                        juce::Justification::centredRight, true);
     }
-
-    // ── Footer separator ──────────────────────────────────────────────────────
-    g.setColour(juce::Colour(0xff3a3a3a));
-    g.fillRect(0, footerY() - 6, getWidth(), 1);
 }
 
 //==============================================================================
 void Sp3ctraAudioProcessorEditor::resized()
 {
     const int lxp = colLX();
-    const int rxp = colRX();
     const int rsy = rowsStartY();
 
     // ── CIS Visualizer ────────────────────────────────────────────────────────
     cisVisualizer->setBounds(kHPad, kVisY, getWidth() - 2*kHPad, kVisH);
 
-    // ── Tab buttons ───────────────────────────────────────────────────────────
-    synthTabBtn  .setBounds(kHPad,          kTabsY + 2, 92, kTabsH - 4);
-    samplerTabBtn.setBounds(kHPad + 96,     kTabsY + 2, 92, kTabsH - 4);
+    // ── Tab buttons (IMAGE | SYNTH | SAMPLER) ─────────────────────────────────
+    imageTabBtn  .setBounds(kHPad,       kTabsY + 2, 80, Sp3ctraTheme::kTabBtnH);
+    synthTabBtn  .setBounds(kHPad + 84,  kTabsY + 2, 80, Sp3ctraTheme::kTabBtnH);
+    samplerTabBtn.setBounds(kHPad + 168, kTabsY + 2, 92, Sp3ctraTheme::kTabBtnH);
 
-    // ── LuxStral controls ─────────────────────────────────────────────────────
+    // ── LuxStral controls (SYNTH page, left column) ───────────────────────────
     {
         const int cx = lxp + kCtrlOffset;
         int cy = rsy;
         deviceOnToggle    .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
         masterVolumeSlider.setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
-        gammaSlider       .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
-        contrastMinSlider .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
         attackSlider      .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
         releaseSlider     .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
         stereoTempSlider  .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
@@ -273,47 +355,39 @@ void Sp3ctraAudioProcessorEditor::resized()
         noiseGateSlider   .setBounds(cx, cy, kCtrlW, kRowH);
     }
 
-    // ── StrokeForge controls ──────────────────────────────────────────────────
+    // ── StrokeForge controls (SYNTH page, right column) ──────────────────────
     {
-        const int cx = rxp + kCtrlOffset;
+        const int rxp = colRX();
+        const int cw  = colWidth();
+        const int cx  = rxp + kCtrlOffset + 4;
+        const int cw2 = cw - kCtrlOffset - 12;
         int cy = rsy;
-        sfEnabledToggle      .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
-        sfBlobThreshSlider   .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
-        sfMergeGapSlider     .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
-        sfFocusSigmaSlider   .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
-        sfSpectralWidthSlider.setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
-        sfFocusOnlyToggle    .setBounds(cx, cy, kCtrlW, kRowH);
+        sfEnabledToggle      .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
+        sfBlobThreshSlider   .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
+        sfMinWidthSlider     .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
+        sfMergeGapSlider     .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
+        sfMorphWidthSlider   .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
+        sfFocusSigmaSlider   .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
+        sfSpectralThreshSlider.setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
+        sfFocusOnlyToggle    .setBounds(cx, cy, cw2, kRowH);
+    }
+
+    // ── Header gear button (top-right) ────────────────────────────────────────
+    const int btnSz = kHeaderH - 8;
+    settingsButton.setBounds(getWidth() - btnSz - 4, 4, btnSz, btnSz);
+
+    // ── IMAGE page (full page area below tabs) ────────────────────────────────
+    if (imagePage)
+    {
+        const int pageH = getHeight() - kPageTop - 8;
+        imagePage->setBounds(kHPad, kPageTop, getWidth() - 2*kHPad, pageH);
     }
 
     // ── Sampler page ──────────────────────────────────────────────────────────
     if (samplerPage)
     {
-        const int pageH = footerY() - kPageTop - 8;
+        const int pageH = getHeight() - kPageTop - 8;
         samplerPage->setBounds(kHPad, kPageTop, getWidth() - 2*kHPad, pageH);
-    }
-
-    // ── Footer ────────────────────────────────────────────────────────────────
-    const int fy = footerY();
-    settingsButton.setBounds(kHPad, fy, 92, 28);
-    statusLabel   .setBounds(kHPad + 100, fy, getWidth() - kHPad - 104, 28);
-}
-
-//==============================================================================
-void Sp3ctraAudioProcessorEditor::timerCallback()
-{
-    // ── UDP status label ──────────────────────────────────────────────────────
-    const auto* core = audioProcessor.getSp3ctraCore();
-    if (core != nullptr && core->isInitialized())
-    {
-        const int  port = static_cast<int>(
-            audioProcessor.getAPVTS().getRawParameterValue("udpPort")->load());
-        statusLabel.setText("UDP :" + juce::String(port), juce::dontSendNotification);
-        statusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
-    }
-    else
-    {
-        statusLabel.setText("waiting for CIS data...", juce::dontSendNotification);
-        statusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
     }
 }
 

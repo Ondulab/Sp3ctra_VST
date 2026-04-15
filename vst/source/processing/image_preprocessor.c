@@ -323,8 +323,8 @@ void preprocess_luxstral(
             if (val < 0.0f) val = 0.0f;  /* Clamp negative values */
             if (val > 1.0f) val = 1.0f;  /* Clamp values above 1.0 */
             
-            /* Apply gamma with protection */
-            float result = powf(val, gamma);
+            /* Apply gamma with protection (photo convention: pow(x, 1/gamma)) */
+            float result = powf(val, 1.0f / gamma);
             
             /* Verify result is valid (not NaN/Inf) */
             if (result != result || result * 0.0f != 0.0f) {
@@ -372,6 +372,154 @@ void preprocess_luxstral(
     
     /* Bug correction: note 0 = 0 */
     out->additive.notes[0] = 0.0f;
+
+    /* STEP 6: Apply live image opacity, freeze mode, and fade-in/out.
+     *
+     * Applies to BOTH out->additive.notes (used by StrokeForge) AND
+     * out->additive.grayscale (used by synth_AudioProcess for LuxStral audio).
+     * synth_AudioProcess reads db->preprocessed_data.additive.grayscale, NOT notes.
+     *
+     * freeze_mode == 2 (STOP/WHITE): fade-out over fade_ms, then silence.
+     * freeze_mode == 1 (HOLD)      : freeze at last PLAY frame immediately (no fade-out).
+     * freeze_mode == 0 (PLAY)      : live stream; fade-in from 0 when entering from HOLD/STOP.
+     *
+     * image_live_opacity [0..1]: darken-blend weight (now applied to grayscale too).
+     * image_fade_in_ms         : ramp duration in ms.
+     */
+    {
+        static float    held_notes[PREPROCESS_MAX_NOTES];
+        static float    held_gray [PREPROCESS_MAX_NOTES]; /* Parallel hold for grayscale */
+        static int      held_count      = 0;
+        static int      held_gray_count = 0;
+        static int      prev_freeze = -1;   /* -1 = first call (uninitialised) */
+        static uint64_t fade_ts_us  = 0;
+        static int      fade_dir    = 0;    /* +1=fade-in, -1=fade-out, 0=none */
+
+        int      freeze   = g_sp3ctra_config.image_freeze_mode;
+        /* RAW upstream gate: if RAW is held/stopped, override live freeze */
+        int raw_freeze = g_sp3ctra_config.raw_freeze_mode;
+        if (raw_freeze > freeze) freeze = raw_freeze;
+        float    opacity  = g_sp3ctra_config.image_live_opacity;
+        int      fade_ms  = g_sp3ctra_config.image_fade_in_ms;
+        /* Use RAW fade timing when RAW gate overrides */
+        if (raw_freeze > g_sp3ctra_config.image_freeze_mode)
+            fade_ms = g_sp3ctra_config.raw_fade_in_ms;
+        uint64_t now_us   = get_timestamp_us();
+
+        /* Clamp nb_pixels to static array bounds */
+        int gn = (nb_pixels < PREPROCESS_MAX_NOTES) ? nb_pixels : PREPROCESS_MAX_NOTES;
+
+        /* ── Detect mode transition ──────────────────────────────────────── */
+        if (freeze != prev_freeze && prev_freeze >= 0)
+        {
+            if (prev_freeze == 0 && freeze == 2)
+            {
+                /* PLAY → STOP/WHITE: fade-out to silence */
+                if (fade_ms > 0)
+                {
+                    fade_ts_us = now_us;
+                    fade_dir   = -1;
+                }
+            }
+            else if (freeze == 0)
+            {
+                /* HOLD/STOP → PLAY: fade-in from silence */
+                if (fade_ms > 0)
+                {
+                    fade_ts_us = now_us;
+                    fade_dir   = 1;
+                }
+            }
+            else
+            {
+                /* PLAY → HOLD, or STOP ↔ HOLD: cancel any in-progress fade.
+                 * PLAY → HOLD is seamless because held_gray == last PLAY frame. */
+                fade_dir = 0;
+            }
+        }
+        if (prev_freeze < 0) prev_freeze = freeze; /* first call: no fade */
+
+        /* ── Apply freeze / hold / play logic ───────────────────────────── */
+        if (freeze == 0)
+        {
+            /* PLAY: apply opacity to notes AND grayscale, then save for HOLD restore */
+            if (opacity < 0.999f)
+            {
+                for (note = 0; note < num_notes; note++)
+                    out->additive.notes[note] *= opacity;
+                for (i = 0; i < gn; i++)
+                    out->additive.grayscale[i] *= opacity;
+            }
+
+            int n = (num_notes < PREPROCESS_MAX_NOTES) ? num_notes : PREPROCESS_MAX_NOTES;
+            for (note = 0; note < n; note++)
+                held_notes[note] = out->additive.notes[note];
+            for (i = 0; i < gn; i++)
+                held_gray[i] = out->additive.grayscale[i];
+            held_count      = n;
+            held_gray_count = gn;
+        }
+        else if (freeze == 1)
+        {
+            /* HOLD: restore last PLAY frame for notes and grayscale */
+            if (held_count > 0)
+            {
+                int n = (num_notes < held_count) ? num_notes : held_count;
+                for (note = 0; note < n; note++)
+                    out->additive.notes[note] = held_notes[note];
+            }
+            if (held_gray_count > 0)
+            {
+                int g = (gn < held_gray_count) ? gn : held_gray_count;
+                for (i = 0; i < g; i++)
+                    out->additive.grayscale[i] = held_gray[i];
+            }
+        }
+        else
+        {
+            /* STOP / WHITE (freeze=2): silence notes and grayscale */
+            for (note = 0; note < num_notes; note++)
+                out->additive.notes[note] = 0.0f;
+            for (i = 0; i < gn; i++)
+                out->additive.grayscale[i] = 0.0f;
+        }
+
+        /* ── Apply fade envelope (notes AND grayscale) ───────────────────── */
+        if (fade_dir != 0 && fade_ms > 0)
+        {
+            float t = (float)(now_us - fade_ts_us) / ((float)fade_ms * 1000.0f);
+            if (t >= 1.0f)
+            {
+                fade_dir = 0; /* ramp complete */
+            }
+            else
+            {
+                /* For STOP fade-out, start from held values (not silence) so
+                 * the signal decays smoothly from the last PLAY frame. */
+                if (fade_dir == -1 && freeze == 2 && held_count > 0)
+                {
+                    float ramp = 1.0f - t;
+                    int n = (num_notes < held_count) ? num_notes : held_count;
+                    for (note = 0; note < n; note++)
+                        out->additive.notes[note] = held_notes[note] * ramp;
+                    /* Apply to grayscale: decay from held values */
+                    int g = (gn < held_gray_count) ? gn : held_gray_count;
+                    for (i = 0; i < g; i++)
+                        out->additive.grayscale[i] = held_gray[i] * ramp;
+                }
+                else
+                {
+                    float ramp = (fade_dir > 0) ? t : (1.0f - t);
+                    for (note = 0; note < num_notes; note++)
+                        out->additive.notes[note] *= ramp;
+                    for (i = 0; i < gn; i++)
+                        out->additive.grayscale[i] *= ramp;
+                }
+            }
+        }
+
+        prev_freeze = freeze;
+    }
 }
 
 /**
@@ -894,3 +1042,246 @@ static int image_preprocess_color_fft(
     return 0;
 }
 #endif
+
+/* ============================================================================
+ * SAMPLER-SPECIFIC PREPROCESSING
+ * Mirrors preprocess_luxstral() but uses sampler parameters:
+ *   sampler_gamma, sampler_contrast_min, sampler_freeze_mode,
+ *   sampler_fade_in_ms, image_sampler_opacity.
+ * Called from FramePlayerThread via image_preprocess_frame_sampler().
+ * ============================================================================ */
+
+/**
+ * @brief LuxStral sampler preprocessing
+ * Identical pipeline to preprocess_luxstral() but uses the independent
+ * sampler parameters instead of the live-stream parameters.
+ */
+void preprocess_luxstral_sampler(
+    const uint8_t *raw_r,
+    const uint8_t *raw_g,
+    const uint8_t *raw_b,
+    PreprocessedImageData *out
+) {
+    int nb_pixels      = get_cis_pixels_nb();
+    int pixels_per_note = g_sp3ctra_config.pixels_per_note;
+    int num_notes      = nb_pixels / pixels_per_note;
+    int i, note, pix;
+
+    /* STEP 1: RGB → Grayscale [0.0, 1.0] */
+    for (i = 0; i < nb_pixels; i++) {
+        float gray = (0.299f * raw_r[i] + 0.587f * raw_g[i] + 0.114f * raw_b[i]);
+        float normalized = gray / 255.0f;
+        if (normalized < 0.0f) normalized = 0.0f;
+        if (normalized > 1.0f) normalized = 1.0f;
+        out->additive.grayscale[i] = normalized;
+    }
+
+    /* STEP 2: Contrast factor (computed before any non-linear transform).
+     * We re-use calculate_contrast() which internally reads additive_contrast_min.
+     * Then we rescale the result to use sampler_contrast_min instead. */
+    {
+        float raw_cf = calculate_contrast(out->additive.grayscale, nb_pixels);
+        /* Undo additive_contrast_min scaling, apply sampler_contrast_min */
+        float live_cmin = g_sp3ctra_config.additive_contrast_min;
+        float smp_cmin  = g_sp3ctra_config.sampler_contrast_min;
+        float denom = (1.0f - live_cmin);
+        float adj   = (denom > 1e-6f)
+                      ? (raw_cf - live_cmin) / denom
+                      : raw_cf;
+        if (adj < 0.0f) adj = 0.0f;
+        if (adj > 1.0f) adj = 1.0f;
+        out->additive.contrast_factor = smp_cmin + (1.0f - smp_cmin) * adj;
+        if (out->additive.contrast_factor > 1.0f)
+            out->additive.contrast_factor = 1.0f;
+        if (out->additive.contrast_factor < smp_cmin)
+            out->additive.contrast_factor = smp_cmin;
+    }
+
+    /* STEP 3: Inversion (same flag as live path) */
+    if (g_sp3ctra_config.invert_intensity) {
+        for (i = 0; i < nb_pixels; i++)
+            out->additive.grayscale[i] = 1.0f - out->additive.grayscale[i];
+    }
+
+    /* STEP 4: Gamma — use sampler_gamma (photo convention: pow(x, 1/gamma)) */
+    if (g_sp3ctra_config.additive_enable_non_linear_mapping) {
+        float gamma = g_sp3ctra_config.sampler_gamma;
+        for (i = 0; i < nb_pixels; i++) {
+            float val = out->additive.grayscale[i];
+            if (val < 0.0f) val = 0.0f;
+            if (val > 1.0f) val = 1.0f;
+            float result = powf(val, 1.0f / gamma);
+            if (result != result || result * 0.0f != 0.0f) result = val;
+            out->additive.grayscale[i] = result;
+        }
+    }
+
+    /* STEP 5: Averaging per note */
+    if (num_notes > PREPROCESS_MAX_NOTES) num_notes = PREPROCESS_MAX_NOTES;
+
+    for (note = 0; note < num_notes; note++) {
+        float sum = 0.0f;
+        int valid_pixels = 0;
+        for (pix = 0; pix < pixels_per_note; pix++) {
+            int idx = note * pixels_per_note + pix;
+            if (idx < nb_pixels) {
+                float val = out->additive.grayscale[idx];
+                if (val == val && val * 0.0f == 0.0f) {
+                    sum += val;
+                    valid_pixels++;
+                }
+            }
+        }
+        out->additive.notes[note] = (valid_pixels > 0)
+                                    ? (sum / (float)valid_pixels)
+                                    : 0.0f;
+        if (out->additive.notes[note] != out->additive.notes[note])
+            out->additive.notes[note] = 0.0f;
+    }
+    out->additive.notes[0] = 0.0f;
+
+    /* STEP 6: Sampler opacity, freeze mode, and fade-in/out
+     *
+     * sampler_freeze_mode  0=PLAY, 1=HOLD, 2=STOP (silence)
+     * image_sampler_opacity [0..1]
+     * sampler_fade_in_ms   ramp duration in ms
+     */
+    {
+        static float    smp_held[PREPROCESS_MAX_NOTES];
+        static int      smp_held_count = 0;
+        static int      smp_prev_freeze = -1;
+        static uint64_t smp_fade_ts_us  = 0;
+        static int      smp_fade_dir    = 0;  /* +1=in, -1=out, 0=none */
+
+        int      freeze  = g_sp3ctra_config.sampler_freeze_mode;
+        /* RAW upstream gate: if RAW is held/stopped, override sampler freeze */
+        int raw_freeze = g_sp3ctra_config.raw_freeze_mode;
+        if (raw_freeze > freeze) freeze = raw_freeze;
+        float    opacity = g_sp3ctra_config.image_sampler_opacity;
+        int      fade_ms = g_sp3ctra_config.sampler_fade_in_ms;
+        /* Use RAW fade timing when RAW gate overrides */
+        if (raw_freeze > g_sp3ctra_config.sampler_freeze_mode)
+            fade_ms = g_sp3ctra_config.raw_fade_in_ms;
+        uint64_t now_us  = get_timestamp_us();
+
+        /* Detect transition */
+        if (freeze != smp_prev_freeze && smp_prev_freeze >= 0)
+        {
+            if (smp_prev_freeze == 0 && freeze != 0) {
+                if (fade_ms > 0) { smp_fade_ts_us = now_us; smp_fade_dir = -1; }
+            } else if (smp_prev_freeze != 0 && freeze == 0) {
+                if (fade_ms > 0) { smp_fade_ts_us = now_us; smp_fade_dir = 1; }
+            }
+        }
+        if (smp_prev_freeze < 0) smp_prev_freeze = freeze;
+
+        /* Apply freeze/hold/play */
+        if (freeze == 0)
+        {
+            if (opacity < 0.999f)
+                for (note = 0; note < num_notes; note++)
+                    out->additive.notes[note] *= opacity;
+
+            int n = (num_notes < PREPROCESS_MAX_NOTES) ? num_notes : PREPROCESS_MAX_NOTES;
+            for (note = 0; note < n; note++)
+                smp_held[note] = out->additive.notes[note];
+            smp_held_count = n;
+        }
+        else if (freeze == 1 && smp_held_count > 0)
+        {
+            int n = (num_notes < smp_held_count) ? num_notes : smp_held_count;
+            for (note = 0; note < n; note++)
+                out->additive.notes[note] = smp_held[note];
+        }
+        else
+        {
+            /* STOP/2: silence */
+            for (note = 0; note < num_notes; note++)
+                out->additive.notes[note] = 0.0f;
+        }
+
+        /* Fade envelope */
+        if (smp_fade_dir != 0 && fade_ms > 0)
+        {
+            float t = (float)(now_us - smp_fade_ts_us) / ((float)fade_ms * 1000.0f);
+            if (t >= 1.0f)
+            {
+                smp_fade_dir = 0;
+            }
+            else
+            {
+                if (smp_fade_dir == -1 && freeze == 2 && smp_held_count > 0)
+                {
+                    float ramp = 1.0f - t;
+                    int n = (num_notes < smp_held_count) ? num_notes : smp_held_count;
+                    for (note = 0; note < n; note++)
+                        out->additive.notes[note] = smp_held[note] * ramp;
+                }
+                else
+                {
+                    float ramp = (smp_fade_dir > 0) ? t : (1.0f - t);
+                    for (note = 0; note < num_notes; note++)
+                        out->additive.notes[note] *= ramp;
+                }
+            }
+        }
+
+        smp_prev_freeze = freeze;
+    }
+}
+
+/**
+ * @brief Sampler-specific variant of image_preprocess_frame().
+ * Uses sampler parameters for the LuxStral additive path.
+ * The StrokeForge blob step is re-run on the sampler notes so blob detection
+ * reflects the sampler stream when a slot is playing.
+ */
+int image_preprocess_frame_sampler(
+    const uint8_t *raw_r,
+    const uint8_t *raw_g,
+    const uint8_t *raw_b,
+    PreprocessedImageData *out
+) {
+    if (!module_initialized) {
+        log_error("PREPROCESS", "Module not initialized (sampler)");
+        return -1;
+    }
+    if (!raw_r || !raw_g || !raw_b || !out) {
+        log_error("PREPROCESS", "NULL pointer passed (sampler)");
+        return -1;
+    }
+
+    out->timestamp_us = get_timestamp_us();
+
+    /* 1. LuxStral additive path — sampler parameters */
+    preprocess_luxstral_sampler(raw_r, raw_g, raw_b, out);
+
+    /* 1b. StrokeForge blob detection on the sampler notes */
+    {
+        int sf_num_notes = get_cis_pixels_nb() / g_sp3ctra_config.pixels_per_note;
+        if (sf_num_notes > PREPROCESS_MAX_NOTES) sf_num_notes = PREPROCESS_MAX_NOTES;
+        strokeforge_analyze_frame(
+            out->additive.notes,
+            sf_num_notes,
+            out->additive.contrast_factor,
+            &out->strokeforge);
+    }
+
+    /* 2. LuxSynth (polyphonic) path — reuse live pipeline (no sampler variant needed) */
+#ifndef DISABLE_LUXSYNTH
+    preprocess_luxsynth(raw_r, raw_g, raw_b, out);
+#endif
+
+    /* 3. LuxWave (photowave) path */
+    preprocess_luxwave(raw_r, raw_g, raw_b, out);
+
+    /* 4. Stereo panning */
+    if (g_sp3ctra_config.stereo_mode_enabled)
+        preprocess_stereo(raw_r, raw_g, raw_b, out);
+
+#ifdef USE_DMX
+    preprocess_dmx(raw_r, raw_g, raw_b, out);
+#endif
+
+    return 0;
+}
