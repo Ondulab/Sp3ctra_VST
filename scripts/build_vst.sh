@@ -33,19 +33,19 @@ BUILD_CONFIG="Release"
 # Parse all arguments
 for arg in "$@"; do
     case "$arg" in
-        clean)
+        clean|--clean)
             CLEAN_BUILD=1
             echo -e "${YELLOW}Clean build requested${NC}"
             ;;
-        install)
+        install|--install)
             INSTALL_PLUGINS=1
             echo -e "${YELLOW}Installation requested${NC}"
             ;;
-        debug)
+        debug|--debug)
             BUILD_CONFIG="Debug"
             echo -e "${YELLOW}Debug build requested${NC}"
             ;;
-        run)
+        run|--run)
             RUN_STANDALONE=1
             echo -e "${YELLOW}Will launch standalone after build${NC}"
             ;;
