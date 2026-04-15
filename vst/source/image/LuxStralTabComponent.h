@@ -2,11 +2,18 @@
  * @file LuxStralTabComponent.h
  * @brief Tab 2 — LUXSTRAL: pipeline visual, source selector, toggles, output nodes.
  *
- * Pipeline:  Source → [Negative] → [DC Blocking] → [Gamma] → LUXSTRAL_GRAY / LUXSTRAL_COLOR / LUXSTRAL_BLOB
+ * Pipeline:  Source → [Negative] → [DC Blocking] → [Gamma] →
+ *            LUXSTRAL_GRAY / LUXSTRAL_COLOR / LUXSTRAL_BLOB
  *
- * UI style: follows the Synth-page charter (Label + Slider rows,
- * kFontSettings, centredRight justification). Boolean parameters are
- * rendered as sliders [0, 1] with step 1 for visual consistency.
+ * Two-column layout (mirrors LuxSynthTabComponent):
+ *   Left  — image pipeline controls + blob detection parameters
+ *   Right — pipeline output nodes
+ *
+ * Blob detection controls are wired to StrokeForge APVTS parameters
+ * (sfBlobBaseThreshold / sfBlobMinWidth / sfBlobMergeGap) which are also
+ * read by the StrokeForge audio synthesis engine.
+ * Image analysis (SPCTR_BLOB renderer) and audio synthesis share the same
+ * parameters deliberately: tuning one tunes both.
  */
 #pragma once
 
@@ -24,9 +31,9 @@ public:
 
     explicit LuxStralTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p),
-          nodeGray("LUXSTRAL GRAY", juce::Colour(0xff6bb8e0), VisualizerMode::SPCTR_GRAY),
+          nodeGray ("LUXSTRAL GRAY",  juce::Colour(0xff6bb8e0), VisualizerMode::SPCTR_GRAY),
           nodeColor("LUXSTRAL COLOR", juce::Colour(0xff4ae0c8), VisualizerMode::SPCTR_COLOR),
-          nodeBlob("LUXSTRAL BLOB", juce::Colour(0xff8888e0), VisualizerMode::SPCTR_BLOB)
+          nodeBlob ("LUXSTRAL BLOB",  juce::Colour(0xff8888e0), VisualizerMode::SPCTR_BLOB)
     {
         auto& apvts = p.getAPVTS();
 
@@ -39,30 +46,67 @@ public:
         sourceAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
             apvts, "luxstralSource", sourceCombo));
 
-        // ── Negative (ToggleButton — Synth-page charter) ────────────────
+        // ── Negative (ToggleButton) ───────────────────────────────────────
         initLabel(negativeLabel, "Negative");
         negativeToggle.setButtonText("Active");
         addAndMakeVisible(negativeToggle);
         negativeAttach.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(
             apvts, "luxstralInversion", negativeToggle));
 
-        // ── DC Blocking (ToggleButton) ──────────────────────────────────
+        // ── DC Blocking (ToggleButton) ────────────────────────────────────
         initLabel(dcBlockLabel, "DC Blocking");
         dcBlockToggle.setButtonText("Active");
         addAndMakeVisible(dcBlockToggle);
         dcBlockAttach.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(
             apvts, "luxstralAcRemoval", dcBlockToggle));
 
-        // ── Gamma slider ─────────────────────────────────────────────────
+        // ── Gamma Value (Slider) ──────────────────────────────────────────
         initLabel(gammaLabel, "Gamma");
         gammaSlider.setSliderStyle(juce::Slider::LinearHorizontal);
         gammaSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                    Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
+                                    50, Sp3ctraTheme::kControlH);
         addAndMakeVisible(gammaSlider);
         gammaAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
             apvts, "luxstralGammaValue", gammaSlider));
 
-        // ── Pipeline output nodes ────────────────────────────────────────
+        // ── BLOB DETECTION — StrokeForge params ───────────────────────────
+        // These parameters are shared between:
+        //   1. Image analysis: detectSpctrBlobs() reads g_sp3ctra_config.strokeforge_blob_*
+        //      (updated from APVTS by PluginProcessor::parameterChanged)
+        //   2. Audio synthesis: StrokeForge engine reads the same config fields
+        // Tuning here affects both the visualizer and the synthesis simultaneously.
+
+        // Row 4: Amplitude threshold — normalised brightness [0..0.2].
+        // Pixels brighter than this value are considered active strokes.
+        initLabel(blobThreshLabel, "Ampl. Thr.");
+        blobThreshSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        blobThreshSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                         50, Sp3ctraTheme::kControlH);
+        addAndMakeVisible(blobThreshSlider);
+        blobThreshAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, "sfBlobBaseThreshold", blobThreshSlider));
+
+        // Row 5: Pixel threshold — minimum blob span in CIS pixels.
+        // Blobs narrower than this value are discarded.
+        initLabel(blobMinWidthLabel, "Pix. Thr.");
+        blobMinWidthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        blobMinWidthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                           50, Sp3ctraTheme::kControlH);
+        addAndMakeVisible(blobMinWidthSlider);
+        blobMinWidthAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, "sfBlobMinWidth", blobMinWidthSlider));
+
+        // Row 6: Merge Gap — maximum inactive-pixel gap that keeps two sub-blobs merged.
+        // 0 = strict (every gap splits), higher = more tolerant merging.
+        initLabel(blobMergeGapLabel, "Merge Gap");
+        blobMergeGapSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        blobMergeGapSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                            50, Sp3ctraTheme::kControlH);
+        addAndMakeVisible(blobMergeGapSlider);
+        blobMergeGapAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, "sfBlobMergeGap", blobMergeGapSlider));
+
+        // ── Pipeline output nodes ─────────────────────────────────────────
         for (auto* n : { &nodeGray, &nodeColor, &nodeBlob })
         {
             addAndMakeVisible(n);
@@ -86,64 +130,136 @@ public:
 
     void paint(juce::Graphics& g) override
     {
-        const auto accent = juce::Colour(0xff4fa3e0);
-        const int pad = 12;
-        const int stageW = getWidth() - 2 * pad;
+        const int W   = getWidth();
+        const int H   = getHeight();
+        const int pad = 8;
+        computeColumns(W, leftX_, leftW_, rightX_, rightW_);
 
-        // Outputs section label
-        g.setColour(accent.withAlpha(0.6f));
+        // ── Divider between columns ───────────────────────────────────────
+        const int divX = rightX_ - pad / 2;
+        g.setColour(juce::Colour(0x18ffffff));
+        g.fillRect(divX, 4, 1, H - 8);
+
+        // ── Left column section header: BLOB DETECTION ────────────────────
+        const int blobSectionY = rowY(3) + Sp3ctraTheme::kControlH + 2;
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
-        g.drawText("Pipeline outputs (click to visualize)",
-                   pad, nodeY() - 16, stageW, 14, juce::Justification::centred);
+        g.setColour(juce::Colour(0xff8888e0).withAlpha(0.55f)); // SPCTR_BLOB accent
+        g.drawText("--- BLOB DETECTION ---", leftX_, blobSectionY, leftW_, 12,
+                   juce::Justification::centred);
+
+        // ── Right column: "Pipeline outputs" label above nodes ───────────
+        const auto accent = juce::Colour(0xff4fa3e0);
+        g.setColour(accent.withAlpha(0.6f));
+        const int prelimLabelY = nodeGray.getY() - 16;
+        if (prelimLabelY >= 0)
+            g.drawText("Pipeline outputs (click to visualize)",
+                       rightX_, prelimLabelY, rightW_, 14,
+                       juce::Justification::centred);
     }
 
     void resized() override
     {
-        const int w   = getWidth();
-        const int nw  = stdNodeW();   // same width as Sources tab
-        const int x0  = w / 2 - nw / 2;  // centred start X
+        const int W = getWidth();
+        const int H = getHeight();
+        computeColumns(W, leftX_, leftW_, rightX_, rightW_);
 
-        // Row 0: Source
-        placeComboRow(sourceLabel, sourceCombo, 0);
+        // ── Left column: all controls ─────────────────────────────────────
+        const int labelW = 80;
+        const int gap    = Sp3ctraTheme::kGap;
+        const int ch     = Sp3ctraTheme::kControlH;
 
-        // Row 1: Negative (toggle)
-        placeToggleRow(negativeLabel, negativeToggle, 1);
+        auto lb = [&](int row) -> juce::Rectangle<int>
+        {
+            return { leftX_, rowY(row), labelW, ch };
+        };
+        auto cb = [&](int row) -> juce::Rectangle<int>
+        {
+            return { leftX_ + labelW + gap, rowY(row),
+                     leftW_ - labelW - gap,  ch };
+        };
 
-        // Row 2: DC Blocking (toggle)
-        placeToggleRow(dcBlockLabel, dcBlockToggle, 2);
+        // Row 0: Source combo
+        sourceLabel.setBounds(lb(0));
+        sourceCombo.setBounds(cb(0));
+        // Row 1: Negative toggle
+        negativeLabel.setBounds(lb(1));
+        negativeToggle.setBounds(cb(1).withWidth(80));
+        // Row 2: DC Blocking toggle
+        dcBlockLabel.setBounds(lb(2));
+        dcBlockToggle.setBounds(cb(2).withWidth(80));
+        // Row 3: Gamma slider
+        gammaLabel.setBounds(lb(3));
+        gammaSlider.setBounds(cb(3));
+        // [blobSectionY header drawn in paint() between row 3 and 4]
+        // Rows 4-6: Blob Detection
+        blobThreshLabel.setBounds(lb(4));     blobThreshSlider.setBounds(cb(4));
+        blobMinWidthLabel.setBounds(lb(5));   blobMinWidthSlider.setBounds(cb(5));
+        blobMergeGapLabel.setBounds(lb(6));   blobMergeGapSlider.setBounds(cb(6));
 
-        // Row 3: Gamma
-        placeSliderRow(gammaLabel, gammaSlider, 3);
+        // ── Right column: 3 output nodes, vertically centred ─────────────
+        constexpr int kNH = 28;   // node height
+        constexpr int kNG = 6;    // gap between nodes
+        constexpr int kLH = 16;   // "Pipeline outputs" label height
+        const int totalH  = kLH + 3 * kNH + 2 * kNG;
+        int ny = juce::jmax(4, (H - totalH) / 2);
 
-        // Output nodes — stacked vertically, full stdNodeW each
-        const int ny = nodeY();
-        constexpr int nodeH  = 28;
-        constexpr int nodeGap = 6;
-        nodeGray.setBounds (x0, ny,                          nw, nodeH);
-        nodeColor.setBounds(x0, ny + (nodeH + nodeGap),      nw, nodeH);
-        nodeBlob.setBounds (x0, ny + 2 * (nodeH + nodeGap),  nw, nodeH);
+        ny += kLH;   // space for the section label
+        nodeGray.setBounds (rightX_, ny, rightW_, kNH);   ny += kNH + kNG;
+        nodeColor.setBounds(rightX_, ny, rightW_, kNH);   ny += kNH + kNG;
+        nodeBlob.setBounds (rightX_, ny, rightW_, kNH);
     }
 
 private:
     [[maybe_unused]] Sp3ctraAudioProcessor& processor;
 
-    // Labels (Synth-page charter: kFontSettings, centredRight)
+    // Labels — image pipeline
     juce::Label sourceLabel, negativeLabel, dcBlockLabel, gammaLabel;
+    // Labels — blob detection
+    juce::Label blobThreshLabel, blobMinWidthLabel, blobMergeGapLabel;
 
-    // Controls
+    // Controls — image pipeline
     juce::ComboBox     sourceCombo;
     juce::ToggleButton negativeToggle, dcBlockToggle;
     juce::Slider       gammaSlider;
+    // Controls — blob detection
+    juce::Slider blobThreshSlider, blobMinWidthSlider, blobMergeGapSlider;
 
-    // Attachments
+    // Attachments — image pipeline
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> sourceAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   negativeAttach, dcBlockAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   negativeAttach,
+                                                                             dcBlockAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   gammaAttach;
+    // Attachments — blob detection (StrokeForge APVTS params)
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   blobThreshAttach,
+                                                                             blobMinWidthAttach,
+                                                                             blobMergeGapAttach;
 
     // Pipeline output nodes
     PipelineNodeComponent nodeGray, nodeColor, nodeBlob;
 
-    // ── Helpers ───────────────────────────────────────────────────────────
+    // Cached column geometry — updated by computeColumns() in paint() / resized()
+    mutable int leftX_  = 0;
+    mutable int leftW_  = 0;
+    mutable int rightX_ = 0;
+    mutable int rightW_ = 0;
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /** Splits the available width into left (controls) and right (nodes) columns.
+     *  Left column: ~55% of width; right column: remainder minus divider gap.
+     *  Identical split ratio to LuxSynthTabComponent. */
+    static void computeColumns(int totalW,
+                                int& lx, int& lw,
+                                int& rx, int& rw) noexcept
+    {
+        constexpr int kPad = 8;
+        constexpr int kDiv = 8;   // gap around the divider
+        lx = kPad;
+        lw = totalW * 55 / 100 - kPad - kDiv / 2;
+        rx = lx + lw + kDiv;
+        rw = totalW - rx - kPad;
+    }
+
     void initLabel(juce::Label& lbl, const juce::String& text)
     {
         lbl.setText(text, juce::dontSendNotification);
@@ -152,52 +268,10 @@ private:
         addAndMakeVisible(lbl);
     }
 
-    /// Same width formula as SourcesTabComponent
-    int stdNodeW() const { return juce::jmin(getWidth() * 2 / 5, 360); }
-
-    int rowY(int row) const
+    /** Y coordinate of control row n (left column). */
+    int rowY(int row) const noexcept
     {
         return 6 + row * (Sp3ctraTheme::kControlH + 14);
-    }
-
-    int nodeY() const { return rowY(4) + 18; }
-
-    void placeComboRow(juce::Label& lbl, juce::ComboBox& combo, int row)
-    {
-        const int w  = getWidth();
-        const int nw = stdNodeW();
-        const int x0 = w / 2 - nw / 2;
-        const int ch = Sp3ctraTheme::kControlH;
-        const int y  = rowY(row);
-        const int labelW = 80;
-        lbl.setBounds(x0, y, labelW, ch);
-        combo.setBounds(x0 + labelW + Sp3ctraTheme::kGap, y,
-                        nw - labelW - Sp3ctraTheme::kGap, ch);
-    }
-
-    void placeToggleRow(juce::Label& lbl, juce::ToggleButton& toggle, int row)
-    {
-        const int w  = getWidth();
-        const int nw = stdNodeW();
-        const int x0 = w / 2 - nw / 2;
-        const int ch = Sp3ctraTheme::kControlH;
-        const int y  = rowY(row);
-        const int labelW = 80;
-        lbl.setBounds(x0, y, labelW, ch);
-        toggle.setBounds(x0 + labelW + Sp3ctraTheme::kGap, y, 120, ch);
-    }
-
-    void placeSliderRow(juce::Label& lbl, juce::Slider& slider, int row)
-    {
-        const int w  = getWidth();
-        const int nw = stdNodeW();
-        const int x0 = w / 2 - nw / 2;
-        const int ch = Sp3ctraTheme::kControlH;
-        const int y  = rowY(row);
-        const int labelW = 80;
-        lbl.setBounds(x0, y, labelW, ch);
-        slider.setBounds(x0 + labelW + Sp3ctraTheme::kGap, y,
-                         nw - labelW - Sp3ctraTheme::kGap, ch);
     }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxStralTabComponent)
