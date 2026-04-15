@@ -183,6 +183,14 @@ private:
     /** Exponentially smoothed version of fftMagnitudes_ for display.
      *  Same size as fftMagnitudes_. */
     std::vector<float> fftMagnitudesSmoothed_;
+    /** Per-harmonic harmonicity derived from CIS colour temperature.
+     *  harmonicity[k] ∈ [0..1]:  1.0 = warm (R>B) → harmonic timbre,
+     *                             0.0 = cool (R<B) → inharmonic timbre.
+     *  Same size as fftMagnitudes_.  Updated by computeFftMagnitudes(). */
+    std::vector<float> fftHarmonicity_;
+    /** Number of harmonics extracted in the last computeFftMagnitudes() call.
+     *  Set from the lxFftBins APVTS parameter.  Used by both paint helpers. */
+    int                fftNumHarmonics_ { 128 };
     /** cisPixelsCount value used for the last kiss_fftr_alloc call. */
     int                fftSize_ { 0 };
     /** Opaque pointer to a kiss_fftr_cfg.

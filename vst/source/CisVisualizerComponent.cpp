@@ -1324,11 +1324,32 @@ void CisVisualizerComponent::computeFftMagnitudes()
     {
         fftMagnitudes_.clear();
         fftMagnitudesSmoothed_.clear();
+        fftHarmonicity_.clear();
+        fftNumHarmonics_ = 0;
         return;
     }
 
+    // ── Read quality / smoothing parameters from APVTS ────────────────────────
+    // lxFftBins choice: 0=32, 1=64, 2=128, 3=256 harmonics.
+    // This is the number of oscillators that will be fed to the LuxSynth engine.
+    static const int kBinsChoices[] = { 32, 64, 128, 256 };
+    const int binsChoice = juce::jlimit(0, 3, static_cast<int>(
+        processor.getAPVTS().getRawParameterValue("lxFftBins")->load()));
+    const int nHarmonics = kBinsChoices[binsChoice];
+
+    // lxFftSmoothing [0..1]:
+    //   0 = very fast / reactive : alpha_attack≈0.80, alpha_release≈0.50
+    //   1 = very slow / smooth   : alpha_attack≈0.05, alpha_release≈0.02
+    const float sm = juce::jlimit(0.0f, 1.0f,
+        processor.getAPVTS().getRawParameterValue("lxFftSmoothing")->load());
+    const float alphaAttack  = 0.80f - sm * 0.75f;  // [0.05 .. 0.80]
+    const float alphaRelease = 0.50f - sm * 0.48f;  // [0.02 .. 0.50]
+
     const int N     = cisPixelsCount;
     const int nBins = N / 2 + 1;
+    // Cap harmonics to what the FFT can actually provide
+    const int nDisplay = juce::jmin(nHarmonics, nBins - 1);
+    fftNumHarmonics_ = nDisplay;
 
     // ── Reallocate KissFFT config when the signal size changes ────────────────
     if (fftSize_ != N)
@@ -1342,23 +1363,23 @@ void CisVisualizerComponent::computeFftMagnitudes()
         fftSize_ = N;
         fftMagnitudes_.assign(static_cast<size_t>(nBins), 0.0f);
         fftMagnitudesSmoothed_.assign(static_cast<size_t>(nBins), 0.0f);
+        fftHarmonicity_.assign(static_cast<size_t>(nBins), 0.5f);
     }
+    // Grow buffers if bins choice changes
+    if (fftHarmonicity_.size() < static_cast<size_t>(nBins))
+        fftHarmonicity_.assign(static_cast<size_t>(nBins), 0.5f);
 
     auto* cfg = reinterpret_cast<kiss_fftr_cfg>(fftCfg_);
     if (!cfg) return;
 
-    // Thread-local staging buffers — no heap alloc at 30 fps
     thread_local std::vector<kiss_fft_scalar> inBuf;
     thread_local std::vector<kiss_fft_cpx>    outBuf;
     inBuf.resize(static_cast<size_t>(N));
     outBuf.resize(static_cast<size_t>(nBins));
 
-    // ── Apply Hann window to localDataGray ────────────────────────────────────
-    // Hann window: w(i) = 0.5 * (1 - cos(2π·i / (N-1)))
-    // Reduces spectral leakage by tapering the signal to zero at both ends.
+    // ── Hann window ───────────────────────────────────────────────────────────
     const float kTwoPiOverN =
         2.0f * static_cast<float>(M_PI) / static_cast<float>(juce::jmax(1, N - 1));
-
     for (int i = 0; i < N; ++i)
     {
         const float hann = 0.5f * (1.0f - std::cos(kTwoPiOverN * static_cast<float>(i)));
@@ -1366,13 +1387,12 @@ void CisVisualizerComponent::computeFftMagnitudes()
             (static_cast<float>(localDataGray[static_cast<size_t>(i)]) / 255.0f) * hann;
     }
 
-    // ── Real FFT (N points → N/2+1 complex bins) ─────────────────────────────
     kiss_fftr(cfg, inBuf.data(), outBuf.data());
 
-    // ── Compute magnitudes — suppress DC (bin 0) ─────────────────────────────
+    // ── Magnitudes — suppress DC ──────────────────────────────────────────────
     fftMagnitudes_[0] = 0.0f;
-    float maxMag = 1e-12f; // guard against all-silence frames
-    for (int k = 1; k < nBins; ++k)
+    float maxMag = 1e-12f;
+    for (int k = 1; k <= nDisplay; ++k)
     {
         const float re  = outBuf[static_cast<size_t>(k)].r;
         const float im  = outBuf[static_cast<size_t>(k)].i;
@@ -1381,55 +1401,75 @@ void CisVisualizerComponent::computeFftMagnitudes()
         if (mag > maxMag) maxMag = mag;
     }
 
-    // ── Peak-normalise to [0..1] ──────────────────────────────────────────────
+    // ── Peak-normalise (first nDisplay bins only) ─────────────────────────────
     const float invMax = 1.0f / maxMag;
-    for (int k = 1; k < nBins; ++k)
+    for (int k = 1; k <= nDisplay; ++k)
         fftMagnitudes_[static_cast<size_t>(k)] *= invMax;
 
-    // ── Temporal smoothing: fast attack, slow release ─────────────────────────
-    // alpha_attack  = 0.40  → bars rise to 40% of new value in one frame
-    // alpha_release = 0.08  → bars decay to 92% of previous value per frame
-    // This gives the classic "fast rise, slow fall" VU-meter behaviour.
-    for (int k = 0; k < nBins; ++k)
+    // ── Temporal smoothing (parametric attack / release) ──────────────────────
+    for (int k = 0; k <= nDisplay; ++k)
     {
         const float cur  = fftMagnitudes_[static_cast<size_t>(k)];
         const float prev = fftMagnitudesSmoothed_[static_cast<size_t>(k)];
-        const float a    = (cur >= prev) ? 0.40f : 0.08f;
+        const float a    = (cur >= prev) ? alphaAttack : alphaRelease;
         fftMagnitudesSmoothed_[static_cast<size_t>(k)] =
             a * cur + (1.0f - a) * prev;
+    }
+
+    // ── Per-bin harmonicity from CIS colour temperature ───────────────────────
+    // The LuxSynth engine uses harmonicity[k] to decide whether oscillator k
+    // behaves as a harmonic (warm: R>B) or inharmonic (cool: B>R) partial.
+    //
+    // Mapping: divide the CIS scan into nDisplay equal sections.
+    // Bin k ↔ section k of the scan (k spatial cycles across the full line).
+    // Average (R-B)/255 in that section → temperature → harmonicity [0..1].
+    // Light temporal smoothing (τ ≈ 10 frames at 30 fps) avoids flicker.
+    if (!localDataR.empty() && !localDataB.empty())
+    {
+        const int regionW = juce::jmax(1, cisPixelsCount / juce::jmax(1, nDisplay));
+        for (int k = 1; k <= nDisplay; ++k)
+        {
+            const int posStart = juce::jlimit(0, cisPixelsCount - 1, (k - 1) * regionW);
+            const int posEnd   = juce::jlimit(posStart + 1, cisPixelsCount, k * regionW);
+            float sumR = 0.0f, sumB = 0.0f;
+            for (int i = posStart; i < posEnd; ++i)
+            {
+                sumR += static_cast<float>(localDataR[static_cast<size_t>(i)]);
+                sumB += static_cast<float>(localDataB[static_cast<size_t>(i)]);
+            }
+            const float n    = static_cast<float>(posEnd - posStart);
+            const float temp = (sumR - sumB) / (n * 255.0f);   // [-1..1]
+            const float newH = juce::jlimit(0.0f, 1.0f, (temp + 1.0f) * 0.5f);
+            // Light 10-frame smoothing (τ ≈ 0.33 s at 30 fps)
+            fftHarmonicity_[static_cast<size_t>(k)] =
+                0.10f * newH + 0.90f * fftHarmonicity_[static_cast<size_t>(k)];
+        }
     }
 }
 
 //==============================================================================
 // FFT GRAY — monochromatic spectrum bar chart
+// Shows fftNumHarmonics_ bins (from lxFftBins) as a grayscale VU-meter.
 //==============================================================================
 void CisVisualizerComponent::paintFftGrayMode(juce::Graphics& g, int W, int H)
 {
     g.fillAll(juce::Colour(0xff080808));
-
     if (cisPixelsCount == 0 || localDataGray.empty()) return;
 
     computeFftMagnitudes();
 
     const int nBins = static_cast<int>(fftMagnitudesSmoothed_.size());
-    if (nBins < 2) return;
+    if (nBins < 2 || fftNumHarmonics_ < 1) return;
 
-    // Display only the lower half of the positive spectrum — the upper half
-    // contains very high spatial frequencies that are below the noise floor
-    // for a CIS sensor; cutting at N/4 keeps the interesting content visible.
-    const int displayBins = juce::jmax(1, nBins / 2);
+    const int displayBins = fftNumHarmonics_;
 
-    // Logarithmic magnitude scale: log10(1 + 9·x) → maps [0,1] to [0,1]
-    // with the curve lifting low-amplitude bins more than a linear scale.
-    auto logScale = [](float x) -> float
-    {
+    auto logScale = [](float x) -> float {
         return std::log10(1.0f + 9.0f * juce::jlimit(0.0f, 1.0f, x));
     };
 
     for (int x = 0; x < W; ++x)
     {
-        // Map display column linearly to FFT bin index
-        const int bin = 1 + static_cast<int>(
+        const int bin    = 1 + static_cast<int>(
             static_cast<float>(x) / static_cast<float>(juce::jmax(1, W - 1))
             * static_cast<float>(displayBins - 1));
         const int binIdx = juce::jlimit(1, nBins - 1, bin);
@@ -1438,17 +1478,14 @@ void CisVisualizerComponent::paintFftGrayMode(juce::Graphics& g, int W, int H)
         const float logMag = logScale(mag);
         const int   barH   = juce::jmax(1, static_cast<int>(logMag * static_cast<float>(H)));
 
-        // Background column — very dark
         g.setColour(juce::Colour(0xff0d0d0d));
         g.fillRect(x, 0, 1, H - barH);
 
-        // Active bar — brightness proportional to magnitude
         const uint8_t v = static_cast<uint8_t>(
             juce::jlimit(0.0f, 255.0f, (0.35f + 0.65f * logMag) * 255.0f));
         g.setColour(juce::Colour(v, v, v));
         g.fillRect(x, H - barH, 1, barH);
 
-        // Bright 2-px peak cap for VU-meter feel
         if (barH > 2)
         {
             g.setColour(juce::Colours::white.withAlpha(0.60f));
@@ -1456,7 +1493,6 @@ void CisVisualizerComponent::paintFftGrayMode(juce::Graphics& g, int W, int H)
         }
     }
 
-    // ── Reference grid (10 %, 30 %, 70 %, 90 % log-magnitude) ───────────────
     g.setColour(juce::Colour(0x16ffffff));
     for (float ref : {0.1f, 0.3f, 0.7f, 0.9f})
     {
@@ -1464,69 +1500,87 @@ void CisVisualizerComponent::paintFftGrayMode(juce::Graphics& g, int W, int H)
         g.fillRect(0, refY, W, 1);
     }
 
-    // ── Footer label ──────────────────────────────────────────────────────────
+    // Harmonic count badge
+    {
+        const juce::String badge = juce::String(displayBins) + " harmonics";
+        g.setColour(juce::Colour(0xa0000000));
+        g.fillRoundedRectangle(static_cast<float>(W - 84), 4.f, 80.f, 16.f, 3.f);
+        g.setColour(juce::Colour(0xffe06868));
+        g.setFont(juce::FontOptions(9.0f));
+        g.drawText(badge, W - 84, 4, 80, 16, juce::Justification::centred, false);
+    }
+
     g.setColour(juce::Colour(0x50ffffff));
     g.setFont(juce::FontOptions(9.0f));
-    g.drawText("FFT spectrum  (spatial frequencies)",
+    g.drawText("FFT spectrum  (spatial harmonics)",
                juce::Rectangle<int>(4, H - 16, W - 8, 13),
                juce::Justification::centredLeft, false);
 }
 
 //==============================================================================
-// FFT COLOR — HSV-mapped spectrum bar chart
-// Low-frequency bins → blue (hue ≈ 240°)
-// High-frequency bins → red (hue ≈ 0°)
+// FFT COLOR — per-bin harmonicity visualizer (LuxSynth synthesis data)
+//
+// Each bar represents one LuxSynth oscillator (harmonic partial).
+// Height  = FFT magnitude (oscillator amplitude in synthesis engine).
+// Hue     = harmonicity derived from CIS colour temperature:
+//             warm (R>B) → orange/red   → harmonic partial behavior
+//             cool (R<B) → cyan/blue    → inharmonic partial behavior
+//
+// This gives musicians a direct visual representation of the timbral data
+// that will be fed to the LuxSynth additive synthesis engine.
 //==============================================================================
 void CisVisualizerComponent::paintFftColorMode(juce::Graphics& g, int W, int H)
 {
     g.fillAll(juce::Colour(0xff080808));
-
     if (cisPixelsCount == 0 || localDataGray.empty()) return;
 
     computeFftMagnitudes();
 
     const int nBins = static_cast<int>(fftMagnitudesSmoothed_.size());
-    if (nBins < 2) return;
+    if (nBins < 2 || fftNumHarmonics_ < 1) return;
 
-    const int displayBins = juce::jmax(1, nBins / 2);
+    const int displayBins = fftNumHarmonics_;
 
-    auto logScale = [](float x) -> float
-    {
+    // Ensure harmonicity buffer is large enough
+    if (fftHarmonicity_.size() < static_cast<size_t>(nBins))
+        fftHarmonicity_.resize(static_cast<size_t>(nBins), 0.5f);
+
+    auto logScale = [](float x) -> float {
         return std::log10(1.0f + 9.0f * juce::jlimit(0.0f, 1.0f, x));
     };
 
     for (int x = 0; x < W; ++x)
     {
         const float t = static_cast<float>(x) / static_cast<float>(juce::jmax(1, W - 1));
-
-        const int bin = 1 + static_cast<int>(t * static_cast<float>(displayBins - 1));
+        const int bin    = 1 + static_cast<int>(t * static_cast<float>(displayBins - 1));
         const int binIdx = juce::jlimit(1, nBins - 1, bin);
 
         const float mag    = fftMagnitudesSmoothed_[static_cast<size_t>(binIdx)];
         const float logMag = logScale(mag);
         const int   barH   = juce::jmax(1, static_cast<int>(logMag * static_cast<float>(H)));
 
-        // HSV hue: 0.667 (blue) at low freq → 0.0 (red) at high freq
-        const float hue = (1.0f - t) * 0.667f;
-        const float val = 0.18f + 0.82f * logMag;
+        // Hue from harmonicity:
+        //   1.0 (warm/harmonic)  → hue ≈ 0.05 (orange-red)
+        //   0.5 (neutral)        → hue ≈ 0.35 (green-yellow)
+        //   0.0 (cool/inharmonic)→ hue ≈ 0.60 (cyan-blue)
+        const float harm = fftHarmonicity_[static_cast<size_t>(binIdx)];
+        const float hue  = 0.60f - harm * 0.55f;  // [0.60..0.05] as harm→1
+        const float val  = 0.15f + 0.85f * logMag;
 
-        // Background — very dim tinted
-        g.setColour(juce::Colour::fromHSV(hue, 0.80f, 0.05f + 0.05f * logMag, 1.0f));
+        g.setColour(juce::Colour::fromHSV(hue, 0.75f, 0.04f + 0.04f * logMag, 1.0f));
         g.fillRect(x, 0, 1, H - barH);
 
-        // Active bar
         g.setColour(juce::Colour::fromHSV(hue, 0.90f, val, 1.0f));
         g.fillRect(x, H - barH, 1, barH);
 
-        // Bright 2-px peak cap
         if (barH > 2)
         {
-            g.setColour(juce::Colour::fromHSV(hue, 0.40f, 1.0f, 0.65f));
+            g.setColour(juce::Colour::fromHSV(hue, 0.35f, 1.0f, 0.65f));
             g.fillRect(x, H - barH, 1, 2);
         }
     }
 
-    // ── Reference grid ────────────────────────────────────────────────────────
+    // Reference grid
     g.setColour(juce::Colour(0x16ffffff));
     for (float ref : {0.1f, 0.3f, 0.7f, 0.9f})
     {
@@ -1534,29 +1588,38 @@ void CisVisualizerComponent::paintFftColorMode(juce::Graphics& g, int W, int H)
         g.fillRect(0, refY, W, 1);
     }
 
-    // ── Rainbow frequency legend (4 px strip at top) ─────────────────────────
+    // ── Harmonicity legend strip (4 px at top) ────────────────────────────────
+    // Shows the mapping: harmonic (left/orange) → inharmonic (right/blue)
     for (int x2 = 0; x2 < W; ++x2)
     {
-        const float t2   = static_cast<float>(x2) / static_cast<float>(juce::jmax(1, W - 1));
-        const float hue2 = (1.0f - t2) * 0.667f;
-        g.setColour(juce::Colour::fromHSV(hue2, 0.90f, 0.70f, 0.60f));
+        const float t2  = static_cast<float>(x2) / static_cast<float>(juce::jmax(1, W - 1));
+        const float h2  = 0.05f + t2 * 0.55f;  // orange→blue from left to right
+        g.setColour(juce::Colour::fromHSV(h2, 0.90f, 0.75f, 0.60f));
         g.fillRect(x2, 0, 1, 4);
     }
 
-    // "Low / High" axis labels
-    g.setColour(juce::Colour(0x60ffffff));
+    g.setColour(juce::Colour(0x70ffffff));
     g.setFont(juce::FontOptions(9.0f));
-    g.drawText("Low",
-               juce::Rectangle<int>(4, 5, 28, 12),
+    g.drawText("Harm.",
+               juce::Rectangle<int>(4, 5, 36, 12),
                juce::Justification::centredLeft, false);
-    g.drawText("High",
-               juce::Rectangle<int>(W - 34, 5, 30, 12),
+    g.drawText("Inharm.",
+               juce::Rectangle<int>(W - 44, 5, 40, 12),
                juce::Justification::centredRight, false);
 
-    // ── Footer label ──────────────────────────────────────────────────────────
+    // Harmonic count badge
+    {
+        const juce::String badge = juce::String(displayBins) + " harmonics";
+        g.setColour(juce::Colour(0xa0000000));
+        g.fillRoundedRectangle(static_cast<float>(W - 84), 18.f, 80.f, 16.f, 3.f);
+        g.setColour(juce::Colour(0xffcc88cc));  // SYNTH_FFT_COLOR accent
+        g.setFont(juce::FontOptions(9.0f));
+        g.drawText(badge, W - 84, 18, 80, 16, juce::Justification::centred, false);
+    }
+
     g.setColour(juce::Colour(0x50ffffff));
     g.setFont(juce::FontOptions(9.0f));
-    g.drawText("FFT color spectrum",
+    g.drawText("LuxSynth harmonics  \xe2\x80\x94 color = harmonicity",
                juce::Rectangle<int>(4, H - 16, W - 8, 13),
                juce::Justification::centredLeft, false);
 }
