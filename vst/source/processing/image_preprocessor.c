@@ -1148,9 +1148,11 @@ void preprocess_luxstral_sampler(
             out->additive.grayscale[i] = 1.0f - out->additive.grayscale[i];
     }
 
-    /* STEP 4: Gamma — use sampler_gamma (photo convention: pow(x, 1/gamma)) */
+    /* STEP 4: Gamma — use additive_gamma_value (same as live path).
+     * FIX(gamma): The old sampler_gamma was a separate hidden parameter
+     * not connected to the LuxStral Gamma slider — replaced to unify. */
     if (g_sp3ctra_config.additive_enable_non_linear_mapping) {
-        float gamma = g_sp3ctra_config.sampler_gamma;
+        float gamma = g_sp3ctra_config.additive_gamma_value;
         for (i = 0; i < nb_pixels; i++) {
             float val = out->additive.grayscale[i];
             if (val < 0.0f) val = 0.0f;

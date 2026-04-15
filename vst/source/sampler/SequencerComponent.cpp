@@ -148,7 +148,6 @@ void SequencerComponent::paint(juce::Graphics& g)
 void SequencerComponent::resized()
 {
     constexpr int cols    = kDisplayCols; // 8
-    constexpr int rows    = kDisplayRows; // 2
     constexpr int gap     = 3;
     constexpr int headerH = 30; // 4 top + 22 title + 4 gap
 

@@ -5,8 +5,7 @@
 
 //==============================================================================
 LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
-    : audioProcessor(processor),
-      apvts(processor.getAPVTS())
+    : apvts(processor.getAPVTS())
 {
     // Setup viewport for scrolling
     addAndMakeVisible(viewport);

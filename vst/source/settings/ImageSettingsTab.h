@@ -26,7 +26,6 @@ public:
     void resized() override;
 
 private:
-    Sp3ctraAudioProcessor&              audioProcessor;
     juce::AudioProcessorValueTreeState& apvts;
 
     // ── Section: Image Processing Flags ───────────────────────────────────────

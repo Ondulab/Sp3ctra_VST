@@ -1403,19 +1403,28 @@ void FramePlayerThread::run()
                 }
             }
 
-            // ── Treble cut: fade right-half pixels toward white ─────────────────────
-            // Right-half pixels = high-frequency content (closer to the far edge
-            // of the illuminated strip).
+            // ── Treble cut: hard cutoff on right-half pixels ────────────────────────
+            // Right-half pixels = high-frequency content.
+            // The slider controls the cutoff position:
+            //   p_tc=0 → no masking; p_tc=1 → entire right half → white.
+            // A short transition zone (~16 px) softens the edge.
             {
                 const float p_tc = sampler.getSlotTrebleCut(slotToPlay);
                 if (p_tc > 0.001f)
                 {
-                    const int halfPx = nb / 2;
-                    for (int px = halfPx; px < nb; ++px)
+                    const int halfPx    = nb / 2;
+                    const int halfWidth = nb - halfPx;
+                    // Cutoff: everything at or beyond this pixel → white
+                    const int cutoffPx  = halfPx + static_cast<int>(
+                        (1.0f - p_tc) * static_cast<float>(halfWidth));
+                    // Short transition zone for smooth edge (≤16 px)
+                    const int transW    = std::max(1, std::min(16, halfWidth / 8));
+                    const int transStart = std::max(halfPx, cutoffPx - transW);
+                    for (int px = transStart; px < nb; ++px)
                     {
-                        // Linear taper: no lift at halfPx, full lift at nb-1
-                        const float t = p_tc * static_cast<float>(px - halfPx)
-                                        / static_cast<float>(std::max(1, nb - 1 - halfPx));
+                        const float t = (px >= cutoffPx) ? 1.0f
+                            : static_cast<float>(px - transStart)
+                              / static_cast<float>(std::max(1, cutoffPx - transStart));
                         workR[px] = static_cast<uint8_t>(
                             workR[px] + t * (255.0f - (float)workR[px]));
                         workG[px] = static_cast<uint8_t>(
@@ -1426,18 +1435,28 @@ void FramePlayerThread::run()
                 }
             }
 
-            // ── Bass cut: fade left-half pixels toward white ──────────────────────────
-            // Left-half pixels = low-frequency content (closer to the sensor edge).
+            // ── Bass cut: hard cutoff on left-half pixels ───────────────────────────
+            // Left-half pixels = low-frequency content.
+            // The slider controls the cutoff position (mirrored):
+            //   p_bc=0 → no masking; p_bc=1 → entire left half → white.
+            // A short transition zone (~16 px) softens the edge.
             {
                 const float p_bc = sampler.getSlotBassCut(slotToPlay);
                 if (p_bc > 0.001f)
                 {
-                    const int halfPx = nb / 2;
-                    for (int px = 0; px < halfPx; ++px)
+                    const int halfPx    = nb / 2;
+                    // Cutoff: everything at or below this pixel → white
+                    // p_bc=0 → cutoffPx=-1 (nothing); p_bc=1 → cutoffPx=halfPx-1
+                    const int cutoffPx  = static_cast<int>(
+                        p_bc * static_cast<float>(halfPx)) - 1;
+                    // Short transition zone for smooth edge (≤16 px)
+                    const int transW    = std::max(1, std::min(16, halfPx / 8));
+                    const int transEnd  = std::min(halfPx - 1, cutoffPx + transW);
+                    for (int px = 0; px <= transEnd; ++px)
                     {
-                        // Linear taper: full lift at px=0, no lift at halfPx-1
-                        const float t = p_bc * static_cast<float>(halfPx - 1 - px)
-                                        / static_cast<float>(std::max(1, halfPx - 1));
+                        const float t = (px <= cutoffPx) ? 1.0f
+                            : 1.0f - static_cast<float>(px - cutoffPx)
+                                     / static_cast<float>(std::max(1, transEnd - cutoffPx));
                         workR[px] = static_cast<uint8_t>(
                             workR[px] + t * (255.0f - (float)workR[px]));
                         workG[px] = static_cast<uint8_t>(

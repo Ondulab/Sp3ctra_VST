@@ -358,7 +358,9 @@ void CisVisualizerComponent::paintSourceLabel(
     const char* label = visualizerModeLabel(source);
 
     // Semi-transparent pill badge — top-left corner
-    const float pillW = 8.f + juce::Font(juce::FontOptions(10.f)).getStringWidthFloat(label) + 8.f;
+    juce::GlyphArrangement ga;
+    ga.addLineOfText(juce::Font(juce::FontOptions(10.f)), label, 0.f, 0.f);
+    const float pillW = 8.f + ga.getBoundingBox(0, -1, false).getWidth() + 8.f;
     constexpr float pillH = 16.f;
     constexpr float pillX = 4.f;
     constexpr float pillY = 4.f;
@@ -700,9 +702,12 @@ void CisVisualizerComponent::updateCisData()
                                            : g_sp3ctra_config.luxsynth_ac_removal);
 
         /* Gamma: per-path.
-         *  SPCTR_* (LUXSTRAL): switch between live and sampler gamma based on what
-         *    the view is actually showing — NOT just samplerWriting.  When Source=LIVE,
-         *    the sampler state must never influence the gamma (fixes visual contamination).
+         *  SPCTR_* (LUXSTRAL): always use additive_gamma_value controlled by the
+         *    single "Gamma" slider in the LuxStral tab, regardless of source mode.
+         *    FIX(gamma): The old code switched to sampler_gamma when the sampler was
+         *    playing, but sampler_gamma is a separate hidden parameter that the user
+         *    cannot adjust from the LuxStral tab → gamma had no effect on the
+         *    visualization for Source=Sampler and Source=Mix.
          *  SYNTH_*: no gamma (original behaviour). */
         float gammaVal;
         int   gammaOn;
@@ -710,15 +715,8 @@ void CisVisualizerComponent::updateCisData()
             gammaVal = 0.0f;
             gammaOn  = 0;
         } else if (isSpctrView) {
-            // FIX(routing): Use sampler_gamma ONLY when the configured source actually
-            // carries sampler data.  Source=LIVE must always use the live (additive)
-            // gamma regardless of whether the sampler is playing.
-            const bool useSamplerGamma = samplerWriting
-                && (g_sp3ctra_config.luxstral_source_type != IMAGE_SOURCE_LIVE);
-            gammaVal = useSamplerGamma ? g_sp3ctra_config.sampler_gamma
-                                       : g_sp3ctra_config.additive_gamma_value;
-            gammaOn  = useSamplerGamma ? (gammaVal > 0.0f ? 1 : 0)
-                                       : g_sp3ctra_config.additive_enable_non_linear_mapping;
+            gammaVal = g_sp3ctra_config.additive_gamma_value;
+            gammaOn  = g_sp3ctra_config.additive_enable_non_linear_mapping;
         } else {
             /* SYNTH_* — no gamma by design */
             gammaVal = 0.0f;

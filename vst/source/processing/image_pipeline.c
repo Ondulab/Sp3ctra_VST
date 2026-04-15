@@ -266,12 +266,16 @@ PipelineConfig pipeline_build_config_sampler(void)
 {
     PipelineConfig cfg;
 
-    /* Path A — LuxStral: per-path source/inversion/AC from APVTS, sampler-specific gamma */
+    /* Path A — LuxStral: per-path source/inversion/AC from APVTS.
+     * FIX(gamma): Use the SAME gamma as the live path (additive_gamma_value)
+     * controlled by the single "Gamma" slider in the LuxStral tab.
+     * The old sampler_gamma was a separate hidden parameter with no UI control,
+     * causing gamma to have no effect when Source=Sampler. */
     cfg.luxstral_path.source     = (ImageSourceType)g_sp3ctra_config.luxstral_source_type;
     cfg.luxstral_path.inversion  = g_sp3ctra_config.luxstral_inversion;
     cfg.luxstral_path.ac_removal = g_sp3ctra_config.luxstral_ac_removal;
     cfg.luxstral_path.gamma      = g_sp3ctra_config.additive_enable_non_linear_mapping
-                                   ? g_sp3ctra_config.sampler_gamma : 0.0f;
+                                   ? g_sp3ctra_config.additive_gamma_value : 0.0f;
 
     /* Path B — LuxSynth+LuxWave: per-path from APVTS */
     cfg.luxsynth_luxwave_path.source     = (ImageSourceType)g_sp3ctra_config.luxsynth_source_type;
