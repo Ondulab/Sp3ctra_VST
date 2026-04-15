@@ -668,6 +668,18 @@ private:
     std::vector<uint8_t> finalGrayBuffer_;
 
     // -------------------------------------------------------------------------
+    // Slot data mutex — guards all non-atomic access to slots[].frames,
+    // slots[].frame_count, slots[].has_content, slots[].duration_us, and
+    // slots[].label between the message thread (readers: sampleSpectralForTimeline,
+    // sampleBrightnessForTimeline, saveToFile, copySlotTo) and the UDP thread
+    // (writer: onFrameAssembled) and any thread calling clearSlot / loadFromFile.
+    //
+    // RT path (processBlock / processMidi) MUST NOT acquire this mutex.
+    // FramePlayerThread acquires it only for the brief frame-pointer read.
+    // -------------------------------------------------------------------------
+    mutable std::mutex slotsMutex_;
+
+    // -------------------------------------------------------------------------
     // Live frame cache
     // -------------------------------------------------------------------------
     std::mutex liveMutex_;
