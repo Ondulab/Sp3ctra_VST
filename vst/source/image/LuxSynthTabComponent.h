@@ -117,10 +117,10 @@ public:
         // 32 = fast / low-res, 256 = slow / high-res (default 128).
         initLabel(fftBinsLabel, "FFT Bins");
         addAndMakeVisible(fftBinsCombo);
-        fftBinsCombo.addItem("32  \xe2\x80\x94 fast",     1);
-        fftBinsCombo.addItem("64",                         2);
-        fftBinsCombo.addItem("128 \xe2\x80\x94 default",  3);
-        fftBinsCombo.addItem("256 \xe2\x80\x94 quality",  4);
+        fftBinsCombo.addItem("32  - fast",    1);
+        fftBinsCombo.addItem("64",            2);
+        fftBinsCombo.addItem("128 - default", 3);
+        fftBinsCombo.addItem("256 - quality", 4);
         fftBinsAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
             apvts, "lxFftBins", fftBinsCombo));
 
@@ -163,84 +163,120 @@ public:
 
     void paint(juce::Graphics& g) override
     {
-        const auto accent = juce::Colour(0xffe08844);
-        const auto blobAccent = juce::Colour(0xffd07040); // SYNTH_BLOB colour
-        const int pad = 12;
-        const int stageW = getWidth() - 2 * pad;
+        const int W   = getWidth();
+        const int H   = getHeight();
+        const int pad = 8;
+        computeColumns(W, leftX_, leftW_, rightX_, rightW_);
 
-        // ── Blob Detection section header (between Gamma row and blob sliders) ──
-        // Draws at row 4 gap — between row 3 bottom and row 4 top
-        const int blobSectionY = rowY(3) + Sp3ctraTheme::kControlH + 2;
-        g.setColour(blobAccent.withAlpha(0.55f));
+        // ── Divider line between columns ──────────────────────────────────
+        const int divX = rightX_ - pad / 2;
+        g.setColour(juce::Colour(0x18ffffff));
+        g.fillRect(divX, 4, 1, H - 8);
+
+        // ── Left column section headers ───────────────────────────────────
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
-        g.drawText("--- BLOB DETECTION ---", pad, blobSectionY, stageW, 12,
+
+        const int blobSectionY = rowY(3) + Sp3ctraTheme::kControlH + 2;
+        g.setColour(juce::Colour(0xffd07040).withAlpha(0.55f));
+        g.drawText("--- BLOB DETECTION ---", leftX_, blobSectionY, leftW_, 12,
                    juce::Justification::centred);
 
-        // ── FFT Parameters section header (between blob sliders and FFT rows) ──
         const int fftSectionY = rowY(7) + Sp3ctraTheme::kControlH + 2;
         g.setColour(juce::Colour(0xffe06868).withAlpha(0.55f));
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
-        g.drawText("--- FFT PARAMETERS ---", pad, fftSectionY, stageW, 12,
+        g.drawText("--- FFT PARAMETERS ---", leftX_, fftSectionY, leftW_, 12,
                    juce::Justification::centred);
 
-        // Preliminary outputs label
+        // ── Right column node section labels ──────────────────────────────
+        const auto accent = juce::Colour(0xffe08844);
         g.setColour(accent.withAlpha(0.6f));
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
-        g.drawText("Preliminary outputs", pad, preNodeY() - 16, stageW, 14,
-                   juce::Justification::centred);
 
-        // FFT outputs label
-        g.setColour(accent.withAlpha(0.6f));
-        g.drawText("Spectral analysis (FFT)", pad, fftNodeY() - 16, stageW, 14,
-                   juce::Justification::centred);
+        // "Preliminary outputs" label sits above nodeGray
+        const int prelimLabelY = nodeGray.getY() - 16;
+        if (prelimLabelY >= 0)
+            g.drawText("Preliminary outputs",
+                       rightX_, prelimLabelY, rightW_, 14,
+                       juce::Justification::centred);
+
+        // "Spectral analysis (FFT)" label sits above nodeFftGray
+        const int fftLabelY = nodeFftGray.getY() - 16;
+        if (fftLabelY >= 0)
+            g.drawText("Spectral analysis (FFT)",
+                       rightX_, fftLabelY, rightW_, 14,
+                       juce::Justification::centred);
     }
 
     void resized() override
     {
-        const int w  = getWidth();
-        const int nw = stdNodeW();
-        const int x0 = w / 2 - nw / 2;
+        const int W = getWidth();
+        const int H = getHeight();
+        computeColumns(W, leftX_, leftW_, rightX_, rightW_);
 
-        // Row 0: Source
-        placeComboRow(sourceLabel, sourceCombo, 0);
+        // ── Left column: all controls ─────────────────────────────────────
+        const int labelW = 80;
+        const int gap    = Sp3ctraTheme::kGap;
+        const int ch     = Sp3ctraTheme::kControlH;
 
-        // Row 1: Negative (toggle)
-        placeToggleRow(negativeLabel, negativeToggle, 1);
+        auto lb = [&](int row) -> juce::Rectangle<int>
+        {
+            return { leftX_, rowY(row), labelW, ch };
+        };
+        auto cb = [&](int row) -> juce::Rectangle<int>
+        {
+            return { leftX_ + labelW + gap, rowY(row),
+                     leftW_ - labelW - gap,  ch };
+        };
 
-        // Row 2: DC Blocking (toggle)
-        placeToggleRow(dcBlockLabel, dcBlockToggle, 2);
-
-        // Row 3: Gamma (slider — always active)
-        placeSliderRow(gammaValueLabel, gammaSlider, 3);
-
-        // Rows 4-7: Blob Detection sliders
-        // (row 4 section header is drawn in paint() in the gap between row 3 and row 4)
-        placeSliderRow(blobThreshLabel,    blobThreshSlider,    4);
-        placeSliderRow(blobMinWidthLabel,  blobMinWidthSlider,  5);
-        placeSliderRow(blobMergeGapLabel,  blobMergeGapSlider,  6);
-        placeSliderRow(blobColorSplitLabel, blobColorSplitSlider, 7);
-
+        // Row 0: Source combo
+        sourceLabel.setBounds(lb(0));
+        sourceCombo.setBounds(cb(0));
+        // Row 1: Negative toggle
+        negativeLabel.setBounds(lb(1));
+        negativeToggle.setBounds(cb(1).withWidth(80));
+        // Row 2: DC Blocking toggle
+        dcBlockLabel.setBounds(lb(2));
+        dcBlockToggle.setBounds(cb(2).withWidth(80));
+        // Row 3: Gamma slider
+        gammaValueLabel.setBounds(lb(3));
+        gammaSlider.setBounds(cb(3));
+        // Rows 4-7: Blob Detection
+        blobThreshLabel.setBounds(lb(4));      blobThreshSlider.setBounds(cb(4));
+        blobMinWidthLabel.setBounds(lb(5));    blobMinWidthSlider.setBounds(cb(5));
+        blobMergeGapLabel.setBounds(lb(6));    blobMergeGapSlider.setBounds(cb(6));
+        blobColorSplitLabel.setBounds(lb(7));  blobColorSplitSlider.setBounds(cb(7));
         // Rows 8-9: FFT Parameters
-        // (row 8 section header is drawn in paint() in the gap between row 7 and row 8)
-        placeComboRow (fftBinsLabel,      fftBinsCombo,      8);
-        placeSliderRow(fftSmoothingLabel, fftSmoothingSlider, 9);
+        fftBinsLabel.setBounds(lb(8));         fftBinsCombo.setBounds(cb(8));
+        fftSmoothingLabel.setBounds(lb(9));    fftSmoothingSlider.setBounds(cb(9));
 
-        // Preliminary nodes — stacked vertically, full stdNodeW each
-        constexpr int nodeH   = 28;
-        constexpr int nodeGap = 6;
-        const int pny = preNodeY();
-        nodeGray.setBounds (x0, pny,                          nw, nodeH);
-        nodeColor.setBounds(x0, pny + (nodeH + nodeGap),      nw, nodeH);
-        nodeBlob.setBounds (x0, pny + 2 * (nodeH + nodeGap),  nw, nodeH);
+        // ── Right column: 5 output nodes, vertically distributed ──────────
+        // Layout (top → bottom):
+        //   [16 px: "Preliminary outputs" label – drawn in paint()]
+        //   nodeGray  (28px)
+        //   nodeColor (28px)
+        //   nodeBlob  (28px)
+        //   [16 px: "Spectral analysis (FFT)" label – drawn in paint()]
+        //   nodeFftGray  (28px)
+        //   nodeFftColor (28px)
+        constexpr int kNH  = 28;   // node height
+        constexpr int kNG  = 5;    // gap between consecutive nodes
+        constexpr int kLH  = 16;   // section label height
+        constexpr int kSG  = 14;   // extra gap between the two sections
+        // Total content height: 2 labels + 5 nodes + 4 intra-node gaps + 1 section gap
+        const int totalH = 2 * kLH + 5 * kNH + 4 * kNG + kSG;
+        // Centre the block vertically in the right column
+        int ny = juce::jmax(4, (H - totalH) / 2);
 
-        // FFT nodes — stacked vertically, full stdNodeW each
-        const int fny = fftNodeY();
-        nodeFftGray.setBounds (x0, fny,                     nw, nodeH);
-        nodeFftColor.setBounds(x0, fny + (nodeH + nodeGap), nw, nodeH);
+        ny += kLH;   // space for "Preliminary outputs" label
+        nodeGray.setBounds (rightX_, ny, rightW_, kNH);   ny += kNH + kNG;
+        nodeColor.setBounds(rightX_, ny, rightW_, kNH);   ny += kNH + kNG;
+        nodeBlob.setBounds (rightX_, ny, rightW_, kNH);   ny += kNH + kSG;
+
+        ny += kLH;   // space for "Spectral analysis (FFT)" label
+        nodeFftGray.setBounds (rightX_, ny, rightW_, kNH);   ny += kNH + kNG;
+        nodeFftColor.setBounds(rightX_, ny, rightW_, kNH);
     }
 
 private:
-    Sp3ctraAudioProcessor& processor;
+    [[maybe_unused]] Sp3ctraAudioProcessor& processor;
 
     // Labels — image pipeline
     juce::Label sourceLabel, negativeLabel, dcBlockLabel, gammaValueLabel;
@@ -276,7 +312,28 @@ private:
     // Pipeline output nodes
     PipelineNodeComponent nodeGray, nodeColor, nodeBlob, nodeFftGray, nodeFftColor;
 
+    // Cached column geometry — updated by computeColumns() in paint() / resized()
+    mutable int leftX_  = 0;
+    mutable int leftW_  = 0;
+    mutable int rightX_ = 0;
+    mutable int rightW_ = 0;
+
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /** Splits the available width into left (controls) and right (nodes) columns.
+     *  Left column: ~55% of width; right column: remainder minus divider gap. */
+    static void computeColumns(int totalW,
+                                int& lx, int& lw,
+                                int& rx, int& rw) noexcept
+    {
+        constexpr int kPad    = 8;
+        constexpr int kDiv    = 8;   // gap around the divider
+        lx = kPad;
+        lw = totalW * 55 / 100 - kPad - kDiv / 2;
+        rx = lx + lw + kDiv;
+        rw = totalW - rx - kPad;
+    }
+
     void initLabel(juce::Label& lbl, const juce::String& text)
     {
         lbl.setText(text, juce::dontSendNotification);
@@ -285,53 +342,10 @@ private:
         addAndMakeVisible(lbl);
     }
 
-    /// Same width formula as SourcesTabComponent
-    int stdNodeW() const { return juce::jmin(getWidth() * 2 / 5, 360); }
-
-    int rowY(int row) const
+    /** Y coordinate of control row n (left column). */
+    int rowY(int row) const noexcept
     {
         return 6 + row * (Sp3ctraTheme::kControlH + 14);
-    }
-
-    // 10 control rows (0-7: pipeline + blob-detection, 8-9: FFT parameters),
-    // then 38 px gap before preliminary output nodes.
-    int preNodeY() const { return rowY(10) + 38; }
-    // 3 stacked nodes: 3 × 28 + 2 × 6 = 96, plus 20 for label spacing
-    int fftNodeY() const { return preNodeY() + 96 + 20; }
-
-    void placeComboRow(juce::Label& lbl, juce::ComboBox& combo, int row)
-    {
-        const int nw     = stdNodeW();
-        const int x0     = getWidth() / 2 - nw / 2;
-        const int ch     = Sp3ctraTheme::kControlH;
-        const int y      = rowY(row);
-        const int labelW = 80;
-        lbl.setBounds(x0, y, labelW, ch);
-        combo.setBounds(x0 + labelW + Sp3ctraTheme::kGap, y,
-                        nw - labelW - Sp3ctraTheme::kGap, ch);
-    }
-
-    void placeToggleRow(juce::Label& lbl, juce::ToggleButton& toggle, int row)
-    {
-        const int nw     = stdNodeW();
-        const int x0     = getWidth() / 2 - nw / 2;
-        const int ch     = Sp3ctraTheme::kControlH;
-        const int y      = rowY(row);
-        const int labelW = 80;
-        lbl.setBounds(x0, y, labelW, ch);
-        toggle.setBounds(x0 + labelW + Sp3ctraTheme::kGap, y, 120, ch);
-    }
-
-    void placeSliderRow(juce::Label& lbl, juce::Slider& slider, int row)
-    {
-        const int nw     = stdNodeW();
-        const int x0     = getWidth() / 2 - nw / 2;
-        const int ch     = Sp3ctraTheme::kControlH;
-        const int y      = rowY(row);
-        const int labelW = 80;
-        lbl.setBounds(x0, y, labelW, ch);
-        slider.setBounds(x0 + labelW + Sp3ctraTheme::kGap, y,
-                         nw - labelW - Sp3ctraTheme::kGap, ch);
     }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxSynthTabComponent)
