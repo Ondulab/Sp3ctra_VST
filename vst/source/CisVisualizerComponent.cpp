@@ -1210,27 +1210,46 @@ void CisVisualizerComponent::mouseMove(const juce::MouseEvent& event)
     hoverPos_ = event.getPosition();
 
     const int W = getWidth();
-    if (W <= 1 || cisPixelsCount <= 0)
+    if (W <= 1 || cisPixelsCount <= 0 || synthBlobs_.empty())
     {
         hoverBlobIdx_ = -1;
         return;
     }
 
-    // Convert display X to CIS pixel index
-    const float pos = static_cast<float>(hoverPos_.x)
-                    / static_cast<float>(W - 1);
-    const int ci = juce::jlimit(0, cisPixelsCount - 1,
-        static_cast<int>(pos * static_cast<float>(cisPixelsCount - 1) + 0.5f));
+    // ── Magnetic snap ─────────────────────────────────────────────────────────
+    // Convert cursor X → fractional CIS pixel position
+    const float cisPerDisplayPx = static_cast<float>(cisPixelsCount - 1)
+                                 / static_cast<float>(W - 1);
+    const float cursorCi = static_cast<float>(hoverPos_.x) * cisPerDisplayPx;
 
-    hoverBlobIdx_ = -1;
+    // Snap radius: 20 display pixels expressed in CIS pixels.
+    // This makes thin blobs (even 1-px wide) easy to hover — no need to be
+    // pixel-perfect; the nearest blob within the radius wins.
+    constexpr float kSnapDisplayPx = 20.f;
+    const float snapRadiusCi = kSnapDisplayPx * cisPerDisplayPx;
+
+    int   bestIdx  = -1;
+    float bestDist = snapRadiusCi; // must beat this to become candidate
+
     for (int b = 0; b < static_cast<int>(synthBlobs_.size()); ++b)
     {
-        if (ci >= synthBlobs_[b].startPx && ci < synthBlobs_[b].endPx)
+        const auto& blob = synthBlobs_[b];
+
+        // Distance from cursor to nearest blob edge (0 if cursor is inside blob)
+        float distCi = 0.f;
+        if (cursorCi < static_cast<float>(blob.startPx))
+            distCi = static_cast<float>(blob.startPx) - cursorCi;
+        else if (cursorCi >= static_cast<float>(blob.endPx))
+            distCi = cursorCi - static_cast<float>(blob.endPx - 1);
+
+        if (distCi <= bestDist)
         {
-            hoverBlobIdx_ = b;
-            break;
+            bestDist = distCi;
+            bestIdx  = b;
         }
     }
+
+    hoverBlobIdx_ = bestIdx;
 }
 
 //==============================================================================
