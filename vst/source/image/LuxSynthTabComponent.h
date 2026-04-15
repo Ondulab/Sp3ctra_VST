@@ -144,7 +144,7 @@ public:
         const int blobSectionY = rowY(3) + Sp3ctraTheme::kControlH + 2;
         g.setColour(blobAccent.withAlpha(0.55f));
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
-        g.drawText("──  BLOB DETECTION  ──", pad, blobSectionY, stageW, 12,
+        g.drawText("--- BLOB DETECTION ---", pad, blobSectionY, stageW, 12,
                    juce::Justification::centred);
 
         // Preliminary outputs label
