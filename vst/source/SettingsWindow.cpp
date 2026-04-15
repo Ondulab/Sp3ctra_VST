@@ -7,8 +7,7 @@
 //==============================================================================
 
 SettingsComponent::SettingsComponent(Sp3ctraAudioProcessor& processor)
-    : audioProcessor(processor),
-      tabbedComponent(juce::TabbedButtonBar::TabsAtTop)
+    : tabbedComponent(juce::TabbedButtonBar::TabsAtTop)
 {
     // Create and add tabs — ordered by pipeline stage (sensor → image → audio → playback)
     generalTab      = new GeneralSettingsTab(processor);

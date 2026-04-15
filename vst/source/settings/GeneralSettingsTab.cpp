@@ -4,8 +4,7 @@
 
 //==============================================================================
 GeneralSettingsTab::GeneralSettingsTab(Sp3ctraAudioProcessor& processor)
-    : audioProcessor(processor),
-      apvts(processor.getAPVTS())
+    : apvts(processor.getAPVTS())
 {
     // ── Visualizer Mode ───────────────────────────────────────────────────────
     visualizerModeLabel.setText("Visualizer Mode:", juce::dontSendNotification);

@@ -31,8 +31,6 @@ public:
     void resized() override;
 
 private:
-    Sp3ctraAudioProcessor& audioProcessor;
-
     // Tabbed interface
     juce::TabbedComponent tabbedComponent;
 

@@ -22,8 +22,7 @@ namespace
 
 //==============================================================================
 ImageSettingsTab::ImageSettingsTab(Sp3ctraAudioProcessor& processor)
-    : audioProcessor(processor),
-      apvts(processor.getAPVTS())
+    : apvts(processor.getAPVTS())
 {
     // ── Section: Image Processing Flags ───────────────────────────────────────
     setupLabel(gammaEnableLabel, "Gamma Enable");
