@@ -285,43 +285,6 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     sfEnabledAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "sfEnabled", sfEnabledToggle);
 
-    // Blob Threshold — detection sensitivity
-    sfBlobThresholdLabel.setText("Detect Threshold:", juce::dontSendNotification);
-    sfBlobThresholdLabel.setJustificationType(juce::Justification::centredRight);
-    sfBlobThresholdLabel.setTooltip("Minimum brightness to consider a region as a stroke.");
-    contentComponent.addAndMakeVisible(sfBlobThresholdLabel);
-    sfBlobThresholdSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    sfBlobThresholdSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
-    sfBlobThresholdSlider.setTooltip(sfBlobThresholdLabel.getTooltip());
-    contentComponent.addAndMakeVisible(sfBlobThresholdSlider);
-    sfBlobThresholdAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "sfBlobBaseThreshold", sfBlobThresholdSlider);
-
-    // Min Blob Width — anti-noise filter
-    sfMinWidthLabel.setText("Min Stroke Width:", juce::dontSendNotification);
-    sfMinWidthLabel.setJustificationType(juce::Justification::centredRight);
-    sfMinWidthLabel.setTooltip("Minimum width (notes) for a detected region to count as a stroke.\n"
-                               "Increase to reject sensor noise.");
-    contentComponent.addAndMakeVisible(sfMinWidthLabel);
-    sfMinWidthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    sfMinWidthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
-    sfMinWidthSlider.setTooltip(sfMinWidthLabel.getTooltip());
-    contentComponent.addAndMakeVisible(sfMinWidthSlider);
-    sfMinWidthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "sfBlobMinWidth", sfMinWidthSlider);
-
-    // Merge Gap — join nearby segments
-    sfMergeGapLabel.setText("Merge Gap:", juce::dontSendNotification);
-    sfMergeGapLabel.setJustificationType(juce::Justification::centredRight);
-    sfMergeGapLabel.setTooltip("Maximum gap (notes) between two segments to merge them into one stroke.");
-    contentComponent.addAndMakeVisible(sfMergeGapLabel);
-    sfMergeGapSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    sfMergeGapSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
-    sfMergeGapSlider.setTooltip(sfMergeGapLabel.getTooltip());
-    contentComponent.addAndMakeVisible(sfMergeGapSlider);
-    sfMergeGapAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "sfBlobMergeGap", sfMergeGapSlider);
-
     // Morph Width Scale — maps physical stroke width to morph=1.0 (full square)
     sfMorphWidthLabel.setText("Square at Width:", juce::dontSendNotification);
     sfMorphWidthLabel.setJustificationType(juce::Justification::centredRight);
@@ -551,18 +514,6 @@ void LuxStralSettingsTab::layoutContentComponent()
 
     sfEnabledLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
     sfEnabledToggle.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
-    yPos += rowHeight + itemSpacing;
-
-    sfBlobThresholdLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
-    sfBlobThresholdSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
-    yPos += rowHeight + itemSpacing;
-
-    sfMinWidthLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
-    sfMinWidthSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
-    yPos += rowHeight + itemSpacing;
-
-    sfMergeGapLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
-    sfMergeGapSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + itemSpacing;
 
     sfMorphWidthLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
