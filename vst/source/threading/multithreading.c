@@ -744,6 +744,17 @@ void *udpThread(void *arg) {
             memset(db->preprocessed_data.additive.grayscale, 0,
                    sizeof(db->preprocessed_data.additive.grayscale));
             db->preprocessed_data.additive.contrast_factor = 0.0f;
+            /* FIX(silence): Also zero polyphonic.* when LuxSynth source is SAMPLER.
+             * Without this, LuxSynth keeps generating audio from the last frame
+             * after recording stops or when no slot is playing. */
+            if (g_sp3ctra_config.luxsynth_source_type == 0 /* IMAGE_SOURCE_SAMPLER */)
+            {
+              memset(db->preprocessed_data.polyphonic.grayscale, 0,
+                     sizeof(db->preprocessed_data.polyphonic.grayscale));
+              memset(db->preprocessed_data.polyphonic.magnitudes, 0,
+                     sizeof(db->preprocessed_data.polyphonic.magnitudes));
+              db->preprocessed_data.polyphonic.valid = 0;
+            }
             db->dataReady = 2; /* tag=2: sampler slot — consumer gating intact */
           }
           /* else frame_sampler_is_playing(): FramePlayerThread is the sole

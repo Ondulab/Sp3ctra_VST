@@ -1045,12 +1045,23 @@ void FramePlayerThread::injectWhiteFrame() noexcept
         if (g_sp3ctra_config.luxstral_source_type == 0 /* IMAGE_SOURCE_SAMPLER */)
         {
             pthread_mutex_lock(&doubleBuffer->mutex);
-            // Zero additive synthesis input — identical to multithreading.c lines 696-701.
+            // Zero additive synthesis input — identical to multithreading.c silence branch.
             std::memset(doubleBuffer->preprocessed_data.additive.grayscale, 0,
                         sizeof(doubleBuffer->preprocessed_data.additive.grayscale));
             std::memset(doubleBuffer->preprocessed_data.additive.notes, 0,
                         sizeof(doubleBuffer->preprocessed_data.additive.notes));
             doubleBuffer->preprocessed_data.additive.contrast_factor = 0.0f;
+            // FIX(silence): Also zero polyphonic.* when LuxSynth source is SAMPLER.
+            // Without this, LuxSynth keeps generating audio from the last played
+            // frame during STEP_EMPTY / rtStop / LoopMode::NONE end.
+            if (g_sp3ctra_config.luxsynth_source_type == 0 /* IMAGE_SOURCE_SAMPLER */)
+            {
+                std::memset(doubleBuffer->preprocessed_data.polyphonic.grayscale, 0,
+                            sizeof(doubleBuffer->preprocessed_data.polyphonic.grayscale));
+                std::memset(doubleBuffer->preprocessed_data.polyphonic.magnitudes, 0,
+                            sizeof(doubleBuffer->preprocessed_data.polyphonic.magnitudes));
+                doubleBuffer->preprocessed_data.polyphonic.valid = 0;
+            }
             doubleBuffer->dataReady = 2; /* sampler source tag — consumer gating intact */
             pthread_mutex_unlock(&doubleBuffer->mutex);
         }
