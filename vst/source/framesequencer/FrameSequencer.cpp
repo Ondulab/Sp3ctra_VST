@@ -141,6 +141,7 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
             as.stopPlayCmd.store(true, std::memory_order_release);
         as.activePlaySlot.store(-1, std::memory_order_release);
         as.passthroughEnabled.store(true, std::memory_order_release);
+        as.seqLiveStepActive.store(true, std::memory_order_release);  // STEP_LIVE only
         frameSampler->setSeqSilentStep(false); // clear silence flag — live is active
         rtPrevActiveBank = STEP_LIVE;
         return;
@@ -155,6 +156,7 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
             as.stopPlayCmd.store(true, std::memory_order_release);
         as.activePlaySlot.store(-1,    std::memory_order_release);
         as.passthroughEnabled.store(false, std::memory_order_release); // suppress live
+        as.seqLiveStepActive.store(false, std::memory_order_release);  // not STEP_LIVE
         frameSampler->setSeqSilentStep(true); // tell visualizer to show white
         // FIX(silence): Signal FramePlayerThread to inject a full-white (255) frame
         // immediately into AudioImageBuffers and preprocessed_data.
@@ -202,6 +204,7 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
         // FramePlayerThread never restores passthroughEnabled on its own when
         // the sample finishes or the slot has no content.  Only the sequencer
         // (STEP_LIVE or rtStop) is allowed to re-enable live passthrough.
+        as.seqLiveStepActive.store(false, std::memory_order_release);  // not STEP_LIVE
         as.seqControlledPlay.store(true,  std::memory_order_release);
         as.stopPlayCmd.store(false, std::memory_order_release);
         as.slotState[bankIdx].store(static_cast<int>(SlotState::PLAYING),
@@ -245,6 +248,7 @@ void FrameSequencer::rtStop() noexcept
         // passthroughEnabled is set to true below so the live UDP stream will
         // naturally overwrite AudioImageBuffers once the next UDP frame arrives.
         as.injectSilenceCmd.store(true, std::memory_order_release);
+        as.seqLiveStepActive.store(false, std::memory_order_release);  // clear on stop
         as.passthroughEnabled.store(true, std::memory_order_release);
     }
 }

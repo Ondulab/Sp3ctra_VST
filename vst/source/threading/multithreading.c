@@ -614,7 +614,7 @@ void *udpThread(void *arg) {
              * no slot is playing — sampler_pointers still hold the old frame.
              * Use the live UDP data instead so the pipeline processes the
              * actual CIS stream, not stale sampler data. */
-            if (frame_sampler_is_passthrough() && !frame_sampler_is_playing())
+            if (frame_sampler_is_seq_live_step() && !frame_sampler_is_playing())
             {
                 src_R = db->activeBuffer_R;
                 src_G = db->activeBuffer_G;
@@ -748,9 +748,9 @@ void *udpThread(void *arg) {
           }
           else if (!frame_sampler_is_playing())
           {
-            if (frame_sampler_is_passthrough())
+            if (frame_sampler_is_seq_live_step())
             {
-              /* FIX(live): STEP_LIVE or rtStop with passthrough enabled.
+              /* FIX(live): Sequencer STEP_LIVE is active.
                * Source=S but no slot is playing — the live CIS stream IS the
                * intended content.  Write the full preprocessed_temp (computed
                * from the live UDP frame) so synthesis uses live data.

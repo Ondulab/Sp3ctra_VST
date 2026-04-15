@@ -137,6 +137,12 @@ struct FrameSamplerAtomicState
     std::atomic<int>  slotState[FrameSamplerConstants::NUM_SLOTS];
     std::atomic<int>  activePlaySlot     { -1 };   // -1 = none playing
     std::atomic<bool> passthroughEnabled { true };  // false during PLAYING
+    /** True ONLY when the sequencer is running and the current step is STEP_LIVE.
+     *  Unlike passthroughEnabled (which is also true during normal idle/stop),
+     *  this flag is set exclusively by triggerStep(STEP_LIVE) and cleared by
+     *  triggerStep(anything_else) and rtStop().
+     *  Used by the UDP thread to route live data through the Source=S path. */
+    std::atomic<bool> seqLiveStepActive { false };
     /** Set by FrameSequencer::triggerStep() before posting startPlayCmd so that
      *  FramePlayerThread does NOT restore passthroughEnabled when the sample
      *  finishes or the slot has no content.  The sequencer is the only authority

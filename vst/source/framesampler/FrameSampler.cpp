@@ -79,6 +79,14 @@ extern "C"
         return FrameSampler::s_instance->getAtomicState()
                    .passthroughEnabled.load(std::memory_order_relaxed) ? 1 : 0;
     }
+
+    int frame_sampler_is_seq_live_step(void)
+    {
+        if (FrameSampler::s_instance == nullptr)
+            return 0; // No sampler → no sequencer STEP_LIVE
+        return FrameSampler::s_instance->getAtomicState()
+                   .seqLiveStepActive.load(std::memory_order_relaxed) ? 1 : 0;
+    }
 }
 
 // ============================================================================
@@ -1095,12 +1103,12 @@ void FramePlayerThread::run()
             // or rtStop() when the sequencer was idle).
             if (state.injectSilenceCmd.exchange(false, std::memory_order_acq_rel))
             {
-                // FIX(live): When passthrough is active (STEP_LIVE or rtStop),
+                // FIX(live): When the sequencer's STEP_LIVE is active,
                 // the live UDP stream is the sole authority — NEVER inject white.
                 // Consume the flag but skip the white frame injection.
-                if (state.passthroughEnabled.load(std::memory_order_relaxed))
+                if (state.seqLiveStepActive.load(std::memory_order_relaxed))
                 {
-                    log_info("FS", "FramePlayerThread: idle — passthrough active, skipping white frame");
+                    log_info("FS", "FramePlayerThread: idle — seqLiveStep active, skipping white frame");
                 }
                 else
                 {
@@ -1680,12 +1688,13 @@ void FramePlayerThread::run()
                 || sampler.isSeqSilentStepActive()
                 || state.injectSilenceCmd.exchange(false, std::memory_order_acq_rel);
 
-            // FIX(live): When passthrough is active (STEP_LIVE), the live UDP
+            // FIX(live): When the sequencer's STEP_LIVE is active, the live UDP
             // stream is the intended content — NEVER overwrite with white.
-            // This is a hard bypass: passthrough trumps all silence rules.
-            const bool passthrough = state.passthroughEnabled.load(std::memory_order_relaxed);
+            // seqLiveStepActive (not passthroughEnabled!) distinguishes
+            // sequencer-STEP_LIVE from normal idle/stop where silence IS needed.
+            const bool liveStep = state.seqLiveStepActive.load(std::memory_order_relaxed);
 
-            if (doSilence && !passthrough)
+            if (doSilence && !liveStep)
             {
                 if (stoppedByNoneMode)
                     log_info("FS", "Slot %d: NONE mode end — injecting white frame (silence)",
@@ -1695,9 +1704,9 @@ void FramePlayerThread::run()
                              slotToPlay);
                 injectWhiteFrame();
             }
-            else if (doSilence && passthrough)
+            else if (doSilence && liveStep)
             {
-                log_info("FS", "Slot %d: passthrough active — skipping white frame",
+                log_info("FS", "Slot %d: seqLiveStep active — skipping white frame",
                          slotToPlay);
             }
         }
