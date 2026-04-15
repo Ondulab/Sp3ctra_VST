@@ -545,6 +545,15 @@ void *udpThread(void *arg) {
         audio_image_buffers_complete_write(audioBuffers);
         audio_write_started = 0;
       }
+      else {
+        /* FIX(raw): Write bus was not started (sampler is playing and owns
+         * AudioImageBuffers), but the RAW snapshot must still reflect the
+         * live UDP data so the RAW visualizer and Source=L pipeline path
+         * stay live during sampler playback. */
+        audio_image_buffers_snapshot_raw_external(audioBuffers,
+            db->activeBuffer_R, db->activeBuffer_G, db->activeBuffer_B,
+            nb_pixels);
+      }
 
       /* FrameSampler hook: record assembled CIS line if a slot is RECORDING */
 #ifdef VST_MODE

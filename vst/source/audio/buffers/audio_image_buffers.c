@@ -401,6 +401,32 @@ void audio_image_buffers_snapshot_raw_before_swap(AudioImageBuffers *buffers) {
 }
 
 /**
+ * @brief Snapshot raw from external data (no write_mutex required).
+ *
+ * Used when the AudioImageBuffers write bus was not started (e.g. during
+ * FrameSampler playback) but the UDP thread still needs to update raw_R/G/B
+ * so the RAW visualizer and Source=L pipeline path stay live.
+ *
+ * @param buffers   Pointer to AudioImageBuffers structure
+ * @param srcR      Source R channel (pure UDP frame)
+ * @param srcG      Source G channel (pure UDP frame)
+ * @param srcB      Source B channel (pure UDP frame)
+ * @param nb_pixels Number of pixels to copy
+ */
+void audio_image_buffers_snapshot_raw_external(AudioImageBuffers *buffers,
+                                               const uint8_t *srcR,
+                                               const uint8_t *srcG,
+                                               const uint8_t *srcB,
+                                               int nb_pixels) {
+  if (!buffers || !buffers->initialized || !srcR || !srcG || !srcB || nb_pixels <= 0)
+    return;
+
+  memcpy(buffers->raw_R, srcR, nb_pixels);
+  memcpy(buffers->raw_G, srcG, nb_pixels);
+  memcpy(buffers->raw_B, srcB, nb_pixels);
+}
+
+/**
  * @brief Get pointers to the last pure UDP frame (lock-free, read-only).
  *
  * These buffers are never written to by the sampler — they always

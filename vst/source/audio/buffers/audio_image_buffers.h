@@ -88,6 +88,16 @@ void audio_image_buffers_snapshot_raw(AudioImageBuffers *buffers);
 // immune to FramePlayerThread's buffer swaps.
 void audio_image_buffers_snapshot_raw_before_swap(AudioImageBuffers *buffers);
 
+// FIX(raw): Snapshot raw from external data (no write_mutex required).
+// Used when the AudioImageBuffers write bus was not started (e.g. during
+// FrameSampler playback) but the UDP thread still needs to update raw_R/G/B
+// so the RAW visualizer and Source=L pipeline stay live.
+void audio_image_buffers_snapshot_raw_external(AudioImageBuffers *buffers,
+                                               const uint8_t *srcR,
+                                               const uint8_t *srcG,
+                                               const uint8_t *srcB,
+                                               int nb_pixels);
+
 // Lock-free read of the last pure UDP frame (no sampler contamination).
 void audio_image_buffers_get_raw_pointers(const AudioImageBuffers *buffers,
                                           uint8_t **out_R, uint8_t **out_G,
