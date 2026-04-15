@@ -38,16 +38,15 @@ TransportBarComponent::TransportBarComponent(Sp3ctraAudioProcessor& proc)
     auto& apvts = processor.getAPVTS();
 
     // ── Play / Hold / Stop ────────────────────────────────────────────────────
-    // Each button writes samplerFreezeMode (shared with Image tab) AND drives
-    // the FrameSequencer, so both tabs always reflect the same state.
+    // These buttons drive ONLY the FrameSequencer.  They do NOT write
+    // samplerFreezeMode — that parameter is owned exclusively by the
+    // IMAGE page's S–Sampler transport (SourcesTabComponent).
+    // The sequencer overrides freeze_mode internally via seqControlledPlay.
     seqPlayBtn.setIconPath(Icons::play());
     seqPlayBtn.onClick = [this]
     {
-        processor.getAPVTS().getParameterAsValue("samplerFreezeMode").setValue(0);
         if (auto* seq = processor.getFrameSequencer())
         {
-            // If the sequencer is paused (held), resume from the current step.
-            // Otherwise (stopped or fresh start), restart from step 0.
             if (seq->isHeld())
                 seq->uiResume();
             else
@@ -60,7 +59,6 @@ TransportBarComponent::TransportBarComponent(Sp3ctraAudioProcessor& proc)
     seqHoldBtn.setIconPath(Icons::pause());
     seqHoldBtn.onClick = [this]
     {
-        processor.getAPVTS().getParameterAsValue("samplerFreezeMode").setValue(1);
         if (auto* seq = processor.getFrameSequencer()) seq->uiHold();
         updateTransportButtons();
     };
@@ -69,7 +67,6 @@ TransportBarComponent::TransportBarComponent(Sp3ctraAudioProcessor& proc)
     seqStopBtn.setIconPath(Icons::stop());
     seqStopBtn.onClick = [this]
     {
-        processor.getAPVTS().getParameterAsValue("samplerFreezeMode").setValue(2);
         if (auto* seq = processor.getFrameSequencer()) seq->uiStop();
         updateTransportButtons();
     };
@@ -214,10 +211,10 @@ void TransportBarComponent::resized()
 // ─────────────────────────────────────────────────────────────────────────────
 void TransportBarComponent::updateTransportButtons()
 {
-    // Single source of truth: samplerFreezeMode (shared with Image tab).
-    //   0 = PLAY  →  green
-    //   1 = HOLD  →  purple
-    //   2 = STOP  →  dark red
+    // Source of truth: FrameSequencer state (independent of samplerFreezeMode).
+    //   playing && !held  → Play  highlighted (green)
+    //   playing &&  held  → Hold  highlighted (purple)
+    //   !playing          → Stop  highlighted (dark red)
     static const juce::Colour kPlay  { 0xff2a6040 };
     static const juce::Colour kHold  { 0xff6040a0 };
     static const juce::Colour kStop  { 0xff5a2020 };
@@ -225,8 +222,16 @@ void TransportBarComponent::updateTransportButtons()
     static const juce::Colour kFgOn  = juce::Colours::white;
     static const juce::Colour kFgOff { 0xff888888 };
 
-    const int mode = static_cast<int>(
-        processor.getAPVTS().getRawParameterValue("samplerFreezeMode")->load());
+    bool playing = false;
+    bool held    = false;
+    if (auto* seq = processor.getFrameSequencer())
+    {
+        playing = seq->isPlaying();
+        held    = seq->isHeld();
+    }
+
+    // mode: 0=PLAY, 1=HOLD, 2=STOP (sequencer state, NOT samplerFreezeMode)
+    const int mode = playing ? (held ? 1 : 0) : 2;
 
     auto style = [](IconTextButton& btn, bool active, juce::Colour col)
     {
