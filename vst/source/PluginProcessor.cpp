@@ -246,6 +246,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"luxsynthInversion", 1}, "LuxSynth Inversion", true));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"luxsynthAcRemoval", 1}, "LuxSynth DC Blocking", true));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthGammaValue", 1}, "LuxSynth Gamma",
+        juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f, 0.30f), 1.0f));
 
     // Fade-in duration [ms] — applied when restarting the live stream after Stop.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -407,6 +410,7 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("luxsynthSource",       this);
     apvts.addParameterListener("luxsynthInversion",    this);
     apvts.addParameterListener("luxsynthAcRemoval",    this);
+    apvts.addParameterListener("luxsynthGammaValue",   this);
 
     // Image pipeline parameters (live transport + opacity + fade-in)
     apvts.addParameterListener("imageFreezeMode",      this);
@@ -1292,14 +1296,19 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
             static_cast<int>(apvts.getRawParameterValue("luxsynthInversion")->load());
         g_sp3ctra_config.luxsynth_ac_removal  =
             static_cast<int>(apvts.getRawParameterValue("luxsynthAcRemoval")->load());
+        // Image Processing - LuxSynth pipeline: gamma is always active (no enable flag).
+        // preprocess_luxsynth() skips it as a no-op when gamma_value == 1.0.
+        g_sp3ctra_config.luxsynth_gamma_value =
+            apvts.getRawParameterValue("luxsynthGammaValue")->load();
 
-        log_debug("VST", "Per-path routing: LS source=%d inv=%d ac=%d  |  LX source=%d inv=%d ac=%d",
+        log_debug("VST", "Per-path routing: LS source=%d inv=%d ac=%d  |  LX source=%d inv=%d ac=%d gamma=%.2f",
                   g_sp3ctra_config.luxstral_source_type,
                   g_sp3ctra_config.luxstral_inversion,
                   g_sp3ctra_config.luxstral_ac_removal,
                   g_sp3ctra_config.luxsynth_source_type,
                   g_sp3ctra_config.luxsynth_inversion,
-                  g_sp3ctra_config.luxsynth_ac_removal);
+                  g_sp3ctra_config.luxsynth_ac_removal,
+                  (double)g_sp3ctra_config.luxsynth_gamma_value);
     }
 
     // Update logger level immediately

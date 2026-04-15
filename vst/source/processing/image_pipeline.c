@@ -234,7 +234,9 @@ PipelineConfig pipeline_build_config_live(void)
     cfg.luxsynth_luxwave_path.source     = (ImageSourceType)g_sp3ctra_config.luxsynth_source_type;
     cfg.luxsynth_luxwave_path.inversion  = g_sp3ctra_config.luxsynth_inversion;
     cfg.luxsynth_luxwave_path.ac_removal = g_sp3ctra_config.luxsynth_ac_removal;
-    cfg.luxsynth_luxwave_path.gamma      = 0.0f; /* No gamma for FFT */
+    /* Gamma for LuxSynth FFT input (photo convention: pow(x, 1/gamma)).
+     * No enable flag — preprocess_luxsynth() skips it as a no-op when value == 1.0. */
+    cfg.luxsynth_luxwave_path.gamma      = g_sp3ctra_config.luxsynth_gamma_value;
 
     /* Mix opacities (not used for live-only, kept for API consistency) */
     cfg.sampler_opacity = g_sp3ctra_config.image_sampler_opacity;
@@ -275,7 +277,8 @@ PipelineConfig pipeline_build_config_sampler(void)
     cfg.luxsynth_luxwave_path.source     = (ImageSourceType)g_sp3ctra_config.luxsynth_source_type;
     cfg.luxsynth_luxwave_path.inversion  = g_sp3ctra_config.luxsynth_inversion;
     cfg.luxsynth_luxwave_path.ac_removal = g_sp3ctra_config.luxsynth_ac_removal;
-    cfg.luxsynth_luxwave_path.gamma      = 0.0f;
+    /* Gamma for LuxSynth FFT input — mirrors the live path (same user control, no enable flag). */
+    cfg.luxsynth_luxwave_path.gamma      = g_sp3ctra_config.luxsynth_gamma_value;
 
     /* Mix opacities */
     cfg.sampler_opacity = g_sp3ctra_config.image_sampler_opacity;

@@ -2,12 +2,14 @@
  * @file LuxSynthTabComponent.h
  * @brief Tab 3 — LUXSYNTH: pipeline visual, source selector, toggles, output nodes.
  *
- * Pipeline:  Source → [Negative] → [DC Blocking] → NO GAMMA →
+ * Pipeline:  Source → [Negative] → [DC Blocking] → Gamma →
  *            SYNTH_GRAY / SYNTH_COLOR / SYNTH_BLOB → FFT → FFT_GRAY / FFT_COLOR
+ *
+ * Gamma is always active (no enable toggle) — set to 1.0 for identity (no-op).
  *
  * UI style: follows the Synth-page charter (Label + Slider rows,
  * kFontSettings, centredRight justification). Boolean parameters are
- * rendered as sliders [0, 1] with step 1 for visual consistency.
+ * rendered as ToggleButtons for visual consistency with LUXSTRAL tab.
  */
 #pragma once
 
@@ -42,21 +44,32 @@ public:
         sourceAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
             apvts, "luxsynthSource", sourceCombo));
 
-        // ── Negative (ToggleButton — Synth-page charter) ────────────────
+        // ── Negative (ToggleButton) ───────────────────────────────────────
         initLabel(negativeLabel, "Negative");
         negativeToggle.setButtonText("Active");
         addAndMakeVisible(negativeToggle);
         negativeAttach.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(
             apvts, "luxsynthInversion", negativeToggle));
 
-        // ── DC Blocking (ToggleButton) ──────────────────────────────────
+        // ── DC Blocking (ToggleButton) ────────────────────────────────────
         initLabel(dcBlockLabel, "DC Blocking");
         dcBlockToggle.setButtonText("Active");
         addAndMakeVisible(dcBlockToggle);
         dcBlockAttach.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(
             apvts, "luxsynthAcRemoval", dcBlockToggle));
 
-        // ── All output nodes ─────────────────────────────────────────────
+        // ── Gamma Value (Slider) — always active, 1.0 = no-op ────────────
+        initLabel(gammaValueLabel, "Gamma");
+        gammaSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        gammaSlider.setTextBoxStyle(juce::Slider::TextBoxRight,
+                                    false,
+                                    50,
+                                    Sp3ctraTheme::kControlH);
+        addAndMakeVisible(gammaSlider);
+        gammaValueAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, "luxsynthGammaValue", gammaSlider));
+
+        // ── All output nodes ──────────────────────────────────────────────
         for (auto* n : { &nodeGray, &nodeColor, &nodeBlob, &nodeFftGray, &nodeFftColor })
         {
             addAndMakeVisible(n);
@@ -115,8 +128,11 @@ public:
         // Row 2: DC Blocking (toggle)
         placeToggleRow(dcBlockLabel, dcBlockToggle, 2);
 
+        // Row 3: Gamma (slider — always active)
+        placeSliderRow(gammaValueLabel, gammaSlider, 3);
+
         // Preliminary nodes — stacked vertically, full stdNodeW each
-        constexpr int nodeH  = 28;
+        constexpr int nodeH   = 28;
         constexpr int nodeGap = 6;
         const int pny = preNodeY();
         nodeGray.setBounds (x0, pny,                          nw, nodeH);
@@ -125,7 +141,7 @@ public:
 
         // FFT nodes — stacked vertically, full stdNodeW each
         const int fny = fftNodeY();
-        nodeFftGray.setBounds (x0, fny,                    nw, nodeH);
+        nodeFftGray.setBounds (x0, fny,                     nw, nodeH);
         nodeFftColor.setBounds(x0, fny + (nodeH + nodeGap), nw, nodeH);
     }
 
@@ -133,20 +149,23 @@ private:
     Sp3ctraAudioProcessor& processor;
 
     // Labels
-    juce::Label sourceLabel, negativeLabel, dcBlockLabel;
+    juce::Label sourceLabel, negativeLabel, dcBlockLabel, gammaValueLabel;
 
     // Controls
     juce::ComboBox     sourceCombo;
     juce::ToggleButton negativeToggle, dcBlockToggle;
+    juce::Slider       gammaSlider;
 
     // Attachments
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> sourceAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   negativeAttach, dcBlockAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   negativeAttach,
+                                                                             dcBlockAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   gammaValueAttach;
 
     // Pipeline output nodes
     PipelineNodeComponent nodeGray, nodeColor, nodeBlob, nodeFftGray, nodeFftColor;
 
-    // ── Helpers ───────────────────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────────
     void initLabel(juce::Label& lbl, const juce::String& text)
     {
         lbl.setText(text, juce::dontSendNotification);
@@ -163,17 +182,17 @@ private:
         return 6 + row * (Sp3ctraTheme::kControlH + 14);
     }
 
-    int preNodeY() const { return rowY(3) + 38; }
+    // 4 control rows (0-3), then 38 px gap before preliminary output nodes
+    int preNodeY() const { return rowY(4) + 38; }
     // 3 stacked nodes: 3 × 28 + 2 × 6 = 96, plus 20 for label spacing
     int fftNodeY() const { return preNodeY() + 96 + 20; }
 
     void placeComboRow(juce::Label& lbl, juce::ComboBox& combo, int row)
     {
-        const int w  = getWidth();
-        const int nw = stdNodeW();
-        const int x0 = w / 2 - nw / 2;
-        const int ch = Sp3ctraTheme::kControlH;
-        const int y  = rowY(row);
+        const int nw     = stdNodeW();
+        const int x0     = getWidth() / 2 - nw / 2;
+        const int ch     = Sp3ctraTheme::kControlH;
+        const int y      = rowY(row);
         const int labelW = 80;
         lbl.setBounds(x0, y, labelW, ch);
         combo.setBounds(x0 + labelW + Sp3ctraTheme::kGap, y,
@@ -182,14 +201,25 @@ private:
 
     void placeToggleRow(juce::Label& lbl, juce::ToggleButton& toggle, int row)
     {
-        const int w  = getWidth();
-        const int nw = stdNodeW();
-        const int x0 = w / 2 - nw / 2;
-        const int ch = Sp3ctraTheme::kControlH;
-        const int y  = rowY(row);
+        const int nw     = stdNodeW();
+        const int x0     = getWidth() / 2 - nw / 2;
+        const int ch     = Sp3ctraTheme::kControlH;
+        const int y      = rowY(row);
         const int labelW = 80;
         lbl.setBounds(x0, y, labelW, ch);
         toggle.setBounds(x0 + labelW + Sp3ctraTheme::kGap, y, 120, ch);
+    }
+
+    void placeSliderRow(juce::Label& lbl, juce::Slider& slider, int row)
+    {
+        const int nw     = stdNodeW();
+        const int x0     = getWidth() / 2 - nw / 2;
+        const int ch     = Sp3ctraTheme::kControlH;
+        const int y      = rowY(row);
+        const int labelW = 80;
+        lbl.setBounds(x0, y, labelW, ch);
+        slider.setBounds(x0 + labelW + Sp3ctraTheme::kGap, y,
+                         nw - labelW - Sp3ctraTheme::kGap, ch);
     }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxSynthTabComponent)
