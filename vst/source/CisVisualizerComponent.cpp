@@ -9,6 +9,7 @@ extern "C" {
     #include "config/config_instrument.h"
     #include "config/config_loader.h"
     #include "processing/image_pipeline_types.h"
+    #include "synthesis/luxsynth/kissfft/kiss_fftr.h"
 }
 
 // Forward-declare C hooks defined in FrameSampler.cpp.
@@ -25,6 +26,12 @@ CisVisualizerComponent::CisVisualizerComponent(Sp3ctraAudioProcessor& proc)
 CisVisualizerComponent::~CisVisualizerComponent()
 {
     stopTimer();
+    // Release the cached KissFFT config (allocated on heap by kiss_fftr_alloc)
+    if (fftCfg_)
+    {
+        kiss_fft_free(reinterpret_cast<kiss_fftr_cfg>(fftCfg_));
+        fftCfg_ = nullptr;
+    }
 }
 
 //==============================================================================
@@ -70,6 +77,23 @@ void CisVisualizerComponent::paint(juce::Graphics& g)
 
     // ── Active pipeline source (selected via pipeline node click) ─────────────
     const auto source = getActiveSource();
+
+    // ── SYNTH_BLOB: dedicated coloured blob visualizer ────────────────────────
+    // Intercept before the generic rendering path; has its own full renderer.
+    if (source == VisualizerMode::SYNTH_BLOB)
+    {
+        paintSynthBlobMode(g, W, H);
+        paintSourceLabel(g, W, H);
+        return;
+    }
+
+    // ── FFT mode: dedicated spectrum renderer ────────────────────────────────
+    if (source == VisualizerMode::SYNTH_FFT_COLOR)
+    {
+        paintFftColorMode(g, W, H);
+        paintSourceLabel(g, W, H);
+        return;
+    }
 
     // ── COLOR sources always use the colour-temperature renderer ──────────────
     if (isColorSource(source))
@@ -267,8 +291,6 @@ void CisVisualizerComponent::paintSourceLabel(
             accent = juce::Colour(0xffe0c864); break;
         case VisualizerMode::SYNTH_BLOB:
             accent = juce::Colour(0xffd07040); break;
-        case VisualizerMode::SYNTH_FFT_GRAY:
-            accent = juce::Colour(0xffe06868); break;
         case VisualizerMode::SYNTH_FFT_COLOR:
             accent = juce::Colour(0xffcc88cc); break;
         default:
@@ -795,9 +817,10 @@ void CisVisualizerComponent::paintColorTemperatureMode(
 //==============================================================================
 bool CisVisualizerComponent::isColorSource(VisualizerMode m) const noexcept
 {
+    // Note: SYNTH_FFT_COLOR is intercepted before this call in paint() and
+    // handled by its own dedicated renderer — do NOT include it here.
     return m == VisualizerMode::SPCTR_COLOR
-        || m == VisualizerMode::SYNTH_COLOR
-        || m == VisualizerMode::SYNTH_FFT_COLOR;
+        || m == VisualizerMode::SYNTH_COLOR;
 }
 
 //==============================================================================
@@ -805,7 +828,8 @@ bool CisVisualizerComponent::supportsDisplayModes(VisualizerMode m) const noexce
 {
     // Display mode switching (Image / Waveform / Inverted) is only relevant
     // for RAW data, Live, Sampler, Mix, and grayscale pipeline views.
-    // COLOR and BLOB have their own dedicated renderers.
+    // COLOR, BLOB, and FFT modes have their own dedicated renderers and are
+    // intercepted in paint() before this function is ever consulted.
     switch (m)
     {
         case VisualizerMode::RAW:
@@ -814,7 +838,6 @@ bool CisVisualizerComponent::supportsDisplayModes(VisualizerMode m) const noexce
         case VisualizerMode::MIX:
         case VisualizerMode::SPCTR_GRAY:
         case VisualizerMode::SYNTH_GRAY:
-        case VisualizerMode::SYNTH_FFT_GRAY:
             return true;
         default:
             return false;
@@ -890,4 +913,768 @@ uint8_t CisVisualizerComponent::interpolateCisPixel(
         return static_cast<uint8_t>(buffer[idx] * (1.f - frac) + buffer[idx+1] * frac);
 
     return buffer[idx];
+}
+
+//==============================================================================
+// SYNTH_BLOB — blob detection (color + continuity, max 88 blobs)
+//==============================================================================
+void CisVisualizerComponent::detectSynthBlobs()
+{
+    synthBlobs_.clear();
+
+    if (localDataGray.empty() || cisPixelsCount == 0
+        || localDataR.empty() || localDataB.empty())
+        return;
+
+    extern sp3ctra_config_t g_sp3ctra_config;
+    // Use LuxSynth-dedicated blob params — fully isolated from StrokeForge/LuxStral.
+    // Configured via lxBlob* APVTS params in the LUXSYNTH tab → BLOB DETECTION section.
+    const float threshold     = g_sp3ctra_config.luxsynth_blob_threshold;
+    const int   minWidth      = juce::jmax(1, g_sp3ctra_config.luxsynth_blob_min_width);
+    const int   mergeGap      = juce::jmax(0, g_sp3ctra_config.luxsynth_blob_merge_gap);
+    // Color Split parameter [0..1]:
+    //   0% → no color-based split (color completely ignored, pure gap merge)
+    //   100% → maximum split (any color divergence breaks a blob, including
+    //           within continuous active regions — independent of Merge Gap)
+    // Internally converted to a merge threshold:
+    //   colorMergeThr = 1 - colorSplitParam
+    //   dist > colorMergeThr → split
+    const float colorSplitParam = juce::jlimit(0.0f, 1.0f,
+                                      g_sp3ctra_config.luxsynth_blob_color_split);
+    const float colorMergeThr   = 1.0f - colorSplitParam;
+
+    // ── Pre-compute locally smoothed normalised RGB per CIS pixel ─────────────
+    // Box average ±kSmoothRadius represents the "local color identity" of each
+    // pixel, independent of single-photosite noise. Used to decide whether two
+    // active regions separated by an inactive gap should be merged (same color
+    // neighbourhood) or kept separate (different color neighbourhood).
+    constexpr int kSmoothRadius = 8;
+
+    thread_local std::vector<float> smR, smG, smB;
+    smR.resize(static_cast<size_t>(cisPixelsCount));
+    smG.resize(static_cast<size_t>(cisPixelsCount));
+    smB.resize(static_cast<size_t>(cisPixelsCount));
+
+    for (int i = 0; i < cisPixelsCount; ++i)
+    {
+        const int   lo = std::max(0, i - kSmoothRadius);
+        const int   hi = std::min(cisPixelsCount - 1, i + kSmoothRadius);
+        const float n  = static_cast<float>(hi - lo + 1);
+        float sr = 0.f, sg = 0.f, sb = 0.f;
+        for (int k = lo; k <= hi; ++k)
+        {
+            sr += static_cast<float>(localDataR[k]);
+            sg += static_cast<float>(localDataG[k]);
+            sb += static_cast<float>(localDataB[k]);
+        }
+        smR[static_cast<size_t>(i)] = sr / (n * 255.f);
+        smG[static_cast<size_t>(i)] = sg / (n * 255.f);
+        smB[static_cast<size_t>(i)] = sb / (n * 255.f);
+    }
+
+    // ── 1-D scan — gap-based merge with colorimetric proximity check ──────────
+    //
+    // Logic:
+    //  - Active pixel (act ≥ threshold): extend or start blob
+    //  - Inactive pixel: count gap; if gap > mergeGap → close blob
+    //  - On gap resume (active after inactive, gap ≤ mergeGap):
+    //      compute Euclidean RGB distance between new pixel's local color and
+    //      running blob's accumulated mean local color.
+    //      dist ≤ colorMergeThr → merge (continue blob)
+    //      dist >  colorMergeThr → don't merge (close and start new blob)
+    //
+    bool  inBlob    = false;
+    int   blobStart = 0;
+    int   gapCount  = 0;
+    float blobPeak  = 0.f;
+    float blobSum   = 0.f;
+    int   blobLen   = 0;
+    float blobRSum  = 0.f, blobGSum = 0.f, blobBSum = 0.f;
+
+    auto startNewBlob = [&](int px)
+    {
+        blobStart = px;
+        inBlob    = true;
+        blobPeak  = localDataGray[px] / 255.f;
+        blobSum   = blobPeak;
+        blobLen   = 1;
+        blobRSum  = smR[static_cast<size_t>(px)];
+        blobGSum  = smG[static_cast<size_t>(px)];
+        blobBSum  = smB[static_cast<size_t>(px)];
+        gapCount  = 0;
+    };
+
+    auto finishBlob = [&](int endPx)
+    {
+        const int width = endPx - blobStart;
+        if (width >= minWidth && blobLen > 0
+            && static_cast<int>(synthBlobs_.size()) < kMaxSynthBlobs)
+        {
+            SynthBlob b;
+            b.startPx       = blobStart;
+            b.endPx         = endPx;
+            b.peakIntensity = blobPeak;
+            b.avgIntensity  = blobSum / static_cast<float>(blobLen);
+            const float mr  = juce::jlimit(0.f, 1.f, blobRSum / static_cast<float>(blobLen));
+            const float mg  = juce::jlimit(0.f, 1.f, blobGSum / static_cast<float>(blobLen));
+            const float mb  = juce::jlimit(0.f, 1.f, blobBSum / static_cast<float>(blobLen));
+            b.avgColorTemp  = mr - mb; // warm/cool approximation for tooltip
+            b.avgLocalColor = juce::Colour(static_cast<uint8_t>(mr * 255.f),
+                                           static_cast<uint8_t>(mg * 255.f),
+                                           static_cast<uint8_t>(mb * 255.f));
+            b.color         = juce::Colours::white; // hue assigned after scan
+            synthBlobs_.push_back(b);
+        }
+        inBlob   = false;
+        gapCount = 0;
+        blobPeak = blobSum = 0.f;
+        blobLen  = 0;
+        blobRSum = blobGSum = blobBSum = 0.f;
+    };
+
+    for (int i = 0; i < cisPixelsCount; ++i)
+    {
+        const float act    = localDataGray[i] / 255.f;
+        const bool  active = (act >= threshold);
+
+        if (active)
+        {
+            if (!inBlob)
+            {
+                startNewBlob(i);
+            }
+            else if (gapCount > 0)
+            {
+                // ── Gap resume: color proximity check ────────────────────────
+                // gapCount ≤ mergeGap (otherwise blob was already closed).
+                // Decide whether to merge based on colorimetric distance.
+                const float meanR = blobRSum / static_cast<float>(blobLen);
+                const float meanG = blobGSum / static_cast<float>(blobLen);
+                const float meanB = blobBSum / static_cast<float>(blobLen);
+                const float dr    = smR[static_cast<size_t>(i)] - meanR;
+                const float dg    = smG[static_cast<size_t>(i)] - meanG;
+                const float db    = smB[static_cast<size_t>(i)] - meanB;
+                // Euclidean distance in normalised RGB, range [0..sqrt(3)] → /sqrt(3) → [0..1]
+                const float dist  = std::sqrt(dr*dr + dg*dg + db*db) * 0.5774f;
+
+                if (dist > colorMergeThr
+                    && static_cast<int>(synthBlobs_.size()) < kMaxSynthBlobs - 1)
+                {
+                    // Colors too different → close running blob, start a new one
+                    finishBlob(i - gapCount);
+                    startNewBlob(i);
+                }
+                else
+                {
+                    // Colors close → merge: continue extending the blob
+                    if (act > blobPeak) blobPeak = act;
+                    blobSum  += act;
+                    blobLen++;
+                    blobRSum += smR[static_cast<size_t>(i)];
+                    blobGSum += smG[static_cast<size_t>(i)];
+                    blobBSum += smB[static_cast<size_t>(i)];
+                    gapCount  = 0;
+                }
+            }
+            else
+            {
+                // ── Within continuous active region: color split check ────────
+                // Fires even with no gap — independent of Merge Gap.
+                // Only active when colorSplitParam > 0 (i.e. user wants splitting).
+                // At 0% the threshold = 1.0 so dist never exceeds it → no split.
+                if (colorSplitParam > 0.001f && blobLen > 0)
+                {
+                    const float meanR = blobRSum / static_cast<float>(blobLen);
+                    const float meanG = blobGSum / static_cast<float>(blobLen);
+                    const float meanB = blobBSum / static_cast<float>(blobLen);
+                    const float dr    = smR[static_cast<size_t>(i)] - meanR;
+                    const float dg    = smG[static_cast<size_t>(i)] - meanG;
+                    const float db    = smB[static_cast<size_t>(i)] - meanB;
+                    const float dist  = std::sqrt(dr*dr + dg*dg + db*db) * 0.5774f;
+
+                    if (dist > colorMergeThr
+                        && static_cast<int>(synthBlobs_.size()) < kMaxSynthBlobs - 1)
+                    {
+                        // Color divergence → close current blob, start new one at i.
+                        // startNewBlob already initialises blobLen=1 with pixel i.
+                        finishBlob(i);
+                        startNewBlob(i);
+                        continue; // pixel i already consumed by startNewBlob
+                    }
+                }
+                // Extend current blob
+                if (act > blobPeak) blobPeak = act;
+                blobSum  += act;
+                blobLen++;
+                blobRSum += smR[static_cast<size_t>(i)];
+                blobGSum += smG[static_cast<size_t>(i)];
+                blobBSum += smB[static_cast<size_t>(i)];
+            }
+        }
+        else // inactive pixel
+        {
+            if (inBlob)
+            {
+                ++gapCount;
+                if (gapCount > mergeGap)
+                    finishBlob(i - gapCount);
+            }
+        }
+    }
+
+    if (inBlob)
+        finishBlob(cisPixelsCount - gapCount);
+
+    // ── Assign unique hues — evenly spaced on HSV wheel ───────────────────────
+    const int nb = static_cast<int>(synthBlobs_.size());
+    for (int b = 0; b < nb; ++b)
+    {
+        const float hue = (nb > 1) ? static_cast<float>(b) / static_cast<float>(nb)
+                                   : 0.0f;
+        synthBlobs_[b].color = juce::Colour::fromHSV(hue, 0.85f, 0.90f, 1.0f);
+    }
+}
+
+//==============================================================================
+// SYNTH_BLOB — full coloured visualizer
+//==============================================================================
+void CisVisualizerComponent::paintSynthBlobMode(juce::Graphics& g, int W, int H)
+{
+    // ── Background ────────────────────────────────────────────────────────────
+    g.fillAll(juce::Colour(0xff080808));
+
+    if (cisPixelsCount == 0 || localDataGray.empty())
+        return;
+
+    // ── Run blob detection (30 fps, O(N) 1-D scan — fast) ────────────────────
+    detectSynthBlobs();
+
+    // ── Build pixel-to-blob-index lookup (thread-local to avoid alloc) ────────
+    thread_local std::vector<int> pixelBlobIdx;
+    pixelBlobIdx.assign(cisPixelsCount, -1);
+    for (int b = 0; b < static_cast<int>(synthBlobs_.size()); ++b)
+    {
+        const auto& blob = synthBlobs_[b];
+        for (int i = blob.startPx; i < blob.endPx && i < cisPixelsCount; ++i)
+            pixelBlobIdx[i] = b;
+    }
+
+    // ── Render column by column ───────────────────────────────────────────────
+    // For each display column we find the corresponding CIS pixel and decide
+    // whether it belongs to a blob or is background.
+    //
+    // Blob columns: bottom-anchored waveform bar (height ∝ activity), coloured.
+    // Background  : very dim grayscale texture (shows the raw signal level).
+    for (int x = 0; x < W; ++x)
+    {
+        const float pos = static_cast<float>(x) / static_cast<float>(juce::jmax(1, W - 1));
+        const int   ci  = juce::jlimit(0, cisPixelsCount - 1,
+                              static_cast<int>(pos * static_cast<float>(cisPixelsCount - 1) + 0.5f));
+
+        const float act  = localDataGray[ci] / 255.0f;
+        const int   bIdx = pixelBlobIdx[ci];
+
+        if (bIdx < 0)
+        {
+            // Background — very dim grayscale texture
+            const uint8_t v = static_cast<uint8_t>(act * 22.0f);
+            g.setColour(juce::Colour(v, v, v));
+            g.fillRect(x, 0, 1, H);
+        }
+        else
+        {
+            const auto& blob = synthBlobs_[bIdx];
+
+            // Bottom-anchored waveform bar
+            const int barH = juce::jmax(1, static_cast<int>(act * static_cast<float>(H)));
+
+            // Upper (inactive) region — dim blob colour
+            g.setColour(blob.color.withAlpha(0.10f));
+            g.fillRect(x, 0, 1, H - barH);
+
+            // Lower (active) waveform — bright blob colour
+            const float alpha = 0.40f + 0.60f * act;
+            g.setColour(blob.color.withAlpha(alpha));
+            g.fillRect(x, H - barH, 1, barH);
+        }
+    }
+
+    // ── Draw blob outlines, peak markers, and labels ──────────────────────────
+    const float cisScale = static_cast<float>(W - 1)
+                         / static_cast<float>(juce::jmax(1, cisPixelsCount - 1));
+
+    for (int b = 0; b < static_cast<int>(synthBlobs_.size()); ++b)
+    {
+        const auto& blob = synthBlobs_[b];
+        const int x0 = static_cast<int>(static_cast<float>(blob.startPx)  * cisScale);
+        const int x1 = static_cast<int>(static_cast<float>(blob.endPx - 1) * cisScale);
+        const int bw = juce::jmax(1, x1 - x0 + 1);
+
+        // Blob bounding-box outline
+        g.setColour(blob.color.withAlpha(0.85f));
+        g.drawRect(x0, 0, bw, H, 1);
+
+        // Peak-intensity horizontal line (bottom-anchored)
+        {
+            const int peakH  = juce::jmax(2, static_cast<int>(blob.peakIntensity * static_cast<float>(H)));
+            const int lineY  = H - peakH;
+            g.setColour(blob.color.brighter(0.4f));
+            g.fillRect(x0, lineY, bw, 2);
+        }
+
+        // ── Width indicator bar (bottom of component, 3 px) ──────────────────
+        // Fills the full width of the blob at the very bottom — quick visual
+        // for comparing relative blob widths.
+        g.setColour(blob.color.withAlpha(0.60f));
+        g.fillRect(x0, H - 3, bw, 3);
+    }
+
+    // ── Summary badge: "N/88 blobs" + color key ───────────────────────────────
+    {
+        const int nb = static_cast<int>(synthBlobs_.size());
+        const juce::String badge =
+            juce::String(nb) + "/" + juce::String(kMaxSynthBlobs) + " blobs";
+
+        constexpr float bw = 100.f, bh = 16.f;
+        const float bx = static_cast<float>(W) - bw - 4.f;
+        constexpr float by = 4.f;
+
+        g.setColour(juce::Colour(0xb0000000));
+        g.fillRoundedRectangle(bx, by, bw, bh, 3.f);
+        g.setColour(juce::Colour(0xffd07040)); // SYNTH_BLOB accent
+        g.drawRoundedRectangle(bx, by, bw, bh, 3.f, 1.f);
+
+        g.setColour(juce::Colours::white.withAlpha(0.90f));
+        g.setFont(juce::FontOptions(9.f));
+        g.drawText(badge,
+                   static_cast<int>(bx), static_cast<int>(by),
+                   static_cast<int>(bw), static_cast<int>(bh),
+                   juce::Justification::centred, false);
+    }
+
+    // ── Hover tooltip — drawn last so it always appears on top ────────────────
+    // Shown when the mouse is over a blob in SYNTH_BLOB mode.
+    // hoverBlobIdx_ is kept up-to-date by mouseMove() / mouseExit().
+    if (hoverBlobIdx_ >= 0 && hoverBlobIdx_ < static_cast<int>(synthBlobs_.size()))
+    {
+        const auto& blob = synthBlobs_[hoverBlobIdx_];
+
+        // ── Build info lines ────────────────────────────────────────────────
+        const juce::String line1 =
+            "Blob #" + juce::String(hoverBlobIdx_ + 1);
+        const juce::String line2 =
+            "Width:  " + juce::String(blob.endPx - blob.startPx) + " px";
+        const juce::String line3 =
+            "Peak:   " + juce::String(static_cast<int>(blob.peakIntensity * 100.f)) + "%"
+            + "  avg: " + juce::String(static_cast<int>(blob.avgIntensity * 100.f)) + "%";
+        const juce::String tempStr =
+            (blob.avgColorTemp >  0.08f) ? "Warm" :
+            (blob.avgColorTemp < -0.08f) ? "Cool" : "Neutral";
+        const juce::String line4 = "Temp:   " + tempStr;
+
+        // ── Tooltip box geometry ─────────────────────────────────────────────
+        constexpr float kTW = 148.f, kTH = 70.f, kTR = 4.f;
+        float tx = static_cast<float>(hoverPos_.x) + 14.f;
+        float ty = static_cast<float>(hoverPos_.y) - kTH * 0.5f;
+
+        // Clamp inside component bounds
+        if (tx + kTW > static_cast<float>(W)) tx = static_cast<float>(hoverPos_.x) - kTW - 10.f;
+        if (ty < 2.f)                          ty = 2.f;
+        if (ty + kTH > static_cast<float>(H)) ty = static_cast<float>(H) - kTH - 2.f;
+
+        // Background + border
+        g.setColour(juce::Colour(0xee0d0d0d));
+        g.fillRoundedRectangle(tx, ty, kTW, kTH, kTR);
+        g.setColour(blob.color.withAlpha(0.90f));
+        g.drawRoundedRectangle(tx, ty, kTW, kTH, kTR, 1.2f);
+
+        // ── Text ─────────────────────────────────────────────────────────────
+        const auto ti = [&](int lineIdx) {
+            return static_cast<int>(ty + 4.f + static_cast<float>(lineIdx) * 16.f);
+        };
+        const int lw = static_cast<int>(kTW) - 8;
+        const int lx = static_cast<int>(tx) + 4;
+
+        g.setFont(juce::FontOptions(9.5f));
+        g.setColour(blob.color.brighter(0.25f));
+        g.drawText(line1, lx, ti(0), lw, 14, juce::Justification::centredLeft, false);
+        g.setColour(juce::Colours::white.withAlpha(0.85f));
+        g.setFont(juce::FontOptions(8.5f));
+        g.drawText(line2, lx, ti(1), lw, 13, juce::Justification::centredLeft, false);
+        g.drawText(line3, lx, ti(2), lw, 13, juce::Justification::centredLeft, false);
+        g.drawText(line4, lx, ti(3), lw, 13, juce::Justification::centredLeft, false);
+    }
+}
+
+//==============================================================================
+void CisVisualizerComponent::mouseMove(const juce::MouseEvent& event)
+{
+    if (getActiveSource() != VisualizerMode::SYNTH_BLOB)
+    {
+        hoverBlobIdx_ = -1;
+        return;
+    }
+
+    hoverPos_ = event.getPosition();
+
+    const int W = getWidth();
+    if (W <= 1 || cisPixelsCount <= 0 || synthBlobs_.empty())
+    {
+        hoverBlobIdx_ = -1;
+        return;
+    }
+
+    // ── Magnetic snap ─────────────────────────────────────────────────────────
+    // Convert cursor X → fractional CIS pixel position
+    const float cisPerDisplayPx = static_cast<float>(cisPixelsCount - 1)
+                                 / static_cast<float>(W - 1);
+    const float cursorCi = static_cast<float>(hoverPos_.x) * cisPerDisplayPx;
+
+    // Snap radius: 20 display pixels expressed in CIS pixels.
+    // This makes thin blobs (even 1-px wide) easy to hover — no need to be
+    // pixel-perfect; the nearest blob within the radius wins.
+    constexpr float kSnapDisplayPx = 20.f;
+    const float snapRadiusCi = kSnapDisplayPx * cisPerDisplayPx;
+
+    int   bestIdx  = -1;
+    float bestDist = snapRadiusCi; // must beat this to become candidate
+
+    for (int b = 0; b < static_cast<int>(synthBlobs_.size()); ++b)
+    {
+        const auto& blob = synthBlobs_[b];
+
+        // Distance from cursor to nearest blob edge (0 if cursor is inside blob)
+        float distCi = 0.f;
+        if (cursorCi < static_cast<float>(blob.startPx))
+            distCi = static_cast<float>(blob.startPx) - cursorCi;
+        else if (cursorCi >= static_cast<float>(blob.endPx))
+            distCi = cursorCi - static_cast<float>(blob.endPx - 1);
+
+        if (distCi <= bestDist)
+        {
+            bestDist = distCi;
+            bestIdx  = b;
+        }
+    }
+
+    hoverBlobIdx_ = bestIdx;
+}
+
+//==============================================================================
+void CisVisualizerComponent::mouseExit(const juce::MouseEvent&)
+{
+    hoverBlobIdx_ = -1;
+}
+
+//==============================================================================
+// FFT — computeFftMagnitudes
+// Computes a Hann-windowed real FFT on localDataGray using KissFFT.
+// Results are stored in fftMagnitudesSmoothed_ with exponential smoothing.
+// The KissFFT config is cached in fftCfg_ and reallocated only when
+// cisPixelsCount changes.  All work is O(N log N) on the UI thread at 30 fps.
+//==============================================================================
+void CisVisualizerComponent::computeFftMagnitudes()
+{
+    if (localDataGray.empty() || cisPixelsCount == 0)
+    {
+        fftMagnitudes_.clear();
+        fftMagnitudesSmoothed_.clear();
+        fftHarmonicity_.clear();
+        fftNumHarmonics_ = 0;
+        return;
+    }
+
+    // ── Read quality / smoothing parameters from APVTS ────────────────────────
+    // lxFftBins choice: 0=32, 1=64, 2=128, 3=256 harmonics.
+    // This is the number of oscillators that will be fed to the LuxSynth engine.
+    static const int kBinsChoices[] = { 32, 64, 128, 256 };
+    const int binsChoice = juce::jlimit(0, 3, static_cast<int>(
+        processor.getAPVTS().getRawParameterValue("lxFftBins")->load()));
+    const int nHarmonics = kBinsChoices[binsChoice];
+
+    // lxFftSmoothing [0..1]:
+    //   0 = very fast / reactive : alpha_attack≈0.80, alpha_release≈0.50
+    //   1 = very slow / smooth   : alpha_attack≈0.05, alpha_release≈0.02
+    const float sm = juce::jlimit(0.0f, 1.0f,
+        processor.getAPVTS().getRawParameterValue("lxFftSmoothing")->load());
+    const float alphaAttack  = 0.80f - sm * 0.75f;  // [0.05 .. 0.80]
+    const float alphaRelease = 0.50f - sm * 0.48f;  // [0.02 .. 0.50]
+
+    const int N     = cisPixelsCount;
+    const int nBins = N / 2 + 1;
+    // Cap harmonics to what the FFT can actually provide
+    const int nDisplay = juce::jmin(nHarmonics, nBins - 1);
+    fftNumHarmonics_ = nDisplay;
+
+    // ── Reallocate KissFFT config when the signal size changes ────────────────
+    if (fftSize_ != N)
+    {
+        if (fftCfg_)
+        {
+            kiss_fft_free(reinterpret_cast<kiss_fftr_cfg>(fftCfg_));
+            fftCfg_ = nullptr;
+        }
+        fftCfg_  = static_cast<void*>(kiss_fftr_alloc(N, 0, nullptr, nullptr));
+        fftSize_ = N;
+        fftMagnitudes_.assign(static_cast<size_t>(nBins), 0.0f);
+        fftMagnitudesSmoothed_.assign(static_cast<size_t>(nBins), 0.0f);
+        fftHarmonicity_.assign(static_cast<size_t>(nBins), 0.5f);
+    }
+    // Grow buffers if bins choice changes
+    if (fftHarmonicity_.size() < static_cast<size_t>(nBins))
+        fftHarmonicity_.assign(static_cast<size_t>(nBins), 0.5f);
+
+    auto* cfg = reinterpret_cast<kiss_fftr_cfg>(fftCfg_);
+    if (!cfg) return;
+
+    thread_local std::vector<kiss_fft_scalar> inBuf;
+    thread_local std::vector<kiss_fft_cpx>    outBuf;
+    inBuf.resize(static_cast<size_t>(N));
+    outBuf.resize(static_cast<size_t>(nBins));
+
+    // ── Hann window ───────────────────────────────────────────────────────────
+    const float kTwoPiOverN =
+        2.0f * static_cast<float>(M_PI) / static_cast<float>(juce::jmax(1, N - 1));
+    for (int i = 0; i < N; ++i)
+    {
+        const float hann = 0.5f * (1.0f - std::cos(kTwoPiOverN * static_cast<float>(i)));
+        inBuf[static_cast<size_t>(i)] =
+            (static_cast<float>(localDataGray[static_cast<size_t>(i)]) / 255.0f) * hann;
+    }
+
+    kiss_fftr(cfg, inBuf.data(), outBuf.data());
+
+    // ── Magnitudes — suppress DC ──────────────────────────────────────────────
+    fftMagnitudes_[0] = 0.0f;
+    float maxMag = 1e-12f;
+    for (int k = 1; k <= nDisplay; ++k)
+    {
+        const float re  = outBuf[static_cast<size_t>(k)].r;
+        const float im  = outBuf[static_cast<size_t>(k)].i;
+        const float mag = std::sqrt(re * re + im * im);
+        fftMagnitudes_[static_cast<size_t>(k)] = mag;
+        if (mag > maxMag) maxMag = mag;
+    }
+
+    // ── Peak-normalise (first nDisplay bins only) ─────────────────────────────
+    const float invMax = 1.0f / maxMag;
+    for (int k = 1; k <= nDisplay; ++k)
+        fftMagnitudes_[static_cast<size_t>(k)] *= invMax;
+
+    // ── Temporal smoothing (parametric attack / release) ──────────────────────
+    for (int k = 0; k <= nDisplay; ++k)
+    {
+        const float cur  = fftMagnitudes_[static_cast<size_t>(k)];
+        const float prev = fftMagnitudesSmoothed_[static_cast<size_t>(k)];
+        const float a    = (cur >= prev) ? alphaAttack : alphaRelease;
+        fftMagnitudesSmoothed_[static_cast<size_t>(k)] =
+            a * cur + (1.0f - a) * prev;
+    }
+
+    // ── Per-bin harmonicity from CIS colour temperature ───────────────────────
+    // The LuxSynth engine uses harmonicity[k] to decide whether oscillator k
+    // behaves as a harmonic (warm: R>B) or inharmonic (cool: B>R) partial.
+    //
+    // Mapping: divide the CIS scan into nDisplay equal sections.
+    // Bin k ↔ section k of the scan (k spatial cycles across the full line).
+    // Average (R-B)/255 in that section → temperature → harmonicity [0..1].
+    // Light temporal smoothing (τ ≈ 10 frames at 30 fps) avoids flicker.
+    if (!localDataR.empty() && !localDataB.empty())
+    {
+        // ── Subtract global CIS sensor R-B bias ───────────────────────────────
+        // The CIS sensor has a fixed warm bias (R > B globally on white surfaces).
+        // Subtracting the per-frame global mean centres harmonicity around 0.5 so
+        // that only *local* colour variations drive the per-bin values.
+        float globalR = 0.0f, globalB = 0.0f;
+        for (int i = 0; i < cisPixelsCount; ++i)
+        {
+            globalR += static_cast<float>(localDataR[static_cast<size_t>(i)]);
+            globalB += static_cast<float>(localDataB[static_cast<size_t>(i)]);
+        }
+        const float globalBias = (globalR - globalB)
+                                 / (static_cast<float>(cisPixelsCount) * 255.0f);
+
+        // Amplification: the per-bin R-B delta is typically small after bias removal;
+        // multiply by kHarmGain so that even moderate colour variations push the
+        // harmonicity toward 0 or 1 rather than hovering near 0.5.
+        constexpr float kHarmGain = 4.0f;
+
+        const int regionW = juce::jmax(1, cisPixelsCount / juce::jmax(1, nDisplay));
+        for (int k = 1; k <= nDisplay; ++k)
+        {
+            const int posStart = juce::jlimit(0, cisPixelsCount - 1, (k - 1) * regionW);
+            const int posEnd   = juce::jlimit(posStart + 1, cisPixelsCount, k * regionW);
+            float sumR = 0.0f, sumB = 0.0f;
+            for (int i = posStart; i < posEnd; ++i)
+            {
+                sumR += static_cast<float>(localDataR[static_cast<size_t>(i)]);
+                sumB += static_cast<float>(localDataB[static_cast<size_t>(i)]);
+            }
+            const float n        = static_cast<float>(posEnd - posStart);
+            // Bias-corrected, amplified temperature [-1..1]
+            const float tempRaw  = (sumR - sumB) / (n * 255.0f) - globalBias;
+            const float tempAmp  = juce::jlimit(-1.0f, 1.0f, tempRaw * kHarmGain);
+            const float newH     = (tempAmp + 1.0f) * 0.5f;  // [0..1]
+            // Faster smoothing (τ ≈ 3 frames) so the cursor reacts quickly
+            fftHarmonicity_[static_cast<size_t>(k)] =
+                0.40f * newH + 0.60f * fftHarmonicity_[static_cast<size_t>(k)];
+        }
+    }
+}
+
+//==============================================================================
+// FFT COLOR — per-bin harmonicity visualizer (LuxSynth synthesis data)
+//
+// Each bar represents one LuxSynth oscillator (harmonic partial).
+// Height  = FFT magnitude (oscillator amplitude in synthesis engine).
+// Hue     = harmonicity derived from CIS colour temperature:
+//             warm (R>B) → orange/red   → harmonic partial behavior
+//             cool (R<B) → cyan/blue    → inharmonic partial behavior
+//
+// This gives musicians a direct visual representation of the timbral data
+// that will be fed to the LuxSynth additive synthesis engine.
+//==============================================================================
+void CisVisualizerComponent::paintFftColorMode(juce::Graphics& g, int W, int H)
+{
+    g.fillAll(juce::Colour(0xff080808));
+    if (cisPixelsCount == 0 || localDataGray.empty()) return;
+
+    computeFftMagnitudes();
+
+    const int nBins = static_cast<int>(fftMagnitudesSmoothed_.size());
+    if (nBins < 2 || fftNumHarmonics_ < 1) return;
+
+    const int displayBins = fftNumHarmonics_;
+
+    // Ensure harmonicity buffer is large enough
+    if (fftHarmonicity_.size() < static_cast<size_t>(nBins))
+        fftHarmonicity_.resize(static_cast<size_t>(nBins), 0.5f);
+
+    auto logScale = [](float x) -> float {
+        return std::log10(1.0f + 9.0f * juce::jlimit(0.0f, 1.0f, x));
+    };
+
+    for (int x = 0; x < W; ++x)
+    {
+        const float t = static_cast<float>(x) / static_cast<float>(juce::jmax(1, W - 1));
+        const int bin    = 1 + static_cast<int>(t * static_cast<float>(displayBins - 1));
+        const int binIdx = juce::jlimit(1, nBins - 1, bin);
+
+        const float mag    = fftMagnitudesSmoothed_[static_cast<size_t>(binIdx)];
+        const float logMag = logScale(mag);
+        const int   barH   = juce::jmax(1, static_cast<int>(logMag * static_cast<float>(H)));
+
+        // Hue from harmonicity:
+        //   1.0 (warm/harmonic)  → hue ≈ 0.05 (orange-red)
+        //   0.5 (neutral)        → hue ≈ 0.35 (green-yellow)
+        //   0.0 (cool/inharmonic)→ hue ≈ 0.60 (cyan-blue)
+        const float harm = fftHarmonicity_[static_cast<size_t>(binIdx)];
+        const float hue  = 0.60f - harm * 0.55f;  // [0.60..0.05] as harm→1
+        const float val  = 0.15f + 0.85f * logMag;
+
+        g.setColour(juce::Colour::fromHSV(hue, 0.75f, 0.04f + 0.04f * logMag, 1.0f));
+        g.fillRect(x, 0, 1, H - barH);
+
+        g.setColour(juce::Colour::fromHSV(hue, 0.90f, val, 1.0f));
+        g.fillRect(x, H - barH, 1, barH);
+
+        if (barH > 2)
+        {
+            g.setColour(juce::Colour::fromHSV(hue, 0.35f, 1.0f, 0.65f));
+            g.fillRect(x, H - barH, 1, 2);
+        }
+    }
+
+    // Reference grid
+    g.setColour(juce::Colour(0x16ffffff));
+    for (float ref : {0.1f, 0.3f, 0.7f, 0.9f})
+    {
+        const int refY = H - static_cast<int>(logScale(ref) * static_cast<float>(H));
+        g.fillRect(0, refY, W, 1);
+    }
+
+    // ── Harmonicity legend strip (4 px at top) ────────────────────────────────
+    // Shows the mapping: harmonic (left/orange) → inharmonic (right/blue)
+    for (int x2 = 0; x2 < W; ++x2)
+    {
+        const float t2  = static_cast<float>(x2) / static_cast<float>(juce::jmax(1, W - 1));
+        const float h2  = 0.05f + t2 * 0.55f;  // orange→blue from left to right
+        g.setColour(juce::Colour::fromHSV(h2, 0.90f, 0.75f, 0.60f));
+        g.fillRect(x2, 0, 1, 4);
+    }
+
+    g.setColour(juce::Colour(0x70ffffff));
+    g.setFont(juce::FontOptions(9.0f));
+    g.drawText("Harm.",
+               juce::Rectangle<int>(4, 5, 36, 12),
+               juce::Justification::centredLeft, false);
+    g.drawText("Inharm.",
+               juce::Rectangle<int>(W - 44, 5, 40, 12),
+               juce::Justification::centredRight, false);
+
+    // ── Live harmonicity cursor ────────────────────────────────────────────────
+    // A white downward triangle moves along the legend strip in real-time (30 fps),
+    // showing the mean harmonicity of the current frame.
+    // Left = harmonic (warm/orange), Right = inharmonic (cool/blue).
+    {
+        // Magnitude-weighted mean harmonicity:
+        // Silent bins (near-zero magnitude) don't drag the cursor to mid-position.
+        // Only bins with actual energy determine where the cursor sits.
+        float sumH = 0.0f, sumMag = 0.0f;
+        const int nH = fftNumHarmonics_;
+        const size_t nbSize = fftMagnitudesSmoothed_.size();
+        for (int k = 1; k <= nH; ++k)
+        {
+            const float mag = (static_cast<size_t>(k) < nbSize)
+                              ? fftMagnitudesSmoothed_[static_cast<size_t>(k)]
+                              : 0.0f;
+            sumH   += fftHarmonicity_[static_cast<size_t>(k)] * mag;
+            sumMag += mag;
+        }
+        const float avgH = (sumMag > 1e-6f) ? (sumH / sumMag) : 0.5f;
+
+        // Map: harm=1 → x=0 (left), harm=0 → x=W-1 (right)
+        const int ix = juce::jlimit(4, W - 5,
+            static_cast<int>((1.0f - avgH) * static_cast<float>(W - 1) + 0.5f));
+
+        // Thin full-height reference line (very transparent)
+        g.setColour(juce::Colours::white.withAlpha(0.15f));
+        g.fillRect(ix, 8, 1, H - 8);
+
+        // Downward triangle sitting flush on top of the legend strip (Y=0..7)
+        juce::Path tri;
+        tri.addTriangle(static_cast<float>(ix - 4), 0.f,
+                        static_cast<float>(ix + 4), 0.f,
+                        static_cast<float>(ix),     7.f);
+        g.setColour(juce::Colours::white.withAlpha(0.92f));
+        g.fillPath(tri);
+
+        // Percentage label: "NNH" (e.g. "73H" = 73% harmonic)
+        // Placed on the side with more space to avoid overlap with Harm./Inharm. labels
+        const int harmPct   = juce::roundToInt(avgH * 100.f);
+        const juce::String pct = juce::String(harmPct) + "% H";
+        const bool putLeft  = (ix > W / 2);  // label goes opposite side of cursor
+        const int  labelX   = putLeft ? juce::jmax(40, ix - 38)
+                                      : juce::jmin(W - 46, ix + 6);
+        g.setColour(juce::Colours::white.withAlpha(0.78f));
+        g.setFont(juce::FontOptions(8.5f));
+        g.drawText(pct, labelX, 2, 36, 10,
+                   juce::Justification::centredLeft, false);
+    }
+
+    // Harmonic count badge
+    {
+        const juce::String badge = juce::String(displayBins) + " harmonics";
+        g.setColour(juce::Colour(0xa0000000));
+        g.fillRoundedRectangle(static_cast<float>(W - 84), 18.f, 80.f, 16.f, 3.f);
+        g.setColour(juce::Colour(0xffcc88cc));  // SYNTH_FFT_COLOR accent
+        g.setFont(juce::FontOptions(9.0f));
+        g.drawText(badge, W - 84, 18, 80, 16, juce::Justification::centred, false);
+    }
+
+    g.setColour(juce::Colour(0x50ffffff));
+    g.setFont(juce::FontOptions(9.0f));
+    g.drawText("LuxSynth harmonics  \xe2\x80\x94 color = harmonicity",
+               juce::Rectangle<int>(4, H - 16, W - 8, 13),
+               juce::Justification::centredLeft, false);
 }
