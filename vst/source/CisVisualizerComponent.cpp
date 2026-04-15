@@ -1326,11 +1326,23 @@ void CisVisualizerComponent::detectSpctrBlobs()
 
     extern sp3ctra_config_t g_sp3ctra_config;
     // Use StrokeForge-dedicated blob params — fully isolated from LuxSynth path.
-    const float threshold = g_sp3ctra_config.strokeforge_blob_base_threshold;
-    const int   minWidth  = juce::jmax(1, g_sp3ctra_config.strokeforge_blob_min_width);
-    const int   mergeGap  = juce::jmax(0, g_sp3ctra_config.strokeforge_blob_merge_gap);
-    // No color-split parameter on the LuxStral path — pure gap-based merge only.
-    // colorMergeThr = 1.0 means dist (max = 1.0) never exceeds it → no color split.
+    // Read from spctrBlob* APVTS params — identical ranges as lxBlob* (IMAGE LUXSYNTH).
+    // These are UI thread reads; detectSpctrBlobs() is called from paint() (message thread).
+    auto& apvts_ = processor.getAPVTS();
+    const float threshold = apvts_.getRawParameterValue("spctrBlobThreshold")->load();
+    const int   minWidth  = juce::jmax(1, static_cast<int>(
+                                apvts_.getRawParameterValue("spctrBlobMinWidth")->load()));
+    const int   mergeGap  = juce::jmax(0, static_cast<int>(
+                                apvts_.getRawParameterValue("spctrBlobMergeGap")->load()));
+    // Internally converted to a merge threshold (same formula as detectSynthBlobs):
+    //   colorMergeThr = 1 - colorSplitParam
+    //   dist > colorMergeThr → split
+    // Note: spctrBlobColorSplit ≥ 0 → colorMergeThr ≤ 1.0.
+    // In grayscale mode (LuxStral pipeline) dist ≡ 0 so split is a no-op;
+    // the parameter is active when the upstream source carries real colour.
+    const float colorSplitParam = juce::jlimit(0.0f, 1.0f,
+                                      apvts_.getRawParameterValue("spctrBlobColorSplit")->load());
+    const float colorMergeThr   = 1.0f - colorSplitParam;
 
     // ── Pre-compute locally smoothed RGB (used for avgLocalColor in tooltip) ───
     constexpr int kSmoothRadius = 8;
@@ -1356,7 +1368,7 @@ void CisVisualizerComponent::detectSpctrBlobs()
         smB[static_cast<size_t>(i)] = sb / (n * 255.f);
     }
 
-    // ── 1-D scan — pure gap-based merge ──────────────────────────────────────
+    // ── 1-D scan — gap + color-split merge (same algorithm as detectSynthBlobs) ──
     bool  inBlob   = false;
     int   blobStart = 0;
     int   gapCount  = 0;
@@ -1415,13 +1427,35 @@ void CisVisualizerComponent::detectSpctrBlobs()
             }
             else if (gapCount > 0)
             {
-                // Gap closed — merge (pure gap-based, no color check)
-                if (act > blobPeak) blobPeak = act;
-                blobSum  += act;  blobLen++;
-                blobRSum += smR[static_cast<size_t>(i)];
-                blobGSum += smG[static_cast<size_t>(i)];
-                blobBSum += smB[static_cast<size_t>(i)];
-                gapCount  = 0;
+                // ── Gap resume: color proximity check (identical to detectSynthBlobs) ──
+                // Compute Euclidean RGB distance between current pixel's local color
+                // and the running blob's accumulated mean local color.
+                // In grayscale mode smR≡smG≡smB → dist ≡ 0 → always merges.
+                const float meanR = blobRSum / static_cast<float>(blobLen);
+                const float meanG = blobGSum / static_cast<float>(blobLen);
+                const float meanB = blobBSum / static_cast<float>(blobLen);
+                const float dr    = smR[static_cast<size_t>(i)] - meanR;
+                const float dg    = smG[static_cast<size_t>(i)] - meanG;
+                const float db    = smB[static_cast<size_t>(i)] - meanB;
+                const float dist  = std::sqrt(dr*dr + dg*dg + db*db) * 0.5774f;
+
+                if (dist > colorMergeThr
+                    && static_cast<int>(spctrBlobs_.size()) < kMaxSynthBlobs - 1)
+                {
+                    // Colors diverge → close current blob, start fresh from i
+                    finishBlob(i - gapCount);
+                    startNew(i);
+                }
+                else
+                {
+                    // Colors close → merge: continue extending the blob
+                    if (act > blobPeak) blobPeak = act;
+                    blobSum  += act;  blobLen++;
+                    blobRSum += smR[static_cast<size_t>(i)];
+                    blobGSum += smG[static_cast<size_t>(i)];
+                    blobBSum += smB[static_cast<size_t>(i)];
+                    gapCount  = 0;
+                }
             }
             else
             {
