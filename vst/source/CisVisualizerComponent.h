@@ -173,6 +173,27 @@ private:
     /** Cache of detected blobs — rebuilt every paint call in SYNTH_BLOB mode. */
     std::vector<SynthBlob> synthBlobs_;
 
+    // ── SPCTR_BLOB mode: coloured blob visualizer (LuxStral path) ─────────────
+    /**
+     * @brief Detect blobs from localDataGray (LuxStral-processed).
+     *
+     * Same algorithm as detectSynthBlobs() but uses StrokeForge configuration
+     * parameters (strokeforge_blob_*) and writes to spctrBlobs_.
+     * No color-split pass — not exposed in the LuxStral configuration.
+     */
+    void detectSpctrBlobs();
+
+    /**
+     * @brief Render the SPCTR_BLOB visualizer (mirrors paintSynthBlobMode).
+     *
+     * Same rendering logic as SYNTH_BLOB but reads from spctrBlobs_ and
+     * uses the LuxStral accent colour (0xff8888e0 — blue-purple).
+     */
+    void paintSpctrBlobMode(juce::Graphics& g, int W, int H);
+
+    /** Cache of detected blobs for SPCTR_BLOB — rebuilt every paint call. */
+    std::vector<SynthBlob> spctrBlobs_;
+
     // ── FFT state (UI thread only, owned by computeFftMagnitudes) ────────────
     /** Raw per-bin FFT magnitudes after peak normalisation.
      *  Size = cisPixelsCount / 2 + 1.  DC bin (index 0) is always 0. */

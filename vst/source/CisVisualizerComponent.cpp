@@ -78,6 +78,14 @@ void CisVisualizerComponent::paint(juce::Graphics& g)
     // ── Active pipeline source (selected via pipeline node click) ─────────────
     const auto source = getActiveSource();
 
+    // ── SPCTR_BLOB: dedicated coloured blob visualizer (LuxStral path) ───────
+    if (source == VisualizerMode::SPCTR_BLOB)
+    {
+        paintSpctrBlobMode(g, W, H);
+        paintSourceLabel(g, W, H);
+        return;
+    }
+
     // ── SYNTH_BLOB: dedicated coloured blob visualizer ────────────────────────
     // Intercept before the generic rendering path; has its own full renderer.
     if (source == VisualizerMode::SYNTH_BLOB)
@@ -1307,9 +1315,284 @@ void CisVisualizerComponent::paintSynthBlobMode(juce::Graphics& g, int W, int H)
 }
 
 //==============================================================================
+// SPCTR_BLOB — blob detection (LuxStral path, gap-based, no color split)
+// Uses StrokeForge configuration parameters, isolated from LuxSynth/SYNTH_BLOB.
+//==============================================================================
+void CisVisualizerComponent::detectSpctrBlobs()
+{
+    spctrBlobs_.clear();
+
+    if (localDataGray.empty() || cisPixelsCount == 0) return;
+
+    extern sp3ctra_config_t g_sp3ctra_config;
+    // Use StrokeForge-dedicated blob params — fully isolated from LuxSynth path.
+    const float threshold = g_sp3ctra_config.strokeforge_blob_base_threshold;
+    const int   minWidth  = juce::jmax(1, g_sp3ctra_config.strokeforge_blob_min_width);
+    const int   mergeGap  = juce::jmax(0, g_sp3ctra_config.strokeforge_blob_merge_gap);
+    // No color-split parameter on the LuxStral path — pure gap-based merge only.
+    // colorMergeThr = 1.0 means dist (max = 1.0) never exceeds it → no color split.
+
+    // ── Pre-compute locally smoothed RGB (used for avgLocalColor in tooltip) ───
+    constexpr int kSmoothRadius = 8;
+    thread_local std::vector<float> smR, smG, smB;
+    smR.resize(static_cast<size_t>(cisPixelsCount));
+    smG.resize(static_cast<size_t>(cisPixelsCount));
+    smB.resize(static_cast<size_t>(cisPixelsCount));
+
+    for (int i = 0; i < cisPixelsCount; ++i)
+    {
+        const int   lo = std::max(0, i - kSmoothRadius);
+        const int   hi = std::min(cisPixelsCount - 1, i + kSmoothRadius);
+        const float n  = static_cast<float>(hi - lo + 1);
+        float sr = 0.f, sg = 0.f, sb = 0.f;
+        for (int k = lo; k <= hi; ++k)
+        {
+            sr += static_cast<float>(localDataR[k]);
+            sg += static_cast<float>(localDataG[k]);
+            sb += static_cast<float>(localDataB[k]);
+        }
+        smR[static_cast<size_t>(i)] = sr / (n * 255.f);
+        smG[static_cast<size_t>(i)] = sg / (n * 255.f);
+        smB[static_cast<size_t>(i)] = sb / (n * 255.f);
+    }
+
+    // ── 1-D scan — pure gap-based merge ──────────────────────────────────────
+    bool  inBlob   = false;
+    int   blobStart = 0;
+    int   gapCount  = 0;
+    float blobPeak  = 0.f;
+    float blobSum   = 0.f;
+    int   blobLen   = 0;
+    float blobRSum  = 0.f, blobGSum = 0.f, blobBSum = 0.f;
+
+    auto startNew = [&](int px)
+    {
+        blobStart = px;   inBlob   = true;
+        blobPeak  = localDataGray[px] / 255.f;
+        blobSum   = blobPeak;  blobLen  = 1;
+        blobRSum  = smR[static_cast<size_t>(px)];
+        blobGSum  = smG[static_cast<size_t>(px)];
+        blobBSum  = smB[static_cast<size_t>(px)];
+        gapCount  = 0;
+    };
+
+    auto finishBlob = [&](int endPx)
+    {
+        const int width = endPx - blobStart;
+        if (width >= minWidth && blobLen > 0
+            && static_cast<int>(spctrBlobs_.size()) < kMaxSynthBlobs)
+        {
+            SynthBlob b;
+            b.startPx       = blobStart;
+            b.endPx         = endPx;
+            b.peakIntensity = blobPeak;
+            b.avgIntensity  = blobSum / static_cast<float>(blobLen);
+            const float mr  = juce::jlimit(0.f, 1.f, blobRSum / static_cast<float>(blobLen));
+            const float mg  = juce::jlimit(0.f, 1.f, blobGSum / static_cast<float>(blobLen));
+            const float mb  = juce::jlimit(0.f, 1.f, blobBSum / static_cast<float>(blobLen));
+            b.avgColorTemp  = mr - mb;
+            b.avgLocalColor = juce::Colour(static_cast<uint8_t>(mr * 255.f),
+                                           static_cast<uint8_t>(mg * 255.f),
+                                           static_cast<uint8_t>(mb * 255.f));
+            b.color         = juce::Colours::white; // hue assigned after scan
+            spctrBlobs_.push_back(b);
+        }
+        inBlob   = false;  gapCount = 0;
+        blobPeak = blobSum = 0.f;  blobLen = 0;
+        blobRSum = blobGSum = blobBSum = 0.f;
+    };
+
+    for (int i = 0; i < cisPixelsCount; ++i)
+    {
+        const float act    = localDataGray[i] / 255.f;
+        const bool  active = (act >= threshold);
+
+        if (active)
+        {
+            if (!inBlob)
+            {
+                startNew(i);
+            }
+            else if (gapCount > 0)
+            {
+                // Gap closed — merge (pure gap-based, no color check)
+                if (act > blobPeak) blobPeak = act;
+                blobSum  += act;  blobLen++;
+                blobRSum += smR[static_cast<size_t>(i)];
+                blobGSum += smG[static_cast<size_t>(i)];
+                blobBSum += smB[static_cast<size_t>(i)];
+                gapCount  = 0;
+            }
+            else
+            {
+                // Extend current blob
+                if (act > blobPeak) blobPeak = act;
+                blobSum  += act;  blobLen++;
+                blobRSum += smR[static_cast<size_t>(i)];
+                blobGSum += smG[static_cast<size_t>(i)];
+                blobBSum += smB[static_cast<size_t>(i)];
+            }
+        }
+        else
+        {
+            if (inBlob)
+            {
+                ++gapCount;
+                if (gapCount > mergeGap)
+                    finishBlob(i - gapCount);
+            }
+        }
+    }
+    if (inBlob) finishBlob(cisPixelsCount - gapCount);
+
+    // ── Assign unique hues — evenly spaced on HSV wheel ──────────────────────
+    const int nb = static_cast<int>(spctrBlobs_.size());
+    for (int b = 0; b < nb; ++b)
+    {
+        const float hue = (nb > 1) ? static_cast<float>(b) / static_cast<float>(nb)
+                                   : 0.0f;
+        spctrBlobs_[b].color = juce::Colour::fromHSV(hue, 0.85f, 0.90f, 1.0f);
+    }
+}
+
+//==============================================================================
+// SPCTR_BLOB — full coloured visualizer (mirrors paintSynthBlobMode)
+// Reads from spctrBlobs_; uses LuxStral accent colour (0xff8888e0).
+//==============================================================================
+void CisVisualizerComponent::paintSpctrBlobMode(juce::Graphics& g, int W, int H)
+{
+    g.fillAll(juce::Colour(0xff080808));
+    if (cisPixelsCount == 0 || localDataGray.empty()) return;
+
+    detectSpctrBlobs();
+
+    thread_local std::vector<int> pixelBlobIdx;
+    pixelBlobIdx.assign(cisPixelsCount, -1);
+    for (int b = 0; b < static_cast<int>(spctrBlobs_.size()); ++b)
+    {
+        const auto& blob = spctrBlobs_[b];
+        for (int i = blob.startPx; i < blob.endPx && i < cisPixelsCount; ++i)
+            pixelBlobIdx[i] = b;
+    }
+
+    for (int x = 0; x < W; ++x)
+    {
+        const float pos = static_cast<float>(x) / static_cast<float>(juce::jmax(1, W - 1));
+        const int   ci  = juce::jlimit(0, cisPixelsCount - 1,
+                              static_cast<int>(pos * static_cast<float>(cisPixelsCount - 1) + 0.5f));
+        const float act  = localDataGray[ci] / 255.0f;
+        const int   bIdx = pixelBlobIdx[ci];
+
+        if (bIdx < 0)
+        {
+            const uint8_t v = static_cast<uint8_t>(act * 22.0f);
+            g.setColour(juce::Colour(v, v, v));
+            g.fillRect(x, 0, 1, H);
+        }
+        else
+        {
+            const auto& blob = spctrBlobs_[bIdx];
+            const int barH = juce::jmax(1, static_cast<int>(act * static_cast<float>(H)));
+            g.setColour(blob.color.withAlpha(0.10f));
+            g.fillRect(x, 0, 1, H - barH);
+            g.setColour(blob.color.withAlpha(0.40f + 0.60f * act));
+            g.fillRect(x, H - barH, 1, barH);
+        }
+    }
+
+    const float cisScale = static_cast<float>(W - 1)
+                         / static_cast<float>(juce::jmax(1, cisPixelsCount - 1));
+
+    for (int b = 0; b < static_cast<int>(spctrBlobs_.size()); ++b)
+    {
+        const auto& blob = spctrBlobs_[b];
+        const int x0 = static_cast<int>(static_cast<float>(blob.startPx)  * cisScale);
+        const int x1 = static_cast<int>(static_cast<float>(blob.endPx - 1) * cisScale);
+        const int bw = juce::jmax(1, x1 - x0 + 1);
+
+        g.setColour(blob.color.withAlpha(0.85f));
+        g.drawRect(x0, 0, bw, H, 1);
+
+        {
+            const int peakH = juce::jmax(2, static_cast<int>(blob.peakIntensity * static_cast<float>(H)));
+            g.setColour(blob.color.brighter(0.4f));
+            g.fillRect(x0, H - peakH, bw, 2);
+        }
+
+        g.setColour(blob.color.withAlpha(0.60f));
+        g.fillRect(x0, H - 3, bw, 3);
+    }
+
+    // ── Summary badge: "N/88 blobs" — LuxStral accent ────────────────────────
+    {
+        const int nb = static_cast<int>(spctrBlobs_.size());
+        const juce::String badge =
+            juce::String(nb) + "/" + juce::String(kMaxSynthBlobs) + " blobs";
+
+        constexpr float bw = 100.f, bh = 16.f;
+        const float bx = static_cast<float>(W) - bw - 4.f;
+        constexpr float by = 4.f;
+
+        g.setColour(juce::Colour(0xb0000000));
+        g.fillRoundedRectangle(bx, by, bw, bh, 3.f);
+        g.setColour(juce::Colour(0xff8888e0)); // SPCTR_BLOB accent
+        g.drawRoundedRectangle(bx, by, bw, bh, 3.f, 1.f);
+        g.setColour(juce::Colours::white.withAlpha(0.90f));
+        g.setFont(juce::FontOptions(9.f));
+        g.drawText(badge,
+                   static_cast<int>(bx), static_cast<int>(by),
+                   static_cast<int>(bw), static_cast<int>(bh),
+                   juce::Justification::centred, false);
+    }
+
+    // ── Hover tooltip ─────────────────────────────────────────────────────────
+    if (hoverBlobIdx_ >= 0 && hoverBlobIdx_ < static_cast<int>(spctrBlobs_.size()))
+    {
+        const auto& blob = spctrBlobs_[hoverBlobIdx_];
+
+        const juce::String line1 = "Blob #" + juce::String(hoverBlobIdx_ + 1);
+        const juce::String line2 = "Width:  " + juce::String(blob.endPx - blob.startPx) + " px";
+        const juce::String line3 =
+            "Peak:   " + juce::String(static_cast<int>(blob.peakIntensity * 100.f)) + "%"
+            + "  avg: " + juce::String(static_cast<int>(blob.avgIntensity * 100.f)) + "%";
+        const juce::String tempStr =
+            (blob.avgColorTemp >  0.08f) ? "Warm" :
+            (blob.avgColorTemp < -0.08f) ? "Cool" : "Neutral";
+        const juce::String line4 = "Temp:   " + tempStr;
+
+        constexpr float kTW = 148.f, kTH = 70.f, kTR = 4.f;
+        float tx = static_cast<float>(hoverPos_.x) + 14.f;
+        float ty = static_cast<float>(hoverPos_.y) - kTH * 0.5f;
+        if (tx + kTW > static_cast<float>(W)) tx = static_cast<float>(hoverPos_.x) - kTW - 10.f;
+        if (ty < 2.f)                          ty = 2.f;
+        if (ty + kTH > static_cast<float>(H)) ty = static_cast<float>(H) - kTH - 2.f;
+
+        g.setColour(juce::Colour(0xee0d0d0d));
+        g.fillRoundedRectangle(tx, ty, kTW, kTH, kTR);
+        g.setColour(blob.color.withAlpha(0.90f));
+        g.drawRoundedRectangle(tx, ty, kTW, kTH, kTR, 1.2f);
+
+        const auto ti = [&](int li) { return static_cast<int>(ty + 4.f + static_cast<float>(li) * 16.f); };
+        const int lw = static_cast<int>(kTW) - 8;
+        const int lx = static_cast<int>(tx) + 4;
+
+        g.setFont(juce::FontOptions(9.5f));
+        g.setColour(blob.color.brighter(0.25f));
+        g.drawText(line1, lx, ti(0), lw, 14, juce::Justification::centredLeft, false);
+        g.setColour(juce::Colours::white.withAlpha(0.85f));
+        g.setFont(juce::FontOptions(8.5f));
+        g.drawText(line2, lx, ti(1), lw, 13, juce::Justification::centredLeft, false);
+        g.drawText(line3, lx, ti(2), lw, 13, juce::Justification::centredLeft, false);
+        g.drawText(line4, lx, ti(3), lw, 13, juce::Justification::centredLeft, false);
+    }
+}
+
+//==============================================================================
 void CisVisualizerComponent::mouseMove(const juce::MouseEvent& event)
 {
-    if (getActiveSource() != VisualizerMode::SYNTH_BLOB)
+    const auto ms = getActiveSource();
+    const bool isSpctr = (ms == VisualizerMode::SPCTR_BLOB);
+    if (ms != VisualizerMode::SYNTH_BLOB && !isSpctr)
     {
         hoverBlobIdx_ = -1;
         return;
@@ -1318,43 +1601,33 @@ void CisVisualizerComponent::mouseMove(const juce::MouseEvent& event)
     hoverPos_ = event.getPosition();
 
     const int W = getWidth();
-    if (W <= 1 || cisPixelsCount <= 0 || synthBlobs_.empty())
+    const auto& blobs = isSpctr ? spctrBlobs_ : synthBlobs_;
+    if (W <= 1 || cisPixelsCount <= 0 || blobs.empty())
     {
         hoverBlobIdx_ = -1;
         return;
     }
 
     // ── Magnetic snap ─────────────────────────────────────────────────────────
-    // Convert cursor X → fractional CIS pixel position
     const float cisPerDisplayPx = static_cast<float>(cisPixelsCount - 1)
                                  / static_cast<float>(W - 1);
     const float cursorCi = static_cast<float>(hoverPos_.x) * cisPerDisplayPx;
 
-    // Snap radius: 20 display pixels expressed in CIS pixels.
-    // This makes thin blobs (even 1-px wide) easy to hover — no need to be
-    // pixel-perfect; the nearest blob within the radius wins.
     constexpr float kSnapDisplayPx = 20.f;
     const float snapRadiusCi = kSnapDisplayPx * cisPerDisplayPx;
 
     int   bestIdx  = -1;
-    float bestDist = snapRadiusCi; // must beat this to become candidate
+    float bestDist = snapRadiusCi;
 
-    for (int b = 0; b < static_cast<int>(synthBlobs_.size()); ++b)
+    for (int b = 0; b < static_cast<int>(blobs.size()); ++b)
     {
-        const auto& blob = synthBlobs_[b];
-
-        // Distance from cursor to nearest blob edge (0 if cursor is inside blob)
+        const auto& blob = blobs[b];
         float distCi = 0.f;
         if (cursorCi < static_cast<float>(blob.startPx))
             distCi = static_cast<float>(blob.startPx) - cursorCi;
         else if (cursorCi >= static_cast<float>(blob.endPx))
             distCi = cursorCi - static_cast<float>(blob.endPx - 1);
-
-        if (distCi <= bestDist)
-        {
-            bestDist = distCi;
-            bestIdx  = b;
-        }
+        if (distCi <= bestDist) { bestDist = distCi; bestIdx = b; }
     }
 
     hoverBlobIdx_ = bestIdx;
