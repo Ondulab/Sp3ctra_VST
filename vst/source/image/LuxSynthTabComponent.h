@@ -70,8 +70,9 @@ public:
             apvts, "luxsynthGammaValue", gammaSlider));
 
         // ── BLOB DETECTION — LuxSynth-only params (isolated from LuxStral) ──
-        // Row 5: Threshold
-        initLabel(blobThreshLabel, "Blob Thr.");
+        // Row 4: Amplitude threshold — expressed as normalised brightness [0..1].
+        // 0.05 means pixels brighter than 5% of max amplitude are considered active.
+        initLabel(blobThreshLabel, "Ampl. Thr.");
         blobThreshSlider.setSliderStyle(juce::Slider::LinearHorizontal);
         blobThreshSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
                                          50, Sp3ctraTheme::kControlH);
@@ -79,8 +80,8 @@ public:
         blobThreshAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
             apvts, "lxBlobThreshold", blobThreshSlider));
 
-        // Row 6: Min Width
-        initLabel(blobMinWidthLabel, "Min Width");
+        // Row 5: Min Pixel Width — minimum blob width in CIS pixels
+        initLabel(blobMinWidthLabel, "Min Px W.");
         blobMinWidthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
         blobMinWidthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
                                            50, Sp3ctraTheme::kControlH);
