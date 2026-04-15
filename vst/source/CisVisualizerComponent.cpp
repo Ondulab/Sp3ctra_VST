@@ -1526,6 +1526,46 @@ void CisVisualizerComponent::paintFftColorMode(juce::Graphics& g, int W, int H)
                juce::Rectangle<int>(W - 44, 5, 40, 12),
                juce::Justification::centredRight, false);
 
+    // ── Live harmonicity cursor ────────────────────────────────────────────────
+    // A white downward triangle moves along the legend strip in real-time (30 fps),
+    // showing the mean harmonicity of the current frame.
+    // Left = harmonic (warm/orange), Right = inharmonic (cool/blue).
+    {
+        float sumH = 0.0f;
+        const int nH = fftNumHarmonics_;
+        for (int k = 1; k <= nH; ++k)
+            sumH += fftHarmonicity_[static_cast<size_t>(k)];
+        const float avgH = (nH > 0) ? (sumH / static_cast<float>(nH)) : 0.5f;
+
+        // Map: harm=1 → x=0 (left), harm=0 → x=W-1 (right)
+        const int ix = juce::jlimit(4, W - 5,
+            static_cast<int>((1.0f - avgH) * static_cast<float>(W - 1) + 0.5f));
+
+        // Thin full-height reference line (very transparent)
+        g.setColour(juce::Colours::white.withAlpha(0.15f));
+        g.fillRect(ix, 8, 1, H - 8);
+
+        // Downward triangle sitting flush on top of the legend strip (Y=0..7)
+        juce::Path tri;
+        tri.addTriangle(static_cast<float>(ix - 4), 0.f,
+                        static_cast<float>(ix + 4), 0.f,
+                        static_cast<float>(ix),     7.f);
+        g.setColour(juce::Colours::white.withAlpha(0.92f));
+        g.fillPath(tri);
+
+        // Percentage label: "NNH" (e.g. "73H" = 73% harmonic)
+        // Placed on the side with more space to avoid overlap with Harm./Inharm. labels
+        const int harmPct   = juce::roundToInt(avgH * 100.f);
+        const juce::String pct = juce::String(harmPct) + "% H";
+        const bool putLeft  = (ix > W / 2);  // label goes opposite side of cursor
+        const int  labelX   = putLeft ? juce::jmax(40, ix - 38)
+                                      : juce::jmin(W - 46, ix + 6);
+        g.setColour(juce::Colours::white.withAlpha(0.78f));
+        g.setFont(juce::FontOptions(8.5f));
+        g.drawText(pct, labelX, 2, 36, 10,
+                   juce::Justification::centredLeft, false);
+    }
+
     // Harmonic count badge
     {
         const juce::String badge = juce::String(displayBins) + " harmonics";

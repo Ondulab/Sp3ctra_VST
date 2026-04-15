@@ -27,10 +27,10 @@ public:
 
     explicit LuxSynthTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p),
-          nodeGray     ("SYNTH GRAY",    juce::Colour(0xffe0a84a), VisualizerMode::SYNTH_GRAY),
-          nodeColor    ("SYNTH COLOR",   juce::Colour(0xffe0c864), VisualizerMode::SYNTH_COLOR),
-          nodeBlob     ("SYNTH BLOB",    juce::Colour(0xffd07040), VisualizerMode::SYNTH_BLOB),
-          nodeFftColor ("FFT COLOR",     juce::Colour(0xffcc88cc), VisualizerMode::SYNTH_FFT_COLOR)
+          nodeGray     ("LUXSYNTH GRAY",  juce::Colour(0xffe0a84a), VisualizerMode::SYNTH_GRAY),
+          nodeColor    ("LUXSYNTH COLOR", juce::Colour(0xffe0c864), VisualizerMode::SYNTH_COLOR),
+          nodeBlob     ("LUXSYNTH BLOB",  juce::Colour(0xffd07040), VisualizerMode::SYNTH_BLOB),
+          nodeFftColor ("LUXSYNTH FFT",   juce::Colour(0xffcc88cc), VisualizerMode::SYNTH_FFT_COLOR)
     {
         auto& apvts = p.getAPVTS();
 

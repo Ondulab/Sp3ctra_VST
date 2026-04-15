@@ -35,12 +35,12 @@ inline const char* visualizerModeLabel(VisualizerMode m)
         case VisualizerMode::SAMPLER:        return "SAMPLER";
         case VisualizerMode::MIX:            return "MIX";
         case VisualizerMode::SPCTR_GRAY:     return "LUXSTRAL GRAY";
-        case VisualizerMode::SYNTH_GRAY:     return "SYNTH GRAY";
+        case VisualizerMode::SYNTH_GRAY:     return "LUXSYNTH GRAY";
         case VisualizerMode::SPCTR_COLOR:    return "LUXSTRAL COLOR";
-        case VisualizerMode::SYNTH_COLOR:    return "SYNTH COLOR";
-        case VisualizerMode::SYNTH_FFT_COLOR: return "FFT COLOR";
+        case VisualizerMode::SYNTH_COLOR:    return "LUXSYNTH COLOR";
+        case VisualizerMode::SYNTH_FFT_COLOR: return "LUXSYNTH FFT";
         case VisualizerMode::SPCTR_BLOB:     return "LUXSTRAL BLOB";
-        case VisualizerMode::SYNTH_BLOB:     return "SYNTH BLOB";
+        case VisualizerMode::SYNTH_BLOB:     return "LUXSYNTH BLOB";
         default:                             return "???";
     }
 }
