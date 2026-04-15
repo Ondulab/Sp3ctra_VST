@@ -1019,24 +1019,40 @@ void FramePlayerThread::injectWhiteFrame() noexcept
         }
     }
 
-    // 3. Clear preprocessed_data for Source=S (pure sampler — no UDP writer).
-    //    In Source=M or Source=L modes the UDP thread owns preprocessed_data
-    //    and will overwrite it naturally; no action is needed here.
+    // 3. Silence ONLY the LuxStral additive section of preprocessed_data.
+    //
+    // CRITICAL — do NOT use pipeline_process_frame(white) here:
+    //   pipeline_process_frame() fills ALL sections of PreprocessedImageData,
+    //   including polyphonic.grayscale (LuxSynth) with white = 1.0 (max signal).
+    //   Because the UDP thread's silence branch (multithreading.c, src=0 /
+    //   not playing) only zeroes additive.* and never restores polyphonic.*,
+    //   polyphonic.grayscale would stay frozen at 1.0 permanently, causing
+    //   LuxSynth (Source=L) to produce sound from a flat-white spectrum instead
+    //   of the live signal — the "LuxSynth gray freeze" regression.
+    //
+    // Instead, mirror exactly the UDP thread's silence injection:
+    //   zero additive.{grayscale, notes, contrast_factor} only.
+    //   polyphonic (LuxSynth), photowave (LuxWave) and stereo sections are
+    //   owned by their respective source-routing paths and must not be touched
+    //   here.
+    //
+    // This covers Source=S (LuxStral on Sampler).  Source=L and Source=M are
+    // handled exclusively by the UDP thread (preprocessed_data = preprocessed_temp,
+    // dataReady = 1) and do not require any action from injectWhiteFrame().
     if (doubleBuffer != nullptr)
     {
         extern sp3ctra_config_t g_sp3ctra_config;
         if (g_sp3ctra_config.luxstral_source_type == 0 /* IMAGE_SOURCE_SAMPLER */)
         {
-            PreprocessedImageData ppSilence {};
-            PipelineConfig sampler_cfg = pipeline_build_config_sampler();
-            if (pipeline_process_frame(whiteR, whiteG, whiteB, &sampler_cfg, &ppSilence) == 0)
-            {
-                ppSilence.timestamp_us = static_cast<uint64_t>(currentTimeUs());
-                pthread_mutex_lock(&doubleBuffer->mutex);
-                doubleBuffer->preprocessed_data = ppSilence;
-                doubleBuffer->dataReady = 2; /* 2 = sampler source tag */
-                pthread_mutex_unlock(&doubleBuffer->mutex);
-            }
+            pthread_mutex_lock(&doubleBuffer->mutex);
+            // Zero additive synthesis input — identical to multithreading.c lines 696-701.
+            std::memset(doubleBuffer->preprocessed_data.additive.grayscale, 0,
+                        sizeof(doubleBuffer->preprocessed_data.additive.grayscale));
+            std::memset(doubleBuffer->preprocessed_data.additive.notes, 0,
+                        sizeof(doubleBuffer->preprocessed_data.additive.notes));
+            doubleBuffer->preprocessed_data.additive.contrast_factor = 0.0f;
+            doubleBuffer->dataReady = 2; /* sampler source tag — consumer gating intact */
+            pthread_mutex_unlock(&doubleBuffer->mutex);
         }
     }
 }
