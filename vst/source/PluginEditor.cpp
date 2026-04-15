@@ -74,21 +74,6 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     sfEnabledAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "sfEnabled", sfEnabledToggle);
 
-    initSlider(sfBlobThreshSlider);
-    addChildComponent(sfBlobThreshSlider);
-    sfBlobThreshAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "sfBlobBaseThreshold", sfBlobThreshSlider);
-
-    initSlider(sfMinWidthSlider);
-    addChildComponent(sfMinWidthSlider);
-    sfMinWidthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "sfBlobMinWidth", sfMinWidthSlider);
-
-    initSlider(sfMergeGapSlider);
-    addChildComponent(sfMergeGapSlider);
-    sfMergeGapAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "sfBlobMergeGap", sfMergeGapSlider);
-
     initSlider(sfMorphWidthSlider);
     addChildComponent(sfMorphWidthSlider);
     sfMorphWidthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -149,12 +134,11 @@ void Sp3ctraAudioProcessorEditor::switchToTab(Tab tab)
 
     // SYNTH controls (audio-only params + StrokeForge right column)
     const bool synthVis = (tab == Tab::Synth);
-    std::array<juce::Component*, 15> synthCtrls = {
+    std::array<juce::Component*, 12> synthCtrls = {
         &deviceOnToggle,   &masterVolumeSlider,
         &attackSlider,     &releaseSlider,
         &stereoTempSlider, &sumExpSlider, &noiseGateSlider,
-        &sfEnabledToggle,  &sfBlobThreshSlider,
-        &sfMinWidthSlider, &sfMergeGapSlider,
+        &sfEnabledToggle,
         &sfMorphWidthSlider, &sfFocusSigmaSlider,
         &sfSpectralThreshSlider, &sfFocusOnlyToggle
     };
@@ -318,8 +302,8 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
         g.setColour(juce::Colour(0xffb8c4d0));
 
         static const char* const sfLbls[kSF_ROWS] = {
-            "Enable", "Detect Threshold", "Min Stroke Width", "Merge Gap",
-            "Square at Width", "Focus Sigma", "Spectral Threshold", "Focus Only (spectral)"
+            "Enable", "Square at Width", "Focus Sigma",
+            "Spectral Threshold", "Focus Only (spectral)"
         };
         for (int i = 0; i < kSF_ROWS; ++i)
             g.drawText(sfLbls[i],
@@ -363,9 +347,6 @@ void Sp3ctraAudioProcessorEditor::resized()
         const int cw2 = cw - kCtrlOffset - 12;
         int cy = rsy;
         sfEnabledToggle      .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
-        sfBlobThreshSlider   .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
-        sfMinWidthSlider     .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
-        sfMergeGapSlider     .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
         sfMorphWidthSlider   .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
         sfFocusSigmaSlider   .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
         sfSpectralThreshSlider.setBounds(cx, cy, cw2, kRowH); cy += kRowStep;

@@ -117,7 +117,7 @@ private:
     // SYNTH tab left col: 7 audio-only rows
     static constexpr int kLS_ROWS    = 7;
     // SYNTH tab right col: 8 StrokeForge rows
-    static constexpr int kSF_ROWS    = 8;
+    static constexpr int kSF_ROWS    = 5;  // Enable + Square at Width + Focus Sigma + Spectral Thr. + Focus Only
 
     static constexpr int kHPad       = Sp3ctraTheme::kHPad;
     static constexpr int kSectionH   = Sp3ctraTheme::kSectionH;
@@ -176,15 +176,6 @@ private:
     // ── SYNTH right column — StrokeForge synthesis controls ───────────────────
     juce::ToggleButton sfEnabledToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfEnabledAttachment;
-
-    juce::Slider sfBlobThreshSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfBlobThreshAttachment;
-
-    juce::Slider sfMinWidthSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMinWidthAttachment;
-
-    juce::Slider sfMergeGapSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMergeGapAttachment;
 
     juce::Slider sfMorphWidthSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMorphWidthAttachment;

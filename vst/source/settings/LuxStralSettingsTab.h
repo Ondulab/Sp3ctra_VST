@@ -113,18 +113,6 @@ private:
     juce::ToggleButton sfEnabledToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfEnabledAttachment;
 
-    juce::Label  sfBlobThresholdLabel;
-    juce::Slider sfBlobThresholdSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfBlobThresholdAttachment;
-
-    juce::Label  sfMinWidthLabel;
-    juce::Slider sfMinWidthSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMinWidthAttachment;
-
-    juce::Label  sfMergeGapLabel;
-    juce::Slider sfMergeGapSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMergeGapAttachment;
-
     juce::Label  sfMorphWidthLabel;
     juce::Slider sfMorphWidthSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMorphWidthAttachment;
