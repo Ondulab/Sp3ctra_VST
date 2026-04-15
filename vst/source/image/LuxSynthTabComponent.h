@@ -111,6 +111,30 @@ public:
         blobColorSplitAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
             apvts, "lxBlobColorSplit", blobColorSplitSlider));
 
+        // ── FFT PARAMETERS ────────────────────────────────────────────────
+        // Row 8: FFT Bins — number of harmonics extracted from spatial FFT.
+        // Each bin maps to one LuxSynth oscillator in the additive synthesis engine.
+        // 32 = fast / low-res, 256 = slow / high-res (default 128).
+        initLabel(fftBinsLabel, "FFT Bins");
+        addAndMakeVisible(fftBinsCombo);
+        fftBinsCombo.addItem("32  \xe2\x80\x94 fast",     1);
+        fftBinsCombo.addItem("64",                         2);
+        fftBinsCombo.addItem("128 \xe2\x80\x94 default",  3);
+        fftBinsCombo.addItem("256 \xe2\x80\x94 quality",  4);
+        fftBinsAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
+            apvts, "lxFftBins", fftBinsCombo));
+
+        // Row 9: FFT Smoothing — temporal averaging of FFT magnitudes.
+        // 0 = very reactive (fast attack + fast release).
+        // 1 = very smooth   (slow attack + slow release).
+        initLabel(fftSmoothingLabel, "Smoothing");
+        fftSmoothingSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        fftSmoothingSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                           50, Sp3ctraTheme::kControlH);
+        addAndMakeVisible(fftSmoothingSlider);
+        fftSmoothingAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, "lxFftSmoothing", fftSmoothingSlider));
+
         // ── All output nodes ──────────────────────────────────────────────
         for (auto* n : { &nodeGray, &nodeColor, &nodeBlob, &nodeFftGray, &nodeFftColor })
         {
@@ -152,6 +176,13 @@ public:
         g.drawText("--- BLOB DETECTION ---", pad, blobSectionY, stageW, 12,
                    juce::Justification::centred);
 
+        // ── FFT Parameters section header (between blob sliders and FFT rows) ──
+        const int fftSectionY = rowY(7) + Sp3ctraTheme::kControlH + 2;
+        g.setColour(juce::Colour(0xffe06868).withAlpha(0.55f));
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
+        g.drawText("--- FFT PARAMETERS ---", pad, fftSectionY, stageW, 12,
+                   juce::Justification::centred);
+
         // Preliminary outputs label
         g.setColour(accent.withAlpha(0.6f));
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
@@ -189,6 +220,11 @@ public:
         placeSliderRow(blobMergeGapLabel,  blobMergeGapSlider,  6);
         placeSliderRow(blobColorSplitLabel, blobColorSplitSlider, 7);
 
+        // Rows 8-9: FFT Parameters
+        // (row 8 section header is drawn in paint() in the gap between row 7 and row 8)
+        placeComboRow (fftBinsLabel,      fftBinsCombo,      8);
+        placeSliderRow(fftSmoothingLabel, fftSmoothingSlider, 9);
+
         // Preliminary nodes — stacked vertically, full stdNodeW each
         constexpr int nodeH   = 28;
         constexpr int nodeGap = 6;
@@ -210,6 +246,8 @@ private:
     juce::Label sourceLabel, negativeLabel, dcBlockLabel, gammaValueLabel;
     // Labels — blob detection (LuxSynth-only, isolated from LuxStral)
     juce::Label blobThreshLabel, blobMinWidthLabel, blobMergeGapLabel, blobColorSplitLabel;
+    // Labels — FFT parameters
+    juce::Label fftBinsLabel, fftSmoothingLabel;
 
     // Controls — image pipeline
     juce::ComboBox     sourceCombo;
@@ -217,6 +255,9 @@ private:
     juce::Slider       gammaSlider;
     // Controls — blob detection
     juce::Slider blobThreshSlider, blobMinWidthSlider, blobMergeGapSlider, blobColorSplitSlider;
+    // Controls — FFT parameters
+    juce::ComboBox fftBinsCombo;
+    juce::Slider   fftSmoothingSlider;
 
     // Attachments — image pipeline
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> sourceAttach;
@@ -228,6 +269,9 @@ private:
                                                                              blobMinWidthAttach,
                                                                              blobMergeGapAttach,
                                                                              blobColorSplitAttach;
+    // Attachments — FFT parameters
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> fftBinsAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   fftSmoothingAttach;
 
     // Pipeline output nodes
     PipelineNodeComponent nodeGray, nodeColor, nodeBlob, nodeFftGray, nodeFftColor;
@@ -249,9 +293,9 @@ private:
         return 6 + row * (Sp3ctraTheme::kControlH + 14);
     }
 
-    // 8 control rows (0-7: 4 image-pipeline + 4 blob-detection),
-    // then 38 px gap before preliminary output nodes
-    int preNodeY() const { return rowY(8) + 38; }
+    // 10 control rows (0-7: pipeline + blob-detection, 8-9: FFT parameters),
+    // then 38 px gap before preliminary output nodes.
+    int preNodeY() const { return rowY(10) + 38; }
     // 3 stacked nodes: 3 × 28 + 2 × 6 = 96, plus 20 for label spacing
     int fftNodeY() const { return preNodeY() + 96 + 20; }
 

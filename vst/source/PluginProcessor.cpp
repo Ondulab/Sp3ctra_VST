@@ -271,6 +271,21 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::NormalisableRange<float>(0.01f, 1.0f, 0.01f), 0.20f,
         juce::AudioParameterFloatAttributes{}.withLabel("")));
 
+    // ── LuxSynth FFT quality / synthesis-data parameters ─────────────────────
+    // lxFftBins: number of harmonics extracted from the spatial FFT.
+    // Each bin maps to one oscillator in the LuxSynth additive synthesis engine.
+    // 32 = fast / low quality, 256 = slow / high quality (default 128).
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"lxFftBins", 1}, "LX FFT Bins",
+        juce::StringArray{"32", "64", "128", "256"}, 2));
+
+    // lxFftSmoothing: temporal smoothing for FFT magnitudes [0..1].
+    // 0 = very fast / reactive (alpha_attack≈0.80, alpha_release≈0.50).
+    // 1 = very slow / smooth   (alpha_attack≈0.05, alpha_release≈0.02).
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"lxFftSmoothing", 1}, "LX FFT Smoothing",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.3f));
+
     // Fade-in duration [ms] — applied when restarting the live stream after Stop.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"imageFadeInMs", 1}, "Fade-In",
