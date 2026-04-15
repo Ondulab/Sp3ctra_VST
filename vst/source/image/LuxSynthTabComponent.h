@@ -98,8 +98,9 @@ public:
         blobMergeGapAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
             apvts, "lxBlobMergeGap", blobMergeGapSlider));
 
-        // Row 8: Color Split
-        initLabel(blobColorSplitLabel, "Color Split");
+        // Row 7: Color Merge — max RGB distance [0..1] for merging across a gap.
+        // 0 = strict (only identical colors merge); 1 = ignore color (gap only).
+        initLabel(blobColorSplitLabel, "Color Merge");
         blobColorSplitSlider.setSliderStyle(juce::Slider::LinearHorizontal);
         blobColorSplitSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
                                               50, Sp3ctraTheme::kControlH);

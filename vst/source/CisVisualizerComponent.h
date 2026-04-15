@@ -107,12 +107,13 @@ private:
      */
     struct SynthBlob
     {
-        int          startPx;       ///< First CIS pixel index (inclusive)
-        int          endPx;         ///< Last  CIS pixel index (exclusive)
-        float        peakIntensity; ///< Max  brightness within blob [0..1]
-        float        avgIntensity;  ///< Mean brightness within blob [0..1]
-        float        avgColorTemp;  ///< Mean color temperature [-1..1]
-        juce::Colour color;         ///< Unique display colour (hue-wheel)
+        int          startPx;        ///< First CIS pixel index (inclusive)
+        int          endPx;          ///< Last  CIS pixel index (exclusive)
+        float        peakIntensity;  ///< Max  brightness within blob [0..1]
+        float        avgIntensity;   ///< Mean brightness within blob [0..1]
+        float        avgColorTemp;   ///< Mean (R-B)/255 — kept for tooltip warm/cool display
+        juce::Colour color;          ///< Unique display colour (hue-wheel)
+        juce::Colour avgLocalColor;  ///< Mean locally-smoothed RGB (used by color-merge logic)
     };
 
     /** Max blobs for SYNTH_BLOB mode — matches piano keyboard range. */
