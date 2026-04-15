@@ -88,16 +88,7 @@ void CisVisualizerComponent::paint(juce::Graphics& g)
         return;
     }
 
-    // ── FFT modes: dedicated spectrum renderers ──────────────────────────────
-    // Intercepted before both the color and generic paths — each has its own
-    // full renderer (computeFftMagnitudes + bar chart).
-    if (source == VisualizerMode::SYNTH_FFT_GRAY)
-    {
-        paintFftGrayMode(g, W, H);
-        paintSourceLabel(g, W, H);
-        return;
-    }
-
+    // ── FFT mode: dedicated spectrum renderer ────────────────────────────────
     if (source == VisualizerMode::SYNTH_FFT_COLOR)
     {
         paintFftColorMode(g, W, H);
@@ -301,8 +292,6 @@ void CisVisualizerComponent::paintSourceLabel(
             accent = juce::Colour(0xffe0c864); break;
         case VisualizerMode::SYNTH_BLOB:
             accent = juce::Colour(0xffd07040); break;
-        case VisualizerMode::SYNTH_FFT_GRAY:
-            accent = juce::Colour(0xffe06868); break;
         case VisualizerMode::SYNTH_FFT_COLOR:
             accent = juce::Colour(0xffcc88cc); break;
         default:
@@ -1445,76 +1434,6 @@ void CisVisualizerComponent::computeFftMagnitudes()
                 0.10f * newH + 0.90f * fftHarmonicity_[static_cast<size_t>(k)];
         }
     }
-}
-
-//==============================================================================
-// FFT GRAY — monochromatic spectrum bar chart
-// Shows fftNumHarmonics_ bins (from lxFftBins) as a grayscale VU-meter.
-//==============================================================================
-void CisVisualizerComponent::paintFftGrayMode(juce::Graphics& g, int W, int H)
-{
-    g.fillAll(juce::Colour(0xff080808));
-    if (cisPixelsCount == 0 || localDataGray.empty()) return;
-
-    computeFftMagnitudes();
-
-    const int nBins = static_cast<int>(fftMagnitudesSmoothed_.size());
-    if (nBins < 2 || fftNumHarmonics_ < 1) return;
-
-    const int displayBins = fftNumHarmonics_;
-
-    auto logScale = [](float x) -> float {
-        return std::log10(1.0f + 9.0f * juce::jlimit(0.0f, 1.0f, x));
-    };
-
-    for (int x = 0; x < W; ++x)
-    {
-        const int bin    = 1 + static_cast<int>(
-            static_cast<float>(x) / static_cast<float>(juce::jmax(1, W - 1))
-            * static_cast<float>(displayBins - 1));
-        const int binIdx = juce::jlimit(1, nBins - 1, bin);
-
-        const float mag    = fftMagnitudesSmoothed_[static_cast<size_t>(binIdx)];
-        const float logMag = logScale(mag);
-        const int   barH   = juce::jmax(1, static_cast<int>(logMag * static_cast<float>(H)));
-
-        g.setColour(juce::Colour(0xff0d0d0d));
-        g.fillRect(x, 0, 1, H - barH);
-
-        const uint8_t v = static_cast<uint8_t>(
-            juce::jlimit(0.0f, 255.0f, (0.35f + 0.65f * logMag) * 255.0f));
-        g.setColour(juce::Colour(v, v, v));
-        g.fillRect(x, H - barH, 1, barH);
-
-        if (barH > 2)
-        {
-            g.setColour(juce::Colours::white.withAlpha(0.60f));
-            g.fillRect(x, H - barH, 1, 2);
-        }
-    }
-
-    g.setColour(juce::Colour(0x16ffffff));
-    for (float ref : {0.1f, 0.3f, 0.7f, 0.9f})
-    {
-        const int refY = H - static_cast<int>(logScale(ref) * static_cast<float>(H));
-        g.fillRect(0, refY, W, 1);
-    }
-
-    // Harmonic count badge
-    {
-        const juce::String badge = juce::String(displayBins) + " harmonics";
-        g.setColour(juce::Colour(0xa0000000));
-        g.fillRoundedRectangle(static_cast<float>(W - 84), 4.f, 80.f, 16.f, 3.f);
-        g.setColour(juce::Colour(0xffe06868));
-        g.setFont(juce::FontOptions(9.0f));
-        g.drawText(badge, W - 84, 4, 80, 16, juce::Justification::centred, false);
-    }
-
-    g.setColour(juce::Colour(0x50ffffff));
-    g.setFont(juce::FontOptions(9.0f));
-    g.drawText("FFT spectrum  (spatial harmonics)",
-               juce::Rectangle<int>(4, H - 16, W - 8, 13),
-               juce::Justification::centredLeft, false);
 }
 
 //==============================================================================

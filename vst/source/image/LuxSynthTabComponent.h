@@ -3,7 +3,7 @@
  * @brief Tab 3 — LUXSYNTH: pipeline visual, source selector, toggles, output nodes.
  *
  * Pipeline:  Source → [Negative] → [DC Blocking] → Gamma →
- *            SYNTH_GRAY / SYNTH_COLOR / SYNTH_BLOB → FFT → FFT_GRAY / FFT_COLOR
+ *            SYNTH_GRAY / SYNTH_COLOR / SYNTH_BLOB → FFT → FFT_COLOR
  *
  * Gamma is always active (no enable toggle) — set to 1.0 for identity (no-op).
  *
@@ -30,7 +30,6 @@ public:
           nodeGray     ("SYNTH GRAY",    juce::Colour(0xffe0a84a), VisualizerMode::SYNTH_GRAY),
           nodeColor    ("SYNTH COLOR",   juce::Colour(0xffe0c864), VisualizerMode::SYNTH_COLOR),
           nodeBlob     ("SYNTH BLOB",    juce::Colour(0xffd07040), VisualizerMode::SYNTH_BLOB),
-          nodeFftGray  ("FFT GRAY",      juce::Colour(0xffe06868), VisualizerMode::SYNTH_FFT_GRAY),
           nodeFftColor ("FFT COLOR",     juce::Colour(0xffcc88cc), VisualizerMode::SYNTH_FFT_COLOR)
     {
         auto& apvts = p.getAPVTS();
@@ -136,7 +135,7 @@ public:
             apvts, "lxFftSmoothing", fftSmoothingSlider));
 
         // ── All output nodes ──────────────────────────────────────────────
-        for (auto* n : { &nodeGray, &nodeColor, &nodeBlob, &nodeFftGray, &nodeFftColor })
+        for (auto* n : { &nodeGray, &nodeColor, &nodeBlob, &nodeFftColor })
         {
             addAndMakeVisible(n);
             n->onClick = [this](VisualizerMode m)
@@ -152,12 +151,10 @@ public:
         nodeGray.setActive     (m == VisualizerMode::SYNTH_GRAY);
         nodeColor.setActive    (m == VisualizerMode::SYNTH_COLOR);
         nodeBlob.setActive     (m == VisualizerMode::SYNTH_BLOB);
-        nodeFftGray.setActive  (m == VisualizerMode::SYNTH_FFT_GRAY);
         nodeFftColor.setActive (m == VisualizerMode::SYNTH_FFT_COLOR);
         nodeGray.setShowEye     (m == VisualizerMode::SYNTH_GRAY);
         nodeColor.setShowEye    (m == VisualizerMode::SYNTH_COLOR);
         nodeBlob.setShowEye     (m == VisualizerMode::SYNTH_BLOB);
-        nodeFftGray.setShowEye  (m == VisualizerMode::SYNTH_FFT_GRAY);
         nodeFftColor.setShowEye (m == VisualizerMode::SYNTH_FFT_COLOR);
     }
 
@@ -197,8 +194,8 @@ public:
                        rightX_, prelimLabelY, rightW_, 14,
                        juce::Justification::centred);
 
-        // "Spectral analysis (FFT)" label sits above nodeFftGray
-        const int fftLabelY = nodeFftGray.getY() - 16;
+        // "Spectral analysis (FFT)" label sits above nodeFftColor
+        const int fftLabelY = nodeFftColor.getY() - 16;
         if (fftLabelY >= 0)
             g.drawText("Spectral analysis (FFT)",
                        rightX_, fftLabelY, rightW_, 14,
@@ -254,14 +251,13 @@ public:
         //   nodeColor (28px)
         //   nodeBlob  (28px)
         //   [16 px: "Spectral analysis (FFT)" label – drawn in paint()]
-        //   nodeFftGray  (28px)
         //   nodeFftColor (28px)
         constexpr int kNH  = 28;   // node height
         constexpr int kNG  = 5;    // gap between consecutive nodes
         constexpr int kLH  = 16;   // section label height
         constexpr int kSG  = 14;   // extra gap between the two sections
-        // Total content height: 2 labels + 5 nodes + 4 intra-node gaps + 1 section gap
-        const int totalH = 2 * kLH + 5 * kNH + 4 * kNG + kSG;
+        // Total content height: 2 labels + 4 nodes + 3 intra-node gaps + 1 section gap
+        const int totalH = 2 * kLH + 4 * kNH + 3 * kNG + kSG;
         // Centre the block vertically in the right column
         int ny = juce::jmax(4, (H - totalH) / 2);
 
@@ -271,7 +267,6 @@ public:
         nodeBlob.setBounds (rightX_, ny, rightW_, kNH);   ny += kNH + kSG;
 
         ny += kLH;   // space for "Spectral analysis (FFT)" label
-        nodeFftGray.setBounds (rightX_, ny, rightW_, kNH);   ny += kNH + kNG;
         nodeFftColor.setBounds(rightX_, ny, rightW_, kNH);
     }
 
@@ -310,7 +305,7 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   fftSmoothingAttach;
 
     // Pipeline output nodes
-    PipelineNodeComponent nodeGray, nodeColor, nodeBlob, nodeFftGray, nodeFftColor;
+    PipelineNodeComponent nodeGray, nodeColor, nodeBlob, nodeFftColor;
 
     // Cached column geometry — updated by computeColumns() in paint() / resized()
     mutable int leftX_  = 0;

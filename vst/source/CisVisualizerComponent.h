@@ -101,13 +101,10 @@ private:
      * The KissFFT config is cached in fftCfg_ and only reallocated when
      * cisPixelsCount changes.
      *
-     * Called at most once per timer tick (30 fps) from paintFftGrayMode()
-     * or paintFftColorMode() — always on the UI/message thread.
+     * Called at most once per timer tick (30 fps) from paintFftColorMode()
+     * — always on the UI/message thread.
      */
     void computeFftMagnitudes();
-
-    /** Render the FFT spectrum as a monochromatic bar chart (gray scale). */
-    void paintFftGrayMode (juce::Graphics& g, int W, int H);
 
     /** Render the FFT spectrum with per-bin HSV colour mapping
      *  (blue = low frequency, red = high frequency). */
