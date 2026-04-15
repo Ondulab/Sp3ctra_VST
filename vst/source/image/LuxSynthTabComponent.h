@@ -69,6 +69,43 @@ public:
         gammaValueAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
             apvts, "luxsynthGammaValue", gammaSlider));
 
+        // ── BLOB DETECTION — LuxSynth-only params (isolated from LuxStral) ──
+        // Row 5: Threshold
+        initLabel(blobThreshLabel, "Blob Thr.");
+        blobThreshSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        blobThreshSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                         50, Sp3ctraTheme::kControlH);
+        addAndMakeVisible(blobThreshSlider);
+        blobThreshAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, "lxBlobThreshold", blobThreshSlider));
+
+        // Row 6: Min Width
+        initLabel(blobMinWidthLabel, "Min Width");
+        blobMinWidthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        blobMinWidthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                           50, Sp3ctraTheme::kControlH);
+        addAndMakeVisible(blobMinWidthSlider);
+        blobMinWidthAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, "lxBlobMinWidth", blobMinWidthSlider));
+
+        // Row 7: Merge Gap
+        initLabel(blobMergeGapLabel, "Merge Gap");
+        blobMergeGapSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        blobMergeGapSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                            50, Sp3ctraTheme::kControlH);
+        addAndMakeVisible(blobMergeGapSlider);
+        blobMergeGapAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, "lxBlobMergeGap", blobMergeGapSlider));
+
+        // Row 8: Color Split
+        initLabel(blobColorSplitLabel, "Color Split");
+        blobColorSplitSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        blobColorSplitSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                              50, Sp3ctraTheme::kControlH);
+        addAndMakeVisible(blobColorSplitSlider);
+        blobColorSplitAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, "lxBlobColorSplit", blobColorSplitSlider));
+
         // ── All output nodes ──────────────────────────────────────────────
         for (auto* n : { &nodeGray, &nodeColor, &nodeBlob, &nodeFftGray, &nodeFftColor })
         {
@@ -98,8 +135,17 @@ public:
     void paint(juce::Graphics& g) override
     {
         const auto accent = juce::Colour(0xffe08844);
+        const auto blobAccent = juce::Colour(0xffd07040); // SYNTH_BLOB colour
         const int pad = 12;
         const int stageW = getWidth() - 2 * pad;
+
+        // ── Blob Detection section header (between Gamma row and blob sliders) ──
+        // Draws at row 4 gap — between row 3 bottom and row 4 top
+        const int blobSectionY = rowY(3) + Sp3ctraTheme::kControlH + 2;
+        g.setColour(blobAccent.withAlpha(0.55f));
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
+        g.drawText("──  BLOB DETECTION  ──", pad, blobSectionY, stageW, 12,
+                   juce::Justification::centred);
 
         // Preliminary outputs label
         g.setColour(accent.withAlpha(0.6f));
@@ -131,6 +177,13 @@ public:
         // Row 3: Gamma (slider — always active)
         placeSliderRow(gammaValueLabel, gammaSlider, 3);
 
+        // Rows 4-7: Blob Detection sliders
+        // (row 4 section header is drawn in paint() in the gap between row 3 and row 4)
+        placeSliderRow(blobThreshLabel,    blobThreshSlider,    4);
+        placeSliderRow(blobMinWidthLabel,  blobMinWidthSlider,  5);
+        placeSliderRow(blobMergeGapLabel,  blobMergeGapSlider,  6);
+        placeSliderRow(blobColorSplitLabel, blobColorSplitSlider, 7);
+
         // Preliminary nodes — stacked vertically, full stdNodeW each
         constexpr int nodeH   = 28;
         constexpr int nodeGap = 6;
@@ -148,19 +201,28 @@ public:
 private:
     Sp3ctraAudioProcessor& processor;
 
-    // Labels
+    // Labels — image pipeline
     juce::Label sourceLabel, negativeLabel, dcBlockLabel, gammaValueLabel;
+    // Labels — blob detection (LuxSynth-only, isolated from LuxStral)
+    juce::Label blobThreshLabel, blobMinWidthLabel, blobMergeGapLabel, blobColorSplitLabel;
 
-    // Controls
+    // Controls — image pipeline
     juce::ComboBox     sourceCombo;
     juce::ToggleButton negativeToggle, dcBlockToggle;
     juce::Slider       gammaSlider;
+    // Controls — blob detection
+    juce::Slider blobThreshSlider, blobMinWidthSlider, blobMergeGapSlider, blobColorSplitSlider;
 
-    // Attachments
+    // Attachments — image pipeline
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> sourceAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   negativeAttach,
                                                                              dcBlockAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   gammaValueAttach;
+    // Attachments — blob detection
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   blobThreshAttach,
+                                                                             blobMinWidthAttach,
+                                                                             blobMergeGapAttach,
+                                                                             blobColorSplitAttach;
 
     // Pipeline output nodes
     PipelineNodeComponent nodeGray, nodeColor, nodeBlob, nodeFftGray, nodeFftColor;
@@ -182,8 +244,9 @@ private:
         return 6 + row * (Sp3ctraTheme::kControlH + 14);
     }
 
-    // 4 control rows (0-3), then 38 px gap before preliminary output nodes
-    int preNodeY() const { return rowY(4) + 38; }
+    // 8 control rows (0-7: 4 image-pipeline + 4 blob-detection),
+    // then 38 px gap before preliminary output nodes
+    int preNodeY() const { return rowY(8) + 38; }
     // 3 stacked nodes: 3 × 28 + 2 × 6 = 96, plus 20 for label spacing
     int fftNodeY() const { return preNodeY() + 96 + 20; }
 
