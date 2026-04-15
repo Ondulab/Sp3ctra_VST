@@ -282,19 +282,22 @@ bool FrameSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const ui
     {
         if (atomicState.startRecCmd[i].exchange(false, std::memory_order_acq_rel))
         {
-            if (!slots[i].isAllocated())
             {
-                slots[i].allocate();
-                log_info("FS", "Slot %d: buffer allocated (%d frames × %zu B)",
-                         i, FrameSamplerConstants::MAX_FRAMES_PER_SLOT,
-                         sizeof(CapturedFrame));
-            }
-            else
-            {
-                slots[i].frame_count = 0;
-                slots[i].play_head   = 0;
-                slots[i].duration_us = 0;
-                slots[i].has_content = false;
+                std::lock_guard<std::mutex> lk(slotsMutex_);
+                if (!slots[i].isAllocated())
+                {
+                    slots[i].allocate();
+                    log_info("FS", "Slot %d: buffer allocated (%d frames × %zu B)",
+                             i, FrameSamplerConstants::MAX_FRAMES_PER_SLOT,
+                             sizeof(CapturedFrame));
+                }
+                else
+                {
+                    slots[i].frame_count = 0;
+                    slots[i].play_head   = 0;
+                    slots[i].duration_us = 0;
+                    slots[i].has_content = false;
+                }
             }
             activeRecSlot.store(i, std::memory_order_release);
             recStartTimeUs = currentTimeUs();
@@ -305,6 +308,7 @@ bool FrameSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const ui
         {
             if (activeRecSlot.load(std::memory_order_relaxed) == i)
             {
+                std::lock_guard<std::mutex> lk(slotsMutex_);
                 slots[i].has_content = (slots[i].frame_count > 0);
                 slots[i].duration_us = currentTimeUs() - recStartTimeUs;
                 activeRecSlot.store(-1, std::memory_order_release);
@@ -338,45 +342,55 @@ bool FrameSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const ui
     const int gate = seqGateSlot.load(std::memory_order_relaxed);
     if (gate >= 0 && gate != recSlot) return false; // gated out — wrong step
 
-    FrameSlot& slot = slots[recSlot];
-    if (!slot.isAllocated()) return false;
-
-    // Check max duration / buffer overflow
-    const uint64_t elapsed = currentTimeUs() - recStartTimeUs;
-    const uint64_t maxUs   = static_cast<uint64_t>(maxDurationS.load() * 1e6f);
-
-    if (elapsed >= maxUs || slot.frame_count >= slot.capacity)
+    // ── Write frame data under slotsMutex_ ───────────────────────────────
+    // slotsMutex_ prevents sampleSpectralForTimeline (message thread) from
+    // reading slot.frames while this function frees/reallocates or appends
+    // to the CapturedFrame[] array.  The lock is held only for the duration
+    // of the frame-write itself to minimise contention at high frame rates.
+    int bytes = 0;
     {
-        slot.has_content = (slot.frame_count > 0);
-        slot.duration_us = elapsed;
-        activeRecSlot.store(-1, std::memory_order_release);
-        // Transition to IDLE (overflow — Non-RT write to atomic is safe)
-        atomicState.slotState[recSlot].store(static_cast<int>(SlotState::IDLE),
-                                              std::memory_order_release);
-        log_info("FS", "Slot %d: overflow — %d frames, %.2f s",
-                 recSlot, slot.frame_count,
-                 static_cast<double>(elapsed) / 1e6);
-        return false;
+        std::lock_guard<std::mutex> lk(slotsMutex_);
+
+        FrameSlot& slot = slots[recSlot];
+        if (!slot.isAllocated()) return false;
+
+        // Check max duration / buffer overflow
+        const uint64_t elapsed = currentTimeUs() - recStartTimeUs;
+        const uint64_t maxUs   = static_cast<uint64_t>(maxDurationS.load() * 1e6f);
+
+        if (elapsed >= maxUs || slot.frame_count >= slot.capacity)
+        {
+            slot.has_content = (slot.frame_count > 0);
+            slot.duration_us = elapsed;
+            activeRecSlot.store(-1, std::memory_order_release);
+            // Transition to IDLE (overflow — Non-RT write to atomic is safe)
+            atomicState.slotState[recSlot].store(static_cast<int>(SlotState::IDLE),
+                                                  std::memory_order_release);
+            log_info("FS", "Slot %d: overflow — %d frames, %.2f s",
+                     recSlot, slot.frame_count,
+                     static_cast<double>(elapsed) / 1e6);
+            return false;
+        }
+
+        // Write the frame
+        CapturedFrame& frame = slot.frames[slot.frame_count];
+        frame.timestamp_us = elapsed;
+        frame.line_id      = line_id;
+        frame.pixel_count  = pixel_count;
+
+        bytes = std::min(static_cast<int>(pixel_count),
+                         FrameSamplerConstants::MAX_PIXELS);
+        std::memcpy(frame.R, R, static_cast<size_t>(bytes));
+        std::memcpy(frame.G, G, static_cast<size_t>(bytes));
+        std::memcpy(frame.B, B, static_cast<size_t>(bytes));
+
+        ++slot.frame_count;
     }
-
-    // Write the frame
-    CapturedFrame& frame = slot.frames[slot.frame_count];
-    frame.timestamp_us = elapsed;
-    frame.line_id      = line_id;
-    frame.pixel_count  = pixel_count;
-
-    const int bytes = std::min(static_cast<int>(pixel_count),
-                               FrameSamplerConstants::MAX_PIXELS);
-    std::memcpy(frame.R, R, static_cast<size_t>(bytes));
-    std::memcpy(frame.G, G, static_cast<size_t>(bytes));
-    std::memcpy(frame.B, B, static_cast<size_t>(bytes));
-
-    ++slot.frame_count;
 
     // ── Write RAW incoming frame to sampler snapshot during recording ─────
     // This ensures Source=Sampler mode can read the live incoming data while
     // a slot is recording (the sampler output reflects the incoming stream).
-    if (audioBuffers_ != nullptr)
+    if (audioBuffers_ != nullptr && bytes > 0)
     {
         audio_image_buffers_snapshot_sampler(audioBuffers_, R, G, B, bytes);
     }
@@ -517,7 +531,9 @@ void FrameSampler::uiClearSlot(int slotIndex) noexcept
     atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::IDLE),
                                             std::memory_order_release);
 
-    // Clear the slot data (Non-RT: heap free allowed here)
+    // Clear the slot data under slotsMutex_ so that sampleSpectralForTimeline
+    // (message thread) cannot access slot.frames while clear() frees it.
+    std::lock_guard<std::mutex> lk(slotsMutex_);
     slots[slotIndex].clear();
 }
 
@@ -577,7 +593,10 @@ void FrameSampler::clearSlot(int i)
     }
 
     atomicState.slotState[i].store(static_cast<int>(SlotState::IDLE));
-    slots[i].clear();
+    {
+        std::lock_guard<std::mutex> lk(slotsMutex_);
+        slots[i].clear();
+    }
     log_info("FS", "Slot %d cleared", i);
 }
 
@@ -599,18 +618,20 @@ void FrameSampler::copySlotTo(int srcIdx, int dstIdx)
     if (dstIdx < 0 || dstIdx >= FrameSamplerConstants::NUM_SLOTS) return;
     if (srcIdx == dstIdx) return;
 
+    // Stop any ongoing activity on the destination (atomics only — no lock needed)
+    atomicState.slotState[dstIdx].store(static_cast<int>(SlotState::IDLE),
+                                        std::memory_order_release);
+    if (atomicState.activePlaySlot.load(std::memory_order_acquire) == dstIdx)
+        atomicState.activePlaySlot.store(-1, std::memory_order_release);
+
+    std::lock_guard<std::mutex> lk(slotsMutex_);
+
     const FrameSlot& src = slots[srcIdx];
     if (!src.has_content || src.frame_count == 0)
     {
         log_warning("FS", "copySlotTo: source slot %d has no content", srcIdx);
         return;
     }
-
-    // Stop any ongoing activity on the destination
-    atomicState.slotState[dstIdx].store(static_cast<int>(SlotState::IDLE),
-                                        std::memory_order_release);
-    if (atomicState.activePlaySlot.load(std::memory_order_acquire) == dstIdx)
-        atomicState.activePlaySlot.store(-1, std::memory_order_release);
 
     FrameSlot& dst = slots[dstIdx];
     dst.allocate(); // resets dst.frame_count to 0, keeps existing heap if already allocated
@@ -625,7 +646,7 @@ void FrameSampler::copySlotTo(int srcIdx, int dstIdx)
     std::strncpy(dst.label, src.label, sizeof(dst.label) - 1);
     dst.label[sizeof(dst.label) - 1] = '\0';
 
-    // Copy play parameters
+    // Copy play parameters (atomic setters — no lock needed)
     setSlotStartFrac (dstIdx, getSlotStartFrac (srcIdx));
     setSlotEndFrac   (dstIdx, getSlotEndFrac   (srcIdx));
     setSlotSpeed     (dstIdx, getSlotSpeed      (srcIdx));
@@ -748,36 +769,40 @@ bool FrameSampler::saveToFile(const juce::File& file) const
     out.write(&hdr, sizeof(hdr));
 
     // ── Slot blocks ──────────────────────────────────────────────────────
-    for (int s = 0; s < NUM_SLOTS; ++s)
     {
-        const FrameSlot& slot = slots[s];
-
-        FsmpSlotHeader shdr {};
-        shdr.slot_index  = static_cast<uint8_t>(s);
-        shdr.has_content = slot.has_content ? 0x01u : 0x00u;
-        shdr.frame_count = static_cast<uint32_t>(slot.frame_count);
-        shdr.duration_us = slot.duration_us;
-        std::strncpy(shdr.label, slot.label, 63);
-        shdr.label[63]   = '\0';
-        shdr.slot_crc32  = crc32_compute(reinterpret_cast<const uint8_t*>(&shdr),
-                                          offsetof(FsmpSlotHeader, slot_crc32));
-        out.write(&shdr, sizeof(shdr));
-
-        if (!slot.has_content || slot.frame_count == 0 || !slot.isAllocated())
-            continue;
-
-        for (int f = 0; f < slot.frame_count; ++f)
+        std::lock_guard<std::mutex> lk(slotsMutex_);
+        for (int s = 0; s < NUM_SLOTS; ++s)
         {
-            const CapturedFrame& fr = slot.frames[f];
-            const uint32_t psize    = sizeof(fr.line_id) + sizeof(fr.pixel_count)
-                                      + 3u * static_cast<uint32_t>(fr.pixel_count);
-            FsmpFrameHeader fhdr { fr.timestamp_us, psize };
-            out.write(&fhdr,          sizeof(fhdr));
-            out.write(&fr.line_id,    sizeof(fr.line_id));
-            out.write(&fr.pixel_count,sizeof(fr.pixel_count));
-            out.write(fr.R, fr.pixel_count);
-            out.write(fr.G, fr.pixel_count);
-            out.write(fr.B, fr.pixel_count);
+            const FrameSlot& slot = slots[s];
+
+            FsmpSlotHeader shdr {};
+            shdr.slot_index  = static_cast<uint8_t>(s);
+            shdr.has_content = slot.has_content ? 0x01u : 0x00u;
+            shdr.frame_count = static_cast<uint32_t>(slot.frame_count);
+            shdr.duration_us = slot.duration_us;
+            std::strncpy(shdr.label, slot.label, 63);
+            shdr.label[63]   = '\0';
+            shdr.slot_crc32  = crc32_compute(reinterpret_cast<const uint8_t*>(&shdr),
+                                              offsetof(FsmpSlotHeader, slot_crc32));
+            out.write(&shdr, sizeof(shdr));
+
+            if (!slot.has_content || slot.frame_count == 0 || !slot.isAllocated())
+                continue;
+
+            const int fc = slot.frame_count; // snapshot under lock
+            for (int f = 0; f < fc; ++f)
+            {
+                const CapturedFrame& fr = slot.frames[f];
+                const uint32_t psize    = sizeof(fr.line_id) + sizeof(fr.pixel_count)
+                                          + 3u * static_cast<uint32_t>(fr.pixel_count);
+                FsmpFrameHeader fhdr { fr.timestamp_us, psize };
+                out.write(&fhdr,          sizeof(fhdr));
+                out.write(&fr.line_id,    sizeof(fr.line_id));
+                out.write(&fr.pixel_count,sizeof(fr.pixel_count));
+                out.write(fr.R, fr.pixel_count);
+                out.write(fr.G, fr.pixel_count);
+                out.write(fr.B, fr.pixel_count);
+            }
         }
     }
 
@@ -855,37 +880,61 @@ bool FrameSampler::loadFromFile(const juce::File& file)
         const int idx = static_cast<int>(shdr.slot_index);
         if (idx < 0 || idx >= NUM_SLOTS) continue;
 
-        slots[idx].clear();
-        if (!shdr.has_content || shdr.frame_count == 0) continue;
-
-        slots[idx].allocate();
-        slots[idx].has_content = true;
-        slots[idx].duration_us = shdr.duration_us;
-        std::strncpy(slots[idx].label, shdr.label, 63);
-        slots[idx].label[63] = '\0';
-
+        // Read frame data into a local staging buffer so that slotsMutex_ is
+        // held only during the final copy into slots[], not during I/O.
         const int toLoad = static_cast<int>(
             std::min(shdr.frame_count, static_cast<uint32_t>(MAX_FRAMES_PER_SLOT)));
 
-        for (int f = 0; f < toLoad; ++f)
+        // Allocate staging buffer on the heap to avoid large stack frames.
+        std::vector<CapturedFrame> staging;
+        bool loadOk = false;
+
+        if (shdr.has_content && shdr.frame_count > 0)
         {
-            FsmpFrameHeader fhdr {};
-            if (in.read(&fhdr, sizeof(fhdr)) != sizeof(fhdr)) break;
+            staging.resize(static_cast<size_t>(toLoad));
+            int loaded = 0;
+            for (int f = 0; f < toLoad; ++f)
+            {
+                FsmpFrameHeader fhdr {};
+                if (in.read(&fhdr, sizeof(fhdr)) != sizeof(fhdr)) break;
 
-            CapturedFrame& fr = slots[idx].frames[f];
-            fr.timestamp_us = fhdr.timestamp_us;
+                CapturedFrame& fr = staging[static_cast<size_t>(f)];
+                fr.timestamp_us = fhdr.timestamp_us;
 
-            uint32_t lid = 0; uint16_t pc = 0;
-            in.read(&lid, sizeof(lid));
-            in.read(&pc,  sizeof(pc));
-            fr.line_id    = lid;
-            fr.pixel_count = pc;
+                uint32_t lid = 0; uint16_t pc = 0;
+                in.read(&lid, sizeof(lid));
+                in.read(&pc,  sizeof(pc));
+                fr.line_id     = lid;
+                fr.pixel_count = pc;
 
-            const int bytes = std::min(static_cast<int>(pc), MAX_PIXELS);
-            in.read(fr.R, bytes);
-            in.read(fr.G, bytes);
-            in.read(fr.B, bytes);
-            ++slots[idx].frame_count;
+                const int bytes = std::min(static_cast<int>(pc), MAX_PIXELS);
+                in.read(fr.R, bytes);
+                in.read(fr.G, bytes);
+                in.read(fr.B, bytes);
+                ++loaded;
+            }
+            staging.resize(static_cast<size_t>(loaded));
+            loadOk = (loaded > 0);
+        }
+
+        // Commit to the slot under slotsMutex_ so sampleSpectralForTimeline
+        // (message thread) cannot read a partially-initialised slot.
+        {
+            std::lock_guard<std::mutex> lk(slotsMutex_);
+            slots[idx].clear();
+            if (!loadOk) continue;
+
+            slots[idx].allocate();
+            slots[idx].has_content = true;
+            slots[idx].duration_us = shdr.duration_us;
+            std::strncpy(slots[idx].label, shdr.label, 63);
+            slots[idx].label[63] = '\0';
+
+            const int count = juce::jmin(static_cast<int>(staging.size()),
+                                         slots[idx].capacity);
+            std::memcpy(slots[idx].frames.get(), staging.data(),
+                        static_cast<size_t>(count) * sizeof(CapturedFrame));
+            slots[idx].frame_count = count;
         }
     }
 
@@ -1562,6 +1611,10 @@ void FrameSampler::sampleBrightnessForTimeline(int    slotIdx,
         || outBrightness == nullptr || count <= 0)
         return;
 
+    // slotsMutex_ prevents a concurrent clear() / allocate() from freeing or
+    // reallocating slot.frames while this function reads from it.
+    std::lock_guard<std::mutex> lk(slotsMutex_);
+
     const FrameSlot& slot = slots[slotIdx];
     if (!slot.has_content || slot.frame_count == 0 || !slot.isAllocated())
     {
@@ -1570,12 +1623,15 @@ void FrameSampler::sampleBrightnessForTimeline(int    slotIdx,
         return;
     }
 
+    // Snapshot frame_count once so the upper bound is consistent throughout
+    // the loop even if the UDP thread increments it concurrently.
+    const int fc = slot.frame_count;
+
     // For each timeline column, pick one frame and average 8 evenly-spaced
     // pixels.  Total cost: O(8 * count) — safe from the message thread.
     for (int k = 0; k < count; ++k)
     {
-        const int frameIdx = juce::jlimit(0, slot.frame_count - 1,
-                                          k * slot.frame_count / count);
+        const int frameIdx = juce::jlimit(0, fc - 1, k * fc / count);
         const CapturedFrame& f = slot.frames[frameIdx];
 
         const int pc   = juce::jlimit(1, FrameSamplerConstants::MAX_PIXELS,
@@ -1610,6 +1666,13 @@ void FrameSampler::sampleSpectralForTimeline(int    slotIdx,
         || outBass == nullptr || outTreble == nullptr || count <= 0)
         return;
 
+    // slotsMutex_ prevents a concurrent clear() / allocate() from freeing or
+    // reallocating slot.frames while this function reads from it.
+    // Root cause of the EXC_BAD_ACCESS crash: frames.reset() was called on
+    // another thread (UDP start-rec or UI clear) while this function held a
+    // stale register-cached pointer to the freed CapturedFrame[] allocation.
+    std::lock_guard<std::mutex> lk(slotsMutex_);
+
     const FrameSlot& slot = slots[slotIdx];
     if (!slot.has_content || slot.frame_count == 0 || !slot.isAllocated())
     {
@@ -1618,12 +1681,15 @@ void FrameSampler::sampleSpectralForTimeline(int    slotIdx,
         return;
     }
 
-    // For each column pick one representative frame and sample 4 pixels
-    // from each half.  O(8 * count) — safe on the message thread.
+    // Snapshot frame_count once so every frameIdx computation in the loop uses
+    // a consistent upper bound even if the UDP thread increments it concurrently.
+    const int fc = slot.frame_count;
+
+    // For each column pick one representative frame and sample pixels from
+    // each half.  O(~512 * 8) — safe on the message thread.
     for (int k = 0; k < count; ++k)
     {
-        const int frameIdx = juce::jlimit(0, slot.frame_count - 1,
-                                          k * slot.frame_count / count);
+        const int frameIdx = juce::jlimit(0, fc - 1, k * fc / count);
         const CapturedFrame& f = slot.frames[frameIdx];
         const int pc   = juce::jlimit(2, FrameSamplerConstants::MAX_PIXELS,
                                       static_cast<int>(f.pixel_count));
