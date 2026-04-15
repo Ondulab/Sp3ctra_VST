@@ -7,11 +7,11 @@ extern "C"
     #include "core/context.h"
     #include "config/config_loader.h"
     #include "utils/logger.h"
-    #include "luxstral/synth_luxstral.h"          // synth_IfftInit / synth_luxstral_cleanup
-    #include "luxstral/synth_luxstral_threading.h" // synth_shutdown_thread_pool
-    #include "luxstral/synth_luxstral_runtime.h"   // synth_runtime_free_buffers
-    #include "luxstral/vst_adapters.h"             // luxstral_init_audio_buffers / luxstral_init_callback_sync
-    #include "luxstral/wave_generation.h"          // request_frequency_reinit / reset_frequency_reinit_state
+    #include "synthesis/luxstral/synth_luxstral.h"          // synth_IfftInit / synth_luxstral_cleanup
+    #include "synthesis/luxstral/synth_luxstral_threading.h" // synth_shutdown_thread_pool
+    #include "synthesis/luxstral/synth_luxstral_runtime.h"   // synth_runtime_free_buffers
+    #include "synthesis/luxstral/vst_adapters.h"             // luxstral_init_audio_buffers / luxstral_init_callback_sync
+    #include "synthesis/luxstral/wave_generation.h"          // request_frequency_reinit / reset_frequency_reinit_state
 }
 
 // ============================================================================

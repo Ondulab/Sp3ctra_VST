@@ -9,8 +9,8 @@
 
 #include "image_preprocessor.h"
 #include "config/config_instrument.h"
-#include "luxstral/synth_luxstral_stereo.h"
-#include "luxstral/synth_luxstral_math.h"
+#include "../synthesis/luxstral/synth_luxstral_stereo.h"
+#include "../synthesis/luxstral/synth_luxstral_math.h"
 #include "config/config_loader.h"
 #include "utils/logger.h"
 #include <string.h>

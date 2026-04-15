@@ -99,7 +99,7 @@ public:
 
         // Label
         g.setColour(active ? juce::Colours::white : nodeColour.brighter(0.3f));
-        g.setFont(juce::Font(Sp3ctraTheme::kFontBadge));
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
         g.drawText(nodeLabel, b, juce::Justification::centred);
     }
 

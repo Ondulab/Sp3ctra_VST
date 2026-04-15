@@ -99,30 +99,30 @@ target_sources(Sp3ctraVST
         source/sampler/SamplerPageComponent.h
         
         # 🎵 PHASE 3: LuxStral Synthesis Engine (VST-adapted)
-        source/luxstral/vst_adapters.cpp
-        source/luxstral/vst_adapters.h
-        source/luxstral/synth_luxstral.c
-        source/luxstral/synth_luxstral.h
-        source/luxstral/synth_luxstral_algorithms.c
-        source/luxstral/synth_luxstral_algorithms.h
-        source/luxstral/synth_luxstral_math.c
-        source/luxstral/synth_luxstral_math.h
-        source/luxstral/synth_luxstral_math_neon.c
-        source/luxstral/synth_luxstral_runtime.c
-        source/luxstral/synth_luxstral_runtime.h
-        source/luxstral/synth_luxstral_state.c
-        source/luxstral/synth_luxstral_state.h
-        source/luxstral/synth_luxstral_stereo.c
-        source/luxstral/synth_luxstral_stereo.h
-        source/luxstral/synth_luxstral_threading.c
-        source/luxstral/synth_luxstral_threading.h
-        source/luxstral/synth_luxstral_threading_rt.c
-        source/luxstral/wave_generation.c
-        source/luxstral/wave_generation.h
-        source/luxstral/pow_approx.c
-        source/luxstral/pow_approx.h
-        source/luxstral/strokeforge.c
-        source/luxstral/strokeforge.h
+        source/synthesis/luxstral/vst_adapters.cpp
+        source/synthesis/luxstral/vst_adapters.h
+        source/synthesis/luxstral/synth_luxstral.c
+        source/synthesis/luxstral/synth_luxstral.h
+        source/synthesis/luxstral/synth_luxstral_algorithms.c
+        source/synthesis/luxstral/synth_luxstral_algorithms.h
+        source/synthesis/luxstral/synth_luxstral_math.c
+        source/synthesis/luxstral/synth_luxstral_math.h
+        source/synthesis/luxstral/synth_luxstral_math_neon.c
+        source/synthesis/luxstral/synth_luxstral_runtime.c
+        source/synthesis/luxstral/synth_luxstral_runtime.h
+        source/synthesis/luxstral/synth_luxstral_state.c
+        source/synthesis/luxstral/synth_luxstral_state.h
+        source/synthesis/luxstral/synth_luxstral_stereo.c
+        source/synthesis/luxstral/synth_luxstral_stereo.h
+        source/synthesis/luxstral/synth_luxstral_threading.c
+        source/synthesis/luxstral/synth_luxstral_threading.h
+        source/synthesis/luxstral/synth_luxstral_threading_rt.c
+        source/synthesis/luxstral/wave_generation.c
+        source/synthesis/luxstral/wave_generation.h
+        source/synthesis/luxstral/pow_approx.c
+        source/synthesis/luxstral/pow_approx.h
+        source/synthesis/luxstral/strokeforge.c
+        source/synthesis/luxstral/strokeforge.h
 )
 
 # ✨ BRICK 1: UDP Reception - Add C sources
@@ -182,7 +182,7 @@ target_include_directories(Sp3ctraVST
         ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/common
         ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/luxwave
         ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/luxsynth
-        ${CMAKE_CURRENT_SOURCE_DIR}/source/luxstral
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/luxstral
         ${CMAKE_CURRENT_SOURCE_DIR}/source/framesampler
         ${CMAKE_CURRENT_SOURCE_DIR}/source/sampler
 )

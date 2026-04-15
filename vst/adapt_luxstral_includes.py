@@ -7,7 +7,7 @@ Replaces relative paths with vst_adapters.h where appropriate
 import os
 import re
 
-LUXSTRAL_DIR = "source/luxstral"
+LUXSTRAL_DIR = "source/synthesis/luxstral"
 
 # Mapping of includes to remove/replace
 INCLUDES_TO_REMOVE = [

@@ -7,9 +7,9 @@ extern "C" {
     #include "config/config_loader.h"
     #include "utils/logger.h"
     #include "utils/rt_profiler.h"
-    #include "luxstral/synth_luxstral_algorithms.h" // update_gap_limiter_coefficients()
-    #include "luxstral/vst_adapters.h"              // luxstral_are_audio_buffers_ready(), buffers
-    #include "luxstral/wave_generation.h"           // request_frequency_reinit() hot-reload
+    #include "synthesis/luxstral/synth_luxstral_algorithms.h" // update_gap_limiter_coefficients()
+    #include "synthesis/luxstral/vst_adapters.h"              // luxstral_are_audio_buffers_ready(), buffers
+    #include "synthesis/luxstral/wave_generation.h"           // request_frequency_reinit() hot-reload
 }
 // Note: synth_luxstral_threading.h / synth_luxstral_runtime.h / AudioProcessingThread.h
 // are now included transitively via Sp3ctraSharedCore.h and handled by Sp3ctraSharedCore.
