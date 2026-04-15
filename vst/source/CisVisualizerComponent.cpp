@@ -17,10 +17,96 @@ extern "C" int frame_sampler_is_playing(void);
 extern "C" int frame_sampler_is_recording(void);
 
 //==============================================================================
+// CisHoverTooltip — desktop-level floating tooltip (never clipped by parent)
+//
+// Added to the JUCE desktop via addToDesktop() so that it appears above ALL
+// plugin UI elements regardless of the CisVisualizerComponent's position in
+// the component hierarchy.  Being a top-level window it is not subject to any
+// parent paint-region clipping.
+//
+// Lifetime: owned by CisVisualizerComponent (unique_ptr). Hidden on mouseExit.
+// Thread safety: all methods called from the UI/message thread only.
+//==============================================================================
+class CisVisualizerComponent::CisHoverTooltip : public juce::Component
+{
+public:
+    CisHoverTooltip()
+    {
+        setInterceptsMouseClicks(false, false);
+        // Add as a temporary top-level window so JUCE paints it independently of
+        // any parent component clip regions.
+        addToDesktop(juce::ComponentPeer::windowIsTemporary
+                   | juce::ComponentPeer::windowIgnoresMouseClicks
+                   | juce::ComponentPeer::windowIgnoresKeyPresses);
+        setAlwaysOnTop(true);
+        setVisible(false);
+    }
+
+    ~CisHoverTooltip() override
+    {
+        removeFromDesktop();
+    }
+
+    // Show tooltip at absolute SCREEN coordinates with given content.
+    void showAt(juce::Rectangle<int> screenBounds,
+                const juce::String& title,
+                const juce::String& l2,
+                const juce::String& l3,
+                const juce::String& l4,
+                juce::Colour accent)
+    {
+        title_  = title;
+        l2_     = l2;
+        l3_     = l3;
+        l4_     = l4;
+        accent_ = accent;
+        setBounds(screenBounds);
+        setVisible(true);
+        toFront(false);
+        repaint();
+    }
+
+    void hide() { setVisible(false); }
+
+    void paint(juce::Graphics& g) override
+    {
+        const float kTW = static_cast<float>(getWidth());
+        const float kTH = static_cast<float>(getHeight());
+        constexpr float kTR = 4.f;
+
+        g.setColour(juce::Colour(0xee0d0d0d));
+        g.fillRoundedRectangle(0.f, 0.f, kTW, kTH, kTR);
+        g.setColour(accent_.withAlpha(0.90f));
+        g.drawRoundedRectangle(0.f, 0.f, kTW, kTH, kTR, 1.2f);
+
+        const int lw = getWidth() - 8;
+        const auto ti = [](int li) { return 4 + li * 16; };
+
+        g.setFont(juce::FontOptions(9.5f));
+        g.setColour(accent_.brighter(0.25f));
+        g.drawText(title_, 4, ti(0), lw, 14, juce::Justification::centredLeft, false);
+
+        g.setColour(juce::Colours::white.withAlpha(0.85f));
+        g.setFont(juce::FontOptions(8.5f));
+        g.drawText(l2_,    4, ti(1), lw, 13, juce::Justification::centredLeft, false);
+        g.drawText(l3_,    4, ti(2), lw, 13, juce::Justification::centredLeft, false);
+        g.drawText(l4_,    4, ti(3), lw, 13, juce::Justification::centredLeft, false);
+    }
+
+private:
+    juce::String title_, l2_, l3_, l4_;
+    juce::Colour accent_ { juce::Colours::white };
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CisHoverTooltip)
+};
+
+//==============================================================================
 CisVisualizerComponent::CisVisualizerComponent(Sp3ctraAudioProcessor& proc)
     : processor(proc)
 {
     startTimer(1000 / kTimerFps);
+    // Desktop-level tooltip overlay — never clipped by parent components.
+    hoverTooltip_ = std::make_unique<CisHoverTooltip>();
 }
 
 CisVisualizerComponent::~CisVisualizerComponent()
@@ -1260,58 +1346,7 @@ void CisVisualizerComponent::paintSynthBlobMode(juce::Graphics& g, int W, int H)
                    juce::Justification::centred, false);
     }
 
-    // ── Hover tooltip — drawn last so it always appears on top ────────────────
-    // Shown when the mouse is over a blob in SYNTH_BLOB mode.
-    // hoverBlobIdx_ is kept up-to-date by mouseMove() / mouseExit().
-    if (hoverBlobIdx_ >= 0 && hoverBlobIdx_ < static_cast<int>(synthBlobs_.size()))
-    {
-        const auto& blob = synthBlobs_[hoverBlobIdx_];
-
-        // ── Build info lines ────────────────────────────────────────────────
-        const juce::String line1 =
-            "Blob #" + juce::String(hoverBlobIdx_ + 1);
-        const juce::String line2 =
-            "Width:  " + juce::String(blob.endPx - blob.startPx) + " px";
-        const juce::String line3 =
-            "Peak:   " + juce::String(static_cast<int>(blob.peakIntensity * 100.f)) + "%"
-            + "  avg: " + juce::String(static_cast<int>(blob.avgIntensity * 100.f)) + "%";
-        const juce::String tempStr =
-            (blob.avgColorTemp >  0.08f) ? "Warm" :
-            (blob.avgColorTemp < -0.08f) ? "Cool" : "Neutral";
-        const juce::String line4 = "Temp:   " + tempStr;
-
-        // ── Tooltip box geometry ─────────────────────────────────────────────
-        constexpr float kTW = 148.f, kTH = 70.f, kTR = 4.f;
-        float tx = static_cast<float>(hoverPos_.x) + 14.f;
-        float ty = static_cast<float>(hoverPos_.y) - kTH * 0.5f;
-
-        // Clamp inside component bounds
-        if (tx + kTW > static_cast<float>(W)) tx = static_cast<float>(hoverPos_.x) - kTW - 10.f;
-        if (ty < 2.f)                          ty = 2.f;
-        if (ty + kTH > static_cast<float>(H)) ty = static_cast<float>(H) - kTH - 2.f;
-
-        // Background + border
-        g.setColour(juce::Colour(0xee0d0d0d));
-        g.fillRoundedRectangle(tx, ty, kTW, kTH, kTR);
-        g.setColour(blob.color.withAlpha(0.90f));
-        g.drawRoundedRectangle(tx, ty, kTW, kTH, kTR, 1.2f);
-
-        // ── Text ─────────────────────────────────────────────────────────────
-        const auto ti = [&](int lineIdx) {
-            return static_cast<int>(ty + 4.f + static_cast<float>(lineIdx) * 16.f);
-        };
-        const int lw = static_cast<int>(kTW) - 8;
-        const int lx = static_cast<int>(tx) + 4;
-
-        g.setFont(juce::FontOptions(9.5f));
-        g.setColour(blob.color.brighter(0.25f));
-        g.drawText(line1, lx, ti(0), lw, 14, juce::Justification::centredLeft, false);
-        g.setColour(juce::Colours::white.withAlpha(0.85f));
-        g.setFont(juce::FontOptions(8.5f));
-        g.drawText(line2, lx, ti(1), lw, 13, juce::Justification::centredLeft, false);
-        g.drawText(line3, lx, ti(2), lw, 13, juce::Justification::centredLeft, false);
-        g.drawText(line4, lx, ti(3), lw, 13, juce::Justification::centredLeft, false);
-    }
+    // ── Tooltip: rendered by hoverTooltip_ desktop overlay (see mouseMove) ───
 }
 
 //==============================================================================
@@ -1579,46 +1614,7 @@ void CisVisualizerComponent::paintSpctrBlobMode(juce::Graphics& g, int W, int H)
                    juce::Justification::centred, false);
     }
 
-    // ── Hover tooltip ─────────────────────────────────────────────────────────
-    if (hoverBlobIdx_ >= 0 && hoverBlobIdx_ < static_cast<int>(spctrBlobs_.size()))
-    {
-        const auto& blob = spctrBlobs_[hoverBlobIdx_];
-
-        const juce::String line1 = "Blob #" + juce::String(hoverBlobIdx_ + 1);
-        const juce::String line2 = "Width:  " + juce::String(blob.endPx - blob.startPx) + " px";
-        const juce::String line3 =
-            "Peak:   " + juce::String(static_cast<int>(blob.peakIntensity * 100.f)) + "%"
-            + "  avg: " + juce::String(static_cast<int>(blob.avgIntensity * 100.f)) + "%";
-        const juce::String tempStr =
-            (blob.avgColorTemp >  0.08f) ? "Warm" :
-            (blob.avgColorTemp < -0.08f) ? "Cool" : "Neutral";
-        const juce::String line4 = "Temp:   " + tempStr;
-
-        constexpr float kTW = 148.f, kTH = 70.f, kTR = 4.f;
-        float tx = static_cast<float>(hoverPos_.x) + 14.f;
-        float ty = static_cast<float>(hoverPos_.y) - kTH * 0.5f;
-        if (tx + kTW > static_cast<float>(W)) tx = static_cast<float>(hoverPos_.x) - kTW - 10.f;
-        if (ty < 2.f)                          ty = 2.f;
-        if (ty + kTH > static_cast<float>(H)) ty = static_cast<float>(H) - kTH - 2.f;
-
-        g.setColour(juce::Colour(0xee0d0d0d));
-        g.fillRoundedRectangle(tx, ty, kTW, kTH, kTR);
-        g.setColour(blob.color.withAlpha(0.90f));
-        g.drawRoundedRectangle(tx, ty, kTW, kTH, kTR, 1.2f);
-
-        const auto ti = [&](int li) { return static_cast<int>(ty + 4.f + static_cast<float>(li) * 16.f); };
-        const int lw = static_cast<int>(kTW) - 8;
-        const int lx = static_cast<int>(tx) + 4;
-
-        g.setFont(juce::FontOptions(9.5f));
-        g.setColour(blob.color.brighter(0.25f));
-        g.drawText(line1, lx, ti(0), lw, 14, juce::Justification::centredLeft, false);
-        g.setColour(juce::Colours::white.withAlpha(0.85f));
-        g.setFont(juce::FontOptions(8.5f));
-        g.drawText(line2, lx, ti(1), lw, 13, juce::Justification::centredLeft, false);
-        g.drawText(line3, lx, ti(2), lw, 13, juce::Justification::centredLeft, false);
-        g.drawText(line4, lx, ti(3), lw, 13, juce::Justification::centredLeft, false);
-    }
+    // ── Tooltip: rendered by hoverTooltip_ desktop overlay (see mouseMove) ───
 }
 
 //==============================================================================
@@ -1665,12 +1661,47 @@ void CisVisualizerComponent::mouseMove(const juce::MouseEvent& event)
     }
 
     hoverBlobIdx_ = bestIdx;
+
+    // ── Show desktop-level tooltip overlay ────────────────────────────────────
+    // The tooltip is a top-level window (addToDesktop) so it is NEVER clipped
+    // by parent component bounds — it appears above all plugin UI elements.
+    if (hoverTooltip_)
+    {
+        if (hoverBlobIdx_ >= 0 && hoverBlobIdx_ < static_cast<int>(blobs.size()))
+        {
+            const auto& blob = blobs[hoverBlobIdx_];
+            const juce::String line1 = "Blob #" + juce::String(hoverBlobIdx_ + 1);
+            const juce::String line2 = "Width:  " + juce::String(blob.endPx - blob.startPx) + " px";
+            const juce::String line3 =
+                "Peak:   " + juce::String(static_cast<int>(blob.peakIntensity * 100.f)) + "%"
+                + "  avg: " + juce::String(static_cast<int>(blob.avgIntensity * 100.f)) + "%";
+            const juce::String tempStr =
+                (blob.avgColorTemp >  0.08f) ? "Warm" :
+                (blob.avgColorTemp < -0.08f) ? "Cool" : "Neutral";
+            const juce::String line4 = "Temp:   " + tempStr;
+
+            // Convert component-local cursor pos to absolute screen coords.
+            // No clamping needed — the overlay is positioned on the desktop.
+            constexpr int kTW = 148, kTH = 70;
+            const auto screenPos = localPointToGlobal(hoverPos_);
+            int tx = screenPos.x + 14;
+            int ty = screenPos.y - kTH / 2;
+
+            hoverTooltip_->showAt({ tx, ty, kTW, kTH },
+                                  line1, line2, line3, line4, blob.color);
+        }
+        else
+        {
+            hoverTooltip_->hide();
+        }
+    }
 }
 
 //==============================================================================
 void CisVisualizerComponent::mouseExit(const juce::MouseEvent&)
 {
     hoverBlobIdx_ = -1;
+    if (hoverTooltip_) hoverTooltip_->hide();
 }
 
 //==============================================================================
