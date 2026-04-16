@@ -1,13 +1,13 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
-#include "../framesampler/FrameSampler.h"
+#include "../luxsampler/LuxSampler.h"
 #include "SlotTimelineComponent.h"
 
 class Sp3ctraAudioProcessor;
 
 /**
- * @brief Edit panel for the currently selected FrameSampler slot.
+ * @brief Edit panel for the currently selected LuxSampler slot.
  *
  * Layout — two vertical columns inside a full-width zone:
  *   Left  (~63 %):
@@ -19,8 +19,8 @@ class Sp3ctraAudioProcessor;
  *     Loop     — four radio-style buttons (NONE / LOOP / INV / PING)
  *     Resume   — toggle: resume from last stopped position
  *
- * Control values are written directly to FrameSampler per-slot play params (Non-RT).
- * Values are refreshed from FrameSampler on slot switch (setSelectedSlot).
+ * Control values are written directly to LuxSampler per-slot play params (Non-RT).
+ * Values are refreshed from LuxSampler on slot switch (setSelectedSlot).
  * Button states are refreshed at ~5 Hz via internal Timer.
  */
 class SlotEditorComponent : public juce::Component,
@@ -40,7 +40,7 @@ public:
 private:
     void timerCallback() override;
 
-    /** Pull slider / resume values from FrameSampler and update UI silently. */
+    /** Pull slider / resume values from LuxSampler and update UI silently. */
     void refreshSliderValues();
 
     /** Update loop-mode button highlight to reflect current LoopMode. */

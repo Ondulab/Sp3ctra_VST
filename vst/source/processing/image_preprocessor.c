@@ -1093,7 +1093,7 @@ static int image_preprocess_color_fft(
  * Mirrors preprocess_luxstral() but uses sampler parameters:
  *   sampler_gamma, sampler_contrast_min, sampler_freeze_mode,
  *   sampler_fade_in_ms, image_sampler_opacity.
- * Called from FramePlayerThread via image_preprocess_frame_sampler().
+ * Called from FramePlayerThread via image_preprocess_lux_sampler().
  * ============================================================================ */
 
 /**
@@ -1283,7 +1283,7 @@ void preprocess_luxstral_sampler(
  * The StrokeForge blob step is re-run on the sampler notes so blob detection
  * reflects the sampler stream when a slot is playing.
  */
-int image_preprocess_frame_sampler(
+int image_preprocess_lux_sampler(
     const uint8_t *raw_r,
     const uint8_t *raw_g,
     const uint8_t *raw_b,

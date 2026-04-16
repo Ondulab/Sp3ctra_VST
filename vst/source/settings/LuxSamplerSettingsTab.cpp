@@ -1,7 +1,7 @@
-#include "FrameSamplerSettingsTab.h"
+#include "LuxSamplerSettingsTab.h"
 #include "../Sp3ctraConstants.h"
 #include "../UITheme.h"
-#include "../framesampler/FrameSampler.h"
+#include "../luxsampler/LuxSampler.h"
 
 // Note names for slot index labels (C0..B0 for REC, C1..B1 for PLAY)
 static const char* const kNoteNames[] = {
@@ -35,12 +35,12 @@ static const char* stateText(SlotState s)
 // Constructor
 // =============================================================================
 
-FrameSamplerSettingsTab::FrameSamplerSettingsTab(Sp3ctraAudioProcessor& processor)
+LuxSamplerSettingsTab::LuxSamplerSettingsTab(Sp3ctraAudioProcessor& processor)
     : audioProcessor(processor),
       apvts(processor.getAPVTS())
 {
     // ── Enable toggle ─────────────────────────────────────────────────────
-    enableLabel.setText("FrameSampler:", juce::dontSendNotification);
+    enableLabel.setText("LuxSampler:", juce::dontSendNotification);
     enableLabel.setJustificationType(juce::Justification::centredRight);
     enableLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(enableLabel);
@@ -49,7 +49,7 @@ FrameSamplerSettingsTab::FrameSamplerSettingsTab(Sp3ctraAudioProcessor& processo
     addAndMakeVisible(enableToggle);
     enableAttachment = std::make_unique<
         juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        apvts, "frameSamplerEnabled", enableToggle);
+        apvts, "luxSamplerEnabled", enableToggle);
 
     // ── MIDI Channel ──────────────────────────────────────────────────────
     midiChannelLabel.setText("MIDI Channel:", juce::dontSendNotification);
@@ -62,7 +62,7 @@ FrameSamplerSettingsTab::FrameSamplerSettingsTab(Sp3ctraAudioProcessor& processo
     addAndMakeVisible(midiChannelCombo);
     midiChannelAttachment = std::make_unique<
         juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-        apvts, "frameSamplerMidiChannel", midiChannelCombo);
+        apvts, "luxSamplerMidiChannel", midiChannelCombo);
 
     // ── Octave Offset ─────────────────────────────────────────────────────
     octaveOffsetLabel.setText("Octave Offset:", juce::dontSendNotification);
@@ -78,7 +78,7 @@ FrameSamplerSettingsTab::FrameSamplerSettingsTab(Sp3ctraAudioProcessor& processo
     addAndMakeVisible(octaveOffsetCombo);
     octaveOffsetAttachment = std::make_unique<
         juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-        apvts, "frameSamplerOctaveOffset", octaveOffsetCombo);
+        apvts, "luxSamplerOctaveOffset", octaveOffsetCombo);
 
     // ── Max Duration ──────────────────────────────────────────────────────
     maxDurationLabel.setText("Max Duration:", juce::dontSendNotification);
@@ -93,7 +93,7 @@ FrameSamplerSettingsTab::FrameSamplerSettingsTab(Sp3ctraAudioProcessor& processo
     addAndMakeVisible(maxDurationSlider);
     maxDurationAttachment = std::make_unique<
         juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "frameSamplerMaxDuration", maxDurationSlider);
+        apvts, "luxSamplerMaxDuration", maxDurationSlider);
 
     // ── Slot rows ─────────────────────────────────────────────────────────
     for (int i = 0; i < NUM_SLOTS; ++i)
@@ -123,7 +123,7 @@ FrameSamplerSettingsTab::FrameSamplerSettingsTab(Sp3ctraAudioProcessor& processo
         slotClearBtn[i].setButtonText("X");
         slotClearBtn[i].onClick = [this, i]()
         {
-            if (auto* fs = audioProcessor.getFrameSampler())
+            if (auto* fs = audioProcessor.getLuxSampler())
                 fs->clearSlot(i);
         };
         addAndMakeVisible(slotClearBtn[i]);
@@ -132,7 +132,7 @@ FrameSamplerSettingsTab::FrameSamplerSettingsTab(Sp3ctraAudioProcessor& processo
     startTimerHz(10); // Refresh at 10 Hz
 }
 
-FrameSamplerSettingsTab::~FrameSamplerSettingsTab()
+LuxSamplerSettingsTab::~LuxSamplerSettingsTab()
 {
     stopTimer();
 }
@@ -141,14 +141,14 @@ FrameSamplerSettingsTab::~FrameSamplerSettingsTab()
 // Timer callback — refresh slot displays
 // =============================================================================
 
-void FrameSamplerSettingsTab::timerCallback()
+void LuxSamplerSettingsTab::timerCallback()
 {
     updateSlotDisplays();
 }
 
-void FrameSamplerSettingsTab::updateSlotDisplays()
+void LuxSamplerSettingsTab::updateSlotDisplays()
 {
-    auto* fs = audioProcessor.getFrameSampler();
+    auto* fs = audioProcessor.getLuxSampler();
     if (fs == nullptr) return;
 
     for (int i = 0; i < NUM_SLOTS; ++i)
@@ -187,14 +187,14 @@ void FrameSamplerSettingsTab::updateSlotDisplays()
 // paint
 // =============================================================================
 
-void FrameSamplerSettingsTab::paint(juce::Graphics& g)
+void LuxSamplerSettingsTab::paint(juce::Graphics& g)
 {
     g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
 
     // Title
     g.setColour(juce::Colours::white);
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
-    g.drawText("FrameSampler", getLocalBounds().removeFromTop(30),
+    g.drawText("LuxSampler", getLocalBounds().removeFromTop(30),
                juce::Justification::centred, true);
 
     // Column headers for slot grid — position must match resized() exactly:
@@ -222,7 +222,7 @@ void FrameSamplerSettingsTab::paint(juce::Graphics& g)
 // resized
 // =============================================================================
 
-void FrameSamplerSettingsTab::resized()
+void LuxSamplerSettingsTab::resized()
 {
     const int w        = getWidth();
     const int titleH   = 30;

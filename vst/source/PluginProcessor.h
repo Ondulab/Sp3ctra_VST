@@ -3,7 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "Sp3ctraSharedCore.h"  // Process-wide singleton (UDP + image pipeline + LuxStral)
 #include "Sp3ctraConstants.h"
-#include "framesampler/FrameSampler.h"
+#include "luxsampler/LuxSampler.h"
 #include "framesequencer/FrameSequencer.h"
 
 // C headers for RT profiling
@@ -80,7 +80,7 @@ public:
     {
         return sharedCore ? sharedCore->getCore() : nullptr;
     }
-    FrameSampler*    getFrameSampler()    { return frameSampler.get();    }
+    LuxSampler*    getLuxSampler()    { return luxSampler.get();    }
     FrameSequencer*  getFrameSequencer()  { return frameSequencer.get();  }
     
     // Helper to build UDP address string from 4 bytes
@@ -124,7 +124,7 @@ private:
     // The shared_ptr keeps the singleton alive as long as this instance exists.
     // The last instance to be destroyed will tear down UDP + synthesis threads.
     std::shared_ptr<Sp3ctraSharedCore> sharedCore;
-    std::unique_ptr<FrameSampler>   frameSampler;
+    std::unique_ptr<LuxSampler>   luxSampler;
     std::unique_ptr<FrameSequencer> frameSequencer;
     
     // ✨ VST Parameters via AudioProcessorValueTreeState
@@ -141,11 +141,11 @@ private:
     static constexpr const char* PARAM_LOG_LEVEL = "logLevel";
     static constexpr const char* PARAM_VISUALIZER_MODE = "visualizerMode";
 
-    // FrameSampler parameter IDs
-    static constexpr const char* PARAM_FS_ENABLED      = "frameSamplerEnabled";
-    static constexpr const char* PARAM_FS_MIDI_CH      = "frameSamplerMidiChannel";
-    static constexpr const char* PARAM_FS_OCT_OFFSET   = "frameSamplerOctaveOffset";
-    static constexpr const char* PARAM_FS_MAX_DUR      = "frameSamplerMaxDuration";
+    // LuxSampler parameter IDs
+    static constexpr const char* PARAM_FS_ENABLED      = "luxSamplerEnabled";
+    static constexpr const char* PARAM_FS_MIDI_CH      = "luxSamplerMidiChannel";
+    static constexpr const char* PARAM_FS_OCT_OFFSET   = "luxSamplerOctaveOffset";
+    static constexpr const char* PARAM_FS_MAX_DUR      = "luxSamplerMaxDuration";
 
     // FrameSequencer parameter IDs
     static constexpr const char* PARAM_SEQ_ENABLED  = "seqEnabled";

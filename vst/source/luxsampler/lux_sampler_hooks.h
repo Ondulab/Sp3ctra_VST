@@ -1,14 +1,14 @@
-#ifndef FRAME_SAMPLER_HOOKS_H
-#define FRAME_SAMPLER_HOOKS_H
+#ifndef LUX_SAMPLER_HOOKS_H
+#define LUX_SAMPLER_HOOKS_H
 
 /*
- * frame_sampler_hooks.h
+ * lux_sampler_hooks.h
  *
- * C/C++ compatible declarations for the FrameSampler interception hooks.
- * These functions are implemented in FrameSampler.cpp (C++ side) and called
+ * C/C++ compatible declarations for the LuxSampler interception hooks.
+ * These functions are implemented in LuxSampler.cpp (C++ side) and called
  * from udpThread() in multithreading.c (C side).
  *
- * Only active in VST_MODE (standalone build has no FrameSampler).
+ * Only active in VST_MODE (standalone build has no LuxSampler).
  */
 
 #ifdef VST_MODE
@@ -23,7 +23,7 @@ extern "C" {
  * @brief Called by udpThread() after a complete CIS line has been assembled
  *        from all UDP fragments (pre-sequencer raw data).
  *
- * Implemented in FrameSampler.cpp — forwards to the active FrameSampler
+ * Implemented in LuxSampler.cpp — forwards to the active LuxSampler
  * instance for recording if a slot is in RECORDING state.
  *
  * Thread: UDP receiver thread (Non-RT). Allocation is allowed here.
@@ -34,14 +34,14 @@ extern "C" {
  * @param pixel_count Number of valid pixels (1728 @200DPI or 3456 @400DPI)
  * @param line_id     Original UDP line identifier (for debug/sync)
  */
-void frame_sampler_on_frame_assembled(const uint8_t* R,
+void lux_sampler_on_frame_assembled(const uint8_t* R,
                                        const uint8_t* G,
                                        const uint8_t* B,
                                        uint16_t       pixel_count,
                                        uint32_t       line_id);
 
 /**
- * @brief Returns non-zero if any FrameSampler slot is currently in PLAYING state.
+ * @brief Returns non-zero if any LuxSampler slot is currently in PLAYING state.
  *
  * Used by udpThread() to decide whether to bypass live UDP data to the
  * synthesis engine (AudioImageBuffers). When playing, FramePlayerThread feeds
@@ -51,10 +51,10 @@ void frame_sampler_on_frame_assembled(const uint8_t* R,
  *
  * @return 1 if playback active (bypass live feed), 0 otherwise (passthrough)
  */
-int frame_sampler_is_playing(void);
+int lux_sampler_is_playing(void);
 
 /**
- * @brief Returns non-zero if any FrameSampler slot is currently RECORDING.
+ * @brief Returns non-zero if any LuxSampler slot is currently RECORDING.
  *
  * Used by udpThread() to allow preprocessed_data writes for Source=Sampler
  * during recording.  The sampler snapshot is updated by onFrameAssembled()
@@ -64,10 +64,10 @@ int frame_sampler_is_playing(void);
  *
  * @return 1 if recording active, 0 otherwise
  */
-int frame_sampler_is_recording(void);
+int lux_sampler_is_recording(void);
 
 /**
- * @brief Returns non-zero if the FrameSampler passthrough flag is active.
+ * @brief Returns non-zero if the LuxSampler passthrough flag is active.
  *
  * Passthrough is enabled during STEP_LIVE sequencer steps and after rtStop().
  * When active, the live CIS stream should flow through all synthesis paths
@@ -77,13 +77,13 @@ int frame_sampler_is_recording(void);
  *
  * @return 1 if passthrough enabled, 0 otherwise
  */
-int frame_sampler_is_passthrough(void);
+int lux_sampler_is_passthrough(void);
 
 /**
  * @brief Returns non-zero ONLY when the sequencer is running and the current
  *        step is STEP_LIVE.
  *
- * Unlike frame_sampler_is_passthrough() (which is also true during normal
+ * Unlike lux_sampler_is_passthrough() (which is also true during normal
  * idle/stop), this flag is set exclusively by triggerStep(STEP_LIVE) and
  * cleared by triggerStep(anything_else) and rtStop().
  *
@@ -94,11 +94,11 @@ int frame_sampler_is_passthrough(void);
  *
  * @return 1 if sequencer STEP_LIVE is active, 0 otherwise
  */
-int frame_sampler_is_seq_live_step(void);
+int lux_sampler_is_seq_live_step(void);
 
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
 
 #endif /* VST_MODE */
-#endif /* FRAME_SAMPLER_HOOKS_H */
+#endif /* LUX_SAMPLER_HOOKS_H */

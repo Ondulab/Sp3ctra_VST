@@ -2,12 +2,12 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <functional>
-#include "../framesampler/FrameSampler.h"
+#include "../luxsampler/LuxSampler.h"
 
 class Sp3ctraAudioProcessor;
 
 /**
- * @brief Horizontal 12-slot display for the FrameSampler sampler page.
+ * @brief Horizontal 12-slot display for the LuxSampler sampler page.
  *
  * - 12 cells drawn via paint(), one per MIDI note C1..B1 (playback trigger).
  * - Click → selects slot for editing (fires onSlotSelected callback).
@@ -17,7 +17,7 @@ class Sp3ctraAudioProcessor;
  *     IDLE(empty)=dark grey  IDLE(content)=dark green  ARMED=orange blink
  *     RECORDING=red blink    PLAYING=bright green       SELECTED=white border
  *
- * RT safety: reads only atomic state via FrameSampler public API.
+ * RT safety: reads only atomic state via LuxSampler public API.
  * Internal 10 Hz Timer drives blink animation and repaints.
  */
 class SlotGridComponent : public juce::Component,
@@ -50,7 +50,7 @@ private:
     int  clipboardSlot = -1; // index of the slot last copied, -1 = empty
 
     // MIDI note names displayed inside each cell (C1..B1)
-    static const char* const kNoteNames[FrameSamplerConstants::NUM_SLOTS];
+    static const char* const kNoteNames[LuxSamplerConstants::NUM_SLOTS];
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SlotGridComponent)
 };

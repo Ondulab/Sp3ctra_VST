@@ -1,11 +1,11 @@
 /*
- * FrameSampler.cpp
+ * LuxSampler.cpp
  *
- * Implementation of the FrameSampler subsystem.
- * See FrameSampler.h for architecture notes.
+ * Implementation of the LuxSampler subsystem.
+ * See LuxSampler.h for architecture notes.
  */
 
-#include "FrameSampler.h"
+#include "LuxSampler.h"
 
 extern "C" {
     #include "audio_image_buffers.h"
@@ -22,40 +22,40 @@ extern "C" {
 // ============================================================================
 // Static instance (singleton for C hook access)
 // ============================================================================
-FrameSampler* FrameSampler::s_instance = nullptr;
+LuxSampler* LuxSampler::s_instance = nullptr;
 
 // ============================================================================
 // C-linkage hook functions — called from udpThread() in multithreading.c
 // ============================================================================
 extern "C"
 {
-    void frame_sampler_on_frame_assembled(const uint8_t* R,
+    void lux_sampler_on_frame_assembled(const uint8_t* R,
                                            const uint8_t* G,
                                            const uint8_t* B,
                                            uint16_t       pixel_count,
                                            uint32_t       line_id)
     {
-        if (FrameSampler::s_instance != nullptr)
-            FrameSampler::s_instance->onFrameAssembled(R, G, B, pixel_count, line_id);
+        if (LuxSampler::s_instance != nullptr)
+            LuxSampler::s_instance->onFrameAssembled(R, G, B, pixel_count, line_id);
     }
 
-    int frame_sampler_is_playing(void)
+    int lux_sampler_is_playing(void)
     {
-        if (FrameSampler::s_instance == nullptr)
+        if (LuxSampler::s_instance == nullptr)
             return 0;
-        if (!FrameSampler::s_instance->isAnySlotPlaying())
+        if (!LuxSampler::s_instance->isAnySlotPlaying())
             return 0;
         // When the sequencer holds the player (seqPlayerHeld), the
         // FramePlayerThread sleeps and does not inject frames.  The RAW
         // live stream must pass through so audio/visual remain alive.
-        if (FrameSampler::s_instance->isSeqPlayerHeld())
+        if (LuxSampler::s_instance->isSeqPlayerHeld())
             return 0;
         // FIX(routing): When the sequencer drives playback (seqControlledPlay=true),
         // FramePlayerThread is always the sole writer of AudioImageBuffers regardless
         // of the sampler Transport UI state (sampler_freeze_mode).
         // sampler_freeze_mode controls the manual Play/Hold/Stop transport ONLY —
         // it must not gate AudioImageBuffers access when the sequencer is running.
-        if (FrameSampler::s_instance->getAtomicState().seqControlledPlay.load(
+        if (LuxSampler::s_instance->getAtomicState().seqControlledPlay.load(
                 std::memory_order_relaxed))
             return 1;
 
@@ -65,26 +65,26 @@ extern "C"
         return (g_sp3ctra_config.sampler_freeze_mode == 0) ? 1 : 0;
     }
 
-    int frame_sampler_is_recording(void)
+    int lux_sampler_is_recording(void)
     {
-        if (FrameSampler::s_instance == nullptr)
+        if (LuxSampler::s_instance == nullptr)
             return 0;
-        return FrameSampler::s_instance->isAnySlotRecording() ? 1 : 0;
+        return LuxSampler::s_instance->isAnySlotRecording() ? 1 : 0;
     }
 
-    int frame_sampler_is_passthrough(void)
+    int lux_sampler_is_passthrough(void)
     {
-        if (FrameSampler::s_instance == nullptr)
+        if (LuxSampler::s_instance == nullptr)
             return 1; // No sampler → default passthrough
-        return FrameSampler::s_instance->getAtomicState()
+        return LuxSampler::s_instance->getAtomicState()
                    .passthroughEnabled.load(std::memory_order_relaxed) ? 1 : 0;
     }
 
-    int frame_sampler_is_seq_live_step(void)
+    int lux_sampler_is_seq_live_step(void)
     {
-        if (FrameSampler::s_instance == nullptr)
+        if (LuxSampler::s_instance == nullptr)
             return 0; // No sampler → no sequencer STEP_LIVE
-        return FrameSampler::s_instance->getAtomicState()
+        return LuxSampler::s_instance->getAtomicState()
                    .seqLiveStepActive.load(std::memory_order_relaxed) ? 1 : 0;
     }
 }
@@ -105,9 +105,9 @@ static uint32_t crc32_compute(const uint8_t* data, size_t len)
 }
 
 // ============================================================================
-// Timing helper (shared between FrameSampler and FramePlayerThread)
+// Timing helper (shared between LuxSampler and FramePlayerThread)
 // ============================================================================
-uint64_t FrameSampler::currentTimeUs() noexcept
+uint64_t LuxSampler::currentTimeUs() noexcept
 {
     struct timeval tv {};
     gettimeofday(&tv, nullptr);
@@ -116,29 +116,29 @@ uint64_t FrameSampler::currentTimeUs() noexcept
 }
 
 // ============================================================================
-// FrameSampler — constructor / destructor
+// LuxSampler — constructor / destructor
 // ============================================================================
 
-FrameSampler::FrameSampler()
+LuxSampler::LuxSampler()
 {
     s_instance = this;
-    for (int i = 0; i < FrameSamplerConstants::NUM_SLOTS; ++i)
+    for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
     {
         currentPlayHead[i].store(0,  std::memory_order_relaxed);
         lastPlayHead[i].store(0,     std::memory_order_relaxed);
         lastDirection[i].store(1,    std::memory_order_relaxed); // forward by default
     }
-    log_info("FS", "FrameSampler initialised — %d slots, %d frames/slot max, %.1f s/slot max",
-             FrameSamplerConstants::NUM_SLOTS,
-             FrameSamplerConstants::MAX_FRAMES_PER_SLOT,
-             static_cast<double>(FrameSamplerConstants::MAX_DURATION_S));
+    log_info("FS", "LuxSampler initialised — %d slots, %d frames/slot max, %.1f s/slot max",
+             LuxSamplerConstants::NUM_SLOTS,
+             LuxSamplerConstants::MAX_FRAMES_PER_SLOT,
+             static_cast<double>(LuxSamplerConstants::MAX_DURATION_S));
 }
 
-FrameSampler::~FrameSampler()
+LuxSampler::~LuxSampler()
 {
     stopPlayerThread();
     s_instance = nullptr;
-    log_info("FS", "FrameSampler destroyed");
+    log_info("FS", "LuxSampler destroyed");
 }
 
 // ============================================================================
@@ -146,7 +146,7 @@ FrameSampler::~FrameSampler()
 // HARD CONSTRAINT: atomics ONLY. No alloc, no mutex, no I/O, no logging.
 // ============================================================================
 
-void FrameSampler::processMidi(const juce::MidiBuffer& midiBuffer)
+void LuxSampler::processMidi(const juce::MidiBuffer& midiBuffer)
 {
     if (!enabled.load(std::memory_order_relaxed)) return;
 
@@ -168,10 +168,10 @@ void FrameSampler::processMidi(const juce::MidiBuffer& midiBuffer)
 }
 
 // RT NoteOn handler — atomics only
-void FrameSampler::handleNoteOn(int note, int velocity) noexcept
+void LuxSampler::handleNoteOn(int note, int velocity) noexcept
 {
     juce::ignoreUnused(velocity);
-    using namespace FrameSamplerConstants;
+    using namespace LuxSamplerConstants;
 
     if (note >= MIDI_REC_NOTE_BASE && note < MIDI_REC_NOTE_BASE + NUM_SLOTS)
     {
@@ -242,9 +242,9 @@ void FrameSampler::handleNoteOn(int note, int velocity) noexcept
 }
 
 // RT NoteOff handler — atomics only
-void FrameSampler::handleNoteOff(int note) noexcept
+void LuxSampler::handleNoteOff(int note) noexcept
 {
-    using namespace FrameSamplerConstants;
+    using namespace LuxSamplerConstants;
 
     if (note >= MIDI_REC_NOTE_BASE && note < MIDI_REC_NOTE_BASE + NUM_SLOTS)
     {
@@ -296,13 +296,13 @@ void FrameSampler::handleNoteOff(int note) noexcept
 // Non-RT path — onFrameAssembled (called from udpThread via C hook)
 // ============================================================================
 
-bool FrameSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const uint8_t* B,
+bool LuxSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const uint8_t* B,
                                      uint16_t pixel_count, uint32_t line_id)
 {
     if (!enabled.load(std::memory_order_relaxed)) return false;
 
     // ── Process pending start/stop commands from RT ───────────────────────
-    for (int i = 0; i < FrameSamplerConstants::NUM_SLOTS; ++i)
+    for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
     {
         if (atomicState.startRecCmd[i].exchange(false, std::memory_order_acq_rel))
         {
@@ -312,7 +312,7 @@ bool FrameSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const ui
                 {
                     slots[i].allocate();
                     log_info("FS", "Slot %d: buffer allocated (%d frames × %zu B)",
-                             i, FrameSamplerConstants::MAX_FRAMES_PER_SLOT,
+                             i, LuxSamplerConstants::MAX_FRAMES_PER_SLOT,
                              sizeof(CapturedFrame));
                 }
                 else
@@ -349,7 +349,7 @@ bool FrameSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const ui
     {
         std::lock_guard<std::mutex> lk(liveMutex_);
         livePixelCount_ = std::min(static_cast<int>(pixel_count),
-                                   FrameSamplerConstants::MAX_PIXELS);
+                                   LuxSamplerConstants::MAX_PIXELS);
         std::memcpy(liveR_, R, static_cast<size_t>(livePixelCount_));
         std::memcpy(liveG_, G, static_cast<size_t>(livePixelCount_));
         std::memcpy(liveB_, B, static_cast<size_t>(livePixelCount_));
@@ -403,7 +403,7 @@ bool FrameSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const ui
         frame.pixel_count  = pixel_count;
 
         bytes = std::min(static_cast<int>(pixel_count),
-                         FrameSamplerConstants::MAX_PIXELS);
+                         LuxSamplerConstants::MAX_PIXELS);
         std::memcpy(frame.R, R, static_cast<size_t>(bytes));
         std::memcpy(frame.G, G, static_cast<size_t>(bytes));
         std::memcpy(frame.B, B, static_cast<size_t>(bytes));
@@ -423,9 +423,9 @@ bool FrameSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const ui
 }
 
 // ============================================================================
-// FrameSampler::getLiveFrame — Non-RT (called by FramePlayerThread)
+// LuxSampler::getLiveFrame — Non-RT (called by FramePlayerThread)
 // ============================================================================
-void FrameSampler::getLiveFrame(uint8_t* outR, uint8_t* outG, uint8_t* outB,
+void LuxSampler::getLiveFrame(uint8_t* outR, uint8_t* outG, uint8_t* outB,
                                  int maxPixels, int& outCount) noexcept
 {
     std::lock_guard<std::mutex> lk(liveMutex_);
@@ -442,9 +442,9 @@ void FrameSampler::getLiveFrame(uint8_t* outR, uint8_t* outG, uint8_t* outB,
 // Non-RT: UI-triggered record toggle
 // ============================================================================
 
-void FrameSampler::uiToggleRecord(int slotIndex) noexcept
+void LuxSampler::uiToggleRecord(int slotIndex) noexcept
 {
-    using namespace FrameSamplerConstants;
+    using namespace LuxSamplerConstants;
     if (slotIndex < 0 || slotIndex >= NUM_SLOTS) return;
 
     const auto cur = static_cast<SlotState>(
@@ -492,9 +492,9 @@ void FrameSampler::uiToggleRecord(int slotIndex) noexcept
 // Non-RT: UI-triggered play / clear
 // ============================================================================
 
-void FrameSampler::uiPlaySlot(int slotIndex) noexcept
+void LuxSampler::uiPlaySlot(int slotIndex) noexcept
 {
-    if (slotIndex < 0 || slotIndex >= FrameSamplerConstants::NUM_SLOTS) return;
+    if (slotIndex < 0 || slotIndex >= LuxSamplerConstants::NUM_SLOTS) return;
 
     const auto st = static_cast<SlotState>(
         atomicState.slotState[slotIndex].load(std::memory_order_relaxed));
@@ -533,9 +533,9 @@ void FrameSampler::uiPlaySlot(int slotIndex) noexcept
     atomicState.passthroughEnabled.store(false,  std::memory_order_release);
 }
 
-void FrameSampler::uiClearSlot(int slotIndex) noexcept
+void LuxSampler::uiClearSlot(int slotIndex) noexcept
 {
-    if (slotIndex < 0 || slotIndex >= FrameSamplerConstants::NUM_SLOTS) return;
+    if (slotIndex < 0 || slotIndex >= LuxSamplerConstants::NUM_SLOTS) return;
 
     // Stop recording / playback first
     const auto st = static_cast<SlotState>(
@@ -565,7 +565,7 @@ void FrameSampler::uiClearSlot(int slotIndex) noexcept
 // Thread lifecycle
 // ============================================================================
 
-void FrameSampler::startPlayerThread(AudioImageBuffers* audioBuffers,
+void LuxSampler::startPlayerThread(AudioImageBuffers* audioBuffers,
                                      DoubleBuffer*      doubleBuffer)
 {
     stopPlayerThread();
@@ -586,7 +586,7 @@ void FrameSampler::startPlayerThread(AudioImageBuffers* audioBuffers,
     log_info("FS", "FramePlayerThread started");
 }
 
-void FrameSampler::stopPlayerThread()
+void LuxSampler::stopPlayerThread()
 {
     if (playerThread)
     {
@@ -602,9 +602,9 @@ void FrameSampler::stopPlayerThread()
 // Slot management
 // ============================================================================
 
-void FrameSampler::clearSlot(int i)
+void LuxSampler::clearSlot(int i)
 {
-    if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return;
+    if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return;
 
     if (activeRecSlot.load() == i) activeRecSlot.store(-1);
 
@@ -624,9 +624,9 @@ void FrameSampler::clearSlot(int i)
     log_info("FS", "Slot %d cleared", i);
 }
 
-void FrameSampler::clearAllSlots()
+void LuxSampler::clearAllSlots()
 {
-    for (int i = 0; i < FrameSamplerConstants::NUM_SLOTS; ++i)
+    for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
         clearSlot(i);
     log_info("FS", "All slots cleared");
 }
@@ -636,10 +636,10 @@ void FrameSampler::clearAllSlots()
 // Deep-copies frame_count frames + play parameters from src to dst.
 // Stops any ongoing activity on the destination slot first.
 // ============================================================================
-void FrameSampler::copySlotTo(int srcIdx, int dstIdx)
+void LuxSampler::copySlotTo(int srcIdx, int dstIdx)
 {
-    if (srcIdx < 0 || srcIdx >= FrameSamplerConstants::NUM_SLOTS) return;
-    if (dstIdx < 0 || dstIdx >= FrameSamplerConstants::NUM_SLOTS) return;
+    if (srcIdx < 0 || srcIdx >= LuxSamplerConstants::NUM_SLOTS) return;
+    if (dstIdx < 0 || dstIdx >= LuxSamplerConstants::NUM_SLOTS) return;
     if (srcIdx == dstIdx) return;
 
     // Stop any ongoing activity on the destination (atomics only — no lock needed)
@@ -684,40 +684,40 @@ void FrameSampler::copySlotTo(int srcIdx, int dstIdx)
 // Slot info queries
 // ============================================================================
 
-SlotState FrameSampler::getSlotState(int i) const noexcept
+SlotState LuxSampler::getSlotState(int i) const noexcept
 {
-    if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return SlotState::IDLE;
+    if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return SlotState::IDLE;
     return static_cast<SlotState>(
         atomicState.slotState[i].load(std::memory_order_relaxed));
 }
 
-int FrameSampler::getSlotFrameCount(int i) const noexcept
+int LuxSampler::getSlotFrameCount(int i) const noexcept
 {
-    if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0;
+    if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0;
     return slots[i].frame_count;
 }
 
-uint64_t FrameSampler::getSlotDurationUs(int i) const noexcept
+uint64_t LuxSampler::getSlotDurationUs(int i) const noexcept
 {
-    if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0;
+    if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0;
     return slots[i].duration_us;
 }
 
-bool FrameSampler::slotHasContent(int i) const noexcept
+bool LuxSampler::slotHasContent(int i) const noexcept
 {
-    if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return false;
+    if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return false;
     return slots[i].has_content;
 }
 
-const char* FrameSampler::getSlotLabel(int i) const noexcept
+const char* LuxSampler::getSlotLabel(int i) const noexcept
 {
-    if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return "";
+    if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return "";
     return slots[i].label;
 }
 
-void FrameSampler::setSlotLabel(int i, const char* label) noexcept
+void LuxSampler::setSlotLabel(int i, const char* label) noexcept
 {
-    if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS || label == nullptr) return;
+    if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS || label == nullptr) return;
     std::strncpy(slots[i].label, label, 63);
     slots[i].label[63] = '\0';
 }
@@ -763,9 +763,9 @@ struct FsmpFrameHeader  // 12 bytes
 
 #pragma pack(pop)
 
-bool FrameSampler::saveToFile(const juce::File& file) const
+bool LuxSampler::saveToFile(const juce::File& file) const
 {
-    using namespace FrameSamplerConstants;
+    using namespace LuxSamplerConstants;
 
     juce::FileOutputStream out(file);
     if (!out.openedOk())
@@ -839,9 +839,9 @@ bool FrameSampler::saveToFile(const juce::File& file) const
     return true;
 }
 
-bool FrameSampler::loadFromFile(const juce::File& file)
+bool LuxSampler::loadFromFile(const juce::File& file)
 {
-    using namespace FrameSamplerConstants;
+    using namespace LuxSamplerConstants;
 
     juce::FileInputStream in(file);
     if (!in.openedOk())
@@ -971,7 +971,7 @@ bool FrameSampler::loadFromFile(const juce::File& file)
 // FramePlayerThread
 // ============================================================================
 
-FramePlayerThread::FramePlayerThread(FrameSampler& sampler,
+FramePlayerThread::FramePlayerThread(LuxSampler& sampler,
                                      AudioImageBuffers* audioBuffers,
                                      DoubleBuffer*      doubleBuffer)
     : juce::Thread("Sp3ctraFramePlayer"),
@@ -1010,13 +1010,13 @@ void FramePlayerThread::injectWhiteFrame() noexcept
     if (audioBuffers == nullptr) return;
 
     // White = 255 on all channels = silence in Sp3ctra's image-to-sound mapping.
-    uint8_t whiteR[FrameSamplerConstants::MAX_PIXELS];
-    uint8_t whiteG[FrameSamplerConstants::MAX_PIXELS];
-    uint8_t whiteB[FrameSamplerConstants::MAX_PIXELS];
+    uint8_t whiteR[LuxSamplerConstants::MAX_PIXELS];
+    uint8_t whiteG[LuxSamplerConstants::MAX_PIXELS];
+    uint8_t whiteB[LuxSamplerConstants::MAX_PIXELS];
     std::memset(whiteR, 255, sizeof(whiteR));
     std::memset(whiteG, 255, sizeof(whiteG));
     std::memset(whiteB, 255, sizeof(whiteB));
-    const int nbPx = FrameSamplerConstants::MAX_PIXELS;
+    const int nbPx = LuxSamplerConstants::MAX_PIXELS;
 
     // 1. Clear sampler snapshot so the visualizer shows white immediately.
     audio_image_buffers_snapshot_sampler(audioBuffers, whiteR, whiteG, whiteB, nbPx);
@@ -1316,10 +1316,10 @@ void FramePlayerThread::run()
             // ── Working buffers — attack + blend applied before BOTH outputs ──────
             // Zero-filled so pixels beyond pixel_count are silent (black = 0).
             const int nb = std::min(static_cast<int>(frame.pixel_count),
-                                    FrameSamplerConstants::MAX_PIXELS);
-            uint8_t workR[FrameSamplerConstants::MAX_PIXELS] {};
-            uint8_t workG[FrameSamplerConstants::MAX_PIXELS] {};
-            uint8_t workB[FrameSamplerConstants::MAX_PIXELS] {};
+                                    LuxSamplerConstants::MAX_PIXELS);
+            uint8_t workR[LuxSamplerConstants::MAX_PIXELS] {};
+            uint8_t workG[LuxSamplerConstants::MAX_PIXELS] {};
+            uint8_t workB[LuxSamplerConstants::MAX_PIXELS] {};
             std::memcpy(workR, frame.R, static_cast<size_t>(nb));
             std::memcpy(workG, frame.G, static_cast<size_t>(nb));
             std::memcpy(workB, frame.B, static_cast<size_t>(nb));
@@ -1479,9 +1479,9 @@ void FramePlayerThread::run()
                 const float p_blend = sampler.getSlotBlendAmount(slotToPlay);
                 if (p_blend > 0.001f)
                 {
-                    uint8_t lvR[FrameSamplerConstants::MAX_PIXELS] {};
-                    uint8_t lvG[FrameSamplerConstants::MAX_PIXELS] {};
-                    uint8_t lvB[FrameSamplerConstants::MAX_PIXELS] {};
+                    uint8_t lvR[LuxSamplerConstants::MAX_PIXELS] {};
+                    uint8_t lvG[LuxSamplerConstants::MAX_PIXELS] {};
+                    uint8_t lvB[LuxSamplerConstants::MAX_PIXELS] {};
                     int liveN = 0;
                     sampler.getLiveFrame(lvR, lvG, lvB, nb, liveN);
                     const int blendN = std::min(liveN, nb);
@@ -1593,9 +1593,9 @@ void FramePlayerThread::run()
                     if (srcType != 0 /* not IMAGE_SOURCE_SAMPLER */
                         && liveFreeze != 2 && liveOp > 0.001f)
                     {
-                        uint8_t lvR[FrameSamplerConstants::MAX_PIXELS] {};
-                        uint8_t lvG[FrameSamplerConstants::MAX_PIXELS] {};
-                        uint8_t lvB[FrameSamplerConstants::MAX_PIXELS] {};
+                        uint8_t lvR[LuxSamplerConstants::MAX_PIXELS] {};
+                        uint8_t lvG[LuxSamplerConstants::MAX_PIXELS] {};
+                        uint8_t lvB[LuxSamplerConstants::MAX_PIXELS] {};
                         int liveN = 0;
                         sampler.getLiveFrame(lvR, lvG, lvB, nb, liveN);
                         const int blendN = std::min(liveN, nb);
@@ -1770,14 +1770,14 @@ void FramePlayerThread::run()
 }
 
 // ============================================================================
-// FrameSampler::sampleBrightnessForTimeline — Non-RT only
+// LuxSampler::sampleBrightnessForTimeline — Non-RT only
 // ============================================================================
 
-void FrameSampler::sampleBrightnessForTimeline(int    slotIdx,
+void LuxSampler::sampleBrightnessForTimeline(int    slotIdx,
                                                 float* outBrightness,
                                                 int    count) const noexcept
 {
-    if (slotIdx < 0 || slotIdx >= FrameSamplerConstants::NUM_SLOTS
+    if (slotIdx < 0 || slotIdx >= LuxSamplerConstants::NUM_SLOTS
         || outBrightness == nullptr || count <= 0)
         return;
 
@@ -1804,7 +1804,7 @@ void FrameSampler::sampleBrightnessForTimeline(int    slotIdx,
         const int frameIdx = juce::jlimit(0, fc - 1, k * fc / count);
         const CapturedFrame& f = slot.frames[frameIdx];
 
-        const int pc   = juce::jlimit(1, FrameSamplerConstants::MAX_PIXELS,
+        const int pc   = juce::jlimit(1, LuxSamplerConstants::MAX_PIXELS,
                                       static_cast<int>(f.pixel_count));
         const int step = std::max(1, pc / 8);
 
@@ -1825,14 +1825,14 @@ void FrameSampler::sampleBrightnessForTimeline(int    slotIdx,
 }
 
 // ============================================================================
-// FrameSampler::sampleSpectralForTimeline — Non-RT only
+// LuxSampler::sampleSpectralForTimeline — Non-RT only
 // ============================================================================
-void FrameSampler::sampleSpectralForTimeline(int    slotIdx,
+void LuxSampler::sampleSpectralForTimeline(int    slotIdx,
                                               float* outBass,
                                               float* outTreble,
                                               int    count) const noexcept
 {
-    if (slotIdx < 0 || slotIdx >= FrameSamplerConstants::NUM_SLOTS
+    if (slotIdx < 0 || slotIdx >= LuxSamplerConstants::NUM_SLOTS
         || outBass == nullptr || outTreble == nullptr || count <= 0)
         return;
 
@@ -1861,7 +1861,7 @@ void FrameSampler::sampleSpectralForTimeline(int    slotIdx,
     {
         const int frameIdx = juce::jlimit(0, fc - 1, k * fc / count);
         const CapturedFrame& f = slot.frames[frameIdx];
-        const int pc   = juce::jlimit(2, FrameSamplerConstants::MAX_PIXELS,
+        const int pc   = juce::jlimit(2, LuxSamplerConstants::MAX_PIXELS,
                                       static_cast<int>(f.pixel_count));
         const int half = pc / 2;
 

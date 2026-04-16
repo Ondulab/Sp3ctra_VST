@@ -55,7 +55,7 @@ void BlobVisualizerComponent::rebuildImage()
     //   - Sequencer STEP_EMPTY (white → no blobs)
     // Previous approach (raw AudioImageBuffers + manual gamma) was both incorrect
     // (missed sampler processing) and redundant (duplicated the pipeline).
-    auto* fs = processor.getFrameSampler();
+    auto* fs = processor.getLuxSampler();
     if (!fs) return;
 
     const auto& grayBuf = fs->getFinalGrayBuffer();

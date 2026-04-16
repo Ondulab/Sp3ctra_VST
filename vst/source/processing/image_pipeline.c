@@ -2,7 +2,7 @@
  * image_pipeline.c
  *
  * Pipeline orchestrator — single entry point for all image preprocessing.
- * Replaces image_preprocess_frame() and image_preprocess_frame_sampler().
+ * Replaces image_preprocess_frame() and image_preprocess_lux_sampler().
  *
  * Author: zhonx
  * Created: 2026-04-14

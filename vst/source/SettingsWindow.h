@@ -6,7 +6,7 @@
 #include "settings/NetworkSettingsTab.h"
 #include "settings/ImageSettingsTab.h"
 #include "settings/LuxStralSettingsTab.h"
-#include "settings/FrameSamplerSettingsTab.h"
+#include "settings/LuxSamplerSettingsTab.h"
 #include "settings/LuxSynthSettingsTab.h"
 
 //==============================================================================
@@ -18,7 +18,7 @@
  *   Network      — UDP configuration, Sensor DPI
  *   Image        — Image pipeline flags, stream opacities, advanced blob params
  *   LuxStral     — Additive synthesis parameters + StrokeForge waveform morphing
- *   FrameSampler — Slot configuration and MIDI mapping
+ *   LuxSampler — Slot configuration and MIDI mapping
  *
  * All changes are automatically saved via APVTS to DAW projects.
  */
@@ -41,7 +41,7 @@ private:
     ImageSettingsTab*        imageTab;
     LuxStralSettingsTab*     luxstralTab;
     LuxSynthSettingsTab*     luxsynthTab;
-    FrameSamplerSettingsTab* frameSamplerTab;
+    LuxSamplerSettingsTab* luxSamplerTab;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SettingsComponent)
 };

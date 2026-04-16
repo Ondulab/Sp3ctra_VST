@@ -3,7 +3,7 @@
 #include "../UITheme.h"
 
 static const char* kLoopLabels[4] = { "NONE", "LOOP", "INV", "PING" };
-static const char* kNoteNamesEd[FrameSamplerConstants::NUM_SLOTS] = {
+static const char* kNoteNamesEd[LuxSamplerConstants::NUM_SLOTS] = {
     "C1","C#1","D1","D#1","E1","F1","F#1","G1","G#1","A1","A#1","B1"
 };
 
@@ -13,14 +13,14 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
 {
     // ── Timeline ──────────────────────────────────────────────────────────────
     // Start/End handles are dragged directly on the timeline and update
-    // FrameSampler atomics in SlotTimelineComponent::mouseDrag() — no sliders.
+    // LuxSampler atomics in SlotTimelineComponent::mouseDrag() — no sliders.
     // The onStartChanged / onEndChanged callbacks are not used here.
     addAndMakeVisible(timeline);
 
     // ── Action buttons ────────────────────────────────────────────────────────
     recBtn.onClick = [this]
     {
-        if (auto* fs = processor.getFrameSampler())
+        if (auto* fs = processor.getLuxSampler())
         {
             fs->uiToggleRecord(selectedSlot);
             timeline.markDirty(); // thumbnail may have changed after record
@@ -30,7 +30,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
 
     playBtn.onClick = [this]
     {
-        if (auto* fs = processor.getFrameSampler())
+        if (auto* fs = processor.getLuxSampler())
         {
             fs->uiPlaySlot(selectedSlot);
             // Auto-activate sampler transport PLAY so the pipeline processes
@@ -44,7 +44,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
 
     clearBtn.onClick = [this]
     {
-        if (auto* fs = processor.getFrameSampler())
+        if (auto* fs = processor.getLuxSampler())
         {
             fs->uiClearSlot(selectedSlot);
             timeline.markDirty();
@@ -80,7 +80,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     brightnessSlider.onValueChange = [this]
     {
         // Slider 100% = full image (lift=0), 0% = white silence (lift=1)
-        if (auto* fs = processor.getFrameSampler())
+        if (auto* fs = processor.getLuxSampler())
             fs->setSlotBrightnessLift(selectedSlot,
                 1.0f - static_cast<float>(brightnessSlider.getValue()) * 0.01f);
     };
@@ -101,7 +101,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     speedSlider.setValue(1.0, juce::dontSendNotification);
     speedSlider.onValueChange = [this]
     {
-        if (auto* fs = processor.getFrameSampler())
+        if (auto* fs = processor.getLuxSampler())
             fs->setSlotSpeed(selectedSlot,
                              static_cast<float>(speedSlider.getValue()));
     };
@@ -121,7 +121,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
                            juce::Colour(0xffb0b0c0));
     resumeToggle.onStateChange = [this]
     {
-        if (auto* fs = processor.getFrameSampler())
+        if (auto* fs = processor.getLuxSampler())
             fs->setSlotResumeMode(selectedSlot,
                                    resumeToggle.getToggleState());
     };
@@ -137,7 +137,7 @@ SlotEditorComponent::~SlotEditorComponent()
 
 void SlotEditorComponent::setSelectedSlot(int idx)
 {
-    selectedSlot = juce::jlimit(0, FrameSamplerConstants::NUM_SLOTS - 1, idx);
+    selectedSlot = juce::jlimit(0, LuxSamplerConstants::NUM_SLOTS - 1, idx);
     timeline.setSelectedSlot(selectedSlot);
     refreshSliderValues();
     refreshLoopButtons();
@@ -146,7 +146,7 @@ void SlotEditorComponent::setSelectedSlot(int idx)
 
 void SlotEditorComponent::refreshSliderValues()
 {
-    auto* fs = processor.getFrameSampler();
+    auto* fs = processor.getLuxSampler();
     if (fs == nullptr) return;
 
     // Start/End are no longer exposed as sliders — they are edited directly
@@ -165,7 +165,7 @@ void SlotEditorComponent::refreshSliderValues()
 
 void SlotEditorComponent::refreshLoopButtons()
 {
-    auto* fs = processor.getFrameSampler();
+    auto* fs = processor.getLuxSampler();
     const int curMode = (fs != nullptr)
                         ? static_cast<int>(fs->getSlotLoopMode(selectedSlot))
                         : 1; // default LOOP
@@ -184,7 +184,7 @@ void SlotEditorComponent::refreshLoopButtons()
 
 void SlotEditorComponent::applyLoopMode(LoopMode m)
 {
-    if (auto* fs = processor.getFrameSampler())
+    if (auto* fs = processor.getLuxSampler())
         fs->setSlotLoopMode(selectedSlot, m);
     refreshLoopButtons();
 }
@@ -220,7 +220,7 @@ void SlotEditorComponent::paint(juce::Graphics& g)
                juce::Justification::centredLeft, false);
 
     // State indicator (right side of title badge)
-    auto* fs = processor.getFrameSampler();
+    auto* fs = processor.getLuxSampler();
     const SlotState st = (fs != nullptr) ? fs->getSlotState(selectedSlot)
                                          : SlotState::IDLE;
     juce::String stateStr;
@@ -348,7 +348,7 @@ void SlotEditorComponent::timerCallback()
 {
     blinkOn = !blinkOn;
 
-    auto* fs = processor.getFrameSampler();
+    auto* fs = processor.getLuxSampler();
     if (fs == nullptr) return;
 
     const SlotState st         = fs->getSlotState(selectedSlot);

@@ -69,8 +69,8 @@ target_sources(Sp3ctraVST
         source/settings/ImageSettingsTab.h
         source/settings/LuxStralSettingsTab.cpp
         source/settings/LuxStralSettingsTab.h
-        source/settings/FrameSamplerSettingsTab.cpp
-        source/settings/FrameSamplerSettingsTab.h
+        source/settings/LuxSamplerSettingsTab.cpp
+        source/settings/LuxSamplerSettingsTab.h
 
         # Image pipeline UI
         source/image/ImagePageComponent.cpp
@@ -78,10 +78,10 @@ target_sources(Sp3ctraVST
         source/image/BlobVisualizerComponent.cpp
         source/image/BlobVisualizerComponent.h
 
-        # FrameSampler subsystem
-        source/framesampler/FrameSampler.cpp
+        # LuxSampler subsystem
+        source/luxsampler/LuxSampler.cpp
         source/framesequencer/FrameSequencer.cpp
-        source/framesampler/FrameSampler.h
+        source/luxsampler/LuxSampler.h
         source/framesequencer/FrameSequencer.h
 
         # Sampler UI components
@@ -196,7 +196,7 @@ target_include_directories(Sp3ctraVST
         ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/luxwave
         ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/luxsynth
         ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/luxstral
-        ${CMAKE_CURRENT_SOURCE_DIR}/source/framesampler
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/luxsampler
         ${CMAKE_CURRENT_SOURCE_DIR}/source/sampler
 )
 

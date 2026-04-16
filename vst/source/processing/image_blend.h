@@ -2,7 +2,7 @@
  * image_blend.h
  *
  * Darken-blend module for mixing Sampler and Live image sources.
- * Extracted from FrameSampler::FramePlayerThread for reuse in the pipeline.
+ * Extracted from LuxSampler::FramePlayerThread for reuse in the pipeline.
  *
  * Blend rule: darken (min per channel) with per-source opacity.
  * White (255) is the identity element for darken blend,
