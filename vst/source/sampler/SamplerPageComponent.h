@@ -8,7 +8,7 @@
 class Sp3ctraAudioProcessor;
 
 /**
- * @brief Master container for the FrameSampler sampler page.
+ * @brief Master container for the LuxSampler sampler page.
  *
  * Layout — four full-width zones stacked vertically:
  *   1. SlotGridComponent     (h=66,  fixed)  — 12 slot cells (sample bank)

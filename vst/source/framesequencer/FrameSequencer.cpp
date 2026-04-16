@@ -1,7 +1,7 @@
 /*
  * FrameSequencer.cpp
  *
- * Step sequencer driving FrameSampler bank playback.
+ * Step sequencer driving LuxSampler bank playback.
  * See FrameSequencer.h for RT safety contract and timing modes.
  */
 
@@ -31,7 +31,7 @@ void FrameSequencer::setStep(int stepIdx, int bankIdx) noexcept
     else if (bankIdx < 0)
         clamped = STEP_EMPTY;
     else
-        clamped = juce::jlimit(0, FrameSamplerConstants::NUM_SLOTS - 1, bankIdx);
+        clamped = juce::jlimit(0, LuxSamplerConstants::NUM_SLOTS - 1, bankIdx);
     steps[stepIdx].store(clamped, std::memory_order_release);
 }
 
@@ -53,7 +53,7 @@ void FrameSequencer::uiPlay() noexcept
     held.store(false, std::memory_order_release);
     startCmd.store(true, std::memory_order_release);
     // Release FramePlayerThread: play_head may advance again.
-    if (frameSampler) frameSampler->setSeqPlayerHeld(false);
+    if (luxSampler) luxSampler->setSeqPlayerHeld(false);
 }
 
 void FrameSequencer::uiHold() noexcept
@@ -66,7 +66,7 @@ void FrameSequencer::uiHold() noexcept
     // holdCmd signals the audio thread (belt-and-suspenders + future RT side-effects).
     holdCmd.store(true, std::memory_order_release);
     // Freeze FramePlayerThread on the current frame until uiResume().
-    if (frameSampler) frameSampler->setSeqPlayerHeld(true);
+    if (luxSampler) luxSampler->setSeqPlayerHeld(true);
 }
 
 void FrameSequencer::uiStop() noexcept
@@ -74,7 +74,7 @@ void FrameSequencer::uiStop() noexcept
     held.store(false, std::memory_order_release);
     stopCmd.store(true, std::memory_order_release);
     // Ensure FramePlayerThread is not left in a frozen state after stop.
-    if (frameSampler) frameSampler->setSeqPlayerHeld(false);
+    if (luxSampler) luxSampler->setSeqPlayerHeld(false);
 }
 
 void FrameSequencer::uiResume() noexcept
@@ -87,7 +87,7 @@ void FrameSequencer::uiResume() noexcept
     held.store(false, std::memory_order_release);
     resumeCmd.store(true, std::memory_order_release);
     // Unfreeze FramePlayerThread: play_head resumes from where it stopped.
-    if (frameSampler) frameSampler->setSeqPlayerHeld(false);
+    if (luxSampler) luxSampler->setSeqPlayerHeld(false);
 }
 
 // ============================================================================
@@ -96,10 +96,10 @@ void FrameSequencer::uiResume() noexcept
 
 void FrameSequencer::triggerStep(int stepIdx) noexcept
 {
-    if (frameSampler == nullptr) return;
+    if (luxSampler == nullptr) return;
 
     const int bankIdx = steps[stepIdx].load(std::memory_order_relaxed);
-    auto& as = frameSampler->getAtomicState();
+    auto& as = luxSampler->getAtomicState();
 
     // ── 1. Finalise the PREVIOUS active bank (playing OR recording) ───────────
     // activePlaySlot only tracks PLAYING banks; rtPrevActiveBank covers RECORDING
@@ -142,7 +142,7 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
         as.activePlaySlot.store(-1, std::memory_order_release);
         as.passthroughEnabled.store(true, std::memory_order_release);
         as.seqLiveStepActive.store(true, std::memory_order_release);  // STEP_LIVE only
-        frameSampler->setSeqSilentStep(false); // clear silence flag — live is active
+        luxSampler->setSeqSilentStep(false); // clear silence flag — live is active
         rtPrevActiveBank = STEP_LIVE;
         return;
     }
@@ -157,7 +157,7 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
         as.activePlaySlot.store(-1,    std::memory_order_release);
         as.passthroughEnabled.store(false, std::memory_order_release); // suppress live
         as.seqLiveStepActive.store(false, std::memory_order_release);  // not STEP_LIVE
-        frameSampler->setSeqSilentStep(true); // tell visualizer to show white
+        luxSampler->setSeqSilentStep(true); // tell visualizer to show white
         // FIX(silence): Signal FramePlayerThread to inject a full-white (255) frame
         // immediately into AudioImageBuffers and preprocessed_data.
         // Without this, the last sampler frame stays frozen in both buffers causing
@@ -174,7 +174,7 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
 
     // bankIdx is a valid slot (0..11)
     // Clear the silent-step flag: a real slot is about to play.
-    frameSampler->setSeqSilentStep(false);
+    luxSampler->setSeqSilentStep(false);
 
     const auto curSt = static_cast<SlotState>(
         as.slotState[bankIdx].load(std::memory_order_relaxed));
@@ -226,9 +226,9 @@ void FrameSequencer::rtStop() noexcept
     rtLastPpqPosition    = -1.0;
     rtPrevActiveBank     = -1;
 
-    if (frameSampler != nullptr)
+    if (luxSampler != nullptr)
     {
-        auto& as = frameSampler->getAtomicState();
+        auto& as = luxSampler->getAtomicState();
         const int cp = as.activePlaySlot.load(std::memory_order_relaxed);
         if (cp >= 0)
         {

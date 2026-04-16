@@ -8,7 +8,7 @@ static void cycleStep(FrameSequencer* seq, int stepIdx, int delta)
     if (!seq) return;
     if (stepIdx >= seq->getNumSteps()) return;
 
-    constexpr int kN         = FrameSamplerConstants::NUM_SLOTS; // 12
+    constexpr int kN         = LuxSamplerConstants::NUM_SLOTS; // 12
     constexpr int kCycleSize = kN + 2; // 14: empty + 12 banks + LIVE
 
     const int cur = seq->getStep(stepIdx);
@@ -51,7 +51,7 @@ SequencerComponent::SequencerComponent(Sp3ctraAudioProcessor& proc)
 SequencerComponent::~SequencerComponent() { stopTimer(); }
 
 // =============================================================================
-// updateButton — refresh colours, label, bankSlot and frameSampler pointer
+// updateButton — refresh colours, label, bankSlot and luxSampler pointer
 // for a single cell. The thumbnail is drawn by StepCell::paintButton itself.
 // =============================================================================
 
@@ -60,7 +60,7 @@ void SequencerComponent::updateButton(int i)
     if (i >= kDisplaySteps) return; // only first 16 are visible
 
     auto* seq = processor.getFrameSequencer();
-    auto* fs  = processor.getFrameSampler();
+    auto* fs  = processor.getLuxSampler();
     if (!seq) return;
 
     const int  nSteps    = seq->getNumSteps();
@@ -76,7 +76,7 @@ void SequencerComponent::updateButton(int i)
         stepBtns[i].setColour(juce::TextButton::textColourOffId,
                                juce::Colour(0xff333333));
         stepBtns[i].bankSlot     = FrameSequencer::STEP_EMPTY;
-        stepBtns[i].frameSampler = nullptr;
+        stepBtns[i].luxSampler = nullptr;
         return;
     }
 
@@ -113,10 +113,10 @@ void SequencerComponent::updateButton(int i)
     stepBtns[i].setColour(juce::TextButton::buttonColourId,  bg);
     stepBtns[i].setColour(juce::TextButton::textColourOffId, txt);
 
-    // Hand off the bank index and FrameSampler pointer so paintButton
+    // Hand off the bank index and LuxSampler pointer so paintButton
     // can render the spectral thumbnail without any extra bookkeeping.
     stepBtns[i].bankSlot     = bank; // >= 0 for normal banks; STEP_EMPTY / STEP_LIVE otherwise
-    stepBtns[i].frameSampler = fs;
+    stepBtns[i].luxSampler = fs;
 }
 
 // =============================================================================

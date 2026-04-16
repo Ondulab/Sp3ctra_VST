@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Sp3ctra – Spécification Technique : FrameSampler + FrameSequencer</title>
+  <title>Sp3ctra – Spécification Technique : LuxSampler + FrameSequencer</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
@@ -151,7 +151,7 @@
     <li><a href="#glossary">Glossaire</a></li>
   </ul>
 
-  <h3>FrameSampler</h3>
+  <h3>LuxSampler</h3>
   <ul>
     <li><a href="#midi-mapping">Mapping MIDI</a></li>
     <li><a href="#state-machine">Machine d'états</a></li>
@@ -199,12 +199,12 @@
       <span class="badge badge-type">Spécification Technique</span>
       <span class="badge badge-new">+ FrameSequencer</span>
     </div>
-    <h1>FrameSampler &amp; FrameSequencer</h1>
+    <h1>LuxSampler &amp; FrameSequencer</h1>
     <p style="color:var(--text); font-size:1.05rem; margin:0.4rem 0 1rem;">
       Enregistrement, stockage et relecture du flux d'images Sp3ctra — avec séquenceur à pas synchronisé DAW.
     </p>
     <div class="meta-grid">
-      <div class="kv"><span class="k">Composants</span><span class="v">FrameSampler + FrameSequencer</span></div>
+      <div class="kv"><span class="k">Composants</span><span class="v">LuxSampler + FrameSequencer</span></div>
       <div class="kv"><span class="k">Projet</span><span class="v">Sp3ctra_VST</span></div>
       <div class="kv"><span class="k">Date</span><span class="v">10 Avril 2026</span></div>
       <div class="kv"><span class="k">Statut</span><span class="v">Implémenté v0.4</span></div>
@@ -222,21 +222,21 @@
     </p>
     <ul class="bullet">
       <li>
-        <strong>FrameSampler</strong> — enregistre le flux d'images CIS en provenance de l'UDP,
+        <strong>LuxSampler</strong> — enregistre le flux d'images CIS en provenance de l'UDP,
         stocke jusqu'à 12 séquences («&nbsp;banks&nbsp;») en mémoire, et les rejoue à la demande.
         Contrôle via MIDI ou via les boutons UI de l'éditeur principal.
       </li>
       <li>
         <strong>FrameSequencer</strong> <span class="chip-new chip">NEW v0.4</span> — séquenceur à pas
         (max 32 steps) qui orchestre automatiquement l'enregistrement et la lecture des banks
-        FrameSampler selon une grille temporelle synchronisée DAW (PPQ) ou un BPM interne.
+        LuxSampler selon une grille temporelle synchronisée DAW (PPQ) ou un BPM interne.
       </li>
     </ul>
 
     <div class="callout callout-info">
       <div class="icon">ℹ️</div>
       <div>
-        <strong>Ce que FrameSampler N'enregistre PAS :</strong> Il capture uniquement le
+        <strong>Ce que LuxSampler N'enregistre PAS :</strong> Il capture uniquement le
         <em>flux de lignes CIS assemblées</em> (paquets UDP <code>IMAGE_DATA</code>).
         Ni MIDI, ni audio, ni fragments UDP individuels.
       </div>
@@ -271,7 +271,7 @@
           <tr><td><strong>Gate séquenceur</strong></td><td>Mécanisme qui n'autorise la capture de frames que lorsque le séquenceur pointe sur la bank armée.</td></tr>
           <tr><td><strong>seqGateSlot</strong></td><td>Atomic qui contient la bank actuellement ciblée par le séquenceur (−1 = pas de gate).</td></tr>
           <tr><td><strong>RT</strong></td><td>Real-Time — chemin <code>processBlock()</code>, contraintes strictes.</td></tr>
-          <tr><td><strong>.fsmp</strong></td><td>FrameSampler Preset — format binaire propriétaire.</td></tr>
+          <tr><td><strong>.fsmp</strong></td><td>LuxSampler Preset — format binaire propriétaire.</td></tr>
         </tbody>
       </table>
     </div>
@@ -282,7 +282,7 @@
     <h2><span class="sec-num">§3</span> Mapping MIDI</h2>
 
     <h3>3.1 Canal MIDI</h3>
-    <p>Un seul canal MIDI actif (1–16), filtré dans <code>FrameSampler::processMidi()</code>.</p>
+    <p>Un seul canal MIDI actif (1–16), filtré dans <code>LuxSampler::processMidi()</code>.</p>
 
     <h3>3.2 Plages de notes</h3>
     <div class="piano-grid">
@@ -348,7 +348,7 @@
     </ul>
 
     <div class="fsm-wrap">
-      <div class="fsm-title">FrameSampler – Machine d'états (par bank)</div>
+      <div class="fsm-title">LuxSampler – Machine d'états (par bank)</div>
       <div class="states">
         <div class="state idle">IDLE<div class="trans">(initial)</div></div>
         <div class="arrow">→</div>
@@ -391,12 +391,12 @@
       L'interception se fait dans <code>multithreading.c</code> via un hook C-linkage,
       appelé après que les 12 fragments UDP d'une ligne ont été réassemblés&nbsp;:
     </p>
-    <pre><span class="cm">// frame_sampler_hooks.h – hook appelé par udpThread() dans multithreading.c</span>
-<span class="kw">extern</span> <span class="st">"C"</span> <span class="ty">void</span> <span class="fn">frame_sampler_on_frame_assembled</span>(
+    <pre><span class="cm">// lux_sampler_hooks.h – hook appelé par udpThread() dans multithreading.c</span>
+<span class="kw">extern</span> <span class="st">"C"</span> <span class="ty">void</span> <span class="fn">lux_sampler_on_frame_assembled</span>(
     <span class="kw">const</span> <span class="ty">uint8_t</span>* R, <span class="kw">const</span> <span class="ty">uint8_t</span>* G, <span class="kw">const</span> <span class="ty">uint8_t</span>* B,
     <span class="ty">uint16_t</span> pixel_count, <span class="ty">uint32_t</span> line_id);
 
-<span class="cm">// Implémenté dans FrameSampler.cpp — dispatche vers FrameSampler::s_instance</span>
+<span class="cm">// Implémenté dans LuxSampler.cpp — dispatche vers LuxSampler::s_instance</span>
 <span class="cm">// Aucun FrameRecorderThread séparé — capture inline dans le thread UDP</span></pre>
 
     <div class="callout callout-info">
@@ -409,7 +409,7 @@
     </div>
 
     <h3>5.2 Logique de <code>onFrameAssembled()</code></h3>
-    <pre><span class="kw">bool</span> FrameSampler::<span class="fn">onFrameAssembled</span>(<span class="kw">const</span> <span class="ty">uint8_t</span>* R, ...)
+    <pre><span class="kw">bool</span> LuxSampler::<span class="fn">onFrameAssembled</span>(<span class="kw">const</span> <span class="ty">uint8_t</span>* R, ...)
 {
     <span class="cm">// 1. Traiter les commandes startRecCmd / stopRecCmd postées par le RT</span>
     <span class="kw">for</span> (<span class="ty">int</span> i = <span class="nu">0</span>; i &lt; NUM_SLOTS; ++i) {
@@ -440,7 +440,7 @@
     <span class="kw">if</span> (curStep &gt;= <span class="nu">0</span>)
         gateSlot = frameSequencer-><span class="fn">getStep</span>(curStep); <span class="cm">// -1 si step passthrough</span>
 }
-frameSampler-><span class="fn">setSeqGateSlot</span>(gateSlot);</pre>
+luxSampler-><span class="fn">setSeqGateSlot</span>(gateSlot);</pre>
 
     <div class="table-wrap">
       <table>
@@ -552,7 +552,7 @@ frameSampler-><span class="fn">setSeqGateSlot</span>(gateSlot);</pre>
     <h2><span class="sec-num">§7</span> Commandes UI <span class="impl-badge impl-new">NEW v0.4</span></h2>
 
     <p>
-      L'éditeur principal expose 12 boutons de bank directement dans le panneau FrameSampler
+      L'éditeur principal expose 12 boutons de bank directement dans le panneau LuxSampler
       (pas uniquement dans SettingsWindow). Les actions sont Non-RT et utilisent des atomiques.
     </p>
 
@@ -614,10 +614,10 @@ frameSampler-><span class="fn">setSeqGateSlot</span>(gateSlot);</pre>
       <table>
         <thead><tr><th>Paramètre APVTS</th><th>Type</th><th>Plage</th><th>Défaut</th><th>Description</th></tr></thead>
         <tbody>
-          <tr><td><code>frameSamplerEnabled</code></td><td>bool</td><td>–</td><td>false</td><td>Active le sous-système FrameSampler.</td></tr>
-          <tr><td><code>frameSamplerMidiChannel</code></td><td>choice</td><td>Ch 1–16</td><td>Ch 1</td><td>Canal MIDI écouté.</td></tr>
-          <tr><td><code>frameSamplerOctaveOffset</code></td><td>choice</td><td>−2 à +2</td><td>0</td><td>Décalage d'octave DAW.</td></tr>
-          <tr><td><code>frameSamplerMaxDuration</code></td><td>float</td><td>1–10 s</td><td>10.0</td><td>Durée max par slot.</td></tr>
+          <tr><td><code>luxSamplerEnabled</code></td><td>bool</td><td>–</td><td>false</td><td>Active le sous-système LuxSampler.</td></tr>
+          <tr><td><code>luxSamplerMidiChannel</code></td><td>choice</td><td>Ch 1–16</td><td>Ch 1</td><td>Canal MIDI écouté.</td></tr>
+          <tr><td><code>luxSamplerOctaveOffset</code></td><td>choice</td><td>−2 à +2</td><td>0</td><td>Décalage d'octave DAW.</td></tr>
+          <tr><td><code>luxSamplerMaxDuration</code></td><td>float</td><td>1–10 s</td><td>10.0</td><td>Durée max par slot.</td></tr>
           <tr><td><code>seqEnabled</code></td><td>bool</td><td>–</td><td>false</td><td>Active le séquenceur.</td></tr>
           <tr><td><code>seqBpm</code></td><td>float</td><td>40–240 BPM</td><td>120</td><td>BPM interne (ignoré si DAW sync actif).</td></tr>
           <tr><td><code>seqNumSteps</code></td><td>int</td><td>1–32</td><td>16</td><td>Nombre de steps actifs.</td></tr>
@@ -635,7 +635,7 @@ frameSampler-><span class="fn">setSeqGateSlot</span>(gateSlot);</pre>
 
     <p>
       Le <strong>FrameSequencer</strong> est un séquenceur à pas (max 32 steps) qui pilote
-      automatiquement les banks FrameSampler. Chaque step peut être assigné à une bank (0–11)
+      automatiquement les banks LuxSampler. Chaque step peut être assigné à une bank (0–11)
       ou laissé vide (passthrough). Le séquenceur avance d'un step à chaque période définie,
       et déclenche l'action appropriée sur la bank ciblée.
     </p>
@@ -780,13 +780,13 @@ frameSampler-><span class="fn">setSeqGateSlot</span>(gateSlot);</pre>
       <table>
         <thead><tr><th>Classe / Module</th><th>Thread</th><th>Rôle</th></tr></thead>
         <tbody>
-          <tr><td><code>FrameSampler</code></td><td>RT (processMidi) + Non-RT (onFrameAssembled)</td><td>Contrôleur principal : états, slots, interface atomique RT↔Non-RT.</td></tr>
+          <tr><td><code>LuxSampler</code></td><td>RT (processMidi) + Non-RT (onFrameAssembled)</td><td>Contrôleur principal : états, slots, interface atomique RT↔Non-RT.</td></tr>
           <tr><td><code>FrameSlot</code></td><td>Non-RT</td><td>Buffer d'un slot : <code>unique_ptr&lt;CapturedFrame[]&gt;</code> (lazy), metadata.</td></tr>
-          <tr><td><code>FrameSamplerAtomicState</code></td><td>Partagé RT/Non-RT</td><td>Ensemble des atomiques de communication entre threads.</td></tr>
+          <tr><td><code>LuxSamplerAtomicState</code></td><td>Partagé RT/Non-RT</td><td>Ensemble des atomiques de communication entre threads.</td></tr>
           <tr><td><code>FramePlayerThread</code></td><td>Non-RT (thread dédié)</td><td>Lit les frames du slot et les injecte dans AudioImageBuffers + doubleBuffer.</td></tr>
           <tr><td><code>FrameSequencer</code></td><td>RT (processBlock)</td><td>Séquenceur à pas : avance les steps, pilote les banks via atomiques.</td></tr>
-          <tr><td><code>frame_sampler_on_frame_assembled</code></td><td>Non-RT (udpThread)</td><td>Hook C-linkage : dispatche les frames assemblées vers <code>FrameSampler::s_instance</code>.</td></tr>
-          <tr><td><code>FrameSampler::saveToFile / loadFromFile</code></td><td>Non-RT (message thread)</td><td>Sérialisation / désérialisation .fsmp.</td></tr>
+          <tr><td><code>lux_sampler_on_frame_assembled</code></td><td>Non-RT (udpThread)</td><td>Hook C-linkage : dispatche les frames assemblées vers <code>LuxSampler::s_instance</code>.</td></tr>
+          <tr><td><code>LuxSampler::saveToFile / loadFromFile</code></td><td>Non-RT (message thread)</td><td>Sérialisation / désérialisation .fsmp.</td></tr>
         </tbody>
       </table>
     </div>
@@ -794,7 +794,7 @@ frameSampler-><span class="fn">setSeqGateSlot</span>(gateSlot);</pre>
     <div class="callout callout-warn">
       <div class="icon">⚠️</div>
       <div>
-        <strong>Singleton :</strong> <code>FrameSampler::s_instance</code> limite à une seule instance VST par processus DAW.
+        <strong>Singleton :</strong> <code>LuxSampler::s_instance</code> limite à une seule instance VST par processus DAW.
         Les hooks C ne supportent pas le multi-instance. Limitation documentée dans le code.
       </div>
     </div>
@@ -802,8 +802,8 @@ frameSampler-><span class="fn">setSeqGateSlot</span>(gateSlot);</pre>
     <h3>14.2 Flux de données</h3>
     <pre><span class="cm">┌────────────────────────────────────────────────────────────────────┐
 │ UDP Thread (Non-RT)                                                 │
-│  frame assemblée → frame_sampler_on_frame_assembled()              │
-│                  → FrameSampler::onFrameAssembled()                 │
+│  frame assemblée → lux_sampler_on_frame_assembled()              │
+│                  → LuxSampler::onFrameAssembled()                 │
 │                     ├─ traite startRecCmd / stopRecCmd              │
 │                     ├─ vérifie seqGateSlot (gate séquenceur)        │
 │                     └─ écrit dans slots[recSlot].frames[]           │
@@ -812,7 +812,7 @@ frameSampler-><span class="fn">setSeqGateSlot</span>(gateSlot);</pre>
 
 ┌────────────────────────────────────────────────────────────────────┐
 │ Audio Thread processBlock() (RT)                                    │
-│  MidiBuffer → FrameSampler::processMidi()                           │
+│  MidiBuffer → LuxSampler::processMidi()                           │
 │                └─ handleNoteOn/Off → atomiques slotState, cmds      │
 │  FrameSequencer::processBlock()                                     │
 │                └─ triggerStep() → atomiques slotState, cmds         │
@@ -832,7 +832,7 @@ frameSampler-><span class="fn">setSeqGateSlot</span>(gateSlot);</pre>
   <section id="atomic-state">
     <h2><span class="sec-num">§15</span> Interface atomique RT ↔ Non-RT</h2>
 
-    <pre><span class="kw">struct</span> <span class="ty">FrameSamplerAtomicState</span> {
+    <pre><span class="kw">struct</span> <span class="ty">LuxSamplerAtomicState</span> {
     <span class="cm">// État par slot</span>
     std::<span class="ty">atomic</span>&lt;<span class="ty">int</span>&gt;  slotState[NUM_SLOTS];      <span class="cm">// IDLE=0, ARMED=1, RECORDING=2, PLAYING=3</span>
     std::<span class="ty">atomic</span>&lt;<span class="ty">int</span>&gt;  activePlaySlot { -<span class="nu">1</span> };    <span class="cm">// -1 si aucun PLAY actif</span>
@@ -845,7 +845,7 @@ frameSampler-><span class="fn">setSeqGateSlot</span>(gateSlot);</pre>
     std::<span class="ty">atomic</span>&lt;<span class="ty">bool</span>&gt; stopPlayCmd  { <span class="kw">false</span> }; <span class="cm">// → FramePlayerThread : stoppe lecture</span>
 };
 
-<span class="cm">// Dans FrameSampler — gate séquenceur (écrit RT, lu Non-RT)</span>
+<span class="cm">// Dans LuxSampler — gate séquenceur (écrit RT, lu Non-RT)</span>
 std::<span class="ty">atomic</span>&lt;<span class="ty">int</span>&gt; seqGateSlot { -<span class="nu">1</span> }; <span class="cm">// -1=pas de gate, 0-11=bank active</span></pre>
 
     <div class="callout callout-danger">
@@ -980,12 +980,12 @@ std::<span class="ty">atomic</span>&lt;<span class="ty">int</span>&gt; seqGateSl
       <table>
         <thead><tr><th>Point</th><th>Classe</th><th>Implémentation</th></tr></thead>
         <tbody>
-          <tr><td>Notes MIDI → FrameSampler</td><td><code>Sp3ctraAudioProcessor::processBlock()</code></td><td><code>frameSampler-&gt;processMidi(midiMessages)</code></td></tr>
+          <tr><td>Notes MIDI → LuxSampler</td><td><code>Sp3ctraAudioProcessor::processBlock()</code></td><td><code>luxSampler-&gt;processMidi(midiMessages)</code></td></tr>
           <tr><td>Séquenceur avance</td><td><code>processBlock()</code></td><td><code>frameSequencer-&gt;processBlock(getPlayHead(), ...)</code></td></tr>
-          <tr><td>Gate séquenceur → FrameSampler</td><td><code>processBlock()</code></td><td><code>frameSampler-&gt;setSeqGateSlot(gateSlot)</code></td></tr>
-          <tr><td>Capture frames UDP</td><td><code>multithreading.c / udpThread()</code></td><td>Appel <code>frame_sampler_on_frame_assembled()</code></td></tr>
+          <tr><td>Gate séquenceur → LuxSampler</td><td><code>processBlock()</code></td><td><code>luxSampler-&gt;setSeqGateSlot(gateSlot)</code></td></tr>
+          <tr><td>Capture frames UDP</td><td><code>multithreading.c / udpThread()</code></td><td>Appel <code>lux_sampler_on_frame_assembled()</code></td></tr>
           <tr><td>Lecture → synthèse</td><td><code>FramePlayerThread</code></td><td>Écrit dans <code>AudioImageBuffers</code> + <code>doubleBuffer</code></td></tr>
-          <tr><td>Thread de lecture</td><td><code>prepareToPlay()</code></td><td><code>frameSampler-&gt;startPlayerThread(audioBuffers, doubleBuffer)</code></td></tr>
+          <tr><td>Thread de lecture</td><td><code>prepareToPlay()</code></td><td><code>luxSampler-&gt;startPlayerThread(audioBuffers, doubleBuffer)</code></td></tr>
           <tr><td>UI banks (12 boutons)</td><td><code>PluginEditor</code></td><td>Grille directement dans l'éditeur principal (pas Settings)</td></tr>
           <tr><td>UI séquenceur</td><td><code>PluginEditor</code></td><td>Grille 32 steps, BPM, Steps, Loop, DAW sync, Play, Stop</td></tr>
           <tr><td>Persistence</td><td><code>getState/setStateInformation</code></td><td>Via APVTS (paramètres FS + Seq)</td></tr>
@@ -993,18 +993,18 @@ std::<span class="ty">atomic</span>&lt;<span class="ty">int</span>&gt; seqGateSl
       </table>
     </div>
 
-    <h3>19.2 Wiring FrameSequencer ↔ FrameSampler</h3>
+    <h3>19.2 Wiring FrameSequencer ↔ LuxSampler</h3>
     <pre><span class="cm">// Dans Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()</span>
-frameSampler   = std::make_unique&lt;<span class="ty">FrameSampler</span>&gt;();
+luxSampler   = std::make_unique&lt;<span class="ty">LuxSampler</span>&gt;();
 frameSequencer = std::make_unique&lt;<span class="ty">FrameSequencer</span>&gt;();
-frameSequencer-><span class="fn">setFrameSampler</span>(frameSampler.<span class="fn">get</span>());</pre>
+frameSequencer-><span class="fn">setLuxSampler</span>(luxSampler.<span class="fn">get</span>());</pre>
   </section>
 
   <!-- §20 EXIGENCES -->
   <section id="requirements">
     <h2><span class="sec-num">§20</span> Tableau des exigences</h2>
 
-    <h4>MUST — FrameSampler</h4>
+    <h4>MUST — LuxSampler</h4>
     <ul class="req-list">
       <li class="req-must"><span class="req-id">FS-001</span><span>Les notes C0–B0 (MIDI 12–23) arment l'enregistrement des slots 0–11 sur le canal MIDI configuré. <span class="impl-badge impl-done">✓ impl</span></span></li>
       <li class="req-must"><span class="req-id">FS-002</span><span>Les notes C1–B1 (MIDI 24–35) déclenchent la lecture des slots 0–11. <span class="impl-badge impl-done">✓ impl</span></span></li>
@@ -1054,7 +1054,7 @@ frameSequencer-><span class="fn">setFrameSampler</span>(frameSampler.<span class
       <li class="req-may"><span class="req-id">FS-107</span><span>Punch-in positionnel (enregistrement depuis la position courante de la tête de lecture). Différé.</span></li>
       <li class="req-may"><span class="req-id">FS-201</span><span>Vitesse de lecture variable (0.5×, 1×, 2×).</span></li>
       <li class="req-may"><span class="req-id">FS-202</span><span>Compression zlib optionnelle des payloads .fsmp.</span></li>
-      <li class="req-may"><span class="req-id">SEQ-101</span><span>Multi-instance FrameSampler (suppression du singleton C).</span></li>
+      <li class="req-may"><span class="req-id">SEQ-101</span><span>Multi-instance LuxSampler (suppression du singleton C).</span></li>
       <li class="req-may"><span class="req-id">SEQ-102</span><span>Longueur de step variable par step (polyrhythmie).</span></li>
     </ul>
   </section>
@@ -1107,7 +1107,7 @@ frameSequencer-><span class="fn">setFrameSampler</span>(frameSampler.<span class
 
   <hr/>
   <p style="text-align:center; color:var(--text-dim); font-size:0.78rem;">
-    Sp3ctra_VST · FrameSampler + FrameSequencer Spec v0.4 · Document interne – Ne pas distribuer
+    Sp3ctra_VST · LuxSampler + FrameSequencer Spec v0.4 · Document interne – Ne pas distribuer
   </p>
 
 </main>

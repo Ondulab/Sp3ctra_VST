@@ -10,7 +10,7 @@
 //   [4]  xmlLen   (bytes)
 //   [*]  UTF-8 XML  (SlotParams + Sequencer state)
 //   [4]  fsmpLen  (bytes)
-//   [*]  binary .fsmp data  (slot audio — existing FrameSampler format)
+//   [*]  binary .fsmp data  (slot audio — existing LuxSampler format)
 //   [4]  EOF marker  0xDEADBEEF
 // ============================================================================
 namespace
@@ -191,10 +191,10 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
                 }
 
                 // Clear all recorded slots and reset play params to defaults
-                if (auto* fs = processor.getFrameSampler())
+                if (auto* fs = processor.getLuxSampler())
                 {
                     fs->clearAllSlots();
-                    for (int i = 0; i < FrameSamplerConstants::NUM_SLOTS; ++i)
+                    for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
                     {
                         fs->setSlotStartFrac   (i, 0.0f);
                         fs->setSlotEndFrac     (i, 1.0f);
@@ -277,7 +277,7 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
     // lastSessionPath is restored from DAW state (setStateInformation) before
     // the editor is created, so it is already available here.
     // Deferred via callAsync so the component is fully laid out and the
-    // FrameSampler player thread is started (prepareToPlay) before file I/O.
+    // LuxSampler player thread is started (prepareToPlay) before file I/O.
     const auto lastPath = processor.getLastSessionPath();
     if (lastPath.isNotEmpty())
     {
@@ -356,7 +356,7 @@ void SamplerPageComponent::resized()
 
 void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
 {
-    auto* fs  = processor.getFrameSampler();
+    auto* fs  = processor.getLuxSampler();
     auto* seq = processor.getFrameSequencer();
     if (!fs || !seq) return;
 
@@ -366,7 +366,7 @@ void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
 
     // Per-slot play parameters
     auto* slotsXml = root.createNewChildElement("SlotParams");
-    for (int i = 0; i < FrameSamplerConstants::NUM_SLOTS; ++i)
+    for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
     {
         auto* s = slotsXml->createNewChildElement("Slot");
         s->setAttribute("idx",        i);
@@ -447,7 +447,7 @@ void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
 
 void SamplerPageComponent::doLoadSession(const juce::File& sessionFile)
 {
-    auto* fs  = processor.getFrameSampler();
+    auto* fs  = processor.getLuxSampler();
     auto* seq = processor.getFrameSequencer();
     if (!fs || !seq) return;
 
@@ -508,7 +508,7 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile)
         for (auto* s : slotsXml->getChildIterator())
         {
             const int i = s->getIntAttribute("idx", -1);
-            if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) continue;
+            if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) continue;
             fs->setSlotStartFrac (i, static_cast<float>(s->getDoubleAttribute("startFrac",  0.0)));
             fs->setSlotEndFrac   (i, static_cast<float>(s->getDoubleAttribute("endFrac",    1.0)));
             fs->setSlotSpeed     (i, static_cast<float>(s->getDoubleAttribute("speed",      1.0)));
@@ -548,7 +548,7 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile)
         return;
     }
 
-    // Write to temporary file and load via FrameSampler
+    // Write to temporary file and load via LuxSampler
     juce::TemporaryFile tmpFsmp(".fsmp");
     {
         juce::FileOutputStream fsmpOut(tmpFsmp.getFile());

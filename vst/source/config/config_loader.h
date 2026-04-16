@@ -238,7 +238,7 @@ typedef struct {
     /*   1.0 = full amplitude   0.0 = complete silence (all notes → 0)        */
     float image_live_opacity;
 
-    /* sampler_gamma : gamma applied to FrameSampler playback frames (1.0=off)  */
+    /* sampler_gamma : gamma applied to LuxSampler playback frames (1.0=off)  */
     float sampler_gamma;
     /* sampler_contrast_min : min intensity floor for sampler frames            */
     float sampler_contrast_min;
@@ -271,7 +271,7 @@ typedef struct {
     /*   2 = WHITE — force all notes to 0.0 (silence)                         */
     int image_freeze_mode;
 
-    /* image_sampler_opacity : opacity scale applied to the FrameSampler stream */
+    /* image_sampler_opacity : opacity scale applied to the LuxSampler stream */
     /*   1.0 = full signal   0.0 = complete silence                            */
     float image_sampler_opacity;
 

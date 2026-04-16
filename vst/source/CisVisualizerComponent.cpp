@@ -12,9 +12,9 @@ extern "C" {
     #include "synthesis/luxsynth/kissfft/kiss_fftr.h"
 }
 
-// Forward-declare C hooks defined in FrameSampler.cpp.
-extern "C" int frame_sampler_is_playing(void);
-extern "C" int frame_sampler_is_recording(void);
+// Forward-declare C hooks defined in LuxSampler.cpp.
+extern "C" int lux_sampler_is_playing(void);
+extern "C" int lux_sampler_is_recording(void);
 
 //==============================================================================
 // CisHoverTooltip — desktop-level floating tooltip (never clipped by parent)
@@ -472,7 +472,7 @@ void CisVisualizerComponent::updateCisData()
     // actively playing AND the sampler transport is not STOP.
     const int  rawSmpFreeze  = g_sp3ctra_config.sampler_freeze_mode;
     const int  smpFreezeMode = (rawFreezeMode > rawSmpFreeze) ? rawFreezeMode : rawSmpFreeze;
-    const bool samplerWriting = (frame_sampler_is_playing() != 0)
+    const bool samplerWriting = (lux_sampler_is_playing() != 0)
                                 && (smpFreezeMode != 2);
 
     // ── Active visualizer source ──────────────────────────────────────────────
@@ -492,7 +492,7 @@ void CisVisualizerComponent::updateCisData()
             std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
             std::fill(localDataB.begin(),    localDataB.end(),    uint8_t{255});
             std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-            if (auto* fs = processor.getFrameSampler())
+            if (auto* fs = processor.getLuxSampler())
                 fs->setFinalGrayBuffer(localDataGray);
             return;
         }
@@ -507,7 +507,7 @@ void CisVisualizerComponent::updateCisData()
             std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
             std::fill(localDataB.begin(),    localDataB.end(),    uint8_t{255});
             std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-            if (auto* fs = processor.getFrameSampler())
+            if (auto* fs = processor.getLuxSampler())
                 fs->setFinalGrayBuffer(localDataGray);
             return;
         }
@@ -522,7 +522,7 @@ void CisVisualizerComponent::updateCisData()
         // being captured — the Transport UI state (STOP/HOLD) must not blank
         // or freeze the display.  Bypass all freeze gates while recording so
         // that visual and audio always reflect the same incoming stream.
-        const bool isRecording = (frame_sampler_is_recording() != 0);
+        const bool isRecording = (lux_sampler_is_recording() != 0);
         if (!isRecording)
         {
             if (rawSmpFreeze == 2) // Sampler STOP → white
@@ -531,7 +531,7 @@ void CisVisualizerComponent::updateCisData()
                 std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
                 std::fill(localDataB.begin(),    localDataB.end(),    uint8_t{255});
                 std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-                if (auto* fs = processor.getFrameSampler())
+                if (auto* fs = processor.getLuxSampler())
                     fs->setFinalGrayBuffer(localDataGray);
                 return;
             }
@@ -563,7 +563,7 @@ void CisVisualizerComponent::updateCisData()
                 std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
                 std::fill(localDataB.begin(),    localDataB.end(),    uint8_t{255});
                 std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-                if (auto* fs = processor.getFrameSampler())
+                if (auto* fs = processor.getLuxSampler())
                     fs->setFinalGrayBuffer(localDataGray);
                 return;
             }
@@ -572,7 +572,7 @@ void CisVisualizerComponent::updateCisData()
         else if (downstreamSrcType == IMAGE_SOURCE_SAMPLER)
         {
             // Source=SAMPLER: honour sampler freeze, bypass during recording.
-            const bool isRecording = (frame_sampler_is_recording() != 0);
+            const bool isRecording = (lux_sampler_is_recording() != 0);
             if (!isRecording)
             {
                 if (rawSmpFreeze == 2)
@@ -581,7 +581,7 @@ void CisVisualizerComponent::updateCisData()
                     std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
                     std::fill(localDataB.begin(),    localDataB.end(),    uint8_t{255});
                     std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-                    if (auto* fs = processor.getFrameSampler())
+                    if (auto* fs = processor.getLuxSampler())
                         fs->setFinalGrayBuffer(localDataGray);
                     return;
                 }
@@ -597,13 +597,13 @@ void CisVisualizerComponent::updateCisData()
                 std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
                 std::fill(localDataB.begin(),    localDataB.end(),    uint8_t{255});
                 std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-                if (auto* fs = processor.getFrameSampler())
+                if (auto* fs = processor.getLuxSampler())
                     fs->setFinalGrayBuffer(localDataGray);
                 return;
             }
             if (liveFreezeMode == 1 && !samplerWriting)
             {
-                auto* fs_hold = processor.getFrameSampler();
+                auto* fs_hold = processor.getLuxSampler();
                 if (fs_hold && fs_hold->isSeqSilentStepActive())
                 {
                     std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
@@ -783,7 +783,7 @@ void CisVisualizerComponent::updateCisData()
         // disabled (passthroughEnabled=false) but AudioImageBuffers still holds
         // the last frame.  We must force white here so that both the display
         // and BlobVisualizerComponent see silence.
-        auto* fs_ = processor.getFrameSampler();
+        auto* fs_ = processor.getLuxSampler();
         if (fs_ && fs_->isSeqSilentStepActive())
             std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
 

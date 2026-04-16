@@ -403,9 +403,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::NormalisableRange<float>(0.0f, 2000.0f, 10.0f), 0.0f,
         juce::AudioParameterFloatAttributes{}.withLabel("ms")));
 
-    // ── FrameSampler ──────────────────────────────────────────────────────────
+    // ── LuxSampler ──────────────────────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"frameSamplerEnabled", 1}, "FrameSampler Enabled",
+        juce::ParameterID{"luxSamplerEnabled", 1}, "LuxSampler Enabled",
         false, kHiddenBool));
 
     {
@@ -413,19 +413,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         for (int i = 1; i <= 16; ++i)
             midiChannelNames.add("Channel " + juce::String(i));
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            juce::ParameterID{"frameSamplerMidiChannel", 1}, "FrameSampler MIDI Channel",
+            juce::ParameterID{"luxSamplerMidiChannel", 1}, "LuxSampler MIDI Channel",
             midiChannelNames, 0, kHiddenChoice));  // default = Channel 1 (index 0)
     }
 
     {
         juce::StringArray octaveNames { "-2", "-1", " 0", "+1", "+2" };
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            juce::ParameterID{"frameSamplerOctaveOffset", 1}, "FrameSampler Octave Offset",
+            juce::ParameterID{"luxSamplerOctaveOffset", 1}, "LuxSampler Octave Offset",
             octaveNames, 2, kHiddenChoice));  // default index 2 = 0
     }
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"frameSamplerMaxDuration", 1}, "FrameSampler Max Duration",
+        juce::ParameterID{"luxSamplerMaxDuration", 1}, "LuxSampler Max Duration",
         juce::NormalisableRange<float>(1.0f, 10.0f, 0.1f), 10.0f, kHiddenFloat));
 
     // ── FrameSequencer parameters ─────────────────────────────────────────────
@@ -557,14 +557,14 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("rawFreezeMode",        this);
     apvts.addParameterListener("rawFadeInMs",          this);
 
-    // Create FrameSampler (always active, no lazy init needed)
-    frameSampler = std::make_unique<FrameSampler>();
+    // Create LuxSampler (always active, no lazy init needed)
+    luxSampler = std::make_unique<LuxSampler>();
 
-    // Create FrameSequencer and wire it to the FrameSampler
+    // Create FrameSequencer and wire it to the LuxSampler
     frameSequencer = std::make_unique<FrameSequencer>();
-    frameSequencer->setFrameSampler(frameSampler.get());
+    frameSequencer->setLuxSampler(luxSampler.get());
 
-    // Register FrameSampler parameter listeners
+    // Register LuxSampler parameter listeners
     apvts.addParameterListener(PARAM_FS_ENABLED,    this);
     apvts.addParameterListener(PARAM_FS_MIDI_CH,    this);
     apvts.addParameterListener(PARAM_FS_OCT_OFFSET, this);
@@ -577,13 +577,13 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener(PARAM_SEQ_DAW_SYNC, this);
     apvts.addParameterListener(PARAM_SEQ_BPS,      this);
 
-    // Sync FrameSampler config with initial APVTS values
-    frameSampler->setEnabled(*apvts.getRawParameterValue(PARAM_FS_ENABLED) > 0.5f);
-    frameSampler->setMidiChannel(
+    // Sync LuxSampler config with initial APVTS values
+    luxSampler->setEnabled(*apvts.getRawParameterValue(PARAM_FS_ENABLED) > 0.5f);
+    luxSampler->setMidiChannel(
         static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_MIDI_CH)) + 1);
-    frameSampler->setOctaveOffset(
+    luxSampler->setOctaveOffset(
         static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_OCT_OFFSET)) - 2);
-    frameSampler->setMaxDuration(*apvts.getRawParameterValue(PARAM_FS_MAX_DUR));
+    luxSampler->setMaxDuration(*apvts.getRawParameterValue(PARAM_FS_MAX_DUR));
 
     // ── Acquire the process-wide shared core ─────────────────────────────────
     // If this is the FIRST plugin instance in this DAW process → creates the
@@ -612,14 +612,14 @@ Sp3ctraAudioProcessor::~Sp3ctraAudioProcessor()
     log_info("VST", "Sp3ctraAudioProcessor: Destructor - Shutting down");
     log_info("VST", "=============================================================");
 
-    // ── FrameSampler FIRST (uses AudioImageBuffers / DoubleBuffer owned by sharedCore) ──
+    // ── LuxSampler FIRST (uses AudioImageBuffers / DoubleBuffer owned by sharedCore) ──
     // Must stop before releasing sharedCore to avoid use-after-free.
-    if (frameSampler)
+    if (luxSampler)
     {
-        log_info("VST", "Stopping FrameSampler player thread...");
-        frameSampler->stopPlayerThread();
-        frameSampler.reset();
-        log_info("VST", "FrameSampler stopped");
+        log_info("VST", "Stopping LuxSampler player thread...");
+        luxSampler->stopPlayerThread();
+        luxSampler.reset();
+        log_info("VST", "LuxSampler stopped");
     }
 
     // ── Release the shared core ──────────────────────────────────────────────
@@ -798,10 +798,10 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
         log_info("VST", "Shared pipeline already running — connecting as additional consumer");
     }
 
-    // ── FrameSampler player thread (per-instance, non-RT) ────────────────────
-    if (frameSampler && sharedCore && sharedCore->getCore())
+    // ── LuxSampler player thread (per-instance, non-RT) ────────────────────
+    if (luxSampler && sharedCore && sharedCore->getCore())
     {
-        frameSampler->startPlayerThread(sharedCore->getCore()->getAudioImageBuffers(),
+        luxSampler->startPlayerThread(sharedCore->getCore()->getAudioImageBuffers(),
                                         sharedCore->getCore()->getDoubleBuffer());
     }
 
@@ -854,9 +854,9 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // Clear output buffer first
     buffer.clear();
 
-    // ── FrameSampler MIDI (RT-safe: atomics only, no alloc, no lock, no I/O) ──
-    if (frameSampler != nullptr)
-        frameSampler->processMidi(midiMessages);
+    // ── LuxSampler MIDI (RT-safe: atomics only, no alloc, no lock, no I/O) ──
+    if (luxSampler != nullptr)
+        luxSampler->processMidi(midiMessages);
 
     // ── FrameSequencer: advance step if sequencer is running ─────────────────
     if (frameSequencer != nullptr)
@@ -864,10 +864,10 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                                      buffer.getNumSamples(),
                                      getSampleRate());
 
-    // ── Sequencer-gated recording: update FrameSampler gate slot ─────────────
+    // ── Sequencer-gated recording: update LuxSampler gate slot ─────────────
     // seqGateSlot = bank the sequencer is currently playing, or -1 (no gate).
     // Runs every audio block; onFrameAssembled() reads it atomically.
-    if (frameSampler != nullptr)
+    if (luxSampler != nullptr)
     {
         int gateSlot = -1; // no gate: sequencer off / stopped / passthrough step
         if (frameSequencer != nullptr
@@ -878,7 +878,7 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             if (curStep >= 0)
                 gateSlot = frameSequencer->getStep(curStep); // -1 = passthrough step
         }
-        frameSampler->setSeqGateSlot(gateSlot);
+        luxSampler->setSeqGateSlot(gateSlot);
     }
 
     // RT-safe early exit when device is switched off (atomic read, no lock)
@@ -1063,18 +1063,18 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
     // 🔧 CRITICAL: LuxStral parameters are automatically synced to g_sp3ctra_config
     // They are read directly by the synthesis engine, NO restart needed!
     // StrokeForge parameters — same hot-reload pattern as LuxStral
-    // FrameSampler parameters — update atomic config on FrameSampler
-    if (parameterID.startsWith("frameSampler"))
+    // LuxSampler parameters — update atomic config on LuxSampler
+    if (parameterID.startsWith("luxSampler"))
     {
-        if (frameSampler != nullptr)
+        if (luxSampler != nullptr)
         {
-            frameSampler->setEnabled(
+            luxSampler->setEnabled(
                 *apvts.getRawParameterValue(PARAM_FS_ENABLED) > 0.5f);
-            frameSampler->setMidiChannel(
+            luxSampler->setMidiChannel(
                 static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_MIDI_CH)) + 1);
-            frameSampler->setOctaveOffset(
+            luxSampler->setOctaveOffset(
                 static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_OCT_OFFSET)) - 2);
-            frameSampler->setMaxDuration(
+            luxSampler->setMaxDuration(
                 *apvts.getRawParameterValue(PARAM_FS_MAX_DUR));
         }
         return;

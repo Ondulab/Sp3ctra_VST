@@ -23,7 +23,7 @@
 /* VST synchronization function declaration (defined in vst_adapters.cpp) */
 #ifdef VST_MODE
 extern void luxstral_wait_for_buffer_consumed(void);
-#include "../framesampler/frame_sampler_hooks.h"
+#include "../luxsampler/lux_sampler_hooks.h"
 #endif
 
 /* External sequencer instance */
@@ -450,11 +450,11 @@ void *udpThread(void *arg) {
       fragmentCount = 0;
 
       // Start writing to audio buffers for new line.
-      // During FrameSampler playback, bypass live feed: FramePlayerThread is
+      // During LuxSampler playback, bypass live feed: FramePlayerThread is
       // the sole writer. Skipping start_write here prevents overwriting
       // injected playback frames.
 #ifdef VST_MODE
-      if (!frame_sampler_is_playing())
+      if (!lux_sampler_is_playing())
       {
 #endif
         if (audio_image_buffers_start_write(audioBuffers, &audio_write_R,
@@ -555,9 +555,9 @@ void *udpThread(void *arg) {
             nb_pixels);
       }
 
-      /* FrameSampler hook: record assembled CIS line if a slot is RECORDING */
+      /* LuxSampler hook: record assembled CIS line if a slot is RECORDING */
 #ifdef VST_MODE
-      frame_sampler_on_frame_assembled(
+      lux_sampler_on_frame_assembled(
           db->activeBuffer_R, db->activeBuffer_G, db->activeBuffer_B,
           (uint16_t)nb_pixels, packet.line_id);
 #endif
@@ -614,7 +614,7 @@ void *udpThread(void *arg) {
              * no slot is playing — sampler_pointers still hold the old frame.
              * Use the live UDP data instead so the pipeline processes the
              * actual CIS stream, not stale sampler data. */
-            if (frame_sampler_is_seq_live_step() && !frame_sampler_is_playing())
+            if (lux_sampler_is_seq_live_step() && !lux_sampler_is_playing())
             {
                 src_R = db->activeBuffer_R;
                 src_G = db->activeBuffer_G;
@@ -641,7 +641,7 @@ void *udpThread(void *arg) {
             src_B = mixB;
         }
 
-        /* FIX(routing): When the sequencer is driving playback (frame_sampler_is_playing)
+        /* FIX(routing): When the sequencer is driving playback (lux_sampler_is_playing)
          * and Source=MIX, the sampler contribution must not be silenced by the
          * live transport freeze (image_freeze_mode / raw_freeze_mode).
          * The visualizer already bypasses the freeze gate for MIX when samplerWriting
@@ -649,7 +649,7 @@ void *udpThread(void *arg) {
          * Override freeze_mode to PLAY so ENVELOPE_LIVE does not silence the output. */
 #ifdef VST_MODE
         if (live_cfg.luxstral_path.source == IMAGE_SOURCE_MIX
-            && frame_sampler_is_playing())
+            && lux_sampler_is_playing())
         {
             live_cfg.freeze_mode = 0; /* PLAY — sequencer keeps MIX audio alive */
         }
@@ -716,7 +716,7 @@ void *udpThread(void *arg) {
       swapBuffers(db);
       updateLastValidImage(db);
 
-      /* During FrameSampler playback, FramePlayerThread owns preprocessed_data.
+      /* During LuxSampler playback, FramePlayerThread owns preprocessed_data.
        * Skipping the live update here prevents overwriting playback preprocessing
        * that FramePlayerThread already wrote for the current synthesis cycle.
        * synth_AudioProcess reads db->preprocessed_data directly for audio gen. */
@@ -738,7 +738,7 @@ void *udpThread(void *arg) {
         }
         else if (src == 0 /* IMAGE_SOURCE_SAMPLER */)
         {
-          if (frame_sampler_is_recording())
+          if (lux_sampler_is_recording())
           {
             /* Recording: live UDP stream feeds the sampler path.
              * Use tag=2 so synth_AudioProcess source-tag gating accepts
@@ -746,9 +746,9 @@ void *udpThread(void *arg) {
             db->preprocessed_data = preprocessed_temp;
             db->dataReady = 2;
           }
-          else if (!frame_sampler_is_playing())
+          else if (!lux_sampler_is_playing())
           {
-            if (frame_sampler_is_seq_live_step())
+            if (lux_sampler_is_seq_live_step())
             {
               /* FIX(live): Sequencer STEP_LIVE is active.
                * Source=S but no slot is playing — the live CIS stream IS the
@@ -763,7 +763,7 @@ void *udpThread(void *arg) {
               db->preprocessed_data = preprocessed_temp;
               db->dataReady = 2;
             }
-            else if (frame_sampler_is_passthrough())
+            else if (lux_sampler_is_passthrough())
             {
               /* Truly idle: no slot active, not STEP_EMPTY, not STEP_LIVE.
                * Inject silence so preprocessed_data does not freeze on the
@@ -788,7 +788,7 @@ void *udpThread(void *arg) {
              * FramePlayerThread / injectSilenceCmd handles these cases.
              * Do NOT overwrite preprocessed_data here. */
           }
-          /* else frame_sampler_is_playing(): FramePlayerThread is the sole
+          /* else lux_sampler_is_playing(): FramePlayerThread is the sole
            * writer of preprocessed_data for Source=S during playback. */
         }
       }
@@ -799,14 +799,14 @@ void *udpThread(void *arg) {
 
       /* FIX(routing): LuxSynth polyphonic independent write path.
        * The LuxStral routing block above is gated entirely by luxstral_source_type.
-       * When LuxStral=S and frame_sampler_is_playing(), the ENTIRE block is skipped,
+       * When LuxStral=S and lux_sampler_is_playing(), the ENTIRE block is skipped,
        * leaving polyphonic.* (LuxSynth input) frozen on its last written value.
        * This causes the LuxSynth "Synth Grey" visualisation to freeze whenever
        * the sampler is playing, regardless of LuxSynth's own source setting.
        *
        * Fix: always update polyphonic.* from preprocessed_temp when
        * luxsynth_source_type is LIVE or MIX.  This write is independent of
-       * LuxStral's transport state and of frame_sampler_is_playing().
+       * LuxStral's transport state and of lux_sampler_is_playing().
        * preprocessed_temp.polyphonic was already recomputed from LuxSynth's
        * designated source (live UDP / sampler / mix) by preprocess_luxsynth()
        * in the pipeline processing block above (Change A). */

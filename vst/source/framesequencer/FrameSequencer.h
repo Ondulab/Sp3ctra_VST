@@ -2,10 +2,10 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <atomic>
-#include "../framesampler/FrameSampler.h"
+#include "../luxsampler/LuxSampler.h"
 
 /**
- * @brief Step sequencer for FrameSampler banks.
+ * @brief Step sequencer for LuxSampler banks.
  *
  * RT Safety contract
  * ------------------
@@ -38,7 +38,7 @@ public:
     FrameSequencer();
 
     // ── Wiring ───────────────────────────────────────────────────────────────
-    void setFrameSampler(FrameSampler* fs) noexcept { frameSampler = fs; }
+    void setLuxSampler(LuxSampler* fs) noexcept { luxSampler = fs; }
 
     // ── Configuration (message thread) ───────────────────────────────────────
     void setEnabled      (bool  e) noexcept { enabled.store(e);     }
@@ -86,7 +86,7 @@ public:
     bool loadFromXml (const juce::XmlElement& xml);
 
 private:
-    FrameSampler* frameSampler = nullptr;
+    LuxSampler* luxSampler = nullptr;
 
     // ── Per-step bank assignment (-1 = empty, 0–11 = bank index) ─────────────
     std::atomic<int> steps[MAX_STEPS];

@@ -3,7 +3,7 @@
  *
  * Pipeline orchestrator for the dual-path image processing system.
  * This is the single entry point replacing image_preprocess_frame() and
- * image_preprocess_frame_sampler().
+ * image_preprocess_lux_sampler().
  *
  * Paths:
  *   Path A (LuxStral):          route → gray → contrast → invert → ac_remove → gamma
@@ -41,7 +41,7 @@ void pipeline_cleanup(void);
 /**
  * @brief Process one frame through the dual-path pipeline.
  *
- * Replaces image_preprocess_frame() and image_preprocess_frame_sampler().
+ * Replaces image_preprocess_frame() and image_preprocess_lux_sampler().
  * Includes freeze/opacity/fade envelope for the LuxStral path.
  *
  * @param raw_r, raw_g, raw_b  Input RGB channels [0-255]

@@ -1,9 +1,9 @@
 #pragma once
 
 /*
- * FrameSampler.h
+ * LuxSampler.h
  *
- * Main controller for the FrameSampler subsystem.
+ * Main controller for the LuxSampler subsystem.
  * Records, stores and replays the Sp3ctra CIS image stream via MIDI commands.
  *
  * RT safety contract (enforced throughout):
@@ -11,7 +11,7 @@
  *   - onFrameAssembled() runs on udpThread (Non-RT) → alloc allowed on first use
  *   - FramePlayerThread runs Non-RT → alloc/lock/I/O allowed
  *
- * Architecture: see docs/SPEC_FrameSampler.html §9
+ * Architecture: see docs/SPEC_LuxSampler.html §9
  */
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -32,7 +32,7 @@ extern "C"
 // ============================================================================
 // Constants
 // ============================================================================
-namespace FrameSamplerConstants
+namespace LuxSamplerConstants
 {
     constexpr int     NUM_SLOTS           = 12;
     constexpr int     MAX_FRAMES_PER_SLOT = 30000; // 200 DPI, 10 s, ×1.5 margin
@@ -58,9 +58,9 @@ struct CapturedFrame
     uint64_t timestamp_us = 0; // µs relative to slot start (t₀ = 0)
     uint32_t line_id      = 0; // Original UDP line_id (debug/sync)
     uint16_t pixel_count  = 0; // 1728 @200DPI or 3456 @400DPI
-    uint8_t  R[FrameSamplerConstants::MAX_PIXELS] {};
-    uint8_t  G[FrameSamplerConstants::MAX_PIXELS] {};
-    uint8_t  B[FrameSamplerConstants::MAX_PIXELS] {};
+    uint8_t  R[LuxSamplerConstants::MAX_PIXELS] {};
+    uint8_t  G[LuxSamplerConstants::MAX_PIXELS] {};
+    uint8_t  B[LuxSamplerConstants::MAX_PIXELS] {};
 };
 
 // ============================================================================
@@ -106,8 +106,8 @@ struct FrameSlot
         if (!frames)
         {
             frames   = std::make_unique<CapturedFrame[]>(
-                           FrameSamplerConstants::MAX_FRAMES_PER_SLOT);
-            capacity = FrameSamplerConstants::MAX_FRAMES_PER_SLOT;
+                           LuxSamplerConstants::MAX_FRAMES_PER_SLOT);
+            capacity = LuxSamplerConstants::MAX_FRAMES_PER_SLOT;
         }
         frame_count = 0;
         play_head   = 0;
@@ -129,12 +129,12 @@ struct FrameSlot
 };
 
 // ============================================================================
-// FrameSamplerAtomicState — lock-free RT ↔ Non-RT interface
+// LuxSamplerAtomicState — lock-free RT ↔ Non-RT interface
 // RT path (processBlock) writes these; Non-RT threads read them.
 // ============================================================================
-struct FrameSamplerAtomicState
+struct LuxSamplerAtomicState
 {
-    std::atomic<int>  slotState[FrameSamplerConstants::NUM_SLOTS];
+    std::atomic<int>  slotState[LuxSamplerConstants::NUM_SLOTS];
     std::atomic<int>  activePlaySlot     { -1 };   // -1 = none playing
     std::atomic<bool> passthroughEnabled { true };  // false during PLAYING
     /** True ONLY when the sequencer is running and the current step is STEP_LIVE.
@@ -151,8 +151,8 @@ struct FrameSamplerAtomicState
     std::atomic<bool> seqControlledPlay { false };
 
     // Command pulses: set by RT, cleared (exchange) by Non-RT threads
-    std::atomic<bool> startRecCmd[FrameSamplerConstants::NUM_SLOTS];
-    std::atomic<bool> stopRecCmd[FrameSamplerConstants::NUM_SLOTS];
+    std::atomic<bool> startRecCmd[LuxSamplerConstants::NUM_SLOTS];
+    std::atomic<bool> stopRecCmd[LuxSamplerConstants::NUM_SLOTS];
     std::atomic<int>  startPlayCmd { -1 };   // slot index, -1 = no command
     std::atomic<bool> stopPlayCmd  { false };
 
@@ -168,9 +168,9 @@ struct FrameSamplerAtomicState
      *      after STEP_LIVE, or as the very first step of a sequence). */
     std::atomic<bool> injectSilenceCmd { false };
 
-    FrameSamplerAtomicState() noexcept
+    LuxSamplerAtomicState() noexcept
     {
-        for (int i = 0; i < FrameSamplerConstants::NUM_SLOTS; ++i)
+        for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
         {
             slotState[i].store(static_cast<int>(SlotState::IDLE),
                                std::memory_order_relaxed);
@@ -179,14 +179,14 @@ struct FrameSamplerAtomicState
         }
     }
 
-    FrameSamplerAtomicState(const FrameSamplerAtomicState&) = delete;
-    FrameSamplerAtomicState& operator=(const FrameSamplerAtomicState&) = delete;
+    LuxSamplerAtomicState(const LuxSamplerAtomicState&) = delete;
+    LuxSamplerAtomicState& operator=(const LuxSamplerAtomicState&) = delete;
 };
 
 // ============================================================================
 // Forward declarations
 // ============================================================================
-class FrameSampler;
+class LuxSampler;
 
 // ============================================================================
 // FramePlayerThread — Non-RT thread that injects recorded frames into synthesis
@@ -194,14 +194,14 @@ class FrameSampler;
 class FramePlayerThread final : public juce::Thread
 {
 public:
-    FramePlayerThread(FrameSampler& sampler,
+    FramePlayerThread(LuxSampler& sampler,
                       AudioImageBuffers* audioBuffers,
                       DoubleBuffer*      doubleBuffer);
     ~FramePlayerThread() override;
     void run() override;
 
 private:
-    FrameSampler&      sampler;
+    LuxSampler&      sampler;
     AudioImageBuffers* audioBuffers;
     DoubleBuffer*      doubleBuffer; // for updating preprocessed_data during playback
 
@@ -225,13 +225,13 @@ private:
 };
 
 // ============================================================================
-// FrameSampler — main controller
+// LuxSampler — main controller
 // ============================================================================
-class FrameSampler
+class LuxSampler
 {
 public:
-    FrameSampler();
-    ~FrameSampler();
+    LuxSampler();
+    ~LuxSampler();
 
     // =========================================================================
     // RT path — processBlock  (atomics ONLY — no alloc, no lock, no I/O)
@@ -347,25 +347,25 @@ public:
     // =========================================================================
     void setSlotStartFrac(int i, float v) noexcept
     {
-        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
             slotParams[i].startFrac.store(juce::jlimit(0.0f, 1.0f, v),
                                           std::memory_order_relaxed);
     }
     void setSlotEndFrac(int i, float v) noexcept
     {
-        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
             slotParams[i].endFrac.store(juce::jlimit(0.0f, 1.0f, v),
                                         std::memory_order_relaxed);
     }
     void setSlotSpeed(int i, float v) noexcept
     {
-        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
             slotParams[i].speed.store(juce::jlimit(0.01f, 32.0f, v),
                                       std::memory_order_relaxed);
     }
     void setSlotLoopMode(int i, LoopMode m) noexcept
     {
-        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
             slotParams[i].loopMode.store(static_cast<int>(m),
                                          std::memory_order_relaxed);
     }
@@ -374,14 +374,14 @@ public:
      *  Replaces the unimplemented 'priority' field. */
     void setSlotResumeMode(int i, bool r) noexcept
     {
-        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
             slotParams[i].resumeMode.store(r, std::memory_order_relaxed);
     }
 
     /** Live darken-blend mix amount [0..1]: 0=pure playback, 1=darken(sample,live). */
     void setSlotBlendAmount(int i, float v) noexcept
     {
-        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
             slotParams[i].blendAmount.store(juce::jlimit(0.0f, 1.0f, v),
                                             std::memory_order_relaxed);
     }
@@ -391,7 +391,7 @@ public:
      *  fraction of the active region it is back to normal brightness. */
     void setSlotAttackLen(int i, float v) noexcept
     {
-        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
             slotParams[i].attackLen.store(juce::jlimit(0.0f, 1.0f, v),
                                           std::memory_order_relaxed);
     }
@@ -400,7 +400,7 @@ public:
      *  decayLen frames before that it is back to normal brightness. */
     void setSlotDecayLen(int i, float v) noexcept
     {
-        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
             slotParams[i].decayLen.store(juce::jlimit(0.0f, 1.0f, v),
                                          std::memory_order_relaxed);
     }
@@ -408,7 +408,7 @@ public:
      *  Applied uniformly to every pixel of the playback frame. */
     void setSlotBrightnessLift(int i, float v) noexcept
     {
-        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
             slotParams[i].brightnessLift.store(juce::jlimit(0.0f, 1.0f, v),
                                                std::memory_order_relaxed);
     }
@@ -416,7 +416,7 @@ public:
      *  0=no change, 1=all right-half pixels → white (silence). */
     void setSlotTrebleCut(int i, float v) noexcept
     {
-        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
             slotParams[i].trebleCut.store(juce::jlimit(0.0f, 1.0f, v),
                                           std::memory_order_relaxed);
     }
@@ -424,64 +424,64 @@ public:
      *  0=no change, 1=all left-half pixels → white (silence). */
     void setSlotBassCut(int i, float v) noexcept
     {
-        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
             slotParams[i].bassCut.store(juce::jlimit(0.0f, 1.0f, v),
                                         std::memory_order_relaxed);
     }
 
     float    getSlotStartFrac(int i) const noexcept
     {
-        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0.0f;
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0.0f;
         return slotParams[i].startFrac.load(std::memory_order_relaxed);
     }
     float    getSlotEndFrac(int i) const noexcept
     {
-        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 1.0f;
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 1.0f;
         return slotParams[i].endFrac.load(std::memory_order_relaxed);
     }
     float    getSlotSpeed(int i) const noexcept
     {
-        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 1.0f;
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 1.0f;
         return slotParams[i].speed.load(std::memory_order_relaxed);
     }
     LoopMode getSlotLoopMode(int i) const noexcept
     {
-        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return LoopMode::LOOP;
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return LoopMode::LOOP;
         return static_cast<LoopMode>(slotParams[i].loopMode.load(std::memory_order_relaxed));
     }
     bool     getSlotResumeMode(int i) const noexcept
     {
-        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return false;
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return false;
         return slotParams[i].resumeMode.load(std::memory_order_relaxed);
     }
     float    getSlotBlendAmount(int i) const noexcept
     {
-        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0.0f;
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0.0f;
         return slotParams[i].blendAmount.load(std::memory_order_relaxed);
     }
     float    getSlotAttackLen(int i) const noexcept
     {
-        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0.0f;
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0.0f;
         return slotParams[i].attackLen.load(std::memory_order_relaxed);
     }
     float    getSlotDecayLen(int i) const noexcept
     {
-        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0.0f;
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0.0f;
         return slotParams[i].decayLen.load(std::memory_order_relaxed);
     }
     float    getSlotBrightnessLift(int i) const noexcept
     {
-        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0.0f;
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0.0f;
         return slotParams[i].brightnessLift.load(std::memory_order_relaxed);
     }
     float    getSlotTrebleCut(int i) const noexcept
     {
-        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0.0f;
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0.0f;
         return slotParams[i].trebleCut.load(std::memory_order_relaxed);
     }
     float    getSlotBassCut(int i) const noexcept
     {
-        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0.0f;
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0.0f;
         return slotParams[i].bassCut.load(std::memory_order_relaxed);
     }
 
@@ -518,7 +518,7 @@ public:
      *  Safe to read from the message thread — atomic relaxed load. */
     int getSlotPlayHead(int i) const noexcept
     {
-        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0;
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0;
         return currentPlayHead[i].load(std::memory_order_relaxed);
     }
 
@@ -541,29 +541,29 @@ public:
     // =========================================================================
     void notifyPlayHead(int i, int head) noexcept
     {
-        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
             currentPlayHead[i].store(head, std::memory_order_relaxed);
     }
     void saveLastPlayHead(int i, int head) noexcept
     {
-        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
             lastPlayHead[i].store(head, std::memory_order_relaxed);
     }
     int getLastPlayHead(int i) const noexcept
     {
-        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 0;
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0;
         return lastPlayHead[i].load(std::memory_order_relaxed);
     }
     /** Save the direction (+1 or -1) when playback stops.
      *  Used to restore the PINGPONG sense when Resume mode is active. */
     void saveLastDirection(int i, int dir) noexcept
     {
-        if (i >= 0 && i < FrameSamplerConstants::NUM_SLOTS)
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
             lastDirection[i].store((dir < 0) ? -1 : 1, std::memory_order_relaxed);
     }
     int getLastDirection(int i) const noexcept
     {
-        if (i < 0 || i >= FrameSamplerConstants::NUM_SLOTS) return 1;
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 1;
         const int d = lastDirection[i].load(std::memory_order_relaxed);
         return (d < 0) ? -1 : 1;
     }
@@ -603,20 +603,20 @@ public:
     // Internal access for FramePlayerThread
     // =========================================================================
     FrameSlot&               getSlot(int i)  noexcept { return slots[i]; }
-    FrameSamplerAtomicState& getAtomicState() noexcept { return atomicState; }
+    LuxSamplerAtomicState& getAtomicState() noexcept { return atomicState; }
 
     // =========================================================================
     // Static singleton pointer — set in ctor, cleared in dtor.
-    // Used by C hook functions in FrameSampler.cpp.
+    // Used by C hook functions in LuxSampler.cpp.
     // Limitation: only one VST instance supported per process.
     // =========================================================================
-    static FrameSampler* s_instance;
+    static LuxSampler* s_instance;
 
 private:
     // -------------------------------------------------------------------------
     // RT state (atomics only)
     // -------------------------------------------------------------------------
-    FrameSamplerAtomicState atomicState;
+    LuxSamplerAtomicState atomicState;
 
     std::atomic<bool>  enabled     { false };
     std::atomic<int>   midiChannel { 1 };
@@ -634,7 +634,7 @@ private:
     // -------------------------------------------------------------------------
     // Non-RT state
     // -------------------------------------------------------------------------
-    FrameSlot slots[FrameSamplerConstants::NUM_SLOTS];
+    FrameSlot slots[LuxSamplerConstants::NUM_SLOTS];
 
     std::atomic<int> activeRecSlot { -1 }; // -1 = not recording
     uint64_t         recStartTimeUs = 0;   // set when recording starts
@@ -647,7 +647,7 @@ private:
     DoubleBuffer*      doubleBuffer_ = nullptr; // stored by startPlayerThread()
 
     // -------------------------------------------------------------------------
-    // Per-slot play parameters — parallel to slots[], owned by FrameSampler.
+    // Per-slot play parameters — parallel to slots[], owned by LuxSampler.
     // Written by UI (Non-RT); read by FramePlayerThread (Non-RT).
     // -------------------------------------------------------------------------
     struct SlotPlayParams
@@ -669,14 +669,14 @@ private:
         SlotPlayParams& operator=(const SlotPlayParams&) = delete;
     };
 
-    SlotPlayParams slotParams[FrameSamplerConstants::NUM_SLOTS];
+    SlotPlayParams slotParams[LuxSamplerConstants::NUM_SLOTS];
 
     // Per-slot playhead atomics — written by FramePlayerThread, read by UI.
     // Per-slot playhead atomics — written by FramePlayerThread, read by UI.
-    std::atomic<int> currentPlayHead[FrameSamplerConstants::NUM_SLOTS];
-    std::atomic<int> lastPlayHead[FrameSamplerConstants::NUM_SLOTS];
+    std::atomic<int> currentPlayHead[LuxSamplerConstants::NUM_SLOTS];
+    std::atomic<int> lastPlayHead[LuxSamplerConstants::NUM_SLOTS];
     // Last playback direction (+1 / -1) — used to restore PINGPONG sense on resume.
-    std::atomic<int> lastDirection[FrameSamplerConstants::NUM_SLOTS];
+    std::atomic<int> lastDirection[LuxSamplerConstants::NUM_SLOTS];
 
     // -------------------------------------------------------------------------
     // Live frame cache — updated by UDP thread (onFrameAssembled), read by
@@ -707,9 +707,9 @@ private:
     // Live frame cache
     // -------------------------------------------------------------------------
     std::mutex liveMutex_;
-    uint8_t    liveR_[FrameSamplerConstants::MAX_PIXELS] {};
-    uint8_t    liveG_[FrameSamplerConstants::MAX_PIXELS] {};
-    uint8_t    liveB_[FrameSamplerConstants::MAX_PIXELS] {};
+    uint8_t    liveR_[LuxSamplerConstants::MAX_PIXELS] {};
+    uint8_t    liveG_[LuxSamplerConstants::MAX_PIXELS] {};
+    uint8_t    liveB_[LuxSamplerConstants::MAX_PIXELS] {};
     int        livePixelCount_ = 0;
 
     // -------------------------------------------------------------------------
@@ -721,5 +721,5 @@ private:
     void handleNoteOn (int note, int velocity) noexcept;
     void handleNoteOff(int note)               noexcept;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FrameSampler)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxSampler)
 };

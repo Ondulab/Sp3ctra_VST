@@ -4,9 +4,9 @@
 #include "../PluginProcessor.h"
 
 /**
- * @brief FrameSampler Settings Tab
+ * @brief LuxSampler Settings Tab
  *
- * UI for configuring and monitoring the FrameSampler subsystem.
+ * UI for configuring and monitoring the LuxSampler subsystem.
  * Refreshes slot states at 10 Hz via juce::Timer.
  *
  * Controls:
@@ -17,12 +17,12 @@
  *   - 12-slot status grid (state, duration, clear)
  *   - Save / Load / Clear All buttons
  */
-class FrameSamplerSettingsTab final : public juce::Component,
+class LuxSamplerSettingsTab final : public juce::Component,
                                       private juce::Timer
 {
 public:
-    explicit FrameSamplerSettingsTab(Sp3ctraAudioProcessor& processor);
-    ~FrameSamplerSettingsTab() override;
+    explicit LuxSamplerSettingsTab(Sp3ctraAudioProcessor& processor);
+    ~LuxSamplerSettingsTab() override;
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -64,5 +64,5 @@ private:
     juce::TextButton slotClearBtn[NUM_SLOTS];
 
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FrameSamplerSettingsTab)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxSamplerSettingsTab)
 };

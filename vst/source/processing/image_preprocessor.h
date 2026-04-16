@@ -143,7 +143,7 @@ void preprocess_luxwave(
  * image_sampler_opacity) instead of the live-stream parameters.
  * Called exclusively from FramePlayerThread to process captured slot frames.
  */
-int image_preprocess_frame_sampler(
+int image_preprocess_lux_sampler(
     const uint8_t *raw_r,
     const uint8_t *raw_g,
     const uint8_t *raw_b,

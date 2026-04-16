@@ -13,7 +13,7 @@ SlotTimelineComponent::~SlotTimelineComponent() { stopTimer(); }
 
 void SlotTimelineComponent::setSelectedSlot(int idx)
 {
-    selectedSlot = juce::jlimit(0, FrameSamplerConstants::NUM_SLOTS - 1, idx);
+    selectedSlot = juce::jlimit(0, LuxSamplerConstants::NUM_SLOTS - 1, idx);
     markDirty();
 }
 
@@ -24,7 +24,7 @@ void SlotTimelineComponent::rebuildThumbnail()
 {
     thumbnailDirty = false;
     numSamples     = 0;
-    auto* fs = processor.getFrameSampler();
+    auto* fs = processor.getLuxSampler();
     if (!fs || !fs->slotHasContent(selectedSlot)) return;
     const int w = getWidth();
     if (w <= 0) return;
@@ -48,7 +48,7 @@ void SlotTimelineComponent::paint(juce::Graphics& g)
     g.setColour(juce::Colour(0xff0a0a14));
     g.fillRoundedRectangle(getLocalBounds().toFloat(), 3.0f);
 
-    auto* fs = processor.getFrameSampler();
+    auto* fs = processor.getLuxSampler();
     const bool hasContent = fs && fs->slotHasContent(selectedSlot);
 
     if (!hasContent || numSamples == 0)
@@ -277,7 +277,7 @@ void SlotTimelineComponent::paint(juce::Graphics& g)
 // ─────────────────────────────────────────────────────────────────────────────
 void SlotTimelineComponent::timerCallback()
 {
-    auto* fs = processor.getFrameSampler();
+    auto* fs = processor.getLuxSampler();
     if (!fs) return;
     const SlotState st = fs->getSlotState(selectedSlot);
     if (st == SlotState::IDLE && thumbnailDirty) repaint();
@@ -289,7 +289,7 @@ void SlotTimelineComponent::timerCallback()
 // ─────────────────────────────────────────────────────────────────────────────
 void SlotTimelineComponent::updateCursor(const juce::MouseEvent& e)
 {
-    auto* fs = processor.getFrameSampler();
+    auto* fs = processor.getLuxSampler();
     if (!fs || !fs->slotHasContent(selectedSlot))
     {
         setMouseCursor(juce::MouseCursor::NormalCursor); return;
@@ -342,7 +342,7 @@ void SlotTimelineComponent::mouseMove(const juce::MouseEvent& e) { updateCursor(
 // ─────────────────────────────────────────────────────────────────────────────
 void SlotTimelineComponent::mouseDown(const juce::MouseEvent& e)
 {
-    auto* fs = processor.getFrameSampler();
+    auto* fs = processor.getLuxSampler();
     if (!fs || !fs->slotHasContent(selectedSlot)) return;
 
     const int   h      = getHeight();
@@ -395,7 +395,7 @@ void SlotTimelineComponent::mouseDown(const juce::MouseEvent& e)
 
 void SlotTimelineComponent::mouseDrag(const juce::MouseEvent& e)
 {
-    auto* fs = processor.getFrameSampler();
+    auto* fs = processor.getLuxSampler();
     if (!fs) return;
 
     const int   h  = getHeight();

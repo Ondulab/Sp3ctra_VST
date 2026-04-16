@@ -39,7 +39,7 @@
  * WHAT STAYS PER-INSTANCE (PluginProcessor)
  * ------------------------------------------
  *  - APVTS parameter tree
- *  - FrameSampler
+ *  - LuxSampler
  *  - processBlock read-pointer tracking (lastConsumedReadIdx)
  *
  * PHASE-2 NOTE

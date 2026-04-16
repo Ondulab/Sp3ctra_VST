@@ -1,12 +1,12 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
-#include "../framesampler/FrameSampler.h"
+#include "../luxsampler/LuxSampler.h"
 
 class Sp3ctraAudioProcessor;
 
 /**
- * @brief Horizontal spectral-timeline for a FrameSampler slot.
+ * @brief Horizontal spectral-timeline for a LuxSampler slot.
  *
  * Visualization (symmetric around the horizontal centre line):
  *   Upper half  — treble energy (right-pixel half, high freq) rising upward.

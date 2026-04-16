@@ -2,7 +2,7 @@
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 
-const char* const SlotGridComponent::kNoteNames[FrameSamplerConstants::NUM_SLOTS] = {
+const char* const SlotGridComponent::kNoteNames[LuxSamplerConstants::NUM_SLOTS] = {
     "C1", "C#1", "D1", "D#1", "E1", "F1", "F#1", "G1", "G#1", "A1", "A#1", "B1"
 };
 
@@ -19,7 +19,7 @@ SlotGridComponent::~SlotGridComponent()
 
 void SlotGridComponent::setSelectedSlot(int idx) noexcept
 {
-    const int clamped = juce::jlimit(0, FrameSamplerConstants::NUM_SLOTS - 1, idx);
+    const int clamped = juce::jlimit(0, LuxSamplerConstants::NUM_SLOTS - 1, idx);
     if (clamped != selectedSlot)
     {
         selectedSlot = clamped;
@@ -31,15 +31,15 @@ juce::Rectangle<int> SlotGridComponent::cellBounds(int i) const noexcept
 {
     constexpr int kGap    = 3;
     constexpr int kUnderH = 4; // reserved for sequencer underline
-    const int totalGaps   = (FrameSamplerConstants::NUM_SLOTS - 1) * kGap;
-    const int cellW       = (getWidth() - totalGaps) / FrameSamplerConstants::NUM_SLOTS;
+    const int totalGaps   = (LuxSamplerConstants::NUM_SLOTS - 1) * kGap;
+    const int cellW       = (getWidth() - totalGaps) / LuxSamplerConstants::NUM_SLOTS;
     const int cellH       = getHeight() - kUnderH;
     return { i * (cellW + kGap), 0, cellW, cellH };
 }
 
 void SlotGridComponent::paint(juce::Graphics& g)
 {
-    auto* fs  = processor.getFrameSampler();
+    auto* fs  = processor.getLuxSampler();
     auto* seq = processor.getFrameSequencer();
 
     // Determine which bank is currently sequencer-active
@@ -52,7 +52,7 @@ void SlotGridComponent::paint(juce::Graphics& g)
     }
     const int activePlaySlot = (fs != nullptr) ? fs->getActivePlaySlot() : -1;
 
-    for (int i = 0; i < FrameSamplerConstants::NUM_SLOTS; ++i)
+    for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
     {
         const auto  cell       = cellBounds(i);
         const auto  st         = (fs != nullptr) ? fs->getSlotState(i) : SlotState::IDLE;
@@ -128,17 +128,17 @@ void SlotGridComponent::paint(juce::Graphics& g)
 void SlotGridComponent::mouseDown(const juce::MouseEvent& e)
 {
     constexpr int kGap  = 3;
-    const int totalGaps = (FrameSamplerConstants::NUM_SLOTS - 1) * kGap;
-    const int cellW     = (getWidth() - totalGaps) / FrameSamplerConstants::NUM_SLOTS;
+    const int totalGaps = (LuxSamplerConstants::NUM_SLOTS - 1) * kGap;
+    const int cellW     = (getWidth() - totalGaps) / LuxSamplerConstants::NUM_SLOTS;
     if (cellW <= 0) return;
 
     const int idx = e.x / (cellW + kGap);
-    if (idx < 0 || idx >= FrameSamplerConstants::NUM_SLOTS) return;
+    if (idx < 0 || idx >= LuxSamplerConstants::NUM_SLOTS) return;
 
     if (e.mods.isRightButtonDown())
     {
         // ── Right-click context menu: Copy / Paste bank ───────────────────
-        auto* fs = processor.getFrameSampler();
+        auto* fs = processor.getLuxSampler();
         const bool hasContent    = fs != nullptr && fs->slotHasContent(idx);
         const bool clipboardFull = clipboardSlot >= 0
                                    && fs != nullptr
@@ -161,7 +161,7 @@ void SlotGridComponent::mouseDown(const juce::MouseEvent& e)
                                    getScreenX(), getScreenY()).toFloat().toNearestInt()),
             [this, idx](int result)
             {
-                auto* fs2 = processor.getFrameSampler();
+                auto* fs2 = processor.getLuxSampler();
                 if (fs2 == nullptr) return;
 
                 switch (result)

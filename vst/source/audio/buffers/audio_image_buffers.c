@@ -404,7 +404,7 @@ void audio_image_buffers_snapshot_raw_before_swap(AudioImageBuffers *buffers) {
  * @brief Snapshot raw from external data (no write_mutex required).
  *
  * Used when the AudioImageBuffers write bus was not started (e.g. during
- * FrameSampler playback) but the UDP thread still needs to update raw_R/G/B
+ * LuxSampler playback) but the UDP thread still needs to update raw_R/G/B
  * so the RAW visualizer and Source=L pipeline path stay live.
  *
  * @param buffers   Pointer to AudioImageBuffers structure

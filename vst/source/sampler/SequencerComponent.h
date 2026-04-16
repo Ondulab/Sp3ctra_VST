@@ -1,7 +1,7 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../framesequencer/FrameSequencer.h"
-#include "../framesampler/FrameSampler.h"
+#include "../luxsampler/LuxSampler.h"
 #include <functional>
 #include <cmath>
 
@@ -43,7 +43,7 @@ private:
 
         /** Bank slot index assigned to this step (>=0), or STEP_EMPTY/LIVE. */
         int          bankSlot    = FrameSequencer::STEP_EMPTY;
-        FrameSampler* frameSampler = nullptr;
+        LuxSampler* luxSampler = nullptr;
 
         // ── Rendering ────────────────────────────────────────────────────────
         void paintButton(juce::Graphics& g, bool isHighlighted, bool isDown) override
@@ -57,8 +57,8 @@ private:
 
             // Mini spectral thumbnail of the bank's active zone [start, end]
             if (bankSlot >= 0
-                && frameSampler != nullptr
-                && frameSampler->slotHasContent(bankSlot))
+                && luxSampler != nullptr
+                && luxSampler->slotHasContent(bankSlot))
             {
                 paintSlotThumbnail(g);
             }
@@ -87,7 +87,7 @@ private:
          */
         void paintSlotThumbnail(juce::Graphics& g)
         {
-            if (!frameSampler) return;
+            if (!luxSampler) return;
             const int w = getWidth();
             const int h = getHeight();
             constexpr int margin = 3;
@@ -98,8 +98,8 @@ private:
             if (tw <= 0 || th <= 0) return;
 
             // Active zone
-            const float sf       = frameSampler->getSlotStartFrac(bankSlot);
-            const float ef       = frameSampler->getSlotEndFrac(bankSlot);
+            const float sf       = luxSampler->getSlotStartFrac(bankSlot);
+            const float ef       = luxSampler->getSlotEndFrac(bankSlot);
             const float zoneFrac = juce::jmax(0.01f, ef - sf);
 
             // Request enough samples so the active zone has ~tw bins
@@ -110,7 +110,7 @@ private:
                                                       (int)((float)tw / zoneFrac)));
             float bass  [kMaxCols] {};
             float treble[kMaxCols] {};
-            frameSampler->sampleSpectralForTimeline(bankSlot, bass, treble, kCols);
+            luxSampler->sampleSpectralForTimeline(bankSlot, bass, treble, kCols);
 
             // Map active zone to sample indices
             const int startI  = juce::jlimit(0, kCols - 1, (int)(sf * (float)kCols));
