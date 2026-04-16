@@ -10,19 +10,21 @@ SettingsComponent::SettingsComponent(Sp3ctraAudioProcessor& processor)
     : tabbedComponent(juce::TabbedButtonBar::TabsAtTop)
 {
     // Create and add tabs — ordered by pipeline stage (sensor → image → audio → playback)
-    generalTab      = new GeneralSettingsTab(processor);
-    networkTab      = new NetworkSettingsTab(processor);
-    luxstralTab     = new LuxStralSettingsTab(processor);
-    luxsynthTab     = new LuxSynthSettingsTab(processor);
-    luxSamplerTab   = new LuxSamplerSettingsTab(processor);
-    luxPitchTab     = new LuxPitchSettingsTab(processor);
+    generalTab             = new GeneralSettingsTab(processor);
+    networkTab             = new NetworkSettingsTab(processor);
+    luxstralTab            = new LuxStralSettingsTab(processor);
+    luxsynthTab            = new LuxSynthSettingsTab(processor);
+    luxSamplerTab          = new LuxSamplerSettingsTab(processor);
+    luxPitchTab            = new LuxPitchSettingsTab(processor);
+    videoScrollSettingsTab = new VideoScrollSettingsTab(processor);
 
-    tabbedComponent.addTab("General",      juce::Colours::darkgrey, generalTab,      false);
-    tabbedComponent.addTab("Network",      juce::Colours::darkgrey, networkTab,      false);
-    tabbedComponent.addTab("LuxPitch",     juce::Colours::darkgrey, luxPitchTab,     false);
-    tabbedComponent.addTab("LuxStral",     juce::Colours::darkgrey, luxstralTab,     false);
-    tabbedComponent.addTab("LuxSynth",     juce::Colours::darkgrey, luxsynthTab,     false);
-    tabbedComponent.addTab("LuxSampler",   juce::Colours::darkgrey, luxSamplerTab,   false);
+    tabbedComponent.addTab("General",      juce::Colours::darkgrey, generalTab,             false);
+    tabbedComponent.addTab("Network",      juce::Colours::darkgrey, networkTab,             false);
+    tabbedComponent.addTab("LuxPitch",     juce::Colours::darkgrey, luxPitchTab,            false);
+    tabbedComponent.addTab("LuxStral",     juce::Colours::darkgrey, luxstralTab,            false);
+    tabbedComponent.addTab("LuxSynth",     juce::Colours::darkgrey, luxsynthTab,            false);
+    tabbedComponent.addTab("LuxSampler",   juce::Colours::darkgrey, luxSamplerTab,          false);
+    tabbedComponent.addTab("Video Scroll", juce::Colours::darkgrey, videoScrollSettingsTab, false);
 
     addAndMakeVisible(tabbedComponent);
 

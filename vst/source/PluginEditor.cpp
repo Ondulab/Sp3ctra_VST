@@ -21,17 +21,20 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     cisVisualizer = std::make_unique<CisVisualizerComponent>(audioProcessor);
     addAndMakeVisible(cisVisualizer.get());
 
-    // ── Tab buttons (IMAGE | SYNTH | SAMPLER) ─────────────────────────────────
+    // ── Tab buttons (IMAGE | SYNTH | SAMPLER | VIDEO) ─────────────────────────
     imageTabBtn.onClick   = [this] { switchToTab(Tab::Image);   };
     synthTabBtn.onClick   = [this] { switchToTab(Tab::Synth);   };
     samplerTabBtn.onClick = [this] { switchToTab(Tab::Sampler); };
+    videoTabBtn.onClick   = [this] { switchToTab(Tab::Video);   };
     // Mark as tab buttons so LookAndFeel skips default background painting
     imageTabBtn.getProperties().set("isTab", true);
     synthTabBtn.getProperties().set("isTab", true);
     samplerTabBtn.getProperties().set("isTab", true);
+    videoTabBtn.getProperties().set("isTab", true);
     addAndMakeVisible(imageTabBtn);
     addAndMakeVisible(synthTabBtn);
     addAndMakeVisible(samplerTabBtn);
+    addAndMakeVisible(videoTabBtn);
 
     // ── LuxStral controls (audio only — no image pre-processing params) ────────
     deviceOnToggle.setButtonText("Active");
@@ -163,6 +166,10 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     samplerPage = std::make_unique<SamplerPageComponent>(audioProcessor);
     addChildComponent(samplerPage.get());
 
+    // ── VIDEO page (hidden by default) ────────────────────────────────────────
+    videoScrollPage = std::make_unique<VideoScrollTab>(audioProcessor);
+    addChildComponent(videoScrollPage.get());
+
     // ── Header gear button ────────────────────────────────────────────────────
     settingsButton.onClick = [this] { openSettings(); };
     addAndMakeVisible(settingsButton);
@@ -216,8 +223,17 @@ void Sp3ctraAudioProcessorEditor::switchToTab(Tab tab)
         switchSynthSubTab(currentSynthSub);
 
     // Page components
-    if (imagePage)   imagePage->setVisible(tab == Tab::Image);
-    if (samplerPage) samplerPage->setVisible(tab == Tab::Sampler);
+    if (imagePage)       imagePage->setVisible(tab == Tab::Image);
+    if (samplerPage)     samplerPage->setVisible(tab == Tab::Sampler);
+    if (videoScrollPage)
+    {
+        const bool videoVis = (tab == Tab::Video);
+        videoScrollPage->setVisible(videoVis);
+        if (videoVis)
+            videoScrollPage->onTabActivated();
+        else
+            videoScrollPage->onTabDeactivated();
+    }
 
     // Blob overlay: visible only when IMAGE tab is active
     if (cisVisualizer) cisVisualizer->setBlobOverlayVisible(tab == Tab::Image);
@@ -235,6 +251,7 @@ void Sp3ctraAudioProcessorEditor::switchToTab(Tab tab)
     styleTab(imageTabBtn,   tab == Tab::Image);
     styleTab(synthTabBtn,   tab == Tab::Synth);
     styleTab(samplerTabBtn, tab == Tab::Sampler);
+    styleTab(videoTabBtn,   tab == Tab::Video);
 
     repaint();
 }
@@ -338,10 +355,10 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
         g.fillRect(0, kTabsY + kTabsH, getWidth(), 1);
 
         // Draw each tab background + accent
-        const juce::TextButton* tabs[]  = { &imageTabBtn, &synthTabBtn, &samplerTabBtn };
-        const Tab               tabIds[] = { Tab::Image,   Tab::Synth,   Tab::Sampler };
+        const juce::TextButton* tabs[]   = { &imageTabBtn, &synthTabBtn, &samplerTabBtn, &videoTabBtn };
+        const Tab               tabIds[] = { Tab::Image,   Tab::Synth,   Tab::Sampler,   Tab::Video };
 
-        for (int i = 0; i < 3; ++i)
+        for (int i = 0; i < 4; ++i)
         {
             const bool active = (currentTab == tabIds[i]);
             const auto tbr = tabs[i]->getBounds().toFloat();
@@ -517,10 +534,11 @@ void Sp3ctraAudioProcessorEditor::resized()
     // ── CIS Visualizer ────────────────────────────────────────────────────────
     cisVisualizer->setBounds(kHPad, kVisY, getWidth() - 2*kHPad, kVisH);
 
-    // ── Tab buttons (IMAGE | SYNTH | SAMPLER) ─────────────────────────────────
+    // ── Tab buttons (IMAGE | SYNTH | SAMPLER | VIDEO) ─────────────────────────
     imageTabBtn  .setBounds(kHPad,       kTabsY + 2, 80, Sp3ctraTheme::kTabBtnH);
     synthTabBtn  .setBounds(kHPad + 84,  kTabsY + 2, 80, Sp3ctraTheme::kTabBtnH);
     samplerTabBtn.setBounds(kHPad + 168, kTabsY + 2, 92, Sp3ctraTheme::kTabBtnH);
+    videoTabBtn  .setBounds(kHPad + 264, kTabsY + 2, 70, Sp3ctraTheme::kTabBtnH);
 
     // ── Synth sub-tab buttons ────────────────────────────────────────────────
     luxstralSubBtn.setBounds(kHPad,      kSubTabsY + 1, 72, kSubTabsH - 2);
@@ -600,6 +618,13 @@ void Sp3ctraAudioProcessorEditor::resized()
     {
         const int pageH = getHeight() - kPageTop - 8;
         samplerPage->setBounds(kHPad, kPageTop, getWidth() - 2*kHPad, pageH);
+    }
+
+    // ── Video scroll page ─────────────────────────────────────────────────────
+    if (videoScrollPage)
+    {
+        const int pageH = getHeight() - kPageTop - 8;
+        videoScrollPage->setBounds(kHPad, kPageTop, getWidth() - 2*kHPad, pageH);
     }
 }
 

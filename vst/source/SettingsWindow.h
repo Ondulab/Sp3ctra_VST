@@ -8,6 +8,7 @@
 #include "settings/LuxSamplerSettingsTab.h"
 #include "settings/LuxSynthSettingsTab.h"
 #include "settings/LuxPitchSettingsTab.h"
+#include "settings/VideoScrollSettingsTab.h"
 
 //==============================================================================
 /**
@@ -39,8 +40,9 @@ private:
     NetworkSettingsTab*      networkTab;
     LuxStralSettingsTab*     luxstralTab;
     LuxSynthSettingsTab*     luxsynthTab;
-    LuxSamplerSettingsTab* luxSamplerTab;
-    LuxPitchSettingsTab*   luxPitchTab;
+    LuxSamplerSettingsTab*   luxSamplerTab;
+    LuxPitchSettingsTab*     luxPitchTab;
+    VideoScrollSettingsTab*  videoScrollSettingsTab;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SettingsComponent)
 };

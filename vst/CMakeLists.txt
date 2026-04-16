@@ -141,6 +141,17 @@ target_sources(Sp3ctraVST
         source/settings/LuxPitchSettingsTab.cpp
         source/settings/LuxPitchSettingsTab.h
         source/image/LuxPitchTabComponent.h
+
+        # Video scroll system
+        source/video/VideoScrollMode.h
+        source/video/VideoDisplayComponent.cpp
+        source/video/VideoDisplayComponent.h
+        source/video/VideoWindow.cpp
+        source/video/VideoWindow.h
+        source/video/VideoScrollTab.cpp
+        source/video/VideoScrollTab.h
+        source/settings/VideoScrollSettingsTab.cpp
+        source/settings/VideoScrollSettingsTab.h
 )
 
 # ✨ BRICK 1: UDP Reception - Add C sources
@@ -204,6 +215,8 @@ target_include_directories(Sp3ctraVST
         ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/luxstral
         ${CMAKE_CURRENT_SOURCE_DIR}/source/luxsampler
         ${CMAKE_CURRENT_SOURCE_DIR}/source/sampler
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/video
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/settings
 )
 
 # Compile definitions
