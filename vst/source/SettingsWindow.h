@@ -7,6 +7,7 @@
 #include "settings/ImageSettingsTab.h"
 #include "settings/LuxStralSettingsTab.h"
 #include "settings/FrameSamplerSettingsTab.h"
+#include "settings/LuxSynthSettingsTab.h"
 
 //==============================================================================
 /**
@@ -39,6 +40,7 @@ private:
     NetworkSettingsTab*      networkTab;
     ImageSettingsTab*        imageTab;
     LuxStralSettingsTab*     luxstralTab;
+    LuxSynthSettingsTab*     luxsynthTab;
     FrameSamplerSettingsTab* frameSamplerTab;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SettingsComponent)
