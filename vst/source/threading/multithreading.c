@@ -15,6 +15,7 @@
 #include "../utils/rt_profiler.h"
 #include "../processing/image_preprocessor.h"
 #include "../processing/image_pipeline.h"
+#include "../processing/lux_pitch.h"
 #include "../processing/image_sequencer.h"
 #include "../synthesis/luxwave/synth_luxwave.h"
 #include <time.h>
@@ -631,6 +632,35 @@ void *udpThread(void *arg) {
                 src_B = smpB;
             }
         }
+        else if (live_cfg.luxstral_path.source == IMAGE_SOURCE_LUXPITCH)
+        {
+            /* P — LuxPitch: select upstream source, apply pitch shift */
+            const uint8_t *lp_in_R, *lp_in_G, *lp_in_B;
+            int lp_upstream = g_sp3ctra_config.luxpitch_source_type;
+            if (lp_upstream == 1 /* LIVE */)
+            {
+                lp_in_R = db->activeBuffer_R;
+                lp_in_G = db->activeBuffer_G;
+                lp_in_B = db->activeBuffer_B;
+            }
+            else if (lp_upstream == 0 /* SAMPLER */)
+            {
+                uint8_t *sR, *sG, *sB;
+                audio_image_buffers_get_sampler_pointers(audioBuffers, &sR, &sG, &sB);
+                lp_in_R = sR; lp_in_G = sG; lp_in_B = sB;
+            }
+            else /* MIX */
+            {
+                uint8_t *mR, *mG, *mB;
+                audio_image_buffers_get_read_pointers(audioBuffers, &mR, &mG, &mB);
+                lp_in_R = mR; lp_in_G = mG; lp_in_B = mB;
+            }
+            lux_pitch_process_frame(&g_lux_pitch_proc,
+                                    lp_in_R, lp_in_G, lp_in_B,
+                                    nb_pixels,
+                                    g_sp3ctra_config.num_octaves,
+                                    &src_R, &src_G, &src_B);
+        }
         else
         {
             /* M — AudioImageBuffers read bus = darken-blend of Live + Sampler */
@@ -686,6 +716,18 @@ void *udpThread(void *arg) {
               audio_image_buffers_get_sampler_pointers(audioBuffers, &tmp_R, &tmp_G, &tmp_B);
               syn_R = tmp_R; syn_G = tmp_G; syn_B = tmp_B;
             }
+            else if (luxsynth_src == 3 /* IMAGE_SOURCE_LUXPITCH */)
+            {
+              /* LuxPitch: select upstream, apply pitch shift, use output */
+              const uint8_t *lp_R2, *lp_G2, *lp_B2;
+              int lp_up2 = g_sp3ctra_config.luxpitch_source_type;
+              if (lp_up2 == 1) { lp_R2 = db->activeBuffer_R; lp_G2 = db->activeBuffer_G; lp_B2 = db->activeBuffer_B; }
+              else if (lp_up2 == 0) { audio_image_buffers_get_sampler_pointers(audioBuffers, &tmp_R, &tmp_G, &tmp_B); lp_R2 = tmp_R; lp_G2 = tmp_G; lp_B2 = tmp_B; }
+              else { audio_image_buffers_get_read_pointers(audioBuffers, &tmp_R, &tmp_G, &tmp_B); lp_R2 = tmp_R; lp_G2 = tmp_G; lp_B2 = tmp_B; }
+              lux_pitch_process_frame(&g_lux_pitch_proc, lp_R2, lp_G2, lp_B2,
+                                      nb_pixels, g_sp3ctra_config.num_octaves,
+                                      &syn_R, &syn_G, &syn_B);
+            }
             else /* IMAGE_SOURCE_MIX */
             {
               audio_image_buffers_get_read_pointers(audioBuffers, &tmp_R, &tmp_G, &tmp_B);
@@ -731,7 +773,8 @@ void *udpThread(void *arg) {
       {
         int src = g_sp3ctra_config.luxstral_source_type;
         if (src == 1 /* IMAGE_SOURCE_LIVE */ ||
-            src == 2 /* IMAGE_SOURCE_MIX  */)
+            src == 2 /* IMAGE_SOURCE_MIX  */ ||
+            src == 3 /* IMAGE_SOURCE_LUXPITCH */)
         {
           db->preprocessed_data = preprocessed_temp;
           db->dataReady = 1;
@@ -814,7 +857,8 @@ void *udpThread(void *arg) {
       {
         int luxsynth_src = g_sp3ctra_config.luxsynth_source_type;
         if (luxsynth_src == 1 /* IMAGE_SOURCE_LIVE */ ||
-            luxsynth_src == 2 /* IMAGE_SOURCE_MIX  */)
+            luxsynth_src == 2 /* IMAGE_SOURCE_MIX  */ ||
+            luxsynth_src == 3 /* IMAGE_SOURCE_LUXPITCH */)
         {
           db->preprocessed_data.polyphonic = preprocessed_temp.polyphonic;
           if (db->dataReady == 0)

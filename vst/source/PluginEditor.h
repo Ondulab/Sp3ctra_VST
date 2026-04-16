@@ -117,8 +117,8 @@ private:
     static constexpr int kPageTop    = kSubTabsY + kSubTabsH + 4;
     static constexpr int kColGap     = 18;
     static constexpr int kCtrlW      = 210;
-    // SYNTH tab left col: 7 audio-only rows
-    static constexpr int kLS_ROWS    = 7;
+    // SYNTH tab left col: 8 audio-only rows
+    static constexpr int kLS_ROWS    = 8;
     // SYNTH tab right col: 8 StrokeForge rows
     static constexpr int kSF_ROWS    = 5;  // Enable + Square at Width + Focus Sigma + Spectral Thr. + Focus Only
 
@@ -173,6 +173,9 @@ private:
 
     juce::Slider releaseSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> releaseAttachment;
+
+    juce::ToggleButton stereoEnableToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> stereoEnableAttachment;
 
     juce::Slider stereoTempSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> stereoTempAttachment;

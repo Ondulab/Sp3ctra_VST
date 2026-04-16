@@ -20,6 +20,7 @@ enum class VisualizerMode
     SYNTH_FFT_COLOR,    // LuxSynth FFT magnitudes + colour-coded harmonicity
     SPCTR_BLOB,         // StrokeForge overlay on LuxStral path
     SYNTH_BLOB,         // StrokeForge overlay on LuxSynth path
+    LUXPITCH_OUTPUT,    // LuxPitch shifted image output
     COUNT
 };
 
@@ -41,6 +42,7 @@ inline const char* visualizerModeLabel(VisualizerMode m)
         case VisualizerMode::SYNTH_FFT_COLOR: return "LUXSYNTH FFT";
         case VisualizerMode::SPCTR_BLOB:     return "LUXSTRAL BLOB";
         case VisualizerMode::SYNTH_BLOB:     return "LUXSYNTH BLOB";
+        case VisualizerMode::LUXPITCH_OUTPUT: return "LUXPITCH";
         default:                             return "???";
     }
 }

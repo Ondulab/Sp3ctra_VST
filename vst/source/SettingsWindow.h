@@ -4,10 +4,10 @@
 #include "PluginProcessor.h"
 #include "settings/GeneralSettingsTab.h"
 #include "settings/NetworkSettingsTab.h"
-#include "settings/ImageSettingsTab.h"
 #include "settings/LuxStralSettingsTab.h"
 #include "settings/LuxSamplerSettingsTab.h"
 #include "settings/LuxSynthSettingsTab.h"
+#include "settings/LuxPitchSettingsTab.h"
 
 //==============================================================================
 /**
@@ -16,7 +16,6 @@
  * Organised in 5 tabs (ordered by pipeline stage):
  *   General      — Visualizer Mode, Log Level
  *   Network      — UDP configuration, Sensor DPI
- *   Image        — Image pipeline flags, stream opacities, advanced blob params
  *   LuxStral     — Additive synthesis parameters + StrokeForge waveform morphing
  *   LuxSampler — Slot configuration and MIDI mapping
  *
@@ -38,10 +37,10 @@ private:
     // Tab content (owned by TabbedComponent — raw pointers intentional)
     GeneralSettingsTab*      generalTab;
     NetworkSettingsTab*      networkTab;
-    ImageSettingsTab*        imageTab;
     LuxStralSettingsTab*     luxstralTab;
     LuxSynthSettingsTab*     luxsynthTab;
     LuxSamplerSettingsTab* luxSamplerTab;
+    LuxPitchSettingsTab*   luxPitchTab;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SettingsComponent)
 };

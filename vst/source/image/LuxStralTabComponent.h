@@ -41,9 +41,10 @@ public:
         // ── Source selector ───────────────────────────────────────────────
         initLabel(sourceLabel, "Source");
         addAndMakeVisible(sourceCombo);
-        sourceCombo.addItem("S - Sampler", 1);
-        sourceCombo.addItem("M - Mix",     2);
-        sourceCombo.addItem("L - Live",    3);
+        sourceCombo.addItem("S - Sampler",  1);
+        sourceCombo.addItem("M - Mix",      2);
+        sourceCombo.addItem("L - Live",     3);
+        sourceCombo.addItem("P - LuxPitch", 4);
         sourceAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
             apvts, "luxstralSource", sourceCombo));
 
@@ -69,6 +70,15 @@ public:
         addAndMakeVisible(gammaSlider);
         gammaAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
             apvts, "luxstralGammaValue", gammaSlider));
+
+        // ── Contrast Min (Slider) ───────────────────────────────────────────
+        initLabel(contrastMinLabel, "Contrast Min");
+        contrastMinSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        contrastMinSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                          50, Sp3ctraTheme::kControlH);
+        addAndMakeVisible(contrastMinSlider);
+        contrastMinAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, "luxstralContrastMin", contrastMinSlider));
 
         // ── BLOB DETECTION — spctrBlob* params ────────────────────────────
         // Identical labels, ranges and semantics as lxBlob* (IMAGE LUXSYNTH).
@@ -152,7 +162,7 @@ public:
         g.fillRect(divX, 4, 1, H - 8);
 
         // ── Left column section header: BLOB DETECTION ────────────────────
-        const int blobSectionY = rowY(3) + Sp3ctraTheme::kControlH + 2;
+        const int blobSectionY = rowY(4) + Sp3ctraTheme::kControlH + 2;
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
         g.setColour(juce::Colour(0xff8888e0).withAlpha(0.55f)); // SPCTR_BLOB accent
         g.drawText("--- BLOB DETECTION ---", leftX_, blobSectionY, leftW_, 12,
@@ -201,12 +211,15 @@ public:
         // Row 3: Gamma slider
         gammaLabel.setBounds(lb(3));
         gammaSlider.setBounds(cb(3));
-        // [blobSectionY header drawn in paint() between row 3 and 4]
-        // Rows 4-7: Blob Detection (same layout as LuxSynthTabComponent rows 4-7)
-        blobThreshLabel.setBounds(lb(4));      blobThreshSlider.setBounds(cb(4));
-        blobMinWidthLabel.setBounds(lb(5));    blobMinWidthSlider.setBounds(cb(5));
-        blobMergeGapLabel.setBounds(lb(6));    blobMergeGapSlider.setBounds(cb(6));
-        blobColorSplitLabel.setBounds(lb(7));  blobColorSplitSlider.setBounds(cb(7));
+        // Row 4: Contrast Min slider
+        contrastMinLabel.setBounds(lb(4));
+        contrastMinSlider.setBounds(cb(4));
+        // [blobSectionY header drawn in paint() between row 4 and 5]
+        // Rows 5-8: Blob Detection (same layout as LuxSynthTabComponent rows 4-7)
+        blobThreshLabel.setBounds(lb(5));      blobThreshSlider.setBounds(cb(5));
+        blobMinWidthLabel.setBounds(lb(6));    blobMinWidthSlider.setBounds(cb(6));
+        blobMergeGapLabel.setBounds(lb(7));    blobMergeGapSlider.setBounds(cb(7));
+        blobColorSplitLabel.setBounds(lb(8));  blobColorSplitSlider.setBounds(cb(8));
 
         // ── Right column: 3 output nodes, vertically centred ─────────────
         constexpr int kNH = 28;   // node height
@@ -225,14 +238,14 @@ private:
     [[maybe_unused]] Sp3ctraAudioProcessor& processor;
 
     // Labels — image pipeline
-    juce::Label sourceLabel, negativeLabel, dcBlockLabel, gammaLabel;
+    juce::Label sourceLabel, negativeLabel, dcBlockLabel, gammaLabel, contrastMinLabel;
     // Labels — blob detection (same names as LuxSynthTabComponent for UX consistency)
     juce::Label blobThreshLabel, blobMinWidthLabel, blobMergeGapLabel, blobColorSplitLabel;
 
     // Controls — image pipeline
     juce::ComboBox     sourceCombo;
     juce::ToggleButton negativeToggle, dcBlockToggle;
-    juce::Slider       gammaSlider;
+    juce::Slider       gammaSlider, contrastMinSlider;
     // Controls — blob detection
     juce::Slider blobThreshSlider, blobMinWidthSlider,
                  blobMergeGapSlider, blobColorSplitSlider;
@@ -241,7 +254,8 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> sourceAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   negativeAttach,
                                                                              dcBlockAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   gammaAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   gammaAttach,
+                                                                             contrastMinAttach;
     // Attachments — blob detection (spctrBlob* APVTS params)
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   blobThreshAttach,
                                                                              blobMinWidthAttach,

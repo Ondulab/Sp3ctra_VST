@@ -260,6 +260,7 @@ typedef struct {
     int luxstral_source_type;              /* Which source feeds the LuxStral path */
     int luxstral_inversion;                /* Per-path inversion toggle (0=off, 1=on) */
     int luxstral_ac_removal;               /* Per-path AC removal toggle (0=off, 1=on) */
+    int luxpitch_source_type;              /* Which source feeds LuxPitch (0=S, 1=L, 2=M) */
     int luxsynth_source_type;              /* Which source feeds the LuxSynth+LuxWave path */
     int luxsynth_inversion;                /* Per-path inversion toggle (0=off, 1=on) */
     int luxsynth_ac_removal;               /* Per-path AC removal toggle (0=off, 1=on) */

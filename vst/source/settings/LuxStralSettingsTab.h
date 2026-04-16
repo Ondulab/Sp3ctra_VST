@@ -7,14 +7,15 @@
 /**
  * @brief LuxStral Synthesis Settings Tab
  *
- * Contains all parameters for the additive synthesis engine:
+ * Contains ONLY parameters that are NOT already exposed in the main
+ * SYNTH → LuxStral or IMAGE → LuxStral interfaces:
+ * - Engine Enable
  * - Musical Tuning
- * - Envelope Parameters
- * - Image Processing
- * - Stereo Processing
- * - Dynamics Processing
- * - Performance
- * - StrokeForge (sine→square waveform morphing)
+ * - Dynamics Processing (Soft Limit only)
+ * - Performance (Worker Threads)
+ *
+ * Parameters already in the main UI (Envelope, Image Processing, Stereo,
+ * StrokeForge) have been intentionally removed to avoid duplication.
  */
 class LuxStralSettingsTab : public juce::Component,
                             public juce::ComboBox::Listener,
@@ -33,6 +34,11 @@ private:
     // Viewport for scrolling
     juce::Viewport viewport;
     juce::Component contentComponent;
+
+    // Section: Engine Enable
+    juce::Label enableLabel;
+    juce::ToggleButton enableToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> enableAttachment;
 
     // Section: Musical Tuning
     juce::Label tuningRangeSectionLabel;
@@ -53,41 +59,8 @@ private:
     juce::Slider physiologicalDepthSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> physiologicalDepthAttachment;
 
-    // Section: Envelope Parameters
-    juce::Label envelopeSectionLabel;
-    juce::Label attackLabel;
-    juce::Slider attackSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attackAttachment;
-    juce::Label releaseLabel;
-    juce::Slider releaseSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> releaseAttachment;
-
-    // Section: Image Processing
-    juce::Label imageProcSectionLabel;
-    juce::Label gammaEnableLabel;
-    juce::ToggleButton gammaEnableToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> gammaEnableAttachment;
-    juce::Label gammaValueLabel;
-    juce::Slider gammaValueSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> gammaValueAttachment;
-    juce::Label contrastMinLabel;
-    juce::Slider contrastMinSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> contrastMinAttachment;
-
-    // Section: Stereo Processing
-    juce::Label stereoSectionLabel;
-    juce::Label stereoEnableLabel;
-    juce::ToggleButton stereoEnableToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> stereoEnableAttachment;
-    juce::Label stereoTempAmpLabel;
-    juce::Slider stereoTempAmpSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> stereoTempAmpAttachment;
-
-    // Section: Dynamics Processing
+    // Section: Dynamics Processing (Soft Limit only)
     juce::Label dynamicsSectionLabel;
-    juce::Label volumeWeightingLabel;
-    juce::Slider volumeWeightingSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> volumeWeightingAttachment;
     juce::Label softLimitThresholdLabel;
     juce::Slider softLimitThresholdSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> softLimitThresholdAttachment;
@@ -95,45 +68,20 @@ private:
     juce::Slider softLimitKneeSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> softLimitKneeAttachment;
 
+    // Section: StrokeForge Advanced Blob Detection
+    juce::Label sfBlobSectionLabel;
+    juce::Label contrastAdaptiveLabel;
+    juce::ToggleButton contrastAdaptiveToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> contrastAdaptiveAttachment;
+    juce::Label contrastSensLabel;
+    juce::Slider contrastSensSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> contrastSensAttachment;
+
     // Section: Performance
     juce::Label performanceSectionLabel;
     juce::Label numWorkersLabel;
     juce::Slider numWorkersSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> numWorkersAttachment;
-
-    // ── StrokeForge — Sine → Square waveform morphing ────────────────────
-    // The waveform morph is controlled by stroke width:
-    //   narrow stroke → g_waveform_morph≈0 → pure sine
-    //   wide   stroke → g_waveform_morph≈1 → pure square (bandlimited)
-    // sfMorphWidthScale = blob width (in notes) that saturates morph to 1.0
-    juce::Label sfSectionLabel;
-
-    juce::Label       sfEnabledLabel;
-    juce::ToggleButton sfEnabledToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfEnabledAttachment;
-
-    juce::Label  sfMorphWidthLabel;
-    juce::Slider sfMorphWidthSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMorphWidthAttachment;
-
-    // Focus sigma: Gaussian half-width (notes) controlling how many oscillators
-    // are active per blob. Small = pure tone, large = spectral cloud.
-    juce::Label  sfFocusSigmaLabel;
-    juce::Slider sfFocusSigmaSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfFocusSigmaAttachment;
-
-    // Spectral width threshold: blobs wider than this value bypass Gaussian focus
-    // and let raw image pixel intensities pass through unchanged (spectral mode).
-    // 0 = disabled (all blobs use Gaussian focus regardless of width).
-    juce::Label  sfSpectralWidthThresholdLabel;
-    juce::Slider sfSpectralWidthThresholdSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfSpectralWidthThresholdAttachment;
-
-    // Focus-only mode: Gaussian focus without sine→square morph.
-    // Allows pitch-focused spectral mode (pure sine) without StrokeForge waveform morphing.
-    juce::Label        sfFocusOnlyLabel;
-    juce::ToggleButton sfFocusOnlyToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfFocusOnlyAttachment;
 
     void layoutContentComponent();
 

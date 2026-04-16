@@ -12,17 +12,17 @@ SettingsComponent::SettingsComponent(Sp3ctraAudioProcessor& processor)
     // Create and add tabs — ordered by pipeline stage (sensor → image → audio → playback)
     generalTab      = new GeneralSettingsTab(processor);
     networkTab      = new NetworkSettingsTab(processor);
-    imageTab        = new ImageSettingsTab(processor);
     luxstralTab     = new LuxStralSettingsTab(processor);
     luxsynthTab     = new LuxSynthSettingsTab(processor);
-    luxSamplerTab = new LuxSamplerSettingsTab(processor);
+    luxSamplerTab   = new LuxSamplerSettingsTab(processor);
+    luxPitchTab     = new LuxPitchSettingsTab(processor);
 
     tabbedComponent.addTab("General",      juce::Colours::darkgrey, generalTab,      false);
     tabbedComponent.addTab("Network",      juce::Colours::darkgrey, networkTab,      false);
-    tabbedComponent.addTab("Image",        juce::Colours::darkgrey, imageTab,        false);
+    tabbedComponent.addTab("LuxPitch",     juce::Colours::darkgrey, luxPitchTab,     false);
     tabbedComponent.addTab("LuxStral",     juce::Colours::darkgrey, luxstralTab,     false);
     tabbedComponent.addTab("LuxSynth",     juce::Colours::darkgrey, luxsynthTab,     false);
-    tabbedComponent.addTab("LuxSampler", juce::Colours::darkgrey, luxSamplerTab, false);
+    tabbedComponent.addTab("LuxSampler",   juce::Colours::darkgrey, luxSamplerTab,   false);
 
     addAndMakeVisible(tabbedComponent);
 

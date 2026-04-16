@@ -1,9 +1,9 @@
 /**
  * @file ImagePageComponent.h
- * @brief Image Pipeline Page — 3-tab container (Sources / LuxStral / LuxSynth).
+ * @brief Image Pipeline Page — 4-tab container (Sources / LuxPitch / LuxStral / LuxSynth).
  *
  * ┌──────────────────────────────────────────────────────────────────┐
- * │  [ SOURCES ]  [ LUXSTRAL ]  [ LUXSYNTH ]   ← sub-tabs          │
+ * │  [ SOURCES ] [ LUXPITCH ] [ LUXSTRAL ] [ LUXSYNTH ] ← sub-tabs │
  * ├──────────────────────────────────────────────────────────────────┤
  * │                                                                  │
  * │   Active tab content (pipeline, controls, clickable nodes)      │
@@ -21,6 +21,7 @@
 #include "../UITheme.h"
 #include "VisualizerMode.h"
 #include "SourcesTabComponent.h"
+#include "LuxPitchTabComponent.h"
 #include "LuxStralTabComponent.h"
 #include "LuxSynthTabComponent.h"
 #include <functional>
@@ -41,7 +42,7 @@ public:
     void setActiveVisualizerMode(VisualizerMode m);
 
 private:
-    enum class SubTab { Sources, LuxStral, LuxSynth };
+    enum class SubTab { Sources, LuxPitch, LuxStral, LuxSynth };
 
     void switchSubTab(SubTab tab);
     void handleNodeClicked(VisualizerMode m);
@@ -54,13 +55,15 @@ private:
     // ── Tab buttons ───────────────────────────────────────────────────────────
     static constexpr int kSubTabH = 28;
     juce::TextButton sourcesBtn  { "SOURCES" };
+    juce::TextButton luxpitchBtn { "LUXPITCH" };
     juce::TextButton luxstralBtn { "LUXSTRAL" };
     juce::TextButton luxsynthBtn { "LUXSYNTH" };
 
     // ── Tab content components ────────────────────────────────────────────────
-    std::unique_ptr<SourcesTabComponent>   sourcesTab;
-    std::unique_ptr<LuxStralTabComponent>  luxstralTab;
-    std::unique_ptr<LuxSynthTabComponent>  luxsynthTab;
+    std::unique_ptr<SourcesTabComponent>    sourcesTab;
+    std::unique_ptr<LuxPitchTabComponent>   luxpitchTab;
+    std::unique_ptr<LuxStralTabComponent>   luxstralTab;
+    std::unique_ptr<LuxSynthTabComponent>   luxsynthTab;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ImagePageComponent)
 };
