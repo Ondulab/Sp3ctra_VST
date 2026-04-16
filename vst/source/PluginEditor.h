@@ -7,6 +7,7 @@
 #include "CisVisualizerComponent.h"
 #include "image/ImagePageComponent.h"
 #include "sampler/SamplerPageComponent.h"
+#include "video/VideoScrollTab.h"
 #include "UITheme.h"
 #include "Sp3ctraLookAndFeel.h"
 
@@ -103,7 +104,7 @@ public:
 
 private:
     // ── Active tab ────────────────────────────────────────────────────────────
-    enum class Tab { Image, Synth, Sampler };
+    enum class Tab { Image, Synth, Sampler, Video };
     enum class SynthSub { LuxStral, LuxSynth };
 
     // ── Layout constants ──────────────────────────────────────────────────────
@@ -144,10 +145,11 @@ private:
     Tab currentTab { Tab::Image };
     SynthSub currentSynthSub { SynthSub::LuxStral };
 
-    // ── Tab navigation (3 tabs: IMAGE | SYNTH | SAMPLER) ──────────────────────
+    // ── Tab navigation (4 tabs: IMAGE | SYNTH | SAMPLER | VIDEO) ─────────────
     juce::TextButton imageTabBtn   { "IMAGE" };
     juce::TextButton synthTabBtn   { "SYNTH" };
     juce::TextButton samplerTabBtn { "SAMPLER" };
+    juce::TextButton videoTabBtn   { "VIDEO" };
 
     // ── Synth sub-tab buttons ────────────────────────────────────────────────
     juce::TextButton luxstralSubBtn  { "LuxStral" };
@@ -228,6 +230,9 @@ private:
 
     // ── SAMPLER page ──────────────────────────────────────────────────────────
     std::unique_ptr<SamplerPageComponent> samplerPage;
+
+    // ── VIDEO page ────────────────────────────────────────────────────────────
+    std::unique_ptr<VideoScrollTab> videoScrollPage;
 
     // ── LookAndFeel (declared before all JUCE components that use it) ─────────
     Sp3ctraLookAndFeel sp3ctraLaf;

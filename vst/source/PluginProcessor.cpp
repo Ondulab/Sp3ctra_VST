@@ -522,6 +522,82 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID{"seqBeatsPerStep", 1}, "Seq Beats/Step", 1, 8, 1));
 
+    // ── Video Scroll — master toggle + live controls ───────────────────────────
+    // Hidden from DAW automation (configuration/display parameters).
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"videoScrollEnabled", 1}, "Video Scroll Enabled",
+        false, kHiddenBool));
+
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"videoScrollMode", 1}, "Video Scroll Mode",
+        juce::StringArray{
+            "Live L->R", "Live R->L", "Live Dual",
+            "Seq. Loop Simple", "Seq. Ping-Pong", "Seq. One-Shot"
+        }, 0, kHiddenChoice));
+
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"videoScrollSpeed", 1}, "Video Scroll Speed",
+        juce::NormalisableRange<float>(0.1f, 20.0f, 0.1f, 0.4f),
+        3.0f, kHiddenFloat.withLabel("x")));
+
+    // ── Video Scroll — display configuration (Settings window) ────────────────
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"videoScrollZoom", 1}, "Video Scroll Zoom",
+        juce::NormalisableRange<float>(0.5f, 4.0f, 0.05f),
+        1.0f, kHiddenFloat.withLabel("x")));
+
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"videoScrollBrightness", 1}, "Video Brightness",
+        juce::NormalisableRange<float>(0.1f, 3.0f, 0.05f),
+        1.0f, kHiddenFloat.withLabel("x")));
+
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"videoInvertColor", 1}, "Video Invert Color",
+        false, kHiddenBool));
+
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"videoColorMode", 1}, "Video Color Mode (RGB)",
+        false, kHiddenBool));
+
+    // ── Video Scroll — window geometry (saved across sessions) ────────────────
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"videoWindowWidth", 1}, "Video Window Width",
+        320, 2560, 800, kHiddenInt));
+
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"videoWindowHeight", 1}, "Video Window Height",
+        240, 1440, 600, kHiddenInt));
+
+    // ── Video: live performance params ────────────────────────────────────────
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"videoScrollSource", 1}, "Video Scroll Source",
+        juce::StringArray{"L", "Sample", "Mix", "LuxPitch"}, 0));
+
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"videoScrollDirection", 1}, "Video Scroll Direction",
+        juce::StringArray{"Forward", "Reverse"}, 0));
+
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"videoScrollExposure", 1}, "Video Exposure",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"videoScrollBlendMode", 1}, "Video Blend Mode",
+        juce::StringArray{"Mix", "Add", "Screen", "Mask"}, 0));
+
+    // ── Video: configuration (Settings tab) ───────────────────────────────────
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"videoScrollBpm", 1}, "Video Scroll BPM",
+        juce::NormalisableRange<float>(40.0f, 240.0f, 0.1f), 120.0f, kHiddenFloat));
+
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"videoScrollMidiSync", 1}, "Video MIDI Sync",
+        false, kHiddenBool));
+
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"videoScrollMaxDuration", 1}, "Video Max Seq. Duration (s)",
+        juce::NormalisableRange<float>(1.0f, 30.0f, 0.5f), 10.0f, kHiddenFloat));
+
     return { params.begin(), params.end() };
 }
 
