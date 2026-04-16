@@ -158,4 +158,49 @@ inline void strokePath(juce::Graphics& g, const juce::Path& src,
     g.strokePath(scaled, juce::PathStrokeType(thickness));
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Sp3ctra logo picto — five coloured vertical bars (spectrum analyser motif)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Draw the Sp3ctra logo picto (5 coloured bars) scaled to fit @p area.
+ *
+ * The original SVG coordinates (bounding box 152.411 × 192.938) are
+ * normalised here so the picto can be rendered at any size.
+ *
+ * Bar colours (left to right): orange, lime, cyan, purple, red.
+ */
+inline void drawSp3ctraLogoPicto(juce::Graphics& g,
+                                  juce::Rectangle<float> area)
+{
+    // Original SVG bounding box
+    constexpr float svgW = 152.411f;
+    constexpr float svgH = 192.938f;
+
+    // Compute uniform scale + centring offset
+    const float scale = juce::jmin(area.getWidth()  / svgW,
+                                   area.getHeight() / svgH);
+    const float ox = area.getX() + (area.getWidth()  - svgW * scale) * 0.5f;
+    const float oy = area.getY() + (area.getHeight() - svgH * scale) * 0.5f;
+
+    // Bar definitions: { x, y, w, h, colour (ARGB) }
+    struct Bar { float x, y, w, h; juce::uint32 colour; };
+    constexpr Bar bars[] = {
+        {   0.000f,  60.680f, 12.664f, 106.995f, 0xffff5900 }, // orange
+        {  34.937f,  27.994f, 12.664f, 149.474f, 0xffcdff00 }, // lime
+        {  69.873f,   0.000f, 12.664f, 177.468f, 0xff00ffe2 }, // cyan
+        { 104.810f,  27.994f, 12.664f, 164.944f, 0xffbf00ff }, // purple
+        { 139.747f,  60.680f, 12.664f, 102.973f, 0xffff0000 }, // red
+    };
+
+    for (const auto& b : bars)
+    {
+        g.setColour(juce::Colour(b.colour));
+        g.fillRect(ox + b.x * scale,
+                   oy + b.y * scale,
+                   b.w * scale,
+                   b.h * scale);
+    }
+}
+
 } // namespace Icons

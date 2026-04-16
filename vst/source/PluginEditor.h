@@ -104,6 +104,7 @@ public:
 private:
     // ── Active tab ────────────────────────────────────────────────────────────
     enum class Tab { Image, Synth, Sampler };
+    enum class SynthSub { LuxStral, LuxSynth };
 
     // ── Layout constants ──────────────────────────────────────────────────────
     static constexpr int kHeaderH    = 52;
@@ -111,7 +112,9 @@ private:
     static constexpr int kVisH       = 64;
     static constexpr int kTabsY      = kVisY + kVisH + 6;
     static constexpr int kTabsH      = 26;
-    static constexpr int kPageTop    = kTabsY + kTabsH + 6;
+    static constexpr int kSubTabsY   = kTabsY + kTabsH + 6;
+    static constexpr int kSubTabsH   = 22;
+    static constexpr int kPageTop    = kSubTabsY + kSubTabsH + 4;
     static constexpr int kColGap     = 18;
     static constexpr int kCtrlW      = 210;
     // SYNTH tab left col: 7 audio-only rows
@@ -139,11 +142,18 @@ private:
 
     // ── State ─────────────────────────────────────────────────────────────────
     Tab currentTab { Tab::Image };
+    SynthSub currentSynthSub { SynthSub::LuxStral };
 
     // ── Tab navigation (3 tabs: IMAGE | SYNTH | SAMPLER) ──────────────────────
     juce::TextButton imageTabBtn   { "IMAGE" };
     juce::TextButton synthTabBtn   { "SYNTH" };
     juce::TextButton samplerTabBtn { "SAMPLER" };
+
+    // ── Synth sub-tab buttons ────────────────────────────────────────────────
+    juce::TextButton luxstralSubBtn  { "LuxStral" };
+    juce::TextButton luxsynthSubBtn  { "LuxSynth" };
+
+    void switchSynthSubTab(SynthSub sub);
 
     // ── CIS Visualizer ────────────────────────────────────────────────────────
     std::unique_ptr<CisVisualizerComponent> cisVisualizer;
@@ -188,6 +198,30 @@ private:
 
     juce::ToggleButton sfFocusOnlyToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfFocusOnlyAttachment;
+
+    // ── SYNTH page — LuxSynth audio params ──────────────────────────────────
+    juce::ToggleButton lxEnableToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> lxEnableAttachment;
+
+    juce::Slider lxAttackSlider, lxDecaySlider, lxSustainSlider, lxReleaseSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
+        lxAttackAttach, lxDecayAttach, lxSustainAttach, lxReleaseAttach;
+
+    juce::Slider lxFltAttackSlider, lxFltDecaySlider, lxFltSustainSlider, lxFltReleaseSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
+        lxFltAttackAttach, lxFltDecayAttach, lxFltSustainAttach, lxFltReleaseAttach;
+
+    juce::Slider lxFltCutoffSlider, lxFltDepthSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
+        lxFltCutoffAttach, lxFltDepthAttach;
+
+    juce::Slider lxGammaSlider, lxNumOscSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
+        lxGammaAttach, lxNumOscAttach;
+
+    juce::Slider lxLfoRateSlider, lxLfoDepthSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
+        lxLfoRateAttach, lxLfoDepthAttach;
 
     // ── SAMPLER page ──────────────────────────────────────────────────────────
     std::unique_ptr<SamplerPageComponent> samplerPage;

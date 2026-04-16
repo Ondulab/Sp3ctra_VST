@@ -14,12 +14,14 @@ SettingsComponent::SettingsComponent(Sp3ctraAudioProcessor& processor)
     networkTab      = new NetworkSettingsTab(processor);
     imageTab        = new ImageSettingsTab(processor);
     luxstralTab     = new LuxStralSettingsTab(processor);
+    luxsynthTab     = new LuxSynthSettingsTab(processor);
     frameSamplerTab = new FrameSamplerSettingsTab(processor);
 
     tabbedComponent.addTab("General",      juce::Colours::darkgrey, generalTab,      false);
     tabbedComponent.addTab("Network",      juce::Colours::darkgrey, networkTab,      false);
     tabbedComponent.addTab("Image",        juce::Colours::darkgrey, imageTab,        false);
     tabbedComponent.addTab("LuxStral",     juce::Colours::darkgrey, luxstralTab,     false);
+    tabbedComponent.addTab("LuxSynth",     juce::Colours::darkgrey, luxsynthTab,     false);
     tabbedComponent.addTab("FrameSampler", juce::Colours::darkgrey, frameSamplerTab, false);
 
     addAndMakeVisible(tabbedComponent);

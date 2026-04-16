@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "IconPaths.h"
 
 // ── Helper ───────────────────────────────────────────────────────────────────
 static void initSlider(juce::Slider& s, const char* suffix = nullptr)
@@ -68,6 +69,52 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     noiseGateAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralNoiseGateThreshold", noiseGateSlider);
 
+    // ── Synth sub-tab buttons ────────────────────────────────────────────────
+    luxstralSubBtn.onClick  = [this] { switchSynthSubTab(SynthSub::LuxStral); };
+    luxsynthSubBtn.onClick  = [this] { switchSynthSubTab(SynthSub::LuxSynth); };
+    luxstralSubBtn.getProperties().set("isTab", true);
+    luxsynthSubBtn.getProperties().set("isTab", true);
+    addChildComponent(luxstralSubBtn);
+    addChildComponent(luxsynthSubBtn);
+
+    // ── LuxSynth audio controls ─────────────────────────────────────────────
+    lxEnableToggle.setButtonText("Active");
+    addChildComponent(lxEnableToggle);
+    lxEnableAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "luxsynthEnabled", lxEnableToggle);
+
+    initSlider(lxAttackSlider, " ms");   addChildComponent(lxAttackSlider);
+    lxAttackAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthAttackMs", lxAttackSlider);
+    initSlider(lxDecaySlider, " ms");    addChildComponent(lxDecaySlider);
+    lxDecayAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthDecayMs", lxDecaySlider);
+    initSlider(lxSustainSlider);         addChildComponent(lxSustainSlider);
+    lxSustainAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthSustainLevel", lxSustainSlider);
+    initSlider(lxReleaseSlider, " ms");  addChildComponent(lxReleaseSlider);
+    lxReleaseAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthReleaseMs", lxReleaseSlider);
+
+    initSlider(lxFltAttackSlider, " ms");  addChildComponent(lxFltAttackSlider);
+    lxFltAttackAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthFilterAttackMs", lxFltAttackSlider);
+    initSlider(lxFltDecaySlider, " ms");   addChildComponent(lxFltDecaySlider);
+    lxFltDecayAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthFilterDecayMs", lxFltDecaySlider);
+    initSlider(lxFltSustainSlider);        addChildComponent(lxFltSustainSlider);
+    lxFltSustainAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthFilterSustain", lxFltSustainSlider);
+    initSlider(lxFltReleaseSlider, " ms"); addChildComponent(lxFltReleaseSlider);
+    lxFltReleaseAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthFilterReleaseMs", lxFltReleaseSlider);
+    initSlider(lxFltCutoffSlider, " Hz");  addChildComponent(lxFltCutoffSlider);
+    lxFltCutoffAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthFilterCutoff", lxFltCutoffSlider);
+    initSlider(lxFltDepthSlider);          addChildComponent(lxFltDepthSlider);
+    lxFltDepthAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthFilterEnvDepth", lxFltDepthSlider);
+
+    initSlider(lxGammaSlider);    addChildComponent(lxGammaSlider);
+    lxGammaAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthGamma", lxGammaSlider);
+    initSlider(lxNumOscSlider);   addChildComponent(lxNumOscSlider);
+    lxNumOscAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthNumOscillators", lxNumOscSlider);
+
+    initSlider(lxLfoRateSlider, " Hz");  addChildComponent(lxLfoRateSlider);
+    lxLfoRateAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthLfoRate", lxLfoRateSlider);
+    initSlider(lxLfoDepthSlider);        addChildComponent(lxLfoDepthSlider);
+    lxLfoDepthAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthLfoDepth", lxLfoDepthSlider);
+
     // ── StrokeForge controls (right column, SYNTH tab) ────────────────────────
     sfEnabledToggle.setButtonText("StrokeForge Active");
     addChildComponent(sfEnabledToggle);
@@ -131,10 +178,14 @@ Sp3ctraAudioProcessorEditor::~Sp3ctraAudioProcessorEditor()
 void Sp3ctraAudioProcessorEditor::switchToTab(Tab tab)
 {
     currentTab = tab;
-
-    // SYNTH controls (audio-only params + StrokeForge right column)
     const bool synthVis = (tab == Tab::Synth);
-    std::array<juce::Component*, 12> synthCtrls = {
+
+    // Sub-tab buttons — visible only on SYNTH page
+    luxstralSubBtn.setVisible(synthVis);
+    luxsynthSubBtn.setVisible(synthVis);
+
+    // Hide all synth controls first, then let switchSynthSubTab() show the right ones
+    std::array<juce::Component*, 12> luxstralCtrls = {
         &deviceOnToggle,   &masterVolumeSlider,
         &attackSlider,     &releaseSlider,
         &stereoTempSlider, &sumExpSlider, &noiseGateSlider,
@@ -142,7 +193,22 @@ void Sp3ctraAudioProcessorEditor::switchToTab(Tab tab)
         &sfMorphWidthSlider, &sfFocusSigmaSlider,
         &sfSpectralThreshSlider, &sfFocusOnlyToggle
     };
-    for (auto* c : synthCtrls) c->setVisible(synthVis);
+    for (auto* c : luxstralCtrls) c->setVisible(false);
+
+    std::array<juce::Component*, 16> luxsynthCtrls = {
+        &lxEnableToggle,
+        &lxAttackSlider, &lxDecaySlider, &lxSustainSlider, &lxReleaseSlider,
+        &lxFltAttackSlider, &lxFltDecaySlider, &lxFltSustainSlider, &lxFltReleaseSlider,
+        &lxFltCutoffSlider, &lxFltDepthSlider,
+        &lxGammaSlider, &lxNumOscSlider,
+        &lxLfoRateSlider, &lxLfoDepthSlider,
+        nullptr  // padding to 16
+    };
+    for (auto* c : luxsynthCtrls) if (c) c->setVisible(false);
+
+    // Show the correct sub-tab controls
+    if (synthVis)
+        switchSynthSubTab(currentSynthSub);
 
     // Page components
     if (imagePage)   imagePage->setVisible(tab == Tab::Image);
@@ -169,6 +235,59 @@ void Sp3ctraAudioProcessorEditor::switchToTab(Tab tab)
 }
 
 //==============================================================================
+void Sp3ctraAudioProcessorEditor::switchSynthSubTab(SynthSub sub)
+{
+    currentSynthSub = sub;
+
+    const bool isLuxStral = (sub == SynthSub::LuxStral);
+    const bool isLuxSynth = (sub == SynthSub::LuxSynth);
+
+    // LuxStral controls
+    deviceOnToggle.setVisible(isLuxStral);
+    masterVolumeSlider.setVisible(isLuxStral);
+    attackSlider.setVisible(isLuxStral);
+    releaseSlider.setVisible(isLuxStral);
+    stereoTempSlider.setVisible(isLuxStral);
+    sumExpSlider.setVisible(isLuxStral);
+    noiseGateSlider.setVisible(isLuxStral);
+    sfEnabledToggle.setVisible(isLuxStral);
+    sfMorphWidthSlider.setVisible(isLuxStral);
+    sfFocusSigmaSlider.setVisible(isLuxStral);
+    sfSpectralThreshSlider.setVisible(isLuxStral);
+    sfFocusOnlyToggle.setVisible(isLuxStral);
+
+    // LuxSynth controls
+    lxEnableToggle.setVisible(isLuxSynth);
+    lxAttackSlider.setVisible(isLuxSynth);
+    lxDecaySlider.setVisible(isLuxSynth);
+    lxSustainSlider.setVisible(isLuxSynth);
+    lxReleaseSlider.setVisible(isLuxSynth);
+    lxFltAttackSlider.setVisible(isLuxSynth);
+    lxFltDecaySlider.setVisible(isLuxSynth);
+    lxFltSustainSlider.setVisible(isLuxSynth);
+    lxFltReleaseSlider.setVisible(isLuxSynth);
+    lxFltCutoffSlider.setVisible(isLuxSynth);
+    lxFltDepthSlider.setVisible(isLuxSynth);
+    lxGammaSlider.setVisible(isLuxSynth);
+    lxNumOscSlider.setVisible(isLuxSynth);
+    lxLfoRateSlider.setVisible(isLuxSynth);
+    lxLfoDepthSlider.setVisible(isLuxSynth);
+
+    // Sub-tab button styling
+    auto styleSubTab = [](juce::TextButton& btn, bool active)
+    {
+        btn.setColour(juce::TextButton::buttonColourId,
+                      juce::Colour(active ? 0xff2a3a50 : 0xff1a1a24));
+        btn.setColour(juce::TextButton::textColourOffId,
+                      juce::Colour(active ? 0xffc0d8f0 : 0xff667788));
+    };
+    styleSubTab(luxstralSubBtn, isLuxStral);
+    styleSubTab(luxsynthSubBtn, isLuxSynth);
+
+    repaint();
+}
+
+//==============================================================================
 void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colour(0xff1e1e1e));
@@ -179,9 +298,18 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
         juce::Colour(0xff262626), 0.f, (float)kHeaderH, false));
     g.fillRect(0, 0, getWidth(), kHeaderH);
 
+    // Logo picto (5 coloured bars) — left side of header
+    constexpr float pictoW = 36.f;
+    constexpr float pictoH = 40.f;
+    const float pictoX = 10.f;
+    const float pictoY = ((float)kHeaderH - pictoH) * 0.5f;
+    Icons::drawSp3ctraLogoPicto(g, { pictoX, pictoY, pictoW, pictoH });
+
+    // "Sp3ctra" text — right of the picto
     g.setColour(juce::Colours::white);
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontTitle)).boldened());
-    g.drawText("Sp3ctra", juce::Rectangle<int>(12, 0, getWidth()-24, kHeaderH),
+    const int textX = (int)(pictoX + pictoW + 6.f);
+    g.drawText("Sp3ctra", juce::Rectangle<int>(textX, 0, getWidth() - textX - 24, kHeaderH),
                juce::Justification::centredLeft, true);
 
     // Version — centred between logo and gear button
@@ -245,14 +373,29 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
         }
     }
 
-    // ── SYNTH page labels (drawn inline — ImagePage draws itself) ─────────────
+    // ── SYNTH sub-tab bar background ─────────────────────────────────────────
     if (currentTab == Tab::Synth)
+    {
+        g.setColour(juce::Colour(0xff161620));
+        g.fillRect(0, kSubTabsY, getWidth(), kSubTabsH);
+        g.setColour(juce::Colour(0xff333344));
+        g.fillRect(0, kSubTabsY + kSubTabsH - 1, getWidth(), 1);
+
+        // Active sub-tab accent
+        const auto& activeBtn = (currentSynthSub == SynthSub::LuxStral) ? luxstralSubBtn : luxsynthSubBtn;
+        g.setColour(juce::Colour(0xff4488cc));
+        g.fillRect(activeBtn.getX(), kSubTabsY + kSubTabsH - 2,
+                   activeBtn.getWidth(), 2);
+    }
+
+    // ── SYNTH page labels (drawn inline — ImagePage draws itself) ─────────────
+    if (currentTab == Tab::Synth && currentSynthSub == SynthSub::LuxStral)
     {
         const int cw  = colWidth();
         const int lxp = colLX();
         const int rsy = rowsStartY();
 
-        // LuxStral section badge (audio-only, no image pipeline params)
+        // LuxStral section badge
         g.setColour(juce::Colour(0xff1c3755));
         g.fillRoundedRectangle(juce::Rectangle<int>(lxp, kPageTop, cw, kSectionH).toFloat(), 3.f);
         g.setColour(juce::Colour(0xff7ab0f0));
@@ -274,10 +417,9 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
                        juce::Rectangle<int>(lxp, rsy + i*kRowStep, kLabelW, kRowH),
                        juce::Justification::centredRight, true);
 
-        // ── StrokeForge section (right column) ────────────────────────────────
+        // ── StrokeForge section (right column) ──────────────────────────────
         const int rxp = colRX();
 
-        // Slot-style background for SF panel
         g.setColour(juce::Colour(0xff131320));
         g.fillRoundedRectangle(
             juce::Rectangle<int>(rxp, kPageTop, cw, kSectionH + kSectionGap +
@@ -287,7 +429,6 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
             juce::Rectangle<int>(rxp, kPageTop, cw, kSectionH + kSectionGap +
                                  kSF_ROWS * kRowStep + kSectionGap).toFloat(), 4.f, 1.f);
 
-        // SF badge (purple)
         g.setColour(juce::Colour(0xff2c1f4a));
         g.fillRoundedRectangle(
             juce::Rectangle<int>(rxp+4, kPageTop+4, cw-8, kSectionH-2).toFloat(), 3.f);
@@ -297,16 +438,65 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
                    juce::Rectangle<int>(rxp+10, kPageTop+4, cw-20, kSectionH-2),
                    juce::Justification::centredLeft, true);
 
-        // SF row labels
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
         g.setColour(juce::Colour(0xffb8c4d0));
-
         static const char* const sfLbls[kSF_ROWS] = {
             "Enable", "Square at Width", "Focus Sigma",
             "Spectral Threshold", "Focus Only (spectral)"
         };
         for (int i = 0; i < kSF_ROWS; ++i)
             g.drawText(sfLbls[i],
+                       juce::Rectangle<int>(rxp+4, rsy + i*kRowStep, kLabelW, kRowH),
+                       juce::Justification::centredRight, true);
+    }
+
+    // ── LUXSYNTH labels ──────────────────────────────────────────────────────
+    if (currentTab == Tab::Synth && currentSynthSub == SynthSub::LuxSynth)
+    {
+        const int cw  = colWidth();
+        const int lxp = colLX();
+        const int rxp = colRX();
+        const int rsy = rowsStartY();
+
+        // Left column badge — VOLUME ADSR (teal)
+        g.setColour(juce::Colour(0xff1a3a3a));
+        g.fillRoundedRectangle(juce::Rectangle<int>(lxp, kPageTop, cw, kSectionH).toFloat(), 3.f);
+        g.setColour(juce::Colour(0xff66ccaa));
+        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
+        g.drawText("LUXSYNTH  —  Volume ADSR + Spectral",
+                   juce::Rectangle<int>(lxp+6, kPageTop, cw-12, kSectionH),
+                   juce::Justification::centredLeft, true);
+
+        // Left column labels (8 rows)
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
+        g.setColour(juce::Colour(0xffb8c4d0));
+        static const char* const lxLeftLbls[] = {
+            "Enable", "Attack", "Decay", "Sustain", "Release",
+            "Gamma", "Oscillators", "LFO Rate"
+        };
+        for (int i = 0; i < 8; ++i)
+            g.drawText(lxLeftLbls[i],
+                       juce::Rectangle<int>(lxp, rsy + i*kRowStep, kLabelW, kRowH),
+                       juce::Justification::centredRight, true);
+
+        // Right column badge — FILTER ADSR (purple-pink)
+        g.setColour(juce::Colour(0xff2a1a3a));
+        g.fillRoundedRectangle(juce::Rectangle<int>(rxp, kPageTop, cw, kSectionH).toFloat(), 3.f);
+        g.setColour(juce::Colour(0xffcc88cc));
+        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
+        g.drawText("FILTER ADSR + LFO",
+                   juce::Rectangle<int>(rxp+6, kPageTop, cw-12, kSectionH),
+                   juce::Justification::centredLeft, true);
+
+        // Right column labels (7 rows)
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
+        g.setColour(juce::Colour(0xffb8c4d0));
+        static const char* const lxRightLbls[] = {
+            "Flt. Attack", "Flt. Decay", "Flt. Sustain", "Flt. Release",
+            "Cutoff", "Env Depth", "LFO Depth"
+        };
+        for (int i = 0; i < 7; ++i)
+            g.drawText(lxRightLbls[i],
                        juce::Rectangle<int>(rxp+4, rsy + i*kRowStep, kLabelW, kRowH),
                        juce::Justification::centredRight, true);
     }
@@ -325,6 +515,10 @@ void Sp3ctraAudioProcessorEditor::resized()
     imageTabBtn  .setBounds(kHPad,       kTabsY + 2, 80, Sp3ctraTheme::kTabBtnH);
     synthTabBtn  .setBounds(kHPad + 84,  kTabsY + 2, 80, Sp3ctraTheme::kTabBtnH);
     samplerTabBtn.setBounds(kHPad + 168, kTabsY + 2, 92, Sp3ctraTheme::kTabBtnH);
+
+    // ── Synth sub-tab buttons ────────────────────────────────────────────────
+    luxstralSubBtn.setBounds(kHPad,      kSubTabsY + 1, 72, kSubTabsH - 2);
+    luxsynthSubBtn.setBounds(kHPad + 76, kSubTabsY + 1, 72, kSubTabsH - 2);
 
     // ── LuxStral controls (SYNTH page, left column) ───────────────────────────
     {
@@ -351,6 +545,36 @@ void Sp3ctraAudioProcessorEditor::resized()
         sfFocusSigmaSlider   .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
         sfSpectralThreshSlider.setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
         sfFocusOnlyToggle    .setBounds(cx, cy, cw2, kRowH);
+    }
+
+    // ── LuxSynth controls (SYNTH page, left column = vol ADSR + spectral) ────
+    {
+        const int cx = lxp + kCtrlOffset;
+        int cy = rsy;
+        lxEnableToggle .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        lxAttackSlider .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        lxDecaySlider  .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        lxSustainSlider.setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        lxReleaseSlider.setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        lxGammaSlider  .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        lxNumOscSlider .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        lxLfoRateSlider.setBounds(cx, cy, kCtrlW, kRowH);
+    }
+
+    // ── LuxSynth controls (SYNTH page, right column = filter ADSR + LFO) ─────
+    {
+        const int rxp = colRX();
+        const int cw  = colWidth();
+        const int cx  = rxp + kCtrlOffset + 4;
+        const int cw2 = cw - kCtrlOffset - 12;
+        int cy = rsy;
+        lxFltAttackSlider .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
+        lxFltDecaySlider  .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
+        lxFltSustainSlider.setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
+        lxFltReleaseSlider.setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
+        lxFltCutoffSlider .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
+        lxFltDepthSlider  .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
+        lxLfoDepthSlider  .setBounds(cx, cy, cw2, kRowH);
     }
 
     // ── Header gear button (top-right) ────────────────────────────────────────

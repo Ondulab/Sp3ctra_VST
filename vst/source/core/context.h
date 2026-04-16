@@ -75,6 +75,7 @@ typedef struct {
   DMXContext *dmxCtx;                   // Stub (will be removed later)
   volatile int running;                 // Controls UDP thread (and general shutdown)
   volatile int audio_thread_running;    // 🔧 SEPARATE flag for audio thread (VST buffer size changes)
+  volatile int luxsynth_thread_running; // Controls LuxSynth processing thread
 
   /* IMU state (protected by imu_mutex) */
   pthread_mutex_t imu_mutex;

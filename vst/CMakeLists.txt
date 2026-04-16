@@ -123,6 +123,19 @@ target_sources(Sp3ctraVST
         source/synthesis/luxstral/pow_approx.h
         source/synthesis/luxstral/strokeforge.c
         source/synthesis/luxstral/strokeforge.h
+
+        # 🎵 LuxSynth Additive Synthesis Engine
+        source/synthesis/luxsynth/synth_luxsynth_engine.c
+        source/synthesis/luxsynth/synth_luxsynth_engine.h
+        source/synthesis/luxsynth/luxsynth_vst_adapter.c
+        source/synthesis/luxsynth/luxsynth_vst_adapter.h
+        source/synthesis/common/voice_manager.c
+        source/synthesis/common/voice_manager.h
+        source/LuxSynthProcessingThread.h
+
+        # LuxSynth Settings Tab
+        source/settings/LuxSynthSettingsTab.cpp
+        source/settings/LuxSynthSettingsTab.h
 )
 
 # ✨ BRICK 1: UDP Reception - Add C sources

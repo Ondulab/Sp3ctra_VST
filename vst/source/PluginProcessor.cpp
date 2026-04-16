@@ -292,6 +292,86 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"lxFftSmoothing", 1}, "LX FFT Smoothing",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.3f));
 
+    // ── LuxSynth Engine Parameters ────────────────────────────────────────────
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"luxsynthEnabled", 1}, "LuxSynth Active", false));
+
+    // Volume ADSR
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthAttackMs", 1}, "LS Attack",
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 10.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthDecayMs", 1}, "LS Decay",
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 100.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthSustainLevel", 1}, "LS Sustain",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.7f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthReleaseMs", 1}, "LS Release",
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 200.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+
+    // Filter ADSR
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthFilterAttackMs", 1}, "LS Flt Attack",
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 20.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthFilterDecayMs", 1}, "LS Flt Decay",
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 150.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthFilterSustain", 1}, "LS Flt Sustain",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthFilterReleaseMs", 1}, "LS Flt Release",
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 300.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthFilterCutoff", 1}, "LS Flt Cutoff",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthFilterEnvDepth", 1}, "LS Flt Depth",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+
+    // Spectral
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthGamma", 1}, "LS Gamma",
+        juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f, 0.30f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"luxsynthNumOscillators", 1}, "LS Oscillators",
+        1, 128, 64));
+
+    // LFO
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthLfoRate", 1}, "LS LFO Rate",
+        juce::NormalisableRange<float>(0.0f, 20.0f, 0.01f), 5.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("Hz")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthLfoDepth", 1}, "LS LFO Depth",
+        juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 0.1f,
+        juce::AudioParameterFloatAttributes{}.withLabel("st")));
+
+    // LuxSynth MIDI Channel (Channel 1-16)
+    {
+        juce::StringArray lxMidiChNames;
+        for (int i = 1; i <= 16; ++i)
+            lxMidiChNames.add("Channel " + juce::String(i));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxsynthMidiChannel", 1}, "LuxSynth MIDI Channel",
+            lxMidiChNames, 0, kHiddenChoice));  // default = Channel 1 (index 0)
+    }
+
+    // LuxSynth Octave Offset (-2 .. +2)
+    {
+        juce::StringArray octaveNames { "-2", "-1", " 0", "+1", "+2" };
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxsynthOctaveOffset", 1}, "LuxSynth Octave Offset",
+            octaveNames, 2, kHiddenChoice));  // default index 2 = 0
+    }
+
     // Fade-in duration [ms] — applied when restarting the live stream after Stop.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"imageFadeInMs", 1}, "Fade-In",
