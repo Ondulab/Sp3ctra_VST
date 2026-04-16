@@ -1,164 +1,89 @@
 #include "LuxSynthSettingsTab.h"
+#include "../Sp3ctraConstants.h"
+#include "../UITheme.h"
 
 //==============================================================================
 LuxSynthSettingsTab::LuxSynthSettingsTab(Sp3ctraAudioProcessor& processor)
     : apvts(processor.getAPVTS())
 {
-    auto setupSectionLabel = [this](juce::Label& label, const juce::String& text)
-    {
-        label.setText(text, juce::dontSendNotification);
-        label.setFont(juce::Font(16.0f));
-        label.setColour(juce::Label::textColourId, juce::Colour(0xFF88CCFF));
-        label.setJustificationType(juce::Justification::centredLeft);
-        contentComponent.addAndMakeVisible(label);
-    };
+    // ── Enable toggle ─────────────────────────────────────────────────────
+    enableLabel.setText("LuxSynth:", juce::dontSendNotification);
+    enableLabel.setJustificationType(juce::Justification::centredRight);
+    enableLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+    addAndMakeVisible(enableLabel);
 
-    auto setupLabel = [this](juce::Label& label, const juce::String& text)
-    {
-        label.setText(text, juce::dontSendNotification);
-        label.setJustificationType(juce::Justification::right);
-        contentComponent.addAndMakeVisible(label);
-    };
-
-    auto setupSlider = [this](juce::Slider& slider, const juce::String& paramId,
-                               std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>& attachment)
-    {
-        slider.setSliderStyle(juce::Slider::LinearHorizontal);
-        slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 22);
-        slider.addListener(this);
-        contentComponent.addAndMakeVisible(slider);
-        attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, paramId, slider);
-    };
-
-    // ── Engine Enable ──
-    setupSectionLabel(enableSectionLabel, "ENGINE");
-    setupLabel(enableLabel, "LuxSynth Enabled");
-    contentComponent.addAndMakeVisible(enableToggle);
-    enableAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+    enableToggle.setButtonText("Enabled");
+    addAndMakeVisible(enableToggle);
+    enableAttachment = std::make_unique<
+        juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "luxsynthEnabled", enableToggle);
 
-    setupLabel(midiChannelLabel, "MIDI Channel");
-    contentComponent.addAndMakeVisible(midiChannelCombo);
-    midiChannelAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+    // ── MIDI Channel ──────────────────────────────────────────────────────
+    midiChannelLabel.setText("MIDI Channel:", juce::dontSendNotification);
+    midiChannelLabel.setJustificationType(juce::Justification::centredRight);
+    midiChannelLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+    addAndMakeVisible(midiChannelLabel);
+
+    for (int i = 1; i <= 16; ++i)
+        midiChannelCombo.addItem("Channel " + juce::String(i), i);
+    addAndMakeVisible(midiChannelCombo);
+    midiChannelAttachment = std::make_unique<
+        juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         apvts, "luxsynthMidiChannel", midiChannelCombo);
 
-    setupLabel(octaveOffsetLabel, "Octave Offset");
-    contentComponent.addAndMakeVisible(octaveOffsetCombo);
-    octaveOffsetAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+    // ── Octave Offset ─────────────────────────────────────────────────────
+    octaveOffsetLabel.setText("Octave Offset:", juce::dontSendNotification);
+    octaveOffsetLabel.setJustificationType(juce::Justification::centredRight);
+    octaveOffsetLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+    addAndMakeVisible(octaveOffsetLabel);
+
+    octaveOffsetCombo.addItem("-2", 1);
+    octaveOffsetCombo.addItem("-1", 2);
+    octaveOffsetCombo.addItem(" 0", 3);
+    octaveOffsetCombo.addItem("+1", 4);
+    octaveOffsetCombo.addItem("+2", 5);
+    addAndMakeVisible(octaveOffsetCombo);
+    octaveOffsetAttachment = std::make_unique<
+        juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         apvts, "luxsynthOctaveOffset", octaveOffsetCombo);
-
-    // ── Volume ADSR ──
-    setupSectionLabel(volAdsrSectionLabel, "VOLUME ADSR");
-    setupLabel(attackLabel, "Attack");
-    setupSlider(attackSlider, "luxsynthAttackMs", attackAttachment);
-    setupLabel(decayLabel, "Decay");
-    setupSlider(decaySlider, "luxsynthDecayMs", decayAttachment);
-    setupLabel(sustainLabel, "Sustain");
-    setupSlider(sustainSlider, "luxsynthSustainLevel", sustainAttachment);
-    setupLabel(releaseLabel, "Release");
-    setupSlider(releaseSlider, "luxsynthReleaseMs", releaseAttachment);
-
-    // ── Filter ADSR ──
-    setupSectionLabel(fltAdsrSectionLabel, "FILTER ADSR");
-    setupLabel(fltAttackLabel, "Filter Attack");
-    setupSlider(fltAttackSlider, "luxsynthFilterAttackMs", fltAttackAttachment);
-    setupLabel(fltDecayLabel, "Filter Decay");
-    setupSlider(fltDecaySlider, "luxsynthFilterDecayMs", fltDecayAttachment);
-    setupLabel(fltSustainLabel, "Filter Sustain");
-    setupSlider(fltSustainSlider, "luxsynthFilterSustain", fltSustainAttachment);
-    setupLabel(fltReleaseLabel, "Filter Release");
-    setupSlider(fltReleaseSlider, "luxsynthFilterReleaseMs", fltReleaseAttachment);
-    setupLabel(fltCutoffLabel, "Cutoff");
-    setupSlider(fltCutoffSlider, "luxsynthFilterCutoff", fltCutoffAttachment);
-    setupLabel(fltDepthLabel, "Env Depth");
-    setupSlider(fltDepthSlider, "luxsynthFilterEnvDepth", fltDepthAttachment);
-
-    // ── Spectral ──
-    setupSectionLabel(spectralSectionLabel, "SPECTRAL");
-    setupLabel(gammaLabel, "Gamma");
-    setupSlider(gammaSlider, "luxsynthGamma", gammaAttachment);
-    setupLabel(numOscLabel, "Oscillators");
-    setupSlider(numOscSlider, "luxsynthNumOscillators", numOscAttachment);
-
-    // ── LFO ──
-    setupSectionLabel(lfoSectionLabel, "LFO (VIBRATO)");
-    setupLabel(lfoRateLabel, "Rate");
-    setupSlider(lfoRateSlider, "luxsynthLfoRate", lfoRateAttachment);
-    setupLabel(lfoDepthLabel, "Depth");
-    setupSlider(lfoDepthSlider, "luxsynthLfoDepth", lfoDepthAttachment);
-
-    viewport.setViewedComponent(&contentComponent, false);
-    viewport.setScrollBarsShown(true, false);
-    addAndMakeVisible(viewport);
 }
 
 LuxSynthSettingsTab::~LuxSynthSettingsTab() = default;
 
+//==============================================================================
 void LuxSynthSettingsTab::paint(juce::Graphics& g)
 {
     g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
+
+    // Title
+    g.setColour(juce::Colours::white);
+    g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
+    g.drawText("LuxSynth", getLocalBounds().removeFromTop(30),
+               juce::Justification::centred, true);
 }
 
+//==============================================================================
 void LuxSynthSettingsTab::resized()
 {
-    viewport.setBounds(getLocalBounds());
-    layoutContentComponent();
-}
+    const int w        = getWidth();
+    const int titleH   = 30;
+    constexpr int rowH   = Sp3ctraTheme::kRowStep;
+    constexpr int labelW = Sp3ctraTheme::kLabelW;
+    const int ctrlX    = 20 + labelW;
+    const int ctrlW    = w - ctrlX - 20;
 
-void LuxSynthSettingsTab::layoutContentComponent()
-{
-    const int w = viewport.getMaximumVisibleWidth();
-    const int rowH = 28;
-    const int sectionH = 32;
-    const int labelW = 130;
-    const int gap = 6;
-    int y = 10;
+    int y = titleH + 5;
 
-    auto addSection = [&](juce::Label& label)
+    constexpr int ctrlH = Sp3ctraTheme::kControlH;
+    auto row = [&](juce::Label& lbl, juce::Component& ctrl)
     {
-        label.setBounds(10, y, w - 20, sectionH);
-        y += sectionH + gap;
+        const int vc = (rowH - ctrlH) / 2;
+        lbl .setBounds(20,    y + vc, labelW, ctrlH);
+        ctrl.setBounds(ctrlX, y + vc, ctrlW,  ctrlH);
+        y += rowH;
     };
 
-    auto addRow = [&](juce::Label& label, juce::Component& ctrl)
-    {
-        label.setBounds(10, y, labelW, rowH);
-        ctrl.setBounds(labelW + 10, y, w - labelW - 30, rowH);
-        y += rowH + gap;
-    };
-
-    addSection(enableSectionLabel);
-    addRow(enableLabel, enableToggle);
-    addRow(midiChannelLabel, midiChannelCombo);
-    addRow(octaveOffsetLabel, octaveOffsetCombo);
-
-    addSection(volAdsrSectionLabel);
-    addRow(attackLabel, attackSlider);
-    addRow(decayLabel, decaySlider);
-    addRow(sustainLabel, sustainSlider);
-    addRow(releaseLabel, releaseSlider);
-
-    addSection(fltAdsrSectionLabel);
-    addRow(fltAttackLabel, fltAttackSlider);
-    addRow(fltDecayLabel, fltDecaySlider);
-    addRow(fltSustainLabel, fltSustainSlider);
-    addRow(fltReleaseLabel, fltReleaseSlider);
-    addRow(fltCutoffLabel, fltCutoffSlider);
-    addRow(fltDepthLabel, fltDepthSlider);
-
-    addSection(spectralSectionLabel);
-    addRow(gammaLabel, gammaSlider);
-    addRow(numOscLabel, numOscSlider);
-
-    addSection(lfoSectionLabel);
-    addRow(lfoRateLabel, lfoRateSlider);
-    addRow(lfoDepthLabel, lfoDepthSlider);
-
-    contentComponent.setSize(w, y + 20);
-}
-
-void LuxSynthSettingsTab::sliderValueChanged(juce::Slider* /*slider*/)
-{
-    /* All parameter changes are handled via APVTS attachments.
-     * The LuxSynth engine reads these atomically in its processing loop. */
+    row(enableLabel,       enableToggle);
+    row(midiChannelLabel,  midiChannelCombo);
+    row(octaveOffsetLabel, octaveOffsetCombo);
 }

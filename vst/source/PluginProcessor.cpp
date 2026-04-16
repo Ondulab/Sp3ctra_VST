@@ -10,6 +10,7 @@ extern "C" {
     #include "synthesis/luxstral/synth_luxstral_algorithms.h" // update_gap_limiter_coefficients()
     #include "synthesis/luxstral/vst_adapters.h"              // luxstral_are_audio_buffers_ready(), buffers
     #include "synthesis/luxstral/wave_generation.h"           // request_frequency_reinit() hot-reload
+    #include "processing/lux_pitch.h"                         // LuxPitch engine + g_lux_pitch
 }
 // Note: synth_luxstral_threading.h / synth_luxstral_runtime.h / AudioProcessingThread.h
 // are now included transitively via Sp3ctraSharedCore.h and handled by Sp3ctraSharedCore.
@@ -223,7 +224,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     // ── Pipeline routing — per-path source selection & toggles ────────────────
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"luxstralSource", 1}, "LuxStral Source",
-        juce::StringArray{"S - Sampler", "M - Mix", "L - Live"}, 1));
+        juce::StringArray{"S - Sampler", "M - Mix", "L - Live", "P - LuxPitch"}, 1));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"luxstralInversion", 1}, "LuxStral Inversion", true));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
@@ -231,7 +232,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
 
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"luxsynthSource", 1}, "LuxSynth Source",
-        juce::StringArray{"S - Sampler", "M - Mix", "L - Live"}, 1));
+        juce::StringArray{"S - Sampler", "M - Mix", "L - Live", "P - LuxPitch"}, 1));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"luxsynthInversion", 1}, "LuxSynth Inversion", true));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
@@ -370,6 +371,84 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             juce::ParameterID{"luxsynthOctaveOffset", 1}, "LuxSynth Octave Offset",
             octaveNames, 2, kHiddenChoice));  // default index 2 = 0
+    }
+
+    // ── LuxPitch Parameters ───────────────────────────────────────────────────
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"luxpitchEnabled", 1}, "LuxPitch Enabled", false));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"luxpitchPolyphony", 1}, "LuxPitch Polyphony", false));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"luxpitchBackgroundMode", 1}, "LuxPitch Background",
+        juce::StringArray{"Black", "White"}, 0, kHiddenChoice));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"luxpitchCouplingMode", 1}, "LuxPitch Coupling",
+        juce::StringArray{"LuxStral", "Free"}, 0, kHiddenChoice));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxpitchFreePixelsPerST", 1}, "LP px/semitone",
+        juce::NormalisableRange<float>(1.0f, 200.0f, 0.5f), 36.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxpitchPitchBendRange", 1}, "LP PB Range",
+        juce::NormalisableRange<float>(0.0f, 24.0f, 0.5f), 2.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("st")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxpitchAttackMs", 1}, "LP Attack",
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 10.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxpitchDecayMs", 1}, "LP Decay",
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 50.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxpitchSustainLevel", 1}, "LP Sustain",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxpitchReleaseMs", 1}, "LP Release",
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 100.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxpitchGlideMs", 1}, "LP Glide",
+        juce::NormalisableRange<float>(0.0f, 5000.0f, 1.0f, 0.3f), 0.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxpitchLfoRate", 1}, "LP LFO Rate",
+        juce::NormalisableRange<float>(0.0f, 20.0f, 0.01f), 5.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("Hz")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxpitchLfoDepth", 1}, "LP LFO Depth",
+        juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 0.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("st")));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"luxpitchVelocityCoupling", 1}, "LP Velocity", false));
+    // LuxPitch source selector (S/M/L — cannot take itself)
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"luxpitchSource", 1}, "LuxPitch Source",
+        juce::StringArray{"S - Sampler", "M - Mix", "L - Live"}, 1));
+    // LuxPitch MIDI infrastructure (settings tab)
+    {
+        juce::StringArray lpMidiChNames;
+        for (int i = 1; i <= 16; ++i)
+            lpMidiChNames.add("Channel " + juce::String(i));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxpitchMidiChannel", 1}, "LuxPitch MIDI Channel",
+            lpMidiChNames, 0, kHiddenChoice));
+    }
+    {
+        juce::StringArray octNames { "-2", "-1", " 0", "+1", "+2" };
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxpitchOctaveOffset", 1}, "LuxPitch Octave Offset",
+            octNames, 2, kHiddenChoice));
+    }
+    {
+        // Reference note C1..B6 (72 items), default A3 = index 33
+        juce::StringArray lpNoteNames;
+        const char* lpNoteLetters[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+        for (int oct = 1; oct <= 6; ++oct)
+            for (int n = 0; n < 12; ++n)
+                lpNoteNames.add(juce::String(lpNoteLetters[n]) + juce::String(oct));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxpitchReferenceNote", 1}, "LuxPitch Reference Note",
+            lpNoteNames, 33, kHiddenChoice));  // A3 = index 33
     }
 
     // Fade-in duration [ms] — applied when restarting the live stream after Stop.
@@ -557,6 +636,26 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("rawFreezeMode",        this);
     apvts.addParameterListener("rawFadeInMs",          this);
 
+    // LuxPitch parameter listeners
+    apvts.addParameterListener("luxpitchEnabled",          this);
+    apvts.addParameterListener("luxpitchPolyphony",        this);
+    apvts.addParameterListener("luxpitchBackgroundMode",   this);
+    apvts.addParameterListener("luxpitchCouplingMode",     this);
+    apvts.addParameterListener("luxpitchFreePixelsPerST",  this);
+    apvts.addParameterListener("luxpitchPitchBendRange",   this);
+    apvts.addParameterListener("luxpitchAttackMs",         this);
+    apvts.addParameterListener("luxpitchDecayMs",          this);
+    apvts.addParameterListener("luxpitchSustainLevel",     this);
+    apvts.addParameterListener("luxpitchReleaseMs",        this);
+    apvts.addParameterListener("luxpitchGlideMs",          this);
+    apvts.addParameterListener("luxpitchLfoRate",          this);
+    apvts.addParameterListener("luxpitchLfoDepth",         this);
+    apvts.addParameterListener("luxpitchVelocityCoupling", this);
+    apvts.addParameterListener("luxpitchSource",           this);
+    apvts.addParameterListener("luxpitchMidiChannel",      this);
+    apvts.addParameterListener("luxpitchOctaveOffset",     this);
+    apvts.addParameterListener("luxpitchReferenceNote",    this);
+
     // Create LuxSampler (always active, no lazy init needed)
     luxSampler = std::make_unique<LuxSampler>();
 
@@ -597,6 +696,10 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     // We defer startWithConfig() to prepareToPlay() so we have the correct
     // sample rate and buffer size when initializing LuxStral.
     
+    // Initialize LuxPitch instances (both UI and processing thread)
+    lux_pitch_init(&g_lux_pitch);
+    lux_pitch_init(&g_lux_pitch_proc);
+
     // Just update g_sp3ctra_config with current APVTS defaults (no socket/buffer creation)
     applyConfigurationToCore(false);
     
@@ -857,6 +960,34 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // ── LuxSampler MIDI (RT-safe: atomics only, no alloc, no lock, no I/O) ──
     if (luxSampler != nullptr)
         luxSampler->processMidi(midiMessages);
+
+    // ── LuxPitch MIDI (RT-safe: lock-free pitch shift from notes/pitch-bend) ──
+    {
+        const int lpCh  = static_cast<int>(apvts.getRawParameterValue("luxpitchMidiChannel")->load()) + 1;
+        const int lpOct = static_cast<int>(apvts.getRawParameterValue("luxpitchOctaveOffset")->load()) - 2;
+        for (const auto metadata : midiMessages)
+        {
+            const auto msg = metadata.getMessage();
+            if (msg.getChannel() != lpCh) continue;
+            const int shifted = msg.getNoteNumber() + lpOct * 12;
+            if (msg.isNoteOn())
+            {
+                lux_pitch_note_on(&g_lux_pitch, shifted, msg.getFloatVelocity());
+                lux_pitch_note_on(&g_lux_pitch_proc, shifted, msg.getFloatVelocity());
+            }
+            else if (msg.isNoteOff())
+            {
+                lux_pitch_note_off(&g_lux_pitch, shifted);
+                lux_pitch_note_off(&g_lux_pitch_proc, shifted);
+            }
+            else if (msg.isPitchWheel())
+            {
+                float bend = (msg.getPitchWheelValue() - 8192) / 8192.0f;
+                lux_pitch_set_pitch_bend(&g_lux_pitch, bend);
+                lux_pitch_set_pitch_bend(&g_lux_pitch_proc, bend);
+            }
+        }
+    }
 
     // ── FrameSequencer: advance step if sequencer is running ─────────────────
     if (frameSequencer != nullptr)
@@ -1409,16 +1540,16 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     // ========================================================================
     // Per-path pipeline routing — source selection, inversion, AC removal
     //
-    // APVTS choice indices:  0 = "S - Sampler",  1 = "M - Mix",  2 = "L - Live"
-    // ImageSourceType enum:  SAMPLER=0, LIVE=1, MIX=2
+    // APVTS choice indices:  0="S - Sampler", 1="M - Mix", 2="L - Live", 3="P - LuxPitch"
+    // ImageSourceType enum:  SAMPLER=0, LIVE=1, MIX=2, LUXPITCH=3
     // Mapping table: choice → enum
     // ========================================================================
     {
-        static const int kChoiceToSource[3] = { 0, 2, 1 }; // S→0, M→2, L→1
+        static const int kChoiceToSource[4] = { 0, 2, 1, 3 }; // S→0, M→2, L→1, P→3
 
         int lsChoice = static_cast<int>(
             apvts.getRawParameterValue("luxstralSource")->load());
-        if (lsChoice < 0 || lsChoice > 2) lsChoice = 1; // default M
+        if (lsChoice < 0 || lsChoice > 3) lsChoice = 1; // default M
         g_sp3ctra_config.luxstral_source_type = kChoiceToSource[lsChoice];
         g_sp3ctra_config.luxstral_inversion   =
             static_cast<int>(apvts.getRawParameterValue("luxstralInversion")->load());
@@ -1427,7 +1558,7 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
 
         int lxChoice = static_cast<int>(
             apvts.getRawParameterValue("luxsynthSource")->load());
-        if (lxChoice < 0 || lxChoice > 2) lxChoice = 1;
+        if (lxChoice < 0 || lxChoice > 3) lxChoice = 1;
         g_sp3ctra_config.luxsynth_source_type = kChoiceToSource[lxChoice];
         g_sp3ctra_config.luxsynth_inversion   =
             static_cast<int>(apvts.getRawParameterValue("luxsynthInversion")->load());
@@ -1437,6 +1568,37 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         // preprocess_luxsynth() skips it as a no-op when gamma_value == 1.0.
         g_sp3ctra_config.luxsynth_gamma_value =
             apvts.getRawParameterValue("luxsynthGammaValue")->load();
+
+        // ── LuxPitch source routing (S/M/L — no P option for its own source) ──
+        {
+            static const int kLpChoiceToSrc[3] = { 0, 2, 1 }; // S→SAMPLER, M→MIX, L→LIVE
+            int lpSrcChoice = static_cast<int>(
+                apvts.getRawParameterValue("luxpitchSource")->load());
+            if (lpSrcChoice < 0 || lpSrcChoice > 2) lpSrcChoice = 1;
+            g_sp3ctra_config.luxpitch_source_type = kLpChoiceToSrc[lpSrcChoice];
+        }
+
+        // ── Sync LuxPitch config to BOTH instances (UI + processing thread) ──
+        {
+            LuxPitchConfig lpc;
+            lpc.enabled                 = static_cast<int>(apvts.getRawParameterValue("luxpitchEnabled")->load());
+            lpc.polyphony_enabled       = static_cast<int>(apvts.getRawParameterValue("luxpitchPolyphony")->load());
+            lpc.background_mode         = static_cast<int>(apvts.getRawParameterValue("luxpitchBackgroundMode")->load());
+            lpc.coupling_mode           = static_cast<int>(apvts.getRawParameterValue("luxpitchCouplingMode")->load());
+            lpc.free_pixels_per_semitone = apvts.getRawParameterValue("luxpitchFreePixelsPerST")->load();
+            lpc.pitch_bend_range        = apvts.getRawParameterValue("luxpitchPitchBendRange")->load();
+            lpc.attack_ms               = apvts.getRawParameterValue("luxpitchAttackMs")->load();
+            lpc.decay_ms                = apvts.getRawParameterValue("luxpitchDecayMs")->load();
+            lpc.sustain_level           = apvts.getRawParameterValue("luxpitchSustainLevel")->load();
+            lpc.release_ms              = apvts.getRawParameterValue("luxpitchReleaseMs")->load();
+            lpc.glide_time_ms           = apvts.getRawParameterValue("luxpitchGlideMs")->load();
+            lpc.lfo_rate_hz             = apvts.getRawParameterValue("luxpitchLfoRate")->load();
+            lpc.lfo_depth_semitones     = apvts.getRawParameterValue("luxpitchLfoDepth")->load();
+            lpc.velocity_coupling       = static_cast<int>(apvts.getRawParameterValue("luxpitchVelocityCoupling")->load());
+            lpc.reference_note          = 24 + static_cast<int>(apvts.getRawParameterValue("luxpitchReferenceNote")->load());
+            g_lux_pitch.config      = lpc;  /* UI / visualizer thread */
+            g_lux_pitch_proc.config = lpc;  /* processing / synthesis thread */
+        }
 
         log_debug("VST", "Per-path routing: LS source=%d inv=%d ac=%d  |  LX source=%d inv=%d ac=%d gamma=%.2f",
                   g_sp3ctra_config.luxstral_source_type,

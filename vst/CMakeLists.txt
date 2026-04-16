@@ -136,6 +136,11 @@ target_sources(Sp3ctraVST
         # LuxSynth Settings Tab
         source/settings/LuxSynthSettingsTab.cpp
         source/settings/LuxSynthSettingsTab.h
+
+        # LuxPitch Settings Tab + UI Tab
+        source/settings/LuxPitchSettingsTab.cpp
+        source/settings/LuxPitchSettingsTab.h
+        source/image/LuxPitchTabComponent.h
 )
 
 # ✨ BRICK 1: UDP Reception - Add C sources
@@ -164,6 +169,7 @@ target_sources(Sp3ctraVST
         source/processing/image_blend.c
         source/processing/image_pipeline_stages.c
         source/processing/image_pipeline.c
+        source/processing/lux_pitch.c
 
         # Pan system (required for stereo mode)
         source/audio/pan/lock_free_pan.c

@@ -9,6 +9,7 @@ extern "C" {
     #include "config/config_instrument.h"
     #include "config/config_loader.h"
     #include "processing/image_pipeline_types.h"
+    #include "processing/lux_pitch.h"
     #include "synthesis/luxsynth/kissfft/kiss_fftr.h"
 }
 
@@ -208,7 +209,8 @@ void CisVisualizerComponent::paint(juce::Graphics& g)
         const bool isSourceView = (source == VisualizerMode::RAW
                                 || source == VisualizerMode::SAMPLER
                                 || source == VisualizerMode::LIVE
-                                || source == VisualizerMode::MIX);
+                                || source == VisualizerMode::MIX
+                                || source == VisualizerMode::LUXPITCH_OUTPUT);
 
         switch (renderMode)
         {
@@ -389,6 +391,8 @@ void CisVisualizerComponent::paintSourceLabel(
             accent = juce::Colour(0xffd07040); break;
         case VisualizerMode::SYNTH_FFT_COLOR:
             accent = juce::Colour(0xffcc88cc); break;
+        case VisualizerMode::LUXPITCH_OUTPUT:
+            accent = juce::Colour(0xffe06bb8); break;
         default:
             accent = juce::Colour(0xffe08844); break;
     }
@@ -631,6 +635,22 @@ void CisVisualizerComponent::updateCisData()
     {
         audio_image_buffers_get_read_pointers(buffers, &pR, &pG, &pB);
     }
+    else if (vizSource == VisualizerMode::LUXPITCH_OUTPUT)
+    {
+        // LuxPitch output: read source based on luxpitchSource (S=0, M=1, L=2)
+        static const int kLpChoiceToSrc[3] = { 0, 2, 1 }; // S→SAMPLER, M→MIX, L→LIVE
+        int lpChoice = static_cast<int>(
+            processor.getAPVTS().getRawParameterValue("luxpitchSource")->load());
+        if (lpChoice < 0 || lpChoice > 2) lpChoice = 1;
+        const int lpSrc = kLpChoiceToSrc[lpChoice];
+
+        if (lpSrc == IMAGE_SOURCE_LIVE)
+            audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
+        else if (lpSrc == IMAGE_SOURCE_SAMPLER)
+            audio_image_buffers_get_sampler_pointers(buffers, &pR, &pG, &pB);
+        else
+            audio_image_buffers_get_read_pointers(buffers, &pR, &pG, &pB);
+    }
     else
     {
         // Downstream views: route according to per-path source selector
@@ -640,7 +660,23 @@ void CisVisualizerComponent::updateCisData()
         const int srcType = isSpctr ? g_sp3ctra_config.luxstral_source_type
                                     : g_sp3ctra_config.luxsynth_source_type;
 
-        if (srcType == IMAGE_SOURCE_LIVE)
+        if (srcType == IMAGE_SOURCE_LUXPITCH)
+        {
+            // LuxPitch as downstream source: read from LuxPitch's own input source
+            static const int kLpChoiceToSrc[3] = { 0, 2, 1 }; // S→SAMPLER, M→MIX, L→LIVE
+            int lpChoice = static_cast<int>(
+                processor.getAPVTS().getRawParameterValue("luxpitchSource")->load());
+            if (lpChoice < 0 || lpChoice > 2) lpChoice = 1;
+            const int lpSrc = kLpChoiceToSrc[lpChoice];
+
+            if (lpSrc == IMAGE_SOURCE_LIVE)
+                audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
+            else if (lpSrc == IMAGE_SOURCE_SAMPLER)
+                audio_image_buffers_get_sampler_pointers(buffers, &pR, &pG, &pB);
+            else
+                audio_image_buffers_get_read_pointers(buffers, &pR, &pG, &pB);
+        }
+        else if (srcType == IMAGE_SOURCE_LIVE)
             audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
         else if (srcType == IMAGE_SOURCE_SAMPLER)
             audio_image_buffers_get_sampler_pointers(buffers, &pR, &pG, &pB);
@@ -650,6 +686,62 @@ void CisVisualizerComponent::updateCisData()
     std::memcpy(localDataR.data(), pR, cisPixelsCount);
     std::memcpy(localDataG.data(), pG, cisPixelsCount);
     std::memcpy(localDataB.data(), pB, cisPixelsCount);
+
+    // ── LuxPitch processing (shift + envelope + glide + LFO) ──────────────────
+    // Runs for LUXPITCH_OUTPUT direct view AND for downstream SPCTR_*/SYNTH_*
+    // views when their source is set to LuxPitch.
+    const bool needsLuxPitch = [&]() {
+        if (vizSource == VisualizerMode::LUXPITCH_OUTPUT) return true;
+        const bool isSpctr = (vizSource == VisualizerMode::SPCTR_GRAY
+                           || vizSource == VisualizerMode::SPCTR_COLOR
+                           || vizSource == VisualizerMode::SPCTR_BLOB);
+        const bool isSynth = (vizSource == VisualizerMode::SYNTH_GRAY
+                           || vizSource == VisualizerMode::SYNTH_COLOR
+                           || vizSource == VisualizerMode::SYNTH_BLOB
+                           || vizSource == VisualizerMode::SYNTH_FFT_COLOR);
+        if (!isSpctr && !isSynth) return false;
+        const int srcType = isSpctr ? g_sp3ctra_config.luxstral_source_type
+                                    : g_sp3ctra_config.luxsynth_source_type;
+        return srcType == IMAGE_SOURCE_LUXPITCH;
+    }();
+
+    if (needsLuxPitch)
+    {
+        // Sync config from APVTS to g_lux_pitch.config
+        auto& apvts = processor.getAPVTS();
+        g_lux_pitch.config.enabled                 = static_cast<int>(apvts.getRawParameterValue("luxpitchEnabled")->load());
+        g_lux_pitch.config.background_mode         = static_cast<int>(apvts.getRawParameterValue("luxpitchBackgroundMode")->load());
+        g_lux_pitch.config.coupling_mode            = static_cast<int>(apvts.getRawParameterValue("luxpitchCouplingMode")->load());
+        g_lux_pitch.config.free_pixels_per_semitone = apvts.getRawParameterValue("luxpitchFreePixelsPerST")->load();
+        g_lux_pitch.config.pitch_bend_range         = apvts.getRawParameterValue("luxpitchPitchBendRange")->load();
+        g_lux_pitch.config.attack_ms                = apvts.getRawParameterValue("luxpitchAttackMs")->load();
+        g_lux_pitch.config.decay_ms                 = apvts.getRawParameterValue("luxpitchDecayMs")->load();
+        g_lux_pitch.config.sustain_level            = apvts.getRawParameterValue("luxpitchSustainLevel")->load();
+        g_lux_pitch.config.release_ms               = apvts.getRawParameterValue("luxpitchReleaseMs")->load();
+        g_lux_pitch.config.glide_time_ms            = apvts.getRawParameterValue("luxpitchGlideMs")->load();
+        g_lux_pitch.config.lfo_rate_hz              = apvts.getRawParameterValue("luxpitchLfoRate")->load();
+        g_lux_pitch.config.lfo_depth_semitones      = apvts.getRawParameterValue("luxpitchLfoDepth")->load();
+        g_lux_pitch.config.velocity_coupling        = static_cast<int>(apvts.getRawParameterValue("luxpitchVelocityCoupling")->load());
+        // Reference note from settings: C1..B6, index to MIDI note (C1=24)
+        g_lux_pitch.config.reference_note           = 24 + static_cast<int>(apvts.getRawParameterValue("luxpitchReferenceNote")->load());
+
+        // Process frame through LuxPitch
+        const uint8_t *outR, *outG, *outB;
+        lux_pitch_process_frame(
+            &g_lux_pitch,
+            localDataR.data(), localDataG.data(), localDataB.data(),
+            cisPixelsCount,
+            g_sp3ctra_config.num_octaves,
+            &outR, &outG, &outB);
+
+        // Copy shifted output back if pointers differ (i.e. not bypass)
+        if (outR != localDataR.data())
+        {
+            std::memcpy(localDataR.data(), outR, cisPixelsCount);
+            std::memcpy(localDataG.data(), outG, cisPixelsCount);
+            std::memcpy(localDataB.data(), outB, cisPixelsCount);
+        }
+    }
 
     // ── Apply live opacity ───────────────────────────────────────────────────
     // Opacity controls affect ONLY the MIX bus (the blended output).
@@ -930,6 +1022,7 @@ bool CisVisualizerComponent::supportsDisplayModes(VisualizerMode m) const noexce
         case VisualizerMode::MIX:
         case VisualizerMode::SPCTR_GRAY:
         case VisualizerMode::SYNTH_GRAY:
+        case VisualizerMode::LUXPITCH_OUTPUT:
             return true;
         default:
             return false;

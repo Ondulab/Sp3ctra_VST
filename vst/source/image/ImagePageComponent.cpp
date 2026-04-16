@@ -1,11 +1,12 @@
 /**
  * @file ImagePageComponent.cpp
- * @brief Image Pipeline Page — 3-tab container implementation.
+ * @brief Image Pipeline Page — 4-tab container implementation.
  */
 #include "ImagePageComponent.h"
 
 // ── Colours for sub-tab highlights — sourced from theme tokens ──────────────
 static const juce::Colour kSourcesColour (Sp3ctraTheme::kColSubTabAccentSrc);
+static const juce::Colour kLuxPitchColour(0xffe06bb8);  // Pink/Magenta accent
 static const juce::Colour kLuxStralColour(Sp3ctraTheme::kColSubTabAccentLux);
 static const juce::Colour kLuxSynthColour(Sp3ctraTheme::kColSubTabAccentSyn);
 
@@ -15,27 +16,33 @@ ImagePageComponent::ImagePageComponent(Sp3ctraAudioProcessor& proc)
 {
     // Create sub-tab content components
     sourcesTab  = std::make_unique<SourcesTabComponent>(proc);
+    luxpitchTab = std::make_unique<LuxPitchTabComponent>(proc);
     luxstralTab = std::make_unique<LuxStralTabComponent>(proc);
     luxsynthTab = std::make_unique<LuxSynthTabComponent>(proc);
 
     // Wire node-click callbacks to our handler
     sourcesTab->onNodeClicked  = [this](VisualizerMode m) { handleNodeClicked(m); };
+    luxpitchTab->onNodeClicked = [this](VisualizerMode m) { handleNodeClicked(m); };
     luxstralTab->onNodeClicked = [this](VisualizerMode m) { handleNodeClicked(m); };
     luxsynthTab->onNodeClicked = [this](VisualizerMode m) { handleNodeClicked(m); };
 
     addAndMakeVisible(sourcesTab.get());
-    addChildComponent(luxstralTab.get());   // hidden initially
-    addChildComponent(luxsynthTab.get());   // hidden initially
+    addChildComponent(luxpitchTab.get());    // hidden initially
+    addChildComponent(luxstralTab.get());    // hidden initially
+    addChildComponent(luxsynthTab.get());    // hidden initially
 
     // Tab buttons — marked as tabs so LookAndFeel renders transparent background
     sourcesBtn.getProperties().set("isTab", true);
+    luxpitchBtn.getProperties().set("isTab", true);
     luxstralBtn.getProperties().set("isTab", true);
     luxsynthBtn.getProperties().set("isTab", true);
     addAndMakeVisible(sourcesBtn);
+    addAndMakeVisible(luxpitchBtn);
     addAndMakeVisible(luxstralBtn);
     addAndMakeVisible(luxsynthBtn);
 
     sourcesBtn.onClick  = [this] { switchSubTab(SubTab::Sources);  };
+    luxpitchBtn.onClick = [this] { switchSubTab(SubTab::LuxPitch); };
     luxstralBtn.onClick = [this] { switchSubTab(SubTab::LuxStral); };
     luxsynthBtn.onClick = [this] { switchSubTab(SubTab::LuxSynth); };
 
@@ -49,6 +56,7 @@ void ImagePageComponent::switchSubTab(SubTab tab)
     currentSubTab = tab;
 
     sourcesTab->setVisible (tab == SubTab::Sources);
+    luxpitchTab->setVisible(tab == SubTab::LuxPitch);
     luxstralTab->setVisible(tab == SubTab::LuxStral);
     luxsynthTab->setVisible(tab == SubTab::LuxSynth);
 
@@ -71,6 +79,7 @@ void ImagePageComponent::switchSubTab(SubTab tab)
     };
 
     setActive(sourcesBtn,  tab == SubTab::Sources,  kSourcesColour);
+    setActive(luxpitchBtn, tab == SubTab::LuxPitch, kLuxPitchColour);
     setActive(luxstralBtn, tab == SubTab::LuxStral, kLuxStralColour);
     setActive(luxsynthBtn, tab == SubTab::LuxSynth, kLuxSynthColour);
 
@@ -82,6 +91,7 @@ void ImagePageComponent::handleNodeClicked(VisualizerMode m)
 {
     // Update all tabs so only the clicked node is highlighted
     sourcesTab->setActiveMode(m);
+    luxpitchTab->setActiveMode(m);
     luxstralTab->setActiveMode(m);
     luxsynthTab->setActiveMode(m);
 
@@ -94,6 +104,7 @@ void ImagePageComponent::handleNodeClicked(VisualizerMode m)
 void ImagePageComponent::setActiveVisualizerMode(VisualizerMode m)
 {
     sourcesTab->setActiveMode(m);
+    luxpitchTab->setActiveMode(m);
     luxstralTab->setActiveMode(m);
     luxsynthTab->setActiveMode(m);
 }
@@ -114,16 +125,17 @@ void ImagePageComponent::paint(juce::Graphics& g)
     switch (currentSubTab)
     {
         case SubTab::Sources:  accent = kSourcesColour;  break;
+        case SubTab::LuxPitch: accent = kLuxPitchColour; break;
         case SubTab::LuxStral: accent = kLuxStralColour; break;
         case SubTab::LuxSynth: accent = kLuxSynthColour; break;
     }
 
     // Draw each sub-tab background + accent behind the buttons
-    const juce::TextButton* btns[]    = { &sourcesBtn, &luxstralBtn, &luxsynthBtn };
-    const SubTab             subIds[] = { SubTab::Sources, SubTab::LuxStral, SubTab::LuxSynth };
-    const juce::Colour       accents[] = { kSourcesColour, kLuxStralColour, kLuxSynthColour };
+    const juce::TextButton* btns[]    = { &sourcesBtn, &luxpitchBtn, &luxstralBtn, &luxsynthBtn };
+    const SubTab             subIds[] = { SubTab::Sources, SubTab::LuxPitch, SubTab::LuxStral, SubTab::LuxSynth };
+    const juce::Colour       accents[] = { kSourcesColour, kLuxPitchColour, kLuxStralColour, kLuxSynthColour };
 
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < 4; ++i)
     {
         const bool active = (currentSubTab == subIds[i]);
         const auto tbr = btns[i]->getBounds().toFloat();
@@ -170,16 +182,18 @@ void ImagePageComponent::resized()
 {
     auto bounds = getLocalBounds();
     const int w = bounds.getWidth();
-    const int tabW = w / 3;
+    const int tabW = w / 4;
 
-    // Tab buttons
-    sourcesBtn.setBounds (0,        0, tabW, kSubTabH);
-    luxstralBtn.setBounds(tabW,     0, tabW, kSubTabH);
-    luxsynthBtn.setBounds(tabW * 2, 0, w - tabW * 2, kSubTabH);
+    // Tab buttons — 4 tabs
+    sourcesBtn.setBounds (0,          0, tabW, kSubTabH);
+    luxpitchBtn.setBounds(tabW,       0, tabW, kSubTabH);
+    luxstralBtn.setBounds(tabW * 2,   0, tabW, kSubTabH);
+    luxsynthBtn.setBounds(tabW * 3,   0, w - tabW * 3, kSubTabH);
 
     // Content area — below the tab bar
     auto contentBounds = bounds.withTrimmedTop(kSubTabH + 2);
     sourcesTab->setBounds(contentBounds);
+    luxpitchTab->setBounds(contentBounds);
     luxstralTab->setBounds(contentBounds);
     luxsynthTab->setBounds(contentBounds);
 }

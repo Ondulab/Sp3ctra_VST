@@ -54,6 +54,11 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     releaseAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralReleaseMs", releaseSlider);
 
+    stereoEnableToggle.setButtonText("Active");
+    addAndMakeVisible(stereoEnableToggle);
+    stereoEnableAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "luxstralStereoEnable", stereoEnableToggle);
+
     initSlider(stereoTempSlider);
     addAndMakeVisible(stereoTempSlider);
     stereoTempAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -185,10 +190,10 @@ void Sp3ctraAudioProcessorEditor::switchToTab(Tab tab)
     luxsynthSubBtn.setVisible(synthVis);
 
     // Hide all synth controls first, then let switchSynthSubTab() show the right ones
-    std::array<juce::Component*, 12> luxstralCtrls = {
+    std::array<juce::Component*, 13> luxstralCtrls = {
         &deviceOnToggle,   &masterVolumeSlider,
         &attackSlider,     &releaseSlider,
-        &stereoTempSlider, &sumExpSlider, &noiseGateSlider,
+        &stereoEnableToggle, &stereoTempSlider, &sumExpSlider, &noiseGateSlider,
         &sfEnabledToggle,
         &sfMorphWidthSlider, &sfFocusSigmaSlider,
         &sfSpectralThreshSlider, &sfFocusOnlyToggle
@@ -247,6 +252,7 @@ void Sp3ctraAudioProcessorEditor::switchSynthSubTab(SynthSub sub)
     masterVolumeSlider.setVisible(isLuxStral);
     attackSlider.setVisible(isLuxStral);
     releaseSlider.setVisible(isLuxStral);
+    stereoEnableToggle.setVisible(isLuxStral);
     stereoTempSlider.setVisible(isLuxStral);
     sumExpSlider.setVisible(isLuxStral);
     noiseGateSlider.setVisible(isLuxStral);
@@ -410,7 +416,7 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
 
         static const char* const lsLbls[kLS_ROWS] = {
             "Device On", "Volume", "Attack", "Release",
-            "Stereo Temp.", "Sum. Exp.", "Noise Gate"
+            "Stereo", "Stereo Temp.", "Sum. Exp.", "Noise Gate"
         };
         for (int i = 0; i < kLS_ROWS; ++i)
             g.drawText(lsLbls[i],
@@ -528,6 +534,7 @@ void Sp3ctraAudioProcessorEditor::resized()
         masterVolumeSlider.setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
         attackSlider      .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
         releaseSlider     .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        stereoEnableToggle.setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
         stereoTempSlider  .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
         sumExpSlider      .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
         noiseGateSlider   .setBounds(cx, cy, kCtrlW, kRowH);

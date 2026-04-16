@@ -39,7 +39,8 @@ public:
         addAndMakeVisible(sourceCombo);
         sourceCombo.addItem("S - Sampler", 1);
         sourceCombo.addItem("M - Mix",     2);
-        sourceCombo.addItem("L - Live",    3);
+        sourceCombo.addItem("L - Live",     3);
+        sourceCombo.addItem("P - LuxPitch", 4);
         sourceAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
             apvts, "luxsynthSource", sourceCombo));
 
@@ -67,6 +68,15 @@ public:
         addAndMakeVisible(gammaSlider);
         gammaValueAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
             apvts, "luxsynthGammaValue", gammaSlider));
+
+        // ── Contrast Min (Slider) ───────────────────────────────────────────
+        initLabel(contrastMinLabel, "Contrast Min");
+        contrastMinSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        contrastMinSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                          50, Sp3ctraTheme::kControlH);
+        addAndMakeVisible(contrastMinSlider);
+        contrastMinAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, "samplerContrastMin", contrastMinSlider));
 
         // ── BLOB DETECTION — LuxSynth-only params (isolated from LuxStral) ──
         // Row 4: Amplitude threshold — expressed as normalised brightness [0..1].
@@ -173,12 +183,12 @@ public:
         // ── Left column section headers ───────────────────────────────────
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
 
-        const int blobSectionY = rowY(3) + Sp3ctraTheme::kControlH + 2;
+        const int blobSectionY = rowY(4) + Sp3ctraTheme::kControlH + 2;
         g.setColour(juce::Colour(0xffd07040).withAlpha(0.55f));
         g.drawText("--- BLOB DETECTION ---", leftX_, blobSectionY, leftW_, 12,
                    juce::Justification::centred);
 
-        const int fftSectionY = rowY(7) + Sp3ctraTheme::kControlH + 2;
+        const int fftSectionY = rowY(8) + Sp3ctraTheme::kControlH + 2;
         g.setColour(juce::Colour(0xffe06868).withAlpha(0.55f));
         g.drawText("--- FFT PARAMETERS ---", leftX_, fftSectionY, leftW_, 12,
                    juce::Justification::centred);
@@ -235,14 +245,17 @@ public:
         // Row 3: Gamma slider
         gammaValueLabel.setBounds(lb(3));
         gammaSlider.setBounds(cb(3));
-        // Rows 4-7: Blob Detection
-        blobThreshLabel.setBounds(lb(4));      blobThreshSlider.setBounds(cb(4));
-        blobMinWidthLabel.setBounds(lb(5));    blobMinWidthSlider.setBounds(cb(5));
-        blobMergeGapLabel.setBounds(lb(6));    blobMergeGapSlider.setBounds(cb(6));
-        blobColorSplitLabel.setBounds(lb(7));  blobColorSplitSlider.setBounds(cb(7));
-        // Rows 8-9: FFT Parameters
-        fftBinsLabel.setBounds(lb(8));         fftBinsCombo.setBounds(cb(8));
-        fftSmoothingLabel.setBounds(lb(9));    fftSmoothingSlider.setBounds(cb(9));
+        // Row 4: Contrast Min slider
+        contrastMinLabel.setBounds(lb(4));
+        contrastMinSlider.setBounds(cb(4));
+        // Rows 5-8: Blob Detection
+        blobThreshLabel.setBounds(lb(5));      blobThreshSlider.setBounds(cb(5));
+        blobMinWidthLabel.setBounds(lb(6));    blobMinWidthSlider.setBounds(cb(6));
+        blobMergeGapLabel.setBounds(lb(7));    blobMergeGapSlider.setBounds(cb(7));
+        blobColorSplitLabel.setBounds(lb(8));  blobColorSplitSlider.setBounds(cb(8));
+        // Rows 9-10: FFT Parameters
+        fftBinsLabel.setBounds(lb(9));         fftBinsCombo.setBounds(cb(9));
+        fftSmoothingLabel.setBounds(lb(10));   fftSmoothingSlider.setBounds(cb(10));
 
         // ── Right column: 5 output nodes, vertically distributed ──────────
         // Layout (top → bottom):
@@ -274,7 +287,7 @@ private:
     [[maybe_unused]] Sp3ctraAudioProcessor& processor;
 
     // Labels — image pipeline
-    juce::Label sourceLabel, negativeLabel, dcBlockLabel, gammaValueLabel;
+    juce::Label sourceLabel, negativeLabel, dcBlockLabel, gammaValueLabel, contrastMinLabel;
     // Labels — blob detection (LuxSynth-only, isolated from LuxStral)
     juce::Label blobThreshLabel, blobMinWidthLabel, blobMergeGapLabel, blobColorSplitLabel;
     // Labels — FFT parameters
@@ -283,7 +296,7 @@ private:
     // Controls — image pipeline
     juce::ComboBox     sourceCombo;
     juce::ToggleButton negativeToggle, dcBlockToggle;
-    juce::Slider       gammaSlider;
+    juce::Slider       gammaSlider, contrastMinSlider;
     // Controls — blob detection
     juce::Slider blobThreshSlider, blobMinWidthSlider, blobMergeGapSlider, blobColorSplitSlider;
     // Controls — FFT parameters
@@ -294,7 +307,8 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> sourceAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   negativeAttach,
                                                                              dcBlockAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   gammaValueAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   gammaValueAttach,
+                                                                             contrastMinAttach;
     // Attachments — blob detection
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   blobThreshAttach,
                                                                              blobMinWidthAttach,
