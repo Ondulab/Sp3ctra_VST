@@ -143,7 +143,7 @@ private:
     bool seqFinished_  { false };
 
     // Previous mode (detect transitions)
-    VideoScrollMode prevMode_ { VideoScrollMode::LiveLeftToRight };
+    VideoScrollMode prevMode_ { VideoScrollMode::Deg0 };
 
     // ── Speed fractional accumulator ──────────────────────────────────────────
     // Accumulated fractional "rows to paint" across timer ticks.

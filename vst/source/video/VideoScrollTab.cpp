@@ -48,14 +48,15 @@ VideoScrollTab::VideoScrollTab(Sp3ctraAudioProcessor& processor)
     sourceAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         apvts, "videoScrollSource", sourceCombo_);
 
-    // ── Scroll Mode ───────────────────────────────────────────────────────────
-    modeCombo_.addItem("Live L->R  (left to right)",    1);
-    modeCombo_.addItem("Live R->L  (right to left)",    2);
-    modeCombo_.addItem("Live Dual  (ping-pong L<->R)",  3);
-    modeCombo_.addItem("Seq. Loop Simple  (A->B loop)", 4);
-    modeCombo_.addItem("Seq. Ping-Pong   (A->B->A)",   5);
-    modeCombo_.addItem("Seq. One-Shot    (A->B stop)",  6);
-    modeCombo_.setTooltip("Scroll direction and sequencer loop mode.");
+    // ── Scroll Orientation ────────────────────────────────────────────────────
+    modeCombo_.addItem("0°   — scroll up      (new data at bottom)", 1);
+    modeCombo_.addItem("90°  — scroll left    (new data at right)",  2);
+    modeCombo_.addItem("180° — scroll down    (new data at top)",    3);
+    modeCombo_.addItem("270° — scroll right   (new data at left)",   4);
+    modeCombo_.setTooltip(
+        "Orientation of the waterfall scroll.\n"
+        "90° is the classic L->R scanner view.\n"
+        "270° is the R->L view.");
     addAndMakeVisible(modeCombo_);
     modeAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         apvts, "videoScrollMode", modeCombo_);

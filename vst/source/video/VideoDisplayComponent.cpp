@@ -148,6 +148,26 @@ void VideoDisplayComponent::paint(juce::Graphics& g)
     const float compW = (float)getWidth();
     const float compH = (float)getHeight();
 
+    // ── Orientation rotation ─────────────────────────────────────────────────
+    // The scroll buffer always stores rows top-to-bottom (vertical waterfall).
+    // The chosen orientation angle rotates the rendered output around the
+    // component centre:
+    //   Deg0   (0°)   → no transform  → vertical scroll,   new data at bottom
+    //   Deg90  (90°)  → 90° CW       → horizontal scroll,  new data at right
+    //   Deg180 (180°) → 180°         → vertical scroll,    new data at top
+    //   Deg270 (270°) → 270° CW      → horizontal scroll,  new data at left
+    // ─────────────────────────────────────────────────────────────────────────
+    const int modeVal = static_cast<int>(
+        apvts.getRawParameterValue("videoScrollMode")->load());
+    const float angle = static_cast<float>(juce::jlimit(0, 3, modeVal))
+                        * juce::MathConstants<float>::halfPi;
+    const float cx = compW * 0.5f;
+    const float cy = compH * 0.5f;
+
+    g.saveState();
+    if (modeVal != 0)
+        g.addTransform(juce::AffineTransform::rotation(angle, cx, cy));
+
     // Heights of the two halves in image pixels
     const int topRows = reverse ? writeRow_         : (imgH - writeRow_);
     const int botRows = reverse ? (imgH - writeRow_): writeRow_;
@@ -172,8 +192,8 @@ void VideoDisplayComponent::paint(juce::Graphics& g)
                     0, botSrcY, imgW, botRows);
     }
 
-    // Mode overlay removed — label is now displayed in the VideoWindow toolbar.
-    // Seq recording/done status is visible via timerCallback → repaint of toolbar.
+    g.restoreState();
+    // Orientation label is displayed in the VideoWindow toolbar.
 }
 
 //==============================================================================
@@ -191,17 +211,7 @@ void VideoDisplayComponent::timerCallback()
         juce::jlimit(0, (int)VideoScrollMode::COUNT - 1, modeVal));
 
     if (mode != prevMode_)
-    {
-        const bool nowSeq = (mode == VideoScrollMode::SeqLoopSimple  ||
-                             mode == VideoScrollMode::SeqLoopPingPong ||
-                             mode == VideoScrollMode::SeqOneShot);
-        if (nowSeq) resetSequence();
         prevMode_ = mode;
-    }
-
-    // Update maxSeqFrames from APVTS parameter
-    const float maxDur = apvts.getRawParameterValue("videoScrollMaxDuration")->load();
-    maxSeqFrames_ = juce::jmax(10, (int)maxDur);
 
     if (bufW_ > 0 && bufH_ > 0)
         drainRingAndAdvance(mode);
@@ -277,58 +287,11 @@ void VideoDisplayComponent::drainRingAndAdvance(VideoScrollMode mode)
             else
                 writeRow_ = (writeRow_ + 1) % bufH_;
 
-            switch (mode)
-            {
-                case VideoScrollMode::LiveLeftToRight:
-                    paintRowFromFrame(writeRow_, false, fr);
-                    break;
+            // All 4 orientation modes (Deg0/90/180/270) store rows identically.
+            // Orientation is handled purely by AffineTransform in paint().
+            juce::ignoreUnused(mode);
+            paintRowFromFrame(writeRow_, false, fr);
 
-                case VideoScrollMode::LiveRightToLeft:
-                    paintRowFromFrame(writeRow_, true, fr);
-                    break;
-
-                case VideoScrollMode::LiveDual:
-                {
-                    const int interval = juce::jmax(1, bufH_);
-                    ++dualCounter_;
-                    if (dualCounter_ >= interval) { dualCounter_ = 0; dualForward_ = !dualForward_; }
-                    paintRowFromFrame(writeRow_, !dualForward_, fr);
-                    break;
-                }
-
-                case VideoScrollMode::SeqLoopSimple:
-                case VideoScrollMode::SeqLoopPingPong:
-                case VideoScrollMode::SeqOneShot:
-                {
-                    if (seqRecording_)
-                    {
-                        paintRowFromFrame(writeRow_, false, fr);
-                        appendSeqFrame(fr.r, fr.g, fr.b, fr.gray);
-                        if ((int)seqFrames_.size() >= maxSeqFrames_)
-                        {
-                            seqRecording_ = false;
-                            seqPlayHead_  = reverse ? (int)seqFrames_.size() - 1 : 0;
-                            seqPingFwd_   = !reverse;
-                            seqFinished_  = false;
-                        }
-                    }
-                    else if (seqFinished_)
-                    {
-                        if (!seqFrames_.empty())
-                            paintRowFromSeq(writeRow_, false, seqPlayHead_);
-                    }
-                    else
-                    {
-                        paintRowFromSeq(writeRow_, false, seqPlayHead_);
-                        advanceSeqPlayHead(mode, reverse);
-                    }
-                    break;
-                }
-
-                default:
-                    paintRowFromFrame(writeRow_, false, fr);
-                    break;
-            } // switch mode
         } // for rowsForThisFrame
     } // for available
 }
@@ -451,36 +414,7 @@ void VideoDisplayComponent::appendSeqFrame(const std::vector<uint8_t>& r,
     seqFrames_.push_back(std::move(f));
 }
 
-void VideoDisplayComponent::advanceSeqPlayHead(VideoScrollMode mode, bool reverse)
+void VideoDisplayComponent::advanceSeqPlayHead(VideoScrollMode /*mode*/, bool /*reverse*/)
 {
-    const int total = (int)seqFrames_.size();
-    if (total == 0) return;
-    const int step = reverse ? -1 : 1;
-
-    switch (mode)
-    {
-        case VideoScrollMode::SeqLoopSimple:
-            seqPlayHead_ = (seqPlayHead_ + step + total) % total;
-            break;
-        case VideoScrollMode::SeqLoopPingPong:
-            if (seqPingFwd_)
-            {
-                seqPlayHead_ += step;
-                const bool past = reverse ? (seqPlayHead_ < 0) : (seqPlayHead_ >= total);
-                if (past) { seqPlayHead_ = reverse ? 1 : total-2; seqPingFwd_ = false; }
-            }
-            else
-            {
-                seqPlayHead_ -= step;
-                const bool past = reverse ? (seqPlayHead_ >= total) : (seqPlayHead_ < 0);
-                if (past) { seqPlayHead_ = reverse ? total-2 : 1; seqPingFwd_ = true; }
-            }
-            seqPlayHead_ = juce::jlimit(0, total-1, seqPlayHead_);
-            break;
-        case VideoScrollMode::SeqOneShot:
-            if (reverse) { if (seqPlayHead_ > 0)       --seqPlayHead_; else seqFinished_ = true; }
-            else         { if (seqPlayHead_ < total-1) ++seqPlayHead_; else seqFinished_ = true; }
-            break;
-        default: break;
-    }
+    // Seq modes removed — 4 simple orientation angles (Deg0/90/180/270) only.
 }
