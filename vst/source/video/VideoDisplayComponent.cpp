@@ -236,29 +236,24 @@ void VideoDisplayComponent::drainRingAndAdvance(VideoScrollMode mode)
         }
     }
 
-    // ── Fractional speed accumulator ─────────────────────────────────────────
-    // rowAccumulator_ accumulates fractional "rows to paint" across ticks:
-    //   speed=1.0 → consume all available frames  (real-time)
-    //   speed=0.5 → consume half, drop the rest   (2× slow-motion)
-    //   speed=0.1 → consume ~1/10 each tick        (10× slow-motion)
-    //   speed=2.0 → consume 2× available (capped)  (2× fast-motion)
+    // ── Per-frame fractional row accumulator ──────────────────────────────────
+    // ALL captured frames are drained from the ring every tick to prevent
+    // overflow.  For each frame, rowAccumulator_ advances by `speed`:
     //
-    // Frames NOT painted are DROPPED (ringReadIdx_ advanced without painting)
-    // so the ring never overflows even at very low speed values.
+    //   speed=1.0 → 1 row painted per frame       → real-time scroll
+    //   speed=0.5 → 1 row painted every 2 frames  → 2× slow-motion
+    //   speed=0.1 → 1 row every 10 frames         → 10× slow-motion
+    //   speed=2.0 → 2 rows per frame (frame reuse) → 2× fast scroll
+    //   speed=3.0 → 3 rows per frame               → 3× fast scroll
+    //
+    // For speed > 1.0 each CIS line is painted multiple times (upsampling),
+    // creating a visible stretch of each scanline in the waterfall.
+    // Safety cap: at most bufH_ total rows per tick (one full screen refresh).
     // ─────────────────────────────────────────────────────────────────────────
-    rowAccumulator_ += (float)available * speed;
-    int toConsume = (int)rowAccumulator_;
-    rowAccumulator_ -= (float)toConsume;
-    toConsume = juce::jmin(toConsume, available);
+    const int maxRowsThisTick = juce::jmax(1, bufH_); // avoid CPU spike at very high speed
+    int rowsPaintedThisTick   = 0;
 
-    // Drop frames that won't be painted (ring drain without rendering)
-    const int toDrop = available - toConsume;
-    if (toDrop > 0) ringReadIdx_ += toDrop;
-
-    if (toConsume <= 0) return;
-
-    // For Seq modes: only record/play one frame per consumed slot
-    for (int i = 0; i < toConsume; ++i)
+    for (int i = 0; i < available; ++i)
     {
         const int slot = ringReadIdx_ & (kRingSize - 1);
         ++ringReadIdx_;
@@ -267,65 +262,75 @@ void VideoDisplayComponent::drainRingAndAdvance(VideoScrollMode mode)
         if (fr.gray.empty()) continue;
         if (bufW_ <= 0 || bufH_ <= 0 || !scrollBuffer_.isValid()) continue;
 
-        // Advance circular write position
-        if (reverse)
-            writeRow_ = (writeRow_ - 1 + bufH_) % bufH_;
-        else
-            writeRow_ = (writeRow_ + 1) % bufH_;
+        // How many waterfall rows to paint for this captured CIS frame
+        rowAccumulator_ += speed;
+        int rowsForThisFrame = (int)rowAccumulator_;
+        rowAccumulator_ -= (float)rowsForThisFrame;
 
-        switch (mode)
+        for (int r = 0; r < rowsForThisFrame; ++r)
         {
-            case VideoScrollMode::LiveLeftToRight:
-                paintRowFromFrame(writeRow_, false, fr);
-                break;
+            if (rowsPaintedThisTick >= maxRowsThisTick) break; // safety cap
+            ++rowsPaintedThisTick;
 
-            case VideoScrollMode::LiveRightToLeft:
-                paintRowFromFrame(writeRow_, true, fr);
-                break;
+            if (reverse)
+                writeRow_ = (writeRow_ - 1 + bufH_) % bufH_;
+            else
+                writeRow_ = (writeRow_ + 1) % bufH_;
 
-            case VideoScrollMode::LiveDual:
+            switch (mode)
             {
-                const int interval = juce::jmax(1, bufH_);
-                ++dualCounter_;
-                if (dualCounter_ >= interval) { dualCounter_ = 0; dualForward_ = !dualForward_; }
-                paintRowFromFrame(writeRow_, !dualForward_, fr);
-                break;
-            }
-
-            case VideoScrollMode::SeqLoopSimple:
-            case VideoScrollMode::SeqLoopPingPong:
-            case VideoScrollMode::SeqOneShot:
-            {
-                if (seqRecording_)
-                {
+                case VideoScrollMode::LiveLeftToRight:
                     paintRowFromFrame(writeRow_, false, fr);
-                    appendSeqFrame(fr.r, fr.g, fr.b, fr.gray);
-                    if ((int)seqFrames_.size() >= maxSeqFrames_)
-                    {
-                        seqRecording_ = false;
-                        seqPlayHead_  = reverse ? (int)seqFrames_.size() - 1 : 0;
-                        seqPingFwd_   = !reverse;
-                        seqFinished_  = false;
-                    }
-                }
-                else if (seqFinished_)
-                {
-                    if (!seqFrames_.empty())
-                        paintRowFromSeq(writeRow_, false, seqPlayHead_);
-                }
-                else
-                {
-                    paintRowFromSeq(writeRow_, false, seqPlayHead_);
-                    advanceSeqPlayHead(mode, reverse);
-                }
-                break;
-            }
+                    break;
 
-            default:
-                paintRowFromFrame(writeRow_, false, fr);
-                break;
-        }
-    }
+                case VideoScrollMode::LiveRightToLeft:
+                    paintRowFromFrame(writeRow_, true, fr);
+                    break;
+
+                case VideoScrollMode::LiveDual:
+                {
+                    const int interval = juce::jmax(1, bufH_);
+                    ++dualCounter_;
+                    if (dualCounter_ >= interval) { dualCounter_ = 0; dualForward_ = !dualForward_; }
+                    paintRowFromFrame(writeRow_, !dualForward_, fr);
+                    break;
+                }
+
+                case VideoScrollMode::SeqLoopSimple:
+                case VideoScrollMode::SeqLoopPingPong:
+                case VideoScrollMode::SeqOneShot:
+                {
+                    if (seqRecording_)
+                    {
+                        paintRowFromFrame(writeRow_, false, fr);
+                        appendSeqFrame(fr.r, fr.g, fr.b, fr.gray);
+                        if ((int)seqFrames_.size() >= maxSeqFrames_)
+                        {
+                            seqRecording_ = false;
+                            seqPlayHead_  = reverse ? (int)seqFrames_.size() - 1 : 0;
+                            seqPingFwd_   = !reverse;
+                            seqFinished_  = false;
+                        }
+                    }
+                    else if (seqFinished_)
+                    {
+                        if (!seqFrames_.empty())
+                            paintRowFromSeq(writeRow_, false, seqPlayHead_);
+                    }
+                    else
+                    {
+                        paintRowFromSeq(writeRow_, false, seqPlayHead_);
+                        advanceSeqPlayHead(mode, reverse);
+                    }
+                    break;
+                }
+
+                default:
+                    paintRowFromFrame(writeRow_, false, fr);
+                    break;
+            } // switch mode
+        } // for rowsForThisFrame
+    } // for available
 }
 
 //==============================================================================
