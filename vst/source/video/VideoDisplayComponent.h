@@ -61,6 +61,12 @@ public:
     bool isFinished()  const noexcept { return seqFinished_;  }
 
 private:
+    // ── Forward-declared ring frame (used in method signatures below) ─────────
+    struct RingFrame
+    {
+        std::vector<uint8_t> r, g, b, gray;
+    };
+
     // ── Dedicated CIS capture thread ──────────────────────────────────────────
     class CaptureThread final : public juce::Thread
     {
@@ -82,7 +88,9 @@ private:
     void drainRingAndAdvance(VideoScrollMode mode);
 
     // ── Row painters ─────────────────────────────────────────────────────────
-    // target: absolute row in scrollBuffer_; mirror: L↔R flip
+    // Core painter — takes a RingFrame directly (used by pre-fill + normal scroll)
+    void paintRowFromFrame(int target, bool mirror, const RingFrame& fr);
+    // Convenience: paints from the last consumed ring slot
     void paintRowFromRing(int target, bool mirror);
     void paintRowFromSeq (int target, bool mirror, int seqIdx) const;
 
@@ -100,14 +108,11 @@ private:
     // Each entry holds one CIS scanline (R/G/B/Gray channels).
     // kRingSize must be power of 2 for cheap modulo.
     static constexpr int kRingSize = 2048; // ~2 s at 1000fps
-    struct RingFrame
-    {
-        std::vector<uint8_t> r, g, b, gray;
-    };
     std::vector<RingFrame>  frameRing_;
     std::atomic<int>        ringWriteIdx_ { 0 };   // written by capture thread
     int                     ringReadIdx_  { 0 };   // read by timer tick (msg thread)
     int                     cisCount_     { 0 };   // updated by capture thread, checked atomically
+    bool                    bufferPreFilled_ { false }; // true after first pre-fill pass
 
     // Counter from AudioImageBuffers — detect new frames without mutex
     std::atomic<uint64_t>   lastLinesReceived_ { 0 };

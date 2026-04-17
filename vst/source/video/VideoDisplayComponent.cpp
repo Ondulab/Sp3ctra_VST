@@ -75,10 +75,15 @@ void VideoDisplayComponent::captureCurrentFrame()
         case 1: // Sample
             audio_image_buffers_get_sampler_pointers(aib, &pR, &pG, &pB);
             break;
-        case 3: // LuxPitch — route to whatever luxpitch_source_type reads
+        case 3: // LuxPitch — mirrors the APVTS "luxpitchSource" selector
         {
-            extern sp3ctra_config_t g_sp3ctra_config;
-            const int lp = g_sp3ctra_config.luxpitch_source_type;
+            // luxpitchSource choices: 0=S-Sampler, 1=M-Mix, 2=L-Live
+            // Same mapping as CisVisualizerComponent: S→0(SAMPLER), M→2(MIX), L→1(LIVE)
+            static const int kLpChoiceToSrc[3] = { 0, 2, 1 };
+            int lpChoice = static_cast<int>(
+                processor_.getAPVTS().getRawParameterValue("luxpitchSource")->load());
+            if (lpChoice < 0 || lpChoice > 2) lpChoice = 1; // default: Mix
+            const int lp = kLpChoiceToSrc[lpChoice];
             if      (lp == 1) audio_image_buffers_get_raw_pointers    (aib, &pR, &pG, &pB);
             else if (lp == 0) audio_image_buffers_get_sampler_pointers(aib, &pR, &pG, &pB);
             else              audio_image_buffers_get_read_pointers    (aib, &pR, &pG, &pB);
@@ -250,6 +255,19 @@ void VideoDisplayComponent::drainRingAndAdvance(VideoScrollMode mode)
     const int available = ringWriteIdx_.load(std::memory_order_acquire) - ringReadIdx_;
     if (available <= 0) return;
 
+    // One-time pre-fill: populate entire scroll buffer with first available frame
+    // so the window shows CIS data immediately (no half-black startup).
+    if (!bufferPreFilled_ && bufH_ > 0 && scrollBuffer_.isValid())
+    {
+        const auto& firstFr = frameRing_[ringReadIdx_ & (kRingSize - 1)];
+        if (!firstFr.gray.empty())
+        {
+            for (int row = 0; row < bufH_; ++row)
+                paintRowFromFrame(row, false, firstFr);
+            bufferPreFilled_ = true;
+        }
+    }
+
     // speed=1.0 → consume all available frames (real-time)
     // speed=0.5 → consume half (slow-motion)
     // speed=2.0 → consume twice (time-lapse, capped by available)
@@ -261,12 +279,11 @@ void VideoDisplayComponent::drainRingAndAdvance(VideoScrollMode mode)
         const int slot = ringReadIdx_ & (kRingSize - 1);
         ++ringReadIdx_;
 
-        const auto& fr = frameRing_[slot];
+        const RingFrame& fr = frameRing_[slot];
         if (fr.gray.empty()) continue;
-
         if (bufW_ <= 0 || bufH_ <= 0 || !scrollBuffer_.isValid()) continue;
 
-        // Advance write position
+        // Advance circular write position
         if (reverse)
             writeRow_ = (writeRow_ - 1 + bufH_) % bufH_;
         else
@@ -275,26 +292,29 @@ void VideoDisplayComponent::drainRingAndAdvance(VideoScrollMode mode)
         switch (mode)
         {
             case VideoScrollMode::LiveLeftToRight:
-                paintRowFromRing(writeRow_, false);
+                paintRowFromFrame(writeRow_, false, fr);
                 break;
+
             case VideoScrollMode::LiveRightToLeft:
-                paintRowFromRing(writeRow_, true);
+                paintRowFromFrame(writeRow_, true, fr);
                 break;
+
             case VideoScrollMode::LiveDual:
             {
                 const int interval = juce::jmax(1, bufH_);
                 ++dualCounter_;
                 if (dualCounter_ >= interval) { dualCounter_ = 0; dualForward_ = !dualForward_; }
-                paintRowFromRing(writeRow_, !dualForward_);
+                paintRowFromFrame(writeRow_, !dualForward_, fr);
                 break;
             }
+
             case VideoScrollMode::SeqLoopSimple:
             case VideoScrollMode::SeqLoopPingPong:
             case VideoScrollMode::SeqOneShot:
             {
                 if (seqRecording_)
                 {
-                    paintRowFromRing(writeRow_, false);
+                    paintRowFromFrame(writeRow_, false, fr);
                     appendSeqFrame(fr.r, fr.g, fr.b, fr.gray);
                     if ((int)seqFrames_.size() >= maxSeqFrames_)
                     {
@@ -316,8 +336,9 @@ void VideoDisplayComponent::drainRingAndAdvance(VideoScrollMode mode)
                 }
                 break;
             }
+
             default:
-                paintRowFromRing(writeRow_, false);
+                paintRowFromFrame(writeRow_, false, fr);
                 break;
         }
     }
@@ -327,12 +348,10 @@ void VideoDisplayComponent::drainRingAndAdvance(VideoScrollMode mode)
 // Row painters
 //==============================================================================
 
-void VideoDisplayComponent::paintRowFromRing(int rowY, bool mirror)
+void VideoDisplayComponent::paintRowFromFrame(int rowY, bool mirror, const RingFrame& fr)
 {
-    const int slot = (ringReadIdx_ - 1) & (kRingSize - 1);
-    const auto& fr = frameRing_[slot];
     const int count = (int)fr.gray.size();
-    if (count <= 0 || !scrollBuffer_.isValid()) return;
+    if (count <= 0 || bufW_ <= 0 || !scrollBuffer_.isValid()) return;
 
     auto& apvts = processor_.getAPVTS();
     const float brightness = apvts.getRawParameterValue("videoScrollBrightness")->load();
@@ -347,9 +366,9 @@ void VideoDisplayComponent::paintRowFromRing(int rowY, bool mirror)
         if (mirror) ci = count - 1 - ci;
         ci = juce::jlimit(0, count - 1, ci);
 
-        uint8_t r = colorMode ? fr.r[ci] : fr.gray[ci];
-        uint8_t gv = colorMode ? fr.g[ci] : fr.gray[ci];
-        uint8_t b = colorMode ? fr.b[ci] : fr.gray[ci];
+        uint8_t r  = colorMode ? fr.r[ci]    : fr.gray[ci];
+        uint8_t gv = colorMode ? fr.g[ci]    : fr.gray[ci];
+        uint8_t b  = colorMode ? fr.b[ci]    : fr.gray[ci];
 
         if (invert) { r = 255-r; gv = 255-gv; b = 255-b; }
         if (brightness != 1.f)
@@ -360,6 +379,11 @@ void VideoDisplayComponent::paintRowFromRing(int rowY, bool mirror)
         }
         bmp.setPixelColour(px, rowY, juce::Colour(r, gv, b));
     }
+}
+
+void VideoDisplayComponent::paintRowFromRing(int rowY, bool mirror)
+{
+    paintRowFromFrame(rowY, mirror, frameRing_[(ringReadIdx_ - 1) & (kRingSize - 1)]);
 }
 
 void VideoDisplayComponent::paintRowFromSeq(int rowY, bool mirror, int seqIdx) const
