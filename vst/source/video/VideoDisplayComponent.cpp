@@ -179,30 +179,8 @@ void VideoDisplayComponent::paint(juce::Graphics& g)
                     0, botSrcY, imgW, botRows);
     }
 
-    // ── Mode / status overlay ──────────────────────────────────────────────
-    {
-        const int modeVal = static_cast<int>(
-            apvts.getRawParameterValue("videoScrollMode")->load());
-        const VideoScrollMode mode = static_cast<VideoScrollMode>(
-            juce::jlimit(0, (int)VideoScrollMode::COUNT - 1, modeVal));
-
-        juce::String label = videoScrollModeLabel(mode);
-        if (seqRecording_)
-        {
-            const int pct = (maxSeqFrames_ > 0)
-                ? (int)((float)seqFrames_.size() / (float)maxSeqFrames_ * 100.f)
-                : 0;
-            label += "  [REC " + juce::String(pct) + "%]";
-        }
-        else if (seqFinished_)
-            label += "  [DONE]";
-
-        g.setColour(juce::Colour(0xaa000000));
-        g.fillRoundedRectangle(6.f, 6.f, 220.f, 18.f, 4.f);
-        g.setColour(juce::Colour(0xff66cc88));
-        g.setFont(juce::Font(juce::FontOptions(10.f)));
-        g.drawText(label, 8, 6, 216, 18, juce::Justification::centredLeft, true);
-    }
+    // Mode overlay removed — label is now displayed in the VideoWindow toolbar.
+    // Seq recording/done status is visible via timerCallback → repaint of toolbar.
 }
 
 //==============================================================================

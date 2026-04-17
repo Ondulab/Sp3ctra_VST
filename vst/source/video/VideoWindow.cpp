@@ -1,5 +1,6 @@
 #include "VideoWindow.h"
 #include "../PluginProcessor.h"
+#include "VideoScrollMode.h"
 
 //==============================================================================
 // ContentComponent
@@ -7,7 +8,7 @@
 
 VideoWindow::ContentComponent::ContentComponent(Sp3ctraAudioProcessor& proc,
                                                 VideoWindow& owner)
-    : display(proc), owner_(owner),
+    : display(proc), proc_(proc), owner_(owner),
       fullscreenBtn_("[ ] Full Screen"),
       closeBtn_     ("x  Close")
 {
@@ -37,28 +38,58 @@ VideoWindow::ContentComponent::ContentComponent(Sp3ctraAudioProcessor& proc,
 
 void VideoWindow::ContentComponent::paint(juce::Graphics& g)
 {
-    // Toolbar background
-    g.setColour(juce::Colour(0xff1a1a1a));
-    g.fillRect(0, 0, getWidth(), kToolbarH);
+    const bool fs = owner_.isFullScreen();
 
-    g.setColour(juce::Colour(0xff333333));
-    g.drawLine(0.f, (float)kToolbarH, (float)getWidth(), (float)kToolbarH, 1.f);
+    if (!fs)
+    {
+        // Toolbar background
+        g.setColour(juce::Colour(0xff1a1a1a));
+        g.fillRect(0, 0, getWidth(), kToolbarH);
 
-    // Waterfall area background
+        g.setColour(juce::Colour(0xff333333));
+        g.drawLine(0.f, (float)kToolbarH, (float)getWidth(), (float)kToolbarH, 1.f);
+
+        // Mode label — read current scroll mode from APVTS
+        const int modeVal = static_cast<int>(
+            proc_.getAPVTS().getRawParameterValue("videoScrollMode")->load());
+        const VideoScrollMode mode = static_cast<VideoScrollMode>(
+            juce::jlimit(0, (int)VideoScrollMode::COUNT - 1, modeVal));
+
+        juce::String label = juce::String("VIDEO  |  ") + videoScrollModeLabel(mode);
+
+        g.setColour(juce::Colour(0xff66cc88));
+        g.setFont(juce::Font(juce::FontOptions(11.f)).boldened());
+        g.drawText(label, 8, 0, getWidth() - 280, kToolbarH,
+                   juce::Justification::centredLeft, true);
+    }
+
+    // Waterfall area background (always)
     g.setColour(juce::Colours::black);
-    g.fillRect(0, kToolbarH, getWidth(), getHeight() - kToolbarH);
+    g.fillRect(0, fs ? 0 : kToolbarH, getWidth(), getHeight() - (fs ? 0 : kToolbarH));
 }
 
 void VideoWindow::ContentComponent::resized()
 {
-    const int btnH    = kToolbarH - 4;
-    const int btnW    = 130;
-    const int yOff    = 2;
+    const bool fs    = owner_.isFullScreen();
+    const int  btnH  = kToolbarH - 4;
+    const int  btnW  = 130;
+    const int  yOff  = 2;
 
-    fullscreenBtn_.setBounds(getWidth() - (btnW + 4 + btnW + 4), yOff, btnW, btnH);
-    closeBtn_     .setBounds(getWidth() - (btnW + 4),             yOff, btnW, btnH);
-
-    display.setBounds(0, kToolbarH, getWidth(), getHeight() - kToolbarH);
+    // In fullscreen: hide toolbar buttons, display occupies full content area
+    if (fs)
+    {
+        fullscreenBtn_.setVisible(false);
+        closeBtn_     .setVisible(false);
+        display.setBounds(0, 0, getWidth(), getHeight());
+    }
+    else
+    {
+        fullscreenBtn_.setVisible(true);
+        closeBtn_     .setVisible(true);
+        fullscreenBtn_.setBounds(getWidth() - (btnW + 4 + btnW + 4), yOff, btnW, btnH);
+        closeBtn_     .setBounds(getWidth() - (btnW + 4),             yOff, btnW, btnH);
+        display.setBounds(0, kToolbarH, getWidth(), getHeight() - kToolbarH);
+    }
 }
 
 //==============================================================================

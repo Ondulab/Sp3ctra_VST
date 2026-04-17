@@ -51,9 +51,10 @@ private:
     private:
         static constexpr int kToolbarH = 30;
 
-        VideoWindow&     owner_;
-        juce::TextButton fullscreenBtn_;
-        juce::TextButton closeBtn_;
+        Sp3ctraAudioProcessor& proc_;   ///< for reading APVTS mode label
+        VideoWindow&           owner_;
+        juce::TextButton       fullscreenBtn_;
+        juce::TextButton       closeBtn_;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ContentComponent)
     };
