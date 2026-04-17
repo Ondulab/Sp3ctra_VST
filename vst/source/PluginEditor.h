@@ -167,8 +167,8 @@ private:
     juce::ToggleButton deviceOnToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> deviceOnAttachment;
 
-    juce::Slider masterVolumeSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> masterVolumeAttachment;
+    juce::Slider luxstralVolumeSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> luxstralVolumeAttachment;
 
     juce::Slider attackSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attackAttachment;
@@ -208,6 +208,9 @@ private:
     juce::ToggleButton lxEnableToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> lxEnableAttachment;
 
+    juce::Slider luxsynthVolumeSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> luxsynthVolumeAttachment;
+
     juce::Slider lxAttackSlider, lxDecaySlider, lxSustainSlider, lxReleaseSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
         lxAttackAttach, lxDecayAttach, lxSustainAttach, lxReleaseAttach;
@@ -220,9 +223,9 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
         lxFltCutoffAttach, lxFltDepthAttach;
 
-    juce::Slider lxGammaSlider, lxNumOscSlider;
+    juce::Slider lxNumOscSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
-        lxGammaAttach, lxNumOscAttach;
+        lxNumOscAttach;
 
     juce::Slider lxLfoRateSlider, lxLfoDepthSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>

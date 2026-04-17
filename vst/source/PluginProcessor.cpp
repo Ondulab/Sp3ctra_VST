@@ -11,6 +11,7 @@ extern "C" {
     #include "synthesis/luxstral/vst_adapters.h"              // luxstral_are_audio_buffers_ready(), buffers
     #include "synthesis/luxstral/wave_generation.h"           // request_frequency_reinit() hot-reload
     #include "processing/lux_pitch.h"                         // LuxPitch engine + g_lux_pitch
+    #include "synthesis/luxsynth/luxsynth_vst_adapter.h"      // luxsynth_push_midi_event(), buffers, engine
 }
 // Note: synth_luxstral_threading.h / synth_luxstral_runtime.h / AudioProcessingThread.h
 // are now included transitively via Sp3ctraSharedCore.h and handled by Sp3ctraSharedCore.
@@ -135,10 +136,17 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"luxstralPhysiologicalDepth", 1}, "Equal-Loudness Depth",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, kHiddenFloat));
 
-    // ── Gameplay — Master Volume ──────────────────────────────────────────────
-    // Applied as output gain in processBlock() — RT-safe atomic read, no lock.
+    // ── Gameplay — Volume Controls ────────────────────────────────────────────
+    // Master output gain applied after all synthesis consumers.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"masterVolume", 1}, "Volume",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    // Per-synth volume: independent gain for LuxStral and LuxSynth consumers.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxstralVolume", 1}, "LuxStral Vol.",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthVolume", 1}, "LuxSynth Vol.",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
 
     // ── Gameplay — Device On ─────────────────────────────────────────────────
@@ -937,6 +945,7 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
 
     // ── Reset consumer tracking (prevent stale buffer re-output at startup) ──
     lastConsumedReadIdx = -1;
+    lastConsumedReadIdxLuxSynth = -1;
 
     // ── Start the shared pipeline (idempotent: no-op if already running) ─────
     if (coreNeedsInit)
@@ -1065,6 +1074,27 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         }
     }
 
+    // ── LuxSynth MIDI (RT-safe: push into lock-free ring buffer) ─────────────
+    {
+        const bool lxEnabled = apvts.getRawParameterValue("luxsynthEnabled")->load() > 0.5f;
+        if (lxEnabled && g_luxsynth_engine.initialized)
+        {
+            const int lxCh  = static_cast<int>(apvts.getRawParameterValue("luxsynthMidiChannel")->load()) + 1;
+            const int lxOct = static_cast<int>(apvts.getRawParameterValue("luxsynthOctaveOffset")->load()) - 2;
+            for (const auto metadata : midiMessages)
+            {
+                const auto msg = metadata.getMessage();
+                if (msg.getChannel() != lxCh) continue;
+                const int shifted = msg.getNoteNumber() + lxOct * 12;
+                if (shifted < 0 || shifted > 127) continue;
+                if (msg.isNoteOn())
+                    luxsynth_push_midi_event(0x90, (uint8_t)shifted, (uint8_t)msg.getVelocity());
+                else if (msg.isNoteOff())
+                    luxsynth_push_midi_event(0x80, (uint8_t)shifted, 0);
+            }
+        }
+    }
+
     // ── FrameSequencer: advance step if sequencer is running ─────────────────
     if (frameSequencer != nullptr)
         frameSequencer->processBlock(getPlayHead(),
@@ -1088,15 +1118,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         luxSampler->setSeqGateSlot(gateSlot);
     }
 
-    // RT-safe early exit when device is switched off (atomic read, no lock)
-    if (deviceEnabledParam != nullptr && deviceEnabledParam->load() < 0.5f)
-    {
-        rt_profiler_callback_end(&g_vst_rt_profiler);
-        return;
-    }
-
     // ========================================================================
-    // 🎯 LOCK-FREE DOUBLE-BUFFER CONSUMER (RT-SAFE)
+    // 🎯 LUXSTRAL LOCK-FREE DOUBLE-BUFFER CONSUMER (RT-SAFE)
     //
     // Architecture: AudioProcessingThread (producer) writes audio to a double-
     // buffer. processBlock (consumer) reads from it. The key insight is:
@@ -1107,8 +1130,11 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // We track which buffer was last consumed via lastConsumedReadIdx.
     // Only signal "consumed" ONCE per new buffer (avoids double-triggering).
     // DO NOT set ready=0 in the consumer — let the producer manage ready flags.
+    //
+    // Gated by deviceEnabled (LuxStral toggle). LuxSynth has its own gate.
     // ========================================================================
-    if (sharedCore && sharedCore->isReady() && luxstral_are_audio_buffers_ready()) {
+    const bool luxstralEnabled = (deviceEnabledParam == nullptr || deviceEnabledParam->load() >= 0.5f);
+    if (luxstralEnabled && sharedCore && sharedCore->isReady() && luxstral_are_audio_buffers_ready()) {
         extern AudioImageBuffer luxstral_buffers_L[2];
         extern AudioImageBuffer luxstral_buffers_R[2];
         extern volatile int luxstral_buffer_index;
@@ -1129,16 +1155,17 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             float* leftData = luxstral_buffers_L[readIdx].data;
             float* rightData = luxstral_buffers_R[readIdx].data;
             
-            if (leftData && rightData) {
+                if (leftData && rightData) {
+                const float lsVol = apvts.getRawParameterValue("luxstralVolume")->load();
                 if (totalNumOutputChannels >= 1) {
                     float* destLeft = buffer.getWritePointer(0);
                     for (int i = 0; i < samplesToRead; ++i)
-                        destLeft[i] = leftData[i];
+                        destLeft[i] = leftData[i] * lsVol;
                 }
                 if (totalNumOutputChannels >= 2) {
                     float* destRight = buffer.getWritePointer(1);
                     for (int i = 0; i < samplesToRead; ++i)
-                        destRight[i] = rightData[i];
+                        destRight[i] = rightData[i] * lsVol;
                 }
                 
                 // Track which buffer we consumed (don't signal twice for same data)
@@ -1157,15 +1184,16 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             float* rightData = luxstral_buffers_R[readIdx].data;
             
             if (leftData && rightData) {
+                const float lsVol = apvts.getRawParameterValue("luxstralVolume")->load();
                 if (totalNumOutputChannels >= 1) {
                     float* destLeft = buffer.getWritePointer(0);
                     for (int i = 0; i < samplesToRead; ++i)
-                        destLeft[i] = leftData[i];
+                        destLeft[i] = leftData[i] * lsVol;
                 }
                 if (totalNumOutputChannels >= 2) {
                     float* destRight = buffer.getWritePointer(1);
                     for (int i = 0; i < samplesToRead; ++i)
-                        destRight[i] = rightData[i];
+                        destRight[i] = rightData[i] * lsVol;
                 }
             }
             // DO NOT signal consumed — producer is still working on the next buffer
@@ -1176,6 +1204,49 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         }
     }
     
+    // ========================================================================
+    // 🎯 LUXSYNTH INLINE SYNTHESIS (RT-SAFE, ADDITIVE)
+    //
+    // The LuxSynth engine is fully RT-safe (no allocation, no lock, no I/O),
+    // so it runs directly in processBlock.  This eliminates all double-buffer
+    // synchronisation issues (timing mismatch, stale data replay, temporal
+    // discontinuities) that occurred with the former async thread approach.
+    //
+    // MIDI events are pushed to the lock-free ring buffer above, then drained
+    // here before generating audio for exactly `numSamples` samples — always
+    // matching the DAW buffer size.
+    // ========================================================================
+    if (sharedCore && sharedCore->isReady() && g_luxsynth_engine.initialized)
+    {
+        const bool lxEnabled = apvts.getRawParameterValue("luxsynthEnabled")->load() > 0.5f;
+        if (lxEnabled)
+        {
+            // 1. Drain pending MIDI events into engine voices
+            luxsynth_process_pending_midi();
+
+            // 2. Generate audio directly — uses preallocated engine buffers
+            luxsynth_engine_process(&g_luxsynth_engine, numSamples,
+                                    g_luxsynth_engine.output_left,
+                                    g_luxsynth_engine.output_right);
+
+            // 3. Mix into JUCE output buffer (additive)
+            const float lxVol = apvts.getRawParameterValue("luxsynthVolume")->load();
+
+            if (totalNumOutputChannels >= 1)
+            {
+                float* dest = buffer.getWritePointer(0);
+                for (int i = 0; i < numSamples; ++i)
+                    dest[i] += g_luxsynth_engine.output_left[i] * lxVol;
+            }
+            if (totalNumOutputChannels >= 2)
+            {
+                float* dest = buffer.getWritePointer(1);
+                for (int i = 0; i < numSamples; ++i)
+                    dest[i] += g_luxsynth_engine.output_right[i] * lxVol;
+            }
+        }
+    }
+
     // Apply master volume — RT-safe: atomic read, O(N) multiply, no lock, no allocation
     if (masterVolumeParam != nullptr)
     {

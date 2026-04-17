@@ -8,6 +8,9 @@
 #include "UdpReceiverThread.h"
 #include "AudioProcessingThread.h"
 
+// Forward declaration — full include in .cpp to avoid transitive C header issues
+class LuxSynthProcessingThread;
+
 /**
  * @file Sp3ctraSharedCore.h
  * @brief Process-wide singleton that owns all shared, expensive resources.
@@ -154,9 +157,10 @@ private:
     // -------------------------------------------------------------------------
     // Owned resources
     // -------------------------------------------------------------------------
-    std::unique_ptr<Sp3ctraCore>           core;
-    std::unique_ptr<UdpReceiverThread>     udpThread;
-    std::unique_ptr<AudioProcessingThread> audioThread;
+    std::unique_ptr<Sp3ctraCore>              core;
+    std::unique_ptr<UdpReceiverThread>        udpThread;
+    std::unique_ptr<AudioProcessingThread>    audioThread;
+    std::unique_ptr<LuxSynthProcessingThread> luxSynthThread;
 
     std::atomic<bool> ready{false};
 };
