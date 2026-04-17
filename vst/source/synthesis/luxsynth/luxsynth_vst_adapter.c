@@ -144,15 +144,11 @@ void luxsynth_process_pending_midi(void)
  * MAIN PROCESSING LOOP (called from LuxSynthProcessingThread)
  * ========================================================================== */
 
-void luxsynth_processing_loop(void *ctx_ptr)
+void luxsynth_processing_loop(volatile int *running_flag)
 {
-    /* ctx_ptr is Context* — we check ctx->luxsynth_thread_running */
-    typedef struct { int running; int audio_thread_running; int luxsynth_thread_running; } MinContext;
-    MinContext *ctx = (MinContext *)ctx_ptr;
+    if (!running_flag) return;
 
-    if (!ctx) return;
-
-    while (ctx->luxsynth_thread_running)
+    while (__atomic_load_n(running_flag, __ATOMIC_ACQUIRE))
     {
         /* 1. Process pending MIDI events */
         luxsynth_process_pending_midi();

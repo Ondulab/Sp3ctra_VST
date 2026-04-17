@@ -1,4 +1,5 @@
 #include "Sp3ctraSharedCore.h"
+#include "LuxSynthProcessingThread.h"
 
 #include <juce_core/juce_core.h>
 
@@ -12,6 +13,7 @@ extern "C"
     #include "synthesis/luxstral/synth_luxstral_runtime.h"   // synth_runtime_free_buffers
     #include "synthesis/luxstral/vst_adapters.h"             // luxstral_init_audio_buffers / luxstral_init_callback_sync
     #include "synthesis/luxstral/wave_generation.h"          // request_frequency_reinit / reset_frequency_reinit_state
+    #include "synthesis/luxsynth/luxsynth_vst_adapter.h"     // luxsynth_init_audio_buffers / luxsynth_engine_init / luxsynth_free_audio_buffers
 }
 
 // ============================================================================
@@ -134,10 +136,34 @@ bool Sp3ctraSharedCore::startWithConfig(const Sp3ctraCore::ActiveConfig& config,
     reset_frequency_reinit_state();
     request_frequency_reinit(); // PENDING is set BEFORE the thread starts → safe
 
-    // ── 7. Audio processing thread ───────────────────────────────────────────
+    // ── 7. Audio processing thread (LuxStral) ────────────────────────────────
     audioThread = std::make_unique<AudioProcessingThread>(core.get());
     audioThread->startThread(juce::Thread::Priority::highest);
     log_info("SHARED", "AudioProcessingThread started");
+
+    // ── 8. LuxSynth additive synthesis engine ────────────────────────────────
+    if (luxsynth_init_audio_buffers(samplesPerBlock) != 0)
+    {
+        log_error("SHARED", "startWithConfig() — luxsynth_init_audio_buffers() failed");
+        // Non-fatal: LuxStral still works, LuxSynth just won't produce audio
+    }
+    else
+    {
+        int lsResult = luxsynth_engine_init(&g_luxsynth_engine,
+                                            static_cast<float>(sampleRate),
+                                            samplesPerBlock);
+        if (lsResult != 0)
+        {
+            log_error("SHARED", "startWithConfig() — luxsynth_engine_init() failed (rc=%d)", lsResult);
+        }
+        else
+        {
+            // LuxSynth engine is now called inline from processBlock (RT-safe).
+            // No dedicated thread needed — eliminates double-buffer sync issues.
+            log_info("SHARED", "LuxSynth engine initialized inline (SR=%.0f, BS=%d)",
+                     sampleRate, samplesPerBlock);
+        }
+    }
 
     ready.store(true);
     log_info("SHARED", "startWithConfig() — pipeline up and running");
@@ -146,7 +172,7 @@ bool Sp3ctraSharedCore::startWithConfig(const Sp3ctraCore::ActiveConfig& config,
 
 void Sp3ctraSharedCore::stopThreads()
 {
-    if (!ready.load() && !audioThread && !udpThread)
+    if (!ready.load() && !audioThread && !luxSynthThread && !udpThread)
     {
         log_info("SHARED", "stopThreads() — nothing to stop");
         return;
@@ -154,7 +180,32 @@ void Sp3ctraSharedCore::stopThreads()
 
     log_info("SHARED", "stopThreads() — stopping all shared threads");
 
-    // ── AudioProcessingThread first ──────────────────────────────────────────
+    // ── LuxSynthProcessingThread ─────────────────────────────────────────────
+    // Stop before AudioProcessingThread to ensure clean shutdown order.
+    if (luxSynthThread)
+    {
+        log_info("SHARED", "Stopping LuxSynthProcessingThread...");
+        luxSynthThread->requestStop();
+        bool stopped = luxSynthThread->stopThread(2000);
+
+        if (!stopped)
+        {
+            log_error("SHARED",
+                      "LuxSynthProcessingThread did NOT exit within timeout — leaking to avoid crash");
+            (void)luxSynthThread.release(); // NOLINT: intentional leak
+        }
+        else
+        {
+            luxSynthThread.reset();
+            log_info("SHARED", "LuxSynthProcessingThread stopped");
+        }
+    }
+
+    // ── LuxSynth cleanup ─────────────────────────────────────────────────────
+    luxsynth_free_audio_buffers();
+    log_info("SHARED", "LuxSynth buffers freed");
+
+    // ── AudioProcessingThread (LuxStral) ─────────────────────────────────────
     // Must stop before calling synth_luxstral_cleanup() to avoid use-after-free.
     if (audioThread)
     {

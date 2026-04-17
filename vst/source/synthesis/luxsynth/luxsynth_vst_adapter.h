@@ -118,7 +118,7 @@ void luxsynth_process_pending_midi(void);
  * Reads spectral data, processes MIDI, generates audio, writes to double-buffer.
  * @param ctx  Context pointer (for thread running flag).
  */
-void luxsynth_processing_loop(void *ctx);
+void luxsynth_processing_loop(volatile int *running_flag);
 
 #ifdef __cplusplus
 }

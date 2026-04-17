@@ -42,10 +42,10 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     deviceOnAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "deviceEnabled", deviceOnToggle);
 
-    initSlider(masterVolumeSlider);
-    addAndMakeVisible(masterVolumeSlider);
-    masterVolumeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "masterVolume", masterVolumeSlider);
+    initSlider(luxstralVolumeSlider);
+    addAndMakeVisible(luxstralVolumeSlider);
+    luxstralVolumeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "luxstralVolume", luxstralVolumeSlider);
 
     initSlider(attackSlider, " ms");
     addAndMakeVisible(attackSlider);
@@ -91,6 +91,11 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     lxEnableAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "luxsynthEnabled", lxEnableToggle);
 
+    initSlider(luxsynthVolumeSlider);
+    addChildComponent(luxsynthVolumeSlider);
+    luxsynthVolumeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "luxsynthVolume", luxsynthVolumeSlider);
+
     initSlider(lxAttackSlider, " ms");   addChildComponent(lxAttackSlider);
     lxAttackAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthAttackMs", lxAttackSlider);
     initSlider(lxDecaySlider, " ms");    addChildComponent(lxDecaySlider);
@@ -113,8 +118,6 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     initSlider(lxFltDepthSlider);          addChildComponent(lxFltDepthSlider);
     lxFltDepthAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthFilterEnvDepth", lxFltDepthSlider);
 
-    initSlider(lxGammaSlider);    addChildComponent(lxGammaSlider);
-    lxGammaAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthGamma", lxGammaSlider);
     initSlider(lxNumOscSlider);   addChildComponent(lxNumOscSlider);
     lxNumOscAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxsynthNumOscillators", lxNumOscSlider);
 
@@ -198,7 +201,7 @@ void Sp3ctraAudioProcessorEditor::switchToTab(Tab tab)
 
     // Hide all synth controls first, then let switchSynthSubTab() show the right ones
     std::array<juce::Component*, 13> luxstralCtrls = {
-        &deviceOnToggle,   &masterVolumeSlider,
+        &deviceOnToggle,   &luxstralVolumeSlider,
         &attackSlider,     &releaseSlider,
         &stereoEnableToggle, &stereoTempSlider, &sumExpSlider, &noiseGateSlider,
         &sfEnabledToggle,
@@ -207,14 +210,13 @@ void Sp3ctraAudioProcessorEditor::switchToTab(Tab tab)
     };
     for (auto* c : luxstralCtrls) c->setVisible(false);
 
-    std::array<juce::Component*, 16> luxsynthCtrls = {
-        &lxEnableToggle,
+    std::array<juce::Component*, 15> luxsynthCtrls = {
+        &lxEnableToggle, &luxsynthVolumeSlider,
         &lxAttackSlider, &lxDecaySlider, &lxSustainSlider, &lxReleaseSlider,
         &lxFltAttackSlider, &lxFltDecaySlider, &lxFltSustainSlider, &lxFltReleaseSlider,
         &lxFltCutoffSlider, &lxFltDepthSlider,
-        &lxGammaSlider, &lxNumOscSlider,
-        &lxLfoRateSlider, &lxLfoDepthSlider,
-        nullptr  // padding to 16
+        &lxNumOscSlider,
+        &lxLfoRateSlider, &lxLfoDepthSlider
     };
     for (auto* c : luxsynthCtrls) if (c) c->setVisible(false);
 
@@ -266,7 +268,7 @@ void Sp3ctraAudioProcessorEditor::switchSynthSubTab(SynthSub sub)
 
     // LuxStral controls
     deviceOnToggle.setVisible(isLuxStral);
-    masterVolumeSlider.setVisible(isLuxStral);
+    luxstralVolumeSlider.setVisible(isLuxStral);
     attackSlider.setVisible(isLuxStral);
     releaseSlider.setVisible(isLuxStral);
     stereoEnableToggle.setVisible(isLuxStral);
@@ -281,6 +283,7 @@ void Sp3ctraAudioProcessorEditor::switchSynthSubTab(SynthSub sub)
 
     // LuxSynth controls
     lxEnableToggle.setVisible(isLuxSynth);
+    luxsynthVolumeSlider.setVisible(isLuxSynth);
     lxAttackSlider.setVisible(isLuxSynth);
     lxDecaySlider.setVisible(isLuxSynth);
     lxSustainSlider.setVisible(isLuxSynth);
@@ -291,7 +294,6 @@ void Sp3ctraAudioProcessorEditor::switchSynthSubTab(SynthSub sub)
     lxFltReleaseSlider.setVisible(isLuxSynth);
     lxFltCutoffSlider.setVisible(isLuxSynth);
     lxFltDepthSlider.setVisible(isLuxSynth);
-    lxGammaSlider.setVisible(isLuxSynth);
     lxNumOscSlider.setVisible(isLuxSynth);
     lxLfoRateSlider.setVisible(isLuxSynth);
     lxLfoDepthSlider.setVisible(isLuxSynth);
@@ -494,8 +496,8 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
         g.setColour(juce::Colour(0xffb8c4d0));
         static const char* const lxLeftLbls[] = {
-            "Enable", "Attack", "Decay", "Sustain", "Release",
-            "Gamma", "Oscillators", "LFO Rate"
+            "Enable", "Volume", "Attack", "Decay", "Sustain", "Release",
+            "Oscillators", "LFO Rate"
         };
         for (int i = 0; i < 8; ++i)
             g.drawText(lxLeftLbls[i],
@@ -549,7 +551,7 @@ void Sp3ctraAudioProcessorEditor::resized()
         const int cx = lxp + kCtrlOffset;
         int cy = rsy;
         deviceOnToggle    .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
-        masterVolumeSlider.setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        luxstralVolumeSlider.setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
         attackSlider      .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
         releaseSlider     .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
         stereoEnableToggle.setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
@@ -576,12 +578,12 @@ void Sp3ctraAudioProcessorEditor::resized()
     {
         const int cx = lxp + kCtrlOffset;
         int cy = rsy;
-        lxEnableToggle .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
-        lxAttackSlider .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        lxEnableToggle      .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        luxsynthVolumeSlider.setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        lxAttackSlider      .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
         lxDecaySlider  .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
         lxSustainSlider.setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
         lxReleaseSlider.setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
-        lxGammaSlider  .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
         lxNumOscSlider .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
         lxLfoRateSlider.setBounds(cx, cy, kCtrlW, kRowH);
     }

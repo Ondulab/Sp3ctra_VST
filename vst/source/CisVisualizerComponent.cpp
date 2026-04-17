@@ -11,6 +11,8 @@ extern "C" {
     #include "processing/image_pipeline_types.h"
     #include "processing/lux_pitch.h"
     #include "synthesis/luxsynth/kissfft/kiss_fftr.h"
+    #include "synthesis/luxsynth/synth_luxsynth_engine.h"
+    #include "synthesis/luxsynth/luxsynth_vst_adapter.h"
 }
 
 // Forward-declare C hooks defined in LuxSampler.cpp.
@@ -414,6 +416,13 @@ void CisVisualizerComponent::resized() {}
 void CisVisualizerComponent::timerCallback()
 {
     updateCisData();
+
+    // Always run FFT + feed spectral data to the LuxSynth engine, regardless
+    // of which visualizer tab is active.  Without this, the engine only receives
+    // spectral data when the user is on the FFT Color view, causing silence on
+    // all other tabs.
+    computeFftMagnitudes();
+
     repaint();
 }
 
@@ -810,9 +819,10 @@ void CisVisualizerComponent::updateCisData()
             gammaVal = g_sp3ctra_config.additive_gamma_value;
             gammaOn  = g_sp3ctra_config.additive_enable_non_linear_mapping;
         } else {
-            /* SYNTH_* — no gamma by design */
-            gammaVal = 0.0f;
-            gammaOn  = 0;
+            /* SYNTH_* — use per-path LuxSynth gamma (luxsynthGammaValue).
+             * Always active (no enable flag); identity when gamma == 1.0. */
+            gammaVal = g_sp3ctra_config.luxsynth_gamma_value;
+            gammaOn  = (gammaVal > 0.0f && gammaVal != 1.0f) ? 1 : 0;
         }
 
         localDataGray.resize(cisPixelsCount);
@@ -1948,6 +1958,56 @@ void CisVisualizerComponent::computeFftMagnitudes()
             fftHarmonicity_[static_cast<size_t>(k)] =
                 0.40f * newH + 0.60f * fftHarmonicity_[static_cast<size_t>(k)];
         }
+    }
+
+    // ========================================================================
+    // 🎯 BRIDGE: Feed spectral data to the LuxSynth additive synthesis engine.
+    //
+    // fftMagnitudesSmoothed_[1..nDisplay] → oscillator amplitudes
+    // fftHarmonicity_[1..nDisplay]        → per-bin harmonicity (future use)
+    // Left/right gains = NULL → engine defaults to center pan (0.707, 0.707).
+    //
+    // This is called from the UI timer thread (~30 fps).  The engine reads
+    // the spectral struct from the LuxSynthProcessingThread — a benign race
+    // on aligned floats, same pattern as LuxStral's image data pipeline.
+    // ========================================================================
+    if (luxsynth_are_buffers_ready() && nDisplay > 0)
+    {
+        // Skip DC bin (index 0) — engine expects magnitudes[0] = 1st harmonic
+        luxsynth_engine_set_spectral_data(
+            &g_luxsynth_engine,
+            fftMagnitudesSmoothed_.data() + 1,   // magnitudes (skip DC)
+            nullptr,                              // pan_positions (unused)
+            fftHarmonicity_.data() + 1,           // harmonicity
+            nullptr,                              // left_gains  (center default)
+            nullptr,                              // right_gains (center default)
+            nDisplay);                            // num_bins
+
+        // ── Sync engine config from APVTS (non-RT, ~30 fps) ──────────────────
+        auto& apvts = processor.getAPVTS();
+        LuxSynthConfig cfg;
+        cfg.attack_ms            = apvts.getRawParameterValue("luxsynthAttackMs")->load();
+        cfg.decay_ms             = apvts.getRawParameterValue("luxsynthDecayMs")->load();
+        cfg.sustain_level        = apvts.getRawParameterValue("luxsynthSustainLevel")->load();
+        cfg.release_ms           = apvts.getRawParameterValue("luxsynthReleaseMs")->load();
+        cfg.filter_attack_ms     = apvts.getRawParameterValue("luxsynthFilterAttackMs")->load();
+        cfg.filter_decay_ms      = apvts.getRawParameterValue("luxsynthFilterDecayMs")->load();
+        cfg.filter_sustain       = apvts.getRawParameterValue("luxsynthFilterSustain")->load();
+        cfg.filter_release_ms    = apvts.getRawParameterValue("luxsynthFilterReleaseMs")->load();
+        cfg.filter_cutoff        = apvts.getRawParameterValue("luxsynthFilterCutoff")->load();
+        cfg.filter_env_depth     = apvts.getRawParameterValue("luxsynthFilterEnvDepth")->load();
+        cfg.lfo_rate_hz          = apvts.getRawParameterValue("luxsynthLfoRate")->load();
+        cfg.lfo_depth_semitones  = apvts.getRawParameterValue("luxsynthLfoDepth")->load();
+        cfg.gamma                = apvts.getRawParameterValue("luxsynthGammaValue")->load();
+        cfg.num_oscillators      = static_cast<int>(
+            apvts.getRawParameterValue("luxsynthNumOscillators")->load());
+        cfg.master_volume        = 0.5f;  // fixed for now
+        cfg.sample_rate          = g_luxsynth_engine.sample_rate;
+        cfg.buffer_size          = static_cast<int>(
+            g_luxsynth_engine.sample_rate > 0 ? g_luxsynth_engine.sample_rate / 30.0f : 512);
+        cfg.enabled              = apvts.getRawParameterValue("luxsynthEnabled")->load() > 0.5f;
+
+        luxsynth_engine_set_config(&g_luxsynth_engine, &cfg);
     }
 }
 

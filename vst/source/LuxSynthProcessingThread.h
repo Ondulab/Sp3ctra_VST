@@ -67,7 +67,10 @@ public:
         ctx->luxsynth_thread_running = 1;
         log_info("LUXSYNTH", "Calling luxsynth_processing_loop()...");
 
-        luxsynth_processing_loop((void*)ctx);
+        // Pass a direct pointer to the running flag — avoids the old MinContext
+        // struct-layout mismatch that caused the loop to read the wrong offset
+        // on 64-bit systems (offset 8 = socket instead of offset 72 = flag).
+        luxsynth_processing_loop(&ctx->luxsynth_thread_running);
 
         log_info("LUXSYNTH", "luxsynth_processing_loop() returned");
     }
