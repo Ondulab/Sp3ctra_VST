@@ -75,19 +75,13 @@ void VideoDisplayComponent::captureCurrentFrame()
         case 1: // Sample
             audio_image_buffers_get_sampler_pointers(aib, &pR, &pG, &pB);
             break;
-        case 3: // LuxPitch — show the same source buffer that LuxPitch synthesis reads
-        {
-            // luxpitchSource APVTS choices: 0=S-Sampler  1=M-Mix(default)  2=L-Live
-            const int lpChoice = juce::jlimit(0, 2, static_cast<int>(
-                processor_.getAPVTS().getRawParameterValue("luxpitchSource")->load()));
-            switch (lpChoice)
-            {
-                case 0:  audio_image_buffers_get_sampler_pointers(aib, &pR, &pG, &pB); break;
-                case 2:  audio_image_buffers_get_raw_pointers    (aib, &pR, &pG, &pB); break;
-                default: audio_image_buffers_get_read_pointers   (aib, &pR, &pG, &pB); break;
-            }
+        case 3: // LuxPitch — always shows the blended synthesis buffer (read_pointers).
+                // LuxPitch reads the same buffer for pitch detection regardless of its
+                // own luxpitchSource setting.  Do NOT read luxpitchSource here: that
+                // parameter controls the synthesis engine, not the video visualizer.
+                // Note: visually identical to Mix when no sampler is playing (expected).
+            audio_image_buffers_get_read_pointers(aib, &pR, &pG, &pB);
             break;
-        }
         case 2: // Mix
         default:
             audio_image_buffers_get_read_pointers(aib, &pR, &pG, &pB);
