@@ -132,53 +132,51 @@ void VideoDisplayComponent::mouseDoubleClick(const juce::MouseEvent&)
 void VideoDisplayComponent::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colours::black);
-    if (bufW_ <= 0 || bufH_ <= 0 || !scrollBuffer_.isValid()) return;
+    if (!scrollBuffer_.isValid()) return;
+
+    // Always use the ACTUAL image dimensions (guards against bufW_/bufH_ drift)
+    const int imgW = scrollBuffer_.getWidth();
+    const int imgH = scrollBuffer_.getHeight();
+    if (imgW <= 0 || imgH <= 0) return;
 
     // ── Circular rendering (no memcpy): two-pass draw ──────────────────────
     // writeRow_ is the NEXT row to be written → the "oldest" visible row.
     // Layout on screen (Forward direction, newest at bottom):
-    //   [writeRow_ .. bufH_-1] → screen top    (oldest data)
-    //   [0 .. writeRow_-1]     → screen bottom  (newest data)
+    //   [writeRow_ .. imgH-1] → screen top    (oldest data)
+    //   [0 .. writeRow_-1]    → screen bottom  (newest data)
     //
     // For Reverse (newest at top): swap the two halves.
-    //
-    // We stretch both halves to fill the component bounds.
+    // Both halves are stretched to fill the full component width.
     // ──────────────────────────────────────────────────────────────────────
 
     const auto& apvts = processor_.getAPVTS();
-    const float zoom    = apvts.getRawParameterValue("videoScrollZoom")->load();
     const bool reverse  = apvts.getRawParameterValue("videoScrollDirection")->load() > 0.5f;
 
     const float compW = (float)getWidth();
     const float compH = (float)getHeight();
 
-    // Zoom: zoomed in → we draw a smaller source rect centred on the image.
-    // srcW/srcX apply horizontally; vertical split is handled by the two-pass circular draw.
-    const float srcW = (zoom > 0.0f) ? ((float)bufW_ / zoom) : (float)bufW_;
-    const float srcX = ((float)bufW_ - srcW) * 0.5f;
-    (void)srcX; // horizontal zoom not yet applied to split-draw; kept for future use
+    // Heights of the two halves in image pixels
+    const int topRows = reverse ? writeRow_         : (imgH - writeRow_);
+    const int botRows = reverse ? (imgH - writeRow_): writeRow_;
 
-    // Heights of the two halves in buffer pixels
-    const int topRows = reverse ? writeRow_          : (bufH_ - writeRow_);
-    const int botRows = reverse ? (bufH_ - writeRow_): writeRow_;
+    const int topSrcY  = reverse ? 0        : writeRow_;
+    const int botSrcY  = reverse ? writeRow_ : 0;
 
-    const int topSrcY  = reverse ? 0                 : writeRow_;
-    const int botSrcY  = reverse ? writeRow_          : 0;
-
-    const float topScreenH = compH * (float)topRows / (float)bufH_;
+    const float topScreenH = (imgH > 0) ? (compH * (float)topRows / (float)imgH) : 0.f;
     const float botScreenH = compH - topScreenH;
 
     if (topRows > 0)
     {
+        // Source width = imgW (full image width); dest width = compW (full component)
         g.drawImage(scrollBuffer_,
                     0.f, 0.f, compW, topScreenH,
-                    (int)srcX, topSrcY, bufW_, topRows);
+                    0, topSrcY, imgW, topRows);
     }
     if (botRows > 0)
     {
         g.drawImage(scrollBuffer_,
                     0.f, topScreenH, compW, botScreenH,
-                    (int)srcX, botSrcY, bufW_, botRows);
+                    0, botSrcY, imgW, botRows);
     }
 
     // ── Mode / status overlay ──────────────────────────────────────────────
@@ -434,9 +432,10 @@ void VideoDisplayComponent::allocateScrollBuffer()
     if (w <= 0 || h <= 0) return;
     if (w != bufW_ || h != bufH_)
     {
-        bufW_     = w;
-        bufH_     = h;
-        writeRow_ = 0;
+        bufW_            = w;
+        bufH_            = h;
+        writeRow_        = 0;
+        bufferPreFilled_ = false;  // force re-fill with first frame after resize
         scrollBuffer_ = juce::Image(juce::Image::RGB, w, h, true);
         scrollBuffer_.clear(scrollBuffer_.getBounds(), juce::Colours::black);
     }
