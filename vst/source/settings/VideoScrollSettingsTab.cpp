@@ -14,8 +14,8 @@ namespace
     constexpr int kTbW    = Sp3ctraTheme::kTbStd;
     constexpr int kTbH    = Sp3ctraTheme::kTextBoxH;
 
-    // Total scrollable content height (3 sections)
-    constexpr int kContentH = 420;
+    // Total scrollable content height (2 sections: Display + Window)
+    constexpr int kContentH = 260;
 
     void styleSectionLabel(juce::Label& lbl, const juce::String& text)
     {
@@ -81,40 +81,6 @@ VideoScrollSettingsTab::VideoScrollSettingsTab(Sp3ctraAudioProcessor& processor)
     content_.addAndMakeVisible(colorModeToggle_);
     colorModeAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts_, "videoColorMode", colorModeToggle_);
-
-    // ── Section: Sequencer ────────────────────────────────────────────────────
-    styleSectionLabel(seqSectionLabel_, "Sequencer");
-    content_.addAndMakeVisible(seqSectionLabel_);
-
-    styleLabel(bpmLabel_, "BPM");
-    content_.addAndMakeVisible(bpmLabel_);
-    styleSlider(bpmSlider_, " BPM");
-    bpmSlider_.setTooltip(
-        "Tempo used for MIDI-clock-synced scroll modes.\n"
-        "Only active when MIDI Sync is enabled.");
-    content_.addAndMakeVisible(bpmSlider_);
-    bpmAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts_, "videoScrollBpm", bpmSlider_);
-
-    styleLabel(midiSyncLabel_, "MIDI Sync");
-    content_.addAndMakeVisible(midiSyncLabel_);
-    midiSyncToggle_.setButtonText("Sync to MIDI clock");
-    midiSyncToggle_.setTooltip(
-        "When enabled, scroll speed is quantized to the MIDI clock\n"
-        "received from the DAW or an external device.");
-    content_.addAndMakeVisible(midiSyncToggle_);
-    midiSyncAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        apvts_, "videoScrollMidiSync", midiSyncToggle_);
-
-    styleLabel(maxDurLabel_, "Max duration");
-    content_.addAndMakeVisible(maxDurLabel_);
-    styleSlider(maxDurSlider_, " s");
-    maxDurSlider_.setTooltip(
-        "Maximum sequence recording duration (seconds).\n"
-        "Higher values consume more memory (10 KB/frame * fps * duration).");
-    content_.addAndMakeVisible(maxDurSlider_);
-    maxDurAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts_, "videoScrollMaxDuration", maxDurSlider_);
 
     // ── Section: Window ───────────────────────────────────────────────────────
     styleSectionLabel(windowSectionLabel_, "Video Window");
@@ -182,16 +148,6 @@ void VideoScrollSettingsTab::layoutContent()
     placeRow   (brightnessLabel_, brightnessSlider_);
     placeToggle(invertLabel_,     invertToggle_);
     placeToggle(colorModeLabel_,  colorModeToggle_);
-
-    y += kStep / 2;
-
-    // ── Sequencer ─────────────────────────────────────────────────────────────
-    seqSectionLabel_.setBounds(kHP, y, W - 2*kHP, kSecH);
-    y += kSecH + kSecGap;
-
-    placeRow   (bpmLabel_,     bpmSlider_);
-    placeToggle(midiSyncLabel_, midiSyncToggle_);
-    placeRow   (maxDurLabel_,  maxDurSlider_);
 
     y += kStep / 2;
 

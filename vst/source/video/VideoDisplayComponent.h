@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_audio_basics/juce_audio_basics.h>
 #include "VideoScrollMode.h"
 #include <vector>
 #include <atomic>
@@ -11,27 +12,33 @@ class Sp3ctraAudioProcessor;
 /**
  * @brief Full-resolution scrolling waterfall display for CIS image data.
  *
- * Renders incoming CIS frames as a 2D waterfall:
- *   - X axis = CIS pixel position (0 .. CIS_MAX_PIXELS_NB)
- *   - Y axis = time  (most recent row at bottom, oldest at top)
+ * Architecture (matches Legacy SFML approach):
+ * ─────────────────────────────────────────────────────────────────────────────
+ *   CIS UDP thread  →  AudioImageBuffers (double-buffer, latest frame)
+ *                               ↓  polled every ~1ms
+ *   VideoFrameCaptureThread  →  frameRing_ (circular ring of captured frames)
+ *                               ↓  drained every timer tick
+ *   timerCallback() (30fps)  →  scrollBuffer_ (juce::Image, circular write)
+ *                               ↓
+ *   paint()                  →  drawn with writeRow_ offset (no memcpy)
+ * ─────────────────────────────────────────────────────────────────────────────
  *
- * Each timer tick a new CIS line is painted at the bottom of the waterfall
- * and the existing content is scrolled up.
+ * Key design decisions:
+ *   - NO moveImageSection() — zero memcpy for scrolling.
+ *     writeRow_ advances forward; paint() renders the Image as a circular
+ *     buffer using two drawImage calls (top/bottom halves).
+ *   - Dedicated capture thread polls AudioImageBuffers.lines_received every
+ *     ~1ms (matching the ~1000fps CIS acquisition rate) to capture all frames.
+ *   - Timer callback drains the ring and paints all pending frames, giving true
+ *     real-time scrolling regardless of the 30fps display rate.
+ *   - speed parameter is now a true multiplier: 1.0 = real-time, 0.5 = half, 2.0 = 2×.
+ *     It controls how many captured frames are consumed per ring-drain cycle.
  *
- * VideoScrollMode controls the pixel direction + replay behaviour:
- *   LiveLeftToRight — pixels drawn 0→N (normal)
- *   LiveRightToLeft — pixels drawn N→0 (mirrored)
- *   LiveDual        — alternates L→R / R→L every half-buffer (ping-pong)
- *   SeqLoopSimple   — records N frames then loops A→B→A→B
- *   SeqLoopPingPong — records N frames then bounces A→B→A
- *   SeqOneShot      — records N frames, plays once, freezes
- *
- * Scroll speed is read from APVTS "videoScrollSpeed" (rows per second factor).
- * Brightness and zoom are read from "videoScrollBrightness" / "videoScrollZoom".
- * Color mode is toggled by "videoColorMode" (false = grayscale, true = RGB).
- * Invert is toggled by "videoInvertColor".
- *
- * Double-click on the component triggers onFullscreenRequested (if set).
+ * Thread safety:
+ *   - frameRing_ uses atomic write index (capture thread) + non-atomic read
+ *     index (message thread only) → lock-free single-producer single-consumer.
+ *   - scrollBuffer_ is written only from timerCallback (message thread).
+ *   - paint() also runs on message thread → no concurrent access to scrollBuffer_.
  */
 class VideoDisplayComponent : public juce::Component,
                               private juce::Timer
@@ -45,73 +52,99 @@ public:
     void resized() override;
     void mouseDoubleClick(const juce::MouseEvent& e) override;
 
-    // ── Callback: called on double-click so VideoWindow can toggle fullscreen ─
+    // ── Callback: double-click toggles fullscreen ─────────────────────────────
     std::function<void()> onFullscreenRequested;
 
     // ── Sequence control ──────────────────────────────────────────────────────
-    /** Reset the sequence buffer (used when mode changes to a Seq* mode). */
     void resetSequence();
-
-    /** Returns true while a Seq* mode is in recording phase. */
     bool isRecording() const noexcept { return seqRecording_; }
-
-    /** Returns true when a SeqOneShot has finished playing. */
-    bool isFinished() const noexcept { return seqFinished_; }
+    bool isFinished()  const noexcept { return seqFinished_;  }
 
 private:
-    // ── Timer ─────────────────────────────────────────────────────────────────
+    // ── Dedicated CIS capture thread ──────────────────────────────────────────
+    class CaptureThread final : public juce::Thread
+    {
+    public:
+        explicit CaptureThread(VideoDisplayComponent& owner)
+            : juce::Thread("VideoCaptureThread"), owner_(owner) {}
+        void run() override;
+    private:
+        VideoDisplayComponent& owner_;
+    };
+
+    void captureCurrentFrame();   // called from capture thread
+
+    // ── Timer (display refresh) ───────────────────────────────────────────────
     void timerCallback() override;
 
-    // ── CIS data reading (UI thread only) ─────────────────────────────────────
-    void readCisData();
-
-    // ── Waterfall helpers ─────────────────────────────────────────────────────
+    // ── Waterfall ─────────────────────────────────────────────────────────────
     void allocateScrollBuffer();
-    void advanceWaterfall(VideoScrollMode mode);
-    void paintRowFromLive(int rowY, bool mirror) const;
-    void paintRowFromSeq(int rowY, bool mirror) const;
+    void drainRingAndAdvance(VideoScrollMode mode);
 
-    // ── Sequence playback helpers ─────────────────────────────────────────────
-    void appendSeqFrame();
-    void advanceSeqPlayHead(VideoScrollMode mode, bool reverse = false);
+    // ── Row painters ─────────────────────────────────────────────────────────
+    // target: absolute row in scrollBuffer_; mirror: L↔R flip
+    void paintRowFromRing(int target, bool mirror);
+    void paintRowFromSeq (int target, bool mirror, int seqIdx) const;
+
+    // ── Sequence helpers ──────────────────────────────────────────────────────
+    void appendSeqFrame(const std::vector<uint8_t>& r,
+                        const std::vector<uint8_t>& g,
+                        const std::vector<uint8_t>& b,
+                        const std::vector<uint8_t>& gray);
+    void advanceSeqPlayHead(VideoScrollMode mode, bool reverse);
 
     // ── Processor reference ───────────────────────────────────────────────────
     Sp3ctraAudioProcessor& processor_;
 
-    // ── Waterfall image buffer ────────────────────────────────────────────────
-    juce::Image scrollBuffer_;
-    int bufW_  { 0 };
-    int bufH_  { 0 };
-
-    // ── CIS local buffers (UI thread only) ────────────────────────────────────
-    std::vector<uint8_t> cisR_, cisG_, cisB_, cisGray_;
-    int cisCount_ { 0 };
-
-    // ── Scroll accumulator ────────────────────────────────────────────────────
-    float scrollAccumulator_ { 0.0f };
-
-    // ── Live Dual mode state ──────────────────────────────────────────────────
-    bool  dualForward_ { true  };
-    int   dualCounter_ { 0     };  ///< rows since last direction flip
-
-    // ── Sequence playback ─────────────────────────────────────────────────────
-    struct SequenceFrame
+    // ── Frame ring buffer (SPSC: capture thread → timer callback) ────────────
+    // Each entry holds one CIS scanline (R/G/B/Gray channels).
+    // kRingSize must be power of 2 for cheap modulo.
+    static constexpr int kRingSize = 2048; // ~2 s at 1000fps
+    struct RingFrame
     {
         std::vector<uint8_t> r, g, b, gray;
     };
-    static constexpr int kMaxSeqFrames = 1000;
+    std::vector<RingFrame>  frameRing_;
+    std::atomic<int>        ringWriteIdx_ { 0 };   // written by capture thread
+    int                     ringReadIdx_  { 0 };   // read by timer tick (msg thread)
+    int                     cisCount_     { 0 };   // updated by capture thread, checked atomically
 
-    std::vector<SequenceFrame> seqFrames_;
-    int   seqPlayHead_   { 0    };
-    bool  seqPingFwd_    { true };  ///< current direction for PingPong mode
-    bool  seqRecording_  { false }; ///< true while filling seqFrames_
-    bool  seqFinished_   { false }; ///< true after OneShot has played
+    // Counter from AudioImageBuffers — detect new frames without mutex
+    std::atomic<uint64_t>   lastLinesReceived_ { 0 };
 
-    // ── Previous mode (detect mode switch) ───────────────────────────────────
+    // ── Scroll image (circular, no memcpy) ───────────────────────────────────
+    juce::Image scrollBuffer_;
+    int bufW_     { 0 };
+    int bufH_     { 0 };
+    int writeRow_ { 0 };  // current write position (advances circularly)
+
+    // ── Live Dual mode ────────────────────────────────────────────────────────
+    bool dualForward_ { true };
+    int  dualCounter_ { 0    };
+
+    // ── Sequence mode ─────────────────────────────────────────────────────────
+    struct SeqFrame
+    {
+        std::vector<uint8_t> r, g, b, gray;
+    };
+    // Max sequence frames: driven by APVTS "videoScrollMaxDuration" at runtime
+    static constexpr int kDefaultMaxSeqFrames = 1000;
+    int maxSeqFrames_ { kDefaultMaxSeqFrames };
+
+    std::vector<SeqFrame> seqFrames_;
+    int  seqPlayHead_  { 0    };
+    bool seqPingFwd_   { true };
+    bool seqRecording_ { false };
+    bool seqFinished_  { false };
+
+    // Previous mode (detect transitions)
     VideoScrollMode prevMode_ { VideoScrollMode::LiveLeftToRight };
 
-    // ── Timer FPS ─────────────────────────────────────────────────────────────
-    static constexpr int kTimerFps = 30;
+    // ── Display refresh rate ──────────────────────────────────────────────────
+    static constexpr int kTimerFps = 60; // raised from 30 for smoother display
+
+    // ── Owned capture thread ──────────────────────────────────────────────────
+    CaptureThread captureThread_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(VideoDisplayComponent)
 };

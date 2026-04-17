@@ -71,6 +71,15 @@ VideoScrollTab::VideoScrollTab(Sp3ctraAudioProcessor& processor)
     directionAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         apvts, "videoScrollDirection", directionCombo_);
 
+    // ── Max Frames (seq recording limit) ──────────────────────────────────────
+    styleSliderH(maxDurSlider_, " fr");
+    maxDurSlider_.setTooltip(
+        "Maximum number of frames recorded before Seq playback starts.\n"
+        "~1000 fr = 1 second of CIS data at real-time speed.");
+    addAndMakeVisible(maxDurSlider_);
+    maxDurAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "videoScrollMaxDuration", maxDurSlider_);
+
     // ── Zoom (live) ───────────────────────────────────────────────────────────
     styleSliderH(zoomSlider_, " x");
     zoomSlider_.setTooltip("Zoom factor (1.0 = fit, >1 = zoomed).");
@@ -220,11 +229,12 @@ void VideoScrollTab::paint(juce::Graphics& g)
 
     const int secScroll = secSrc + 2*kStep + 10;
     drawSection("SCROLL", secScroll);
-    drawLabel("Mode",      secScroll + kStep);
-    drawLabel("Speed",     secScroll + 2*kStep);
-    drawLabel("Direction", secScroll + 3*kStep);
+    drawLabel("Mode",       secScroll + kStep);
+    drawLabel("Speed",      secScroll + 2*kStep);
+    drawLabel("Direction",  secScroll + 3*kStep);
+    drawLabel("Max Frames", secScroll + 4*kStep);
 
-    const int secDisplay = secScroll + 4*kStep + 10;
+    const int secDisplay = secScroll + 5*kStep + 10;
     drawSection("DISPLAY", secDisplay);
     drawLabel("Zoom",     secDisplay + kStep);
     drawLabel("Exposure", secDisplay + 2*kStep);
@@ -258,8 +268,9 @@ void VideoScrollTab::resized()
     modeCombo_     .setBounds(ctrlX, secScroll + kStep,   ctrlW + 50, kCH);
     speedSlider_   .setBounds(ctrlX, secScroll + 2*kStep, ctrlW,      kCH);
     directionCombo_.setBounds(ctrlX, secScroll + 3*kStep, ctrlW,      kCH);
+    maxDurSlider_  .setBounds(ctrlX, secScroll + 4*kStep, ctrlW,      kCH);
 
-    const int secDisplay = secScroll + 4*kStep + 10;
+    const int secDisplay = secScroll + 5*kStep + 10;
     zoomSlider_    .setBounds(ctrlX, secDisplay + kStep,   ctrlW, kCH);
     exposureSlider_.setBounds(ctrlX, secDisplay + 2*kStep, ctrlW, kCH);
     blendModeCombo_.setBounds(ctrlX, secDisplay + 3*kStep, ctrlW, kCH);
