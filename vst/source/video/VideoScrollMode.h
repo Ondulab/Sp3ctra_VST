@@ -1,42 +1,44 @@
 #pragma once
 
+#include <juce_core/juce_core.h>
+
 /**
  * @file VideoScrollMode.h
- * @brief Video scrolling modes — ported from legacy image_sequencer + synth_luxwave.
+ * @brief Video orientation modes — 4 simple rotation angles.
  *
- * Legacy mapping:
- *   LUXWAVE_SCAN_LEFT_TO_RIGHT → LiveLeftToRight
- *   LUXWAVE_SCAN_RIGHT_TO_LEFT → LiveRightToLeft
- *   LUXWAVE_SCAN_DUAL          → LiveDual (ping-pong L↔R)
- *   LOOP_MODE_SIMPLE           → SeqLoopSimple
- *   LOOP_MODE_PINGPONG         → SeqLoopPingPong
- *   LOOP_MODE_ONESHOT          → SeqOneShot
+ * The internal scroll buffer always advances row-by-row (vertical).
+ * The orientation angle is applied as an AffineTransform in paint(),
+ * rotating the rendered waterfall to the desired screen direction.
  *
- * Live modes:  render incoming CIS frames as a waterfall, direction varies.
- * Seq modes:   record N frames from the live stream, then replay at the given speed.
+ *   Deg0   — vertical scroll, new data arrives at bottom  (↑ scroll up)
+ *   Deg90  — horizontal scroll, new data at right         (← scroll left = L->R)
+ *   Deg180 — vertical scroll, new data at top             (↓ scroll down)
+ *   Deg270 — horizontal scroll, new data at left          (→ scroll right = R->L)
  */
-enum class VideoScrollMode
+enum class VideoScrollMode : int
 {
-    LiveLeftToRight = 0,  ///< Live: pixels 0→N, waterfall scrolls upward
-    LiveRightToLeft,      ///< Live: pixels N→0 (mirrored), waterfall scrolls upward
-    LiveDual,             ///< Live: alternates L→R / R→L every half-buffer (ping-pong)
-    SeqLoopSimple,        ///< Seq: record then loop A→B→A→B (legacy LOOP_MODE_SIMPLE)
-    SeqLoopPingPong,      ///< Seq: record then bounce A→B→A     (legacy LOOP_MODE_PINGPONG)
-    SeqOneShot,           ///< Seq: record then play once A→B, freeze (legacy LOOP_MODE_ONESHOT)
-    COUNT
+    Deg0   = 0,   ///< 0°   — new data at bottom, waterfall scrolls up
+    Deg90  = 1,   ///< 90°  — new data at right,  waterfall scrolls left  (L->R)
+    Deg180 = 2,   ///< 180° — new data at top,    waterfall scrolls down
+    Deg270 = 3,   ///< 270° — new data at left,   waterfall scrolls right (R->L)
+    COUNT  = 4
 };
 
-/** Human-readable label for each mode — used in toolbar, ComboBox and tooltips. */
+/** Rotation angle in radians for each mode (used by AffineTransform in paint()). */
+inline float videoScrollModeAngle(VideoScrollMode m)
+{
+    return static_cast<int>(m) * juce::MathConstants<float>::halfPi;
+}
+
+/** Short label shown in the toolbar overlay. */
 inline const char* videoScrollModeLabel(VideoScrollMode m)
 {
     switch (m)
     {
-        case VideoScrollMode::LiveLeftToRight: return "Live L->R";
-        case VideoScrollMode::LiveRightToLeft: return "Live R<-L";
-        case VideoScrollMode::LiveDual:        return "Live Dual";
-        case VideoScrollMode::SeqLoopSimple:   return "Seq. Loop";
-        case VideoScrollMode::SeqLoopPingPong: return "Seq. Ping-Pong";
-        case VideoScrollMode::SeqOneShot:      return "Seq. One-Shot";
-        default:                               return "???";
+        case VideoScrollMode::Deg0:   return "0 deg";
+        case VideoScrollMode::Deg90:  return "90 deg";
+        case VideoScrollMode::Deg180: return "180 deg";
+        case VideoScrollMode::Deg270: return "270 deg";
+        default:                      return "???";
     }
 }

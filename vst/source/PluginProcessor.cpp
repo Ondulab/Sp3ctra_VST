@@ -539,8 +539,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"videoScrollMode", 1}, "Video Scroll Mode",
         juce::StringArray{
-            "Live L->R", "Live R->L", "Live Dual",
-            "Seq. Loop Simple", "Seq. Ping-Pong", "Seq. One-Shot"
+            "0 deg", "90 deg", "180 deg", "270 deg"
         }, 0, kHiddenChoice));
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
