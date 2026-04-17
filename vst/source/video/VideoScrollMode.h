@@ -26,15 +26,15 @@ enum class VideoScrollMode
     COUNT
 };
 
-/** Human-readable label for each mode — used in ComboBox and tooltips. */
+/** Human-readable label for each mode — used in toolbar, ComboBox and tooltips. */
 inline const char* videoScrollModeLabel(VideoScrollMode m)
 {
     switch (m)
     {
-        case VideoScrollMode::LiveLeftToRight: return "Live L\xe2\x86\x92R";
-        case VideoScrollMode::LiveRightToLeft: return "Live R\xe2\x86\x92L";
-        case VideoScrollMode::LiveDual:        return "Live Dual (Ping-Pong)";
-        case VideoScrollMode::SeqLoopSimple:   return "Seq. Boucle Simple";
+        case VideoScrollMode::LiveLeftToRight: return "Live L->R";
+        case VideoScrollMode::LiveRightToLeft: return "Live R<-L";
+        case VideoScrollMode::LiveDual:        return "Live Dual";
+        case VideoScrollMode::SeqLoopSimple:   return "Seq. Loop";
         case VideoScrollMode::SeqLoopPingPong: return "Seq. Ping-Pong";
         case VideoScrollMode::SeqOneShot:      return "Seq. One-Shot";
         default:                               return "???";
