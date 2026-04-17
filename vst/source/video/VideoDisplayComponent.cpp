@@ -75,18 +75,17 @@ void VideoDisplayComponent::captureCurrentFrame()
         case 1: // Sample
             audio_image_buffers_get_sampler_pointers(aib, &pR, &pG, &pB);
             break;
-        case 3: // LuxPitch — mirrors the APVTS "luxpitchSource" selector
+        case 3: // LuxPitch — show the same source buffer that LuxPitch synthesis reads
         {
-            // luxpitchSource choices: 0=S-Sampler, 1=M-Mix, 2=L-Live
-            // Same mapping as CisVisualizerComponent: S→0(SAMPLER), M→2(MIX), L→1(LIVE)
-            static const int kLpChoiceToSrc[3] = { 0, 2, 1 };
-            int lpChoice = static_cast<int>(
-                processor_.getAPVTS().getRawParameterValue("luxpitchSource")->load());
-            if (lpChoice < 0 || lpChoice > 2) lpChoice = 1; // default: Mix
-            const int lp = kLpChoiceToSrc[lpChoice];
-            if      (lp == 1) audio_image_buffers_get_raw_pointers    (aib, &pR, &pG, &pB);
-            else if (lp == 0) audio_image_buffers_get_sampler_pointers(aib, &pR, &pG, &pB);
-            else              audio_image_buffers_get_read_pointers    (aib, &pR, &pG, &pB);
+            // luxpitchSource APVTS choices: 0=S-Sampler  1=M-Mix(default)  2=L-Live
+            const int lpChoice = juce::jlimit(0, 2, static_cast<int>(
+                processor_.getAPVTS().getRawParameterValue("luxpitchSource")->load()));
+            switch (lpChoice)
+            {
+                case 0:  audio_image_buffers_get_sampler_pointers(aib, &pR, &pG, &pB); break;
+                case 2:  audio_image_buffers_get_raw_pointers    (aib, &pR, &pG, &pB); break;
+                default: audio_image_buffers_get_read_pointers   (aib, &pR, &pG, &pB); break;
+            }
             break;
         }
         case 2: // Mix
@@ -226,8 +225,7 @@ void VideoDisplayComponent::drainRingAndAdvance(VideoScrollMode mode)
     const float speed   = apvts.getRawParameterValue("videoScrollSpeed")->load();
     const bool  reverse = apvts.getRawParameterValue("videoScrollDirection")->load() > 0.5f;
 
-    // How many ring frames to consume this tick.
-    // Available = frames captured since last tick.
+    // How many ring frames were captured since last tick.
     const int available = ringWriteIdx_.load(std::memory_order_acquire) - ringReadIdx_;
     if (available <= 0) return;
 
@@ -244,10 +242,26 @@ void VideoDisplayComponent::drainRingAndAdvance(VideoScrollMode mode)
         }
     }
 
-    // speed=1.0 → consume all available frames (real-time)
-    // speed=0.5 → consume half (slow-motion)
-    // speed=2.0 → consume twice (time-lapse, capped by available)
-    int toConsume = juce::jlimit(1, available, (int)((float)available * speed));
+    // ── Fractional speed accumulator ─────────────────────────────────────────
+    // rowAccumulator_ accumulates fractional "rows to paint" across ticks:
+    //   speed=1.0 → consume all available frames  (real-time)
+    //   speed=0.5 → consume half, drop the rest   (2× slow-motion)
+    //   speed=0.1 → consume ~1/10 each tick        (10× slow-motion)
+    //   speed=2.0 → consume 2× available (capped)  (2× fast-motion)
+    //
+    // Frames NOT painted are DROPPED (ringReadIdx_ advanced without painting)
+    // so the ring never overflows even at very low speed values.
+    // ─────────────────────────────────────────────────────────────────────────
+    rowAccumulator_ += (float)available * speed;
+    int toConsume = (int)rowAccumulator_;
+    rowAccumulator_ -= (float)toConsume;
+    toConsume = juce::jmin(toConsume, available);
+
+    // Drop frames that won't be painted (ring drain without rendering)
+    const int toDrop = available - toConsume;
+    if (toDrop > 0) ringReadIdx_ += toDrop;
+
+    if (toConsume <= 0) return;
 
     // For Seq modes: only record/play one frame per consumed slot
     for (int i = 0; i < toConsume; ++i)

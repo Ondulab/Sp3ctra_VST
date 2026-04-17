@@ -145,6 +145,12 @@ private:
     // Previous mode (detect transitions)
     VideoScrollMode prevMode_ { VideoScrollMode::LiveLeftToRight };
 
+    // ── Speed fractional accumulator ──────────────────────────────────────────
+    // Accumulated fractional "rows to paint" across timer ticks.
+    // speed < 1.0: rowAccumulator_ < 1 most ticks → 0 rows drawn → real slow-down.
+    // speed ≥ 1.0: ≥1 row drawn per tick (capped by available).
+    float rowAccumulator_ { 0.f };
+
     // ── Display refresh rate ──────────────────────────────────────────────────
     static constexpr int kTimerFps = 60; // raised from 30 for smoother display
 
