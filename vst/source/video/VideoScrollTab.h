@@ -90,10 +90,6 @@ private:
     juce::Slider zoomSlider_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> zoomAttach_;
 
-    // ── EXPOSURE ─────────────────────────────────────────────────────────────
-    juce::Slider exposureSlider_;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> exposureAttach_;
-
     // ── BLEND MODE ───────────────────────────────────────────────────────────
     juce::ComboBox blendModeCombo_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> blendModeAttach_;

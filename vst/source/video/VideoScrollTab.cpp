@@ -87,14 +87,6 @@ VideoScrollTab::VideoScrollTab(Sp3ctraAudioProcessor& processor)
     zoomAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "videoScrollZoom", zoomSlider_);
 
-    // ── Exposure ──────────────────────────────────────────────────────────────
-    styleSliderH(exposureSlider_);
-    exposureSlider_.setTooltip(
-        "Exposure: 0.0 = underexposed, 0.5 = normal, 1.0 = blown out.");
-    addAndMakeVisible(exposureSlider_);
-    exposureAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "videoScrollExposure", exposureSlider_);
-
     // ── Blend Mode ────────────────────────────────────────────────────────────
     blendModeCombo_.addItem("Mix    (weighted average)", 1);
     blendModeCombo_.addItem("Add    (luminosity boost)", 2);
@@ -236,12 +228,11 @@ void VideoScrollTab::paint(juce::Graphics& g)
 
     const int secDisplay = secScroll + 5*kStep + 10;
     drawSection("DISPLAY", secDisplay);
-    drawLabel("Zoom",     secDisplay + kStep);
-    drawLabel("Exposure", secDisplay + 2*kStep);
-    drawLabel("Blend",    secDisplay + 3*kStep);
+    drawLabel("Zoom",  secDisplay + kStep);
+    drawLabel("Blend", secDisplay + 2*kStep);
 
     // Window section status dot
-    const int secWin = secDisplay + 4*kStep + 10;
+    const int secWin = secDisplay + 3*kStep + 10;
     drawSection("WINDOW", secWin);
     const bool open = (videoWindow_ != nullptr && videoWindow_->isVisible());
     g.setColour(open ? juce::Colour(0xff44cc66u) : juce::Colour(0xff666666u));
@@ -272,10 +263,9 @@ void VideoScrollTab::resized()
 
     const int secDisplay = secScroll + 5*kStep + 10;
     zoomSlider_    .setBounds(ctrlX, secDisplay + kStep,   ctrlW, kCH);
-    exposureSlider_.setBounds(ctrlX, secDisplay + 2*kStep, ctrlW, kCH);
-    blendModeCombo_.setBounds(ctrlX, secDisplay + 3*kStep, ctrlW, kCH);
+    blendModeCombo_.setBounds(ctrlX, secDisplay + 2*kStep, ctrlW, kCH);
 
-    const int secWin = secDisplay + 4*kStep + 10;
+    const int secWin = secDisplay + 3*kStep + 10;
     const int btnY   = secWin + kStep;
     const int btnW   = 140;
     windowBtn_    .setBounds(kHP,             btnY, btnW, kCH + 4);
