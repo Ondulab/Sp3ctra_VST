@@ -82,6 +82,10 @@ private:
     juce::ComboBox directionCombo_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> directionAttach_;
 
+    // ── SEQ MAX FRAMES ────────────────────────────────────────────────────────
+    juce::Slider maxDurSlider_;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> maxDurAttach_;
+
     // ── ZOOM (live control) ───────────────────────────────────────────────────
     juce::Slider zoomSlider_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> zoomAttach_;
