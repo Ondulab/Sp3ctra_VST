@@ -105,7 +105,7 @@ public:
 private:
     // ── Active tab ────────────────────────────────────────────────────────────
     enum class Tab { Image, Synth, Sampler, Video };
-    enum class SynthSub { LuxStral, LuxSynth };
+    enum class SynthSub { LuxStral, LuxSynth, LuxWave };
 
     // ── Layout constants ──────────────────────────────────────────────────────
     static constexpr int kHeaderH    = 52;
@@ -154,6 +154,7 @@ private:
     // ── Synth sub-tab buttons ────────────────────────────────────────────────
     juce::TextButton luxstralSubBtn  { "LuxStral" };
     juce::TextButton luxsynthSubBtn  { "LuxSynth" };
+    juce::TextButton luxwaveSubBtn   { "LuxWave" };
 
     void switchSynthSubTab(SynthSub sub);
 
@@ -230,6 +231,33 @@ private:
     juce::Slider lxLfoRateSlider, lxLfoDepthSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
         lxLfoRateAttach, lxLfoDepthAttach;
+
+    // ── SYNTH page — LuxWave audio params ───────────────────────────────────
+    juce::ToggleButton lwEnableToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> lwEnableAttachment;
+
+    juce::Slider luxwaveVolumeSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> luxwaveVolumeAttachment;
+
+    juce::Slider lwAttackSlider, lwDecaySlider, lwSustainSlider, lwReleaseSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
+        lwAttackAttach, lwDecayAttach, lwSustainAttach, lwReleaseAttach;
+
+    juce::Slider lwFltCutoffSlider, lwFltDepthSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
+        lwFltCutoffAttach, lwFltDepthAttach;
+
+    juce::Slider lwLfoRateSlider, lwLfoDepthSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
+        lwLfoRateAttach, lwLfoDepthAttach;
+
+    juce::Slider lwAmplitudeSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
+        lwAmplitudeAttach;
+
+    juce::ComboBox lwScanModeCombo;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>
+        lwScanModeAttach;
 
     // ── SAMPLER page ──────────────────────────────────────────────────────────
     std::unique_ptr<SamplerPageComponent> samplerPage;

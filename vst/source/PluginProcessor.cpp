@@ -12,6 +12,7 @@ extern "C" {
     #include "synthesis/luxstral/wave_generation.h"           // request_frequency_reinit() hot-reload
     #include "processing/lux_pitch.h"                         // LuxPitch engine + g_lux_pitch
     #include "synthesis/luxsynth/luxsynth_vst_adapter.h"      // luxsynth_push_midi_event(), buffers, engine
+    #include "synthesis/luxwave/luxwave_vst_adapter.h"        // luxwave_push_midi_event(), g_luxwave_engine
 }
 // Note: synth_luxstral_threading.h / synth_luxstral_runtime.h / AudioProcessingThread.h
 // are now included transitively via Sp3ctraSharedCore.h and handled by Sp3ctraSharedCore.
@@ -379,6 +380,78 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             juce::ParameterID{"luxsynthOctaveOffset", 1}, "LuxSynth Octave Offset",
             octaveNames, 2, kHiddenChoice));  // default index 2 = 0
+    }
+
+    // ── LuxWave Engine Parameters ─────────────────────────────────────────────
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"luxwaveEnabled", 1}, "LuxWave Active", false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxwaveVolume", 1}, "LuxWave Vol.",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+
+    // LuxWave Volume ADSR
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxwaveAttackMs", 1}, "LW Attack",
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 10.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxwaveDecayMs", 1}, "LW Decay",
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 100.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxwaveSustainLevel", 1}, "LW Sustain",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.7f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxwaveReleaseMs", 1}, "LW Release",
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 200.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+
+    // LuxWave Filter ADSR
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxwaveFilterCutoff", 1}, "LW Flt Cutoff",
+        juce::NormalisableRange<float>(100.0f, 20000.0f, 1.0f, 0.3f), 8000.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("Hz")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxwaveFilterEnvDepth", 1}, "LW Flt Depth",
+        juce::NormalisableRange<float>(0.0f, 20000.0f, 1.0f, 0.3f), 4000.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("Hz")));
+
+    // LuxWave LFO
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxwaveLfoRate", 1}, "LW LFO Rate",
+        juce::NormalisableRange<float>(0.0f, 20.0f, 0.01f), 5.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("Hz")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxwaveLfoDepth", 1}, "LW LFO Depth",
+        juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 0.1f,
+        juce::AudioParameterFloatAttributes{}.withLabel("st")));
+
+    // LuxWave Scan Mode
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"luxwaveScanMode", 1}, "LW Scan Mode",
+        juce::StringArray{"Left→Right", "Right→Left", "Dual"}, 0));
+
+    // LuxWave Amplitude
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxwaveAmplitude", 1}, "LW Amplitude",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+
+    // LuxWave MIDI Channel (Channel 1-16)
+    {
+        juce::StringArray lwMidiChNames;
+        for (int i = 1; i <= 16; ++i)
+            lwMidiChNames.add("Channel " + juce::String(i));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxwaveMidiChannel", 1}, "LuxWave MIDI Channel",
+            lwMidiChNames, 0, kHiddenChoice));
+    }
+
+    // LuxWave Octave Offset (-2 .. +2)
+    {
+        juce::StringArray lwOctNames { "-2", "-1", " 0", "+1", "+2" };
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxwaveOctaveOffset", 1}, "LuxWave Octave Offset",
+            lwOctNames, 2, kHiddenChoice));
     }
 
     // ── LuxPitch Parameters ───────────────────────────────────────────────────
@@ -1094,6 +1167,27 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         }
     }
 
+    // ── LuxWave MIDI (RT-safe: push into lock-free ring buffer) ──────────────
+    {
+        const bool lwEnabled = apvts.getRawParameterValue("luxwaveEnabled")->load() > 0.5f;
+        if (lwEnabled && g_luxwave_engine.initialized)
+        {
+            const int lwCh  = static_cast<int>(apvts.getRawParameterValue("luxwaveMidiChannel")->load()) + 1;
+            const int lwOct = static_cast<int>(apvts.getRawParameterValue("luxwaveOctaveOffset")->load()) - 2;
+            for (const auto metadata : midiMessages)
+            {
+                const auto msg = metadata.getMessage();
+                if (msg.getChannel() != lwCh) continue;
+                const int shifted = msg.getNoteNumber() + lwOct * 12;
+                if (shifted < 0 || shifted > 127) continue;
+                if (msg.isNoteOn())
+                    luxwave_push_midi_event(0x90, (uint8_t)shifted, (uint8_t)msg.getVelocity());
+                else if (msg.isNoteOff())
+                    luxwave_push_midi_event(0x80, (uint8_t)shifted, 0);
+            }
+        }
+    }
+
     // ── FrameSequencer: advance step if sequencer is running ─────────────────
     if (frameSequencer != nullptr)
         frameSequencer->processBlock(getPlayHead(),
@@ -1242,6 +1336,64 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                 float* dest = buffer.getWritePointer(1);
                 for (int i = 0; i < numSamples; ++i)
                     dest[i] += g_luxsynth_engine.output_right[i] * lxVol;
+            }
+        }
+    }
+
+    // ========================================================================
+    // 🎯 LUXWAVE INLINE SYNTHESIS (RT-SAFE, WAVETABLE)
+    //
+    // LuxWave reads the LuxSynth grayscale line as a dynamic wavetable.
+    // MIDI pitch controls playback speed through the waveform.
+    // Fully RT-safe — runs directly in processBlock.
+    // ========================================================================
+    if (sharedCore && sharedCore->isReady() && g_luxwave_engine.initialized)
+    {
+        const bool lwEnabled = apvts.getRawParameterValue("luxwaveEnabled")->load() > 0.5f;
+        if (lwEnabled)
+        {
+            // 1. Update engine config from APVTS (RT-safe: simple struct copy)
+            LuxWaveConfig lwCfg;
+            lwCfg.attack_ms           = apvts.getRawParameterValue("luxwaveAttackMs")->load();
+            lwCfg.decay_ms            = apvts.getRawParameterValue("luxwaveDecayMs")->load();
+            lwCfg.sustain_level       = apvts.getRawParameterValue("luxwaveSustainLevel")->load();
+            lwCfg.release_ms          = apvts.getRawParameterValue("luxwaveReleaseMs")->load();
+            lwCfg.filter_attack_ms    = 20.0f;
+            lwCfg.filter_decay_ms     = 150.0f;
+            lwCfg.filter_sustain      = 0.5f;
+            lwCfg.filter_release_ms   = 300.0f;
+            lwCfg.filter_cutoff_hz    = apvts.getRawParameterValue("luxwaveFilterCutoff")->load();
+            lwCfg.filter_env_depth_hz = apvts.getRawParameterValue("luxwaveFilterEnvDepth")->load();
+            lwCfg.lfo_rate_hz         = apvts.getRawParameterValue("luxwaveLfoRate")->load();
+            lwCfg.lfo_depth_semitones = apvts.getRawParameterValue("luxwaveLfoDepth")->load();
+            lwCfg.scan_mode           = (LuxWaveScanMode)static_cast<int>(apvts.getRawParameterValue("luxwaveScanMode")->load());
+            lwCfg.amplitude           = apvts.getRawParameterValue("luxwaveAmplitude")->load();
+            lwCfg.sample_rate         = (float)getSampleRate();
+            lwCfg.buffer_size         = numSamples;
+            lwCfg.enabled             = true;
+            luxwave_engine_set_config(&g_luxwave_engine, &lwCfg);
+
+            // 2. Drain pending MIDI events
+            luxwave_process_pending_midi();
+
+            // 3. Generate audio
+            luxwave_engine_process(&g_luxwave_engine, numSamples,
+                                   g_luxwave_engine.output_left,
+                                   g_luxwave_engine.output_right);
+
+            // 4. Mix into JUCE output buffer (additive)
+            const float lwVol = apvts.getRawParameterValue("luxwaveVolume")->load();
+            if (totalNumOutputChannels >= 1)
+            {
+                float* dest = buffer.getWritePointer(0);
+                for (int i = 0; i < numSamples; ++i)
+                    dest[i] += g_luxwave_engine.output_left[i] * lwVol;
+            }
+            if (totalNumOutputChannels >= 2)
+            {
+                float* dest = buffer.getWritePointer(1);
+                for (int i = 0; i < numSamples; ++i)
+                    dest[i] += g_luxwave_engine.output_right[i] * lwVol;
             }
         }
     }

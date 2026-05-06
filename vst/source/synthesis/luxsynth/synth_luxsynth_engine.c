@@ -232,7 +232,7 @@ int luxsynth_engine_init(LuxSynthEngine *engine, float sample_rate, int buffer_s
     engine->config.lfo_depth_semitones = 0.1f;
     engine->config.gamma = 1.0f;
     engine->config.num_oscillators = LUXSYNTH_MAX_OSCILLATORS;
-    engine->config.master_volume = 0.5f;
+    engine->config.master_volume = 0.20f;  /* match legacy default — attenuate 128-oscillator sum before hard clip */
     engine->config.sample_rate = sample_rate;
     engine->config.buffer_size = buffer_size;
     engine->config.enabled = true;

@@ -1807,20 +1807,151 @@ void CisVisualizerComponent::mouseExit(const juce::MouseEvent&)
 
 //==============================================================================
 // FFT — computeFftMagnitudes
-// Computes a Hann-windowed real FFT on localDataGray using KissFFT.
+// Computes a Hann-windowed real FFT using KissFFT.
+// IMPORTANT: reads RGB data INDEPENDENTLY from the source selected in the
+// LUXSYNTH tab dropdown (luxsynth_source_type), NOT from the visualizer's
+// localDataGray.  This decouples what the user sees from what LuxSynth hears.
 // Results are stored in fftMagnitudesSmoothed_ with exponential smoothing.
 // The KissFFT config is cached in fftCfg_ and reallocated only when
 // cisPixelsCount changes.  All work is O(N log N) on the UI thread at 30 fps.
 //==============================================================================
 void CisVisualizerComponent::computeFftMagnitudes()
 {
-    if (localDataGray.empty() || cisPixelsCount == 0)
+    if (cisPixelsCount == 0)
     {
         fftMagnitudes_.clear();
         fftMagnitudesSmoothed_.clear();
         fftHarmonicity_.clear();
         fftNumHarmonics_ = 0;
         return;
+    }
+
+    // ── Populate lxFft buffers from LuxSynth source (independent of visualizer) ─
+    {
+        auto* core = processor.getSp3ctraCore();
+        auto* buffers = (core && core->isInitialized()) ? core->getAudioImageBuffers() : nullptr;
+        if (!buffers || !buffers->initialized)
+        {
+            fftMagnitudes_.clear();
+            fftMagnitudesSmoothed_.clear();
+            fftHarmonicity_.clear();
+            fftNumHarmonics_ = 0;
+            return;
+        }
+
+        lxFftR_.resize(static_cast<size_t>(cisPixelsCount));
+        lxFftG_.resize(static_cast<size_t>(cisPixelsCount));
+        lxFftB_.resize(static_cast<size_t>(cisPixelsCount));
+        lxFftGray_.resize(static_cast<size_t>(cisPixelsCount));
+
+        uint8_t* pR = nullptr;
+        uint8_t* pG = nullptr;
+        uint8_t* pB = nullptr;
+
+        const int srcType = g_sp3ctra_config.luxsynth_source_type;
+
+        if (srcType == IMAGE_SOURCE_LUXPITCH)
+        {
+            // LuxPitch as source: read from LuxPitch's own input source
+            static const int kLpChoiceToSrc[3] = { 0, 2, 1 };
+            int lpChoice = static_cast<int>(
+                processor.getAPVTS().getRawParameterValue("luxpitchSource")->load());
+            if (lpChoice < 0 || lpChoice > 2) lpChoice = 1;
+            const int lpSrc = kLpChoiceToSrc[lpChoice];
+
+            if (lpSrc == IMAGE_SOURCE_LIVE)
+                audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
+            else if (lpSrc == IMAGE_SOURCE_SAMPLER)
+                audio_image_buffers_get_sampler_pointers(buffers, &pR, &pG, &pB);
+            else
+                audio_image_buffers_get_read_pointers(buffers, &pR, &pG, &pB);
+        }
+        else if (srcType == IMAGE_SOURCE_LIVE)
+            audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
+        else if (srcType == IMAGE_SOURCE_SAMPLER)
+            audio_image_buffers_get_sampler_pointers(buffers, &pR, &pG, &pB);
+        else // IMAGE_SOURCE_MIX
+            audio_image_buffers_get_read_pointers(buffers, &pR, &pG, &pB);
+
+        if (!pR || !pG || !pB)
+        {
+            std::fill(lxFftGray_.begin(), lxFftGray_.end(), uint8_t{255});
+            std::fill(lxFftR_.begin(),    lxFftR_.end(),    uint8_t{255});
+            std::fill(lxFftB_.begin(),    lxFftB_.end(),    uint8_t{255});
+        }
+        else
+        {
+            std::memcpy(lxFftR_.data(), pR, static_cast<size_t>(cisPixelsCount));
+            std::memcpy(lxFftG_.data(), pG, static_cast<size_t>(cisPixelsCount));
+            std::memcpy(lxFftB_.data(), pB, static_cast<size_t>(cisPixelsCount));
+
+            // Apply LuxPitch processing if source is LuxPitch
+            if (srcType == IMAGE_SOURCE_LUXPITCH)
+            {
+                const uint8_t *outR, *outG, *outB;
+                lux_pitch_process_frame(
+                    &g_lux_pitch,
+                    lxFftR_.data(), lxFftG_.data(), lxFftB_.data(),
+                    cisPixelsCount,
+                    g_sp3ctra_config.num_octaves,
+                    &outR, &outG, &outB);
+                if (outR != lxFftR_.data())
+                {
+                    std::memcpy(lxFftR_.data(), outR, static_cast<size_t>(cisPixelsCount));
+                    std::memcpy(lxFftG_.data(), outG, static_cast<size_t>(cisPixelsCount));
+                    std::memcpy(lxFftB_.data(), outB, static_cast<size_t>(cisPixelsCount));
+                }
+            }
+
+            // LuxSynth preprocessing: inversion + DC blocking + gamma
+            const int doInvert  = g_sp3ctra_config.luxsynth_inversion;
+            const int doDcBlock = g_sp3ctra_config.luxsynth_ac_removal;
+            const float gammaVal = g_sp3ctra_config.luxsynth_gamma_value;
+            const int gammaOn   = (gammaVal > 0.0f && gammaVal != 1.0f) ? 1 : 0;
+
+            thread_local std::vector<float> grayF;
+            grayF.resize(static_cast<size_t>(cisPixelsCount));
+
+            // Pass 1: grayscale + inversion
+            for (int i = 0; i < cisPixelsCount; ++i)
+            {
+                float gray = (0.299f * static_cast<float>(lxFftR_[i])
+                            + 0.587f * static_cast<float>(lxFftG_[i])
+                            + 0.114f * static_cast<float>(lxFftB_[i])) / 255.0f;
+                if (gray < 0.0f) gray = 0.0f;
+                if (gray > 1.0f) gray = 1.0f;
+                if (doInvert) gray = 1.0f - gray;
+                grayF[static_cast<size_t>(i)] = gray;
+            }
+
+            // Pass 2: DC blocking
+            if (doDcBlock && cisPixelsCount > 0)
+            {
+                float sum = 0.0f;
+                for (int i = 0; i < cisPixelsCount; ++i)
+                    sum += grayF[static_cast<size_t>(i)];
+                float mean = sum / static_cast<float>(cisPixelsCount);
+                for (int i = 0; i < cisPixelsCount; ++i)
+                {
+                    float v = grayF[static_cast<size_t>(i)] - mean;
+                    if (v < 0.0f) v = 0.0f;
+                    if (v > 1.0f) v = 1.0f;
+                    grayF[static_cast<size_t>(i)] = v;
+                }
+            }
+
+            // Pass 3: gamma + quantisation
+            for (int i = 0; i < cisPixelsCount; ++i)
+            {
+                float gray = grayF[static_cast<size_t>(i)];
+                if (gammaOn && gammaVal > 0.0f)
+                    gray = std::pow(gray, 1.0f / gammaVal);
+                if (gray < 0.0f) gray = 0.0f;
+                if (gray > 1.0f) gray = 1.0f;
+                lxFftGray_[static_cast<size_t>(i)] =
+                    static_cast<uint8_t>(gray * 255.0f + 0.5f);
+            }
+        }
     }
 
     // ── Read quality / smoothing parameters from APVTS ────────────────────────
@@ -1878,7 +2009,7 @@ void CisVisualizerComponent::computeFftMagnitudes()
     {
         const float hann = 0.5f * (1.0f - std::cos(kTwoPiOverN * static_cast<float>(i)));
         inBuf[static_cast<size_t>(i)] =
-            (static_cast<float>(localDataGray[static_cast<size_t>(i)]) / 255.0f) * hann;
+            (static_cast<float>(lxFftGray_[static_cast<size_t>(i)]) / 255.0f) * hann;
     }
 
     kiss_fftr(cfg, inBuf.data(), outBuf.data());
@@ -1918,7 +2049,7 @@ void CisVisualizerComponent::computeFftMagnitudes()
     // Bin k ↔ section k of the scan (k spatial cycles across the full line).
     // Average (R-B)/255 in that section → temperature → harmonicity [0..1].
     // Light temporal smoothing (τ ≈ 10 frames at 30 fps) avoids flicker.
-    if (!localDataR.empty() && !localDataB.empty())
+    if (!lxFftR_.empty() && !lxFftB_.empty())
     {
         // ── Subtract global CIS sensor R-B bias ───────────────────────────────
         // The CIS sensor has a fixed warm bias (R > B globally on white surfaces).
@@ -1927,8 +2058,8 @@ void CisVisualizerComponent::computeFftMagnitudes()
         float globalR = 0.0f, globalB = 0.0f;
         for (int i = 0; i < cisPixelsCount; ++i)
         {
-            globalR += static_cast<float>(localDataR[static_cast<size_t>(i)]);
-            globalB += static_cast<float>(localDataB[static_cast<size_t>(i)]);
+            globalR += static_cast<float>(lxFftR_[static_cast<size_t>(i)]);
+            globalB += static_cast<float>(lxFftB_[static_cast<size_t>(i)]);
         }
         const float globalBias = (globalR - globalB)
                                  / (static_cast<float>(cisPixelsCount) * 255.0f);
@@ -1946,8 +2077,8 @@ void CisVisualizerComponent::computeFftMagnitudes()
             float sumR = 0.0f, sumB = 0.0f;
             for (int i = posStart; i < posEnd; ++i)
             {
-                sumR += static_cast<float>(localDataR[static_cast<size_t>(i)]);
-                sumB += static_cast<float>(localDataB[static_cast<size_t>(i)]);
+                sumR += static_cast<float>(lxFftR_[static_cast<size_t>(i)]);
+                sumB += static_cast<float>(lxFftB_[static_cast<size_t>(i)]);
             }
             const float n        = static_cast<float>(posEnd - posStart);
             // Bias-corrected, amplified temperature [-1..1]
@@ -2001,7 +2132,7 @@ void CisVisualizerComponent::computeFftMagnitudes()
         cfg.gamma                = apvts.getRawParameterValue("luxsynthGammaValue")->load();
         cfg.num_oscillators      = static_cast<int>(
             apvts.getRawParameterValue("luxsynthNumOscillators")->load());
-        cfg.master_volume        = 0.5f;  // fixed for now
+        cfg.master_volume        = 0.20f; // legacy default — attenuate additive sum before hard clip
         cfg.sample_rate          = g_luxsynth_engine.sample_rate;
         cfg.buffer_size          = static_cast<int>(
             g_luxsynth_engine.sample_rate > 0 ? g_luxsynth_engine.sample_rate / 30.0f : 512);

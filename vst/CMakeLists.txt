@@ -133,9 +133,17 @@ target_sources(Sp3ctraVST
         source/synthesis/common/voice_manager.h
         source/LuxSynthProcessingThread.h
 
+        # LuxWave Wavetable Synthesis Engine
+        source/synthesis/luxwave/synth_luxwave_engine.c
+        source/synthesis/luxwave/synth_luxwave_engine.h
+        source/synthesis/luxwave/luxwave_vst_adapter.c
+        source/synthesis/luxwave/luxwave_vst_adapter.h
+
         # LuxSynth Settings Tab
         source/settings/LuxSynthSettingsTab.cpp
         source/settings/LuxSynthSettingsTab.h
+        source/settings/LuxWaveSettingsTab.cpp
+        source/settings/LuxWaveSettingsTab.h
 
         # LuxPitch Settings Tab + UI Tab
         source/settings/LuxPitchSettingsTab.cpp

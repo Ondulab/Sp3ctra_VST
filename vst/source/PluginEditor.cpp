@@ -80,10 +80,13 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     // ── Synth sub-tab buttons ────────────────────────────────────────────────
     luxstralSubBtn.onClick  = [this] { switchSynthSubTab(SynthSub::LuxStral); };
     luxsynthSubBtn.onClick  = [this] { switchSynthSubTab(SynthSub::LuxSynth); };
+    luxwaveSubBtn.onClick   = [this] { switchSynthSubTab(SynthSub::LuxWave); };
     luxstralSubBtn.getProperties().set("isTab", true);
     luxsynthSubBtn.getProperties().set("isTab", true);
+    luxwaveSubBtn.getProperties().set("isTab", true);
     addChildComponent(luxstralSubBtn);
     addChildComponent(luxsynthSubBtn);
+    addChildComponent(luxwaveSubBtn);
 
     // ── LuxSynth audio controls ─────────────────────────────────────────────
     lxEnableToggle.setButtonText("Active");
@@ -152,6 +155,46 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     sfFocusOnlyAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "sfFocusOnly", sfFocusOnlyToggle);
 
+    // ── LuxWave audio controls ───────────────────────────────────────────────
+    lwEnableToggle.setButtonText("Active");
+    addChildComponent(lwEnableToggle);
+    lwEnableAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "luxwaveEnabled", lwEnableToggle);
+
+    initSlider(luxwaveVolumeSlider);
+    addChildComponent(luxwaveVolumeSlider);
+    luxwaveVolumeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "luxwaveVolume", luxwaveVolumeSlider);
+
+    initSlider(lwAttackSlider, " ms");   addChildComponent(lwAttackSlider);
+    lwAttackAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxwaveAttackMs", lwAttackSlider);
+    initSlider(lwDecaySlider, " ms");    addChildComponent(lwDecaySlider);
+    lwDecayAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxwaveDecayMs", lwDecaySlider);
+    initSlider(lwSustainSlider);         addChildComponent(lwSustainSlider);
+    lwSustainAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxwaveSustainLevel", lwSustainSlider);
+    initSlider(lwReleaseSlider, " ms");  addChildComponent(lwReleaseSlider);
+    lwReleaseAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxwaveReleaseMs", lwReleaseSlider);
+
+    initSlider(lwFltCutoffSlider, " Hz"); addChildComponent(lwFltCutoffSlider);
+    lwFltCutoffAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxwaveFilterCutoff", lwFltCutoffSlider);
+    initSlider(lwFltDepthSlider, " Hz");  addChildComponent(lwFltDepthSlider);
+    lwFltDepthAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxwaveFilterEnvDepth", lwFltDepthSlider);
+
+    initSlider(lwLfoRateSlider, " Hz");  addChildComponent(lwLfoRateSlider);
+    lwLfoRateAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxwaveLfoRate", lwLfoRateSlider);
+    initSlider(lwLfoDepthSlider);        addChildComponent(lwLfoDepthSlider);
+    lwLfoDepthAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxwaveLfoDepth", lwLfoDepthSlider);
+
+    initSlider(lwAmplitudeSlider);       addChildComponent(lwAmplitudeSlider);
+    lwAmplitudeAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, "luxwaveAmplitude", lwAmplitudeSlider);
+
+    addChildComponent(lwScanModeCombo);
+    lwScanModeCombo.addItem("Forward",     1);
+    lwScanModeCombo.addItem("Ping-Pong",   2);
+    lwScanModeCombo.addItem("Random",      3);
+    lwScanModeAttach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        apvts, "luxwaveScanMode", lwScanModeCombo);
+
     // ── IMAGE page ────────────────────────────────────────────────────────────
     imagePage = std::make_unique<ImagePageComponent>(audioProcessor);
     addChildComponent(imagePage.get());
@@ -198,6 +241,7 @@ void Sp3ctraAudioProcessorEditor::switchToTab(Tab tab)
     // Sub-tab buttons — visible only on SYNTH page
     luxstralSubBtn.setVisible(synthVis);
     luxsynthSubBtn.setVisible(synthVis);
+    luxwaveSubBtn.setVisible(synthVis);
 
     // Hide all synth controls first, then let switchSynthSubTab() show the right ones
     std::array<juce::Component*, 13> luxstralCtrls = {
@@ -219,6 +263,15 @@ void Sp3ctraAudioProcessorEditor::switchToTab(Tab tab)
         &lxLfoRateSlider, &lxLfoDepthSlider
     };
     for (auto* c : luxsynthCtrls) if (c) c->setVisible(false);
+
+    std::array<juce::Component*, 12> luxwaveCtrls = {
+        &lwEnableToggle, &luxwaveVolumeSlider,
+        &lwAttackSlider, &lwDecaySlider, &lwSustainSlider, &lwReleaseSlider,
+        &lwFltCutoffSlider, &lwFltDepthSlider,
+        &lwLfoRateSlider, &lwLfoDepthSlider,
+        &lwAmplitudeSlider, &lwScanModeCombo
+    };
+    for (auto* c : luxwaveCtrls) if (c) c->setVisible(false);
 
     // Show the correct sub-tab controls
     if (synthVis)
@@ -265,6 +318,7 @@ void Sp3ctraAudioProcessorEditor::switchSynthSubTab(SynthSub sub)
 
     const bool isLuxStral = (sub == SynthSub::LuxStral);
     const bool isLuxSynth = (sub == SynthSub::LuxSynth);
+    const bool isLuxWave  = (sub == SynthSub::LuxWave);
 
     // LuxStral controls
     deviceOnToggle.setVisible(isLuxStral);
@@ -298,6 +352,20 @@ void Sp3ctraAudioProcessorEditor::switchSynthSubTab(SynthSub sub)
     lxLfoRateSlider.setVisible(isLuxSynth);
     lxLfoDepthSlider.setVisible(isLuxSynth);
 
+    // LuxWave controls
+    lwEnableToggle.setVisible(isLuxWave);
+    luxwaveVolumeSlider.setVisible(isLuxWave);
+    lwAttackSlider.setVisible(isLuxWave);
+    lwDecaySlider.setVisible(isLuxWave);
+    lwSustainSlider.setVisible(isLuxWave);
+    lwReleaseSlider.setVisible(isLuxWave);
+    lwFltCutoffSlider.setVisible(isLuxWave);
+    lwFltDepthSlider.setVisible(isLuxWave);
+    lwLfoRateSlider.setVisible(isLuxWave);
+    lwLfoDepthSlider.setVisible(isLuxWave);
+    lwAmplitudeSlider.setVisible(isLuxWave);
+    lwScanModeCombo.setVisible(isLuxWave);
+
     // Sub-tab button styling
     auto styleSubTab = [](juce::TextButton& btn, bool active)
     {
@@ -308,6 +376,7 @@ void Sp3ctraAudioProcessorEditor::switchSynthSubTab(SynthSub sub)
     };
     styleSubTab(luxstralSubBtn, isLuxStral);
     styleSubTab(luxsynthSubBtn, isLuxSynth);
+    styleSubTab(luxwaveSubBtn,  isLuxWave);
 
     repaint();
 }
@@ -407,7 +476,9 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
         g.fillRect(0, kSubTabsY + kSubTabsH - 1, getWidth(), 1);
 
         // Active sub-tab accent
-        const auto& activeBtn = (currentSynthSub == SynthSub::LuxStral) ? luxstralSubBtn : luxsynthSubBtn;
+        const auto& activeBtn = (currentSynthSub == SynthSub::LuxStral) ? luxstralSubBtn
+                              : (currentSynthSub == SynthSub::LuxSynth) ? luxsynthSubBtn
+                              :                                            luxwaveSubBtn;
         g.setColour(juce::Colour(0xff4488cc));
         g.fillRect(activeBtn.getX(), kSubTabsY + kSubTabsH - 2,
                    activeBtn.getWidth(), 2);
@@ -525,6 +596,56 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
                        juce::Rectangle<int>(rxp+4, rsy + i*kRowStep, kLabelW, kRowH),
                        juce::Justification::centredRight, true);
     }
+
+    // ── LUXWAVE labels ───────────────────────────────────────────────────────
+    if (currentTab == Tab::Synth && currentSynthSub == SynthSub::LuxWave)
+    {
+        const int cw  = colWidth();
+        const int lxp = colLX();
+        const int rxp = colRX();
+        const int rsy = rowsStartY();
+
+        // Left column badge — Wavetable ADSR (orange-gold)
+        g.setColour(juce::Colour(0xff3a2a1a));
+        g.fillRoundedRectangle(juce::Rectangle<int>(lxp, kPageTop, cw, kSectionH).toFloat(), 3.f);
+        g.setColour(juce::Colour(0xffddaa44));
+        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
+        g.drawText("LUXWAVE  —  Wavetable ADSR + Scan",
+                   juce::Rectangle<int>(lxp+6, kPageTop, cw-12, kSectionH),
+                   juce::Justification::centredLeft, true);
+
+        // Left column labels (8 rows)
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
+        g.setColour(juce::Colour(0xffb8c4d0));
+        static const char* const lwLeftLbls[] = {
+            "Enable", "Volume", "Amplitude", "Attack", "Decay", "Sustain", "Release",
+            "Scan Mode"
+        };
+        for (int i = 0; i < 8; ++i)
+            g.drawText(lwLeftLbls[i],
+                       juce::Rectangle<int>(lxp, rsy + i*kRowStep, kLabelW, kRowH),
+                       juce::Justification::centredRight, true);
+
+        // Right column badge — Filter + LFO (teal-dark)
+        g.setColour(juce::Colour(0xff1a2a3a));
+        g.fillRoundedRectangle(juce::Rectangle<int>(rxp, kPageTop, cw, kSectionH).toFloat(), 3.f);
+        g.setColour(juce::Colour(0xff66aacc));
+        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
+        g.drawText("FILTER + LFO",
+                   juce::Rectangle<int>(rxp+6, kPageTop, cw-12, kSectionH),
+                   juce::Justification::centredLeft, true);
+
+        // Right column labels (4 rows)
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
+        g.setColour(juce::Colour(0xffb8c4d0));
+        static const char* const lwRightLbls[] = {
+            "Flt. Cutoff", "Flt. Env Depth", "LFO Rate", "LFO Depth"
+        };
+        for (int i = 0; i < 4; ++i)
+            g.drawText(lwRightLbls[i],
+                       juce::Rectangle<int>(rxp+4, rsy + i*kRowStep, kLabelW, kRowH),
+                       juce::Justification::centredRight, true);
+    }
 }
 
 //==============================================================================
@@ -543,8 +664,9 @@ void Sp3ctraAudioProcessorEditor::resized()
     videoTabBtn  .setBounds(kHPad + 264, kTabsY + 2, 70, Sp3ctraTheme::kTabBtnH);
 
     // ── Synth sub-tab buttons ────────────────────────────────────────────────
-    luxstralSubBtn.setBounds(kHPad,      kSubTabsY + 1, 72, kSubTabsH - 2);
-    luxsynthSubBtn.setBounds(kHPad + 76, kSubTabsY + 1, 72, kSubTabsH - 2);
+    luxstralSubBtn.setBounds(kHPad,       kSubTabsY + 1, 72, kSubTabsH - 2);
+    luxsynthSubBtn.setBounds(kHPad + 76,  kSubTabsY + 1, 72, kSubTabsH - 2);
+    luxwaveSubBtn .setBounds(kHPad + 152, kSubTabsY + 1, 72, kSubTabsH - 2);
 
     // ── LuxStral controls (SYNTH page, left column) ───────────────────────────
     {
@@ -602,6 +724,33 @@ void Sp3ctraAudioProcessorEditor::resized()
         lxFltCutoffSlider .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
         lxFltDepthSlider  .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
         lxLfoDepthSlider  .setBounds(cx, cy, cw2, kRowH);
+    }
+
+    // ── LuxWave controls (SYNTH page, left column = ADSR + Volume) ────────────
+    {
+        const int cx = lxp + kCtrlOffset;
+        int cy = rsy;
+        lwEnableToggle      .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        luxwaveVolumeSlider .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        lwAmplitudeSlider   .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        lwAttackSlider      .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        lwDecaySlider       .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        lwSustainSlider     .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        lwReleaseSlider     .setBounds(cx, cy, kCtrlW, kRowH); cy += kRowStep;
+        lwScanModeCombo     .setBounds(cx, cy, kCtrlW, kRowH);
+    }
+
+    // ── LuxWave controls (SYNTH page, right column = Filter + LFO) ────────────
+    {
+        const int rxp = colRX();
+        const int cw  = colWidth();
+        const int cx  = rxp + kCtrlOffset + 4;
+        const int cw2 = cw - kCtrlOffset - 12;
+        int cy = rsy;
+        lwFltCutoffSlider .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
+        lwFltDepthSlider  .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
+        lwLfoRateSlider   .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
+        lwLfoDepthSlider  .setBounds(cx, cy, cw2, kRowH);
     }
 
     // ── Header gear button (top-right) ────────────────────────────────────────

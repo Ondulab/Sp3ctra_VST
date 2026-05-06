@@ -38,12 +38,12 @@ VideoScrollTab::VideoScrollTab(Sp3ctraAudioProcessor& processor)
     sourceCombo_.addItem("L  (Live CIS)",        1);
     sourceCombo_.addItem("Sample",               2);
     sourceCombo_.addItem("Mix",                  3);
-    sourceCombo_.addItem("LuxPitch  (= Mix)",    4);
+    sourceCombo_.addItem("LuxPitch Output",      4);
     sourceCombo_.setTooltip(
         "Image source fed to the video scroll window.\n"
-        "'LuxPitch (= Mix)' shows the blended synthesis buffer — the same data\n"
-        "LuxPitch reads for pitch detection.  Visually identical to Mix when no\n"
-        "sampler is playing (expected — both sources read the same buffer).");
+        "'LuxPitch Output' shows the post-LuxPitch processed image — the shifted,\n"
+        "enveloped, and modulated output of the LuxPitch engine.\n"
+        "Requires LuxPitch to be enabled in the IMAGE > LUXPITCH tab.");
     addAndMakeVisible(sourceCombo_);
     sourceAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         apvts, "videoScrollSource", sourceCombo_);

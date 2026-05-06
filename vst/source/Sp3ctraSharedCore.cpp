@@ -14,6 +14,7 @@ extern "C"
     #include "synthesis/luxstral/vst_adapters.h"             // luxstral_init_audio_buffers / luxstral_init_callback_sync
     #include "synthesis/luxstral/wave_generation.h"          // request_frequency_reinit / reset_frequency_reinit_state
     #include "synthesis/luxsynth/luxsynth_vst_adapter.h"     // luxsynth_init_audio_buffers / luxsynth_engine_init / luxsynth_free_audio_buffers
+    #include "synthesis/luxwave/luxwave_vst_adapter.h"       // g_luxwave_engine / luxwave_engine_init
 }
 
 // ============================================================================
@@ -161,6 +162,23 @@ bool Sp3ctraSharedCore::startWithConfig(const Sp3ctraCore::ActiveConfig& config,
             // LuxSynth engine is now called inline from processBlock (RT-safe).
             // No dedicated thread needed — eliminates double-buffer sync issues.
             log_info("SHARED", "LuxSynth engine initialized inline (SR=%.0f, BS=%d)",
+                     sampleRate, samplesPerBlock);
+        }
+    }
+
+    // ── 9. LuxWave wavetable synthesis engine ─────────────────────────────────
+    {
+        int lwResult = luxwave_engine_init(&g_luxwave_engine,
+                                           static_cast<float>(sampleRate),
+                                           samplesPerBlock);
+        if (lwResult != 0)
+        {
+            log_error("SHARED", "startWithConfig() — luxwave_engine_init() failed (rc=%d)", lwResult);
+            // Non-fatal: other engines still work
+        }
+        else
+        {
+            log_info("SHARED", "LuxWave engine initialized inline (SR=%.0f, BS=%d)",
                      sampleRate, samplesPerBlock);
         }
     }

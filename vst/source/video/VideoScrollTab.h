@@ -16,7 +16,7 @@ class VideoWindow;
  *
  * Dissociation of concerns (task requirement):
  *   - This tab = live controls only:
- *       source selection (L / Sample / Mix / LuxPitch)
+ *       source selection (L / Sample / Mix / LuxPitch Output)
  *       scroll mode, speed, direction, zoom, exposure, blend mode
  *       open/close window, fullscreen toggle
  *   - Configuration (brightness, invert, color mode, dimensions, BPM, MIDI sync)

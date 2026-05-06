@@ -14,6 +14,7 @@ SettingsComponent::SettingsComponent(Sp3ctraAudioProcessor& processor)
     networkTab             = new NetworkSettingsTab(processor);
     luxstralTab            = new LuxStralSettingsTab(processor);
     luxsynthTab            = new LuxSynthSettingsTab(processor);
+    luxwaveTab             = new LuxWaveSettingsTab(processor);
     luxSamplerTab          = new LuxSamplerSettingsTab(processor);
     luxPitchTab            = new LuxPitchSettingsTab(processor);
     videoScrollSettingsTab = new VideoScrollSettingsTab(processor);
@@ -23,6 +24,7 @@ SettingsComponent::SettingsComponent(Sp3ctraAudioProcessor& processor)
     tabbedComponent.addTab("LuxPitch",     juce::Colours::darkgrey, luxPitchTab,            false);
     tabbedComponent.addTab("LuxStral",     juce::Colours::darkgrey, luxstralTab,            false);
     tabbedComponent.addTab("LuxSynth",     juce::Colours::darkgrey, luxsynthTab,            false);
+    tabbedComponent.addTab("LuxWave",      juce::Colours::darkgrey, luxwaveTab,             false);
     tabbedComponent.addTab("LuxSampler",   juce::Colours::darkgrey, luxSamplerTab,          false);
     tabbedComponent.addTab("Video Scroll", juce::Colours::darkgrey, videoScrollSettingsTab, false);
 
