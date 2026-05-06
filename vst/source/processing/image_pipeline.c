@@ -12,6 +12,7 @@
 #include "image_pipeline_stages.h"
 #include "config/config_loader.h"
 #include "config/config_instrument.h"
+#include "synthesis/luxwave/luxwave_vst_adapter.h"
 #include "utils/logger.h"
 #include <string.h>
 #include <stddef.h>
@@ -453,7 +454,18 @@ void pipeline_path_luxsynth_luxwave(
     preprocess_luxsynth(raw_r, raw_g, raw_b, out);
 #endif
 
-    /* LuxWave path: direct RGB copy */
+    /* LuxWave path: feed LuxSynth grayscale line as wavetable source.
+     * polyphonic.grayscale is filled by preprocess_luxsynth() above.
+     * luxwave_engine_set_image_line() is a non-owning pointer assignment
+     * (O(1), RT-safe). The engine reads the data during processBlock. */
+    if (g_luxwave_engine.initialized && nb_pixels > 0)
+    {
+        luxwave_engine_set_image_line(&g_luxwave_engine,
+                                       out->polyphonic.grayscale,
+                                       nb_pixels);
+    }
+
+    /* LuxWave path: direct RGB copy (kept for future photowave use) */
     img_stage_copy_rgb_raw(
         raw_r, raw_g, raw_b, nb_pixels,
         out->photowave.r, out->photowave.g, out->photowave.b);

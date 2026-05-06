@@ -355,7 +355,27 @@ bool LuxSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const uint
         std::memcpy(liveB_, B, static_cast<size_t>(livePixelCount_));
     }
 
+    // ── Continuous RAW pass-through into the sampler snapshot ────────────
+    // Mirror the live UDP frame into AudioImageBuffers' sampler snapshot
+    // whenever no slot is playing.  This keeps Source=Sampler / the sampler
+    // visualizer fed by the live stream during IDLE, ARMED and RECORDING
+    // states (previously only RECORDING produced a snapshot).
+    //
+    // During PLAYING: FramePlayerThread is the sole writer of the sampler
+    // snapshot — we must not race with it from the UDP thread.
+    // isAnySlotPlaying() also covers the seqPlayerHeld case (slotState stays
+    // PLAYING while held), so a paused playback keeps its frozen frame.
+    if (audioBuffers_ != nullptr && !isAnySlotPlaying())
+    {
+        const int liveBytes = std::min(static_cast<int>(pixel_count),
+                                        LuxSamplerConstants::MAX_PIXELS);
+        if (liveBytes > 0)
+            audio_image_buffers_snapshot_sampler(audioBuffers_,
+                                                  R, G, B, liveBytes);
+    }
+
     // ── Write frame if recording is active ───────────────────────────────
+
     const int recSlot = activeRecSlot.load(std::memory_order_relaxed);
     if (recSlot < 0) return false;
 
@@ -675,7 +695,15 @@ void LuxSampler::copySlotTo(int srcIdx, int dstIdx)
     setSlotEndFrac   (dstIdx, getSlotEndFrac   (srcIdx));
     setSlotSpeed     (dstIdx, getSlotSpeed      (srcIdx));
     setSlotLoopMode  (dstIdx, getSlotLoopMode   (srcIdx));
-    setSlotResumeMode(dstIdx, getSlotResumeMode (srcIdx));
+    setSlotResumeMode    (dstIdx, getSlotResumeMode    (srcIdx));
+    setSlotBlendAmount   (dstIdx, getSlotBlendAmount   (srcIdx));
+    setSlotAttackLen     (dstIdx, getSlotAttackLen     (srcIdx));
+    setSlotDecayLen      (dstIdx, getSlotDecayLen      (srcIdx));
+    setSlotBrightnessLift(dstIdx, getSlotBrightnessLift(srcIdx));
+    setSlotTrebleCut     (dstIdx, getSlotTrebleCut     (srcIdx));
+    setSlotBassCut       (dstIdx, getSlotBassCut       (srcIdx));
+    setSlotFadeCurveType (dstIdx, getSlotFadeCurveType (srcIdx));
+    setSlotFadeCurvePower(dstIdx, getSlotFadeCurvePower(srcIdx));
 
     log_info("FS", "copySlotTo: slot %d → %d (%d frames)", srcIdx, dstIdx, count);
 }
@@ -1324,6 +1352,10 @@ void FramePlayerThread::run()
             std::memcpy(workG, frame.G, static_cast<size_t>(nb));
             std::memcpy(workB, frame.B, static_cast<size_t>(nb));
 
+            // ── Read fade curve params once per frame (shared by all fades) ─────
+            const auto   p_curveType  = sampler.getSlotFadeCurveType(slotToPlay);
+            const float  p_curvePower = sampler.getSlotFadeCurvePower(slotToPlay);
+
             // ── Attack fade-in (exposure ramp): white at start → normal ─────────
             // attackLen is normalised over [startFrame, endFrame).
             // At headOffset=0 ramp=1 (fully white/silent); at attackLen ramp=0.
@@ -1339,8 +1371,10 @@ void FramePlayerThread::run()
                     if (attackFrames > 0.5f &&
                         headOffset < static_cast<int>(attackFrames + 0.5f))
                     {
-                        const float ramp = 1.0f -
-                            static_cast<float>(headOffset) / attackFrames;
+                        // t: 0 at start bound → 1 at end of attack zone
+                        const float t = static_cast<float>(headOffset) / attackFrames;
+                        // Curve-shaped ramp: 1 (white) at t=0, 0 (normal) at t=1
+                        const float ramp = 1.0f - applyFadeCurve(t, p_curveType, p_curvePower);
                         for (int px = 0; px < nb; ++px)
                         {
                             workR[px] = static_cast<uint8_t>(
@@ -1370,8 +1404,10 @@ void FramePlayerThread::run()
                     if (decayFrames > 0.5f &&
                         tailOffset < static_cast<int>(decayFrames + 0.5f))
                     {
-                        const float ramp = 1.0f -
-                            static_cast<float>(tailOffset) / decayFrames;
+                        // t: 0 at end bound → 1 at start of decay zone
+                        const float t = static_cast<float>(tailOffset) / decayFrames;
+                        // Curve-shaped ramp: 1 (white) at t=0, 0 (normal) at t=1
+                        const float ramp = 1.0f - applyFadeCurve(t, p_curveType, p_curvePower);
                         for (int px = 0; px < nb; ++px)
                         {
                             workR[px] = static_cast<uint8_t>(
@@ -1422,9 +1458,10 @@ void FramePlayerThread::run()
                     const int transStart = std::max(halfPx, cutoffPx - transW);
                     for (int px = transStart; px < nb; ++px)
                     {
-                        const float t = (px >= cutoffPx) ? 1.0f
+                        const float tLin = (px >= cutoffPx) ? 1.0f
                             : static_cast<float>(px - transStart)
                               / static_cast<float>(std::max(1, cutoffPx - transStart));
+                        const float t = applyFadeCurve(tLin, p_curveType, p_curvePower);
                         workR[px] = static_cast<uint8_t>(
                             workR[px] + t * (255.0f - (float)workR[px]));
                         workG[px] = static_cast<uint8_t>(
@@ -1454,9 +1491,10 @@ void FramePlayerThread::run()
                     const int transEnd  = std::min(halfPx - 1, cutoffPx + transW);
                     for (int px = 0; px <= transEnd; ++px)
                     {
-                        const float t = (px <= cutoffPx) ? 1.0f
+                        const float tLin = (px <= cutoffPx) ? 1.0f
                             : 1.0f - static_cast<float>(px - cutoffPx)
                                      / static_cast<float>(std::max(1, transEnd - cutoffPx));
+                        const float t = applyFadeCurve(tLin, p_curveType, p_curvePower);
                         workR[px] = static_cast<uint8_t>(
                             workR[px] + t * (255.0f - (float)workR[px]));
                         workG[px] = static_cast<uint8_t>(

@@ -7,6 +7,7 @@
 #include "settings/LuxStralSettingsTab.h"
 #include "settings/LuxSamplerSettingsTab.h"
 #include "settings/LuxSynthSettingsTab.h"
+#include "settings/LuxWaveSettingsTab.h"
 #include "settings/LuxPitchSettingsTab.h"
 #include "settings/VideoScrollSettingsTab.h"
 
@@ -40,6 +41,7 @@ private:
     NetworkSettingsTab*      networkTab;
     LuxStralSettingsTab*     luxstralTab;
     LuxSynthSettingsTab*     luxsynthTab;
+    LuxWaveSettingsTab*      luxwaveTab;
     LuxSamplerSettingsTab*   luxSamplerTab;
     LuxPitchSettingsTab*     luxPitchTab;
     VideoScrollSettingsTab*  videoScrollSettingsTab;

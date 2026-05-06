@@ -5,6 +5,7 @@ extern "C"
 {
 #include "audio/buffers/audio_image_buffers.h"
 #include "config/config_loader.h"
+#include "processing/lux_pitch.h"
 }
 
 #include <cstring>
@@ -75,12 +76,21 @@ void VideoDisplayComponent::captureCurrentFrame()
         case 1: // Sample
             audio_image_buffers_get_sampler_pointers(aib, &pR, &pG, &pB);
             break;
-        case 3: // LuxPitch — always shows the blended synthesis buffer (read_pointers).
-                // LuxPitch reads the same buffer for pitch detection regardless of its
-                // own luxpitchSource setting.  Do NOT read luxpitchSource here: that
-                // parameter controls the synthesis engine, not the video visualizer.
-                // Note: visually identical to Mix when no sampler is playing (expected).
-            audio_image_buffers_get_read_pointers(aib, &pR, &pG, &pB);
+        case 3: // LuxPitch Output — reads the post-LuxPitch processed buffers
+                // (g_lux_pitch.out_r/g/b) which contain the shifted + enveloped
+                // image after lux_pitch_process_frame() runs in CisVisualizerComponent.
+                // Falls back to Mix (read_pointers) if pixel count exceeds
+                // LUX_PITCH_MAX_PIXELS or if output buffer appears uninitialised.
+            if (count <= LUX_PITCH_MAX_PIXELS)
+            {
+                pR = g_lux_pitch.out_r;
+                pG = g_lux_pitch.out_g;
+                pB = g_lux_pitch.out_b;
+            }
+            else
+            {
+                audio_image_buffers_get_read_pointers(aib, &pR, &pG, &pB);
+            }
             break;
         case 2: // Mix
         default:

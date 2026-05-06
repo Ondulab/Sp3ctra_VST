@@ -18,6 +18,8 @@ class Sp3ctraAudioProcessor;
  *     Speed    — playback speed multiplier [0.01..32.0×]; skewed so 1.0× is at centre
  *     Loop     — four radio-style buttons (NONE / LOOP / INV / PING)
  *     Resume   — toggle: resume from last stopped position
+ *     Curve    — fade curve type selector (LIN / EXP / LOG / S)
+ *     Power    — curve intensity slider [0.1..10.0]
  *
  * Control values are written directly to LuxSampler per-slot play params (Non-RT).
  * Values are refreshed from LuxSampler on slot switch (setSelectedSlot).
@@ -75,6 +77,12 @@ private:
 
     // ── Resume mode toggle ────────────────────────────────────────────────────
     juce::ToggleButton resumeToggle { "Resume from last position" };
+
+    // ── Fade curve controls ───────────────────────────────────────────────────
+    juce::Label    fadeCurveLabel { {}, "Curve" };
+    juce::ComboBox fadeCurveTypeBox;
+    juce::Label    fadePowerLabel { {}, "Power" };
+    juce::Slider   fadePowerSlider;  // 0.1–10.0, default 1.0
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SlotEditorComponent)
 };

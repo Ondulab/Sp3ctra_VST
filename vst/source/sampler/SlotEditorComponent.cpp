@@ -127,6 +127,48 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     };
     addAndMakeVisible(resumeToggle);
 
+    // ── Fade curve type selector ─────────────────────────────────────────────
+    fadeCurveLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
+    fadeCurveLabel.setColour(juce::Label::textColourId,
+                             juce::Colour(0xff888899));
+    fadeCurveLabel.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(fadeCurveLabel);
+
+    fadeCurveTypeBox.addItem("LIN", 1);
+    fadeCurveTypeBox.addItem("EXP", 2);
+    fadeCurveTypeBox.addItem("LOG", 3);
+    fadeCurveTypeBox.addItem("S",   4);
+    fadeCurveTypeBox.setSelectedId(1, juce::dontSendNotification);
+    fadeCurveTypeBox.onChange = [this]
+    {
+        if (auto* fs = processor.getLuxSampler())
+            fs->setSlotFadeCurveType(selectedSlot,
+                static_cast<FadeCurveType>(fadeCurveTypeBox.getSelectedId() - 1));
+    };
+    addAndMakeVisible(fadeCurveTypeBox);
+
+    // ── Fade curve power slider ──────────────────────────────────────────────
+    fadePowerLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
+    fadePowerLabel.setColour(juce::Label::textColourId,
+                             juce::Colour(0xff888899));
+    fadePowerLabel.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(fadePowerLabel);
+
+    fadePowerSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    fadePowerSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                    Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
+    fadePowerSlider.setRange(0.1, 10.0, 0.01);
+    fadePowerSlider.setNumDecimalPlacesToDisplay(2);
+    fadePowerSlider.setSkewFactorFromMidPoint(1.0);
+    fadePowerSlider.setValue(1.0, juce::dontSendNotification);
+    fadePowerSlider.onValueChange = [this]
+    {
+        if (auto* fs = processor.getLuxSampler())
+            fs->setSlotFadeCurvePower(selectedSlot,
+                static_cast<float>(fadePowerSlider.getValue()));
+    };
+    addAndMakeVisible(fadePowerSlider);
+
     startTimer(200); // ~5 Hz for state refresh
 }
 
@@ -161,6 +203,13 @@ void SlotEditorComponent::refreshSliderValues()
         juce::dontSendNotification);
     resumeToggle.setToggleState(fs->getSlotResumeMode(selectedSlot),
                                 juce::dontSendNotification);
+    // Fade curve controls
+    fadeCurveTypeBox.setSelectedId(
+        static_cast<int>(fs->getSlotFadeCurveType(selectedSlot)) + 1,
+        juce::dontSendNotification);
+    fadePowerSlider.setValue(
+        static_cast<double>(fs->getSlotFadeCurvePower(selectedSlot)),
+        juce::dontSendNotification);
 }
 
 void SlotEditorComponent::refreshLoopButtons()
@@ -339,6 +388,16 @@ void SlotEditorComponent::resized()
 
     // Resume toggle
     resumeToggle.setBounds(rightX, ry, rightW, 26);
+    ry += step;
+
+    // Fade curve type
+    fadeCurveLabel  .setBounds(rightX, ry, lW, rowH);
+    fadeCurveTypeBox.setBounds(ctrlX,  ry, ctrlW, rowH);
+    ry += step;
+
+    // Fade curve power
+    fadePowerLabel .setBounds(rightX, ry, lW, rowH);
+    fadePowerSlider.setBounds(ctrlX,  ry, ctrlW, rowH);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

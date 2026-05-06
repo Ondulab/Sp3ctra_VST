@@ -194,6 +194,13 @@ private:
     /** Cache of detected blobs for SPCTR_BLOB — rebuilt every paint call. */
     std::vector<SynthBlob> spctrBlobs_;
 
+    // ── Dedicated LuxSynth FFT data (independent of visualizer source) ───────
+    // These buffers are populated in computeFftMagnitudes() from the source
+    // selected in the LUXSYNTH tab dropdown (luxsynthSource), NOT from the
+    // active visualizer view.  This decouples what the user sees from what
+    // the LuxSynth engine hears.
+    std::vector<uint8_t> lxFftR_, lxFftG_, lxFftB_, lxFftGray_;
+
     // ── FFT state (UI thread only, owned by computeFftMagnitudes) ────────────
     /** Raw per-bin FFT magnitudes after peak normalisation.
      *  Size = cisPixelsCount / 2 + 1.  DC bin (index 0) is always 0. */

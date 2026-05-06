@@ -781,59 +781,33 @@ void *udpThread(void *arg) {
         }
         else if (src == 0 /* IMAGE_SOURCE_SAMPLER */)
         {
-          if (lux_sampler_is_recording())
+          /* Source=S routing — RAW pass-through whenever no slot is playing.
+           *
+           * Behaviour change: the sampler now propagates the live UDP stream
+           * (preprocessed_temp) to db->preprocessed_data continuously while
+           * idle / recording / STEP_LIVE, mirroring the visual snapshot
+           * mirror added in LuxSampler::onFrameAssembled().  The previous
+           * silence-injection branch (idle ⇒ zero additive/polyphonic) is
+           * gone — silence is now driven exclusively by the consumer paths
+           * (STEP_EMPTY / sampler transport STOP / FramePlayerThread end).
+           *
+           * Cases:
+           *   • !is_playing() && is_passthrough()  → idle / REC / STEP_LIVE:
+           *       write preprocessed_temp, tag=2 (sampler).
+           *       (passthroughEnabled stays true during recording and during
+           *        STEP_LIVE; it only goes false during PLAY or STEP_EMPTY.)
+           *   • is_playing()                       → FramePlayerThread is the
+           *       sole writer of preprocessed_data; do not touch.
+           *   • !is_passthrough() && !is_playing() → STEP_EMPTY (or transient
+           *       PLAY-pending state) — the sequencer / injectSilenceCmd will
+           *       inject silence; do not overwrite preprocessed_data here. */
+          if (!lux_sampler_is_playing() && lux_sampler_is_passthrough())
           {
-            /* Recording: live UDP stream feeds the sampler path.
-             * Use tag=2 so synth_AudioProcess source-tag gating accepts
-             * the data when Source=S is selected. */
             db->preprocessed_data = preprocessed_temp;
-            db->dataReady = 2;
+            db->dataReady = 2; /* tag=2: sampler slot — consumer gating intact */
           }
-          else if (!lux_sampler_is_playing())
-          {
-            if (lux_sampler_is_seq_live_step())
-            {
-              /* FIX(live): Sequencer STEP_LIVE is active.
-               * Source=S but no slot is playing — the live CIS stream IS the
-               * intended content.  Write the full preprocessed_temp (computed
-               * from the live UDP frame) so synthesis uses live data.
-               *
-               * CRITICAL: use dataReady=2 (sampler tag), NOT 1 (live tag).
-               * synth_AudioProcess source-tag gating rejects tag=1 when
-               * Source=S.  Tag=2 passes the gate and is semantically correct:
-               * STEP_LIVE is a sequencer override that deliberately routes
-               * live data through the Source=S consumer path. */
-              db->preprocessed_data = preprocessed_temp;
-              db->dataReady = 2;
-            }
-            else if (lux_sampler_is_passthrough())
-            {
-              /* Truly idle: no slot active, not STEP_EMPTY, not STEP_LIVE.
-               * Inject silence so preprocessed_data does not freeze on the
-               * last recorded/played frame. */
-              memset(db->preprocessed_data.additive.notes, 0,
-                     sizeof(db->preprocessed_data.additive.notes));
-              memset(db->preprocessed_data.additive.grayscale, 0,
-                     sizeof(db->preprocessed_data.additive.grayscale));
-              db->preprocessed_data.additive.contrast_factor = 0.0f;
-              if (g_sp3ctra_config.luxsynth_source_type == 0 /* IMAGE_SOURCE_SAMPLER */)
-              {
-                memset(db->preprocessed_data.polyphonic.grayscale, 0,
-                       sizeof(db->preprocessed_data.polyphonic.grayscale));
-                memset(db->preprocessed_data.polyphonic.magnitudes, 0,
-                       sizeof(db->preprocessed_data.polyphonic.magnitudes));
-                db->preprocessed_data.polyphonic.valid = 0;
-              }
-              db->dataReady = 2; /* tag=2: sampler slot — consumer gating intact */
-            }
-            /* else: passthroughEnabled=false → a slot is physically active
-             * (e.g. UI play with sampler_freeze_mode≠0) or STEP_EMPTY.
-             * FramePlayerThread / injectSilenceCmd handles these cases.
-             * Do NOT overwrite preprocessed_data here. */
-          }
-          /* else lux_sampler_is_playing(): FramePlayerThread is the sole
-           * writer of preprocessed_data for Source=S during playback. */
         }
+
       }
 #else
         db->preprocessed_data = preprocessed_temp;

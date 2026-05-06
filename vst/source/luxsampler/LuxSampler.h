@@ -14,6 +14,7 @@
  * Architecture: see docs/SPEC_LuxSampler.html §9
  */
 
+#include "FadeCurve.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <atomic>
 #include <memory>
@@ -429,6 +430,23 @@ public:
                                         std::memory_order_relaxed);
     }
 
+    /** Fade curve type — shared by all fades (Attack, Decay, TrebleCut, BassCut).
+     *  Controls the shape of the crossfade transition. */
+    void setSlotFadeCurveType(int i, FadeCurveType type) noexcept
+    {
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
+            slotParams[i].fadeCurveType.store(static_cast<int>(type),
+                                              std::memory_order_relaxed);
+    }
+    /** Fade curve power [0.1..10.0] — controls the intensity of the curve shape.
+     *  1.0 = neutral (linear-equivalent for EXP/LOG), >1 = sharper, <1 = gentler. */
+    void setSlotFadeCurvePower(int i, float v) noexcept
+    {
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
+            slotParams[i].fadeCurvePower.store(juce::jlimit(0.1f, 10.0f, v),
+                                               std::memory_order_relaxed);
+    }
+
     float    getSlotStartFrac(int i) const noexcept
     {
         if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0.0f;
@@ -483,6 +501,17 @@ public:
     {
         if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0.0f;
         return slotParams[i].bassCut.load(std::memory_order_relaxed);
+    }
+    FadeCurveType getSlotFadeCurveType(int i) const noexcept
+    {
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return FadeCurveType::LINEAR;
+        return static_cast<FadeCurveType>(
+            slotParams[i].fadeCurveType.load(std::memory_order_relaxed));
+    }
+    float    getSlotFadeCurvePower(int i) const noexcept
+    {
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 1.0f;
+        return slotParams[i].fadeCurvePower.load(std::memory_order_relaxed);
     }
 
     /**
@@ -663,6 +692,8 @@ private:
         std::atomic<float> brightnessLift { 0.0f };  // Global brightness lift [0=normal, 1=white]
         std::atomic<float> trebleCut      { 0.0f };  // High-freq fade [0=none, 1=full treble silence]
         std::atomic<float> bassCut        { 0.0f };  // Low-freq  fade [0=none, 1=full bass  silence]
+        std::atomic<int>   fadeCurveType  { static_cast<int>(FadeCurveType::LINEAR) };
+        std::atomic<float> fadeCurvePower { 1.0f };   // Curve power [0.1..10.0], 1.0=neutral
 
         SlotPlayParams() = default;
         SlotPlayParams(const SlotPlayParams&)            = delete;
