@@ -147,7 +147,7 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     // ========================================================================
     // Section: StrokeForge Advanced Blob Detection
     // ========================================================================
-    sfBlobSectionLabel.setText("StrokeForge — Advanced Blob Detection", juce::dontSendNotification);
+    sfBlobSectionLabel.setText("StrokeForge - Advanced Blob Detection", juce::dontSendNotification);
     sfBlobSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
     sfBlobSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightyellow);
     contentComponent.addAndMakeVisible(sfBlobSectionLabel);

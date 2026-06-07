@@ -95,8 +95,114 @@ LuxSamplerSettingsTab::LuxSamplerSettingsTab(Sp3ctraAudioProcessor& processor)
         juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxSamplerMaxDuration", maxDurationSlider);
 
+    // ── Image export on Save Session ──────────────────────────────────────
+    exportImagesLabel.setText("Export Images:", juce::dontSendNotification);
+    exportImagesLabel.setJustificationType(juce::Justification::centredRight);
+    exportImagesLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+    addAndMakeVisible(exportImagesLabel);
+
+    exportImagesToggle.setButtonText("Export PNG/JPEG on Save Session");
+    exportImagesToggle.setTooltip(
+        "When enabled, clicking SAVE SESSION also exports every non-empty "
+        "slot as an image (one row per captured CIS line) next to the .fsmp file.");
+    addAndMakeVisible(exportImagesToggle);
+    exportImagesAttachment = std::make_unique<
+        juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "luxSamplerExportImages", exportImagesToggle);
+
+    exportFormatLabel.setText("Format:", juce::dontSendNotification);
+    exportFormatLabel.setJustificationType(juce::Justification::centredRight);
+    exportFormatLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+    addAndMakeVisible(exportFormatLabel);
+
+    exportFormatCombo.addItem("PNG",  1);
+    exportFormatCombo.addItem("JPEG", 2);
+    addAndMakeVisible(exportFormatCombo);
+    exportFormatAttachment = std::make_unique<
+        juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        apvts, "luxSamplerExportFormat", exportFormatCombo);
+
+    // ── Output Directory (shared by SAVE SESSION and image export) ────────
+    outputDirLabel.setText("Output Dir:", juce::dontSendNotification);
+    outputDirLabel.setJustificationType(juce::Justification::centredRight);
+    outputDirLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+    addAndMakeVisible(outputDirLabel);
+
+    outputDirValueLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
+    outputDirValueLabel.setJustificationType(juce::Justification::centredLeft);
+    outputDirValueLabel.setColour(juce::Label::backgroundColourId,
+                                  juce::Colours::black.withAlpha(0.4f));
+    outputDirValueLabel.setColour(juce::Label::outlineColourId,
+                                  juce::Colours::grey.withAlpha(0.5f));
+    outputDirValueLabel.setMinimumHorizontalScale(0.5f);
+    outputDirValueLabel.setTooltip(
+        "Folder used by SAVE SESSION for the .sp3s file and the optional "
+        "PNG/JPEG image exports. Leave empty to be prompted each time.");
+    addAndMakeVisible(outputDirValueLabel);
+
+    outputDirBrowseBtn.setButtonText("Browse...");
+    outputDirBrowseBtn.onClick = [this]()
+    {
+        const juce::String current = audioProcessor.getSamplerOutputDir();
+        juce::File startDir = current.isNotEmpty()
+            ? juce::File(current)
+            : juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+        if (! startDir.isDirectory())
+            startDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+
+        outputDirChooser = std::make_unique<juce::FileChooser>(
+            "Choose output directory for LuxSampler sessions and images",
+            startDir);
+        const int flags = juce::FileBrowserComponent::openMode
+                        | juce::FileBrowserComponent::canSelectDirectories;
+        outputDirChooser->launchAsync(flags, [this](const juce::FileChooser& fc)
+        {
+            const juce::File chosen = fc.getResult();
+            if (chosen != juce::File{} && chosen.isDirectory())
+            {
+                const juce::String full = chosen.getFullPathName();
+                audioProcessor.setSamplerOutputDir(full);
+                outputDirValueLabel.setText(full, juce::dontSendNotification);
+            }
+        });
+    };
+    addAndMakeVisible(outputDirBrowseBtn);
+
+    outputDirClearBtn.setButtonText("X");
+    outputDirClearBtn.setTooltip("Clear output directory - SAVE SESSION will prompt again.");
+    outputDirClearBtn.onClick = [this]()
+    {
+        audioProcessor.setSamplerOutputDir({});
+        outputDirValueLabel.setText("(not set - file chooser will be used)",
+                                    juce::dontSendNotification);
+    };
+    addAndMakeVisible(outputDirClearBtn);
+
+    // Initialise value label from APVTS-restored value
+    {
+        const juce::String cur = audioProcessor.getSamplerOutputDir();
+        outputDirValueLabel.setText(
+            cur.isNotEmpty() ? cur : juce::String("(not set - file chooser will be used)"),
+            juce::dontSendNotification);
+    }
+
+    // ── Action button MIDI bindings (REC / PLAY / SAVE) ───────────────────
+    // Each row exposes a Type combo (Off/Note/CC), a 0..127 number slider and
+    // a "Learn" button.  The audio thread captures the next incoming MIDI
+    // event matching the configured channel and writes it into the APVTS
+    // parameters via the message thread (timerCallback).
+    initBindingRow(recBinding,  "REC Bind:",
+                   "luxSamplerRecBindType",  "luxSamplerRecBindNum",  0);
+    initBindingRow(playBinding, "PLAY Bind:",
+                   "luxSamplerPlayBindType", "luxSamplerPlayBindNum", 1);
+    initBindingRow(saveBinding, "SAVE Bind:",
+                   "luxSamplerSaveBindType", "luxSamplerSaveBindNum", 2);
+
     // ── Slot rows ─────────────────────────────────────────────────────────
+
+
     for (int i = 0; i < NUM_SLOTS; ++i)
+
     {
         // Index label: "C0 / C1"
         juce::String idxText = juce::String(kNoteNames[i]) + "0 / "
@@ -141,10 +247,126 @@ LuxSamplerSettingsTab::~LuxSamplerSettingsTab()
 // Timer callback — refresh slot displays
 // =============================================================================
 
+// ─────────────────────────────────────────────────────────────────────────────
+// initBindingRow — wire one REC/PLAY/SAVE row to the matching APVTS params.
+// ─────────────────────────────────────────────────────────────────────────────
+void LuxSamplerSettingsTab::initBindingRow(ActionBindingRow& row,
+                                           const juce::String& title,
+                                           const juce::String& typeParamId,
+                                           const juce::String& numParamId,
+                                           int learnTargetId)
+{
+    row.title.setText(title, juce::dontSendNotification);
+    row.title.setJustificationType(juce::Justification::centredRight);
+    row.title.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+    addAndMakeVisible(row.title);
+
+    // Type combo (Off / Note / CC)
+    row.typeBox.addItem("Off",  1);
+    row.typeBox.addItem("Note", 2);
+    row.typeBox.addItem("CC",   3);
+    addAndMakeVisible(row.typeBox);
+    row.typeAtt = std::make_unique<
+        juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        apvts, typeParamId, row.typeBox);
+
+    // Number slider (0..127) — shown as "Note 60" / "CC 7" via text-from-value
+    row.numberSlider.setSliderStyle(juce::Slider::IncDecButtons);
+    row.numberSlider.setIncDecButtonsMode(
+        juce::Slider::incDecButtonsDraggable_Vertical);
+    row.numberSlider.setTextBoxStyle(juce::Slider::TextBoxLeft, false,
+                                      Sp3ctraTheme::kTbXNarrow,
+                                      Sp3ctraTheme::kTextBoxH);
+    row.numberSlider.setRange(0.0, 127.0, 1.0);
+    addAndMakeVisible(row.numberSlider);
+    row.numberAtt = std::make_unique<
+        juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, numParamId, row.numberSlider);
+
+    // Learn button — arms the processor to capture next matching MIDI event
+    row.learnBtn.setClickingTogglesState(true);
+    row.learnBtn.setColour(juce::TextButton::buttonOnColourId,
+                            juce::Colours::orangered);
+    row.learnBtn.setTooltip(
+        "Click then press any Note or send a CC on the configured MIDI channel "
+        "to assign it to this action.");
+    row.learnBtn.onClick = [this, learnTargetId, &row]()
+    {
+        if (row.learnBtn.getToggleState())
+        {
+            // Cancel any other pending learn (only one at a time).
+            audioProcessor.startSamplerMidiLearn(learnTargetId);
+            pendingLearnTarget = learnTargetId;
+            recBinding .learnBtn.setToggleState(learnTargetId == 0, juce::dontSendNotification);
+            playBinding.learnBtn.setToggleState(learnTargetId == 1, juce::dontSendNotification);
+            saveBinding.learnBtn.setToggleState(learnTargetId == 2, juce::dontSendNotification);
+        }
+        else
+        {
+            audioProcessor.cancelSamplerMidiLearn();
+            pendingLearnTarget = -1;
+        }
+    };
+    addAndMakeVisible(row.learnBtn);
+}
+
 void LuxSamplerSettingsTab::timerCallback()
 {
     updateSlotDisplays();
+
+    // ── MIDI Learn polling ───────────────────────────────────────────────────
+    // The audio thread writes the captured event into samplerMidiLearnResult
+    // (encoded as (type << 8) | number) and resets the target to -1 once done.
+    // On the message thread we copy the captured values into the APVTS so the
+    // ComboBox/Slider attachments reflect the new binding and trigger param
+    // change notifications to the host.
+    const int currentTarget = audioProcessor.getSamplerMidiLearnTarget();
+    const int result        = audioProcessor.getSamplerMidiLearnResult();
+
+    if (currentTarget == -1 && result != -1 && pendingLearnTarget != -1)
+    {
+        const int type   = (result >> 8) & 0xFF; // 1 = Note, 2 = CC
+        const int number = result & 0xFF;
+
+        const char* typeParam = nullptr;
+        const char* numParam  = nullptr;
+        switch (pendingLearnTarget)
+        {
+            case 0: typeParam = "luxSamplerRecBindType";
+                    numParam  = "luxSamplerRecBindNum";  break;
+            case 1: typeParam = "luxSamplerPlayBindType";
+                    numParam  = "luxSamplerPlayBindNum"; break;
+            case 2: typeParam = "luxSamplerSaveBindType";
+                    numParam  = "luxSamplerSaveBindNum"; break;
+            default: break;
+        }
+
+        if (typeParam != nullptr)
+        {
+            // ComboBox indices: 0=Off, 1=Note, 2=CC — matches captured type.
+            if (auto* p = apvts.getParameter(typeParam))
+                p->setValueNotifyingHost(p->convertTo0to1((float)type));
+            if (auto* p = apvts.getParameter(numParam))
+                p->setValueNotifyingHost(p->convertTo0to1((float)number));
+        }
+
+        audioProcessor.clearSamplerMidiLearnResult();
+        pendingLearnTarget = -1;
+        recBinding .learnBtn.setToggleState(false, juce::dontSendNotification);
+        playBinding.learnBtn.setToggleState(false, juce::dontSendNotification);
+        saveBinding.learnBtn.setToggleState(false, juce::dontSendNotification);
+    }
+
+    // Keep the toggle visible state in sync if Learn was cancelled elsewhere
+    if (currentTarget == -1 && result == -1 && pendingLearnTarget != -1)
+    {
+        pendingLearnTarget = -1;
+        recBinding .learnBtn.setToggleState(false, juce::dontSendNotification);
+        playBinding.learnBtn.setToggleState(false, juce::dontSendNotification);
+        saveBinding.learnBtn.setToggleState(false, juce::dontSendNotification);
+    }
 }
+
 
 void LuxSamplerSettingsTab::updateSlotDisplays()
 {
@@ -198,10 +420,15 @@ void LuxSamplerSettingsTab::paint(juce::Graphics& g)
                juce::Justification::centred, true);
 
     // Column headers for slot grid — position must match resized() exactly:
-    //   titleH(30) + 5 + 4*kRowStep + kHPad = 30+5+104+10 = 149
+    //   titleH(30) + 5 + 7 control rows (Enable, MIDI, Octave, MaxDur,
+    //   ExportToggle, ExportFormat, OutputDir) + 3 binding rows
+    //   (REC / PLAY / SAVE) * kRowStep + kHPad
     const int titleH  = 30;
-    const int headerY = titleH + 5 + 4 * Sp3ctraTheme::kRowStep + Sp3ctraTheme::kHPad;
+    const int headerY = titleH + 5 + 10 * Sp3ctraTheme::kRowStep + Sp3ctraTheme::kHPad;
+
+
     const int headerH = 20;
+
 
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
     g.setColour(juce::Colours::lightgrey);
@@ -248,8 +475,50 @@ void LuxSamplerSettingsTab::resized()
     row(midiChannelLabel, midiChannelCombo);
     row(octaveOffsetLabel,octaveOffsetCombo);
     row(maxDurationLabel, maxDurationSlider);
+    row(exportImagesLabel, exportImagesToggle);
+    row(exportFormatLabel, exportFormatCombo);
+
+    // ── Output Directory row (special layout: value field + 2 buttons) ────
+    {
+        const int vc       = (rowH - ctrlH) / 2;
+        const int browseW  = 80;
+        const int clearW   = 28;
+        const int btnGap   = 4;
+        const int valueW   = ctrlW - browseW - clearW - 2 * btnGap;
+
+        outputDirLabel.setBounds(20, y + vc, labelW, ctrlH);
+        outputDirValueLabel.setBounds(ctrlX, y + vc, valueW, ctrlH);
+        outputDirBrowseBtn .setBounds(ctrlX + valueW + btnGap, y + vc, browseW, ctrlH);
+        outputDirClearBtn  .setBounds(ctrlX + valueW + btnGap + browseW + btnGap,
+                                       y + vc, clearW, ctrlH);
+        y += rowH;
+    }
+
+    // ── REC / PLAY / SAVE binding rows ──────────────────────────────────────
+    // Layout per row:  [LABEL] [Type combo] [Number slider] [LEARN btn]
+    auto bindingRow = [&](ActionBindingRow& br)
+    {
+        const int vc       = (rowH - ctrlH) / 2;
+        const int typeW    = 70;
+        const int learnW   = 70;
+        const int gap      = 4;
+        const int numberW  = ctrlW - typeW - learnW - 2 * gap;
+
+        br.title       .setBounds(20,                            y + vc, labelW,  ctrlH);
+        br.typeBox     .setBounds(ctrlX,                         y + vc, typeW,   ctrlH);
+        br.numberSlider.setBounds(ctrlX + typeW + gap,           y + vc, numberW, ctrlH);
+        br.learnBtn    .setBounds(ctrlX + typeW + gap + numberW + gap,
+                                   y + vc, learnW,  ctrlH);
+        y += rowH;
+    };
+    bindingRow(recBinding);
+    bindingRow(playBinding);
+    bindingRow(saveBinding);
 
     y += pad; // gap before slot grid
+
+
+
 
     // ── Slot grid header placeholder (painted) ───────────────────────────
     const int headerH = 20;

@@ -36,9 +36,13 @@ extern "C"
 namespace LuxSamplerConstants
 {
     constexpr int     NUM_SLOTS           = 12;
-    constexpr int     MAX_FRAMES_PER_SLOT = 30000; // 200 DPI, 10 s, ×1.5 margin
+    // Max frames per slot — sized for the slot duration cap below:
+    //   200 DPI sensor → ~2000 fps, 60 s × 2000 = 120 000, ×1.5 safety margin = 180 000.
+    // Memory cost: lazy-allocated, ~1.87 GB per actively-used slot (sizeof(CapturedFrame)
+    // ≈ 10 382 B × 180 000). Idle slots stay at 0 bytes thanks to FrameSlot::allocate().
+    constexpr int     MAX_FRAMES_PER_SLOT = 180000;
     constexpr int     MAX_PIXELS          = 3456;  // Fixed 400 DPI (FIXED_BUFFER_PIXELS)
-    constexpr float   MAX_DURATION_S      = 10.0f;
+    constexpr float   MAX_DURATION_S      = 60.0f;
 
     // MIDI note bases (C0 = MIDI 12 — Ableton/GM convention)
     constexpr int MIDI_REC_NOTE_BASE  = 12; // C0..B0 → slots 0..11
@@ -627,6 +631,51 @@ public:
     // =========================================================================
     bool saveToFile(const juce::File& file) const;
     bool loadFromFile(const juce::File& file);
+
+    // =========================================================================
+    // Per-slot file I/O — Non-RT only (.fslot single-slot format)
+    // =========================================================================
+    /**
+     * Save a single slot (frames + per-slot play parameters) to a .fslot file.
+     * The file is fully self-contained: it carries both the raw recorded frames
+     * and the SlotPlayParams (speed, loop mode, fades, etc.) as embedded XML.
+     *
+     * @return true on success; false if slot empty or write failed.
+     */
+    bool saveSlotToFile(int slotIndex, const juce::File& file) const;
+
+    /**
+     * Load a .fslot file into the given destination slot, replacing any
+     * existing content. Stops any ongoing record/play on that slot first.
+     *
+     * @return true on success; false if file invalid or read failed.
+     */
+    bool loadSlotFromFile(int slotIndex, const juce::File& file);
+
+    // =========================================================================
+    // Image export — Non-RT only
+    // =========================================================================
+    /**
+     * Export a slot's recorded frames as a single image file.
+     * Each captured frame becomes one row of the output image (X = pixel column,
+     * Y = frame index, channels = R/G/B).
+     *
+     * @param slotIndex  Slot index [0..NUM_SLOTS-1].
+     * @param file       Destination file (extension determines container).
+     * @param asPng      true → PNG (lossless), false → JPEG (quality 90).
+     * @return true on success; false if slot is empty or file write failed.
+     */
+    bool exportSlotImage(int slotIndex, const juce::File& file, bool asPng) const;
+
+    /**
+     * Export all slots containing data to a directory using a stable naming
+     * pattern: "<baseName>_slot<NN>_<label>.<ext>".
+     * @return number of images successfully written.
+     */
+    int  exportAllSlotsImages(const juce::File& destDirectory,
+                              const juce::String& baseName,
+                              bool asPng) const;
+
 
     // =========================================================================
     // Internal access for FramePlayerThread

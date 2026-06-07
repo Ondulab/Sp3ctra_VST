@@ -62,6 +62,16 @@ private:
     juce::TextButton recBtn   { "REC" };
     juce::TextButton playBtn  { "PLAY" };
     juce::TextButton clearBtn { "CLEAR" };
+    juce::TextButton saveBtn  { "SAVE" };
+    juce::TextButton loadBtn  { "LOAD" };
+
+    // ── File chooser for LOAD (Non-RT, message thread) ────────────────────────
+    std::unique_ptr<juce::FileChooser> fileChooser;
+
+    /** Build the destination directory for SAVE.
+     *  Uses the user's configured Sampler Output Dir if set, otherwise
+     *  falls back to ~/Documents. Creates the directory if needed. */
+    juce::File resolveSaveDirectory() const;
 
     // ── Labels ────────────────────────────────────────────────────────────────
     juce::Label  brightnessLabel { {}, "IMG" };

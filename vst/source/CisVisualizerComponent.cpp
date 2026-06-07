@@ -158,9 +158,49 @@ void CisVisualizerComponent::paint(juce::Graphics& g)
     if (cisPixelsCount == 0)
     {
         g.fillAll(juce::Colour(0xff1a1a1a));
-        g.setColour(juce::Colours::grey);
-        g.drawText("Waiting for CIS data...", getLocalBounds(),
-                   juce::Justification::centred);
+
+        // Distinguish the two no-data states so the user sees the *real* cause:
+        //   1) Standalone with no audio output device selected → prepareToPlay()
+        //      is never invoked by the host, the shared pipeline never starts,
+        //      the UDP socket is never bound and CIS data cannot be received.
+        //   2) Pipeline is running but no UDP packets have arrived yet.
+        const bool pipelineReady = processor.isPipelineReady();
+
+        if (!pipelineReady)
+        {
+            // ── Two-line centred message ─────────────────────────────────────
+            const auto full     = getLocalBounds();
+            const int  cy       = full.getCentreY();
+            const int  lineH    = juce::jmax(14, full.getHeight() / 14);
+            const auto line1Box = juce::Rectangle<int>(full.getX(),
+                                                       cy - lineH,
+                                                       full.getWidth(),
+                                                       lineH);
+            const auto line2Box = juce::Rectangle<int>(full.getX(),
+                                                       cy + 2,
+                                                       full.getWidth(),
+                                                       lineH);
+
+            // Primary line — warm amber, bold, attention-grabbing.
+            g.setColour(juce::Colour(0xffe0a040));
+            g.setFont(juce::Font(juce::FontOptions((float) lineH * 0.85f,
+                                                   juce::Font::bold)));
+            g.drawText("No audio output configured",
+                       line1Box, juce::Justification::centred);
+
+            // Secondary line — actionable hint.
+            g.setColour(juce::Colours::grey);
+            g.setFont(juce::Font(juce::FontOptions((float) lineH * 0.65f)));
+            g.drawText("Open Options > Audio/MIDI Settings and select an output "
+                       "device to start the CIS receiver.",
+                       line2Box, juce::Justification::centred);
+        }
+        else
+        {
+            g.setColour(juce::Colours::grey);
+            g.drawText("Waiting for CIS data...",
+                       getLocalBounds(), juce::Justification::centred);
+        }
         return;
     }
 

@@ -53,7 +53,7 @@ void ImageSettingsTab::paint(juce::Graphics& g)
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
     g.setColour(juce::Colour(Sp3ctraTheme::kColText).brighter(0.2f));
 
-    g.drawText("StrokeForge — Advanced Blob Detection",
+    g.drawText("StrokeForge - Advanced Blob Detection",
                juce::Rectangle<int>(pad, pad, getWidth() - 2 * pad, secH),
                juce::Justification::centredLeft, true);
 }

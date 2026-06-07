@@ -867,7 +867,146 @@ bool LuxSampler::saveToFile(const juce::File& file) const
     return true;
 }
 
+// ============================================================================
+// Image export — Non-RT only
+// Each slot's recorded frames are rendered as a 2D RGB image:
+//   X axis = pixel column (0 .. pixel_count-1)
+//   Y axis = frame index  (0 .. frame_count-1)
+// PNG = lossless, JPEG = quality 90.
+// ============================================================================
+
+bool LuxSampler::exportSlotImage(int slotIndex,
+                                  const juce::File& file,
+                                  bool asPng) const
+{
+    using namespace LuxSamplerConstants;
+
+    if (slotIndex < 0 || slotIndex >= NUM_SLOTS)
+    {
+        log_error("FS", "exportSlotImage: invalid slot index %d", slotIndex);
+        return false;
+    }
+
+    // Snapshot slot under mutex (only metadata + pixel-count of first frame)
+    int      width  = 0;
+    int      height = 0;
+    {
+        std::lock_guard<std::mutex> lk(slotsMutex_);
+        const FrameSlot& slot = slots[slotIndex];
+        if (!slot.has_content || slot.frame_count <= 0 || !slot.isAllocated())
+            return false;
+        height = slot.frame_count;
+        width  = slot.frames[0].pixel_count;
+        if (width <= 0)
+            return false;
+    }
+
+    // Allocate destination JUCE image (RGB, no alpha)
+    juce::Image img(juce::Image::RGB, width, height, true);
+
+    {
+        juce::Image::BitmapData bmp(img, juce::Image::BitmapData::writeOnly);
+        std::lock_guard<std::mutex> lk(slotsMutex_);
+        const FrameSlot& slot = slots[slotIndex];
+
+        // Re-check after lock (frame_count could have changed)
+        const int rowCount = juce::jmin(height, slot.frame_count);
+        for (int y = 0; y < rowCount; ++y)
+        {
+            const CapturedFrame& fr = slot.frames[y];
+            const int            px = juce::jmin(width, static_cast<int>(fr.pixel_count));
+
+            uint8_t* dest = bmp.getLinePointer(y);
+            for (int x = 0; x < px; ++x)
+            {
+                // JUCE RGB pixel order on macOS = B,G,R (matches PixelRGB layout)
+                dest[x * 3 + 0] = fr.B[x];
+                dest[x * 3 + 1] = fr.G[x];
+                dest[x * 3 + 2] = fr.R[x];
+            }
+        }
+    }
+
+    // Write to file (overwrite if it exists)
+    file.deleteFile();
+    juce::FileOutputStream out(file);
+    if (out.failedToOpen())
+    {
+        log_error("FS", "exportSlotImage: cannot open '%s'",
+                  file.getFullPathName().toRawUTF8());
+        return false;
+    }
+
+    bool ok = false;
+    if (asPng)
+    {
+        juce::PNGImageFormat fmt;
+        ok = fmt.writeImageToStream(img, out);
+    }
+    else
+    {
+        juce::JPEGImageFormat fmt;
+        fmt.setQuality(0.9f);
+        ok = fmt.writeImageToStream(img, out);
+    }
+
+    if (!ok)
+    {
+        log_error("FS", "exportSlotImage: encoder failed for '%s'",
+                  file.getFullPathName().toRawUTF8());
+        out.flush();
+        file.deleteFile();
+        return false;
+    }
+
+    log_info("FS", "Exported slot %d image to '%s' (%dx%d, %s)",
+             slotIndex, file.getFullPathName().toRawUTF8(),
+             width, height, asPng ? "PNG" : "JPEG");
+    return true;
+}
+
+int LuxSampler::exportAllSlotsImages(const juce::File& destDirectory,
+                                       const juce::String& baseName,
+                                       bool asPng) const
+{
+    using namespace LuxSamplerConstants;
+
+    if (!destDirectory.createDirectory().wasOk())
+    {
+        log_error("FS", "exportAllSlotsImages: cannot create directory '%s'",
+                  destDirectory.getFullPathName().toRawUTF8());
+        return 0;
+    }
+
+    const juce::String ext = asPng ? ".png" : ".jpg";
+    int exported = 0;
+
+    for (int s = 0; s < NUM_SLOTS; ++s)
+    {
+        if (!slotHasContent(s))
+            continue;
+
+        // Build safe filename: "<baseName>_slotNN_<label>.<ext>"
+        juce::String slotLabel(getSlotLabel(s));
+        slotLabel = slotLabel.retainCharacters(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
+
+        juce::String fname = baseName + "_slot"
+                              + juce::String(s).paddedLeft('0', 2);
+        if (slotLabel.isNotEmpty())
+            fname += "_" + slotLabel;
+        fname += ext;
+
+        const juce::File target = destDirectory.getChildFile(fname);
+        if (exportSlotImage(s, target, asPng))
+            ++exported;
+    }
+
+    return exported;
+}
+
 bool LuxSampler::loadFromFile(const juce::File& file)
+
 {
     using namespace LuxSamplerConstants;
 
@@ -992,6 +1131,318 @@ bool LuxSampler::loadFromFile(const juce::File& file)
 
     log_info("FS", "Loaded from '%s' (%d slots)",
              file.getFullPathName().toRawUTF8(), numSlotsInFile);
+    return true;
+}
+
+// ============================================================================
+// Per-slot file I/O — .fslot binary format
+//
+// Single-slot, self-contained format. Carries one slot's frames PLUS its
+// per-slot play parameters (speed, loop mode, fades, etc.) as embedded XML
+// so the file is fully portable across sessions.
+//
+// Layout:
+//   [4]  magic       "FSLT" (0x46534C54, little-endian = 0x544C5346)
+//   [2]  version     0x0001
+//   [2]  flags       reserved = 0
+//   [2]  slot_index  source slot index (0..NUM_SLOTS-1) — informational
+//   [82] FsmpSlotHeader  (reused from .fsmp format)
+//   [N]  frames      N × (FsmpFrameHeader + line_id + pixel_count + R + G + B)
+//   [4]  paramsXmlLen
+//   [*]  paramsXml   UTF-8 XML <SlotParams .../>
+//   [4]  EOF marker  0xDEADBEEF
+// ============================================================================
+
+namespace
+{
+    constexpr uint32_t FSLOT_MAGIC   = 0x46534C54u; // "FSLT"
+    constexpr uint16_t FSLOT_VERSION = 0x0001u;
+}
+
+bool LuxSampler::saveSlotToFile(int slotIndex, const juce::File& file) const
+{
+    using namespace LuxSamplerConstants;
+
+    if (slotIndex < 0 || slotIndex >= NUM_SLOTS)
+    {
+        log_error("FS", "saveSlotToFile: invalid slot index %d", slotIndex);
+        return false;
+    }
+
+    // Reject empty slots — nothing to save.
+    if (!slots[slotIndex].has_content || slots[slotIndex].frame_count <= 0)
+    {
+        log_warning("FS", "saveSlotToFile: slot %d is empty", slotIndex);
+        return false;
+    }
+
+    file.deleteFile();
+    juce::FileOutputStream out(file);
+    if (!out.openedOk())
+    {
+        log_error("FS", "saveSlotToFile: cannot open '%s'",
+                  file.getFullPathName().toRawUTF8());
+        return false;
+    }
+    out.setPosition(0);
+    out.truncate();
+
+    // ── File header (10 bytes) ───────────────────────────────────────────────
+    const uint32_t magic    = FSLOT_MAGIC;
+    const uint16_t version  = FSLOT_VERSION;
+    const uint16_t flags    = 0;
+    const uint16_t slotIdx  = static_cast<uint16_t>(slotIndex);
+    out.write(&magic,   sizeof(magic));
+    out.write(&version, sizeof(version));
+    out.write(&flags,   sizeof(flags));
+    out.write(&slotIdx, sizeof(slotIdx));
+
+    // ── Slot header + frames (under lock) ────────────────────────────────────
+    {
+        std::lock_guard<std::mutex> lk(slotsMutex_);
+        const FrameSlot& slot = slots[slotIndex];
+
+        FsmpSlotHeader shdr {};
+        shdr.slot_index  = static_cast<uint8_t>(slotIndex);
+        shdr.has_content = slot.has_content ? 0x01u : 0x00u;
+        shdr.frame_count = static_cast<uint32_t>(slot.frame_count);
+        shdr.duration_us = slot.duration_us;
+        std::strncpy(shdr.label, slot.label, 63);
+        shdr.label[63]   = '\0';
+        shdr.slot_crc32  = crc32_compute(reinterpret_cast<const uint8_t*>(&shdr),
+                                          offsetof(FsmpSlotHeader, slot_crc32));
+        out.write(&shdr, sizeof(shdr));
+
+        if (slot.has_content && slot.frame_count > 0 && slot.isAllocated())
+        {
+            const int fc = slot.frame_count;
+            for (int f = 0; f < fc; ++f)
+            {
+                const CapturedFrame& fr = slot.frames[f];
+                const uint32_t psize    = sizeof(fr.line_id) + sizeof(fr.pixel_count)
+                                          + 3u * static_cast<uint32_t>(fr.pixel_count);
+                FsmpFrameHeader fhdr { fr.timestamp_us, psize };
+                out.write(&fhdr,           sizeof(fhdr));
+                out.write(&fr.line_id,     sizeof(fr.line_id));
+                out.write(&fr.pixel_count, sizeof(fr.pixel_count));
+                out.write(fr.R, fr.pixel_count);
+                out.write(fr.G, fr.pixel_count);
+                out.write(fr.B, fr.pixel_count);
+            }
+        }
+    }
+
+    // ── Per-slot play parameters as embedded XML ─────────────────────────────
+    juce::XmlElement paramsXml("SlotParams");
+    paramsXml.setAttribute("startFrac",      static_cast<double>(getSlotStartFrac(slotIndex)));
+    paramsXml.setAttribute("endFrac",        static_cast<double>(getSlotEndFrac(slotIndex)));
+    paramsXml.setAttribute("speed",          static_cast<double>(getSlotSpeed(slotIndex)));
+    paramsXml.setAttribute("loopMode",       static_cast<int>(getSlotLoopMode(slotIndex)));
+    paramsXml.setAttribute("resumeMode",     static_cast<int>(getSlotResumeMode(slotIndex)));
+    paramsXml.setAttribute("blendAmount",    static_cast<double>(getSlotBlendAmount(slotIndex)));
+    paramsXml.setAttribute("attackLen",      static_cast<double>(getSlotAttackLen(slotIndex)));
+    paramsXml.setAttribute("decayLen",       static_cast<double>(getSlotDecayLen(slotIndex)));
+    paramsXml.setAttribute("brightnessLift", static_cast<double>(getSlotBrightnessLift(slotIndex)));
+    paramsXml.setAttribute("trebleCut",      static_cast<double>(getSlotTrebleCut(slotIndex)));
+    paramsXml.setAttribute("bassCut",        static_cast<double>(getSlotBassCut(slotIndex)));
+    paramsXml.setAttribute("fadeCurveType",  static_cast<int>(getSlotFadeCurveType(slotIndex)));
+    paramsXml.setAttribute("fadeCurvePower", static_cast<double>(getSlotFadeCurvePower(slotIndex)));
+    paramsXml.setAttribute("label",          juce::String(getSlotLabel(slotIndex)));
+
+    const juce::String xmlStr = paramsXml.toString();
+    const uint32_t xmlLen     = static_cast<uint32_t>(xmlStr.getNumBytesAsUTF8());
+    out.write(&xmlLen, sizeof(xmlLen));
+    if (xmlLen > 0)
+        out.write(xmlStr.toRawUTF8(), xmlLen);
+
+    // ── EOF marker ───────────────────────────────────────────────────────────
+    const uint32_t eof = FSMP_EOF_MARKER;
+    out.write(&eof, sizeof(eof));
+
+    if (!out.getStatus().wasOk())
+    {
+        log_error("FS", "saveSlotToFile: write error for '%s'",
+                  file.getFullPathName().toRawUTF8());
+        return false;
+    }
+
+    log_info("FS", "Saved slot %d to '%s'",
+             slotIndex, file.getFullPathName().toRawUTF8());
+    return true;
+}
+
+bool LuxSampler::loadSlotFromFile(int slotIndex, const juce::File& file)
+{
+    using namespace LuxSamplerConstants;
+
+    if (slotIndex < 0 || slotIndex >= NUM_SLOTS)
+    {
+        log_error("FS", "loadSlotFromFile: invalid slot index %d", slotIndex);
+        return false;
+    }
+
+    juce::FileInputStream in(file);
+    if (!in.openedOk())
+    {
+        log_error("FS", "loadSlotFromFile: cannot open '%s'",
+                  file.getFullPathName().toRawUTF8());
+        return false;
+    }
+
+    // ── File header (10 bytes) ───────────────────────────────────────────────
+    uint32_t magic   = 0;
+    uint16_t version = 0;
+    uint16_t flags   = 0;
+    uint16_t fileSlotIdx = 0;
+    if (in.read(&magic,       sizeof(magic))       != sizeof(magic)       ||
+        in.read(&version,     sizeof(version))     != sizeof(version)     ||
+        in.read(&flags,       sizeof(flags))       != sizeof(flags)       ||
+        in.read(&fileSlotIdx, sizeof(fileSlotIdx)) != sizeof(fileSlotIdx))
+    {
+        log_error("FS", "loadSlotFromFile: truncated file header");
+        return false;
+    }
+    if (magic != FSLOT_MAGIC)
+    {
+        log_error("FS", "loadSlotFromFile: invalid magic bytes (%08X)", magic);
+        return false;
+    }
+    if (version > FSLOT_VERSION)
+    {
+        log_error("FS", "loadSlotFromFile: unsupported version %u", version);
+        return false;
+    }
+    juce::ignoreUnused(flags, fileSlotIdx);
+
+    // ── Slot header ──────────────────────────────────────────────────────────
+    FsmpSlotHeader shdr {};
+    if (in.read(&shdr, sizeof(shdr)) != sizeof(shdr))
+    {
+        log_error("FS", "loadSlotFromFile: truncated slot header");
+        return false;
+    }
+    const uint32_t calc_crc = crc32_compute(
+        reinterpret_cast<const uint8_t*>(&shdr),
+        offsetof(FsmpSlotHeader, slot_crc32));
+    if (calc_crc != shdr.slot_crc32)
+    {
+        log_error("FS", "loadSlotFromFile: slot CRC mismatch (file=%08X calc=%08X)",
+                  shdr.slot_crc32, calc_crc);
+        return false;
+    }
+
+    // ── Frame data into a staging buffer (no lock during I/O) ────────────────
+    const int toLoad = static_cast<int>(
+        std::min(shdr.frame_count, static_cast<uint32_t>(MAX_FRAMES_PER_SLOT)));
+
+    std::vector<CapturedFrame> staging;
+    bool hasFrames = false;
+    if (shdr.has_content && shdr.frame_count > 0)
+    {
+        staging.resize(static_cast<size_t>(toLoad));
+        int loaded = 0;
+        for (int f = 0; f < toLoad; ++f)
+        {
+            FsmpFrameHeader fhdr {};
+            if (in.read(&fhdr, sizeof(fhdr)) != sizeof(fhdr)) break;
+
+            CapturedFrame& fr = staging[static_cast<size_t>(f)];
+            fr.timestamp_us = fhdr.timestamp_us;
+
+            uint32_t lid = 0; uint16_t pc = 0;
+            in.read(&lid, sizeof(lid));
+            in.read(&pc,  sizeof(pc));
+            fr.line_id     = lid;
+            fr.pixel_count = pc;
+
+            const int bytes = std::min(static_cast<int>(pc), MAX_PIXELS);
+            in.read(fr.R, bytes);
+            in.read(fr.G, bytes);
+            in.read(fr.B, bytes);
+            ++loaded;
+        }
+        staging.resize(static_cast<size_t>(loaded));
+        hasFrames = (loaded > 0);
+    }
+
+    // ── Embedded params XML (optional — older files may not have it) ─────────
+    juce::String paramsXmlStr;
+    uint32_t     xmlLen = 0;
+    if (in.read(&xmlLen, sizeof(xmlLen)) == sizeof(xmlLen)
+        && xmlLen > 0 && xmlLen < 1u * 1024u * 1024u)
+    {
+        juce::MemoryBlock xmlBlock;
+        xmlBlock.setSize(static_cast<size_t>(xmlLen));
+        if (in.read(xmlBlock.getData(), static_cast<int>(xmlLen))
+            == static_cast<int>(xmlLen))
+        {
+            paramsXmlStr = juce::String(
+                static_cast<const char*>(xmlBlock.getData()),
+                static_cast<size_t>(xmlLen));
+        }
+    }
+
+    // ── Stop any ongoing activity on the destination slot ────────────────────
+    if (activeRecSlot.load() == slotIndex) activeRecSlot.store(-1);
+    if (atomicState.activePlaySlot.load(std::memory_order_acquire) == slotIndex)
+    {
+        atomicState.stopPlayCmd.store(true);
+        atomicState.activePlaySlot.store(-1);
+        atomicState.passthroughEnabled.store(true);
+    }
+    atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::IDLE));
+
+    // ── Commit frames under slotsMutex_ ──────────────────────────────────────
+    {
+        std::lock_guard<std::mutex> lk(slotsMutex_);
+        slots[slotIndex].clear();
+
+        if (hasFrames)
+        {
+            slots[slotIndex].allocate();
+            slots[slotIndex].has_content = true;
+            slots[slotIndex].duration_us = shdr.duration_us;
+            std::strncpy(slots[slotIndex].label, shdr.label, 63);
+            slots[slotIndex].label[63] = '\0';
+
+            const int count = juce::jmin(static_cast<int>(staging.size()),
+                                         slots[slotIndex].capacity);
+            std::memcpy(slots[slotIndex].frames.get(), staging.data(),
+                        static_cast<size_t>(count) * sizeof(CapturedFrame));
+            slots[slotIndex].frame_count = count;
+        }
+    }
+
+    // ── Apply embedded params (if present) ───────────────────────────────────
+    if (paramsXmlStr.isNotEmpty())
+    {
+        if (auto xml = juce::parseXML(paramsXmlStr))
+        {
+            if (xml->getTagName() == "SlotParams")
+            {
+                setSlotStartFrac     (slotIndex, static_cast<float>(xml->getDoubleAttribute("startFrac",      0.0)));
+                setSlotEndFrac       (slotIndex, static_cast<float>(xml->getDoubleAttribute("endFrac",        1.0)));
+                setSlotSpeed         (slotIndex, static_cast<float>(xml->getDoubleAttribute("speed",          1.0)));
+                setSlotLoopMode      (slotIndex, static_cast<LoopMode>(xml->getIntAttribute("loopMode",       1)));
+                setSlotResumeMode    (slotIndex, xml->getIntAttribute("resumeMode", 0) != 0);
+                setSlotBlendAmount   (slotIndex, static_cast<float>(xml->getDoubleAttribute("blendAmount",    0.0)));
+                setSlotAttackLen     (slotIndex, static_cast<float>(xml->getDoubleAttribute("attackLen",      0.0)));
+                setSlotDecayLen      (slotIndex, static_cast<float>(xml->getDoubleAttribute("decayLen",       0.0)));
+                setSlotBrightnessLift(slotIndex, static_cast<float>(xml->getDoubleAttribute("brightnessLift", 0.0)));
+                setSlotTrebleCut     (slotIndex, static_cast<float>(xml->getDoubleAttribute("trebleCut",      0.0)));
+                setSlotBassCut       (slotIndex, static_cast<float>(xml->getDoubleAttribute("bassCut",        0.0)));
+                setSlotFadeCurveType (slotIndex, static_cast<FadeCurveType>(xml->getIntAttribute("fadeCurveType", 0)));
+                setSlotFadeCurvePower(slotIndex, static_cast<float>(xml->getDoubleAttribute("fadeCurvePower", 1.0)));
+                const juce::String lbl = xml->getStringAttribute("label", "");
+                if (lbl.isNotEmpty())
+                    setSlotLabel(slotIndex, lbl.toRawUTF8());
+            }
+        }
+    }
+
+    log_info("FS", "Loaded slot %d from '%s' (%d frames)",
+             slotIndex, file.getFullPathName().toRawUTF8(),
+             static_cast<int>(staging.size()));
     return true;
 }
 

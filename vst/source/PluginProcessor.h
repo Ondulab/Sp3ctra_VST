@@ -75,10 +75,33 @@ public:
      *  the Standalone app both restore the session on next launch. */
     void           setLastSessionPath(const juce::String& p) { lastSessionPath = p; }
     juce::String   getLastSessionPath()                const { return lastSessionPath; }
+
+    /** Optional output directory chosen by the user in the LuxSampler
+     *  settings.  When non-empty, SAVE SESSION writes the .sp3s file
+     *  (and the optional PNG/JPEG image exports) into this directory
+     *  directly, bypassing the file chooser.  Persisted in the APVTS
+     *  state blob alongside lastSessionPath. */
+    void           setSamplerOutputDir(const juce::String& p) { samplerOutputDir = p; }
+    juce::String   getSamplerOutputDir()              const { return samplerOutputDir; }
     /** Returns the inner Sp3ctraCore owned by the process-wide singleton. */
     Sp3ctraCore* getSp3ctraCore()
     {
         return sharedCore ? sharedCore->getCore() : nullptr;
+    }
+
+    /**
+     * @brief True once the shared pipeline (UDP socket + threads) has been
+     *        successfully started by prepareToPlay().
+     *
+     * Returns false in Standalone when no audio device is currently selected
+     * or active — in this state the UDP receiver is not bound to any port and
+     * no CIS data can ever be received, regardless of network configuration.
+     *
+     * UI thread safe (queries an atomic flag inside Sp3ctraSharedCore).
+     */
+    bool isPipelineReady() const noexcept
+    {
+        return sharedCore && sharedCore->isReady();
     }
     LuxSampler*    getLuxSampler()    { return luxSampler.get();    }
     FrameSequencer*  getFrameSequencer()  { return frameSequencer.get();  }
@@ -90,7 +113,41 @@ public:
     void beginUdpBatchUpdate();
     void endUdpBatchUpdate();
 
+    // -------------------------------------------------------------------------
+    // Sampler action button MIDI bindings (REC / PLAY / SAVE on selected slot)
+    //
+    // The selected slot is mirrored from the UI (SlotEditorComponent) so the
+    // RT thread can act on the same slot the user sees on screen.  Pulses are
+    // set by processBlock (RT) and consumed by the message thread.
+    //
+    // MIDI Learn:
+    //   target  : -1 = idle, 0 = REC, 1 = PLAY, 2 = SAVE
+    //   result  : -1 = no capture yet, otherwise (type << 8) | number
+    //             where type: 1 = Note, 2 = CC
+    // -------------------------------------------------------------------------
+    void setSamplerSelectedSlot(int s) noexcept { samplerSelectedSlot.store(s, std::memory_order_relaxed); }
+    int  getSamplerSelectedSlot() const noexcept { return samplerSelectedSlot.load(std::memory_order_relaxed); }
+
+    bool consumeSamplerRecTrigger()  noexcept { return samplerRecTriggered .exchange(false, std::memory_order_acquire); }
+    bool consumeSamplerPlayTrigger() noexcept { return samplerPlayTriggered.exchange(false, std::memory_order_acquire); }
+    bool consumeSamplerSaveTrigger() noexcept { return samplerSaveTriggered.exchange(false, std::memory_order_acquire); }
+
+    void startSamplerMidiLearn(int target) noexcept
+    {
+        samplerMidiLearnResult.store(-1, std::memory_order_relaxed);
+        samplerMidiLearnTarget.store(target, std::memory_order_release);
+    }
+    void cancelSamplerMidiLearn() noexcept
+    {
+        samplerMidiLearnTarget.store(-1, std::memory_order_release);
+        samplerMidiLearnResult.store(-1, std::memory_order_relaxed);
+    }
+    int  getSamplerMidiLearnTarget() const noexcept { return samplerMidiLearnTarget.load(std::memory_order_acquire); }
+    int  getSamplerMidiLearnResult() const noexcept { return samplerMidiLearnResult.load(std::memory_order_acquire); }
+    void clearSamplerMidiLearnResult() noexcept { samplerMidiLearnResult.store(-1, std::memory_order_relaxed); }
+
 private:
+
     //==============================================================================
     // Helper to create parameter layout
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
@@ -172,11 +229,31 @@ private:
     std::atomic<bool> udpBatchUpdateActive{false};
     std::atomic<bool> udpNeedsRestart{false};
 
+    // -------------------------------------------------------------------------
+    // Sampler action button MIDI bindings — RT-safe trigger pulses
+    // Set by processBlock (audio thread), consumed by message thread.
+    // -------------------------------------------------------------------------
+    std::atomic<int>  samplerSelectedSlot   { 0 };
+    std::atomic<bool> samplerRecTriggered   { false };
+    std::atomic<bool> samplerPlayTriggered  { false };
+    std::atomic<bool> samplerSaveTriggered  { false };
+
+    // MIDI Learn: target = -1 idle / 0 REC / 1 PLAY / 2 SAVE.
+    // Result encoding: -1 = none, else (type << 8) | number  (type: 1=Note, 2=CC).
+    std::atomic<int>  samplerMidiLearnTarget{ -1 };
+    std::atomic<int>  samplerMidiLearnResult{ -1 };
+
+
     /** Full path of the last .sp3s session saved or loaded.
      *  Serialised inside the APVTS state blob (getStateInformation /
      *  setStateInformation) so it survives DAW project reloads and
      *  Standalone restarts. */
     juce::String lastSessionPath;
+
+    /** Optional output directory for LuxSampler SAVE SESSION + image export.
+     *  Empty → fallback to file chooser (legacy behaviour). Persisted in
+     *  the APVTS state blob alongside lastSessionPath. */
+    juce::String samplerOutputDir;
     
     // Note: RT Profiler is now global (g_vst_rt_profiler) to be accessible from C threads
     
