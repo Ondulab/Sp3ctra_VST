@@ -41,22 +41,24 @@ VideoScrollTab::VideoScrollTab(Sp3ctraAudioProcessor& processor)
     sourceCombo_.addItem("LuxPitch Output",      4);
     sourceCombo_.setTooltip(
         "Image source fed to the video scroll window.\n"
-        "'LuxPitch Output' shows the post-LuxPitch processed image — the shifted,\n"
+        "'LuxPitch Output' shows the post-LuxPitch processed image - the shifted,\n"
         "enveloped, and modulated output of the LuxPitch engine.\n"
         "Requires LuxPitch to be enabled in the IMAGE > LUXPITCH tab.");
+
     addAndMakeVisible(sourceCombo_);
     sourceAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         apvts, "videoScrollSource", sourceCombo_);
 
-    // ── Scroll Orientation ────────────────────────────────────────────────────
-    modeCombo_.addItem("0°   — scroll up      (new data at bottom)", 1);
-    modeCombo_.addItem("90°  — scroll left    (new data at right)",  2);
-    modeCombo_.addItem("180° — scroll down    (new data at top)",    3);
-    modeCombo_.addItem("270° — scroll right   (new data at left)",   4);
+    // Scroll Orientation
+    modeCombo_.addItem("0 deg   - scroll up      (new data at bottom)", 1);
+    modeCombo_.addItem("90 deg  - scroll left    (new data at right)",  2);
+    modeCombo_.addItem("180 deg - scroll down    (new data at top)",    3);
+    modeCombo_.addItem("270 deg - scroll right   (new data at left)",   4);
     modeCombo_.setTooltip(
         "Orientation of the waterfall scroll.\n"
-        "90° is the classic L->R scanner view.\n"
-        "270° is the R->L view.");
+        "90 deg is the classic L->R scanner view.\n"
+        "270 deg is the R->L view.");
+
     addAndMakeVisible(modeCombo_);
     modeAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         apvts, "videoScrollMode", modeCombo_);

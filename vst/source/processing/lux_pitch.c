@@ -25,6 +25,7 @@
 /* ── Global instances ──────────────────────────────────────────────────────── */
 LuxPitchState g_lux_pitch;
 LuxPitchState g_lux_pitch_proc;
+LuxPitchState g_lux_pitch_vid;
 
 /* ── Timestamp helper ──────────────────────────────────────────────────────── */
 static uint64_t lux_pitch_get_timestamp_us(void)

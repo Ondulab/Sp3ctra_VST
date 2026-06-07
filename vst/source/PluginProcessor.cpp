@@ -586,9 +586,54 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxSamplerMaxDuration", 1}, "LuxSampler Max Duration",
-        juce::NormalisableRange<float>(1.0f, 10.0f, 0.1f), 10.0f, kHiddenFloat));
+        juce::NormalisableRange<float>(1.0f, 60.0f, 0.1f), 10.0f, kHiddenFloat));
+
+    // ── LuxSampler action button MIDI bindings (REC / PLAY / SAVE) ───────────
+    // Type: 0 = Off (disabled), 1 = Note, 2 = CC
+    // Number: 0..127 MIDI note number or CC controller index.
+    // Triggering rule:
+    //   - Note: triggers on NoteOn (velocity > 0).
+    //   - CC:   triggers on CC value >= 64 (rising edge).
+    {
+        juce::StringArray bindTypeNames { "Off", "Note", "CC" };
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxSamplerRecBindType", 1},
+            "LuxSampler REC Bind Type", bindTypeNames, 0, kHiddenChoice));
+        params.push_back(std::make_unique<juce::AudioParameterInt>(
+            juce::ParameterID{"luxSamplerRecBindNum",  1},
+            "LuxSampler REC Bind Number", 0, 127, 0, kHiddenInt));
+
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxSamplerPlayBindType", 1},
+            "LuxSampler PLAY Bind Type", bindTypeNames, 0, kHiddenChoice));
+        params.push_back(std::make_unique<juce::AudioParameterInt>(
+            juce::ParameterID{"luxSamplerPlayBindNum",  1},
+            "LuxSampler PLAY Bind Number", 0, 127, 0, kHiddenInt));
+
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxSamplerSaveBindType", 1},
+            "LuxSampler SAVE Bind Type", bindTypeNames, 0, kHiddenChoice));
+        params.push_back(std::make_unique<juce::AudioParameterInt>(
+            juce::ParameterID{"luxSamplerSaveBindNum",  1},
+            "LuxSampler SAVE Bind Number", 0, 127, 0, kHiddenInt));
+    }
+
+    // Image export on Save Session: bool toggle + format choice (PNG / JPEG)
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"luxSamplerExportImages", 1},
+        "LuxSampler Export Images On Save",
+        false, kHiddenBool));
+
+    {
+        juce::StringArray formats { "PNG", "JPEG" };
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxSamplerExportFormat", 1},
+            "LuxSampler Export Format",
+            formats, 0, kHiddenChoice));
+    }
 
     // ── FrameSequencer parameters ─────────────────────────────────────────────
+
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"seqEnabled",  1}, "Sequencer Enabled", false, kHiddenBool));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -852,9 +897,10 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     // We defer startWithConfig() to prepareToPlay() so we have the correct
     // sample rate and buffer size when initializing LuxStral.
     
-    // Initialize LuxPitch instances (both UI and processing thread)
+    // Initialize LuxPitch instances (UI/visualizer, processing thread, video tab)
     lux_pitch_init(&g_lux_pitch);
     lux_pitch_init(&g_lux_pitch_proc);
+    lux_pitch_init(&g_lux_pitch_vid);
 
     // Just update g_sp3ctra_config with current APVTS defaults (no socket/buffer creation)
     applyConfigurationToCore(false);
@@ -1118,6 +1164,72 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     if (luxSampler != nullptr)
         luxSampler->processMidi(midiMessages);
 
+    // ── LuxSampler action button MIDI bindings (REC / PLAY / SAVE) ─────────
+    // RT-safe: only atomic reads/writes, no allocation, no logging.
+    // Triggers are consumed by SlotEditorComponent::timerCallback() (UI thread).
+    {
+        const int samplerCh =
+            static_cast<int>(apvts.getRawParameterValue("luxSamplerMidiChannel")->load()) + 1;
+
+        const int recType  = static_cast<int>(apvts.getRawParameterValue("luxSamplerRecBindType")->load());
+        const int recNum   = static_cast<int>(apvts.getRawParameterValue("luxSamplerRecBindNum") ->load());
+        const int playType = static_cast<int>(apvts.getRawParameterValue("luxSamplerPlayBindType")->load());
+        const int playNum  = static_cast<int>(apvts.getRawParameterValue("luxSamplerPlayBindNum") ->load());
+        const int saveType = static_cast<int>(apvts.getRawParameterValue("luxSamplerSaveBindType")->load());
+        const int saveNum  = static_cast<int>(apvts.getRawParameterValue("luxSamplerSaveBindNum") ->load());
+
+        const int learnTarget = samplerMidiLearnTarget.load(std::memory_order_acquire);
+
+        for (const auto metadata : midiMessages)
+        {
+            const auto msg = metadata.getMessage();
+            if (msg.getChannel() != samplerCh) continue;
+
+            // MIDI Learn: capture first matching event then exit learn mode.
+            // Only captured when learn mode is active AND no result has been
+            // captured yet (-1).
+            if (learnTarget >= 0
+                && samplerMidiLearnResult.load(std::memory_order_relaxed) == -1)
+            {
+                int captured = -1;
+                if (msg.isNoteOn())
+                    captured = (1 << 8) | (msg.getNoteNumber() & 0x7F);
+                else if (msg.isController())
+                    captured = (2 << 8) | (msg.getControllerNumber() & 0x7F);
+
+                if (captured >= 0)
+                {
+                    samplerMidiLearnResult.store(captured, std::memory_order_release);
+                    // Stop learning — UI thread will apply the result.
+                    samplerMidiLearnTarget.store(-1, std::memory_order_release);
+                    continue; // do not also trigger an action on the learning event
+                }
+            }
+
+            // Detect a "trigger" for a given binding.
+            // - Note:  triggered on NoteOn with velocity > 0
+            // - CC:    triggered on rising edge (value >= 64)
+            auto matchesBinding = [&](int type, int number) -> bool
+            {
+                if (type == 1) // Note
+                    return msg.isNoteOn() && msg.getNoteNumber() == number;
+                if (type == 2) // CC
+                    return msg.isController()
+                        && msg.getControllerNumber() == number
+                        && msg.getControllerValue() >= 64;
+                return false;
+            };
+
+            if (matchesBinding(recType,  recNum))
+                samplerRecTriggered .store(true, std::memory_order_release);
+            if (matchesBinding(playType, playNum))
+                samplerPlayTriggered.store(true, std::memory_order_release);
+            if (matchesBinding(saveType, saveNum))
+                samplerSaveTriggered.store(true, std::memory_order_release);
+        }
+    }
+
+
     // ── LuxPitch MIDI (RT-safe: lock-free pitch shift from notes/pitch-bend) ──
     {
         const int lpCh  = static_cast<int>(apvts.getRawParameterValue("luxpitchMidiChannel")->load()) + 1;
@@ -1131,17 +1243,20 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             {
                 lux_pitch_note_on(&g_lux_pitch, shifted, msg.getFloatVelocity());
                 lux_pitch_note_on(&g_lux_pitch_proc, shifted, msg.getFloatVelocity());
+                lux_pitch_note_on(&g_lux_pitch_vid,  shifted, msg.getFloatVelocity());
             }
             else if (msg.isNoteOff())
             {
                 lux_pitch_note_off(&g_lux_pitch, shifted);
                 lux_pitch_note_off(&g_lux_pitch_proc, shifted);
+                lux_pitch_note_off(&g_lux_pitch_vid,  shifted);
             }
             else if (msg.isPitchWheel())
             {
                 float bend = (msg.getPitchWheelValue() - 8192) / 8192.0f;
                 lux_pitch_set_pitch_bend(&g_lux_pitch, bend);
                 lux_pitch_set_pitch_bend(&g_lux_pitch_proc, bend);
+                lux_pitch_set_pitch_bend(&g_lux_pitch_vid,  bend);
             }
         }
     }
@@ -1429,7 +1544,10 @@ void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     // and Standalone restarts (setStateInformation restores it).
     if (lastSessionPath.isNotEmpty())
         state.setProperty("lastSessionPath", lastSessionPath, nullptr);
+    if (samplerOutputDir.isNotEmpty())
+        state.setProperty("samplerOutputDir", samplerOutputDir, nullptr);
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
+
     copyXmlToBinary(*xml, destData);
     log_info("VST", "State saved to DAW project");
 }
@@ -1896,6 +2014,7 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
             lpc.reference_note          = 24 + static_cast<int>(apvts.getRawParameterValue("luxpitchReferenceNote")->load());
             g_lux_pitch.config      = lpc;  /* UI / visualizer thread */
             g_lux_pitch_proc.config = lpc;  /* processing / synthesis thread */
+            g_lux_pitch_vid.config  = lpc;  /* VIDEO tab (image scroll) thread */
         }
 
         log_debug("VST", "Per-path routing: LS source=%d inv=%d ac=%d  |  LX source=%d inv=%d ac=%d gamma=%.2f",

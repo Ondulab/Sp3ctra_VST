@@ -158,8 +158,20 @@ void lux_pitch_process_frame(
 );
 
 /* ── Global instances ──────────────────────────────────────────────────────── */
+/*
+ * Three independent instances are needed to decouple consumers and avoid one
+ * subsystem (e.g. the visualizer) inadvertently driving another (e.g. the
+ * video scroll tab):
+ *   g_lux_pitch      — UI / visualizer thread (only used when LuxPitch view is
+ *                      active in the IMAGE tab)
+ *   g_lux_pitch_proc — synthesis / processing thread
+ *   g_lux_pitch_vid  — VIDEO tab (image scroll waterfall), runs on the
+ *                      VideoDisplayComponent capture thread when its source is
+ *                      "LuxPitch Output", independently of the visualizer.
+ */
 extern LuxPitchState g_lux_pitch;
 extern LuxPitchState g_lux_pitch_proc;
+extern LuxPitchState g_lux_pitch_vid;
 
 #ifdef __cplusplus
 }

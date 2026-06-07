@@ -8,6 +8,10 @@ extern "C"
 #include "processing/lux_pitch.h"
 }
 
+/* Cap LuxPitch output buffer copy at the engine's max pixel capacity.
+ * Defined in processing/lux_pitch.h.  Avoids a redefinition warning when the
+ * macro is reused locally. */
+
 #include <cstring>
 
 //==============================================================================
@@ -76,22 +80,65 @@ void VideoDisplayComponent::captureCurrentFrame()
         case 1: // Sample
             audio_image_buffers_get_sampler_pointers(aib, &pR, &pG, &pB);
             break;
-        case 3: // LuxPitch Output — reads the post-LuxPitch processed buffers
-                // (g_lux_pitch.out_r/g/b) which contain the shifted + enveloped
-                // image after lux_pitch_process_frame() runs in CisVisualizerComponent.
-                // Falls back to Mix (read_pointers) if pixel count exceeds
-                // LUX_PITCH_MAX_PIXELS or if output buffer appears uninitialised.
-            if (count <= LUX_PITCH_MAX_PIXELS)
+        case 3:
+        {
+            // LuxPitch Output — process the LuxPitch pitch-shift INDEPENDENTLY
+            // for the video scroll.  We do NOT depend on the visualizer or on
+            // the audio thread: we drive our own private LuxPitch instance
+            // (g_lux_pitch_vid) so the waterfall keeps scrolling even when the
+            // visualizer is showing another node.
+            //
+            // The visualizer is intentionally not coupled to this pipeline —
+            // visualizers only display their own state.
+            if (count > LUX_PITCH_MAX_PIXELS)
             {
-                pR = g_lux_pitch.out_r;
-                pG = g_lux_pitch.out_g;
-                pB = g_lux_pitch.out_b;
-            }
-            else
-            {
+                // Source too wide for the LuxPitch buffers → fallback to Mix.
                 audio_image_buffers_get_read_pointers(aib, &pR, &pG, &pB);
+                break;
             }
+
+            // Resolve upstream source as configured by the user
+            // (luxpitchSource: 0=Sampler, 1=Mix, 2=Live).
+            const int lpChoice = static_cast<int>(
+                processor_.getAPVTS().getRawParameterValue("luxpitchSource")->load());
+            uint8_t* inR = nullptr;
+            uint8_t* inG = nullptr;
+            uint8_t* inB = nullptr;
+            switch (lpChoice)
+            {
+                case 0:  audio_image_buffers_get_sampler_pointers(aib, &inR, &inG, &inB); break;
+                case 2:  audio_image_buffers_get_raw_pointers    (aib, &inR, &inG, &inB); break;
+                case 1:
+                default: audio_image_buffers_get_read_pointers   (aib, &inR, &inG, &inB); break;
+            }
+
+            if (!inR || !inG || !inB)
+            {
+                // Upstream not ready → silently fallback to Mix to keep the UI alive.
+                audio_image_buffers_get_read_pointers(aib, &pR, &pG, &pB);
+                break;
+            }
+
+            // Run our private LuxPitch engine on the upstream frame.
+            // Config has already been synced into g_lux_pitch_vid.config by
+            // applyConfigurationToCore() (PluginProcessor), and MIDI events are
+            // delivered to g_lux_pitch_vid in processBlock().
+            const uint8_t *outR = nullptr;
+            const uint8_t *outG = nullptr;
+            const uint8_t *outB = nullptr;
+            lux_pitch_process_frame(&g_lux_pitch_vid,
+                                    inR, inG, inB,
+                                    count,
+                                    g_sp3ctra_config.num_octaves,
+                                    &outR, &outG, &outB);
+
+            // lux_pitch_process_frame may return the input pointers as-is
+            // (bypass when disabled) or the internal out_* buffers (when active).
+            pR = (uint8_t*)outR;
+            pG = (uint8_t*)outG;
+            pB = (uint8_t*)outB;
             break;
+        }
         case 2: // Mix
         default:
             audio_image_buffers_get_read_pointers(aib, &pR, &pG, &pB);

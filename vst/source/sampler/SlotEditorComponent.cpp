@@ -52,6 +52,86 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     };
     addAndMakeVisible(clearBtn);
 
+    // ── SAVE button — direct write (no dialog) ────────────────────────────────
+    // Filename pattern: YYYYMMDD-HHMMSS_slotNN.fslot (+ optional .png/.jpg).
+    saveBtn.onClick = [this]
+    {
+        auto* fs = processor.getLuxSampler();
+        if (fs == nullptr || !fs->slotHasContent(selectedSlot))
+            return;
+
+        const juce::File dir = resolveSaveDirectory();
+        if (!dir.isDirectory())
+            return;
+
+        // Build timestamp prefix
+        const juce::Time now = juce::Time::getCurrentTime();
+        const juce::String stamp = juce::String::formatted(
+            "%04d%02d%02d-%02d%02d%02d",
+            now.getYear(),
+            now.getMonth() + 1,
+            now.getDayOfMonth(),
+            now.getHours(),
+            now.getMinutes(),
+            now.getSeconds());
+
+        const juce::String base = stamp + "_slot"
+                                  + juce::String(selectedSlot).paddedLeft('0', 2);
+
+        const juce::File slotFile = dir.getChildFile(base + ".fslot");
+        fs->saveSlotToFile(selectedSlot, slotFile);
+
+        // Optional image export — controlled by user settings (luxSamplerExportImages).
+        auto& apvts = processor.getAPVTS();
+        const bool exportImg =
+            apvts.getRawParameterValue("luxSamplerExportImages") != nullptr
+            && apvts.getRawParameterValue("luxSamplerExportImages")->load() > 0.5f;
+
+        if (exportImg)
+        {
+            bool asPng = true; // 0 = PNG, 1 = JPEG
+            if (auto* p = apvts.getRawParameterValue("luxSamplerExportFormat"))
+                asPng = (p->load() < 0.5f);
+
+            const juce::String ext = asPng ? ".png" : ".jpg";
+            const juce::File imgFile = dir.getChildFile(base + ext);
+            fs->exportSlotImage(selectedSlot, imgFile, asPng);
+        }
+    };
+    addAndMakeVisible(saveBtn);
+
+    // ── LOAD button — file chooser, loads into selected slot ──────────────────
+    loadBtn.onClick = [this]
+    {
+        auto* fs = processor.getLuxSampler();
+        if (fs == nullptr) return;
+
+        const juce::File startDir = resolveSaveDirectory();
+        fileChooser = std::make_unique<juce::FileChooser>(
+            "Load slot (.fslot)",
+            startDir,
+            "*.fslot");
+
+        const int flags = juce::FileBrowserComponent::openMode
+                          | juce::FileBrowserComponent::canSelectFiles;
+
+        fileChooser->launchAsync(flags, [this](const juce::FileChooser& fc)
+        {
+            const juce::File picked = fc.getResult();
+            if (picked == juce::File()) return;
+            auto* sampler = processor.getLuxSampler();
+            if (sampler == nullptr) return;
+
+            if (sampler->loadSlotFromFile(selectedSlot, picked))
+            {
+                timeline.markDirty();
+                refreshSliderValues();
+                refreshLoopButtons();
+            }
+        });
+    };
+    addAndMakeVisible(loadBtn);
+
     // ── Labels ────────────────────────────────────────────────────────────────
     for (auto* lbl : { &speedLabel, &loopLabel })
     {
@@ -179,14 +259,19 @@ SlotEditorComponent::~SlotEditorComponent()
 
 void SlotEditorComponent::setSelectedSlot(int idx)
 {
-    selectedSlot = juce::jlimit(0, LuxSamplerConstants::NUM_SLOTS - 1, idx);
+    selectedSlot = idx;
+    // Mirror selected slot to the audio processor so RT-triggered
+    // REC/PLAY/SAVE bindings act on the slot the user is looking at.
+    processor.setSamplerSelectedSlot(selectedSlot);
     timeline.setSelectedSlot(selectedSlot);
+    // Refresh UI state from new slot
     refreshSliderValues();
     refreshLoopButtons();
     repaint();
 }
 
 void SlotEditorComponent::refreshSliderValues()
+
 {
     auto* fs = processor.getLuxSampler();
     if (fs == nullptr) return;
@@ -339,15 +424,17 @@ void SlotEditorComponent::resized()
     const int leftX  = pad;
     const int rightX = leftX + leftW + gap + pad;
 
-    // ── Left: REC / PLAY / CLEAR (y=30) ──────────────────────────────────────
+    // ── Left: REC / PLAY / CLEAR / SAVE / LOAD (y=30, 5 buttons in one row) ──
     {
         const int btnY   = 30;
         constexpr int btnH   = Sp3ctraTheme::kControlH;
         const int btnGap = Sp3ctraTheme::kGap;
-        const int bW     = (leftW - 2 * btnGap) / 3;
-        recBtn  .setBounds(leftX,                       btnY, bW, btnH);
-        playBtn .setBounds(leftX + bW + btnGap,         btnY, bW, btnH);
-        clearBtn.setBounds(leftX + 2 * (bW + btnGap),   btnY, bW, btnH);
+        const int bW     = (leftW - 4 * btnGap) / 5;
+        recBtn  .setBounds(leftX,                     btnY, bW, btnH);
+        playBtn .setBounds(leftX + 1 * (bW + btnGap), btnY, bW, btnH);
+        clearBtn.setBounds(leftX + 2 * (bW + btnGap), btnY, bW, btnH);
+        saveBtn .setBounds(leftX + 3 * (bW + btnGap), btnY, bW, btnH);
+        loadBtn .setBounds(leftX + 4 * (bW + btnGap), btnY, bW, btnH);
     }
 
     // ── Left: Timeline (y=64, fills remaining height) ─────────────────────────
@@ -407,8 +494,21 @@ void SlotEditorComponent::timerCallback()
 {
     blinkOn = !blinkOn;
 
+    // ── Consume MIDI-triggered REC / PLAY / SAVE pulses ──────────────────────
+    // These are set by Sp3ctraAudioProcessor::processBlock from incoming MIDI
+    // events that match user-defined Note/CC bindings (LuxSampler settings tab).
+    // We invoke the SAME button onClick lambdas so the behaviour is identical
+    // to a manual click (file chooser, state toggling, etc.).
+    if (processor.consumeSamplerRecTrigger() && recBtn.onClick)
+        recBtn.onClick();
+    if (processor.consumeSamplerPlayTrigger() && playBtn.onClick)
+        playBtn.onClick();
+    if (processor.consumeSamplerSaveTrigger() && saveBtn.onClick)
+        saveBtn.onClick();
+
     auto* fs = processor.getLuxSampler();
     if (fs == nullptr) return;
+
 
     const SlotState st         = fs->getSlotState(selectedSlot);
     const bool      hasContent = fs->slotHasContent(selectedSlot);
@@ -457,5 +557,43 @@ void SlotEditorComponent::timerCallback()
 
     clearBtn.setEnabled(hasContent);
 
+    // ── SAVE / LOAD buttons ──────────────────────────────────────────────────
+    saveBtn.setEnabled(hasContent);
+    saveBtn.setColour(juce::TextButton::buttonColourId,
+                      juce::Colour(0xff2a3a4a));
+    saveBtn.setColour(juce::TextButton::textColourOffId,
+                      hasContent ? juce::Colour(0xff88ccff)
+                                 : juce::Colour(0xff556677));
+    // LOAD is always enabled — even an empty slot can be filled.
+    loadBtn.setColour(juce::TextButton::buttonColourId,
+                      juce::Colour(0xff2a3a4a));
+    loadBtn.setColour(juce::TextButton::textColourOffId,
+                      juce::Colour(0xff88ccff));
+
     repaint(); // refresh title state indicator
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// resolveSaveDirectory — build the destination folder for SAVE.
+// Order of resolution:
+//   1. processor.getSamplerOutputDir() (user-configured Sampler Output Dir)
+//   2. ~/Documents
+// Creates the directory if it does not yet exist.
+// ─────────────────────────────────────────────────────────────────────────────
+juce::File SlotEditorComponent::resolveSaveDirectory() const
+{
+    juce::File dir;
+
+    const juce::String configured = processor.getSamplerOutputDir();
+    if (configured.isNotEmpty())
+        dir = juce::File(configured);
+
+    if (dir == juce::File())
+        dir = juce::File::getSpecialLocation(
+                  juce::File::userDocumentsDirectory);
+
+    if (!dir.isDirectory())
+        dir.createDirectory();
+
+    return dir;
 }

@@ -97,7 +97,8 @@ void VideoWindow::ContentComponent::resized()
 //==============================================================================
 
 VideoWindow::VideoWindow(Sp3ctraAudioProcessor& processor)
-    : juce::DocumentWindow("Sp3ctra — Video Scroll",
+    : juce::DocumentWindow("Sp3ctra - Video Scroll",
+
                            juce::Colour(0xff1a1a1a),
                            DocumentWindow::allButtons),
       processor_(processor)
