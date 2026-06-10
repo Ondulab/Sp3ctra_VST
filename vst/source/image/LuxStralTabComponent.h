@@ -45,6 +45,7 @@ public:
         sourceCombo.addItem("M - Mix",      2);
         sourceCombo.addItem("L - Live",     3);
         sourceCombo.addItem("P - LuxPitch", 4);
+        sourceCombo.addItem("K - LuxMask",  5);
         sourceAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
             apvts, "luxstralSource", sourceCombo));
 

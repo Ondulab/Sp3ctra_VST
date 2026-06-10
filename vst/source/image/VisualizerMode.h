@@ -21,6 +21,7 @@ enum class VisualizerMode
     SPCTR_BLOB,         // StrokeForge overlay on LuxStral path
     SYNTH_BLOB,         // StrokeForge overlay on LuxSynth path
     LUXPITCH_OUTPUT,    // LuxPitch shifted image output
+    LUXMASK_OUTPUT,     // LuxMask spotlight image output
     COUNT
 };
 
@@ -43,6 +44,7 @@ inline const char* visualizerModeLabel(VisualizerMode m)
         case VisualizerMode::SPCTR_BLOB:     return "LUXSTRAL BLOB";
         case VisualizerMode::SYNTH_BLOB:     return "LUXSYNTH BLOB";
         case VisualizerMode::LUXPITCH_OUTPUT: return "LUXPITCH";
+        case VisualizerMode::LUXMASK_OUTPUT:  return "LUXMASK";
         default:                             return "???";
     }
 }

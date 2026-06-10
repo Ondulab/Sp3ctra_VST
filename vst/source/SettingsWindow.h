@@ -9,6 +9,7 @@
 #include "settings/LuxSynthSettingsTab.h"
 #include "settings/LuxWaveSettingsTab.h"
 #include "settings/LuxPitchSettingsTab.h"
+#include "settings/LuxMaskSettingsTab.h"
 #include "settings/VideoScrollSettingsTab.h"
 
 //==============================================================================
@@ -44,6 +45,7 @@ private:
     LuxWaveSettingsTab*      luxwaveTab;
     LuxSamplerSettingsTab*   luxSamplerTab;
     LuxPitchSettingsTab*     luxPitchTab;
+    LuxMaskSettingsTab*      luxMaskTab;
     VideoScrollSettingsTab*  videoScrollSettingsTab;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SettingsComponent)

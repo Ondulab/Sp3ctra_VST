@@ -33,7 +33,8 @@ typedef enum {
     IMAGE_SOURCE_SAMPLER  = 0,  /* S — LuxSampler playback (recorded slot) */
     IMAGE_SOURCE_LIVE     = 1,  /* L — Live UDP stream (real-time scanner) */
     IMAGE_SOURCE_MIX      = 2,  /* M — Darken-blend of Sampler × Live */
-    IMAGE_SOURCE_LUXPITCH = 3   /* P — LuxPitch shifted output */
+    IMAGE_SOURCE_LUXPITCH = 3,  /* P — LuxPitch shifted output */
+    IMAGE_SOURCE_LUXMASK  = 4   /* K — LuxMask spotlight output */
 } ImageSourceType;
 
 /* ============================================================================

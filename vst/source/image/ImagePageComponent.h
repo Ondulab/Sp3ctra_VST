@@ -22,6 +22,7 @@
 #include "VisualizerMode.h"
 #include "SourcesTabComponent.h"
 #include "LuxPitchTabComponent.h"
+#include "LuxMaskTabComponent.h"
 #include "LuxStralTabComponent.h"
 #include "LuxSynthTabComponent.h"
 #include <functional>
@@ -42,7 +43,7 @@ public:
     void setActiveVisualizerMode(VisualizerMode m);
 
 private:
-    enum class SubTab { Sources, LuxPitch, LuxStral, LuxSynth };
+    enum class SubTab { Sources, LuxPitch, LuxMask, LuxStral, LuxSynth };
 
     void switchSubTab(SubTab tab);
     void handleNodeClicked(VisualizerMode m);
@@ -56,12 +57,14 @@ private:
     static constexpr int kSubTabH = 28;
     juce::TextButton sourcesBtn  { "SOURCES" };
     juce::TextButton luxpitchBtn { "LUXPITCH" };
+    juce::TextButton luxmaskBtn  { "LUXMASK" };
     juce::TextButton luxstralBtn { "LUXSTRAL" };
     juce::TextButton luxsynthBtn { "LUXSYNTH" };
 
     // ── Tab content components ────────────────────────────────────────────────
     std::unique_ptr<SourcesTabComponent>    sourcesTab;
     std::unique_ptr<LuxPitchTabComponent>   luxpitchTab;
+    std::unique_ptr<LuxMaskTabComponent>    luxmaskTab;
     std::unique_ptr<LuxStralTabComponent>   luxstralTab;
     std::unique_ptr<LuxSynthTabComponent>   luxsynthTab;
 

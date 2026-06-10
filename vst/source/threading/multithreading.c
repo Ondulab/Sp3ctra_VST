@@ -16,6 +16,7 @@
 #include "../processing/image_preprocessor.h"
 #include "../processing/image_pipeline.h"
 #include "../processing/lux_pitch.h"
+#include "../processing/lux_mask.h"
 #include "../processing/image_sequencer.h"
 #include "../synthesis/luxwave/synth_luxwave.h"
 #include <time.h>
@@ -661,6 +662,37 @@ void *udpThread(void *arg) {
                                     g_sp3ctra_config.num_octaves,
                                     &src_R, &src_G, &src_B);
         }
+        else if (live_cfg.luxstral_path.source == IMAGE_SOURCE_LUXMASK)
+        {
+            /* K — LuxMask: select upstream source, apply mobile spotlight */
+            const uint8_t *lm_in_R, *lm_in_G, *lm_in_B;
+            /* LuxMask source choice: 0=S(Sampler), 1=M(Mix), 2=L(Live) */
+            /* (no P/K in its own combo — would be self-recursive)        */
+            int lm_choice = g_sp3ctra_config.luxmask_source_type;
+            if (lm_choice == 1 /* LIVE */)
+            {
+                lm_in_R = db->activeBuffer_R;
+                lm_in_G = db->activeBuffer_G;
+                lm_in_B = db->activeBuffer_B;
+            }
+            else if (lm_choice == 0 /* SAMPLER */)
+            {
+                uint8_t *sR, *sG, *sB;
+                audio_image_buffers_get_sampler_pointers(audioBuffers, &sR, &sG, &sB);
+                lm_in_R = sR; lm_in_G = sG; lm_in_B = sB;
+            }
+            else /* MIX */
+            {
+                uint8_t *mR, *mG, *mB;
+                audio_image_buffers_get_read_pointers(audioBuffers, &mR, &mG, &mB);
+                lm_in_R = mR; lm_in_G = mG; lm_in_B = mB;
+            }
+            lux_mask_process_frame(&g_lux_mask_proc,
+                                   lm_in_R, lm_in_G, lm_in_B,
+                                   nb_pixels,
+                                   g_sp3ctra_config.num_octaves,
+                                   &src_R, &src_G, &src_B);
+        }
         else
         {
             /* M — AudioImageBuffers read bus = darken-blend of Live + Sampler */
@@ -728,6 +760,18 @@ void *udpThread(void *arg) {
                                       nb_pixels, g_sp3ctra_config.num_octaves,
                                       &syn_R, &syn_G, &syn_B);
             }
+            else if (luxsynth_src == 4 /* IMAGE_SOURCE_LUXMASK */)
+            {
+              /* LuxMask: select upstream, apply spotlight mask, use output */
+              const uint8_t *lm_R2, *lm_G2, *lm_B2;
+              int lm_up2 = g_sp3ctra_config.luxmask_source_type;
+              if (lm_up2 == 1) { lm_R2 = db->activeBuffer_R; lm_G2 = db->activeBuffer_G; lm_B2 = db->activeBuffer_B; }
+              else if (lm_up2 == 0) { audio_image_buffers_get_sampler_pointers(audioBuffers, &tmp_R, &tmp_G, &tmp_B); lm_R2 = tmp_R; lm_G2 = tmp_G; lm_B2 = tmp_B; }
+              else { audio_image_buffers_get_read_pointers(audioBuffers, &tmp_R, &tmp_G, &tmp_B); lm_R2 = tmp_R; lm_G2 = tmp_G; lm_B2 = tmp_B; }
+              lux_mask_process_frame(&g_lux_mask_proc, lm_R2, lm_G2, lm_B2,
+                                     nb_pixels, g_sp3ctra_config.num_octaves,
+                                     &syn_R, &syn_G, &syn_B);
+            }
             else /* IMAGE_SOURCE_MIX */
             {
               audio_image_buffers_get_read_pointers(audioBuffers, &tmp_R, &tmp_G, &tmp_B);
@@ -774,7 +818,8 @@ void *udpThread(void *arg) {
         int src = g_sp3ctra_config.luxstral_source_type;
         if (src == 1 /* IMAGE_SOURCE_LIVE */ ||
             src == 2 /* IMAGE_SOURCE_MIX  */ ||
-            src == 3 /* IMAGE_SOURCE_LUXPITCH */)
+            src == 3 /* IMAGE_SOURCE_LUXPITCH */ ||
+            src == 4 /* IMAGE_SOURCE_LUXMASK */)
         {
           db->preprocessed_data = preprocessed_temp;
           db->dataReady = 1;
@@ -832,7 +877,8 @@ void *udpThread(void *arg) {
         int luxsynth_src = g_sp3ctra_config.luxsynth_source_type;
         if (luxsynth_src == 1 /* IMAGE_SOURCE_LIVE */ ||
             luxsynth_src == 2 /* IMAGE_SOURCE_MIX  */ ||
-            luxsynth_src == 3 /* IMAGE_SOURCE_LUXPITCH */)
+            luxsynth_src == 3 /* IMAGE_SOURCE_LUXPITCH */ ||
+            luxsynth_src == 4 /* IMAGE_SOURCE_LUXMASK */)
         {
           db->preprocessed_data.polyphonic = preprocessed_temp.polyphonic;
           if (db->dataReady == 0)

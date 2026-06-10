@@ -10,6 +10,7 @@ extern "C" {
     #include "config/config_loader.h"
     #include "processing/image_pipeline_types.h"
     #include "processing/lux_pitch.h"
+    #include "processing/lux_mask.h"
     #include "synthesis/luxsynth/kissfft/kiss_fftr.h"
     #include "synthesis/luxsynth/synth_luxsynth_engine.h"
     #include "synthesis/luxsynth/luxsynth_vst_adapter.h"
@@ -252,7 +253,8 @@ void CisVisualizerComponent::paint(juce::Graphics& g)
                                 || source == VisualizerMode::SAMPLER
                                 || source == VisualizerMode::LIVE
                                 || source == VisualizerMode::MIX
-                                || source == VisualizerMode::LUXPITCH_OUTPUT);
+                                || source == VisualizerMode::LUXPITCH_OUTPUT
+                                || source == VisualizerMode::LUXMASK_OUTPUT);
 
         switch (renderMode)
         {
@@ -435,6 +437,8 @@ void CisVisualizerComponent::paintSourceLabel(
             accent = juce::Colour(0xffcc88cc); break;
         case VisualizerMode::LUXPITCH_OUTPUT:
             accent = juce::Colour(0xffe06bb8); break;
+        case VisualizerMode::LUXMASK_OUTPUT:
+            accent = juce::Colour(0xff6be0d0); break;
         default:
             accent = juce::Colour(0xffe08844); break;
     }
@@ -700,6 +704,22 @@ void CisVisualizerComponent::updateCisData()
         else
             audio_image_buffers_get_read_pointers(buffers, &pR, &pG, &pB);
     }
+    else if (vizSource == VisualizerMode::LUXMASK_OUTPUT)
+    {
+        // LuxMask output: same source choice convention as LuxPitch (S=0, M=1, L=2)
+        static const int kLmChoiceToSrc[3] = { 0, 2, 1 }; // S→SAMPLER, M→MIX, L→LIVE
+        int lmChoice = static_cast<int>(
+            processor.getAPVTS().getRawParameterValue("luxmaskSource")->load());
+        if (lmChoice < 0 || lmChoice > 2) lmChoice = 1;
+        const int lmSrc = kLmChoiceToSrc[lmChoice];
+
+        if (lmSrc == IMAGE_SOURCE_LIVE)
+            audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
+        else if (lmSrc == IMAGE_SOURCE_SAMPLER)
+            audio_image_buffers_get_sampler_pointers(buffers, &pR, &pG, &pB);
+        else
+            audio_image_buffers_get_read_pointers(buffers, &pR, &pG, &pB);
+    }
     else
     {
         // Downstream views: route according to per-path source selector
@@ -784,6 +804,62 @@ void CisVisualizerComponent::updateCisData()
             &outR, &outG, &outB);
 
         // Copy shifted output back if pointers differ (i.e. not bypass)
+        if (outR != localDataR.data())
+        {
+            std::memcpy(localDataR.data(), outR, cisPixelsCount);
+            std::memcpy(localDataG.data(), outG, cisPixelsCount);
+            std::memcpy(localDataB.data(), outB, cisPixelsCount);
+        }
+    }
+
+    // ── LuxMask processing (spotlight mask, envelope + glide + LFOs) ──────────
+    // Runs for LUXMASK_OUTPUT direct view AND for downstream SPCTR_*/SYNTH_*
+    // views when their source is set to LuxMask.
+    const bool needsLuxMask = [&]() {
+        if (vizSource == VisualizerMode::LUXMASK_OUTPUT) return true;
+        const bool isSpctr = (vizSource == VisualizerMode::SPCTR_GRAY
+                           || vizSource == VisualizerMode::SPCTR_COLOR
+                           || vizSource == VisualizerMode::SPCTR_BLOB);
+        const bool isSynth = (vizSource == VisualizerMode::SYNTH_GRAY
+                           || vizSource == VisualizerMode::SYNTH_COLOR
+                           || vizSource == VisualizerMode::SYNTH_BLOB
+                           || vizSource == VisualizerMode::SYNTH_FFT_COLOR);
+        if (!isSpctr && !isSynth) return false;
+        const int srcType = isSpctr ? g_sp3ctra_config.luxstral_source_type
+                                    : g_sp3ctra_config.luxsynth_source_type;
+        return srcType == IMAGE_SOURCE_LUXMASK;
+    }();
+
+    if (needsLuxMask)
+    {
+        auto& apvts = processor.getAPVTS();
+        g_lux_mask.config.enabled                   = static_cast<int>(apvts.getRawParameterValue("luxmaskEnabled")->load());
+        g_lux_mask.config.polyphony_enabled         = static_cast<int>(apvts.getRawParameterValue("luxmaskPolyphony")->load());
+        g_lux_mask.config.background_mode           = static_cast<int>(apvts.getRawParameterValue("luxmaskBackgroundMode")->load());
+        g_lux_mask.config.coupling_mode             = static_cast<int>(apvts.getRawParameterValue("luxmaskCouplingMode")->load());
+        g_lux_mask.config.free_pixels_per_semitone  = apvts.getRawParameterValue("luxmaskFreePixelsPerST")->load();
+        g_lux_mask.config.pitch_bend_range          = apvts.getRawParameterValue("luxmaskPitchBendRange")->load();
+        g_lux_mask.config.width_base                = apvts.getRawParameterValue("luxmaskWidth")->load();
+        g_lux_mask.config.attack_ms                 = apvts.getRawParameterValue("luxmaskAttackMs")->load();
+        g_lux_mask.config.decay_ms                  = apvts.getRawParameterValue("luxmaskDecayMs")->load();
+        g_lux_mask.config.sustain_level             = apvts.getRawParameterValue("luxmaskSustainLevel")->load();
+        g_lux_mask.config.release_ms                = apvts.getRawParameterValue("luxmaskReleaseMs")->load();
+        g_lux_mask.config.width_attack_px           = apvts.getRawParameterValue("luxmaskWidthAttackPx")->load();
+        g_lux_mask.config.width_release_px          = apvts.getRawParameterValue("luxmaskWidthReleasePx")->load();
+        g_lux_mask.config.glide_time_ms             = apvts.getRawParameterValue("luxmaskGlideMs")->load();
+        g_lux_mask.config.lfo_pos_rate_hz           = apvts.getRawParameterValue("luxmaskLfoPosRate")->load();
+        g_lux_mask.config.lfo_pos_depth_semitones   = apvts.getRawParameterValue("luxmaskLfoPosDepth")->load();
+        g_lux_mask.config.velocity_coupling         = static_cast<int>(apvts.getRawParameterValue("luxmaskVelocityCoupling")->load());
+        g_lux_mask.config.reference_note            = 24 + static_cast<int>(apvts.getRawParameterValue("luxmaskReferenceNote")->load());
+
+        const uint8_t *outR, *outG, *outB;
+        lux_mask_process_frame(
+            &g_lux_mask,
+            localDataR.data(), localDataG.data(), localDataB.data(),
+            cisPixelsCount,
+            g_sp3ctra_config.num_octaves,
+            &outR, &outG, &outB);
+
         if (outR != localDataR.data())
         {
             std::memcpy(localDataR.data(), outR, cisPixelsCount);
@@ -1073,6 +1149,7 @@ bool CisVisualizerComponent::supportsDisplayModes(VisualizerMode m) const noexce
         case VisualizerMode::SPCTR_GRAY:
         case VisualizerMode::SYNTH_GRAY:
         case VisualizerMode::LUXPITCH_OUTPUT:
+        case VisualizerMode::LUXMASK_OUTPUT:
             return true;
         default:
             return false;
