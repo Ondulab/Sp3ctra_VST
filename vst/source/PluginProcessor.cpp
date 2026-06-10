@@ -1737,6 +1737,10 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
             // on construction to auto-reload the session.
             lastSessionPath = apvts.state
                 .getProperty("lastSessionPath", "").toString();
+            // Restore sampler output directory — LuxSamplerSettingsTab and
+            // SAVE SESSION read this to bypass the file chooser when set.
+            samplerOutputDir = apvts.state
+                .getProperty("samplerOutputDir", "").toString();
             log_info("VST", "State restored from DAW project");
             
             // On state restore, just update g_sp3ctra_config.
