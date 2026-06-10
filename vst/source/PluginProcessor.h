@@ -128,9 +128,15 @@ public:
     void setSamplerSelectedSlot(int s) noexcept { samplerSelectedSlot.store(s, std::memory_order_relaxed); }
     int  getSamplerSelectedSlot() const noexcept { return samplerSelectedSlot.load(std::memory_order_relaxed); }
 
-    bool consumeSamplerRecTrigger()  noexcept { return samplerRecTriggered .exchange(false, std::memory_order_acquire); }
-    bool consumeSamplerPlayTrigger() noexcept { return samplerPlayTriggered.exchange(false, std::memory_order_acquire); }
-    bool consumeSamplerSaveTrigger() noexcept { return samplerSaveTriggered.exchange(false, std::memory_order_acquire); }
+    // REC / PLAY bindings now follow a momentary (press-and-hold) semantic:
+    //   pressed  : key down  / CC value crossed >= 64  → start action
+    //   released : key up    / CC value crossed <  64  → stop  action
+    // SAVE keeps a single trigger-on-press semantic.
+    bool consumeSamplerRecPressed()   noexcept { return samplerRecPressed  .exchange(false, std::memory_order_acquire); }
+    bool consumeSamplerRecReleased()  noexcept { return samplerRecReleased .exchange(false, std::memory_order_acquire); }
+    bool consumeSamplerPlayPressed()  noexcept { return samplerPlayPressed .exchange(false, std::memory_order_acquire); }
+    bool consumeSamplerPlayReleased() noexcept { return samplerPlayReleased.exchange(false, std::memory_order_acquire); }
+    bool consumeSamplerSaveTrigger()  noexcept { return samplerSaveTriggered.exchange(false, std::memory_order_acquire); }
 
     void startSamplerMidiLearn(int target) noexcept
     {
@@ -234,8 +240,16 @@ private:
     // Set by processBlock (audio thread), consumed by message thread.
     // -------------------------------------------------------------------------
     std::atomic<int>  samplerSelectedSlot   { 0 };
-    std::atomic<bool> samplerRecTriggered   { false };
-    std::atomic<bool> samplerPlayTriggered  { false };
+    // Momentary state flags: track current "held" state of REC / PLAY bindings
+    // (used by processBlock to detect press/release edges on each MIDI event).
+    std::atomic<bool> samplerRecHeld        { false };
+    std::atomic<bool> samplerPlayHeld       { false };
+    // Edge pulses consumed by the UI timer thread (SlotEditorComponent).
+    std::atomic<bool> samplerRecPressed     { false };
+    std::atomic<bool> samplerRecReleased    { false };
+    std::atomic<bool> samplerPlayPressed    { false };
+    std::atomic<bool> samplerPlayReleased   { false };
+    // SAVE retains the one-shot trigger semantic (no momentary behaviour).
     std::atomic<bool> samplerSaveTriggered  { false };
 
     // MIDI Learn: target = -1 idle / 0 REC / 1 PLAY / 2 SAVE.

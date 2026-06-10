@@ -1348,25 +1348,70 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                 }
             }
 
-            // Detect a "trigger" for a given binding.
-            // - Note:  triggered on NoteOn with velocity > 0
-            // - CC:    triggered on rising edge (value >= 64)
-            auto matchesBinding = [&](int type, int number) -> bool
+            // Momentary (press-and-hold) binding detection.
+            // Returns:
+            //   +1  if this MIDI event represents a "press"   for (type, number)
+            //   -1  if this MIDI event represents a "release" for (type, number)
+            //    0  otherwise (event not relevant for this binding)
+            //
+            // Press / release semantics:
+            //   - Note bindings : NoteOn (vel > 0) → press, NoteOff (or NoteOn vel 0) → release
+            //   - CC   bindings : value >= 64       → press, value <  64               → release
+            //
+            // NOTE: this lambda is called once per binding per MIDI event so the
+            //       same event can update REC and PLAY independently.
+            auto matchesBindingEdge = [&](int type, int number) -> int
             {
                 if (type == 1) // Note
-                    return msg.isNoteOn() && msg.getNoteNumber() == number;
+                {
+                    if (msg.getNoteNumber() != number) return 0;
+                    if (msg.isNoteOn() && msg.getVelocity() > 0) return +1;
+                    if (msg.isNoteOff() || (msg.isNoteOn() && msg.getVelocity() == 0)) return -1;
+                    return 0;
+                }
                 if (type == 2) // CC
-                    return msg.isController()
-                        && msg.getControllerNumber() == number
-                        && msg.getControllerValue() >= 64;
-                return false;
+                {
+                    if (!msg.isController()) return 0;
+                    if (msg.getControllerNumber() != number) return 0;
+                    return (msg.getControllerValue() >= 64) ? +1 : -1;
+                }
+                return 0;
             };
 
-            if (matchesBinding(recType,  recNum))
-                samplerRecTriggered .store(true, std::memory_order_release);
-            if (matchesBinding(playType, playNum))
-                samplerPlayTriggered.store(true, std::memory_order_release);
-            if (matchesBinding(saveType, saveNum))
+            // REC binding — momentary
+            {
+                const int edge = matchesBindingEdge(recType, recNum);
+                if (edge > 0)
+                {
+                    // Press: only emit "pressed" pulse on rising edge (not held → held).
+                    if (!samplerRecHeld.exchange(true, std::memory_order_acq_rel))
+                        samplerRecPressed.store(true, std::memory_order_release);
+                }
+                else if (edge < 0)
+                {
+                    // Release: only emit "released" pulse on falling edge.
+                    if (samplerRecHeld.exchange(false, std::memory_order_acq_rel))
+                        samplerRecReleased.store(true, std::memory_order_release);
+                }
+            }
+
+            // PLAY binding — momentary
+            {
+                const int edge = matchesBindingEdge(playType, playNum);
+                if (edge > 0)
+                {
+                    if (!samplerPlayHeld.exchange(true, std::memory_order_acq_rel))
+                        samplerPlayPressed.store(true, std::memory_order_release);
+                }
+                else if (edge < 0)
+                {
+                    if (samplerPlayHeld.exchange(false, std::memory_order_acq_rel))
+                        samplerPlayReleased.store(true, std::memory_order_release);
+                }
+            }
+
+            // SAVE binding — one-shot trigger on press (release ignored)
+            if (matchesBindingEdge(saveType, saveNum) > 0)
                 samplerSaveTriggered.store(true, std::memory_order_release);
         }
     }
