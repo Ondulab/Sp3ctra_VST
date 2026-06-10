@@ -249,7 +249,10 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     };
     addAndMakeVisible(fadePowerSlider);
 
-    startTimer(200); // ~5 Hz for state refresh
+    // 30 ms (~33 Hz) — frequent enough so MIDI press/release pulses get
+    // consumed with low latency (worst-case ~30 ms after the MIDI event).
+    // UI repaint cost is negligible at this rate.
+    startTimer(30);
 }
 
 SlotEditorComponent::~SlotEditorComponent()
@@ -362,7 +365,7 @@ void SlotEditorComponent::paint(juce::Graphics& g)
     switch (st)
     {
         case SlotState::RECORDING:
-            stateStr = blinkOn ? "* REC" : "  REC";
+            stateStr = "* REC";
             stateCol = juce::Colour(0xffff4444);
             break;
         case SlotState::ARMED:
@@ -495,18 +498,49 @@ void SlotEditorComponent::timerCallback()
     blinkOn = !blinkOn;
 
     // ── Consume MIDI-triggered REC / PLAY / SAVE pulses ──────────────────────
-    // These are set by Sp3ctraAudioProcessor::processBlock from incoming MIDI
-    // events that match user-defined Note/CC bindings (LuxSampler settings tab).
-    // We invoke the SAME button onClick lambdas so the behaviour is identical
-    // to a manual click (file chooser, state toggling, etc.).
-    if (processor.consumeSamplerRecTrigger() && recBtn.onClick)
-        recBtn.onClick();
-    if (processor.consumeSamplerPlayTrigger() && playBtn.onClick)
-        playBtn.onClick();
+    // REC / PLAY now follow a momentary (press-and-hold) semantic:
+    //   press   → start the action (only if not already running on this slot)
+    //   release → stop  the action (only if currently running on this slot)
+    // This avoids re-triggering the UI toggle in the wrong direction (which
+    // would otherwise stop the action on release, or restart it on press if
+    // it was already running).
+    //
+    // We rely on the LuxSampler's idempotent toggle behaviour: calling
+    // uiToggleRecord() / uiPlaySlot() while in the matching state stops the
+    // action, calling it while in any other state starts it.  We therefore
+    // check the current slot state before invoking the toggle.
+    auto* fs = processor.getLuxSampler();
+
+    const bool recPressed   = processor.consumeSamplerRecPressed();
+    const bool recReleased  = processor.consumeSamplerRecReleased();
+    const bool playPressed  = processor.consumeSamplerPlayPressed();
+    const bool playReleased = processor.consumeSamplerPlayReleased();
+
+    if (fs != nullptr)
+    {
+        const SlotState midiSt = fs->getSlotState(selectedSlot);
+
+        // REC press → start recording if not already in RECORDING state.
+        if (recPressed && midiSt != SlotState::RECORDING && recBtn.onClick)
+            recBtn.onClick();
+        // REC release → stop recording if currently in RECORDING state.
+        else if (recReleased && midiSt == SlotState::RECORDING && recBtn.onClick)
+            recBtn.onClick();
+
+        // Re-read state because REC may have just changed it.
+        const SlotState midiSt2 = fs->getSlotState(selectedSlot);
+
+        // PLAY press → start playback if not already in PLAYING state.
+        if (playPressed && midiSt2 != SlotState::PLAYING && playBtn.onClick)
+            playBtn.onClick();
+        // PLAY release → stop playback if currently in PLAYING state.
+        else if (playReleased && midiSt2 == SlotState::PLAYING && playBtn.onClick)
+            playBtn.onClick();
+    }
+
     if (processor.consumeSamplerSaveTrigger() && saveBtn.onClick)
         saveBtn.onClick();
 
-    auto* fs = processor.getLuxSampler();
     if (fs == nullptr) return;
 
 
@@ -522,9 +556,9 @@ void SlotEditorComponent::timerCallback()
     {
         case SlotState::RECORDING:
             recBtn.setButtonText("STOP");
+            // Solid red (no blink) — visual stability is preferred over flashing.
             recBtn.setColour(juce::TextButton::buttonColourId,
-                             blinkOn ? juce::Colour(0xffcc2222)
-                                     : juce::Colour(0xff7a1010));
+                             juce::Colour(0xffcc2222));
             recBtn.setColour(juce::TextButton::textColourOffId,
                              juce::Colours::white);
             break;
