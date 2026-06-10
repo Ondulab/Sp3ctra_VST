@@ -150,6 +150,11 @@ target_sources(Sp3ctraVST
         source/settings/LuxPitchSettingsTab.h
         source/image/LuxPitchTabComponent.h
 
+        # LuxMask Settings Tab + UI Tab
+        source/settings/LuxMaskSettingsTab.cpp
+        source/settings/LuxMaskSettingsTab.h
+        source/image/LuxMaskTabComponent.h
+
         # Video scroll system
         source/video/VideoScrollMode.h
         source/video/VideoDisplayComponent.cpp
@@ -189,6 +194,7 @@ target_sources(Sp3ctraVST
         source/processing/image_pipeline_stages.c
         source/processing/image_pipeline.c
         source/processing/lux_pitch.c
+        source/processing/lux_mask.c
 
         # Pan system (required for stereo mode)
         source/audio/pan/lock_free_pan.c

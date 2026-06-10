@@ -24,7 +24,7 @@ class VideoWindow;
  *
  * APVTS parameters used here:
  *   "videoScrollEnabled"    bool   — master enable (opens/closes the VideoWindow)
- *   "videoScrollSource"     choice — L / Sample / Mix / LuxPitch
+ *   "videoScrollSource"     choice — L / Sample / Mix / LuxPitch / LuxMask
  *   "videoScrollMode"       choice — scroll direction + loop mode
  *   "videoScrollSpeed"      float  — scroll speed factor [0.1 .. 20 x]
  *   "videoScrollDirection"  choice — Forward / Reverse

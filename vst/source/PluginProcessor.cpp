@@ -11,6 +11,7 @@ extern "C" {
     #include "synthesis/luxstral/vst_adapters.h"              // luxstral_are_audio_buffers_ready(), buffers
     #include "synthesis/luxstral/wave_generation.h"           // request_frequency_reinit() hot-reload
     #include "processing/lux_pitch.h"                         // LuxPitch engine + g_lux_pitch
+    #include "processing/lux_mask.h"                          // LuxMask engine + g_lux_mask, g_lux_mask_proc, g_lux_mask_vid
     #include "synthesis/luxsynth/luxsynth_vst_adapter.h"      // luxsynth_push_midi_event(), buffers, engine
     #include "synthesis/luxwave/luxwave_vst_adapter.h"        // luxwave_push_midi_event(), g_luxwave_engine
 }
@@ -233,7 +234,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     // ── Pipeline routing — per-path source selection & toggles ────────────────
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"luxstralSource", 1}, "LuxStral Source",
-        juce::StringArray{"S - Sampler", "M - Mix", "L - Live", "P - LuxPitch"}, 1));
+        juce::StringArray{"S - Sampler", "M - Mix", "L - Live", "P - LuxPitch", "K - LuxMask"}, 1));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"luxstralInversion", 1}, "LuxStral Inversion", true));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
@@ -241,7 +242,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
 
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"luxsynthSource", 1}, "LuxSynth Source",
-        juce::StringArray{"S - Sampler", "M - Mix", "L - Live", "P - LuxPitch"}, 1));
+        juce::StringArray{"S - Sampler", "M - Mix", "L - Live", "P - LuxPitch", "K - LuxMask"}, 1));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"luxsynthInversion", 1}, "LuxSynth Inversion", true));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
@@ -532,6 +533,119 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             lpNoteNames, 33, kHiddenChoice));  // A3 = index 33
     }
 
+    // ── LuxMask Parameters ────────────────────────────────────────────────────
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"luxmaskEnabled", 1}, "LuxMask Enabled", false));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"luxmaskPolyphony", 1}, "LuxMask Polyphony", false));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"luxmaskBackgroundMode", 1}, "LuxMask Background",
+        juce::StringArray{"Black", "White"}, 0, kHiddenChoice));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"luxmaskCouplingMode", 1}, "LuxMask Coupling",
+        juce::StringArray{"LuxStral", "Free"}, 0, kHiddenChoice));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxmaskFreePixelsPerST", 1}, "LM px/semitone",
+        juce::NormalisableRange<float>(1.0f, 200.0f, 0.5f), 36.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxmaskPitchBendRange", 1}, "LM PB Range",
+        juce::NormalisableRange<float>(0.0f, 24.0f, 0.5f), 2.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("st")));
+
+    // Mask width (gauss profile only — alternative shapes had no perceptible
+    // musical impact and were removed to keep the UI focused).
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxmaskWidth", 1}, "LM Width",
+        juce::NormalisableRange<float>(8.0f, 8192.0f, 1.0f, 0.5f), 256.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("px")));
+    // ADSR (acts on alpha) + width-env amount
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxmaskAttackMs", 1}, "LM Attack",
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 20.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxmaskDecayMs", 1}, "LM Decay",
+        juce::NormalisableRange<float>(0.5f, 10000.0f, 0.1f, 0.3f), 120.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxmaskSustainLevel", 1}, "LM Sustain",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxmaskReleaseMs", 1}, "LM Release",
+        juce::NormalisableRange<float>(0.5f, 10000.0f, 0.1f, 0.3f), 200.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    // Width horizons — absolute widths in pixels, fully ADSR-driven.
+    //   Width @ Attack  : width at note-on (8..8192 px, up to full image).
+    //                     Held during ATTACK, then collapses to base during
+    //                     DECAY following the audio decay slope.
+    //   Width @ Release : width at full release (8..8192 px).  During RELEASE
+    //                     width grows from base up to this horizon as the
+    //                     envelope fades to zero — visual analogue of a
+    //                     sustain-pedal-lift bloom.
+    // When Velocity → Alpha is on, horizons are pondered between base
+    // (velocity=0) and the configured horizon (velocity=1).
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxmaskWidthAttackPx", 1}, "LM Width @ Attack",
+        juce::NormalisableRange<float>(8.0f, 8192.0f, 1.0f, 0.5f), 1024.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("px")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxmaskWidthReleasePx", 1}, "LM Width @ Release",
+        juce::NormalisableRange<float>(8.0f, 8192.0f, 1.0f, 0.5f), 1024.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("px")));
+
+    // Glide
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxmaskGlideMs", 1}, "LM Glide",
+        juce::NormalisableRange<float>(0.0f, 5000.0f, 1.0f, 0.3f), 0.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+
+    // Position LFO only (vibrato).  The width LFO has been removed because a
+    // periodic wobble on width never sounded musical — width is now entirely
+    // gesture-driven by the velocity / release bloom envelopes above.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxmaskLfoPosRate", 1}, "LM LFO Pos Rate",
+        juce::NormalisableRange<float>(0.0f, 30.0f, 0.01f), 5.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("Hz")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxmaskLfoPosDepth", 1}, "LM LFO Pos Depth",
+        juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 0.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("st")));
+
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"luxmaskVelocityCoupling", 1}, "LM Velocity", false));
+
+    // LuxMask source selector (S/M/L)
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"luxmaskSource", 1}, "LuxMask Source",
+        juce::StringArray{"S - Sampler", "M - Mix", "L - Live"}, 1));
+
+    // LuxMask MIDI infrastructure (settings tab)
+    {
+        juce::StringArray lmMidiChNames;
+        for (int i = 1; i <= 16; ++i)
+            lmMidiChNames.add("Channel " + juce::String(i));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxmaskMidiChannel", 1}, "LuxMask MIDI Channel",
+            lmMidiChNames, 0, kHiddenChoice));
+    }
+    {
+        juce::StringArray octNames { "-2", "-1", " 0", "+1", "+2" };
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxmaskOctaveOffset", 1}, "LuxMask Octave Offset",
+            octNames, 2, kHiddenChoice));
+    }
+    {
+        // Reference note C1..B6 (72 items), default A3 = index 33
+        juce::StringArray lmNoteNames;
+        const char* lmNoteLetters[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+        for (int oct = 1; oct <= 6; ++oct)
+            for (int n = 0; n < 12; ++n)
+                lmNoteNames.add(juce::String(lmNoteLetters[n]) + juce::String(oct));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxmaskReferenceNote", 1}, "LuxMask Reference Note",
+            lmNoteNames, 33, kHiddenChoice));  // A3 = index 33
+    }
+
     // Fade-in duration [ms] — applied when restarting the live stream after Stop.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"imageFadeInMs", 1}, "Fade-In",
@@ -696,7 +810,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     // ── Video: live performance params ────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"videoScrollSource", 1}, "Video Scroll Source",
-        juce::StringArray{"L", "Sample", "Mix", "LuxPitch"}, 0));
+        juce::StringArray{"L", "Sample", "Mix", "LuxPitch", "LuxMask"}, 0));
 
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"videoScrollDirection", 1}, "Video Scroll Direction",
@@ -857,6 +971,29 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("luxpitchOctaveOffset",     this);
     apvts.addParameterListener("luxpitchReferenceNote",    this);
 
+    // LuxMask parameter listeners
+    apvts.addParameterListener("luxmaskEnabled",           this);
+    apvts.addParameterListener("luxmaskPolyphony",         this);
+    apvts.addParameterListener("luxmaskBackgroundMode",    this);
+    apvts.addParameterListener("luxmaskCouplingMode",      this);
+    apvts.addParameterListener("luxmaskFreePixelsPerST",   this);
+    apvts.addParameterListener("luxmaskPitchBendRange",    this);
+    apvts.addParameterListener("luxmaskWidth",             this);
+    apvts.addParameterListener("luxmaskAttackMs",          this);
+    apvts.addParameterListener("luxmaskDecayMs",           this);
+    apvts.addParameterListener("luxmaskSustainLevel",      this);
+    apvts.addParameterListener("luxmaskReleaseMs",         this);
+    apvts.addParameterListener("luxmaskWidthAttackPx",     this);
+    apvts.addParameterListener("luxmaskWidthReleasePx",    this);
+    apvts.addParameterListener("luxmaskGlideMs",           this);
+    apvts.addParameterListener("luxmaskLfoPosRate",        this);
+    apvts.addParameterListener("luxmaskLfoPosDepth",       this);
+    apvts.addParameterListener("luxmaskVelocityCoupling",  this);
+    apvts.addParameterListener("luxmaskSource",            this);
+    apvts.addParameterListener("luxmaskMidiChannel",       this);
+    apvts.addParameterListener("luxmaskOctaveOffset",      this);
+    apvts.addParameterListener("luxmaskReferenceNote",     this);
+
     // Create LuxSampler (always active, no lazy init needed)
     luxSampler = std::make_unique<LuxSampler>();
 
@@ -901,6 +1038,11 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     lux_pitch_init(&g_lux_pitch);
     lux_pitch_init(&g_lux_pitch_proc);
     lux_pitch_init(&g_lux_pitch_vid);
+
+    // Initialize LuxMask instances (UI/visualizer, processing thread, video tab)
+    lux_mask_init(&g_lux_mask);
+    lux_mask_init(&g_lux_mask_proc);
+    lux_mask_init(&g_lux_mask_vid);
 
     // Just update g_sp3ctra_config with current APVTS defaults (no socket/buffer creation)
     applyConfigurationToCore(false);
@@ -1257,6 +1399,37 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                 lux_pitch_set_pitch_bend(&g_lux_pitch, bend);
                 lux_pitch_set_pitch_bend(&g_lux_pitch_proc, bend);
                 lux_pitch_set_pitch_bend(&g_lux_pitch_vid,  bend);
+            }
+        }
+    }
+
+    // ── LuxMask MIDI (RT-safe: lock-free mask center from notes/pitch-bend) ──
+    {
+        const int lmCh  = static_cast<int>(apvts.getRawParameterValue("luxmaskMidiChannel")->load()) + 1;
+        const int lmOct = static_cast<int>(apvts.getRawParameterValue("luxmaskOctaveOffset")->load()) - 2;
+        for (const auto metadata : midiMessages)
+        {
+            const auto msg = metadata.getMessage();
+            if (msg.getChannel() != lmCh) continue;
+            const int shifted = msg.getNoteNumber() + lmOct * 12;
+            if (msg.isNoteOn())
+            {
+                lux_mask_note_on(&g_lux_mask,      shifted, msg.getFloatVelocity());
+                lux_mask_note_on(&g_lux_mask_proc, shifted, msg.getFloatVelocity());
+                lux_mask_note_on(&g_lux_mask_vid,  shifted, msg.getFloatVelocity());
+            }
+            else if (msg.isNoteOff())
+            {
+                lux_mask_note_off(&g_lux_mask,      shifted);
+                lux_mask_note_off(&g_lux_mask_proc, shifted);
+                lux_mask_note_off(&g_lux_mask_vid,  shifted);
+            }
+            else if (msg.isPitchWheel())
+            {
+                float bend = (msg.getPitchWheelValue() - 8192) / 8192.0f;
+                lux_mask_set_pitch_bend(&g_lux_mask,      bend);
+                lux_mask_set_pitch_bend(&g_lux_mask_proc, bend);
+                lux_mask_set_pitch_bend(&g_lux_mask_vid,  bend);
             }
         }
     }
@@ -1961,11 +2134,12 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     // Mapping table: choice → enum
     // ========================================================================
     {
-        static const int kChoiceToSource[4] = { 0, 2, 1, 3 }; // S→0, M→2, L→1, P→3
+        // 5 choices: S=Sampler(0), M=Mix(2), L=Live(1), P=LuxPitch(3), K=LuxMask(4)
+        static const int kChoiceToSource[5] = { 0, 2, 1, 3, 4 };
 
         int lsChoice = static_cast<int>(
             apvts.getRawParameterValue("luxstralSource")->load());
-        if (lsChoice < 0 || lsChoice > 3) lsChoice = 1; // default M
+        if (lsChoice < 0 || lsChoice > 4) lsChoice = 1; // default M
         g_sp3ctra_config.luxstral_source_type = kChoiceToSource[lsChoice];
         g_sp3ctra_config.luxstral_inversion   =
             static_cast<int>(apvts.getRawParameterValue("luxstralInversion")->load());
@@ -1974,7 +2148,7 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
 
         int lxChoice = static_cast<int>(
             apvts.getRawParameterValue("luxsynthSource")->load());
-        if (lxChoice < 0 || lxChoice > 3) lxChoice = 1;
+        if (lxChoice < 0 || lxChoice > 4) lxChoice = 1;
         g_sp3ctra_config.luxsynth_source_type = kChoiceToSource[lxChoice];
         g_sp3ctra_config.luxsynth_inversion   =
             static_cast<int>(apvts.getRawParameterValue("luxsynthInversion")->load());
@@ -1992,6 +2166,15 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
                 apvts.getRawParameterValue("luxpitchSource")->load());
             if (lpSrcChoice < 0 || lpSrcChoice > 2) lpSrcChoice = 1;
             g_sp3ctra_config.luxpitch_source_type = kLpChoiceToSrc[lpSrcChoice];
+        }
+
+        // ── LuxMask source routing (S/M/L — no K option for its own source) ──
+        {
+            static const int kLmChoiceToSrc[3] = { 0, 2, 1 }; // S→SAMPLER, M→MIX, L→LIVE
+            int lmSrcChoice = static_cast<int>(
+                apvts.getRawParameterValue("luxmaskSource")->load());
+            if (lmSrcChoice < 0 || lmSrcChoice > 2) lmSrcChoice = 1;
+            g_sp3ctra_config.luxmask_source_type = kLmChoiceToSrc[lmSrcChoice];
         }
 
         // ── Sync LuxPitch config to BOTH instances (UI + processing thread) ──
@@ -2015,6 +2198,32 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
             g_lux_pitch.config      = lpc;  /* UI / visualizer thread */
             g_lux_pitch_proc.config = lpc;  /* processing / synthesis thread */
             g_lux_pitch_vid.config  = lpc;  /* VIDEO tab (image scroll) thread */
+        }
+
+        // ── Sync LuxMask config to ALL instances (UI + processing + video) ──
+        {
+            LuxMaskConfig lmc;
+            lmc.enabled                  = static_cast<int>(apvts.getRawParameterValue("luxmaskEnabled")->load());
+            lmc.polyphony_enabled        = static_cast<int>(apvts.getRawParameterValue("luxmaskPolyphony")->load());
+            lmc.background_mode          = static_cast<int>(apvts.getRawParameterValue("luxmaskBackgroundMode")->load());
+            lmc.coupling_mode            = static_cast<int>(apvts.getRawParameterValue("luxmaskCouplingMode")->load());
+            lmc.free_pixels_per_semitone = apvts.getRawParameterValue("luxmaskFreePixelsPerST")->load();
+            lmc.pitch_bend_range         = apvts.getRawParameterValue("luxmaskPitchBendRange")->load();
+            lmc.width_base               = apvts.getRawParameterValue("luxmaskWidth")->load();
+            lmc.attack_ms                = apvts.getRawParameterValue("luxmaskAttackMs")->load();
+            lmc.decay_ms                 = apvts.getRawParameterValue("luxmaskDecayMs")->load();
+            lmc.sustain_level            = apvts.getRawParameterValue("luxmaskSustainLevel")->load();
+            lmc.release_ms               = apvts.getRawParameterValue("luxmaskReleaseMs")->load();
+            lmc.width_attack_px          = apvts.getRawParameterValue("luxmaskWidthAttackPx")->load();
+            lmc.width_release_px         = apvts.getRawParameterValue("luxmaskWidthReleasePx")->load();
+            lmc.glide_time_ms            = apvts.getRawParameterValue("luxmaskGlideMs")->load();
+            lmc.lfo_pos_rate_hz          = apvts.getRawParameterValue("luxmaskLfoPosRate")->load();
+            lmc.lfo_pos_depth_semitones  = apvts.getRawParameterValue("luxmaskLfoPosDepth")->load();
+            lmc.velocity_coupling        = static_cast<int>(apvts.getRawParameterValue("luxmaskVelocityCoupling")->load());
+            lmc.reference_note           = 24 + static_cast<int>(apvts.getRawParameterValue("luxmaskReferenceNote")->load());
+            g_lux_mask.config      = lmc;  /* UI / visualizer thread */
+            g_lux_mask_proc.config = lmc;  /* processing / synthesis thread */
+            g_lux_mask_vid.config  = lmc;  /* VIDEO tab (image scroll) thread */
         }
 
         log_debug("VST", "Per-path routing: LS source=%d inv=%d ac=%d  |  LX source=%d inv=%d ac=%d gamma=%.2f",

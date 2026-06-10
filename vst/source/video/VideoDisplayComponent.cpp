@@ -6,6 +6,7 @@ extern "C"
 #include "audio/buffers/audio_image_buffers.h"
 #include "config/config_loader.h"
 #include "processing/lux_pitch.h"
+#include "processing/lux_mask.h"
 }
 
 /* Cap LuxPitch output buffer copy at the engine's max pixel capacity.
@@ -134,6 +135,51 @@ void VideoDisplayComponent::captureCurrentFrame()
 
             // lux_pitch_process_frame may return the input pointers as-is
             // (bypass when disabled) or the internal out_* buffers (when active).
+            pR = (uint8_t*)outR;
+            pG = (uint8_t*)outG;
+            pB = (uint8_t*)outB;
+            break;
+        }
+        case 4:
+        {
+            // LuxMask Output — run a private LuxMask instance independent from
+            // the visualizer or the audio thread.  Same pattern as LuxPitch:
+            // use g_lux_mask_vid driven by MIDI events from processBlock().
+            if (count > LUX_MASK_MAX_PIXELS)
+            {
+                audio_image_buffers_get_read_pointers(aib, &pR, &pG, &pB);
+                break;
+            }
+
+            // Resolve upstream source (luxmaskSource: 0=Sampler, 1=Mix, 2=Live).
+            const int lmChoice = static_cast<int>(
+                processor_.getAPVTS().getRawParameterValue("luxmaskSource")->load());
+            uint8_t* inR = nullptr;
+            uint8_t* inG = nullptr;
+            uint8_t* inB = nullptr;
+            switch (lmChoice)
+            {
+                case 0:  audio_image_buffers_get_sampler_pointers(aib, &inR, &inG, &inB); break;
+                case 2:  audio_image_buffers_get_raw_pointers    (aib, &inR, &inG, &inB); break;
+                case 1:
+                default: audio_image_buffers_get_read_pointers   (aib, &inR, &inG, &inB); break;
+            }
+
+            if (!inR || !inG || !inB)
+            {
+                audio_image_buffers_get_read_pointers(aib, &pR, &pG, &pB);
+                break;
+            }
+
+            const uint8_t *outR = nullptr;
+            const uint8_t *outG = nullptr;
+            const uint8_t *outB = nullptr;
+            lux_mask_process_frame(&g_lux_mask_vid,
+                                   inR, inG, inB,
+                                   count,
+                                   g_sp3ctra_config.num_octaves,
+                                   &outR, &outG, &outB);
+
             pR = (uint8_t*)outR;
             pG = (uint8_t*)outG;
             pB = (uint8_t*)outB;

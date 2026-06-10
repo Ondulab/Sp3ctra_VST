@@ -39,6 +39,7 @@ VideoScrollTab::VideoScrollTab(Sp3ctraAudioProcessor& processor)
     sourceCombo_.addItem("Sample",               2);
     sourceCombo_.addItem("Mix",                  3);
     sourceCombo_.addItem("LuxPitch Output",      4);
+    sourceCombo_.addItem("LuxMask Output",       5);
     sourceCombo_.setTooltip(
         "Image source fed to the video scroll window.\n"
         "'LuxPitch Output' shows the post-LuxPitch processed image - the shifted,\n"
