@@ -916,13 +916,14 @@ bool LuxSampler::exportSlotImage(int slotIndex,
             const CapturedFrame& fr = slot.frames[y];
             const int            px = juce::jmin(width, static_cast<int>(fr.pixel_count));
 
-            uint8_t* dest = bmp.getLinePointer(y);
+            // Use setPixelColour() to be platform-independent: the in-memory byte
+            // order of juce::Image::RGB (PixelRGB) is platform-dependent (BGR on
+            // some targets, RGB on others). Writing raw bytes with a hard-coded
+            // order produced incorrect colours (export looked monochrome).
             for (int x = 0; x < px; ++x)
             {
-                // JUCE RGB pixel order on macOS = B,G,R (matches PixelRGB layout)
-                dest[x * 3 + 0] = fr.B[x];
-                dest[x * 3 + 1] = fr.G[x];
-                dest[x * 3 + 2] = fr.R[x];
+                bmp.setPixelColour(x, y,
+                                   juce::Colour(fr.R[x], fr.G[x], fr.B[x]));
             }
         }
     }
