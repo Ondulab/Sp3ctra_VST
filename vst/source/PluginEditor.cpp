@@ -21,19 +21,25 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     cisVisualizer = std::make_unique<CisVisualizerComponent>(audioProcessor);
     addAndMakeVisible(cisVisualizer.get());
 
-    // ── Tab buttons (IMAGE | SYNTH | SAMPLER | VIDEO) ─────────────────────────
-    imageTabBtn.onClick   = [this] { switchToTab(Tab::Image);   };
-    synthTabBtn.onClick   = [this] { switchToTab(Tab::Synth);   };
+    // ── Tab buttons (SOURCES | PITCH | MASK | SAMPLER | SYNTH | VIDEO) ────────
+    sourcesTabBtn.onClick = [this] { switchToTab(Tab::Sources); };
+    pitchTabBtn  .onClick = [this] { switchToTab(Tab::Pitch);   };
+    maskTabBtn   .onClick = [this] { switchToTab(Tab::Mask);    };
     samplerTabBtn.onClick = [this] { switchToTab(Tab::Sampler); };
-    videoTabBtn.onClick   = [this] { switchToTab(Tab::Video);   };
+    synthTabBtn  .onClick = [this] { switchToTab(Tab::Synth);   };
+    videoTabBtn  .onClick = [this] { switchToTab(Tab::Video);   };
     // Mark as tab buttons so LookAndFeel skips default background painting
-    imageTabBtn.getProperties().set("isTab", true);
-    synthTabBtn.getProperties().set("isTab", true);
+    sourcesTabBtn.getProperties().set("isTab", true);
+    pitchTabBtn  .getProperties().set("isTab", true);
+    maskTabBtn   .getProperties().set("isTab", true);
     samplerTabBtn.getProperties().set("isTab", true);
-    videoTabBtn.getProperties().set("isTab", true);
-    addAndMakeVisible(imageTabBtn);
-    addAndMakeVisible(synthTabBtn);
+    synthTabBtn  .getProperties().set("isTab", true);
+    videoTabBtn  .getProperties().set("isTab", true);
+    addAndMakeVisible(sourcesTabBtn);
+    addAndMakeVisible(pitchTabBtn);
+    addAndMakeVisible(maskTabBtn);
     addAndMakeVisible(samplerTabBtn);
+    addAndMakeVisible(synthTabBtn);
     addAndMakeVisible(videoTabBtn);
 
     // ── LuxStral controls (audio only — no image pre-processing params) ────────
@@ -78,15 +84,21 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         apvts, "luxstralNoiseGateThreshold", noiseGateSlider);
 
     // ── Synth sub-tab buttons ────────────────────────────────────────────────
-    luxstralSubBtn.onClick  = [this] { switchSynthSubTab(SynthSub::LuxStral); };
-    luxsynthSubBtn.onClick  = [this] { switchSynthSubTab(SynthSub::LuxSynth); };
-    luxwaveSubBtn.onClick   = [this] { switchSynthSubTab(SynthSub::LuxWave); };
-    luxstralSubBtn.getProperties().set("isTab", true);
-    luxsynthSubBtn.getProperties().set("isTab", true);
-    luxwaveSubBtn.getProperties().set("isTab", true);
-    addChildComponent(luxstralSubBtn);
-    addChildComponent(luxsynthSubBtn);
-    addChildComponent(luxwaveSubBtn);
+    imgLuxStralSubBtn.onClick = [this] { switchSynthSubTab(SynthSub::ImgLuxStral); };
+    imgLuxSynthSubBtn.onClick = [this] { switchSynthSubTab(SynthSub::ImgLuxSynth); };
+    audioStralSubBtn .onClick = [this] { switchSynthSubTab(SynthSub::AudioStral);  };
+    audioSynthSubBtn .onClick = [this] { switchSynthSubTab(SynthSub::AudioSynth);  };
+    audioWaveSubBtn  .onClick = [this] { switchSynthSubTab(SynthSub::AudioWave);   };
+    imgLuxStralSubBtn.getProperties().set("isTab", true);
+    imgLuxSynthSubBtn.getProperties().set("isTab", true);
+    audioStralSubBtn .getProperties().set("isTab", true);
+    audioSynthSubBtn .getProperties().set("isTab", true);
+    audioWaveSubBtn  .getProperties().set("isTab", true);
+    addChildComponent(imgLuxStralSubBtn);
+    addChildComponent(imgLuxSynthSubBtn);
+    addChildComponent(audioStralSubBtn);
+    addChildComponent(audioSynthSubBtn);
+    addChildComponent(audioWaveSubBtn);
 
     // ── LuxSynth audio controls ─────────────────────────────────────────────
     lxEnableToggle.setButtonText("Active");
@@ -195,18 +207,29 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     lwScanModeAttach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         apvts, "luxwaveScanMode", lwScanModeCombo);
 
-    // ── IMAGE page ────────────────────────────────────────────────────────────
-    imagePage = std::make_unique<ImagePageComponent>(audioProcessor);
-    addChildComponent(imagePage.get());
+    // ── Image pipeline pages (formerly nested in IMAGE / ImagePageComponent) ──
+    // The old IMAGE page is split: SOURCES / PITCH / MASK are now top-level
+    // tabs, while LUXSTRAL / LUXSYNTH have moved under SYNTH as sub-tabs.
+    sourcesPage     = std::make_unique<SourcesTabComponent>(audioProcessor);
+    pitchPage       = std::make_unique<LuxPitchTabComponent>(audioProcessor);
+    maskPage        = std::make_unique<LuxMaskTabComponent>(audioProcessor);
+    imgLuxStralPage = std::make_unique<LuxStralTabComponent>(audioProcessor);
+    imgLuxSynthPage = std::make_unique<LuxSynthTabComponent>(audioProcessor);
 
-    // Wire visualizer source selection:
-    // When the user clicks a pipeline node (RAW / S / L / M / SPCTR_* / SYNTH_*),
-    // propagate the selected mode to the CIS visualizer.
-    imagePage->onVisualizerModeChanged = [this](VisualizerMode mode)
-    {
-        if (cisVisualizer)
-            cisVisualizer->setActiveSource(mode);
-    };
+    addChildComponent(sourcesPage.get());
+    addChildComponent(pitchPage.get());
+    addChildComponent(maskPage.get());
+    addChildComponent(imgLuxStralPage.get());
+    addChildComponent(imgLuxSynthPage.get());
+
+    // Wire node-click events from every image pipeline page so that the
+    // active source is broadcast to the CIS visualiser and mirrored across
+    // all pages (single source-of-truth for the "selected node" highlight).
+    sourcesPage    ->onNodeClicked = [this](VisualizerMode m) { handleNodeClicked(m); };
+    pitchPage      ->onNodeClicked = [this](VisualizerMode m) { handleNodeClicked(m); };
+    maskPage       ->onNodeClicked = [this](VisualizerMode m) { handleNodeClicked(m); };
+    imgLuxStralPage->onNodeClicked = [this](VisualizerMode m) { handleNodeClicked(m); };
+    imgLuxSynthPage->onNodeClicked = [this](VisualizerMode m) { handleNodeClicked(m); };
 
     // ── Sampler page (hidden by default) ──────────────────────────────────────
     samplerPage = std::make_unique<SamplerPageComponent>(audioProcessor);
@@ -220,8 +243,8 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     settingsButton.onClick = [this] { openSettings(); };
     addAndMakeVisible(settingsButton);
 
-    // Start on IMAGE tab
-    switchToTab(Tab::Image);
+    // Start on SOURCES tab
+    switchToTab(Tab::Sources);
     juce::LookAndFeel::setDefaultLookAndFeel(&sp3ctraLaf);
     setSize(740, 760);
 }
@@ -233,17 +256,36 @@ Sp3ctraAudioProcessorEditor::~Sp3ctraAudioProcessorEditor()
 }
 
 //==============================================================================
+void Sp3ctraAudioProcessorEditor::handleNodeClicked(VisualizerMode mode)
+{
+    // Update visualizer source
+    if (cisVisualizer)
+        cisVisualizer->setActiveSource(mode);
+
+    // Mirror the active-node highlight across every image pipeline page so
+    // the selected node remains coherent when the user switches tabs.
+    if (sourcesPage)     sourcesPage    ->setActiveMode(mode);
+    if (pitchPage)       pitchPage      ->setActiveMode(mode);
+    if (maskPage)        maskPage       ->setActiveMode(mode);
+    if (imgLuxStralPage) imgLuxStralPage->setActiveMode(mode);
+    if (imgLuxSynthPage) imgLuxSynthPage->setActiveMode(mode);
+}
+
+//==============================================================================
 void Sp3ctraAudioProcessorEditor::switchToTab(Tab tab)
 {
     currentTab = tab;
     const bool synthVis = (tab == Tab::Synth);
 
     // Sub-tab buttons — visible only on SYNTH page
-    luxstralSubBtn.setVisible(synthVis);
-    luxsynthSubBtn.setVisible(synthVis);
-    luxwaveSubBtn.setVisible(synthVis);
+    imgLuxStralSubBtn.setVisible(synthVis);
+    imgLuxSynthSubBtn.setVisible(synthVis);
+    audioStralSubBtn .setVisible(synthVis);
+    audioSynthSubBtn .setVisible(synthVis);
+    audioWaveSubBtn  .setVisible(synthVis);
 
-    // Hide all synth controls first, then let switchSynthSubTab() show the right ones
+    // Hide all synth audio controls first, then let switchSynthSubTab() show
+    // the right ones if the SYNTH tab is active.
     std::array<juce::Component*, 13> luxstralCtrls = {
         &deviceOnToggle,   &luxstralVolumeSlider,
         &attackSlider,     &releaseSlider,
@@ -273,13 +315,18 @@ void Sp3ctraAudioProcessorEditor::switchToTab(Tab tab)
     };
     for (auto* c : luxwaveCtrls) if (c) c->setVisible(false);
 
-    // Show the correct sub-tab controls
-    if (synthVis)
-        switchSynthSubTab(currentSynthSub);
+    // Image pipeline sub-pages: hide all by default, switchSynthSubTab() will
+    // show the active one when on the SYNTH tab.
+    if (imgLuxStralPage) imgLuxStralPage->setVisible(false);
+    if (imgLuxSynthPage) imgLuxSynthPage->setVisible(false);
 
-    // Page components
-    if (imagePage)       imagePage->setVisible(tab == Tab::Image);
-    if (samplerPage)     samplerPage->setVisible(tab == Tab::Sampler);
+    // Top-level image pipeline pages
+    if (sourcesPage) sourcesPage->setVisible(tab == Tab::Sources);
+    if (pitchPage)   pitchPage  ->setVisible(tab == Tab::Pitch);
+    if (maskPage)    maskPage   ->setVisible(tab == Tab::Mask);
+
+    // SAMPLER / VIDEO pages
+    if (samplerPage) samplerPage->setVisible(tab == Tab::Sampler);
     if (videoScrollPage)
     {
         const bool videoVis = (tab == Tab::Video);
@@ -290,8 +337,18 @@ void Sp3ctraAudioProcessorEditor::switchToTab(Tab tab)
             videoScrollPage->onTabDeactivated();
     }
 
-    // Blob overlay: visible only when IMAGE tab is active
-    if (cisVisualizer) cisVisualizer->setBlobOverlayVisible(tab == Tab::Image);
+    // Show the correct SYNTH sub-tab controls
+    if (synthVis)
+        switchSynthSubTab(currentSynthSub);
+
+    // Blob overlay: visible on the source-listening pipeline pages (any image
+    // tab including the SYNTH image sub-tabs).
+    const bool imageMode = (tab == Tab::Sources)
+                        || (tab == Tab::Pitch)
+                        || (tab == Tab::Mask)
+                        || (synthVis && (currentSynthSub == SynthSub::ImgLuxStral
+                                       || currentSynthSub == SynthSub::ImgLuxSynth));
+    if (cisVisualizer) cisVisualizer->setBlobOverlayVisible(imageMode);
 
     // Tab button colours — use theme tokens
     auto styleTab = [](juce::TextButton& btn, bool active)
@@ -303,11 +360,14 @@ void Sp3ctraAudioProcessorEditor::switchToTab(Tab tab)
                       juce::Colour(active ? Sp3ctraTheme::kColTabActiveText
                                           : Sp3ctraTheme::kColTabInactiveText));
     };
-    styleTab(imageTabBtn,   tab == Tab::Image);
-    styleTab(synthTabBtn,   tab == Tab::Synth);
+    styleTab(sourcesTabBtn, tab == Tab::Sources);
+    styleTab(pitchTabBtn,   tab == Tab::Pitch);
+    styleTab(maskTabBtn,    tab == Tab::Mask);
     styleTab(samplerTabBtn, tab == Tab::Sampler);
+    styleTab(synthTabBtn,   tab == Tab::Synth);
     styleTab(videoTabBtn,   tab == Tab::Video);
 
+    resized();
     repaint();
 }
 
@@ -316,55 +376,64 @@ void Sp3ctraAudioProcessorEditor::switchSynthSubTab(SynthSub sub)
 {
     currentSynthSub = sub;
 
-    const bool isLuxStral = (sub == SynthSub::LuxStral);
-    const bool isLuxSynth = (sub == SynthSub::LuxSynth);
-    const bool isLuxWave  = (sub == SynthSub::LuxWave);
+    const bool isImgStral  = (sub == SynthSub::ImgLuxStral);
+    const bool isImgSynth  = (sub == SynthSub::ImgLuxSynth);
+    const bool isAudStral  = (sub == SynthSub::AudioStral);
+    const bool isAudSynth  = (sub == SynthSub::AudioSynth);
+    const bool isAudWave   = (sub == SynthSub::AudioWave);
 
-    // LuxStral controls
-    deviceOnToggle.setVisible(isLuxStral);
-    luxstralVolumeSlider.setVisible(isLuxStral);
-    attackSlider.setVisible(isLuxStral);
-    releaseSlider.setVisible(isLuxStral);
-    stereoEnableToggle.setVisible(isLuxStral);
-    stereoTempSlider.setVisible(isLuxStral);
-    sumExpSlider.setVisible(isLuxStral);
-    noiseGateSlider.setVisible(isLuxStral);
-    sfEnabledToggle.setVisible(isLuxStral);
-    sfMorphWidthSlider.setVisible(isLuxStral);
-    sfFocusSigmaSlider.setVisible(isLuxStral);
-    sfSpectralThreshSlider.setVisible(isLuxStral);
-    sfFocusOnlyToggle.setVisible(isLuxStral);
+    // Image pipeline sub-pages
+    if (imgLuxStralPage) imgLuxStralPage->setVisible(isImgStral);
+    if (imgLuxSynthPage) imgLuxSynthPage->setVisible(isImgSynth);
 
-    // LuxSynth controls
-    lxEnableToggle.setVisible(isLuxSynth);
-    luxsynthVolumeSlider.setVisible(isLuxSynth);
-    lxAttackSlider.setVisible(isLuxSynth);
-    lxDecaySlider.setVisible(isLuxSynth);
-    lxSustainSlider.setVisible(isLuxSynth);
-    lxReleaseSlider.setVisible(isLuxSynth);
-    lxFltAttackSlider.setVisible(isLuxSynth);
-    lxFltDecaySlider.setVisible(isLuxSynth);
-    lxFltSustainSlider.setVisible(isLuxSynth);
-    lxFltReleaseSlider.setVisible(isLuxSynth);
-    lxFltCutoffSlider.setVisible(isLuxSynth);
-    lxFltDepthSlider.setVisible(isLuxSynth);
-    lxNumOscSlider.setVisible(isLuxSynth);
-    lxLfoRateSlider.setVisible(isLuxSynth);
-    lxLfoDepthSlider.setVisible(isLuxSynth);
+    // AUDIOSTRAL controls (legacy LuxStral audio)
+    deviceOnToggle      .setVisible(isAudStral);
+    luxstralVolumeSlider.setVisible(isAudStral);
+    attackSlider        .setVisible(isAudStral);
+    releaseSlider       .setVisible(isAudStral);
+    stereoEnableToggle  .setVisible(isAudStral);
+    stereoTempSlider    .setVisible(isAudStral);
+    sumExpSlider        .setVisible(isAudStral);
+    noiseGateSlider     .setVisible(isAudStral);
+    sfEnabledToggle     .setVisible(isAudStral);
+    sfMorphWidthSlider  .setVisible(isAudStral);
+    sfFocusSigmaSlider  .setVisible(isAudStral);
+    sfSpectralThreshSlider.setVisible(isAudStral);
+    sfFocusOnlyToggle   .setVisible(isAudStral);
 
-    // LuxWave controls
-    lwEnableToggle.setVisible(isLuxWave);
-    luxwaveVolumeSlider.setVisible(isLuxWave);
-    lwAttackSlider.setVisible(isLuxWave);
-    lwDecaySlider.setVisible(isLuxWave);
-    lwSustainSlider.setVisible(isLuxWave);
-    lwReleaseSlider.setVisible(isLuxWave);
-    lwFltCutoffSlider.setVisible(isLuxWave);
-    lwFltDepthSlider.setVisible(isLuxWave);
-    lwLfoRateSlider.setVisible(isLuxWave);
-    lwLfoDepthSlider.setVisible(isLuxWave);
-    lwAmplitudeSlider.setVisible(isLuxWave);
-    lwScanModeCombo.setVisible(isLuxWave);
+    // AUDIOSYNTH controls (legacy LuxSynth audio)
+    lxEnableToggle      .setVisible(isAudSynth);
+    luxsynthVolumeSlider.setVisible(isAudSynth);
+    lxAttackSlider      .setVisible(isAudSynth);
+    lxDecaySlider       .setVisible(isAudSynth);
+    lxSustainSlider     .setVisible(isAudSynth);
+    lxReleaseSlider     .setVisible(isAudSynth);
+    lxFltAttackSlider   .setVisible(isAudSynth);
+    lxFltDecaySlider    .setVisible(isAudSynth);
+    lxFltSustainSlider  .setVisible(isAudSynth);
+    lxFltReleaseSlider  .setVisible(isAudSynth);
+    lxFltCutoffSlider   .setVisible(isAudSynth);
+    lxFltDepthSlider    .setVisible(isAudSynth);
+    lxNumOscSlider      .setVisible(isAudSynth);
+    lxLfoRateSlider     .setVisible(isAudSynth);
+    lxLfoDepthSlider    .setVisible(isAudSynth);
+
+    // AUDIOWAVE controls (legacy LuxWave audio)
+    lwEnableToggle      .setVisible(isAudWave);
+    luxwaveVolumeSlider .setVisible(isAudWave);
+    lwAttackSlider      .setVisible(isAudWave);
+    lwDecaySlider       .setVisible(isAudWave);
+    lwSustainSlider     .setVisible(isAudWave);
+    lwReleaseSlider     .setVisible(isAudWave);
+    lwFltCutoffSlider   .setVisible(isAudWave);
+    lwFltDepthSlider    .setVisible(isAudWave);
+    lwLfoRateSlider     .setVisible(isAudWave);
+    lwLfoDepthSlider    .setVisible(isAudWave);
+    lwAmplitudeSlider   .setVisible(isAudWave);
+    lwScanModeCombo     .setVisible(isAudWave);
+
+    // Blob overlay follows image-pipeline sub-tabs
+    if (cisVisualizer) cisVisualizer->setBlobOverlayVisible(isImgStral || isImgSynth);
 
     // Sub-tab button styling
     auto styleSubTab = [](juce::TextButton& btn, bool active)
@@ -374,9 +443,11 @@ void Sp3ctraAudioProcessorEditor::switchSynthSubTab(SynthSub sub)
         btn.setColour(juce::TextButton::textColourOffId,
                       juce::Colour(active ? 0xffc0d8f0 : 0xff667788));
     };
-    styleSubTab(luxstralSubBtn, isLuxStral);
-    styleSubTab(luxsynthSubBtn, isLuxSynth);
-    styleSubTab(luxwaveSubBtn,  isLuxWave);
+    styleSubTab(imgLuxStralSubBtn, isImgStral);
+    styleSubTab(imgLuxSynthSubBtn, isImgSynth);
+    styleSubTab(audioStralSubBtn,  isAudStral);
+    styleSubTab(audioSynthSubBtn,  isAudSynth);
+    styleSubTab(audioWaveSubBtn,   isAudWave);
 
     repaint();
 }
@@ -426,10 +497,17 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
         g.fillRect(0, kTabsY + kTabsH, getWidth(), 1);
 
         // Draw each tab background + accent
-        const juce::TextButton* tabs[]   = { &imageTabBtn, &synthTabBtn, &samplerTabBtn, &videoTabBtn };
-        const Tab               tabIds[] = { Tab::Image,   Tab::Synth,   Tab::Sampler,   Tab::Video };
+        const juce::TextButton* tabs[] = {
+            &sourcesTabBtn, &pitchTabBtn, &maskTabBtn,
+            &samplerTabBtn, &synthTabBtn, &videoTabBtn
+        };
+        const Tab tabIds[] = {
+            Tab::Sources, Tab::Pitch, Tab::Mask,
+            Tab::Sampler, Tab::Synth, Tab::Video
+        };
+        constexpr int kNumTabs = (int)(sizeof(tabIds) / sizeof(tabIds[0]));
 
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < kNumTabs; ++i)
         {
             const bool active = (currentTab == tabIds[i]);
             const auto tbr = tabs[i]->getBounds().toFloat();
@@ -475,32 +553,41 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
         g.setColour(juce::Colour(0xff333344));
         g.fillRect(0, kSubTabsY + kSubTabsH - 1, getWidth(), 1);
 
-        // Active sub-tab accent
-        const auto& activeBtn = (currentSynthSub == SynthSub::LuxStral) ? luxstralSubBtn
-                              : (currentSynthSub == SynthSub::LuxSynth) ? luxsynthSubBtn
-                              :                                            luxwaveSubBtn;
-        g.setColour(juce::Colour(0xff4488cc));
-        g.fillRect(activeBtn.getX(), kSubTabsY + kSubTabsH - 2,
-                   activeBtn.getWidth(), 2);
+        // Active sub-tab accent underline
+        const juce::TextButton* activeBtn = nullptr;
+        switch (currentSynthSub)
+        {
+            case SynthSub::ImgLuxStral: activeBtn = &imgLuxStralSubBtn; break;
+            case SynthSub::ImgLuxSynth: activeBtn = &imgLuxSynthSubBtn; break;
+            case SynthSub::AudioStral:  activeBtn = &audioStralSubBtn;  break;
+            case SynthSub::AudioSynth:  activeBtn = &audioSynthSubBtn;  break;
+            case SynthSub::AudioWave:   activeBtn = &audioWaveSubBtn;   break;
+        }
+        if (activeBtn != nullptr)
+        {
+            g.setColour(juce::Colour(0xff4488cc));
+            g.fillRect(activeBtn->getX(), kSubTabsY + kSubTabsH - 2,
+                       activeBtn->getWidth(), 2);
+        }
     }
 
-    // ── SYNTH page labels (drawn inline — ImagePage draws itself) ─────────────
-    if (currentTab == Tab::Synth && currentSynthSub == SynthSub::LuxStral)
+    // ── SYNTH page labels (drawn inline — image pages draw themselves) ────────
+    if (currentTab == Tab::Synth && currentSynthSub == SynthSub::AudioStral)
     {
         const int cw  = colWidth();
         const int lxp = colLX();
         const int rsy = rowsStartY();
 
-        // LuxStral section badge
+        // AUDIOSTRAL section badge
         g.setColour(juce::Colour(0xff1c3755));
         g.fillRoundedRectangle(juce::Rectangle<int>(lxp, kPageTop, cw, kSectionH).toFloat(), 3.f);
         g.setColour(juce::Colour(0xff7ab0f0));
         g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
-        g.drawText("LUXSTRAL",
+        g.drawText("AUDIOSTRAL",
                    juce::Rectangle<int>(lxp+6, kPageTop, cw-12, kSectionH),
                    juce::Justification::centredLeft, true);
 
-        // Row labels — 7 audio-only rows (left col)
+        // Row labels — 8 audio-only rows (left col)
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
         g.setColour(juce::Colour(0xffb8c4d0));
 
@@ -546,8 +633,8 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
                        juce::Justification::centredRight, true);
     }
 
-    // ── LUXSYNTH labels ──────────────────────────────────────────────────────
-    if (currentTab == Tab::Synth && currentSynthSub == SynthSub::LuxSynth)
+    // ── AUDIOSYNTH labels ────────────────────────────────────────────────────
+    if (currentTab == Tab::Synth && currentSynthSub == SynthSub::AudioSynth)
     {
         const int cw  = colWidth();
         const int lxp = colLX();
@@ -559,7 +646,7 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
         g.fillRoundedRectangle(juce::Rectangle<int>(lxp, kPageTop, cw, kSectionH).toFloat(), 3.f);
         g.setColour(juce::Colour(0xff66ccaa));
         g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
-        g.drawText("LUXSYNTH  —  Volume ADSR + Spectral",
+        g.drawText("AUDIOSYNTH  --  Volume ADSR + Spectral",
                    juce::Rectangle<int>(lxp+6, kPageTop, cw-12, kSectionH),
                    juce::Justification::centredLeft, true);
 
@@ -597,8 +684,8 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
                        juce::Justification::centredRight, true);
     }
 
-    // ── LUXWAVE labels ───────────────────────────────────────────────────────
-    if (currentTab == Tab::Synth && currentSynthSub == SynthSub::LuxWave)
+    // ── AUDIOWAVE labels ─────────────────────────────────────────────────────
+    if (currentTab == Tab::Synth && currentSynthSub == SynthSub::AudioWave)
     {
         const int cw  = colWidth();
         const int lxp = colLX();
@@ -610,7 +697,7 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
         g.fillRoundedRectangle(juce::Rectangle<int>(lxp, kPageTop, cw, kSectionH).toFloat(), 3.f);
         g.setColour(juce::Colour(0xffddaa44));
         g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
-        g.drawText("LUXWAVE  —  Wavetable ADSR + Scan",
+        g.drawText("AUDIOWAVE  --  Wavetable ADSR + Scan",
                    juce::Rectangle<int>(lxp+6, kPageTop, cw-12, kSectionH),
                    juce::Justification::centredLeft, true);
 
@@ -657,18 +744,40 @@ void Sp3ctraAudioProcessorEditor::resized()
     // ── CIS Visualizer ────────────────────────────────────────────────────────
     cisVisualizer->setBounds(kHPad, kVisY, getWidth() - 2*kHPad, kVisH);
 
-    // ── Tab buttons (IMAGE | SYNTH | SAMPLER | VIDEO) ─────────────────────────
-    imageTabBtn  .setBounds(kHPad,       kTabsY + 2, 80, Sp3ctraTheme::kTabBtnH);
-    synthTabBtn  .setBounds(kHPad + 84,  kTabsY + 2, 80, Sp3ctraTheme::kTabBtnH);
-    samplerTabBtn.setBounds(kHPad + 168, kTabsY + 2, 92, Sp3ctraTheme::kTabBtnH);
-    videoTabBtn  .setBounds(kHPad + 264, kTabsY + 2, 70, Sp3ctraTheme::kTabBtnH);
+    // ── Tab buttons (SOURCES | PITCH | MASK | SAMPLER | SYNTH | VIDEO) ────────
+    // Compact widths so all 6 tabs fit comfortably within the editor width.
+    {
+        // Tab widths tuned to label length.
+        constexpr int kSourcesW = 80;
+        constexpr int kPitchW   = 60;
+        constexpr int kMaskW    = 60;
+        constexpr int kSamplerW = 80;
+        constexpr int kSynthW   = 64;
+        constexpr int kVideoW   = 60;
+        constexpr int kGap      = 2;
 
-    // ── Synth sub-tab buttons ────────────────────────────────────────────────
-    luxstralSubBtn.setBounds(kHPad,       kSubTabsY + 1, 72, kSubTabsH - 2);
-    luxsynthSubBtn.setBounds(kHPad + 76,  kSubTabsY + 1, 72, kSubTabsH - 2);
-    luxwaveSubBtn .setBounds(kHPad + 152, kSubTabsY + 1, 72, kSubTabsH - 2);
+        int x = kHPad;
+        sourcesTabBtn.setBounds(x, kTabsY + 2, kSourcesW, Sp3ctraTheme::kTabBtnH); x += kSourcesW + kGap;
+        pitchTabBtn  .setBounds(x, kTabsY + 2, kPitchW,   Sp3ctraTheme::kTabBtnH); x += kPitchW   + kGap;
+        maskTabBtn   .setBounds(x, kTabsY + 2, kMaskW,    Sp3ctraTheme::kTabBtnH); x += kMaskW    + kGap;
+        samplerTabBtn.setBounds(x, kTabsY + 2, kSamplerW, Sp3ctraTheme::kTabBtnH); x += kSamplerW + kGap;
+        synthTabBtn  .setBounds(x, kTabsY + 2, kSynthW,   Sp3ctraTheme::kTabBtnH); x += kSynthW   + kGap;
+        videoTabBtn  .setBounds(x, kTabsY + 2, kVideoW,   Sp3ctraTheme::kTabBtnH);
+    }
 
-    // ── LuxStral controls (SYNTH page, left column) ───────────────────────────
+    // ── Synth sub-tab buttons (5 buttons) ────────────────────────────────────
+    {
+        constexpr int kSubW = 80;
+        constexpr int kGap  = 4;
+        int x = kHPad;
+        imgLuxStralSubBtn.setBounds(x, kSubTabsY + 1, kSubW, kSubTabsH - 2); x += kSubW + kGap;
+        imgLuxSynthSubBtn.setBounds(x, kSubTabsY + 1, kSubW, kSubTabsH - 2); x += kSubW + kGap;
+        audioStralSubBtn .setBounds(x, kSubTabsY + 1, kSubW, kSubTabsH - 2); x += kSubW + kGap;
+        audioSynthSubBtn .setBounds(x, kSubTabsY + 1, kSubW, kSubTabsH - 2); x += kSubW + kGap;
+        audioWaveSubBtn  .setBounds(x, kSubTabsY + 1, kSubW, kSubTabsH - 2);
+    }
+
+    // ── AUDIOSTRAL controls (SYNTH page, left column) ─────────────────────────
     {
         const int cx = lxp + kCtrlOffset;
         int cy = rsy;
@@ -696,7 +805,7 @@ void Sp3ctraAudioProcessorEditor::resized()
         sfFocusOnlyToggle    .setBounds(cx, cy, cw2, kRowH);
     }
 
-    // ── LuxSynth controls (SYNTH page, left column = vol ADSR + spectral) ────
+    // ── AUDIOSYNTH controls (SYNTH page, left column = vol ADSR + spectral) ──
     {
         const int cx = lxp + kCtrlOffset;
         int cy = rsy;
@@ -710,7 +819,7 @@ void Sp3ctraAudioProcessorEditor::resized()
         lxLfoRateSlider.setBounds(cx, cy, kCtrlW, kRowH);
     }
 
-    // ── LuxSynth controls (SYNTH page, right column = filter ADSR + LFO) ─────
+    // ── AUDIOSYNTH controls (SYNTH page, right column = filter ADSR + LFO) ───
     {
         const int rxp = colRX();
         const int cw  = colWidth();
@@ -726,7 +835,7 @@ void Sp3ctraAudioProcessorEditor::resized()
         lxLfoDepthSlider  .setBounds(cx, cy, cw2, kRowH);
     }
 
-    // ── LuxWave controls (SYNTH page, left column = ADSR + Volume) ────────────
+    // ── AUDIOWAVE controls (SYNTH page, left column = ADSR + Volume) ─────────
     {
         const int cx = lxp + kCtrlOffset;
         int cy = rsy;
@@ -740,7 +849,7 @@ void Sp3ctraAudioProcessorEditor::resized()
         lwScanModeCombo     .setBounds(cx, cy, kCtrlW, kRowH);
     }
 
-    // ── LuxWave controls (SYNTH page, right column = Filter + LFO) ────────────
+    // ── AUDIOWAVE controls (SYNTH page, right column = Filter + LFO) ─────────
     {
         const int rxp = colRX();
         const int cw  = colWidth();
@@ -757,26 +866,28 @@ void Sp3ctraAudioProcessorEditor::resized()
     const int btnSz = kHeaderH - 8;
     settingsButton.setBounds(getWidth() - btnSz - 4, 4, btnSz, btnSz);
 
-    // ── IMAGE page (full page area below tabs) ────────────────────────────────
-    if (imagePage)
-    {
-        const int pageH = getHeight() - kPageTop - 8;
-        imagePage->setBounds(kHPad, kPageTop, getWidth() - 2*kHPad, pageH);
-    }
+    // ── Top-level image pipeline pages share the full page area ──────────────
+    // Note: the SYNTH image sub-tabs start lower (below the sub-tab bar).
+    const int pageH       = getHeight() - kPageTop - 8;
+    const int topPageY    = kSubTabsY;  // SOURCES/PITCH/MASK have no sub-tab bar
+    const int topPageH    = getHeight() - topPageY - 8;
+    const int pageW       = getWidth() - 2 * kHPad;
+
+    if (sourcesPage) sourcesPage->setBounds(kHPad, topPageY, pageW, topPageH);
+    if (pitchPage)   pitchPage  ->setBounds(kHPad, topPageY, pageW, topPageH);
+    if (maskPage)    maskPage   ->setBounds(kHPad, topPageY, pageW, topPageH);
+
+    // SYNTH image sub-pages sit below the sub-tab bar
+    if (imgLuxStralPage) imgLuxStralPage->setBounds(kHPad, kPageTop, pageW, pageH);
+    if (imgLuxSynthPage) imgLuxSynthPage->setBounds(kHPad, kPageTop, pageW, pageH);
 
     // ── Sampler page ──────────────────────────────────────────────────────────
     if (samplerPage)
-    {
-        const int pageH = getHeight() - kPageTop - 8;
-        samplerPage->setBounds(kHPad, kPageTop, getWidth() - 2*kHPad, pageH);
-    }
+        samplerPage->setBounds(kHPad, topPageY, pageW, topPageH);
 
     // ── Video scroll page ─────────────────────────────────────────────────────
     if (videoScrollPage)
-    {
-        const int pageH = getHeight() - kPageTop - 8;
-        videoScrollPage->setBounds(kHPad, kPageTop, getWidth() - 2*kHPad, pageH);
-    }
+        videoScrollPage->setBounds(kHPad, topPageY, pageW, topPageH);
 }
 
 //==============================================================================

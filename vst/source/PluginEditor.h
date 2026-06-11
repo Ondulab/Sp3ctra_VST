@@ -5,7 +5,12 @@
 #include "PluginProcessor.h"
 #include "SettingsWindow.h"
 #include "CisVisualizerComponent.h"
-#include "image/ImagePageComponent.h"
+#include "image/SourcesTabComponent.h"
+#include "image/LuxPitchTabComponent.h"
+#include "image/LuxMaskTabComponent.h"
+#include "image/LuxStralTabComponent.h"
+#include "image/LuxSynthTabComponent.h"
+#include "image/VisualizerMode.h"
 #include "sampler/SamplerPageComponent.h"
 #include "video/VideoScrollTab.h"
 #include "UITheme.h"
@@ -104,8 +109,19 @@ public:
 
 private:
     // ── Active tab ────────────────────────────────────────────────────────────
-    enum class Tab { Image, Synth, Sampler, Video };
-    enum class SynthSub { LuxStral, LuxSynth, LuxWave };
+    // Top-level tabs (row 1): SOURCES | PITCH | MASK | SAMPLER | SYNTH | VIDEO
+    enum class Tab { Sources, Pitch, Mask, Sampler, Synth, Video };
+    // SYNTH sub-tabs (row 2):
+    //   ImgLuxStral / ImgLuxSynth — image pipeline pages moved from IMAGE
+    //   AudioStral / AudioSynth / AudioWave — original audio parameter pages
+    enum class SynthSub
+    {
+        ImgLuxStral,
+        ImgLuxSynth,
+        AudioStral,
+        AudioSynth,
+        AudioWave
+    };
 
     // ── Layout constants ──────────────────────────────────────────────────────
     static constexpr int kHeaderH    = 52;
@@ -142,27 +158,41 @@ private:
     Sp3ctraAudioProcessor& audioProcessor;
 
     // ── State ─────────────────────────────────────────────────────────────────
-    Tab currentTab { Tab::Image };
-    SynthSub currentSynthSub { SynthSub::LuxStral };
+    Tab currentTab { Tab::Sources };
+    SynthSub currentSynthSub { SynthSub::AudioStral };
 
-    // ── Tab navigation (4 tabs: IMAGE | SYNTH | SAMPLER | VIDEO) ─────────────
-    juce::TextButton imageTabBtn   { "IMAGE" };
-    juce::TextButton synthTabBtn   { "SYNTH" };
+    // ── Tab navigation (6 tabs: SOURCES | PITCH | MASK | SAMPLER | SYNTH | VIDEO)
+    juce::TextButton sourcesTabBtn { "SOURCES" };
+    juce::TextButton pitchTabBtn   { "PITCH" };
+    juce::TextButton maskTabBtn    { "MASK" };
     juce::TextButton samplerTabBtn { "SAMPLER" };
+    juce::TextButton synthTabBtn   { "SYNTH" };
     juce::TextButton videoTabBtn   { "VIDEO" };
 
     // ── Synth sub-tab buttons ────────────────────────────────────────────────
-    juce::TextButton luxstralSubBtn  { "LuxStral" };
-    juce::TextButton luxsynthSubBtn  { "LuxSynth" };
-    juce::TextButton luxwaveSubBtn   { "LuxWave" };
+    juce::TextButton imgLuxStralSubBtn { "LUXSTRAL" };
+    juce::TextButton imgLuxSynthSubBtn { "LUXSYNTH" };
+    juce::TextButton audioStralSubBtn  { "AUDIOSTRAL" };
+    juce::TextButton audioSynthSubBtn  { "AUDIOSYNTH" };
+    juce::TextButton audioWaveSubBtn   { "AUDIOWAVE" };
 
     void switchSynthSubTab(SynthSub sub);
+
+    /** Forwards a node-click event from any image pipeline tab to the
+     *  CIS visualiser so the selected source is rendered live. */
+    void handleNodeClicked(VisualizerMode mode);
 
     // ── CIS Visualizer ────────────────────────────────────────────────────────
     std::unique_ptr<CisVisualizerComponent> cisVisualizer;
 
-    // ── IMAGE page — delegated to ImagePageComponent ───────────────────────────
-    std::unique_ptr<ImagePageComponent> imagePage;
+    // ── Image pipeline pages (moved out of the former IMAGE tab) ─────────────
+    // SOURCES / PITCH / MASK are now top-level tabs.
+    // ImgLuxStral / ImgLuxSynth are SYNTH sub-tabs.
+    std::unique_ptr<SourcesTabComponent>  sourcesPage;
+    std::unique_ptr<LuxPitchTabComponent> pitchPage;
+    std::unique_ptr<LuxMaskTabComponent>  maskPage;
+    std::unique_ptr<LuxStralTabComponent> imgLuxStralPage;
+    std::unique_ptr<LuxSynthTabComponent> imgLuxSynthPage;
 
     // ── SYNTH page — LuxStral audio params (image params removed) ─────────────
     juce::ToggleButton deviceOnToggle;
