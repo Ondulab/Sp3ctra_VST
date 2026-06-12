@@ -272,6 +272,25 @@ void lux_mask_set_pitch_bend(LuxMaskState *state, float bend)
     atomic_store_explicit(&state->midi.pitch_bend, pb, memory_order_release);
 }
 
+void lux_mask_all_notes_off(LuxMaskState *state)
+{
+    int v;
+    if (!state) return;
+
+    /* Release every voice that is currently held.  We DO NOT touch the
+     * envelope_stage / envelope_level directly — clearing the `active`
+     * atomic is exactly what advance_voice_envelope() listens for to
+     * trigger the standard RELEASE transition (so the configured release
+     * curve is preserved, including the exponential decay shape, as well
+     * as the width-bloom snapshot of release_start_level). */
+    for (v = 0; v < LUX_MASK_MAX_VOICES; v++)
+    {
+        atomic_store_explicit(&state->midi.voices[v].active, 0,
+                              memory_order_release);
+    }
+    atomic_store_explicit(&state->midi.voice_count, 0, memory_order_relaxed);
+}
+
 /* ── Voice envelope advance ────────────────────────────────────────────────── */
 static void advance_voice_envelope(
     LuxMaskVoiceState   *voice,
@@ -343,16 +362,32 @@ static void advance_voice_envelope(
             voice->envelope_level = sustain_target;
             break;
         case LUX_MASK_ENV_RELEASE:
-            rate = (cfg->release_ms > 0.1f) ? dt_s / (cfg->release_ms / 1000.0f) : 100.0f;
-            voice->envelope_level -= rate;
+        {
+            /* Exponential decay: musically natural release shape.
+             * The envelope level is multiplied by k each frame, with k
+             * chosen so that the level drops to ~-60 dB (≈ 0.001) over
+             * the user-defined release_ms window. This yields a steep
+             * initial fall followed by a long, smooth tail — much more
+             * musical than the previous linear ramp (which sounded like
+             * a mechanical "brake").
+             *
+             * tau = release_ms / ln(1000) ≈ release_ms / 6.9078
+             * k   = exp(-dt_s / tau) = exp(-dt_s * 6.9078 / release_s) */
+            const float release_s = (cfg->release_ms > 0.1f)
+                                  ? cfg->release_ms / 1000.0f
+                                  : 1e-4f;
+            const float k = expf(-dt_s * 6.9078f / release_s);
+            voice->envelope_level *= k;
             /* Time-based progress for the width interpolation (see above). */
             voice->release_progress_s += dt_s;
-            if (voice->envelope_level <= 0.0f)
+            /* Snap to zero once the level is inaudible. */
+            if (voice->envelope_level <= 1e-4f)
             {
                 voice->envelope_level = 0.0f;
                 voice->envelope_stage = LUX_MASK_ENV_IDLE;
             }
             break;
+        }
     }
 
     if (voice->envelope_level < 0.0f) voice->envelope_level = 0.0f;

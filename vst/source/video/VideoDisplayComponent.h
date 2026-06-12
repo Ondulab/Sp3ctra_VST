@@ -114,8 +114,17 @@ private:
     int                     cisCount_     { 0 };   // updated by capture thread, checked atomically
     bool                    bufferPreFilled_ { false }; // true after first pre-fill pass
 
-    // Counter from AudioImageBuffers — detect new frames without mutex
-    std::atomic<uint64_t>   lastLinesReceived_ { 0 };
+    // Counters from AudioImageBuffers — detect new frames without mutex.
+    // - lastLinesReceived_  : tracks raw UDP frames (incremented on every
+    //                         complete_write() from the UDP thread)
+    // - lastLinesModulated_ : tracks modulated frames (incremented on every
+    //                         snapshot_modulated() from the synthesis thread).
+    //                         Required because the UDP write bus is suppressed
+    //                         while the LuxSampler is playing, freezing
+    //                         lines_received even though the modulated stream
+    //                         keeps advancing.
+    std::atomic<uint64_t>   lastLinesReceived_  { 0 };
+    std::atomic<uint64_t>   lastLinesModulated_ { 0 };
 
     // ── Scroll image (circular, no memcpy) ───────────────────────────────────
     juce::Image scrollBuffer_;

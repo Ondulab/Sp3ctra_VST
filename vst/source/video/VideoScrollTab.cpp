@@ -35,16 +35,23 @@ VideoScrollTab::VideoScrollTab(Sp3ctraAudioProcessor& processor)
     enableToggle_.onStateChange = [this] { updateUIFromState(); };
 
     // ── Source ────────────────────────────────────────────────────────────────
-    sourceCombo_.addItem("L  (Live CIS)",        1);
-    sourceCombo_.addItem("Sample",               2);
-    sourceCombo_.addItem("Mix",                  3);
-    sourceCombo_.addItem("LuxPitch Output",      4);
-    sourceCombo_.addItem("LuxMask Output",       5);
+    // The waterfall now follows the IMAGE INPUT of a synthesis engine — not a
+    // raw bus selector.  Each option mirrors what the engine actually "sees":
+    //   - LuxStral          → reads luxstral_source_type (S/L/M/P/K) routing
+    //   - LuxSynth/LuxWave  → reads luxsynth_source_type (LuxWave shares it)
+    //   - AllSynth          → 50/50 luminance blend of the two streams above
+    sourceCombo_.addItem("LuxStral",         1);
+    sourceCombo_.addItem("LuxSynth/LuxWave", 2);
+    sourceCombo_.addItem("AllSynth",         3);
     sourceCombo_.setTooltip(
-        "Image source fed to the video scroll window.\n"
-        "'LuxPitch Output' shows the post-LuxPitch processed image - the shifted,\n"
-        "enveloped, and modulated output of the LuxPitch engine.\n"
-        "Requires LuxPitch to be enabled in the IMAGE > LUXPITCH tab.");
+        "Which synthesis engine's image input to visualize.\n"
+        "Follows each engine's own source routing (set in IMAGE tab):\n"
+        "  - LuxStral          → image fed to LuxStral synthesis\n"
+        "  - LuxSynth/LuxWave  → image fed to LuxSynth and LuxWave (shared)\n"
+        "  - AllSynth          → 50/50 blend of both streams above\n"
+        "The waterfall always matches what the audio engine actually processes,\n"
+        "regardless of which view is selected in IMAGE > SOURCES.");
+
 
     addAndMakeVisible(sourceCombo_);
     sourceAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(

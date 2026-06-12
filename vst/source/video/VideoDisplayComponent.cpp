@@ -5,6 +5,7 @@ extern "C"
 {
 #include "audio/buffers/audio_image_buffers.h"
 #include "config/config_loader.h"
+#include "processing/image_pipeline_types.h"
 #include "processing/lux_pitch.h"
 #include "processing/lux_mask.h"
 }
@@ -56,139 +57,108 @@ void VideoDisplayComponent::captureCurrentFrame()
     auto* aib = core->getAudioImageBuffers();
     if (!aib || !aib->initialized) return;
 
-    // Detect new frame via lines_received counter (lock-free)
-    const uint64_t received = (uint64_t)aib->lines_received;
-    const uint64_t last     = lastLinesReceived_.load(std::memory_order_relaxed);
-    if (received == last) return;
-    lastLinesReceived_.store(received, std::memory_order_relaxed);
+    // Detect new frame via the AudioImageBuffers generation counters
+    // (lock-free).  Two counters are required because the producer differs
+    // depending on which path drives the waterfall:
+    //   • lines_received  — UDP thread, incremented on complete_write().
+    //                       Frozen while the LuxSampler is playing (UDP
+    //                       write bus is suppressed in that case).
+    //   • lines_modulated — synthesis thread, incremented on
+    //                       snapshot_modulated().  Keeps advancing even when
+    //                       the UDP bus is idle, as long as audio synthesis
+    //                       is running (sampler playback, LuxPitch, LuxMask).
+    //
+    // We treat *any* counter advance as "new frame available" so the
+    // waterfall stays alive in MODULATED mode during sampler playback,
+    // and in LIVE mode while the UDP stream is the only producer.
+    const uint64_t received  = (uint64_t)aib->lines_received;
+    const uint64_t modulated = __atomic_load_n(&aib->lines_modulated,
+                                                __ATOMIC_ACQUIRE);
+    const uint64_t lastR = lastLinesReceived_ .load(std::memory_order_relaxed);
+    const uint64_t lastM = lastLinesModulated_.load(std::memory_order_relaxed);
+    if (received == lastR && modulated == lastM) return;
+    lastLinesReceived_ .store(received,  std::memory_order_relaxed);
+    lastLinesModulated_.store(modulated, std::memory_order_relaxed);
 
     const int count = get_cis_pixels_nb();
     if (count <= 0) return;
 
-    // Select source buffer
+    // ── Source selection (Modulated / Live refactor) ─────────────────────────
+    // videoScrollSource (APVTS choice) selects which synthesis engine the
+    // waterfall mirrors:
+    //   0 = LuxStral         → follows g_sp3ctra_config.luxstral_source_type
+    //   1 = LuxSynth/LuxWave → follows g_sp3ctra_config.luxsynth_source_type
+    //   2 = AllSynth         → 50/50 blend of the two engines above
+    //
+    // Each engine's own channel selector is binary:
+    //   IMAGE_SOURCE_MODULATED (= 0) → use the pre-processed MIX buffer
+    //       which already contains Live ► LuxSampler ► LuxPitch ► LuxMask.
+    //   IMAGE_SOURCE_LIVE      (= 1) → use the raw UDP frame, no processing.
+    //
+    // Deprecated values (SAMPLER, MIX, LUXPITCH, LUXMASK) all collapse to
+    // IMAGE_SOURCE_MODULATED at compile time (see image_pipeline_types.h),
+    // so a simple equality test against IMAGE_SOURCE_LIVE is sufficient.
     const int srcChoice = static_cast<int>(
         processor_.getAPVTS().getRawParameterValue("videoScrollSource")->load());
+
+    auto resolveEngineInput = [&](int engineSourceType,
+                                  uint8_t*& outR, uint8_t*& outG, uint8_t*& outB)
+    {
+        outR = outG = outB = nullptr;
+        if (engineSourceType == IMAGE_SOURCE_LIVE)
+        {
+            // Channel B (LIVE): always the raw UDP frame, untouched.
+            audio_image_buffers_get_raw_pointers(aib, &outR, &outG, &outB);
+        }
+        else
+        {
+            // Channel A (MODULATED): the published post-insert snapshot
+            // (Live ► LuxSampler ► LuxPitch ► LuxMask).  Single producer
+            // (synthesis thread) → safe to read here without locking.
+            audio_image_buffers_get_modulated_pointers(aib, &outR, &outG, &outB);
+        }
+    };
+
 
     uint8_t* pR = nullptr;
     uint8_t* pG = nullptr;
     uint8_t* pB = nullptr;
 
-    switch (srcChoice)
+    // Scratch buffers for AllSynth blend.  Single-producer thread → static OK.
+    static constexpr int kMaxBlendPixels = 8192;
+    static uint8_t blendR[kMaxBlendPixels];
+    static uint8_t blendG[kMaxBlendPixels];
+    static uint8_t blendB[kMaxBlendPixels];
+
+    if (srcChoice == 2 && count <= kMaxBlendPixels)
     {
-        case 0: // L — raw live UDP
-            audio_image_buffers_get_raw_pointers(aib, &pR, &pG, &pB);
-            break;
-        case 1: // Sample
-            audio_image_buffers_get_sampler_pointers(aib, &pR, &pG, &pB);
-            break;
-        case 3:
+        // AllSynth: 50/50 blend per channel.
+        uint8_t *lsR = nullptr, *lsG = nullptr, *lsB = nullptr;
+        uint8_t *lxR = nullptr, *lxG = nullptr, *lxB = nullptr;
+        resolveEngineInput(g_sp3ctra_config.luxstral_source_type, lsR, lsG, lsB);
+        resolveEngineInput(g_sp3ctra_config.luxsynth_source_type, lxR, lxG, lxB);
+        const bool lsOk = (lsR && lsG && lsB);
+        const bool lxOk = (lxR && lxG && lxB);
+        if (lsOk && lxOk)
         {
-            // LuxPitch Output — process the LuxPitch pitch-shift INDEPENDENTLY
-            // for the video scroll.  We do NOT depend on the visualizer or on
-            // the audio thread: we drive our own private LuxPitch instance
-            // (g_lux_pitch_vid) so the waterfall keeps scrolling even when the
-            // visualizer is showing another node.
-            //
-            // The visualizer is intentionally not coupled to this pipeline —
-            // visualizers only display their own state.
-            if (count > LUX_PITCH_MAX_PIXELS)
+            for (int i = 0; i < count; ++i)
             {
-                // Source too wide for the LuxPitch buffers → fallback to Mix.
-                audio_image_buffers_get_read_pointers(aib, &pR, &pG, &pB);
-                break;
+                blendR[i] = (uint8_t)(((int)lsR[i] + (int)lxR[i] + 1) >> 1);
+                blendG[i] = (uint8_t)(((int)lsG[i] + (int)lxG[i] + 1) >> 1);
+                blendB[i] = (uint8_t)(((int)lsB[i] + (int)lxB[i] + 1) >> 1);
             }
-
-            // Resolve upstream source as configured by the user
-            // (luxpitchSource: 0=Sampler, 1=Mix, 2=Live).
-            const int lpChoice = static_cast<int>(
-                processor_.getAPVTS().getRawParameterValue("luxpitchSource")->load());
-            uint8_t* inR = nullptr;
-            uint8_t* inG = nullptr;
-            uint8_t* inB = nullptr;
-            switch (lpChoice)
-            {
-                case 0:  audio_image_buffers_get_sampler_pointers(aib, &inR, &inG, &inB); break;
-                case 2:  audio_image_buffers_get_raw_pointers    (aib, &inR, &inG, &inB); break;
-                case 1:
-                default: audio_image_buffers_get_read_pointers   (aib, &inR, &inG, &inB); break;
-            }
-
-            if (!inR || !inG || !inB)
-            {
-                // Upstream not ready → silently fallback to Mix to keep the UI alive.
-                audio_image_buffers_get_read_pointers(aib, &pR, &pG, &pB);
-                break;
-            }
-
-            // Run our private LuxPitch engine on the upstream frame.
-            // Config has already been synced into g_lux_pitch_vid.config by
-            // applyConfigurationToCore() (PluginProcessor), and MIDI events are
-            // delivered to g_lux_pitch_vid in processBlock().
-            const uint8_t *outR = nullptr;
-            const uint8_t *outG = nullptr;
-            const uint8_t *outB = nullptr;
-            lux_pitch_process_frame(&g_lux_pitch_vid,
-                                    inR, inG, inB,
-                                    count,
-                                    g_sp3ctra_config.num_octaves,
-                                    &outR, &outG, &outB);
-
-            // lux_pitch_process_frame may return the input pointers as-is
-            // (bypass when disabled) or the internal out_* buffers (when active).
-            pR = (uint8_t*)outR;
-            pG = (uint8_t*)outG;
-            pB = (uint8_t*)outB;
-            break;
+            pR = blendR; pG = blendG; pB = blendB;
         }
-        case 4:
-        {
-            // LuxMask Output — run a private LuxMask instance independent from
-            // the visualizer or the audio thread.  Same pattern as LuxPitch:
-            // use g_lux_mask_vid driven by MIDI events from processBlock().
-            if (count > LUX_MASK_MAX_PIXELS)
-            {
-                audio_image_buffers_get_read_pointers(aib, &pR, &pG, &pB);
-                break;
-            }
-
-            // Resolve upstream source (luxmaskSource: 0=Sampler, 1=Mix, 2=Live).
-            const int lmChoice = static_cast<int>(
-                processor_.getAPVTS().getRawParameterValue("luxmaskSource")->load());
-            uint8_t* inR = nullptr;
-            uint8_t* inG = nullptr;
-            uint8_t* inB = nullptr;
-            switch (lmChoice)
-            {
-                case 0:  audio_image_buffers_get_sampler_pointers(aib, &inR, &inG, &inB); break;
-                case 2:  audio_image_buffers_get_raw_pointers    (aib, &inR, &inG, &inB); break;
-                case 1:
-                default: audio_image_buffers_get_read_pointers   (aib, &inR, &inG, &inB); break;
-            }
-
-            if (!inR || !inG || !inB)
-            {
-                audio_image_buffers_get_read_pointers(aib, &pR, &pG, &pB);
-                break;
-            }
-
-            const uint8_t *outR = nullptr;
-            const uint8_t *outG = nullptr;
-            const uint8_t *outB = nullptr;
-            lux_mask_process_frame(&g_lux_mask_vid,
-                                   inR, inG, inB,
-                                   count,
-                                   g_sp3ctra_config.num_octaves,
-                                   &outR, &outG, &outB);
-
-            pR = (uint8_t*)outR;
-            pG = (uint8_t*)outG;
-            pB = (uint8_t*)outB;
-            break;
-        }
-        case 2: // Mix
-        default:
-            audio_image_buffers_get_read_pointers(aib, &pR, &pG, &pB);
-            break;
+        else if (lsOk) { pR = lsR; pG = lsG; pB = lsB; }
+        else if (lxOk) { pR = lxR; pG = lxG; pB = lxB; }
+    }
+    else
+    {
+        // LuxStral (srcChoice 0) or LuxSynth/LuxWave (srcChoice 1).
+        const int engineSrc = (srcChoice == 1)
+                              ? g_sp3ctra_config.luxsynth_source_type
+                              : g_sp3ctra_config.luxstral_source_type;
+        resolveEngineInput(engineSrc, pR, pG, pB);
     }
 
     if (!pR || !pG || !pB) return;

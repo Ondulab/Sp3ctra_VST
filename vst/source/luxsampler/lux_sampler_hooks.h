@@ -41,6 +41,38 @@ void lux_sampler_on_frame_assembled(const uint8_t* R,
                                        uint32_t       line_id);
 
 /**
+ * @brief Phase 1 — live frame assembled (before LuxPitch/LuxMask).
+ *
+ * Image chain: Live ► LuxPitch ► LuxMask ► LuxSampler.
+ * Called by udpThread() right after a scanline has been reassembled but
+ * BEFORE LuxPitch and LuxMask run.  Drains pending start/stop record
+ * commands and caches the live frame for FramePlayerThread's darken-blend.
+ * Does NOT capture a frame into the recording slot — that happens later in
+ * lux_sampler_on_modulated_frame_ready() so the recorded content includes
+ * Pitch + Mask processing.
+ */
+void lux_sampler_on_live_frame_assembled(const uint8_t* R,
+                                          const uint8_t* G,
+                                          const uint8_t* B,
+                                          uint16_t       pixel_count);
+
+/**
+ * @brief Phase 2 — modulated frame ready (after LuxPitch + LuxMask).
+ *
+ * Called by udpThread() AFTER LuxPitch + LuxMask have produced the
+ * post-mask frame.  Responsibilities:
+ *   • Mirror the post-mask frame into the sampler snapshot (so the
+ *     Modulated channel stays alive in idle / REC / STEP_LIVE).
+ *   • Write the post-mask frame into the active recording slot, so
+ *     recorded samples include LuxPitch + LuxMask processing.
+ */
+void lux_sampler_on_modulated_frame_ready(const uint8_t* R,
+                                           const uint8_t* G,
+                                           const uint8_t* B,
+                                           uint16_t       pixel_count,
+                                           uint32_t       line_id);
+
+/**
  * @brief Returns non-zero if any LuxSampler slot is currently in PLAYING state.
  *
  * Used by udpThread() to decide whether to bypass live UDP data to the

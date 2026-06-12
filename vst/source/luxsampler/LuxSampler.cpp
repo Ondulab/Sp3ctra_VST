@@ -39,6 +39,38 @@ extern "C"
             LuxSampler::s_instance->onFrameAssembled(R, G, B, pixel_count, line_id);
     }
 
+    /* New two-phase hooks (image-chain refactor).
+     * udpThread() calls these in sequence:
+     *
+     *   1. lux_sampler_on_live_frame_assembled() — once the line is assembled,
+     *      before the modulation chain (LuxPitch, LuxMask) runs.  Caches the
+     *      live frame so FramePlayerThread can blend it during playback.
+     *
+     *   2. lux_sampler_on_modulated_frame_ready() — after LuxPitch + LuxMask
+     *      have produced the post-mask frame.  This is the signal that:
+     *        – feeds the Modulated channel in idle / REC / STEP_LIVE
+     *        – gets written into the active recording slot, so recorded
+     *          samples already contain LuxPitch + LuxMask processing.
+     */
+    void lux_sampler_on_live_frame_assembled(const uint8_t* R,
+                                              const uint8_t* G,
+                                              const uint8_t* B,
+                                              uint16_t       pixel_count)
+    {
+        if (LuxSampler::s_instance != nullptr)
+            LuxSampler::s_instance->onLiveFrameAssembled(R, G, B, pixel_count);
+    }
+
+    void lux_sampler_on_modulated_frame_ready(const uint8_t* R,
+                                               const uint8_t* G,
+                                               const uint8_t* B,
+                                               uint16_t       pixel_count,
+                                               uint32_t       line_id)
+    {
+        if (LuxSampler::s_instance != nullptr)
+            LuxSampler::s_instance->onModulatedFrameReady(R, G, B, pixel_count, line_id);
+    }
+
     int lux_sampler_is_playing(void)
     {
         if (LuxSampler::s_instance == nullptr)
@@ -293,11 +325,24 @@ void LuxSampler::handleNoteOff(int note) noexcept
 }
 
 // ============================================================================
-// Non-RT path — onFrameAssembled (called from udpThread via C hook)
+// Non-RT path — onLiveFrameAssembled (phase 1)
+//
+// Called by udpThread() RIGHT AFTER a full scanline has been reassembled
+// from UDP fragments — BEFORE LuxPitch / LuxMask are run on it.
+//
+// Responsibilities:
+//   • Drain pending start/stop record commands posted by processMidi()
+//   • Cache the live frame (used later by FramePlayerThread for darken-blend
+//     and by getLiveFrame() callers).
+//
+// MUST NOT capture a frame into the recording slot.  Recording happens in
+// onModulatedFrameReady() so the recorded content includes Pitch/Mask.
+// MUST NOT update the sampler snapshot.  That snapshot now mirrors the
+// post-mask frame (so the Modulated channel stays correct in idle).
 // ============================================================================
 
-bool LuxSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const uint8_t* B,
-                                     uint16_t pixel_count, uint32_t line_id)
+bool LuxSampler::onLiveFrameAssembled(const uint8_t* R, const uint8_t* G,
+                                       const uint8_t* B, uint16_t pixel_count)
 {
     if (!enabled.load(std::memory_order_relaxed)) return false;
 
@@ -355,16 +400,38 @@ bool LuxSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const uint
         std::memcpy(liveB_, B, static_cast<size_t>(livePixelCount_));
     }
 
-    // ── Continuous RAW pass-through into the sampler snapshot ────────────
-    // Mirror the live UDP frame into AudioImageBuffers' sampler snapshot
-    // whenever no slot is playing.  This keeps Source=Sampler / the sampler
-    // visualizer fed by the live stream during IDLE, ARMED and RECORDING
-    // states (previously only RECORDING produced a snapshot).
+    return true;
+}
+
+// ============================================================================
+// Non-RT path — onModulatedFrameReady (phase 2)
+//
+// Called by udpThread() AFTER LuxPitch + LuxMask have produced the post-mask
+// frame.  This is the "input" of the LuxSampler insert in the new chain
+// (Live → LuxPitch → LuxMask → LuxSampler).
+//
+// Responsibilities:
+//   • Mirror the post-mask frame into AudioImageBuffers' sampler snapshot
+//     when no slot is playing → keeps the Modulated channel alive in idle,
+//     REC and STEP_LIVE states.  When a slot IS playing, FramePlayerThread
+//     owns that snapshot.
+//   • Write the post-mask frame into the active recording slot (if any).
+//     Recorded samples therefore include LuxPitch + LuxMask processing.
+// ============================================================================
+
+bool LuxSampler::onModulatedFrameReady(const uint8_t* R, const uint8_t* G,
+                                        const uint8_t* B, uint16_t pixel_count,
+                                        uint32_t line_id)
+{
+    if (!enabled.load(std::memory_order_relaxed)) return false;
+
+    // ── Continuous post-mask pass-through into the sampler snapshot ──────
+    // Mirror the modulated frame into AudioImageBuffers' sampler snapshot
+    // whenever no slot is playing.  This is what feeds the Modulated channel
+    // visualizer + audio path during IDLE / ARMED / RECORDING / STEP_LIVE.
     //
     // During PLAYING: FramePlayerThread is the sole writer of the sampler
     // snapshot — we must not race with it from the UDP thread.
-    // isAnySlotPlaying() also covers the seqPlayerHeld case (slotState stays
-    // PLAYING while held), so a paused playback keeps its frozen frame.
     if (audioBuffers_ != nullptr && !isAnySlotPlaying())
     {
         const int liveBytes = std::min(static_cast<int>(pixel_count),
@@ -387,10 +454,6 @@ bool LuxSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const uint
     if (gate >= 0 && gate != recSlot) return false; // gated out — wrong step
 
     // ── Write frame data under slotsMutex_ ───────────────────────────────
-    // slotsMutex_ prevents sampleSpectralForTimeline (message thread) from
-    // reading slot.frames while this function frees/reallocates or appends
-    // to the CapturedFrame[] array.  The lock is held only for the duration
-    // of the frame-write itself to minimise contention at high frame rates.
     int bytes = 0;
     {
         std::lock_guard<std::mutex> lk(slotsMutex_);
@@ -407,7 +470,6 @@ bool LuxSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const uint
             slot.has_content = (slot.frame_count > 0);
             slot.duration_us = elapsed;
             activeRecSlot.store(-1, std::memory_order_release);
-            // Transition to IDLE (overflow — Non-RT write to atomic is safe)
             atomicState.slotState[recSlot].store(static_cast<int>(SlotState::IDLE),
                                                   std::memory_order_release);
             log_info("FS", "Slot %d: overflow — %d frames, %.2f s",
@@ -416,7 +478,7 @@ bool LuxSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const uint
             return false;
         }
 
-        // Write the frame
+        // Write the (post-mask) frame
         CapturedFrame& frame = slot.frames[slot.frame_count];
         frame.timestamp_us = elapsed;
         frame.line_id      = line_id;
@@ -431,15 +493,31 @@ bool LuxSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G, const uint
         ++slot.frame_count;
     }
 
-    // ── Write RAW incoming frame to sampler snapshot during recording ─────
-    // This ensures Source=Sampler mode can read the live incoming data while
-    // a slot is recording (the sampler output reflects the incoming stream).
+    // ── Also mirror the recorded frame into the sampler snapshot ────────
+    // While recording, the sampler snapshot must reflect the same content
+    // that is being stored in the slot (post-mask) so the visualizer follows.
     if (audioBuffers_ != nullptr && bytes > 0)
     {
         audio_image_buffers_snapshot_sampler(audioBuffers_, R, G, B, bytes);
     }
 
     return true;
+}
+
+// ============================================================================
+// Legacy single-call onFrameAssembled — forwards to the two-phase API.
+// Kept so callers that have not yet been migrated keep working; behaviour is
+// equivalent to "Pitch and Mask are bypassed", i.e. the live frame is recorded
+// directly and used as the Modulated snapshot.
+// ============================================================================
+
+bool LuxSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G,
+                                     const uint8_t* B, uint16_t pixel_count,
+                                     uint32_t line_id)
+{
+    const bool ok1 = onLiveFrameAssembled(R, G, B, pixel_count);
+    const bool ok2 = onModulatedFrameReady(R, G, B, pixel_count, line_id);
+    return ok1 || ok2;
 }
 
 // ============================================================================

@@ -417,8 +417,7 @@ void CisVisualizerComponent::paintSourceLabel(
     {
         case VisualizerMode::RAW:
         case VisualizerMode::LIVE:
-        case VisualizerMode::SAMPLER:
-        case VisualizerMode::MIX:
+        case VisualizerMode::MODULATED: // (legacy SAMPLER/MIX alias to this)
             accent = juce::Colour(0xffa87ae0); // Sources — purple
             break;
         case VisualizerMode::SPCTR_GRAY:
@@ -1144,8 +1143,7 @@ bool CisVisualizerComponent::supportsDisplayModes(VisualizerMode m) const noexce
     {
         case VisualizerMode::RAW:
         case VisualizerMode::LIVE:
-        case VisualizerMode::SAMPLER:
-        case VisualizerMode::MIX:
+        case VisualizerMode::MODULATED: // (legacy SAMPLER/MIX alias to this)
         case VisualizerMode::SPCTR_GRAY:
         case VisualizerMode::SYNTH_GRAY:
         case VisualizerMode::LUXPITCH_OUTPUT:
