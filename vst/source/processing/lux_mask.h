@@ -196,6 +196,11 @@ void lux_mask_note_on(LuxMaskState *state, int note, float velocity);
 void lux_mask_note_off(LuxMaskState *state, int note);
 void lux_mask_set_pitch_bend(LuxMaskState *state, float bend); /* [-1, +1] */
 
+/* MIDI CC 123 "All Notes Off": mark every active voice as released.
+ * Voices enter their normal RELEASE phase (exponential decay), so the
+ * tail remains musical instead of being cut abruptly. RT-safe. */
+void lux_mask_all_notes_off(LuxMaskState *state);
+
 /* ── Frame processing ──────────────────────────────────────────────────────── */
 /*
  * Apply the mask to one RGB frame.  The output is allocated inside `state`

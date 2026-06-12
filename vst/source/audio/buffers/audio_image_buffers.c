@@ -56,11 +56,18 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
   buffers->sampler_G = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
   buffers->sampler_B = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
 
+  // Allocate modulated snapshot buffers (post-Sampler/Pitch/Mask chain)
+  buffers->modulated_R = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
+  buffers->modulated_G = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
+  buffers->modulated_B = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
+
   // Check all allocations
-  if (!buffers->buffer0_R || !buffers->buffer0_G || !buffers->buffer0_B ||
-      !buffers->buffer1_R || !buffers->buffer1_G || !buffers->buffer1_B ||
-      !buffers->raw_R     || !buffers->raw_G     || !buffers->raw_B     ||
-      !buffers->sampler_R || !buffers->sampler_G || !buffers->sampler_B) {
+  if (!buffers->buffer0_R   || !buffers->buffer0_G   || !buffers->buffer0_B   ||
+      !buffers->buffer1_R   || !buffers->buffer1_G   || !buffers->buffer1_B   ||
+      !buffers->raw_R       || !buffers->raw_G       || !buffers->raw_B       ||
+      !buffers->sampler_R   || !buffers->sampler_G   || !buffers->sampler_B   ||
+      !buffers->modulated_R || !buffers->modulated_G || !buffers->modulated_B) {
+
     fprintf(stderr, "ERROR: Failed to allocate audio image buffers\n");
     audio_image_buffers_cleanup(buffers);
     return -1;
@@ -91,6 +98,12 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
   memset(buffers->sampler_R, 255, nb_pixels);
   memset(buffers->sampler_G, 255, nb_pixels);
   memset(buffers->sampler_B, 255, nb_pixels);
+
+  // Initialize modulated snapshot with white (no synthesis cycle yet)
+  memset(buffers->modulated_R, 255, nb_pixels);
+  memset(buffers->modulated_G, 255, nb_pixels);
+  memset(buffers->modulated_B, 255, nb_pixels);
+
 
   log_info("BUFFERS", "Audio image buffers initialized with test pattern for immediate audio feedback");
 
@@ -176,8 +189,21 @@ void audio_image_buffers_cleanup(AudioImageBuffers *buffers) {
     free(buffers->sampler_B);
     buffers->sampler_B = NULL;
   }
+  if (buffers->modulated_R) {
+    free(buffers->modulated_R);
+    buffers->modulated_R = NULL;
+  }
+  if (buffers->modulated_G) {
+    free(buffers->modulated_G);
+    buffers->modulated_G = NULL;
+  }
+  if (buffers->modulated_B) {
+    free(buffers->modulated_B);
+    buffers->modulated_B = NULL;
+  }
 
   // Destroy mutex if initialized
+
   if (buffers->initialized) {
     pthread_mutex_destroy(&buffers->write_mutex);
   }
@@ -495,3 +521,57 @@ void audio_image_buffers_get_sampler_pointers(const AudioImageBuffers *buffers,
   *out_G = buffers->sampler_G;
   *out_B = buffers->sampler_B;
 }
+
+/**
+ * @brief Capture a snapshot of the post-insert modulated frame.
+ *
+ * Single-producer (synthesis thread).  Called once per synthesis cycle, AFTER
+ * the LuxSampler ► LuxPitch ► LuxMask chain has run, with the resulting RGB
+ * pointers.  Multi-reader: video waterfall, visualizers, etc.
+ *
+ * @param buffers   Pointer to AudioImageBuffers structure
+ * @param srcR      Source R channel (modulated frame)
+ * @param srcG      Source G channel (modulated frame)
+ * @param srcB      Source B channel (modulated frame)
+ * @param nb_pixels Number of pixels to copy
+ */
+void audio_image_buffers_snapshot_modulated(AudioImageBuffers *buffers,
+                                            const uint8_t *srcR,
+                                            const uint8_t *srcG,
+                                            const uint8_t *srcB,
+                                            int nb_pixels) {
+  if (!buffers || !buffers->initialized || !srcR || !srcG || !srcB || nb_pixels <= 0)
+    return;
+
+  memcpy(buffers->modulated_R, srcR, nb_pixels);
+  memcpy(buffers->modulated_G, srcG, nb_pixels);
+  memcpy(buffers->modulated_B, srcB, nb_pixels);
+
+  // Publish a new generation tag so consumers polling `lines_modulated` can
+  // detect a fresh modulated frame even while the UDP write bus is idle (e.g.
+  // during LuxSampler playback where `lines_received` stays frozen).
+  __atomic_store_n(&buffers->lines_modulated,
+                   buffers->lines_modulated + 1u,
+                   __ATOMIC_RELEASE);
+}
+
+/**
+ * @brief Get pointers to the last modulated frame (lock-free, read-only).
+ *
+ * @param buffers Pointer to AudioImageBuffers structure (const)
+ * @param out_R   Receives pointer to modulated R channel
+ * @param out_G   Receives pointer to modulated G channel
+ * @param out_B   Receives pointer to modulated B channel
+ */
+void audio_image_buffers_get_modulated_pointers(const AudioImageBuffers *buffers,
+                                                uint8_t **out_R,
+                                                uint8_t **out_G,
+                                                uint8_t **out_B) {
+  if (!buffers || !buffers->initialized || !out_R || !out_G || !out_B)
+    return;
+
+  *out_R = buffers->modulated_R;
+  *out_G = buffers->modulated_G;
+  *out_B = buffers->modulated_B;
+}
+

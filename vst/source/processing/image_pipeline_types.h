@@ -5,13 +5,27 @@
  * These types are used across source routing, blending, and processing stages.
  *
  * Architecture: see docs/SPEC_ImagePipeline_Architecture.html
- *               see docs/PLAN_ImagePipeline_Refactoring.html
  *
- * RT-safety: All types are plain-old-data (POD). No dynamic allocation,
- *            no virtual methods, no JUCE dependencies.
+ * ── Channel model (since "Modulated / Live" refactor) ──────────────────────
+ *
+ * Two fixed channels feed the synthesis engines:
+ *
+ *   Channel Modulated : Live ► LuxSampler ► LuxPitch ► LuxMask ► OUT
+ *                       Each insert auto-bypasses when inactive:
+ *                         - LuxSampler  : pass-through when not playing
+ *                         - LuxPitch    : pass-through when no shift active
+ *                         - LuxMask     : pass-through when opacity == 0
+ *
+ *   Channel Live      : UDP image stream, direct, no processing
+ *
+ * Each synthesis engine (LuxStral, LuxSynth+LuxWave) selects which channel
+ * feeds its preprocessing pipeline.  No more S/M/L choice.
+ *
+ * ── RT-safety ──────────────────────────────────────────────────────────────
+ * All types are plain-old-data (POD).  No dynamic allocation, no virtual
+ * methods, no JUCE dependencies.
  *
  * Author: zhonx
- * Created: 2026-04-14
  */
 
 #ifndef IMAGE_PIPELINE_TYPES_H
@@ -24,17 +38,23 @@ extern "C" {
 #endif
 
 /* ============================================================================
- * ImageSourceType — Source routing enum shared by both paths
+ * ImageSourceType — Channel selector for each synthesis path
  *
- * Each synthesis path (LuxStral, LuxSynth+LuxWave) can independently select
- * its input source from one of these three options.
+ * Two values only.  Previous values (SAMPLER / MIX / LUXPITCH / LUXMASK) are
+ * retained as deprecated aliases for source compatibility during the
+ * transition; they all map to MODULATED at runtime since their effect is now
+ * automatically baked into the modulated chain.
  * ============================================================================ */
 typedef enum {
-    IMAGE_SOURCE_SAMPLER  = 0,  /* S — LuxSampler playback (recorded slot) */
-    IMAGE_SOURCE_LIVE     = 1,  /* L — Live UDP stream (real-time scanner) */
-    IMAGE_SOURCE_MIX      = 2,  /* M — Darken-blend of Sampler × Live */
-    IMAGE_SOURCE_LUXPITCH = 3,  /* P — LuxPitch shifted output */
-    IMAGE_SOURCE_LUXMASK  = 4   /* K — LuxMask spotlight output */
+    IMAGE_SOURCE_MODULATED = 0,  /* Channel A : Live ► LuxSampler ► LuxPitch ► LuxMask */
+    IMAGE_SOURCE_LIVE      = 1,  /* Channel B : direct live UDP feed */
+
+    /* ── Deprecated aliases — kept so any leftover preset/code keeps compiling.
+     * They all behave as IMAGE_SOURCE_MODULATED at runtime. ─────────────── */
+    IMAGE_SOURCE_SAMPLER   = IMAGE_SOURCE_MODULATED,
+    IMAGE_SOURCE_MIX       = IMAGE_SOURCE_MODULATED,
+    IMAGE_SOURCE_LUXPITCH  = IMAGE_SOURCE_MODULATED,
+    IMAGE_SOURCE_LUXMASK   = IMAGE_SOURCE_MODULATED
 } ImageSourceType;
 
 /* ============================================================================
@@ -53,11 +73,11 @@ typedef struct {
 /* ============================================================================
  * PathConfig — Per-path processing configuration
  *
- * Each synthesis path has its own source selection and toggle states.
+ * Each synthesis path has its own channel selection and toggle states.
  * These are populated from APVTS parameters each frame.
  * ============================================================================ */
 typedef struct {
-    ImageSourceType source;     /* S | L | M — which source feeds this path */
+    ImageSourceType source;     /* MODULATED | LIVE — which channel feeds this path */
     int             inversion;  /* 0 = off, 1 = on — invert pixel intensities */
     int             ac_removal; /* 0 = off, 1 = on — subtract per-line DC offset */
     float           gamma;      /* γ value for non-linear mapping (0.0 = bypass) */
@@ -72,8 +92,11 @@ typedef struct {
 typedef struct {
     PathConfig luxstral_path;           /* Path A: LuxStral additive synthesis */
     PathConfig luxsynth_luxwave_path;   /* Path B: LuxSynth + LuxWave */
-    float      sampler_opacity;         /* Sampler stream opacity [0.0, 1.0] */
-    float      live_opacity;            /* Live stream opacity [0.0, 1.0] */
+
+    /* Legacy mix opacities — retained for binary compatibility with callers
+     * that still set them.  Ignored by the new channel-based pipeline. */
+    float      sampler_opacity;
+    float      live_opacity;
 
     /* Freeze / Fade envelope — applied to LuxStral notes + grayscale */
     int        freeze_mode;             /* 0 = PLAY, 1 = HOLD, 2 = STOP/WHITE */
@@ -88,34 +111,33 @@ typedef struct {
     /* Envelope identity — MUST match the caller, NOT the source routing.
      * 0 = ENVELOPE_LIVE  (set by live/UDP callers)
      * 1 = ENVELOPE_SAMPLER (set by FramePlayerThread callers)
-     * Prevents the live thread from corrupting the sampler envelope state
-     * when source routing directs Source=S through the live pipeline. */
+     * Prevents the live thread from corrupting the sampler envelope state. */
     int        envelope_id;
 } PipelineConfig;
 
 /* ============================================================================
  * Helper: create a default PipelineConfig matching legacy behaviour
  *
- * Both paths use MIX source, inversion ON, AC removal ON,
+ * Both paths default to MODULATED channel, inversion ON, AC removal ON,
  * LuxStral gamma = 2.2, LuxSynth gamma = 0 (bypass).
  * ============================================================================ */
 static inline PipelineConfig pipeline_config_default(void)
 {
     PipelineConfig cfg;
 
-    /* Path A — LuxStral: MIX source, inversion ON, AC removal ON, gamma 2.2 */
-    cfg.luxstral_path.source     = IMAGE_SOURCE_MIX;
+    /* Path A — LuxStral: MODULATED channel, inversion ON, AC removal ON, gamma 2.2 */
+    cfg.luxstral_path.source     = IMAGE_SOURCE_MODULATED;
     cfg.luxstral_path.inversion  = 1;
     cfg.luxstral_path.ac_removal = 1;
     cfg.luxstral_path.gamma      = 2.2f;
 
-    /* Path B — LuxSynth+LuxWave: MIX source, inversion ON, AC removal ON, no gamma */
-    cfg.luxsynth_luxwave_path.source     = IMAGE_SOURCE_MIX;
+    /* Path B — LuxSynth+LuxWave: MODULATED channel, inversion ON, AC removal ON, no gamma */
+    cfg.luxsynth_luxwave_path.source     = IMAGE_SOURCE_MODULATED;
     cfg.luxsynth_luxwave_path.inversion  = 1;
     cfg.luxsynth_luxwave_path.ac_removal = 1;
     cfg.luxsynth_luxwave_path.gamma      = 0.0f; /* Linear for FFT */
 
-    /* Mix opacities */
+    /* Legacy mix opacities (ignored by channel-based pipeline) */
     cfg.sampler_opacity = 0.5f;
     cfg.live_opacity    = 0.5f;
 

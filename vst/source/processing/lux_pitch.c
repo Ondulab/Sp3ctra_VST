@@ -233,6 +233,24 @@ void lux_pitch_set_pitch_bend(LuxPitchState *state, float bend)
     atomic_store_explicit(&state->midi.pitch_bend, pb, memory_order_release);
 }
 
+void lux_pitch_all_notes_off(LuxPitchState *state)
+{
+    int v;
+    if (!state) return;
+
+    /* Release every voice that is currently held.  We DO NOT touch the
+     * envelope_stage / envelope_level directly — clearing the `active`
+     * atomic is exactly what advance_voice_envelope() listens for to
+     * trigger the standard RELEASE transition (so the configured release
+     * curve is preserved, including the new exponential decay). */
+    for (v = 0; v < LUX_PITCH_MAX_VOICES; v++)
+    {
+        atomic_store_explicit(&state->midi.voices[v].active, 0,
+                              memory_order_release);
+    }
+    atomic_store_explicit(&state->midi.voice_count, 0, memory_order_relaxed);
+}
+
 /* ── Internal: advance one voice envelope ──────────────────────────────────── */
 static void advance_voice_envelope(
     LuxPitchVoiceState *voice,
@@ -282,15 +300,32 @@ static void advance_voice_envelope(
             voice->envelope_level = sustain_target;
             break;
         case LUX_PITCH_ENV_RELEASE:
-            rate = (cfg->release_ms > 0.1f)
-                ? dt_s / (cfg->release_ms / 1000.0f) : 100.0f;
-            voice->envelope_level -= rate;
-            if (voice->envelope_level <= 0.0f)
+        {
+            /* Exponential decay: musically natural release shape.
+             * The level is multiplied by k each step, with k chosen so
+             * that the envelope drops to ~-60 dB (≈ 0.001) over the
+             * user-defined release_ms window. This produces a steep
+             * initial fall followed by a long, smooth tail — far more
+             * musical than the previous linear ramp (which felt like
+             * a mechanical "brake").
+             *
+             * Tau derivation: e^(-release_ms / tau) = 1/1000
+             *  =>  tau = release_ms / ln(1000) ≈ release_ms / 6.9078
+             *  =>  per-step coefficient k = exp(-dt_s / tau)
+             *                            = exp(-dt_s * 6.9078 / release_s) */
+            const float release_s = (cfg->release_ms > 0.1f)
+                                  ? cfg->release_ms / 1000.0f
+                                  : 1e-4f;
+            const float k = expf(-dt_s * 6.9078f / release_s);
+            voice->envelope_level *= k;
+            /* Snap to zero once the level is inaudible. */
+            if (voice->envelope_level <= 1e-4f)
             {
                 voice->envelope_level = 0.0f;
                 voice->envelope_stage = LUX_PITCH_ENV_IDLE;
             }
             break;
+        }
     }
 
     if (voice->envelope_level < 0.0f) voice->envelope_level = 0.0f;

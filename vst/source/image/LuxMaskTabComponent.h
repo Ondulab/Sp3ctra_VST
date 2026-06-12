@@ -4,9 +4,15 @@
  *        + pipeline output node.
  *
  * Two-column layout (mirrors LuxPitchTabComponent):
- *   Left  — LuxMask controls (enable, source, background, width, ADSR,
+ *   Left  — LuxMask controls (enable, background, width, ADSR,
  *           width-bloom horizons, glide, position LFO, velocity)
  *   Right — pipeline output node (LUXMASK_OUTPUT visualizer)
+ *
+ * ── Channel model (since "Modulated/Live" refactor) ─────────────────────────
+ * LuxMask no longer has a Source selector.  It now lives permanently as an
+ * insert inside the Modulated channel : Live ► LuxSampler ► LuxPitch ► LuxMask.
+ * When disabled or when no MIDI notes are active, it auto-bypasses to the
+ * upstream signal (zero-cost pass-through).
  */
 #pragma once
 
@@ -38,15 +44,6 @@ public:
         addAndMakeVisible(enableToggle);
         enableAttach.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(
             apvts, "luxmaskEnabled", enableToggle));
-
-        // ── Source selector (S / M / L) ────────────────────────────────
-        initLabel(sourceLabel, "Source");
-        addAndMakeVisible(sourceCombo);
-        sourceCombo.addItem("S - Sampler", 1);
-        sourceCombo.addItem("M - Mix",     2);
-        sourceCombo.addItem("L - Live",    3);
-        sourceAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            apvts, "luxmaskSource", sourceCombo));
 
         // ── Background mode ────────────────────────────────────────────
         initLabel(bgLabel, "Background");
@@ -107,15 +104,6 @@ public:
             apvts, "luxmaskReleaseMs", releaseSlider));
 
         // ── Width horizons (absolute pixel widths, fully ADSR-coupled) ──
-        // Width @ Attack  : width in px held at note-on (ATTACK), then
-        //                   collapses to base during DECAY following the
-        //                   audio decay slope.  Long decay ⇒ longer visible
-        //                   "spotlight wide open" phase.
-        // Width @ Release : width in px reached at full release.  Width
-        //                   blooms from base up to this horizon as the
-        //                   envelope fades to zero over the RELEASE segment.
-        //                   Long release ⇒ longer diffusion.
-        // Both scaled by velocity when Velocity → Alpha is on.
         initLabel(widthAttackMaxLabel, "Width @ Attack");
         initSlider(widthAttackMaxSlider);
         widthAttackMaxAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
@@ -177,17 +165,17 @@ public:
 
         const juce::Colour accent (kAccentARGB);
 
-        // WIDTH section header (above row 6 = Width)
+        // WIDTH section header (above row 5 = Width — Source row removed)
         {
-            const int y = rowY(6) - 4;
+            const int y = rowY(5) - 4;
             g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
             g.setColour(accent.withAlpha(0.55f));
             g.drawText("--- MASK WIDTH ---", leftX_, y, leftW_, 12,
                        juce::Justification::centred);
         }
-        // ADSR section header (above row 7 = Attack)
+        // ADSR section header (above row 6 = Attack)
         {
-            const int y = rowY(7) - 4;
+            const int y = rowY(6) - 4;
             g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
             g.setColour(accent.withAlpha(0.55f));
             g.drawText("--- ADSR / MODULATION ---", leftX_, y, leftW_, 12,
@@ -221,56 +209,53 @@ public:
         // Row 0: Enable
         enableLabel  .setBounds(lb(0));
         enableToggle .setBounds(cb(0).withWidth(80));
-        // Row 1: Source
-        sourceLabel  .setBounds(lb(1));
-        sourceCombo  .setBounds(cb(1));
-        // Row 2: Background
-        bgLabel      .setBounds(lb(2));
-        bgCombo      .setBounds(cb(2));
-        // Row 3: Step mode
-        couplingLabel.setBounds(lb(3));
-        couplingCombo.setBounds(cb(3));
-        // Row 4: Free px/semitone
-        freeStepLabel .setBounds(lb(4));
-        freeStepSlider.setBounds(cb(4));
-        // Row 5: PB Range
-        pbRangeLabel  .setBounds(lb(5));
-        pbRangeSlider .setBounds(cb(5));
-        // [WIDTH section header drawn in paint at rowY(6)-4]
-        // Row 6: Width (base)
-        widthLabel    .setBounds(lb(6));
-        widthSlider   .setBounds(cb(6));
-        // [ADSR section header drawn in paint at rowY(7)-4]
-        // Row 7: Attack
-        attackLabel   .setBounds(lb(7));
-        attackSlider  .setBounds(cb(7));
-        // Row 8: Decay
-        decayLabel    .setBounds(lb(8));
-        decaySlider   .setBounds(cb(8));
-        // Row 9: Sustain
-        sustainLabel  .setBounds(lb(9));
-        sustainSlider .setBounds(cb(9));
-        // Row 10: Release
-        releaseLabel  .setBounds(lb(10));
-        releaseSlider .setBounds(cb(10));
-        // Row 11: Width @ Attack
-        widthAttackMaxLabel .setBounds(lb(11));
-        widthAttackMaxSlider.setBounds(cb(11));
-        // Row 12: Width @ Release
-        widthReleaseMaxLabel .setBounds(lb(12));
-        widthReleaseMaxSlider.setBounds(cb(12));
-        // Row 13: Glide
-        glideLabel    .setBounds(lb(13));
-        glideSlider   .setBounds(cb(13));
-        // Row 14: LFO Pos Rate
-        lfoPosRateLabel  .setBounds(lb(14));
-        lfoPosRateSlider .setBounds(cb(14));
-        // Row 15: LFO Pos Depth
-        lfoPosDepthLabel .setBounds(lb(15));
-        lfoPosDepthSlider.setBounds(cb(15));
-        // Row 16: Velocity
-        velCouplingLabel .setBounds(lb(16));
-        velCouplingToggle.setBounds(cb(16).withWidth(80));
+        // Row 1: Background  (Source row removed)
+        bgLabel      .setBounds(lb(1));
+        bgCombo      .setBounds(cb(1));
+        // Row 2: Step mode
+        couplingLabel.setBounds(lb(2));
+        couplingCombo.setBounds(cb(2));
+        // Row 3: Free px/semitone
+        freeStepLabel .setBounds(lb(3));
+        freeStepSlider.setBounds(cb(3));
+        // Row 4: PB Range
+        pbRangeLabel  .setBounds(lb(4));
+        pbRangeSlider .setBounds(cb(4));
+        // [WIDTH section header drawn in paint at rowY(5)-4]
+        // Row 5: Width (base)
+        widthLabel    .setBounds(lb(5));
+        widthSlider   .setBounds(cb(5));
+        // [ADSR section header drawn in paint at rowY(6)-4]
+        // Row 6: Attack
+        attackLabel   .setBounds(lb(6));
+        attackSlider  .setBounds(cb(6));
+        // Row 7: Decay
+        decayLabel    .setBounds(lb(7));
+        decaySlider   .setBounds(cb(7));
+        // Row 8: Sustain
+        sustainLabel  .setBounds(lb(8));
+        sustainSlider .setBounds(cb(8));
+        // Row 9: Release
+        releaseLabel  .setBounds(lb(9));
+        releaseSlider .setBounds(cb(9));
+        // Row 10: Width @ Attack
+        widthAttackMaxLabel .setBounds(lb(10));
+        widthAttackMaxSlider.setBounds(cb(10));
+        // Row 11: Width @ Release
+        widthReleaseMaxLabel .setBounds(lb(11));
+        widthReleaseMaxSlider.setBounds(cb(11));
+        // Row 12: Glide
+        glideLabel    .setBounds(lb(12));
+        glideSlider   .setBounds(cb(12));
+        // Row 13: LFO Pos Rate
+        lfoPosRateLabel  .setBounds(lb(13));
+        lfoPosRateSlider .setBounds(cb(13));
+        // Row 14: LFO Pos Depth
+        lfoPosDepthLabel .setBounds(lb(14));
+        lfoPosDepthSlider.setBounds(cb(14));
+        // Row 15: Velocity
+        velCouplingLabel .setBounds(lb(15));
+        velCouplingToggle.setBounds(cb(15).withWidth(80));
 
         // Right column: single output node, vertically centred
         constexpr int kNH = 28;
@@ -282,8 +267,8 @@ public:
 private:
     [[maybe_unused]] Sp3ctraAudioProcessor& processor;
 
-    // Labels
-    juce::Label enableLabel, sourceLabel, bgLabel, couplingLabel, freeStepLabel, pbRangeLabel;
+    // Labels (no Source label — channel routing is now automatic)
+    juce::Label enableLabel, bgLabel, couplingLabel, freeStepLabel, pbRangeLabel;
     juce::Label widthLabel;
     juce::Label attackLabel, decayLabel, sustainLabel, releaseLabel;
     juce::Label widthAttackMaxLabel, widthReleaseMaxLabel;
@@ -291,9 +276,9 @@ private:
     juce::Label lfoPosRateLabel, lfoPosDepthLabel;
     juce::Label velCouplingLabel;
 
-    // Controls
+    // Controls (no source combo — channel routing is now automatic)
     juce::ToggleButton enableToggle, velCouplingToggle;
-    juce::ComboBox     sourceCombo, bgCombo, couplingCombo;
+    juce::ComboBox     bgCombo, couplingCombo;
     juce::Slider       freeStepSlider, pbRangeSlider;
     juce::Slider       widthSlider;
     juce::Slider       attackSlider, decaySlider, sustainSlider, releaseSlider;
@@ -301,11 +286,11 @@ private:
     juce::Slider       glideSlider;
     juce::Slider       lfoPosRateSlider, lfoPosDepthSlider;
 
-    // Attachments
+    // Attachments (sourceAttach removed)
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>
         enableAttach, velCouplingAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>
-        sourceAttach, bgAttach, couplingAttach;
+        bgAttach, couplingAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
         freeStepAttach, pbRangeAttach,
         widthAttach,

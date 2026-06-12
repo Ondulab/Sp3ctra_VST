@@ -11,7 +11,18 @@
 #include <stddef.h>
 
 /* ============================================================================
- * image_source_select — Route to the selected source
+ * image_source_select — Route to the selected channel
+ *
+ * Since the "Modulated / Live" refactor the router only has two real cases.
+ * The legacy `mix` argument is kept for ABI compatibility with callers that
+ * still pass three frames; it is unused by the new channel model (modulated
+ * processing is now baked upstream into the "sampler" frame: that frame is
+ * already Live ► LuxSampler ► LuxPitch ► LuxMask when the relevant inserts
+ * are active).
+ *
+ * Mapping:
+ *   IMAGE_SOURCE_MODULATED (0) → `sampler` (the modulated chain output)
+ *   IMAGE_SOURCE_LIVE      (1) → `live`    (raw UDP feed)
  * ============================================================================ */
 ImageFrameRGB image_source_select(
     ImageSourceType      source,
@@ -22,20 +33,12 @@ ImageFrameRGB image_source_select(
     const ImageFrameRGB *selected = NULL;
     ImageFrameRGB        empty    = {NULL, NULL, NULL, 0};
 
-    switch (source)
-    {
-        case IMAGE_SOURCE_SAMPLER:
-            selected = sampler;
-            break;
-        case IMAGE_SOURCE_LIVE:
-            selected = live;
-            break;
-        case IMAGE_SOURCE_MIX:
-            selected = mix;
-            break;
-        default:
-            return empty;
-    }
+    (void)mix; /* Deprecated argument — silently ignored */
+
+    if (source == IMAGE_SOURCE_LIVE)
+        selected = live;
+    else /* IMAGE_SOURCE_MODULATED (and all deprecated aliases) */
+        selected = sampler;
 
     /* Return the selected source if valid, otherwise return empty frame */
     if (selected != NULL && image_frame_is_valid(selected))

@@ -39,13 +39,13 @@ public:
         auto& apvts = p.getAPVTS();
 
         // ── Source selector ───────────────────────────────────────────────
+        // Two channels only (since "Modulated/Live" refactor):
+        //   Modulated = Live ► LuxSampler ► LuxPitch ► LuxMask (auto-bypass chain)
+        //   Live      = raw UDP feed, untouched
         initLabel(sourceLabel, "Source");
         addAndMakeVisible(sourceCombo);
-        sourceCombo.addItem("S - Sampler",  1);
-        sourceCombo.addItem("M - Mix",      2);
-        sourceCombo.addItem("L - Live",     3);
-        sourceCombo.addItem("P - LuxPitch", 4);
-        sourceCombo.addItem("K - LuxMask",  5);
+        sourceCombo.addItem("Modulated", 1);
+        sourceCombo.addItem("Live",      2);
         sourceAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
             apvts, "luxstralSource", sourceCombo));
 

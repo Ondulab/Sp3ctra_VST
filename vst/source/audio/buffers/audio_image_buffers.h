@@ -51,10 +51,28 @@ typedef struct AudioImageBuffers {
   uint8_t *sampler_G;
   uint8_t *sampler_B;
 
+  // ── Modulated snapshot (written by the synthesis thread) ─────────────────
+  // Holds the last frame after the full insert chain :
+  //     Live ► LuxSampler ► LuxPitch ► LuxMask
+  // This is the buffer consumed by the synth engines when their source is
+  // set to MODULATED, and the buffer mirrored by the video waterfall.
+  uint8_t *modulated_R;
+  uint8_t *modulated_G;
+  uint8_t *modulated_B;
+
+
   // Statistics and monitoring
   uint64_t lines_received;
   uint64_t lines_processed;
   uint64_t buffer_swaps;
+
+  // Number of snapshots published to modulated_R/G/B by the synthesis thread.
+  // Incremented exactly once per audio_image_buffers_snapshot_modulated() call,
+  // letting downstream consumers (e.g. waterfall capture) detect a fresh
+  // modulated frame even when the UDP write bus is idle (sampler playback
+  // suppresses lines_received).
+  // Single producer (synthesis thread) → atomic load on the reader side.
+  uint64_t lines_modulated;
 
   // Initialization flag
   uint8_t initialized;
@@ -116,6 +134,23 @@ void audio_image_buffers_snapshot_sampler(AudioImageBuffers *buffers,
 void audio_image_buffers_get_sampler_pointers(const AudioImageBuffers *buffers,
                                               uint8_t **out_R, uint8_t **out_G,
                                               uint8_t **out_B);
+
+// ── Modulated snapshot (written by the synthesis thread) ──────────────────
+// Called once per synthesis cycle after the full insert chain runs
+// (Live ► LuxSampler ► LuxPitch ► LuxMask).  Single-producer / multi-reader.
+void audio_image_buffers_snapshot_modulated(AudioImageBuffers *buffers,
+                                            const uint8_t *srcR,
+                                            const uint8_t *srcG,
+                                            const uint8_t *srcB,
+                                            int nb_pixels);
+
+// Lock-free read of the last modulated frame.  Mirrors what the synth
+// engines consume when their source is set to MODULATED.
+void audio_image_buffers_get_modulated_pointers(const AudioImageBuffers *buffers,
+                                                uint8_t **out_R,
+                                                uint8_t **out_G,
+                                                uint8_t **out_B);
+
 
 // Utility functions
 void audio_image_buffers_get_stats(AudioImageBuffers *buffers,

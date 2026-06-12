@@ -143,6 +143,11 @@ void lux_pitch_note_on(LuxPitchState *state, int note, float velocity);
 void lux_pitch_note_off(LuxPitchState *state, int note);
 void lux_pitch_set_pitch_bend(LuxPitchState *state, float bend);
 
+/* MIDI CC 123 "All Notes Off": mark every active voice as released.
+ * Voices enter their normal RELEASE phase (exponential decay), so the
+ * tail remains musical instead of being cut abruptly. RT-safe. */
+void lux_pitch_all_notes_off(LuxPitchState *state);
+
 /* ── Frame processing ──────────────────────────────────────────────────────── */
 
 void lux_pitch_process_frame(

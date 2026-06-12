@@ -5,6 +5,12 @@
  * Two-column layout (mirrors LuxStralTabComponent):
  *   Left  — LuxPitch controls (enable, background, ADSR, glide, LFO, velocity)
  *   Right — pipeline output node
+ *
+ * ── Channel model (since "Modulated/Live" refactor) ─────────────────────────
+ * LuxPitch no longer has a Source selector.  It now lives permanently as an
+ * insert inside the Modulated channel : Live ► LuxSampler ► LuxPitch ► LuxMask.
+ * When disabled or when no MIDI notes are active, it auto-bypasses to the
+ * upstream signal (zero-cost pass-through).
  */
 #pragma once
 
@@ -32,15 +38,6 @@ public:
         addAndMakeVisible(enableToggle);
         enableAttach.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(
             apvts, "luxpitchEnabled", enableToggle));
-
-        // ── Source selector ────────────────────────────────────────────
-        initLabel(sourceLabel, "Source");
-        addAndMakeVisible(sourceCombo);
-        sourceCombo.addItem("S - Sampler", 1);
-        sourceCombo.addItem("M - Mix",     2);
-        sourceCombo.addItem("L - Live",    3);
-        sourceAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            apvts, "luxpitchSource", sourceCombo));
 
         // ── Background mode ────────────────────────────────────────────
         initLabel(bgLabel, "Background");
@@ -167,8 +164,8 @@ public:
         g.setColour(juce::Colour(0x18ffffff));
         g.fillRect(rightX_ - 4, 4, 1, H - 8);
 
-        // ADSR section header
-        const int adsrSectionY = rowY(6) - 4;
+        // ADSR section header (now at row 5 — Source row removed)
+        const int adsrSectionY = rowY(5) - 4;
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
         g.setColour(juce::Colour(0xffe06bb8).withAlpha(0.55f));
         g.drawText("--- ADSR / MODULATION ---", leftX_, adsrSectionY, leftW_, 12,
@@ -202,46 +199,43 @@ public:
         // Row 0: Enable
         enableLabel.setBounds(lb(0));
         enableToggle.setBounds(cb(0).withWidth(80));
-        // Row 1: Source
-        sourceLabel.setBounds(lb(1));
-        sourceCombo.setBounds(cb(1));
-        // Row 2: Background
-        bgLabel.setBounds(lb(2));
-        bgCombo.setBounds(cb(2));
-        // Row 3: Step mode
-        couplingLabel.setBounds(lb(3));
-        couplingCombo.setBounds(cb(3));
-        // Row 4: Free px/semitone
-        freeStepLabel.setBounds(lb(4));
-        freeStepSlider.setBounds(cb(4));
-        // Row 5: PB Range
-        pbRangeLabel.setBounds(lb(5));
-        pbRangeSlider.setBounds(cb(5));
-        // [ADSR section header drawn in paint at rowY(6)-4]
-        // Row 6: Attack
-        attackLabel.setBounds(lb(6));
-        attackSlider.setBounds(cb(6));
-        // Row 7: Decay
-        decayLabel.setBounds(lb(7));
-        decaySlider.setBounds(cb(7));
-        // Row 8: Sustain
-        sustainLabel.setBounds(lb(8));
-        sustainSlider.setBounds(cb(8));
-        // Row 9: Release
-        releaseLabel.setBounds(lb(9));
-        releaseSlider.setBounds(cb(9));
-        // Row 10: Glide
-        glideLabel.setBounds(lb(10));
-        glideSlider.setBounds(cb(10));
-        // Row 11: LFO Rate
-        lfoRateLabel.setBounds(lb(11));
-        lfoRateSlider.setBounds(cb(11));
-        // Row 12: LFO Depth
-        lfoDepthLabel.setBounds(lb(12));
-        lfoDepthSlider.setBounds(cb(12));
-        // Row 13: Velocity
-        velCouplingLabel.setBounds(lb(13));
-        velCouplingToggle.setBounds(cb(13).withWidth(80));
+        // Row 1: Background  (Source row removed — channel routing is automatic)
+        bgLabel.setBounds(lb(1));
+        bgCombo.setBounds(cb(1));
+        // Row 2: Step mode
+        couplingLabel.setBounds(lb(2));
+        couplingCombo.setBounds(cb(2));
+        // Row 3: Free px/semitone
+        freeStepLabel.setBounds(lb(3));
+        freeStepSlider.setBounds(cb(3));
+        // Row 4: PB Range
+        pbRangeLabel.setBounds(lb(4));
+        pbRangeSlider.setBounds(cb(4));
+        // [ADSR section header drawn in paint at rowY(5)-4]
+        // Row 5: Attack
+        attackLabel.setBounds(lb(5));
+        attackSlider.setBounds(cb(5));
+        // Row 6: Decay
+        decayLabel.setBounds(lb(6));
+        decaySlider.setBounds(cb(6));
+        // Row 7: Sustain
+        sustainLabel.setBounds(lb(7));
+        sustainSlider.setBounds(cb(7));
+        // Row 8: Release
+        releaseLabel.setBounds(lb(8));
+        releaseSlider.setBounds(cb(8));
+        // Row 9: Glide
+        glideLabel.setBounds(lb(9));
+        glideSlider.setBounds(cb(9));
+        // Row 10: LFO Rate
+        lfoRateLabel.setBounds(lb(10));
+        lfoRateSlider.setBounds(cb(10));
+        // Row 11: LFO Depth
+        lfoDepthLabel.setBounds(lb(11));
+        lfoDepthSlider.setBounds(cb(11));
+        // Row 12: Velocity
+        velCouplingLabel.setBounds(lb(12));
+        velCouplingToggle.setBounds(cb(12).withWidth(80));
 
         // Right column: single output node, vertically centred
         constexpr int kNH = 28;
@@ -253,23 +247,23 @@ public:
 private:
     [[maybe_unused]] Sp3ctraAudioProcessor& processor;
 
-    // Labels
-    juce::Label enableLabel, sourceLabel, bgLabel, couplingLabel, freeStepLabel, pbRangeLabel;
+    // Labels (no Source label — channel routing is now automatic)
+    juce::Label enableLabel, bgLabel, couplingLabel, freeStepLabel, pbRangeLabel;
     juce::Label attackLabel, decayLabel, sustainLabel, releaseLabel;
     juce::Label glideLabel, lfoRateLabel, lfoDepthLabel, velCouplingLabel;
 
-    // Controls
+    // Controls (no source combo — channel routing is now automatic)
     juce::ToggleButton enableToggle, velCouplingToggle;
-    juce::ComboBox     sourceCombo, bgCombo, couplingCombo;
+    juce::ComboBox     bgCombo, couplingCombo;
     juce::Slider       freeStepSlider, pbRangeSlider;
     juce::Slider       attackSlider, decaySlider, sustainSlider, releaseSlider;
     juce::Slider       glideSlider, lfoRateSlider, lfoDepthSlider;
 
-    // Attachments
+    // Attachments (sourceAttach removed)
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>
         enableAttach, velCouplingAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>
-        sourceAttach, bgAttach, couplingAttach;
+        bgAttach, couplingAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
         freeStepAttach, pbRangeAttach,
         attackAttach, decayAttach, sustainAttach, releaseAttach,

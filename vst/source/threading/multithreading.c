@@ -557,11 +557,22 @@ void *udpThread(void *arg) {
             nb_pixels);
       }
 
-      /* LuxSampler hook: record assembled CIS line if a slot is RECORDING */
+      /* LuxSampler hook (phase 1 — live frame assembled).
+       *
+       * The image chain is now: Live → LuxPitch → LuxMask → LuxSampler.
+       * LuxSampler must therefore see the post-mask frame to:
+       *   • feed the Modulated channel from idle/REC passthrough
+       *   • record into a slot with Pitch+Mask already applied
+       *
+       * Phase 1 here drains start/stop record commands and caches the live
+       * frame for FramePlayerThread.  Phase 2 (the actual capture + sampler
+       * snapshot update) happens AFTER LuxPitch + LuxMask have run — see
+       * lux_sampler_on_modulated_frame_ready() below.
+       */
 #ifdef VST_MODE
-      lux_sampler_on_frame_assembled(
+      lux_sampler_on_live_frame_assembled(
           db->activeBuffer_R, db->activeBuffer_G, db->activeBuffer_B,
-          (uint16_t)nb_pixels, packet.line_id);
+          (uint16_t)nb_pixels);
 #endif
 
       /* 🎬 NEW ARCHITECTURE: Sequencer BEFORE preprocessing
@@ -587,13 +598,18 @@ void *udpThread(void *arg) {
         memcpy(mixed_B, db->activeBuffer_B, nb_pixels);
       }
       
-      /* Step 2: Preprocess via pipeline — source routing selects the correct
-       * input (S/L/M) for each synthesis path based on per-path config.
+      /* Step 2: Preprocess via pipeline — channel routing selects either
+       * the MODULATED chain or the raw LIVE feed for each synthesis path.
        *
-       * Available sources in this thread:
-       *   LIVE    (L) = db->activeBuffer_R/G/B   (raw UDP, pre-blend)
-       *   MIX     (M) = mixed_R/G/B              (darken-blended live+sampler)
-       *   SAMPLER (S) = audioBuffers sampler slot (last frame written by FramePlayerThread)
+       *   Channel A — MODULATED : Live ► LuxSampler ► LuxPitch ► LuxMask
+       *     • base frame  = sampler frame (FramePlayerThread output when a slot
+       *       plays, otherwise live UDP passthrough)
+       *     • LuxPitch and LuxMask auto-bypass when inactive (no voice, no
+       *       config.enabled, etc.) — no branching required at this level
+       *   Channel B — LIVE      : db->activeBuffer (raw UDP, no processing)
+       *
+       * Both synthesis paths (LuxStral and LuxSynth+LuxWave) independently pick
+       * one of these two channels via their own APVTS source parameter.
        */
       {
         PipelineConfig live_cfg = pipeline_build_config_live();
@@ -602,180 +618,147 @@ void *udpThread(void *arg) {
         const uint8_t *src_G;
         const uint8_t *src_B;
 
-        if (live_cfg.luxstral_path.source == IMAGE_SOURCE_LIVE)
+        /* ── Build the MODULATED frame once — used by any path that selects it.
+         * The inserts run inside their own preallocated buffers (see lux_pitch.c
+         * / lux_mask.c, no allocation in this hot path).  When disabled or no
+         * voice is active the engines short-circuit and return the input
+         * pointers as-is, so the cost is O(1). */
+        const uint8_t *mod_R = NULL;
+        const uint8_t *mod_G = NULL;
+        const uint8_t *mod_B = NULL;
+        int            need_modulated =
+            (live_cfg.luxstral_path.source         == IMAGE_SOURCE_MODULATED) ||
+            (live_cfg.luxsynth_luxwave_path.source == IMAGE_SOURCE_MODULATED);
+
+        if (need_modulated)
         {
-            /* L — Raw UDP data (pre-blend, pre-sequencer) */
-            src_R = db->activeBuffer_R;
-            src_G = db->activeBuffer_G;
-            src_B = db->activeBuffer_B;
-        }
-        else if (live_cfg.luxstral_path.source == IMAGE_SOURCE_SAMPLER)
-        {
+            /* ── Chain: Live ► LuxPitch ► LuxMask ► LuxSampler ──
+             *
+             * The Modulated channel is now the FINAL stage of the image chain
+             * (= what the synth engines actually consume when source=MODULATED,
+             * and what the VideoScroll waterfall mirrors).  The sampler is
+             * the last stage, so two cases:
+             *
+             *   • PLAYING : modulated = sampler frame directly.
+             *               The recorded sample already contains the Pitch +
+             *               Mask processing that was active at record time
+             *               (see Phase 2 hook below) — re-applying Pitch/Mask
+             *               on top would double-apply them.  Therefore the
+             *               sampler output is the final modulated signal as-is.
+             *
+             *   • IDLE / REC / STEP_LIVE :
+             *               modulated = LuxMask(LuxPitch(live)).
+             *               LuxSampler::onModulatedFrameReady() then mirrors
+             *               this post-mask result back into the sampler
+             *               snapshot AND writes it into the active recording
+             *               slot, so anything captured already has Pitch+Mask
+             *               baked in.
+             */
 #ifdef VST_MODE
-            /* FIX(live): When passthrough is active (STEP_LIVE / rtStop),
-             * no slot is playing — sampler_pointers still hold the old frame.
-             * Use the live UDP data instead so the pipeline processes the
-             * actual CIS stream, not stale sampler data. */
-            if (lux_sampler_is_seq_live_step() && !lux_sampler_is_playing())
+            if (lux_sampler_is_playing())
             {
-                src_R = db->activeBuffer_R;
-                src_G = db->activeBuffer_G;
-                src_B = db->activeBuffer_B;
+                /* PLAYING: sampler frame IS the modulated output.  No Pitch/Mask
+                 * re-application — recorded samples already contain them. */
+                uint8_t *smpR, *smpG, *smpB;
+                audio_image_buffers_get_sampler_pointers(audioBuffers, &smpR, &smpG, &smpB);
+                mod_R = smpR;
+                mod_G = smpG;
+                mod_B = smpB;
+
+                if (mod_R && mod_G && mod_B)
+                {
+                    audio_image_buffers_snapshot_modulated(audioBuffers,
+                                                           mod_R, mod_G, mod_B,
+                                                           nb_pixels);
+                }
+                /* No phase-2 hook here: sampler IS the source, no recording
+                 * happens while playing back. */
             }
             else
 #endif
             {
-                /* S — Last sampler frame written by FramePlayerThread */
-                uint8_t *smpR, *smpG, *smpB;
-                audio_image_buffers_get_sampler_pointers(audioBuffers, &smpR, &smpG, &smpB);
-                src_R = smpR;
-                src_G = smpG;
-                src_B = smpB;
+                /* IDLE / REC / STEP_LIVE: apply Pitch+Mask on the raw live
+                 * frame, publish as modulated, then let the sampler hook
+                 * mirror & record it. */
+                const uint8_t *after_lp_R, *after_lp_G, *after_lp_B;
+
+                /* LuxPitch insert (auto-bypass if not enabled / no voice) */
+                lux_pitch_process_frame(&g_lux_pitch_proc,
+                                        db->activeBuffer_R,
+                                        db->activeBuffer_G,
+                                        db->activeBuffer_B,
+                                        nb_pixels,
+                                        g_sp3ctra_config.num_octaves,
+                                        &after_lp_R, &after_lp_G, &after_lp_B);
+
+                /* LuxMask insert (auto-bypass if not enabled / no voice) */
+                lux_mask_process_frame(&g_lux_mask_proc,
+                                       after_lp_R, after_lp_G, after_lp_B,
+                                       nb_pixels,
+                                       g_sp3ctra_config.num_octaves,
+                                       &mod_R, &mod_G, &mod_B);
+
+                if (mod_R && mod_G && mod_B)
+                {
+                    audio_image_buffers_snapshot_modulated(audioBuffers,
+                                                           mod_R, mod_G, mod_B,
+                                                           nb_pixels);
+
+                    /* LuxSampler hook (phase 2 — modulated frame ready).
+                     * Mirrors the post-mask frame into the sampler snapshot
+                     * (so the sampler visualiser stays alive in idle) and
+                     * writes it into the active recording slot, so recorded
+                     * samples are Pitch+Mask "printed". */
+#ifdef VST_MODE
+                    lux_sampler_on_modulated_frame_ready(mod_R, mod_G, mod_B,
+                                                         (uint16_t)nb_pixels,
+                                                         packet.line_id);
+#endif
+                }
             }
-        }
-        else if (live_cfg.luxstral_path.source == IMAGE_SOURCE_LUXPITCH)
-        {
-            /* P — LuxPitch: select upstream source, apply pitch shift */
-            const uint8_t *lp_in_R, *lp_in_G, *lp_in_B;
-            int lp_upstream = g_sp3ctra_config.luxpitch_source_type;
-            if (lp_upstream == 1 /* LIVE */)
-            {
-                lp_in_R = db->activeBuffer_R;
-                lp_in_G = db->activeBuffer_G;
-                lp_in_B = db->activeBuffer_B;
-            }
-            else if (lp_upstream == 0 /* SAMPLER */)
-            {
-                uint8_t *sR, *sG, *sB;
-                audio_image_buffers_get_sampler_pointers(audioBuffers, &sR, &sG, &sB);
-                lp_in_R = sR; lp_in_G = sG; lp_in_B = sB;
-            }
-            else /* MIX */
-            {
-                uint8_t *mR, *mG, *mB;
-                audio_image_buffers_get_read_pointers(audioBuffers, &mR, &mG, &mB);
-                lp_in_R = mR; lp_in_G = mG; lp_in_B = mB;
-            }
-            lux_pitch_process_frame(&g_lux_pitch_proc,
-                                    lp_in_R, lp_in_G, lp_in_B,
-                                    nb_pixels,
-                                    g_sp3ctra_config.num_octaves,
-                                    &src_R, &src_G, &src_B);
-        }
-        else if (live_cfg.luxstral_path.source == IMAGE_SOURCE_LUXMASK)
-        {
-            /* K — LuxMask: select upstream source, apply mobile spotlight */
-            const uint8_t *lm_in_R, *lm_in_G, *lm_in_B;
-            /* LuxMask source choice: 0=S(Sampler), 1=M(Mix), 2=L(Live) */
-            /* (no P/K in its own combo — would be self-recursive)        */
-            int lm_choice = g_sp3ctra_config.luxmask_source_type;
-            if (lm_choice == 1 /* LIVE */)
-            {
-                lm_in_R = db->activeBuffer_R;
-                lm_in_G = db->activeBuffer_G;
-                lm_in_B = db->activeBuffer_B;
-            }
-            else if (lm_choice == 0 /* SAMPLER */)
-            {
-                uint8_t *sR, *sG, *sB;
-                audio_image_buffers_get_sampler_pointers(audioBuffers, &sR, &sG, &sB);
-                lm_in_R = sR; lm_in_G = sG; lm_in_B = sB;
-            }
-            else /* MIX */
-            {
-                uint8_t *mR, *mG, *mB;
-                audio_image_buffers_get_read_pointers(audioBuffers, &mR, &mG, &mB);
-                lm_in_R = mR; lm_in_G = mG; lm_in_B = mB;
-            }
-            lux_mask_process_frame(&g_lux_mask_proc,
-                                   lm_in_R, lm_in_G, lm_in_B,
-                                   nb_pixels,
-                                   g_sp3ctra_config.num_octaves,
-                                   &src_R, &src_G, &src_B);
-        }
-        else
-        {
-            /* M — AudioImageBuffers read bus = darken-blend of Live + Sampler */
-            uint8_t *mixR, *mixG, *mixB;
-            audio_image_buffers_get_read_pointers(audioBuffers, &mixR, &mixG, &mixB);
-            src_R = mixR;
-            src_G = mixG;
-            src_B = mixB;
         }
 
-        /* FIX(routing): When the sequencer is driving playback (lux_sampler_is_playing)
-         * and Source=MIX, the sampler contribution must not be silenced by the
-         * live transport freeze (image_freeze_mode / raw_freeze_mode).
-         * The visualizer already bypasses the freeze gate for MIX when samplerWriting
-         * is true — the audio pipeline must follow the same logic.
-         * Override freeze_mode to PLAY so ENVELOPE_LIVE does not silence the output. */
-#ifdef VST_MODE
-        if (live_cfg.luxstral_path.source == IMAGE_SOURCE_MIX
-            && lux_sampler_is_playing())
+
+        /* ── Pick LuxStral's channel ─────────────────────────────────────── */
+        if (live_cfg.luxstral_path.source == IMAGE_SOURCE_LIVE)
         {
-            live_cfg.freeze_mode = 0; /* PLAY — sequencer keeps MIX audio alive */
+            src_R = db->activeBuffer_R;
+            src_G = db->activeBuffer_G;
+            src_B = db->activeBuffer_B;
         }
-#endif
+        else /* IMAGE_SOURCE_MODULATED */
+        {
+            src_R = mod_R;
+            src_G = mod_G;
+            src_B = mod_B;
+        }
 
         if (pipeline_process_frame(src_R, src_G, src_B, &live_cfg, &preprocessed_temp) != 0) {
           log_error("THREAD", "Pipeline processing failed");
         }
 
-        /* FIX(routing): LuxSynth polyphonic independent source path.
-         * pipeline_process_frame() computed polyphonic.* from LuxStral's source.
-         * When luxsynth_source_type differs from luxstral_source_type (e.g.
-         * LuxSynth=L while LuxStral=S), recompute polyphonic.* from LuxSynth's
-         * own designated source using preprocess_luxsynth().
-         * db->activeBuffer_R/G/B still holds the pure live UDP frame at this
-         * point — it is overwritten with mixed_R only at the swapBuffers step. */
+        /* ── LuxSynth polyphonic independent channel path ────────────────────
+         * pipeline_process_frame() computed polyphonic.* from LuxStral's
+         * channel.  When LuxSynth selects a different channel, recompute
+         * polyphonic.* from its own designated channel. */
 #ifdef VST_MODE
         {
-          int luxsynth_src = g_sp3ctra_config.luxsynth_source_type;
-          int luxstral_src = (int)live_cfg.luxstral_path.source;
+          ImageSourceType luxsynth_src = live_cfg.luxsynth_luxwave_path.source;
+          ImageSourceType luxstral_src = live_cfg.luxstral_path.source;
           if (luxsynth_src != luxstral_src)
           {
             const uint8_t *syn_R, *syn_G, *syn_B;
-            uint8_t *tmp_R, *tmp_G, *tmp_B;
-            if (luxsynth_src == 1 /* IMAGE_SOURCE_LIVE */)
+            if (luxsynth_src == IMAGE_SOURCE_LIVE)
             {
-              /* Pure live UDP — db->activeBuffer_R not yet overwritten with mixed */
               syn_R = db->activeBuffer_R;
               syn_G = db->activeBuffer_G;
               syn_B = db->activeBuffer_B;
             }
-            else if (luxsynth_src == 0 /* IMAGE_SOURCE_SAMPLER */)
+            else /* IMAGE_SOURCE_MODULATED */
             {
-              audio_image_buffers_get_sampler_pointers(audioBuffers, &tmp_R, &tmp_G, &tmp_B);
-              syn_R = tmp_R; syn_G = tmp_G; syn_B = tmp_B;
-            }
-            else if (luxsynth_src == 3 /* IMAGE_SOURCE_LUXPITCH */)
-            {
-              /* LuxPitch: select upstream, apply pitch shift, use output */
-              const uint8_t *lp_R2, *lp_G2, *lp_B2;
-              int lp_up2 = g_sp3ctra_config.luxpitch_source_type;
-              if (lp_up2 == 1) { lp_R2 = db->activeBuffer_R; lp_G2 = db->activeBuffer_G; lp_B2 = db->activeBuffer_B; }
-              else if (lp_up2 == 0) { audio_image_buffers_get_sampler_pointers(audioBuffers, &tmp_R, &tmp_G, &tmp_B); lp_R2 = tmp_R; lp_G2 = tmp_G; lp_B2 = tmp_B; }
-              else { audio_image_buffers_get_read_pointers(audioBuffers, &tmp_R, &tmp_G, &tmp_B); lp_R2 = tmp_R; lp_G2 = tmp_G; lp_B2 = tmp_B; }
-              lux_pitch_process_frame(&g_lux_pitch_proc, lp_R2, lp_G2, lp_B2,
-                                      nb_pixels, g_sp3ctra_config.num_octaves,
-                                      &syn_R, &syn_G, &syn_B);
-            }
-            else if (luxsynth_src == 4 /* IMAGE_SOURCE_LUXMASK */)
-            {
-              /* LuxMask: select upstream, apply spotlight mask, use output */
-              const uint8_t *lm_R2, *lm_G2, *lm_B2;
-              int lm_up2 = g_sp3ctra_config.luxmask_source_type;
-              if (lm_up2 == 1) { lm_R2 = db->activeBuffer_R; lm_G2 = db->activeBuffer_G; lm_B2 = db->activeBuffer_B; }
-              else if (lm_up2 == 0) { audio_image_buffers_get_sampler_pointers(audioBuffers, &tmp_R, &tmp_G, &tmp_B); lm_R2 = tmp_R; lm_G2 = tmp_G; lm_B2 = tmp_B; }
-              else { audio_image_buffers_get_read_pointers(audioBuffers, &tmp_R, &tmp_G, &tmp_B); lm_R2 = tmp_R; lm_G2 = tmp_G; lm_B2 = tmp_B; }
-              lux_mask_process_frame(&g_lux_mask_proc, lm_R2, lm_G2, lm_B2,
-                                     nb_pixels, g_sp3ctra_config.num_octaves,
-                                     &syn_R, &syn_G, &syn_B);
-            }
-            else /* IMAGE_SOURCE_MIX */
-            {
-              audio_image_buffers_get_read_pointers(audioBuffers, &tmp_R, &tmp_G, &tmp_B);
-              syn_R = tmp_R; syn_G = tmp_G; syn_B = tmp_B;
+              syn_R = mod_R;
+              syn_G = mod_G;
+              syn_B = mod_B;
             }
             preprocess_luxsynth(syn_R, syn_G, syn_B, &preprocessed_temp);
           }
