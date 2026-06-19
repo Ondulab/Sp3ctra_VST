@@ -9,30 +9,17 @@
 SettingsComponent::SettingsComponent(Sp3ctraAudioProcessor& processor)
     : tabbedComponent(juce::TabbedButtonBar::TabsAtTop)
 {
-    // Create and add tabs — ordered by pipeline stage (sensor → image → audio → playback)
-    generalTab             = new GeneralSettingsTab(processor);
-    networkTab             = new NetworkSettingsTab(processor);
-    luxstralTab            = new LuxStralSettingsTab(processor);
-    luxsynthTab            = new LuxSynthSettingsTab(processor);
-    luxwaveTab             = new LuxWaveSettingsTab(processor);
-    luxSamplerTab          = new LuxSamplerSettingsTab(processor);
-    luxPitchTab            = new LuxPitchSettingsTab(processor);
-    luxMaskTab             = new LuxMaskSettingsTab(processor);
-    videoScrollSettingsTab = new VideoScrollSettingsTab(processor);
+    // Machine-level settings only (M5 / C9): everything musical moved to the
+    // per-block SETUP faces (zone 3) and the waterfall toolbar (zone 4).
+    networkTab = new NetworkSettingsTab(processor);
+    systemTab  = new SystemSettingsTab(processor);
 
-    tabbedComponent.addTab("General",      juce::Colours::darkgrey, generalTab,             false);
-    tabbedComponent.addTab("Network",      juce::Colours::darkgrey, networkTab,             false);
-    tabbedComponent.addTab("LuxPitch",     juce::Colours::darkgrey, luxPitchTab,            false);
-    tabbedComponent.addTab("LuxMask",      juce::Colours::darkgrey, luxMaskTab,             false);
-    tabbedComponent.addTab("LuxStral",     juce::Colours::darkgrey, luxstralTab,            false);
-    tabbedComponent.addTab("LuxSynth",     juce::Colours::darkgrey, luxsynthTab,            false);
-    tabbedComponent.addTab("LuxWave",      juce::Colours::darkgrey, luxwaveTab,             false);
-    tabbedComponent.addTab("LuxSampler",   juce::Colours::darkgrey, luxSamplerTab,          false);
-    tabbedComponent.addTab("Video Scroll", juce::Colours::darkgrey, videoScrollSettingsTab, false);
+    tabbedComponent.addTab("Network", juce::Colours::darkgrey, networkTab, false);
+    tabbedComponent.addTab("System",  juce::Colours::darkgrey, systemTab,  false);
 
     addAndMakeVisible(tabbedComponent);
 
-    setSize(600, 650);
+    setSize(560, 420);
 }
 
 SettingsComponent::~SettingsComponent()
@@ -46,7 +33,7 @@ void SettingsComponent::paint(juce::Graphics& g)
 
     // Title
     g.setColour(juce::Colours::white);
-    g.setFont(juce::Font(juce::FontOptions(18.0f)).boldened());
+    g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontWindowTitle)).boldened());
     g.drawText("Sp3ctra Configuration", getLocalBounds().removeFromTop(40),
                juce::Justification::centred, true);
 }

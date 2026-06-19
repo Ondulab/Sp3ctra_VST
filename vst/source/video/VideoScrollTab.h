@@ -10,17 +10,18 @@
 class VideoWindow;
 
 /**
- * @brief VIDEO tab — live performance controls for the video scroll window.
+ * @brief Live performance controls for the video scroll waterfall.
  *
- * Placed as the 4th main tab in the plugin editor (IMAGE | SYNTH | SAMPLER | VIDEO).
+ * Hosted in the zone-4 waterfall column (WaterfallColumnComponent, M4).
  *
- * Dissociation of concerns (task requirement):
- *   - This tab = live controls only:
+ * Dissociation of concerns:
+ *   - This component = live controls only:
  *       source selection (L / Sample / Mix / LuxPitch Output)
  *       scroll mode, speed, direction, zoom, exposure, blend mode
  *       open/close window, fullscreen toggle
- *   - Configuration (brightness, invert, color mode, dimensions, BPM, MIDI sync)
- *     lives in the Settings window → "Video Scroll" tab (VideoScrollSettingsTab).
+ *   - Display configuration (brightness, invert, color mode) lives in the
+ *     zone-4 toolbar (WaterfallColumnComponent header area, M5); the detached
+ *     window default size lives in the gear Settings window → System tab.
  *
  * APVTS parameters used here:
  *   "videoScrollEnabled"    bool   — master enable (opens/closes the VideoWindow)
@@ -47,6 +48,11 @@ public:
 
     /** Called by PluginEditor when the user enters the VIDEO tab. */
     void onTabActivated();
+
+    /** Opens (or re-shows) the detached VideoWindow — exposed for the
+     *  zone 4 waterfall column's [⧉] button (M4 layout). Same code path
+     *  the old VIDEO tab used internally. */
+    void openDetachedWindow() { openVideoWindow(); }
 
 private:
     // ── APVTS listener ───────────────────────────────────────────────────────

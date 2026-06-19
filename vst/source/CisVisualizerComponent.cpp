@@ -9,6 +9,7 @@ extern "C" {
     #include "config/config_instrument.h"
     #include "config/config_loader.h"
     #include "processing/image_pipeline_types.h"
+    #include "processing/image_chain.h"
     #include "processing/lux_pitch.h"
     #include "processing/lux_mask.h"
     #include "synthesis/luxsynth/kissfft/kiss_fftr.h"
@@ -133,14 +134,47 @@ void CisVisualizerComponent::setBlobRegions(
 }
 
 //==============================================================================
-void CisVisualizerComponent::setActiveSource(VisualizerMode mode) noexcept
+void CisVisualizerComponent::setActiveSources(const std::vector<VisualizerMode>& sources)
 {
-    activeSource_.store(static_cast<int>(mode), std::memory_order_relaxed);
+    // Message thread only.  Rebuild the panel list, preserving the buffers of
+    // panels whose mode is unchanged (avoids a frame of black on re-selection).
+    std::vector<PanelData> next;
+    next.reserve(sources.size());
+    for (auto mode : sources)
+    {
+        PanelData pd;
+        pd.mode = mode;
+        // Reuse an existing same-mode panel's buffers when possible.
+        for (auto& old : panels_)
+            if (old.mode == mode)
+            {
+                pd.r = std::move(old.r); pd.g = std::move(old.g);
+                pd.b = std::move(old.b); pd.gray = std::move(old.gray);
+                break;
+            }
+        // Size buffers now so the first paint after a re-selection never sees
+        // empty panel buffers (updateCisData() refills them every timer tick).
+        if (cisPixelsCount > 0)
+        {
+            auto fit = [this](std::vector<uint8_t>& v)
+            { if (static_cast<int>(v.size()) != cisPixelsCount)
+                  v.assign(static_cast<size_t>(cisPixelsCount), 255); };
+            fit(pd.r); fit(pd.g); fit(pd.b); fit(pd.gray);
+        }
+        next.push_back(std::move(pd));
+    }
+    panels_ = std::move(next);
+    repaint();
 }
 
-VisualizerMode CisVisualizerComponent::getActiveSource() const noexcept
+VisualizerMode CisVisualizerComponent::panelModeAtY(int y) const noexcept
 {
-    return static_cast<VisualizerMode>(activeSource_.load(std::memory_order_relaxed));
+    const int n = static_cast<int>(panels_.size());
+    const int H = getHeight();
+    if (n <= 0 || H <= 0) return VisualizerMode::MODULATED;
+    int idx = (y * n) / H;
+    idx = juce::jlimit(0, n - 1, idx);
+    return panels_[static_cast<size_t>(idx)].mode;
 }
 
 //==============================================================================
@@ -205,14 +239,52 @@ void CisVisualizerComponent::paint(juce::Graphics& g)
         return;
     }
 
-    // ── Active pipeline source (selected via pipeline node click) ─────────────
-    const auto source = getActiveSource();
+    // ── Stacked panels: one per active pipeline output ────────────────────────
+    // The fixed visualizer height is divided between N panels (top-to-bottom).
+    // Each panel renders its own source from its own frame buffers, which were
+    // filled by updateCisData() → fillSourceBuffers().
+    const int n = static_cast<int>(panels_.size());
+    if (n <= 0) return;
 
+    for (int i = 0; i < n; ++i)
+    {
+        const int y  = (i * H) / n;
+        const int ph = ((i + 1) * H) / n - y;
+        if (ph <= 0) continue;
+
+        // Copy this panel's frame into the localData* scratch buffers that the
+        // paint helpers read.  (≤4 panels × 30 fps → negligible.)
+        const auto& pd = panels_[static_cast<size_t>(i)];
+        localDataR    = pd.r;
+        localDataG    = pd.g;
+        localDataB    = pd.b;
+        localDataGray = pd.gray;
+
+        {
+            juce::Graphics::ScopedSaveState ss(g);
+            g.reduceClipRegion(0, y, W, ph);
+            g.setOrigin(0, y);
+            paintSource(g, pd.mode, W, ph);
+        }
+
+        // Separator line between panels.
+        if (i > 0)
+        {
+            g.setColour(juce::Colour(0x40ffffff));
+            g.fillRect(0, y, W, 1);
+        }
+    }
+}
+
+//==============================================================================
+void CisVisualizerComponent::paintSource(
+    juce::Graphics& g, VisualizerMode source, int W, int H)
+{
     // ── SPCTR_BLOB: dedicated coloured blob visualizer (LuxStral path) ───────
     if (source == VisualizerMode::SPCTR_BLOB)
     {
         paintSpctrBlobMode(g, W, H);
-        paintSourceLabel(g, W, H);
+        paintSourceLabel(g, source, W, H);
         return;
     }
 
@@ -221,7 +293,7 @@ void CisVisualizerComponent::paint(juce::Graphics& g)
     if (source == VisualizerMode::SYNTH_BLOB)
     {
         paintSynthBlobMode(g, W, H);
-        paintSourceLabel(g, W, H);
+        paintSourceLabel(g, source, W, H);
         return;
     }
 
@@ -229,7 +301,7 @@ void CisVisualizerComponent::paint(juce::Graphics& g)
     if (source == VisualizerMode::SYNTH_FFT_COLOR)
     {
         paintFftColorMode(g, W, H);
-        paintSourceLabel(g, W, H);
+        paintSourceLabel(g, source, W, H);
         return;
     }
 
@@ -278,7 +350,7 @@ void CisVisualizerComponent::paint(juce::Graphics& g)
     }
 
     // ── Source label overlay (always shown) ───────────────────────────────────
-    paintSourceLabel(g, W, H);
+    paintSourceLabel(g, source, W, H);
 }
 
 //==============================================================================
@@ -398,9 +470,9 @@ void CisVisualizerComponent::paintRawImageMode(
 
 //==============================================================================
 void CisVisualizerComponent::paintSourceLabel(
-    juce::Graphics& g, int W, int H) const
+    juce::Graphics& g, VisualizerMode source, int W, int H) const
 {
-    const auto source = getActiveSource();
+    juce::ignoreUnused(W, H);
     const char* label = visualizerModeLabel(source);
 
     // Semi-transparent pill badge — top-left corner
@@ -515,6 +587,49 @@ void CisVisualizerComponent::updateCisData()
         localDataGray.resize(cisPixelsCount, 255);
     }
 
+    // ── Render one stacked panel per active source ────────────────────────────
+    if (panels_.empty())
+        return;
+    for (size_t i = 0; i < panels_.size(); ++i)
+        fillSourceBuffers(panels_[i], i == 0);
+
+    // ── Insert-tap demand (single-simulation model, M2) ───────────────────────
+    // Declare interest if ANY displayed panel needs that insert's tap; the
+    // synthesis-thread chain executor snapshots them (and runs even when no
+    // engine consumes the Modulated channel).
+    bool wantPitchTap = false, wantMaskTap = false;
+    for (const auto& p : panels_)
+    {
+        if (p.mode == VisualizerMode::LUXPITCH_OUTPUT) wantPitchTap = true;
+        if (p.mode == VisualizerMode::LUXMASK_OUTPUT)  wantMaskTap  = true;
+    }
+    image_chain_set_tap_demand(IMAGE_CHAIN_INSERT_LUXPITCH, wantPitchTap ? 1 : 0);
+    image_chain_set_tap_demand(IMAGE_CHAIN_INSERT_LUXMASK,  wantMaskTap  ? 1 : 0);
+}
+
+//==============================================================================
+void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
+{
+    auto* core = processor.getSp3ctraCore();
+    if (!core || !core->isInitialized()) return;
+    auto* buffers = core->getAudioImageBuffers();
+    if (!buffers || !buffers->initialized) return;
+
+    extern sp3ctra_config_t g_sp3ctra_config;
+    const VisualizerMode vizSource = out.mode;
+
+    // ── Restore this panel's previous frame into the localData* scratch ───────
+    // The paint helpers read localData*; HOLD / freeze-hold paths leave it
+    // untouched so the panel keeps its last frame.  Side-effects that feed
+    // synthesis (final-gray publish) only run for the primary panel.
+    auto ensureSized = [this](std::vector<uint8_t>& v)
+    {
+        if (static_cast<int>(v.size()) != cisPixelsCount)
+            v.assign(static_cast<size_t>(cisPixelsCount), 255);
+    };
+    ensureSized(out.r); ensureSized(out.g); ensureSized(out.b); ensureSized(out.gray);
+    localDataR = out.r; localDataG = out.g; localDataB = out.b; localDataGray = out.gray;
+
     // ── Read transport states ─────────────────────────────────────────────────
     const int rawLiveFreeze = static_cast<int>(
         processor.getAPVTS().getRawParameterValue("imageFreezeMode")->load());
@@ -531,8 +646,13 @@ void CisVisualizerComponent::updateCisData()
     const bool samplerWriting = (lux_sampler_is_playing() != 0)
                                 && (smpFreezeMode != 2);
 
-    // ── Active visualizer source ──────────────────────────────────────────────
-    const auto vizSource = getActiveSource();
+    // ── publish helper: only the primary panel feeds synthesis/BlobVisualizer ─
+    auto publishGray = [this, isPrimary]
+    {
+        if (isPrimary)
+            if (auto* fs = processor.getLuxSampler())
+                fs->setFinalGrayBuffer(localDataGray);
+    };
 
     // ── Source-specific freeze gates ──────────────────────────────────────────
     // Each visualizer source has its own freeze semantics:
@@ -548,11 +668,10 @@ void CisVisualizerComponent::updateCisData()
             std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
             std::fill(localDataB.begin(),    localDataB.end(),    uint8_t{255});
             std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-            if (auto* fs = processor.getLuxSampler())
-                fs->setFinalGrayBuffer(localDataGray);
-            return;
+            publishGray();
+            goto done;
         }
-        if (rawFreezeMode == 1) return; // RAW HOLD → freeze display
+        if (rawFreezeMode == 1) goto done; // RAW HOLD → freeze display
     }
     else if (vizSource == VisualizerMode::LIVE)
     {
@@ -563,11 +682,10 @@ void CisVisualizerComponent::updateCisData()
             std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
             std::fill(localDataB.begin(),    localDataB.end(),    uint8_t{255});
             std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-            if (auto* fs = processor.getLuxSampler())
-                fs->setFinalGrayBuffer(localDataGray);
-            return;
+            publishGray();
+            goto done;
         }
-        if (liveFreezeMode == 1) return;
+        if (liveFreezeMode == 1) goto done;
     }
     else if (vizSource == VisualizerMode::SAMPLER)
     {
@@ -587,11 +705,10 @@ void CisVisualizerComponent::updateCisData()
                 std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
                 std::fill(localDataB.begin(),    localDataB.end(),    uint8_t{255});
                 std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-                if (auto* fs = processor.getLuxSampler())
-                    fs->setFinalGrayBuffer(localDataGray);
-                return;
+                publishGray();
+                goto done;
             }
-            if (rawSmpFreeze == 1) return; // Sampler HOLD → freeze
+            if (rawSmpFreeze == 1) goto done; // Sampler HOLD → freeze
         }
         // isRecording == true: fall through and display the live scanner data
     }
@@ -619,11 +736,10 @@ void CisVisualizerComponent::updateCisData()
                 std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
                 std::fill(localDataB.begin(),    localDataB.end(),    uint8_t{255});
                 std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-                if (auto* fs = processor.getLuxSampler())
-                    fs->setFinalGrayBuffer(localDataGray);
-                return;
+                publishGray();
+                goto done;
             }
-            if (liveFreezeMode == 1) return;
+            if (liveFreezeMode == 1) goto done;
         }
         else if (downstreamSrcType == IMAGE_SOURCE_SAMPLER)
         {
@@ -637,11 +753,10 @@ void CisVisualizerComponent::updateCisData()
                     std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
                     std::fill(localDataB.begin(),    localDataB.end(),    uint8_t{255});
                     std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-                    if (auto* fs = processor.getLuxSampler())
-                        fs->setFinalGrayBuffer(localDataGray);
-                    return;
+                    publishGray();
+                    goto done;
                 }
-                if (rawSmpFreeze == 1) return;
+                if (rawSmpFreeze == 1) goto done;
             }
         }
         else // IMAGE_SOURCE_MIX
@@ -653,9 +768,8 @@ void CisVisualizerComponent::updateCisData()
                 std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
                 std::fill(localDataB.begin(),    localDataB.end(),    uint8_t{255});
                 std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-                if (auto* fs = processor.getLuxSampler())
-                    fs->setFinalGrayBuffer(localDataGray);
-                return;
+                publishGray();
+                goto done;
             }
             if (liveFreezeMode == 1 && !samplerWriting)
             {
@@ -663,9 +777,10 @@ void CisVisualizerComponent::updateCisData()
                 if (fs_hold && fs_hold->isSeqSilentStepActive())
                 {
                     std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-                    fs_hold->setFinalGrayBuffer(localDataGray);
+                    if (isPrimary)
+                        fs_hold->setFinalGrayBuffer(localDataGray);
                 }
-                return;
+                goto done;
             }
         }
     }
@@ -689,35 +804,18 @@ void CisVisualizerComponent::updateCisData()
     }
     else if (vizSource == VisualizerMode::LUXPITCH_OUTPUT)
     {
-        // LuxPitch output: read source based on luxpitchSource (S=0, M=1, L=2)
-        static const int kLpChoiceToSrc[3] = { 0, 2, 1 }; // S→SAMPLER, M→MIX, L→LIVE
-        int lpChoice = static_cast<int>(
-            processor.getAPVTS().getRawParameterValue("luxpitchSource")->load());
-        if (lpChoice < 0 || lpChoice > 2) lpChoice = 1;
-        const int lpSrc = kLpChoiceToSrc[lpChoice];
-
-        if (lpSrc == IMAGE_SOURCE_LIVE)
+        // Single-simulation model (M2): read the tap published by the
+        // synthesis-thread chain executor — the view shows EXACTLY what the
+        // engines consume (no UI-side re-simulation, audio == visual).
+        if (audio_image_buffers_get_insert_tap_pointers(
+                buffers, IMAGE_CHAIN_INSERT_LUXPITCH, &pR, &pG, &pB) != 0)
             audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
-        else if (lpSrc == IMAGE_SOURCE_SAMPLER)
-            audio_image_buffers_get_sampler_pointers(buffers, &pR, &pG, &pB);
-        else
-            audio_image_buffers_get_read_pointers(buffers, &pR, &pG, &pB);
     }
     else if (vizSource == VisualizerMode::LUXMASK_OUTPUT)
     {
-        // LuxMask output: same source choice convention as LuxPitch (S=0, M=1, L=2)
-        static const int kLmChoiceToSrc[3] = { 0, 2, 1 }; // S→SAMPLER, M→MIX, L→LIVE
-        int lmChoice = static_cast<int>(
-            processor.getAPVTS().getRawParameterValue("luxmaskSource")->load());
-        if (lmChoice < 0 || lmChoice > 2) lmChoice = 1;
-        const int lmSrc = kLmChoiceToSrc[lmChoice];
-
-        if (lmSrc == IMAGE_SOURCE_LIVE)
+        if (audio_image_buffers_get_insert_tap_pointers(
+                buffers, IMAGE_CHAIN_INSERT_LUXMASK, &pR, &pG, &pB) != 0)
             audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
-        else if (lmSrc == IMAGE_SOURCE_SAMPLER)
-            audio_image_buffers_get_sampler_pointers(buffers, &pR, &pG, &pB);
-        else
-            audio_image_buffers_get_read_pointers(buffers, &pR, &pG, &pB);
     }
     else
     {
@@ -728,155 +826,32 @@ void CisVisualizerComponent::updateCisData()
         const int srcType = isSpctr ? g_sp3ctra_config.luxstral_source_type
                                     : g_sp3ctra_config.luxsynth_source_type;
 
-        if (srcType == IMAGE_SOURCE_LUXPITCH)
-        {
-            // LuxPitch as downstream source: read from LuxPitch's own input source
-            static const int kLpChoiceToSrc[3] = { 0, 2, 1 }; // S→SAMPLER, M→MIX, L→LIVE
-            int lpChoice = static_cast<int>(
-                processor.getAPVTS().getRawParameterValue("luxpitchSource")->load());
-            if (lpChoice < 0 || lpChoice > 2) lpChoice = 1;
-            const int lpSrc = kLpChoiceToSrc[lpChoice];
-
-            if (lpSrc == IMAGE_SOURCE_LIVE)
-                audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
-            else if (lpSrc == IMAGE_SOURCE_SAMPLER)
-                audio_image_buffers_get_sampler_pointers(buffers, &pR, &pG, &pB);
-            else
-                audio_image_buffers_get_read_pointers(buffers, &pR, &pG, &pB);
-        }
-        else if (srcType == IMAGE_SOURCE_LIVE)
+        if (srcType == IMAGE_SOURCE_LIVE)
             audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
         else if (srcType == IMAGE_SOURCE_SAMPLER)
             audio_image_buffers_get_sampler_pointers(buffers, &pR, &pG, &pB);
         else
-            audio_image_buffers_get_read_pointers(buffers, &pR, &pG, &pB);
+            // MODULATED (and legacy LUXPITCH/LUXMASK/MIX aliases): the frame
+            // the engines actually consume, published once per chain run.
+            audio_image_buffers_get_modulated_pointers(buffers, &pR, &pG, &pB);
     }
     std::memcpy(localDataR.data(), pR, cisPixelsCount);
     std::memcpy(localDataG.data(), pG, cisPixelsCount);
     std::memcpy(localDataB.data(), pB, cisPixelsCount);
 
-    // ── LuxPitch processing (shift + envelope + glide + LFO) ──────────────────
-    // Runs for LUXPITCH_OUTPUT direct view AND for downstream SPCTR_*/SYNTH_*
-    // views when their source is set to LuxPitch.
-    const bool needsLuxPitch = [&]() {
-        if (vizSource == VisualizerMode::LUXPITCH_OUTPUT) return true;
-        const bool isSpctr = (vizSource == VisualizerMode::SPCTR_GRAY
-                           || vizSource == VisualizerMode::SPCTR_COLOR
-                           || vizSource == VisualizerMode::SPCTR_BLOB);
-        const bool isSynth = (vizSource == VisualizerMode::SYNTH_GRAY
-                           || vizSource == VisualizerMode::SYNTH_COLOR
-                           || vizSource == VisualizerMode::SYNTH_BLOB
-                           || vizSource == VisualizerMode::SYNTH_FFT_COLOR);
-        if (!isSpctr && !isSynth) return false;
-        const int srcType = isSpctr ? g_sp3ctra_config.luxstral_source_type
-                                    : g_sp3ctra_config.luxsynth_source_type;
-        return srcType == IMAGE_SOURCE_LUXPITCH;
-    }();
-
-    if (needsLuxPitch)
-    {
-        // Sync config from APVTS to g_lux_pitch.config
-        auto& apvts = processor.getAPVTS();
-        g_lux_pitch.config.enabled                 = static_cast<int>(apvts.getRawParameterValue("luxpitchEnabled")->load());
-        g_lux_pitch.config.background_mode         = static_cast<int>(apvts.getRawParameterValue("luxpitchBackgroundMode")->load());
-        g_lux_pitch.config.coupling_mode            = static_cast<int>(apvts.getRawParameterValue("luxpitchCouplingMode")->load());
-        g_lux_pitch.config.free_pixels_per_semitone = apvts.getRawParameterValue("luxpitchFreePixelsPerST")->load();
-        g_lux_pitch.config.pitch_bend_range         = apvts.getRawParameterValue("luxpitchPitchBendRange")->load();
-        g_lux_pitch.config.attack_ms                = apvts.getRawParameterValue("luxpitchAttackMs")->load();
-        g_lux_pitch.config.decay_ms                 = apvts.getRawParameterValue("luxpitchDecayMs")->load();
-        g_lux_pitch.config.sustain_level            = apvts.getRawParameterValue("luxpitchSustainLevel")->load();
-        g_lux_pitch.config.release_ms               = apvts.getRawParameterValue("luxpitchReleaseMs")->load();
-        g_lux_pitch.config.glide_time_ms            = apvts.getRawParameterValue("luxpitchGlideMs")->load();
-        g_lux_pitch.config.lfo_rate_hz              = apvts.getRawParameterValue("luxpitchLfoRate")->load();
-        g_lux_pitch.config.lfo_depth_semitones      = apvts.getRawParameterValue("luxpitchLfoDepth")->load();
-        g_lux_pitch.config.velocity_coupling        = static_cast<int>(apvts.getRawParameterValue("luxpitchVelocityCoupling")->load());
-        // Reference note from settings: C1..B6, index to MIDI note (C1=24)
-        g_lux_pitch.config.reference_note           = 24 + static_cast<int>(apvts.getRawParameterValue("luxpitchReferenceNote")->load());
-
-        // Process frame through LuxPitch
-        const uint8_t *outR, *outG, *outB;
-        lux_pitch_process_frame(
-            &g_lux_pitch,
-            localDataR.data(), localDataG.data(), localDataB.data(),
-            cisPixelsCount,
-            g_sp3ctra_config.num_octaves,
-            &outR, &outG, &outB);
-
-        // Copy shifted output back if pointers differ (i.e. not bypass)
-        if (outR != localDataR.data())
-        {
-            std::memcpy(localDataR.data(), outR, cisPixelsCount);
-            std::memcpy(localDataG.data(), outG, cisPixelsCount);
-            std::memcpy(localDataB.data(), outB, cisPixelsCount);
-        }
-    }
-
-    // ── LuxMask processing (spotlight mask, envelope + glide + LFOs) ──────────
-    // Runs for LUXMASK_OUTPUT direct view AND for downstream SPCTR_*/SYNTH_*
-    // views when their source is set to LuxMask.
-    const bool needsLuxMask = [&]() {
-        if (vizSource == VisualizerMode::LUXMASK_OUTPUT) return true;
-        const bool isSpctr = (vizSource == VisualizerMode::SPCTR_GRAY
-                           || vizSource == VisualizerMode::SPCTR_COLOR
-                           || vizSource == VisualizerMode::SPCTR_BLOB);
-        const bool isSynth = (vizSource == VisualizerMode::SYNTH_GRAY
-                           || vizSource == VisualizerMode::SYNTH_COLOR
-                           || vizSource == VisualizerMode::SYNTH_BLOB
-                           || vizSource == VisualizerMode::SYNTH_FFT_COLOR);
-        if (!isSpctr && !isSynth) return false;
-        const int srcType = isSpctr ? g_sp3ctra_config.luxstral_source_type
-                                    : g_sp3ctra_config.luxsynth_source_type;
-        return srcType == IMAGE_SOURCE_LUXMASK;
-    }();
-
-    if (needsLuxMask)
-    {
-        auto& apvts = processor.getAPVTS();
-        g_lux_mask.config.enabled                   = static_cast<int>(apvts.getRawParameterValue("luxmaskEnabled")->load());
-        g_lux_mask.config.polyphony_enabled         = static_cast<int>(apvts.getRawParameterValue("luxmaskPolyphony")->load());
-        g_lux_mask.config.background_mode           = static_cast<int>(apvts.getRawParameterValue("luxmaskBackgroundMode")->load());
-        g_lux_mask.config.coupling_mode             = static_cast<int>(apvts.getRawParameterValue("luxmaskCouplingMode")->load());
-        g_lux_mask.config.free_pixels_per_semitone  = apvts.getRawParameterValue("luxmaskFreePixelsPerST")->load();
-        g_lux_mask.config.pitch_bend_range          = apvts.getRawParameterValue("luxmaskPitchBendRange")->load();
-        g_lux_mask.config.width_base                = apvts.getRawParameterValue("luxmaskWidth")->load();
-        g_lux_mask.config.attack_ms                 = apvts.getRawParameterValue("luxmaskAttackMs")->load();
-        g_lux_mask.config.decay_ms                  = apvts.getRawParameterValue("luxmaskDecayMs")->load();
-        g_lux_mask.config.sustain_level             = apvts.getRawParameterValue("luxmaskSustainLevel")->load();
-        g_lux_mask.config.release_ms                = apvts.getRawParameterValue("luxmaskReleaseMs")->load();
-        g_lux_mask.config.width_attack_px           = apvts.getRawParameterValue("luxmaskWidthAttackPx")->load();
-        g_lux_mask.config.width_release_px          = apvts.getRawParameterValue("luxmaskWidthReleasePx")->load();
-        g_lux_mask.config.glide_time_ms             = apvts.getRawParameterValue("luxmaskGlideMs")->load();
-        g_lux_mask.config.lfo_pos_rate_hz           = apvts.getRawParameterValue("luxmaskLfoPosRate")->load();
-        g_lux_mask.config.lfo_pos_depth_semitones   = apvts.getRawParameterValue("luxmaskLfoPosDepth")->load();
-        g_lux_mask.config.velocity_coupling         = static_cast<int>(apvts.getRawParameterValue("luxmaskVelocityCoupling")->load());
-        g_lux_mask.config.reference_note            = 24 + static_cast<int>(apvts.getRawParameterValue("luxmaskReferenceNote")->load());
-
-        const uint8_t *outR, *outG, *outB;
-        lux_mask_process_frame(
-            &g_lux_mask,
-            localDataR.data(), localDataG.data(), localDataB.data(),
-            cisPixelsCount,
-            g_sp3ctra_config.num_octaves,
-            &outR, &outG, &outB);
-
-        if (outR != localDataR.data())
-        {
-            std::memcpy(localDataR.data(), outR, cisPixelsCount);
-            std::memcpy(localDataG.data(), outG, cisPixelsCount);
-            std::memcpy(localDataB.data(), outB, cisPixelsCount);
-        }
-    }
+    // (Insert-tap demand is set once per frame in updateCisData(), based on
+    //  whichever panels are displayed — see the loop there.)
 
     // ── Apply live opacity ───────────────────────────────────────────────────
     // Opacity controls affect ONLY the MIX bus (the blended output).
     // RAW, LIVE, and SAMPLER show their pure data without opacity adjustments.
     // For MIX: apply live opacity only when sampler is not writing
     //   (when sampler writes, opacities are already baked into the bus).
-    const bool applyLiveOpacity =
-        (vizSource == VisualizerMode::MIX
-         && !samplerWriting && liveFreezeMode == 0);
-
-    if (applyLiveOpacity)
+    // Inlined (no function-scope variable) so the freeze-gate `goto done;`
+    // statements do not bypass a variable with an initializer that is in scope
+    // at the label — which would be ill-formed.
+    if (vizSource == VisualizerMode::MIX
+        && !samplerWriting && liveFreezeMode == 0)
     {
         const float liveOp = processor.getAPVTS()
                                  .getRawParameterValue("imageLiveOpacity")->load();
@@ -1004,12 +979,16 @@ void CisVisualizerComponent::updateCisData()
         if (fs_ && fs_->isSeqSilentStepActive())
             std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
 
-        // ── Publish the mix-final gray buffer ─────────────────────────────────
+        // ── Publish the mix-final gray buffer (primary panel only) ────────────
         // BlobVisualizerComponent reads this via getFinalGrayBuffer() so that
         // it always operates on the same image that is displayed to the user.
-        if (fs_)
+        if (isPrimary && fs_)
             fs_->setFinalGrayBuffer(localDataGray);
     }
+
+done:
+    // ── Store the computed frame back into the panel's buffers ────────────────
+    out.r = localDataR; out.g = localDataG; out.b = localDataB; out.gray = localDataGray;
 }
 
 //==============================================================================
@@ -1159,7 +1138,7 @@ void CisVisualizerComponent::mouseDown(const juce::MouseEvent& event)
 {
     if (event.mods.isPopupMenu())
     {
-        showDisplayModeMenu();
+        showDisplayModeMenu(panelModeAtY(event.y));
         return;
     }
 
@@ -1168,10 +1147,8 @@ void CisVisualizerComponent::mouseDown(const juce::MouseEvent& event)
 }
 
 //==============================================================================
-void CisVisualizerComponent::showDisplayModeMenu()
+void CisVisualizerComponent::showDisplayModeMenu(VisualizerMode source)
 {
-    const auto source = getActiveSource();
-
     juce::PopupMenu menu;
 
     if (supportsDisplayModes(source))
@@ -1836,11 +1813,13 @@ void CisVisualizerComponent::paintSpctrBlobMode(juce::Graphics& g, int W, int H)
 //==============================================================================
 void CisVisualizerComponent::mouseMove(const juce::MouseEvent& event)
 {
-    const auto ms = getActiveSource();
+    // Hit-test only when the panel under the cursor is a blob view.
+    const auto ms = panelModeAtY(event.getPosition().y);
     const bool isSpctr = (ms == VisualizerMode::SPCTR_BLOB);
     if (ms != VisualizerMode::SYNTH_BLOB && !isSpctr)
     {
         hoverBlobIdx_ = -1;
+        if (hoverTooltip_) hoverTooltip_->hide();
         return;
     }
 
@@ -1965,28 +1944,15 @@ void CisVisualizerComponent::computeFftMagnitudes()
 
         const int srcType = g_sp3ctra_config.luxsynth_source_type;
 
-        if (srcType == IMAGE_SOURCE_LUXPITCH)
-        {
-            // LuxPitch as source: read from LuxPitch's own input source
-            static const int kLpChoiceToSrc[3] = { 0, 2, 1 };
-            int lpChoice = static_cast<int>(
-                processor.getAPVTS().getRawParameterValue("luxpitchSource")->load());
-            if (lpChoice < 0 || lpChoice > 2) lpChoice = 1;
-            const int lpSrc = kLpChoiceToSrc[lpChoice];
-
-            if (lpSrc == IMAGE_SOURCE_LIVE)
-                audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
-            else if (lpSrc == IMAGE_SOURCE_SAMPLER)
-                audio_image_buffers_get_sampler_pointers(buffers, &pR, &pG, &pB);
-            else
-                audio_image_buffers_get_read_pointers(buffers, &pR, &pG, &pB);
-        }
-        else if (srcType == IMAGE_SOURCE_LIVE)
+        if (srcType == IMAGE_SOURCE_LIVE)
             audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
         else if (srcType == IMAGE_SOURCE_SAMPLER)
             audio_image_buffers_get_sampler_pointers(buffers, &pR, &pG, &pB);
-        else // IMAGE_SOURCE_MIX
-            audio_image_buffers_get_read_pointers(buffers, &pR, &pG, &pB);
+        else
+            // MODULATED (and legacy LUXPITCH/LUXMASK/MIX aliases): read the
+            // frame published by the synthesis-thread chain — no UI-side
+            // re-simulation (single-simulation model, M2).
+            audio_image_buffers_get_modulated_pointers(buffers, &pR, &pG, &pB);
 
         if (!pR || !pG || !pB)
         {
@@ -1999,24 +1965,6 @@ void CisVisualizerComponent::computeFftMagnitudes()
             std::memcpy(lxFftR_.data(), pR, static_cast<size_t>(cisPixelsCount));
             std::memcpy(lxFftG_.data(), pG, static_cast<size_t>(cisPixelsCount));
             std::memcpy(lxFftB_.data(), pB, static_cast<size_t>(cisPixelsCount));
-
-            // Apply LuxPitch processing if source is LuxPitch
-            if (srcType == IMAGE_SOURCE_LUXPITCH)
-            {
-                const uint8_t *outR, *outG, *outB;
-                lux_pitch_process_frame(
-                    &g_lux_pitch,
-                    lxFftR_.data(), lxFftG_.data(), lxFftB_.data(),
-                    cisPixelsCount,
-                    g_sp3ctra_config.num_octaves,
-                    &outR, &outG, &outB);
-                if (outR != lxFftR_.data())
-                {
-                    std::memcpy(lxFftR_.data(), outR, static_cast<size_t>(cisPixelsCount));
-                    std::memcpy(lxFftG_.data(), outG, static_cast<size_t>(cisPixelsCount));
-                    std::memcpy(lxFftB_.data(), outB, static_cast<size_t>(cisPixelsCount));
-                }
-            }
 
             // LuxSynth preprocessing: inversion + DC blocking + gamma
             const int doInvert  = g_sp3ctra_config.luxsynth_inversion;

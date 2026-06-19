@@ -64,6 +64,8 @@ typedef struct {
     LM_ATOMIC(int) active;
     LM_ATOMIC(int) note;
     LM_ATOMIC(int) velocity;
+    LM_ATOMIC(int) retrigger;     /* 1 = voice was stolen while active: force re-ATTACK */
+    LM_ATOMIC(int) sustained;     /* 1 = note released while sustain pedal (CC64) held */
 } LuxMaskVoiceMidi;
 
 /* ============================================================================
@@ -101,6 +103,8 @@ typedef struct {
     LuxMaskVoiceMidi voices[LUX_MASK_MAX_VOICES];
     LM_ATOMIC(int)   pitch_bend;
     LM_ATOMIC(int)   voice_count;
+    LM_ATOMIC(int)   sustain;     /* CC64 sustain pedal: 1 = held */
+    LM_ATOMIC(int)   mod_wheel;   /* CC1 modulation wheel (0-127) → extra vibrato depth */
 } LuxMaskMidiState;
 
 /* ============================================================================
@@ -196,6 +200,15 @@ void lux_mask_note_on(LuxMaskState *state, int note, float velocity);
 void lux_mask_note_off(LuxMaskState *state, int note);
 void lux_mask_set_pitch_bend(LuxMaskState *state, float bend); /* [-1, +1] */
 
+/* CC64 sustain pedal. While held, note-offs are deferred (voices keep
+ * shining); releasing the pedal releases every deferred voice through the
+ * normal RELEASE envelope. RT-safe. */
+void lux_mask_set_sustain(LuxMaskState *state, int on);
+
+/* CC1 modulation wheel [0, 1]. Adds up to +1 semitone of position-vibrato
+ * depth on top of the configured LFO depth. RT-safe. */
+void lux_mask_set_mod_wheel(LuxMaskState *state, float wheel);
+
 /* MIDI CC 123 "All Notes Off": mark every active voice as released.
  * Voices enter their normal RELEASE phase (exponential decay), so the
  * tail remains musical instead of being cut abruptly. RT-safe. */
@@ -218,10 +231,8 @@ void lux_mask_process_frame(
     const uint8_t **out_g,
     const uint8_t **out_b);
 
-/* ── Global instances (mirror LuxPitch ownership pattern) ──────────────────── */
-extern LuxMaskState g_lux_mask;
+/* ── Global instance (mirrors LuxPitch single-simulation model, M2) ────────── */
 extern LuxMaskState g_lux_mask_proc;
-extern LuxMaskState g_lux_mask_vid;
 
 #ifdef __cplusplus
 }

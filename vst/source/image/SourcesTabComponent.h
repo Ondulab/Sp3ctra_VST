@@ -25,34 +25,16 @@
 #include "../UITheme.h"
 #include "../IconPaths.h"
 #include "../sampler/TransportBarComponent.h"   // IconTextButton
-#include "PipelineNodeComponent.h"
 #include "VisualizerMode.h"
-#include <functional>
 
 class SourcesTabComponent : public juce::Component,
                             private juce::Timer
 {
 public:
-    /** Callback fired when a pipeline node is clicked. */
-    std::function<void(VisualizerMode)> onNodeClicked;
-
     explicit SourcesTabComponent(Sp3ctraAudioProcessor& p)
-        : processor(p),
-          nodeRaw ("RAW",                juce::Colour(0xff68788f), VisualizerMode::RAW),
-          nodeMod ("A - Modulated",      juce::Colour(0xffe0b84a), VisualizerMode::MODULATED),
-          nodeLive("B - Live",           juce::Colour(0xff4ae0a0), VisualizerMode::LIVE)
+        : processor(p)
     {
         auto& apvts = p.getAPVTS();
-
-        for (auto* n : { &nodeRaw, &nodeMod, &nodeLive })
-        {
-            addAndMakeVisible(n);
-            n->onClick = [this](VisualizerMode m)
-            {
-                setActiveMode(m);  // also updates eye indicator
-                if (onNodeClicked) onNodeClicked(m);
-            };
-        }
 
         // ── RAW transport ─────────────────────────────────────────────────────
         rawPlayBtn.setIconPath(Icons::play());
@@ -108,22 +90,11 @@ public:
         liveFadeAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
             apvts, "imageFadeInMs", liveFadeSlider));
 
-        // Default: MODULATED channel highlighted (most common choice).
-        nodeMod.setActive(true);
-        updateEyeIndicator(VisualizerMode::MODULATED);
         updateAllTransportButtons();
         startTimer(200);
     }
 
     ~SourcesTabComponent() override { stopTimer(); }
-
-    void setActiveMode(VisualizerMode m)
-    {
-        nodeRaw .setActive(m == VisualizerMode::RAW);
-        nodeMod .setActive(m == VisualizerMode::MODULATED);
-        nodeLive.setActive(m == VisualizerMode::LIVE);
-        updateEyeIndicator(m);
-    }
 
     void paint(juce::Graphics& g) override
     {
@@ -163,9 +134,6 @@ public:
         const int stdNodeW = juce::jmin(w * 2 / 5, 360);
 
         // ── Zone 1: RAW (centred) ────────────────────────────────────────────
-        const int rawX = w / 2 - stdNodeW / 2;
-        nodeRaw.setBounds(rawX, 18, stdNodeW, nodeH);
-
         {
             const int tY = 18 + nodeH + 4;
             const int totalW = btnSz * 3 + gap * 2;
@@ -186,9 +154,6 @@ public:
         const int z2NodeY = z2 + 16;
         const int modX  = w / 4     - stdNodeW / 2;
         const int liveX = w * 3 / 4 - stdNodeW / 2;
-
-        nodeMod .setBounds(modX,  z2NodeY, stdNodeW, nodeH);
-        nodeLive.setBounds(liveX, z2NodeY, stdNodeW, nodeH);
 
         auto placeTransport2 = [&](int centreX,
                                    IconTextButton& play, IconTextButton& hold, IconTextButton& stop)
@@ -212,9 +177,6 @@ public:
 
 private:
     Sp3ctraAudioProcessor& processor;
-
-    // ── Nodes ─────────────────────────────────────────────────────────────────
-    PipelineNodeComponent nodeRaw, nodeMod, nodeLive;
 
     // ── RAW transport ─────────────────────────────────────────────────────────
     IconTextButton rawPlayBtn, rawHoldBtn, rawStopBtn;
@@ -262,13 +224,6 @@ private:
         s.setTextBoxStyle(juce::Slider::TextBoxRight, false, 62, 16);
         s.setTextValueSuffix(" ms");
         s.setNumDecimalPlacesToDisplay(0);
-    }
-
-    void updateEyeIndicator(VisualizerMode active)
-    {
-        nodeRaw .setShowEye(active == VisualizerMode::RAW);
-        nodeMod .setShowEye(active == VisualizerMode::MODULATED);
-        nodeLive.setShowEye(active == VisualizerMode::LIVE);
     }
 
     // ── Transport button state highlighting ───────────────────────────────────

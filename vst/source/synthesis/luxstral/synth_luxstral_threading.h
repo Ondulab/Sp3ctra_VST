@@ -21,6 +21,7 @@
 
 /* Forward declarations ------------------------------------------------------*/
 struct DoubleBuffer;
+struct LuxStralEngine;  /* Engine instance state (defined in luxstral_engine.h) */
 
 /* Exported types ------------------------------------------------------------*/
 
@@ -28,6 +29,7 @@ struct DoubleBuffer;
  * @brief  Structure for persistent thread pool worker optimized for synthesis
  */
 typedef struct synth_thread_worker_s {
+  struct LuxStralEngine *engine; // Owning engine (back-pointer for pool/barrier state)
   int thread_id;      // Thread ID (0, 1, 2)
   int start_note;     // Start note for this thread
   int end_note;       // End note for this thread
@@ -90,10 +92,8 @@ typedef struct synth_thread_worker_s {
 } synth_thread_worker_t;
 
 /* Barrier synchronization for deterministic execution (cross-platform) */
-#ifdef __linux__
-extern pthread_barrier_t g_worker_start_barrier;
-extern pthread_barrier_t g_worker_end_barrier;
-#else
+/* NOTE: the barrier instances live in LuxStralEngine (luxstral_engine.h) */
+#ifndef __linux__
 // macOS doesn't have pthread_barrier, use custom implementation
 typedef struct {
   pthread_mutex_t mutex;
@@ -103,44 +103,31 @@ typedef struct {
   int generation;
 } barrier_t;
 
-extern barrier_t g_worker_start_barrier;
-extern barrier_t g_worker_end_barrier;
-
 int barrier_init(barrier_t *barrier, int count);
-int barrier_wait(barrier_t *barrier);
+int barrier_wait(struct LuxStralEngine *eng, barrier_t *barrier);
 int barrier_destroy(barrier_t *barrier);
 #endif
-
-extern _Atomic int g_use_barriers;  // Enable/disable barrier mode (RT-safe atomic)
 
 /* Exported function prototypes ----------------------------------------------*/
 
 /* Thread pool management */
-int synth_init_thread_pool(void);
-int synth_start_worker_threads(void);
-void synth_shutdown_thread_pool(void);
+int synth_init_thread_pool(struct LuxStralEngine *eng);
+int synth_start_worker_threads(struct LuxStralEngine *eng);
+void synth_shutdown_thread_pool(void);  // Public entry point (atexit/shared core)
 
 /* RT deterministic threading (Phase 1 & 2) */
-int synth_init_barriers(int num_threads);
-void synth_cleanup_barriers(void);
+int synth_init_barriers(struct LuxStralEngine *eng, int num_threads);
+void synth_cleanup_barriers(struct LuxStralEngine *eng);
 int synth_set_rt_priority(pthread_t thread, int priority);
-int synth_barrier_wait(void *barrier);
+int synth_barrier_wait(struct LuxStralEngine *eng, void *barrier);
 
 /* Thread processing functions */
 void *synth_persistent_worker_thread(void *arg);
 void synth_process_worker_range(synth_thread_worker_t *worker);
-void synth_precompute_wave_data(float *imageData, struct DoubleBuffer *db);
+void synth_precompute_wave_data(struct LuxStralEngine *eng, float *imageData, struct DoubleBuffer *db);
 
-/* Thread pool access for synthesis core */
+/* Thread pool limits */
 #define MAX_WORKERS 16  // Maximum number of worker threads (M-series: 10–12 perf cores)
-extern synth_thread_worker_t *thread_pool;  // Dynamically allocated based on num_workers
-extern pthread_t *worker_threads;           // Dynamically allocated based on num_workers
-extern int num_workers;                     // Actual number of workers (from config)
-extern _Atomic int synth_pool_initialized;  // RT-SAFE: atomic flag (no volatile needed with -O2)
-extern _Atomic int synth_pool_shutdown;     // RT-SAFE: atomic flag (no volatile needed with -O2)
-
-/* 🔧 CRITICAL FIX: Signals to unblock workers during buffer size changes */
-extern _Atomic int synth_workers_must_exit;  // RT-SAFE: atomic flag (no volatile needed with -O2)
 
 /* RT-safe double buffering system */
 typedef struct {
@@ -151,13 +138,9 @@ typedef struct {
   pthread_mutex_t swap_mutex; // Protects buffer swapping (non-RT thread only)
 } rt_safe_buffer_t;
 
-extern rt_safe_buffer_t g_rt_luxstral_buffer;
-extern rt_safe_buffer_t g_rt_stereo_L_buffer;  
-extern rt_safe_buffer_t g_rt_stereo_R_buffer;
-
-/* RT-safe buffer management */
-int init_rt_safe_buffers(void);
-void cleanup_rt_safe_buffers(void);
-void rt_safe_swap_buffers(void); // Called by workers when done (non-RT)
+/* RT-safe buffer management (buffers live in LuxStralEngine) */
+int init_rt_safe_buffers(struct LuxStralEngine *eng);
+void cleanup_rt_safe_buffers(struct LuxStralEngine *eng);
+void rt_safe_swap_buffers(struct LuxStralEngine *eng); // Called by workers when done (non-RT)
 
 #endif /* __SYNTH_LUXSTRAL_THREADING_H__ */

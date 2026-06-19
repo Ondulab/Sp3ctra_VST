@@ -26,10 +26,10 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-/* ── Global instances ──────────────────────────────────────────────────────── */
-LuxMaskState g_lux_mask;
+/* ── Global instance ───────────────────────────────────────────────────────────
+ * Single simulation (M2): the synthesis-thread instance is the only one.
+ * Visualizers read the insert taps published by the chain executor. */
 LuxMaskState g_lux_mask_proc;
-LuxMaskState g_lux_mask_vid;
 
 /* LUT domain: d ∈ [0, LUT_DMAX] mapped onto [0, LUT_SIZE-1]. */
 #define LUX_MASK_LUT_DMAX 4.0f
@@ -117,9 +117,11 @@ void lux_mask_init(LuxMaskState *state)
 
     for (v = 0; v < LUX_MASK_MAX_VOICES; v++)
     {
-        atomic_init(&state->midi.voices[v].active,   0);
-        atomic_init(&state->midi.voices[v].note,     57);
-        atomic_init(&state->midi.voices[v].velocity, 0);
+        atomic_init(&state->midi.voices[v].active,    0);
+        atomic_init(&state->midi.voices[v].note,      57);
+        atomic_init(&state->midi.voices[v].velocity,  0);
+        atomic_init(&state->midi.voices[v].retrigger, 0);
+        atomic_init(&state->midi.voices[v].sustained, 0);
         state->voices[v].envelope_stage      = LUX_MASK_ENV_IDLE;
         state->voices[v].envelope_level      = 0.0f;
         state->voices[v].peak_level          = 1.0f;
@@ -128,6 +130,8 @@ void lux_mask_init(LuxMaskState *state)
     }
     atomic_init(&state->midi.pitch_bend,  0);
     atomic_init(&state->midi.voice_count, 0);
+    atomic_init(&state->midi.sustain,     0);
+    atomic_init(&state->midi.mod_wheel,   0);
 
     state->next_age         = 1;
     state->lfo_pos_phase    = 0.0f;
@@ -168,10 +172,12 @@ void lux_mask_note_on(LuxMaskState *state, int note, float velocity)
 
     if (!state->config.polyphony_enabled)
     {
-        atomic_store_explicit(&state->midi.voices[0].note,     note, memory_order_relaxed);
-        atomic_store_explicit(&state->midi.voices[0].velocity, vel,  memory_order_relaxed);
-        atomic_store_explicit(&state->midi.voices[0].active,   1,    memory_order_release);
-        atomic_store_explicit(&state->midi.voice_count,        1,    memory_order_relaxed);
+        /* Mono: legato (no retrigger) — glide covers the transition. */
+        atomic_store_explicit(&state->midi.voices[0].note,      note, memory_order_relaxed);
+        atomic_store_explicit(&state->midi.voices[0].velocity,  vel,  memory_order_relaxed);
+        atomic_store_explicit(&state->midi.voices[0].sustained, 0,    memory_order_relaxed);
+        atomic_store_explicit(&state->midi.voices[0].active,    1,    memory_order_release);
+        atomic_store_explicit(&state->midi.voice_count,         1,    memory_order_relaxed);
         return;
     }
 
@@ -214,12 +220,18 @@ void lux_mask_note_on(LuxMaskState *state, int note, float velocity)
                 best = v;
             }
         }
+        /* Stolen voice never sees an inactive edge → flag a forced
+         * re-ATTACK (consumed by process_frame) so the spotlight blooms
+         * again instead of teleporting mid-sustain. */
+        atomic_store_explicit(&state->midi.voices[best].retrigger, 1,
+                              memory_order_relaxed);
     }
 
     state->voices[best].age = state->next_age++;
-    atomic_store_explicit(&state->midi.voices[best].note,     note, memory_order_relaxed);
-    atomic_store_explicit(&state->midi.voices[best].velocity, vel,  memory_order_relaxed);
-    atomic_store_explicit(&state->midi.voices[best].active,   1,    memory_order_release);
+    atomic_store_explicit(&state->midi.voices[best].note,      note, memory_order_relaxed);
+    atomic_store_explicit(&state->midi.voices[best].velocity,  vel,  memory_order_relaxed);
+    atomic_store_explicit(&state->midi.voices[best].sustained, 0,    memory_order_relaxed);
+    atomic_store_explicit(&state->midi.voices[best].active,    1,    memory_order_release);
 
     {
         int count = 0;
@@ -233,13 +245,21 @@ void lux_mask_note_on(LuxMaskState *state, int note, float velocity)
 void lux_mask_note_off(LuxMaskState *state, int note)
 {
     int v;
+    int sustain;
     if (!state) return;
+
+    sustain = atomic_load_explicit(&state->midi.sustain, memory_order_relaxed);
 
     if (!state->config.polyphony_enabled)
     {
         int cur = atomic_load_explicit(&state->midi.voices[0].note, memory_order_relaxed);
         if (cur == note)
-            atomic_store_explicit(&state->midi.voices[0].active, 0, memory_order_release);
+        {
+            if (sustain)
+                atomic_store_explicit(&state->midi.voices[0].sustained, 1, memory_order_relaxed);
+            else
+                atomic_store_explicit(&state->midi.voices[0].active, 0, memory_order_release);
+        }
         return;
     }
 
@@ -248,7 +268,10 @@ void lux_mask_note_off(LuxMaskState *state, int note)
         if (atomic_load_explicit(&state->midi.voices[v].active, memory_order_relaxed) &&
             atomic_load_explicit(&state->midi.voices[v].note,   memory_order_relaxed) == note)
         {
-            atomic_store_explicit(&state->midi.voices[v].active, 0, memory_order_release);
+            if (sustain)
+                atomic_store_explicit(&state->midi.voices[v].sustained, 1, memory_order_relaxed);
+            else
+                atomic_store_explicit(&state->midi.voices[v].active, 0, memory_order_release);
             break;
         }
     }
@@ -272,6 +295,36 @@ void lux_mask_set_pitch_bend(LuxMaskState *state, float bend)
     atomic_store_explicit(&state->midi.pitch_bend, pb, memory_order_release);
 }
 
+void lux_mask_set_sustain(LuxMaskState *state, int on)
+{
+    int v;
+    if (!state) return;
+
+    atomic_store_explicit(&state->midi.sustain, on ? 1 : 0, memory_order_relaxed);
+
+    if (!on)
+    {
+        /* Pedal up: release every voice whose note-off was deferred. */
+        for (v = 0; v < LUX_MASK_MAX_VOICES; v++)
+        {
+            if (atomic_exchange_explicit(&state->midi.voices[v].sustained, 0,
+                                         memory_order_relaxed))
+                atomic_store_explicit(&state->midi.voices[v].active, 0,
+                                      memory_order_release);
+        }
+    }
+}
+
+void lux_mask_set_mod_wheel(LuxMaskState *state, float wheel)
+{
+    int w;
+    if (!state) return;
+    w = (int)(wheel * 127.0f);
+    if (w < 0)   w = 0;
+    if (w > 127) w = 127;
+    atomic_store_explicit(&state->midi.mod_wheel, w, memory_order_relaxed);
+}
+
 void lux_mask_all_notes_off(LuxMaskState *state)
 {
     int v;
@@ -285,6 +338,8 @@ void lux_mask_all_notes_off(LuxMaskState *state)
      * as the width-bloom snapshot of release_start_level). */
     for (v = 0; v < LUX_MASK_MAX_VOICES; v++)
     {
+        atomic_store_explicit(&state->midi.voices[v].sustained, 0,
+                              memory_order_relaxed);
         atomic_store_explicit(&state->midi.voices[v].active, 0,
                               memory_order_release);
     }
@@ -463,16 +518,22 @@ void lux_mask_process_frame(
         pps = state->config.free_pixels_per_semitone;
     }
 
-    /* ── LFOs (shared across voices) ──────────────────────────────────── */
+    /* ── LFOs (shared across voices) ──────────────────────────────────────
+     * Effective depth = configured depth + mod wheel (CC1) contribution of
+     * up to +1 semitone — instant expressive vibrato from the wheel even
+     * when the configured depth is 0. */
     lfo_pos_px = 0.0f;
-    if (state->config.lfo_pos_depth_semitones > 0.001f &&
-        state->config.lfo_pos_rate_hz > 0.001f)
     {
-        state->lfo_pos_phase += 2.0f * (float)M_PI * state->config.lfo_pos_rate_hz * dt_s;
-        if (state->lfo_pos_phase > 2.0f * (float)M_PI)
-            state->lfo_pos_phase -= 2.0f * (float)M_PI;
-        lfo_pos_px = sinf(state->lfo_pos_phase) *
-                     state->config.lfo_pos_depth_semitones * pps;
+        float wheel = (float)atomic_load_explicit(&state->midi.mod_wheel,
+                                                  memory_order_relaxed) / 127.0f;
+        float depth = state->config.lfo_pos_depth_semitones + wheel * 1.0f;
+        if (depth > 0.001f && state->config.lfo_pos_rate_hz > 0.001f)
+        {
+            state->lfo_pos_phase += 2.0f * (float)M_PI * state->config.lfo_pos_rate_hz * dt_s;
+            if (state->lfo_pos_phase > 2.0f * (float)M_PI)
+                state->lfo_pos_phase -= 2.0f * (float)M_PI;
+            lfo_pos_px = sinf(state->lfo_pos_phase) * depth * pps;
+        }
     }
 
     /* ── Background ───────────────────────────────────────────────────── */
@@ -488,10 +549,22 @@ void lux_mask_process_frame(
         int midi_active = atomic_load_explicit(&state->midi.voices[v].active,   memory_order_acquire);
         int midi_note   = atomic_load_explicit(&state->midi.voices[v].note,     memory_order_relaxed);
         int midi_vel    = atomic_load_explicit(&state->midi.voices[v].velocity, memory_order_relaxed);
+        int retrig      = atomic_exchange_explicit(&state->midi.voices[v].retrigger, 0,
+                                                   memory_order_relaxed);
         float note_offset, half;
 
         state->voices[v].note          = midi_note;
         state->voices[v].velocity_norm = (float)midi_vel / 127.0f;
+
+        /* Stolen voice: force a fresh ATTACK from the current level (no
+         * flash) and restart the width-bloom trackers — without this the
+         * envelope never sees an edge and the spotlight teleports. */
+        if (retrig)
+        {
+            state->voices[v].envelope_stage     = LUX_MASK_ENV_ATTACK;
+            state->voices[v].decay_progress_s   = 0.0f;
+            state->voices[v].release_progress_s = 0.0f;
+        }
 
         /* Target position: image centered on reference note + offset in px. */
         half = (float)pixel_count * 0.5f;

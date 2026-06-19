@@ -56,6 +56,8 @@ typedef struct {
     LP_ATOMIC(int)   active;        /* 1 = note held, 0 = released (in release phase or idle) */
     LP_ATOMIC(int)   note;          /* MIDI note number (0-127) */
     LP_ATOMIC(int)   velocity;      /* MIDI velocity (0-127) */
+    LP_ATOMIC(int)   retrigger;     /* 1 = voice was stolen while active: force re-ATTACK */
+    LP_ATOMIC(int)   sustained;     /* 1 = note released while sustain pedal (CC64) held */
 } LuxPitchVoiceMidi;
 
 /* ============================================================================
@@ -79,6 +81,8 @@ typedef struct {
     LuxPitchVoiceMidi voices[LUX_PITCH_MAX_VOICES];
     LP_ATOMIC(int)    pitch_bend;   /* Pitch bend (-8192..+8191), center = 0 */
     LP_ATOMIC(int)    voice_count;  /* Number of currently allocated voices (informational) */
+    LP_ATOMIC(int)    sustain;      /* CC64 sustain pedal: 1 = held */
+    LP_ATOMIC(int)    mod_wheel;    /* CC1 modulation wheel (0-127) → extra vibrato depth */
 } LuxPitchMidiState;
 
 /* ============================================================================
@@ -143,6 +147,16 @@ void lux_pitch_note_on(LuxPitchState *state, int note, float velocity);
 void lux_pitch_note_off(LuxPitchState *state, int note);
 void lux_pitch_set_pitch_bend(LuxPitchState *state, float bend);
 
+/* CC64 sustain pedal. While held, note-offs are deferred (voices keep
+ * sounding); releasing the pedal releases every deferred voice through the
+ * normal RELEASE envelope. RT-safe. */
+void lux_pitch_set_sustain(LuxPitchState *state, int on);
+
+/* CC1 modulation wheel [0, 1]. Adds up to +1 semitone of vibrato depth on
+ * top of the configured LFO depth (instant expressive vibrato even when the
+ * configured depth is 0). RT-safe. */
+void lux_pitch_set_mod_wheel(LuxPitchState *state, float wheel);
+
 /* MIDI CC 123 "All Notes Off": mark every active voice as released.
  * Voices enter their normal RELEASE phase (exponential decay), so the
  * tail remains musical instead of being cut abruptly. RT-safe. */
@@ -162,21 +176,15 @@ void lux_pitch_process_frame(
     const uint8_t   **out_b
 );
 
-/* ── Global instances ──────────────────────────────────────────────────────── */
+/* ── Global instance ───────────────────────────────────────────────────────── */
 /*
- * Three independent instances are needed to decouple consumers and avoid one
- * subsystem (e.g. the visualizer) inadvertently driving another (e.g. the
- * video scroll tab):
- *   g_lux_pitch      — UI / visualizer thread (only used when LuxPitch view is
- *                      active in the IMAGE tab)
- *   g_lux_pitch_proc — synthesis / processing thread
- *   g_lux_pitch_vid  — VIDEO tab (image scroll waterfall), runs on the
- *                      VideoDisplayComponent capture thread when its source is
- *                      "LuxPitch Output", independently of the visualizer.
+ * Single simulation (M2 refactor): the synthesis-thread instance is the only
+ * authoritative state.  Visual consumers (CIS visualizer, video waterfall)
+ * read the insert taps published by the chain executor
+ * (audio_image_buffers_get_insert_tap_pointers) — they never re-simulate, so
+ * what you SEE is exactly what the engines CONSUME.
  */
-extern LuxPitchState g_lux_pitch;
 extern LuxPitchState g_lux_pitch_proc;
-extern LuxPitchState g_lux_pitch_vid;
 
 #ifdef __cplusplus
 }

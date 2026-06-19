@@ -1,11 +1,14 @@
-#include "LuxPitchSettingsTab.h"
+#include "PitchSetupPanel.h"
+#include "SetupHeader.h"
+#include "../../UITheme.h"
 
-LuxPitchSettingsTab::LuxPitchSettingsTab(Sp3ctraAudioProcessor& processor)
-    : apvts(processor.getAPVTS())
+PitchSetupPanel::PitchSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour)
+    : apvts(processor.getAPVTS()), accent(accentColour)
 {
     // ── MIDI Channel (1-16) ────────────────────────────────────────────
     midiChannelLabel.setText("MIDI Channel", juce::dontSendNotification);
     midiChannelLabel.setJustificationType(juce::Justification::centredRight);
+    midiChannelLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(midiChannelLabel);
 
     for (int ch = 1; ch <= 16; ++ch)
@@ -18,6 +21,7 @@ LuxPitchSettingsTab::LuxPitchSettingsTab(Sp3ctraAudioProcessor& processor)
     // ── Octave Offset (-2..+2) ─────────────────────────────────────────
     octaveOffsetLabel.setText("Octave Offset", juce::dontSendNotification);
     octaveOffsetLabel.setJustificationType(juce::Justification::centredRight);
+    octaveOffsetLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(octaveOffsetLabel);
 
     octaveOffsetCombo.addItem("-2", 1);
@@ -33,6 +37,7 @@ LuxPitchSettingsTab::LuxPitchSettingsTab(Sp3ctraAudioProcessor& processor)
     // ── Reference Note (C1..B6, default A3) ────────────────────────────
     refNoteLabel.setText("Reference Note", juce::dontSendNotification);
     refNoteLabel.setJustificationType(juce::Justification::centredRight);
+    refNoteLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(refNoteLabel);
 
     const char* noteLetters[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
@@ -48,6 +53,7 @@ LuxPitchSettingsTab::LuxPitchSettingsTab(Sp3ctraAudioProcessor& processor)
     // ── Polyphony (up to 10 voices) ──────────────────────────────────
     polyphonyLabel.setText("Polyphony", juce::dontSendNotification);
     polyphonyLabel.setJustificationType(juce::Justification::centredRight);
+    polyphonyLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(polyphonyLabel);
 
     polyphonyToggle.setButtonText("Enable (10 voices max)");
@@ -57,27 +63,22 @@ LuxPitchSettingsTab::LuxPitchSettingsTab(Sp3ctraAudioProcessor& processor)
             apvts, "luxpitchPolyphony", polyphonyToggle));
 }
 
-LuxPitchSettingsTab::~LuxPitchSettingsTab() {}
+PitchSetupPanel::~PitchSetupPanel() {}
 
-void LuxPitchSettingsTab::paint(juce::Graphics& g)
+void PitchSetupPanel::paint(juce::Graphics& g)
 {
-    g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
-
-    g.setColour(juce::Colours::white);
-    g.setFont(juce::Font(juce::FontOptions(16.0f)).boldened());
-    g.drawText("LuxPitch MIDI Configuration",
-               getLocalBounds().removeFromTop(30),
-               juce::Justification::centred, true);
+    SetupUI::paintHeader(g, *this, "PITCH -- SETUP", accent);
 }
 
-void LuxPitchSettingsTab::resized()
+void PitchSetupPanel::resized()
 {
-    auto area = getLocalBounds().reduced(20);
-    area.removeFromTop(35);
+    auto area = getLocalBounds().reduced(Sp3ctraTheme::kHPad, 0);
+    area.removeFromTop(SetupUI::kHeaderH + Sp3ctraTheme::kSectionGap);
 
-    const int rowH   = 30;
-    const int gap     = 8;
-    const int labelW  = 120;
+    constexpr int rowH   = Sp3ctraTheme::kControlH;
+    constexpr int gap    = Sp3ctraTheme::kRowGap * 2;
+    constexpr int labelW = Sp3ctraTheme::kLabelW;
+    const int ctrlW      = juce::jmin(260, area.getWidth() - labelW - Sp3ctraTheme::kGap);
 
     auto row = [&]() -> juce::Rectangle<int>
     {
@@ -90,28 +91,28 @@ void LuxPitchSettingsTab::resized()
     {
         auto r = row();
         midiChannelLabel.setBounds(r.removeFromLeft(labelW));
-        r.removeFromLeft(gap);
-        midiChannelCombo.setBounds(r);
+        r.removeFromLeft(Sp3ctraTheme::kGap);
+        midiChannelCombo.setBounds(r.removeFromLeft(ctrlW));
     }
     // Row 2: Octave Offset
     {
         auto r = row();
         octaveOffsetLabel.setBounds(r.removeFromLeft(labelW));
-        r.removeFromLeft(gap);
-        octaveOffsetCombo.setBounds(r);
+        r.removeFromLeft(Sp3ctraTheme::kGap);
+        octaveOffsetCombo.setBounds(r.removeFromLeft(ctrlW));
     }
     // Row 3: Reference Note
     {
         auto r = row();
         refNoteLabel.setBounds(r.removeFromLeft(labelW));
-        r.removeFromLeft(gap);
-        refNoteCombo.setBounds(r);
+        r.removeFromLeft(Sp3ctraTheme::kGap);
+        refNoteCombo.setBounds(r.removeFromLeft(ctrlW));
     }
     // Row 4: Polyphony
     {
         auto r = row();
         polyphonyLabel.setBounds(r.removeFromLeft(labelW));
-        r.removeFromLeft(gap);
-        polyphonyToggle.setBounds(r);
+        r.removeFromLeft(Sp3ctraTheme::kGap);
+        polyphonyToggle.setBounds(r.removeFromLeft(ctrlW));
     }
 }

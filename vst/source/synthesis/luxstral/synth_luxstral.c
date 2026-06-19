@@ -17,6 +17,9 @@
 // VST Adapter layer (C-only version for pure C files)
 #include "vst_adapters_c.h"
 
+// Engine instance state (M3 phase A de-globalization)
+#include "luxstral_engine.h"
+
 // Include all the specialized modules
 #include "synth_luxstral_algorithms.h"
 #include "synth_luxstral_math.h"
@@ -43,47 +46,38 @@
 #endif
 
 
-/* Private variables ---------------------------------------------------------*/
-// Mutex to ensure thread-safe synthesis processing for stereo channels
-static pthread_mutex_t g_synth_process_mutex;
-
-// Variables for log limiting (periodic display)
-static uint32_t log_counter = 0;
-
-static int32_t *imageRef = NULL; // Dynamically allocated
-
-// Last calculated contrast factor (atomic for thread-safe access by auto-volume)
-static _Atomic float g_last_contrast_factor = 0.0f;
+/* Engine instance -----------------------------------------------------------*/
+/* The single LuxStral engine instance (M3 phase A). All mutable engine state
+ * (DSP buffers, worker pool, barriers, RT output buffers, freeze/display
+ * state, counters) lives in this struct — see luxstral_engine.h.
+ * Zero-initialized except use_barriers (enabled by default, matching the
+ * former `_Atomic int g_use_barriers = 1;` static initializer).             */
+LuxStralEngine g_luxstral_engine_a = {
+    .use_barriers = 1,
+};
 
 /* Global context variables (moved from shared.c) */
 struct shared_var shared_var;
 
-// Persistent dynamically-sized buffers (allocated on first use; freed in synth_luxstral_cleanup)
-static float *additiveBuffer   = NULL;
-static float *sumVolumeBuffer  = NULL;
-static float *maxVolumeBuffer  = NULL;
-static float *tmp_audioData    = NULL;
-// Stereo temp accumulation buffers (persistently allocated to avoid per-call alloc)
-static float *stereoBuffer_L   = NULL;
-static float *stereoBuffer_R   = NULL;
+// Cleanup function to release persistent buffers
+static void synth_luxstral_cleanup_impl(LuxStralEngine *eng) {
+  if (eng->additiveBuffer)  { free(eng->additiveBuffer);  eng->additiveBuffer = NULL; }
+  if (eng->sumVolumeBuffer) { free(eng->sumVolumeBuffer); eng->sumVolumeBuffer = NULL; }
+  if (eng->maxVolumeBuffer) { free(eng->maxVolumeBuffer); eng->maxVolumeBuffer = NULL; }
+  if (eng->tmp_audioData)   { free(eng->tmp_audioData);   eng->tmp_audioData = NULL; }
+  if (eng->stereoBuffer_L)  { free(eng->stereoBuffer_L);  eng->stereoBuffer_L = NULL; }
+  if (eng->stereoBuffer_R)  { free(eng->stereoBuffer_R);  eng->stereoBuffer_R = NULL; }
+  if (eng->imageRef)        { free(eng->imageRef);        eng->imageRef = NULL; }
+}
 
-// Track current audio buffer size for safe reallocation
-static int g_luxstral_audio_buffer_size = 0;
-
-// Cleanup function to release persistent buffers (registered via atexit)
+// Public wrapper (registered via atexit; called by Sp3ctraSharedCore)
 void synth_luxstral_cleanup(void) {
-  if (additiveBuffer)  { free(additiveBuffer);  additiveBuffer = NULL; }
-  if (sumVolumeBuffer) { free(sumVolumeBuffer); sumVolumeBuffer = NULL; }
-  if (maxVolumeBuffer) { free(maxVolumeBuffer); maxVolumeBuffer = NULL; }
-  if (tmp_audioData)   { free(tmp_audioData);   tmp_audioData = NULL; }
-  if (stereoBuffer_L)  { free(stereoBuffer_L);  stereoBuffer_L = NULL; }
-  if (stereoBuffer_R)  { free(stereoBuffer_R);  stereoBuffer_R = NULL; }
-  if (imageRef)        { free(imageRef);        imageRef = NULL; }
+  synth_luxstral_cleanup_impl(&g_luxstral_engine_a);
 }
 
 /* Public functions ----------------------------------------------------------*/
 
-int32_t synth_IfftInit(void) {
+static int32_t synth_IfftInit_impl(LuxStralEngine *eng) {
   int32_t buffer_len = 0;
 
   log_info("SYNTH", "---------- SYNTH INIT ---------");
@@ -167,20 +161,20 @@ int32_t synth_IfftInit(void) {
 #endif
 
   // Allocate imageRef dynamically
-  imageRef = (int32_t*)calloc(get_current_number_of_notes(), sizeof(int32_t));
-  if (!imageRef) {
+  eng->imageRef = (int32_t*)calloc(get_current_number_of_notes(), sizeof(int32_t));
+  if (!eng->imageRef) {
     log_error("SYNTH", "Failed to allocate imageRef");
     return -1;
   }
   // REFACTORED: Initialize with 1.0 in micros scale (normalized amplitude)
   // This matches the new preprocessing that stores values as (normalized * 1000000)
-  fill_int32(1000000, imageRef, get_current_number_of_notes());
+  fill_int32(1000000, eng->imageRef, get_current_number_of_notes());
 
   // Initialize image debug system
   image_debug_init();
 
-  // Initialize the global synthesis mutex
-  if (pthread_mutex_init(&g_synth_process_mutex, NULL) != 0) {
+  // Initialize the engine synthesis mutex
+  if (pthread_mutex_init(&eng->synth_process_mutex, NULL) != 0) {
       perror("Failed to initialize synth process mutex");
       die("synth init failed");
       return -1;
@@ -195,46 +189,52 @@ int32_t synth_IfftInit(void) {
   return 0;
 }
 
+// Public wrapper (signature unchanged for external callers)
+int32_t synth_IfftInit(void) {
+  return synth_IfftInit_impl(&g_luxstral_engine_a);
+}
+
 /**
  * @brief  Optimized version of the LuxStral synthesis with a persistent thread pool
+ * @param  eng Engine instance
  * @param  imageData Grayscale input data
  * @param  audioDataLeft Left channel audio output buffer (stereo mode)
  * @param  audioDataRight Right channel audio output buffer (stereo mode)
  * @param  contrast_factor Contrast factor for volume modulation
  * @retval None
  */
-void synth_IfftMode(float *imageData, float *audioDataLeft, float *audioDataRight, float contrast_factor, DoubleBuffer *db) {
+static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *audioDataLeft, float *audioDataRight, float contrast_factor, DoubleBuffer *db) {
 
   // LuxStral mode (limited logs)
-  if (log_counter % LOG_FREQUENCY == 0) {
+  if (eng->log_counter % LOG_FREQUENCY == 0) {
     // printf("===== LuxStral Mode called (optimized) =====\n");
   }
 
-  static int buff_idx;
+  int buff_idx;
 
-  // Persistent dynamically-sized buffers are declared at file scope
+  // Persistent dynamically-sized buffers live in the engine struct
 
   // Initialize thread pool and RT-safe buffers if not initialized
   // This handles both first start AND restart after buffer size change
-  if (!synth_pool_initialized) {
-    log_info("SYNTH", "Initializing synthesis system (pool_init=%d, shutdown=%d)", 
-             synth_pool_initialized, synth_pool_shutdown);
-             
-    if (synth_init_thread_pool() == 0) {
-      if (init_rt_safe_buffers() == 0) {
-        if (synth_start_worker_threads() == 0) {
+  if (!eng->pool_initialized) {
+    log_info("SYNTH", "Initializing synthesis system (pool_init=%d, shutdown=%d)",
+             eng->pool_initialized, eng->pool_shutdown);
+
+    if (synth_init_thread_pool(eng) == 0) {
+      if (init_rt_safe_buffers(eng) == 0) {
+        if (synth_start_worker_threads(eng) == 0) {
           log_info("SYNTH", "RT-safe synthesis system initialized successfully");
         } else {
           log_error("SYNTH", "Failed to start worker threads, synthesis will fail");
-          synth_pool_initialized = 0;
+          eng->pool_initialized = 0;
         }
       } else {
         log_error("SYNTH", "Failed to initialize RT-safe buffers, synthesis will fail");
-        synth_pool_initialized = 0;
+        eng->pool_initialized = 0;
       }
     } else {
       log_error("SYNTH", "Failed to initialize thread pool, synthesis will fail");
-      synth_pool_initialized = 0;
+      eng->pool_initialized = 0;
     }
   }
 
@@ -245,24 +245,24 @@ void synth_IfftMode(float *imageData, float *audioDataLeft, float *audioDataRigh
     return;
   }
 
-  if (g_luxstral_audio_buffer_size != bs) {
+  if (eng->audio_buffer_size != bs) {
     // Free old buffers if size changed
-    free(additiveBuffer);  additiveBuffer = NULL;
-    free(sumVolumeBuffer); sumVolumeBuffer = NULL;
-    free(maxVolumeBuffer); maxVolumeBuffer = NULL;
-    free(tmp_audioData);   tmp_audioData = NULL;
-    free(stereoBuffer_L);  stereoBuffer_L = NULL;
-    free(stereoBuffer_R);  stereoBuffer_R = NULL;
+    free(eng->additiveBuffer);  eng->additiveBuffer = NULL;
+    free(eng->sumVolumeBuffer); eng->sumVolumeBuffer = NULL;
+    free(eng->maxVolumeBuffer); eng->maxVolumeBuffer = NULL;
+    free(eng->tmp_audioData);   eng->tmp_audioData = NULL;
+    free(eng->stereoBuffer_L);  eng->stereoBuffer_L = NULL;
+    free(eng->stereoBuffer_R);  eng->stereoBuffer_R = NULL;
 
-    g_luxstral_audio_buffer_size = bs;
+    eng->audio_buffer_size = bs;
   }
 
-  if (!additiveBuffer) {
-    additiveBuffer   = (float*)calloc(bs, sizeof(float));
-    sumVolumeBuffer  = (float*)calloc(bs, sizeof(float));
-    maxVolumeBuffer  = (float*)calloc(bs, sizeof(float));
-    tmp_audioData    = (float*)calloc(bs, sizeof(float));
-    if (!additiveBuffer || !sumVolumeBuffer || !maxVolumeBuffer || !tmp_audioData) {
+  if (!eng->additiveBuffer) {
+    eng->additiveBuffer   = (float*)calloc(bs, sizeof(float));
+    eng->sumVolumeBuffer  = (float*)calloc(bs, sizeof(float));
+    eng->maxVolumeBuffer  = (float*)calloc(bs, sizeof(float));
+    eng->tmp_audioData    = (float*)calloc(bs, sizeof(float));
+    if (!eng->additiveBuffer || !eng->sumVolumeBuffer || !eng->maxVolumeBuffer || !eng->tmp_audioData) {
       log_error("SYNTH", "Failed to allocate additive persistent buffers");
       return;
     }
@@ -275,36 +275,36 @@ void synth_IfftMode(float *imageData, float *audioDataLeft, float *audioDataRigh
   // buffers allocated at first call above
 
   // Reset final buffers
-  fill_float(0, additiveBuffer, g_sp3ctra_config.audio_buffer_size);
-  fill_float(0, sumVolumeBuffer, g_sp3ctra_config.audio_buffer_size);
-  fill_float(0, maxVolumeBuffer, g_sp3ctra_config.audio_buffer_size);
+  fill_float(0, eng->additiveBuffer, g_sp3ctra_config.audio_buffer_size);
+  fill_float(0, eng->sumVolumeBuffer, g_sp3ctra_config.audio_buffer_size);
+  fill_float(0, eng->maxVolumeBuffer, g_sp3ctra_config.audio_buffer_size);
 
 
-  if (synth_pool_initialized && !synth_pool_shutdown) {
+  if (eng->pool_initialized && !eng->pool_shutdown) {
     // === OPTIMIZED VERSION WITH THREAD POOL ===
-    
+
     // HOT-RELOAD CHECK: Process pending frequency reinit BEFORE workers start
     // This is safe because workers are waiting on start_barrier
     check_and_process_frequency_reinit();
-    
+
     // Phase 1: Pre-compute data in single-thread (avoids contention)
-    synth_precompute_wave_data(imageData, db);
+    synth_precompute_wave_data(eng, imageData, db);
 
     // Phase 2: Start workers in parallel
     // Deterministic execution with barriers
     // Signal all workers to start via barrier
-    synth_barrier_wait(&g_worker_start_barrier);
-    
+    synth_barrier_wait(eng, &eng->worker_start_barrier);
+
     // Wait for all workers to complete via barrier
-    synth_barrier_wait(&g_worker_end_barrier);
+    synth_barrier_wait(eng, &eng->worker_end_barrier);
 
     // Capture per-sample (per buffer) volumes across all notes to ensure 1 image line = 1 audio sample
   if (image_debug_is_oscillator_capture_enabled()) {
     // Iterate over each sample inside this audio buffer
     for (int s = 0; s < g_sp3ctra_config.audio_buffer_size; s++) {
       // Visit notes in ascending order across workers to keep strict note order
-      for (int wi = 0; wi < num_workers; wi++) {
-        synth_thread_worker_t *w = &thread_pool[wi];
+      for (int wi = 0; wi < eng->num_workers; wi++) {
+        synth_thread_worker_t *w = &eng->thread_pool[wi];
         // Safety: ensure captured buffers are allocated for this worker
         if (!w->captured_current_volume || !w->captured_target_volume) {
           continue;
@@ -328,23 +328,23 @@ void synth_IfftMode(float *imageData, float *audioDataLeft, float *audioDataRigh
     // Thread buffers combination completed
 
     // Float32 version: combine float buffers directly
-    for (int i = 0; i < num_workers; i++) {
-      synth_thread_worker_t *w = &thread_pool[i];
+    for (int i = 0; i < eng->num_workers; i++) {
+      synth_thread_worker_t *w = &eng->thread_pool[i];
       if (w->thread_luxstralBuffer) {
-        add_float(w->thread_luxstralBuffer, additiveBuffer,
-                  additiveBuffer, g_sp3ctra_config.audio_buffer_size);
+        add_float(w->thread_luxstralBuffer, eng->additiveBuffer,
+                  eng->additiveBuffer, g_sp3ctra_config.audio_buffer_size);
       }
       if (w->thread_sumVolumeBuffer) {
-        add_float(w->thread_sumVolumeBuffer, sumVolumeBuffer,
-                  sumVolumeBuffer, g_sp3ctra_config.audio_buffer_size);
+        add_float(w->thread_sumVolumeBuffer, eng->sumVolumeBuffer,
+                  eng->sumVolumeBuffer, g_sp3ctra_config.audio_buffer_size);
       }
 
       // For maxVolumeBuffer, take the maximum
       if (w->thread_maxVolumeBuffer) {
         for (buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
           if (w->thread_maxVolumeBuffer[buff_idx] >
-              maxVolumeBuffer[buff_idx]) {
-            maxVolumeBuffer[buff_idx] =
+              eng->maxVolumeBuffer[buff_idx]) {
+            eng->maxVolumeBuffer[buff_idx] =
                 w->thread_maxVolumeBuffer[buff_idx];
           }
         }
@@ -353,7 +353,7 @@ void synth_IfftMode(float *imageData, float *audioDataLeft, float *audioDataRigh
 
     // SATURATION PREVENTION: Apply pre-scaling to keep headroom before normalization
     const float safety_scale = 0.35f;
-    scale_float(additiveBuffer, safety_scale, g_sp3ctra_config.audio_buffer_size);
+    scale_float(eng->additiveBuffer, safety_scale, g_sp3ctra_config.audio_buffer_size);
 
     // CORRECTION: Conditional normalization by platform
 #ifdef __linux__
@@ -403,64 +403,64 @@ void synth_IfftMode(float *imageData, float *audioDataLeft, float *audioDataRigh
     
     for (buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
         // Compression applied to all signals
-        if (sumVolumeBuffer[buff_idx] > SUM_EPS_FLOAT) {
+        if (eng->sumVolumeBuffer[buff_idx] > SUM_EPS_FLOAT) {
           // Apply exponential response curve to reduce compression effects
-          float sum_normalized = sumVolumeBuffer[buff_idx] / (float)VOLUME_AMP_RESOLUTION;
+          float sum_normalized = eng->sumVolumeBuffer[buff_idx] / (float)VOLUME_AMP_RESOLUTION;
           float base_level = norm_base;
           // CORRECTED: Proper exponent logic for compression reduction with normalized waveforms
           float expo = norm_expo;
           float x = sum_normalized + base_level;
           float response_curve = (fabsf(expo - 0.5f) <= 1e-3f) ? sqrtf(x < 0.0f ? 0.0f : x)
                                   : pow_shifted_fast(x, base_level, expo);
-          float ratio = additiveBuffer[buff_idx] * peak_compensation / (response_curve * (float)VOLUME_AMP_RESOLUTION);
-          tmp_audioData[buff_idx] = ratio * fade_in_factor; // Apply anti-tac fade-in
+          float ratio = eng->additiveBuffer[buff_idx] * peak_compensation / (response_curve * (float)VOLUME_AMP_RESOLUTION);
+          eng->tmp_audioData[buff_idx] = ratio * fade_in_factor; // Apply anti-tac fade-in
         } else {
-          tmp_audioData[buff_idx] = 0.0f;
+          eng->tmp_audioData[buff_idx] = 0.0f;
         }
     }
-    
+
     // SOFT LIMITER: Prevent hard clipping while preserving dynamics (applied AFTER normalization)
     for (buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
-        float abs_signal = fabsf(tmp_audioData[buff_idx]);
+        float abs_signal = fabsf(eng->tmp_audioData[buff_idx]);
         if (abs_signal > g_sp3ctra_config.soft_limit_threshold) {
           // Soft compression using tanh for smooth saturation
           float excess = abs_signal - g_sp3ctra_config.soft_limit_threshold;
           float compressed = tanhf(excess / g_sp3ctra_config.soft_limit_knee) * g_sp3ctra_config.soft_limit_knee;
-          tmp_audioData[buff_idx] = copysignf(g_sp3ctra_config.soft_limit_threshold + compressed, tmp_audioData[buff_idx]);
+          eng->tmp_audioData[buff_idx] = copysignf(g_sp3ctra_config.soft_limit_threshold + compressed, eng->tmp_audioData[buff_idx]);
         }
     }
 
   // The contrast factor is now passed as parameter from synth_AudioProcess
 
   // Apply contrast modulation and unified stereo output
-  if (synth_pool_initialized && !synth_pool_shutdown) {
+  if (eng->pool_initialized && !eng->pool_shutdown) {
     if (g_sp3ctra_config.stereo_mode_enabled) {
     // STEREO MODE: Use actual stereo buffers from threads
-    // Combine stereo buffers from all threads (declared at file scope)
-    
+    // Combine stereo buffers from all threads (held in the engine struct)
+
     // Initialize stereo buffers (allocate once)
-    if (!stereoBuffer_L) {
-      stereoBuffer_L = (float*)calloc(g_sp3ctra_config.audio_buffer_size, sizeof(float));
-      stereoBuffer_R = (float*)calloc(g_sp3ctra_config.audio_buffer_size, sizeof(float));
-      if (!stereoBuffer_L || !stereoBuffer_R) {
+    if (!eng->stereoBuffer_L) {
+      eng->stereoBuffer_L = (float*)calloc(g_sp3ctra_config.audio_buffer_size, sizeof(float));
+      eng->stereoBuffer_R = (float*)calloc(g_sp3ctra_config.audio_buffer_size, sizeof(float));
+      if (!eng->stereoBuffer_L || !eng->stereoBuffer_R) {
         log_error("SYNTH", "Failed to allocate stereo buffers");
       }
     }
-    fill_float(0, stereoBuffer_L, g_sp3ctra_config.audio_buffer_size);
-    fill_float(0, stereoBuffer_R, g_sp3ctra_config.audio_buffer_size);
-    
+    fill_float(0, eng->stereoBuffer_L, g_sp3ctra_config.audio_buffer_size);
+    fill_float(0, eng->stereoBuffer_R, g_sp3ctra_config.audio_buffer_size);
+
     // Float32 version: combine float stereo buffers directly
-    for (int i = 0; i < num_workers; i++) {
-      add_float(thread_pool[i].thread_luxstralBuffer_L, stereoBuffer_L,
-                stereoBuffer_L, g_sp3ctra_config.audio_buffer_size);
-      add_float(thread_pool[i].thread_luxstralBuffer_R, stereoBuffer_R,
-                stereoBuffer_R, g_sp3ctra_config.audio_buffer_size);
+    for (int i = 0; i < eng->num_workers; i++) {
+      add_float(eng->thread_pool[i].thread_luxstralBuffer_L, eng->stereoBuffer_L,
+                eng->stereoBuffer_L, g_sp3ctra_config.audio_buffer_size);
+      add_float(eng->thread_pool[i].thread_luxstralBuffer_R, eng->stereoBuffer_R,
+                eng->stereoBuffer_R, g_sp3ctra_config.audio_buffer_size);
     }
-    
+
     // SATURATION PREVENTION: Apply same safety scaling to stereo buffers
     const float safety_scale_stereo = 0.35f;  // Same as mono for consistency
-    scale_float(stereoBuffer_L, safety_scale_stereo, g_sp3ctra_config.audio_buffer_size);
-    scale_float(stereoBuffer_R, safety_scale_stereo, g_sp3ctra_config.audio_buffer_size);
+    scale_float(eng->stereoBuffer_L, safety_scale_stereo, g_sp3ctra_config.audio_buffer_size);
+    scale_float(eng->stereoBuffer_R, safety_scale_stereo, g_sp3ctra_config.audio_buffer_size);
 
     // DEBUG: Check if stereo buffers have data (disabled for production)
     // static int stereo_dbg_cnt = 0;
@@ -484,17 +484,17 @@ void synth_IfftMode(float *imageData, float *audioDataLeft, float *audioDataRigh
 
       {
         const float SUM_EPS_FLOAT = 1.0e-6f;
-        if (sumVolumeBuffer[buff_idx] > SUM_EPS_FLOAT) {
+        if (eng->sumVolumeBuffer[buff_idx] > SUM_EPS_FLOAT) {
           // Apply exponential response curve to reduce compression effects (stereo mode)
-          float sum_normalized = sumVolumeBuffer[buff_idx] / (float)VOLUME_AMP_RESOLUTION;
+          float sum_normalized = eng->sumVolumeBuffer[buff_idx] / (float)VOLUME_AMP_RESOLUTION;
           float base_level = norm_base;
           // CORRECTED: Proper exponent logic for compression reduction with normalized waveforms
           float expo = norm_expo;
           float x = sum_normalized + base_level;
           float response_curve = (fabsf(expo - 0.5f) <= 1e-3f) ? sqrtf(x < 0.0f ? 0.0f : x)
                                   : pow_shifted_fast(x, base_level, expo);
-          left_signal  = stereoBuffer_L[buff_idx] * peak_compensation / (response_curve * (float)VOLUME_AMP_RESOLUTION);
-          right_signal = stereoBuffer_R[buff_idx] * peak_compensation / (response_curve * (float)VOLUME_AMP_RESOLUTION);
+          left_signal  = eng->stereoBuffer_L[buff_idx] * peak_compensation / (response_curve * (float)VOLUME_AMP_RESOLUTION);
+          right_signal = eng->stereoBuffer_R[buff_idx] * peak_compensation / (response_curve * (float)VOLUME_AMP_RESOLUTION);
           
           // Apply same anti-tac fade-in as mono mode
           left_signal *= fade_in_factor;
@@ -550,7 +550,7 @@ void synth_IfftMode(float *imageData, float *audioDataLeft, float *audioDataRigh
       float peakPre = 0.0f;
 
       for (buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
-        float mono_pre = tmp_audioData[buff_idx];
+        float mono_pre = eng->tmp_audioData[buff_idx];
         float a = fabsf(mono_pre);
         if (a > peakPre) peakPre = a;
 
@@ -588,16 +588,21 @@ void synth_IfftMode(float *imageData, float *audioDataLeft, float *audioDataRigh
   }
 
   // Increment global counter for log frequency limitation
-  log_counter++;
+  eng->log_counter++;
 
   shared_var.synth_process_cnt += g_sp3ctra_config.audio_buffer_size;
 }
 
+// Public wrapper (signature unchanged for external callers)
+void synth_IfftMode(float *imageData, float *audioDataLeft, float *audioDataRight, float contrast_factor, DoubleBuffer *db) {
+  synth_IfftMode_impl(&g_luxstral_engine_a, imageData, audioDataLeft, audioDataRight, contrast_factor, db);
+}
+
 // Synth process function
-void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
-                        uint8_t *buffer_B, DoubleBuffer *db) {
+static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint8_t *buffer_G,
+                                    uint8_t *buffer_B, DoubleBuffer *db) {
   // Audio processing (limited logs)
-  if (log_counter % LOG_FREQUENCY == 0) {
+  if (eng->log_counter % LOG_FREQUENCY == 0) {
     // printf("===== Audio Process called =====\n"); // Removed or commented
   }
 
@@ -609,14 +614,13 @@ void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
   }
   int index = __atomic_load_n(&current_buffer_index, __ATOMIC_RELAXED);
   int nb_pixels = get_cis_pixels_nb();
-  static float *g_grayScale_live = NULL; // Buffer for live grayscale data (normalized float [0, 1])
-  static float *processed_grayScale = NULL; // Buffer for data to be passed to synth_IfftMode (normalized float [0, 1])
-  
+  // Grayscale staging buffers live in the engine struct (allocated on first call)
+
   // Allocate buffers on first call
-  if (!g_grayScale_live) {
-    g_grayScale_live = (float *)malloc(nb_pixels * sizeof(float));
-    processed_grayScale = (float *)malloc(nb_pixels * sizeof(float));
-    if (!g_grayScale_live || !processed_grayScale) {
+  if (!eng->grayScale_live) {
+    eng->grayScale_live = (float *)malloc(nb_pixels * sizeof(float));
+    eng->processed_grayScale = (float *)malloc(nb_pixels * sizeof(float));
+    if (!eng->grayScale_live || !eng->processed_grayScale) {
       log_error("SYNTH", "Failed to allocate grayscale buffers");
       return;
     }
@@ -658,8 +662,7 @@ void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
     int tag = db->dataReady;
 
     /* Diagnostic: print source routing state every ~500 synth calls (~0.5s) */
-    static int _diag_ctr = 0;
-    int _diag_print = ((_diag_ctr++ % 500) == 0);
+    int _diag_print = ((eng->diag_ctr++ % 500) == 0);
 
     if (has_preprocessed) {
       if ((src == 0 && tag != 2) || (src == 1 && tag != 1)) {
@@ -685,7 +688,7 @@ void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
   }
 #endif
   if (has_preprocessed) {
-    memcpy(g_grayScale_live, db->preprocessed_data.additive.grayscale,
+    memcpy(eng->grayScale_live, db->preprocessed_data.additive.grayscale,
            nb_pixels * sizeof(float));
     contrast_factor = db->preprocessed_data.additive.contrast_factor;
   }
@@ -700,7 +703,7 @@ void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
     int fallback_src = g_sp3ctra_config.luxstral_source_type;
     if (fallback_src == 0 /* IMAGE_SOURCE_SAMPLER */) {
       /* Source=S: silence until sampler data arrives */
-      memset(g_grayScale_live, 0, nb_pixels * sizeof(float));
+      memset(eng->grayScale_live, 0, nb_pixels * sizeof(float));
       contrast_factor = 0.0f;
     } else
 #endif
@@ -708,7 +711,7 @@ void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
       PreprocessedImageData preprocessed_temp;
       PipelineConfig fallback_cfg = pipeline_build_config_live();
       if (pipeline_process_frame(buffer_R, buffer_G, buffer_B, &fallback_cfg, &preprocessed_temp) == 0) {
-        memcpy(g_grayScale_live, preprocessed_temp.additive.grayscale,
+        memcpy(eng->grayScale_live, preprocessed_temp.additive.grayscale,
                nb_pixels * sizeof(float));
         contrast_factor = preprocessed_temp.additive.contrast_factor;
 
@@ -717,7 +720,7 @@ void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
         db->dataReady = 1;
         pthread_mutex_unlock(&db->mutex);
       } else {
-        memset(g_grayScale_live, 0, nb_pixels * sizeof(float));
+        memset(eng->grayScale_live, 0, nb_pixels * sizeof(float));
         contrast_factor = 0.0f;
       }
     }
@@ -727,35 +730,33 @@ void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
   image_debug_capture_raw_scanner_line(buffer_R, buffer_G, buffer_B);
 
   // --- Synth Data Freeze/Fade Logic ---
-  pthread_mutex_lock(&g_synth_data_freeze_mutex);
-  int local_is_frozen = g_is_synth_data_frozen;
-  int local_is_fading = g_is_synth_data_fading_out;
+  pthread_mutex_lock(&eng->synth_data_freeze_mutex);
+  int local_is_frozen = eng->is_synth_data_frozen;
+  int local_is_fading = eng->is_synth_data_fading_out;
 
-  static int prev_frozen_state_synth = 0;
-  if (local_is_frozen && !prev_frozen_state_synth && !local_is_fading) {
-    memcpy(g_frozen_grayscale_buffer, g_grayScale_live,
+  if (local_is_frozen && !eng->prev_frozen_state && !local_is_fading) {
+    memcpy(eng->frozen_grayscale_buffer, eng->grayScale_live,
            nb_pixels * sizeof(float));
   }
-  prev_frozen_state_synth = local_is_frozen;
+  eng->prev_frozen_state = local_is_frozen;
 
-  static int prev_fading_state_synth = 0;
-  if (local_is_fading && !prev_fading_state_synth) {
-    g_synth_data_fade_start_time = synth_getCurrentTimeInSeconds();
+  if (local_is_fading && !eng->prev_fading_state) {
+    eng->synth_data_fade_start_time = synth_getCurrentTimeInSeconds();
   }
-  prev_fading_state_synth = local_is_fading;
-  pthread_mutex_unlock(&g_synth_data_freeze_mutex);
+  eng->prev_fading_state = local_is_fading;
+  pthread_mutex_unlock(&eng->synth_data_freeze_mutex);
 
   float alpha_blend = 1.0f; // For cross-fade
 
   if (local_is_fading) {
     double elapsed_time =
-        synth_getCurrentTimeInSeconds() - g_synth_data_fade_start_time;
+        synth_getCurrentTimeInSeconds() - eng->synth_data_fade_start_time;
     if (elapsed_time >= G_SYNTH_DATA_FADE_DURATION_SECONDS) {
-      pthread_mutex_lock(&g_synth_data_freeze_mutex);
-      g_is_synth_data_fading_out = 0;
-      g_is_synth_data_frozen = 0;
-      pthread_mutex_unlock(&g_synth_data_freeze_mutex);
-      memcpy(processed_grayScale, g_grayScale_live,
+      pthread_mutex_lock(&eng->synth_data_freeze_mutex);
+      eng->is_synth_data_fading_out = 0;
+      eng->is_synth_data_frozen = 0;
+      pthread_mutex_unlock(&eng->synth_data_freeze_mutex);
+      memcpy(eng->processed_grayScale, eng->grayScale_live,
              nb_pixels * sizeof(float)); // Use live data
     } else {
       alpha_blend =
@@ -766,27 +767,28 @@ void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
                         ? 0.0f
                         : ((alpha_blend > 1.0f) ? 1.0f : alpha_blend);
       for (int i = 0; i < nb_pixels; ++i) {
-        processed_grayScale[i] =
-            g_frozen_grayscale_buffer[i] * (1.0f - alpha_blend) +
-            g_grayScale_live[i] * alpha_blend;
+        eng->processed_grayScale[i] =
+            eng->frozen_grayscale_buffer[i] * (1.0f - alpha_blend) +
+            eng->grayScale_live[i] * alpha_blend;
       }
     }
   } else if (local_is_frozen) {
-    memcpy(processed_grayScale, g_frozen_grayscale_buffer,
+    memcpy(eng->processed_grayScale, eng->frozen_grayscale_buffer,
            nb_pixels * sizeof(float)); // Use frozen data
   } else {
-    memcpy(processed_grayScale, g_grayScale_live,
+    memcpy(eng->processed_grayScale, eng->grayScale_live,
            nb_pixels * sizeof(float)); // Use live data
   }
   // --- End Synth Data Freeze/Fade Logic ---
 
   // Store contrast factor atomically for auto-volume system (using memcpy for float)
   // Note: Single float write is atomic on most platforms, but we use explicit atomic for clarity
-  g_last_contrast_factor = contrast_factor;
+  eng->last_contrast_factor = contrast_factor;
 
   // Launch synthesis with potentially frozen/faded data
   // Unified mode: always pass both left and right buffers
-  synth_IfftMode(processed_grayScale,
+  synth_IfftMode_impl(eng,
+                 eng->processed_grayScale,
                  buffers_L[index].data,
                  buffers_R[index].data,
                  contrast_factor,
@@ -852,11 +854,17 @@ void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
   __atomic_store_n(&current_buffer_index, 1 - index, __ATOMIC_RELEASE);
 }
 
+// Public wrapper (signature unchanged for external callers, e.g. multithreading.c)
+void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
+                        uint8_t *buffer_B, DoubleBuffer *db) {
+  synth_AudioProcess_impl(&g_luxstral_engine_a, buffer_R, buffer_G, buffer_B, db);
+}
+
 /**
  * @brief Get the last calculated contrast factor (thread-safe)
  * @return Last contrast factor value (0.0-1.0 range typically)
  * @note Used by auto-volume system to detect audio intensity for adaptive thresholding
  */
 float synth_get_last_contrast_factor(void) {
-  return g_last_contrast_factor;
+  return g_luxstral_engine_a.last_contrast_factor;
 }

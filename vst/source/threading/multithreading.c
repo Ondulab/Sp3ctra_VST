@@ -9,12 +9,14 @@
 #include "context.h"
 #include "error.h"
 #include "synth_luxstral.h"
+#include "../synthesis/luxstral/luxstral_engine.h" /* display buffer accessors */
 #include "udp.h"
 #include "logger.h"
 #include "../utils/image_debug_stubs.h"
 #include "../utils/rt_profiler.h"
 #include "../processing/image_preprocessor.h"
 #include "../processing/image_pipeline.h"
+#include "../processing/image_chain.h"
 #include "../processing/lux_pitch.h"
 #include "../processing/lux_mask.h"
 #include "../processing/image_sequencer.h"
@@ -628,13 +630,17 @@ void *udpThread(void *arg) {
         const uint8_t *mod_B = NULL;
         int            need_modulated =
             (live_cfg.luxstral_path.source         == IMAGE_SOURCE_MODULATED) ||
-            (live_cfg.luxsynth_luxwave_path.source == IMAGE_SOURCE_MODULATED);
+            (live_cfg.luxsynth_luxwave_path.source == IMAGE_SOURCE_MODULATED) ||
+            image_chain_any_tap_demand(); /* a visualizer watches an insert tap */
 
         if (need_modulated)
         {
-            /* ── Chain: Live ► LuxPitch ► LuxMask ► LuxSampler ──
+            /* ── Chain: Live ► [LuxPitch ⇄ LuxMask] ► LuxSampler ──
              *
-             * The Modulated channel is now the FINAL stage of the image chain
+             * The insert order is configurable (chainInsertOrder param, see
+             * image_chain.h) and executed by image_chain_process_inserts().
+             *
+             * The Modulated channel is the FINAL stage of the image chain
              * (= what the synth engines actually consume when source=MODULATED,
              * and what the VideoScroll waterfall mirrors).  The sampler is
              * the last stage, so two cases:
@@ -677,26 +683,17 @@ void *udpThread(void *arg) {
             else
 #endif
             {
-                /* IDLE / REC / STEP_LIVE: apply Pitch+Mask on the raw live
-                 * frame, publish as modulated, then let the sampler hook
-                 * mirror & record it. */
-                const uint8_t *after_lp_R, *after_lp_G, *after_lp_B;
-
-                /* LuxPitch insert (auto-bypass if not enabled / no voice) */
-                lux_pitch_process_frame(&g_lux_pitch_proc,
-                                        db->activeBuffer_R,
-                                        db->activeBuffer_G,
-                                        db->activeBuffer_B,
-                                        nb_pixels,
-                                        g_sp3ctra_config.num_octaves,
-                                        &after_lp_R, &after_lp_G, &after_lp_B);
-
-                /* LuxMask insert (auto-bypass if not enabled / no voice) */
-                lux_mask_process_frame(&g_lux_mask_proc,
-                                       after_lp_R, after_lp_G, after_lp_B,
-                                       nb_pixels,
-                                       g_sp3ctra_config.num_octaves,
-                                       &mod_R, &mod_G, &mod_B);
+                /* IDLE / REC / STEP_LIVE: run the insert chain on the raw
+                 * live frame (configurable order, per-insert visual taps),
+                 * publish as modulated, then let the sampler hook mirror &
+                 * record it. */
+                image_chain_process_inserts(db->activeBuffer_R,
+                                            db->activeBuffer_G,
+                                            db->activeBuffer_B,
+                                            nb_pixels,
+                                            g_sp3ctra_config.num_octaves,
+                                            &mod_R, &mod_G, &mod_B,
+                                            audioBuffers);
 
                 if (mod_R && mod_G && mod_B)
                 {
@@ -888,11 +885,11 @@ void *udpThread(void *arg) {
       }
       */
       
-      pthread_mutex_lock(&g_displayable_synth_mutex);
-      memcpy(g_displayable_synth_R, mixed_R, nb_pixels);
-      memcpy(g_displayable_synth_G, mixed_G, nb_pixels);
-      memcpy(g_displayable_synth_B, mixed_B, nb_pixels);
-      pthread_mutex_unlock(&g_displayable_synth_mutex);
+      luxstral_engine_displayable_lock();
+      memcpy(luxstral_engine_displayable_R(), mixed_R, nb_pixels);
+      memcpy(luxstral_engine_displayable_G(), mixed_G, nb_pixels);
+      memcpy(luxstral_engine_displayable_B(), mixed_B, nb_pixels);
+      luxstral_engine_displayable_unlock();
 
       /* Capture raw scanner data only when new UDP data arrives
        * Function handles runtime enable/disable internally

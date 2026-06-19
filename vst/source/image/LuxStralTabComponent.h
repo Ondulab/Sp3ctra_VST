@@ -21,20 +21,13 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
-#include "PipelineNodeComponent.h"
 #include "VisualizerMode.h"
-#include <functional>
 
 class LuxStralTabComponent : public juce::Component
 {
 public:
-    std::function<void(VisualizerMode)> onNodeClicked;
-
     explicit LuxStralTabComponent(Sp3ctraAudioProcessor& p)
-        : processor(p),
-          nodeGray ("LUXSTRAL GRAY",  juce::Colour(0xff6bb8e0), VisualizerMode::SPCTR_GRAY),
-          nodeColor("LUXSTRAL COLOR", juce::Colour(0xff4ae0c8), VisualizerMode::SPCTR_COLOR),
-          nodeBlob ("LUXSTRAL BLOB",  juce::Colour(0xff8888e0), VisualizerMode::SPCTR_BLOB)
+        : processor(p)
     {
         auto& apvts = p.getAPVTS();
 
@@ -127,62 +120,24 @@ public:
         addAndMakeVisible(blobColorSplitSlider);
         blobColorSplitAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
             apvts, "spctrBlobColorSplit", blobColorSplitSlider));
-
-        // ── Pipeline output nodes ─────────────────────────────────────────
-        for (auto* n : { &nodeGray, &nodeColor, &nodeBlob })
-        {
-            addAndMakeVisible(n);
-            n->onClick = [this](VisualizerMode m)
-            {
-                setActiveMode(m);
-                if (onNodeClicked) onNodeClicked(m);
-            };
-        }
-    }
-
-    void setActiveMode(VisualizerMode m)
-    {
-        nodeGray.setActive (m == VisualizerMode::SPCTR_GRAY);
-        nodeColor.setActive(m == VisualizerMode::SPCTR_COLOR);
-        nodeBlob.setActive (m == VisualizerMode::SPCTR_BLOB);
-        nodeGray.setShowEye (m == VisualizerMode::SPCTR_GRAY);
-        nodeColor.setShowEye(m == VisualizerMode::SPCTR_COLOR);
-        nodeBlob.setShowEye (m == VisualizerMode::SPCTR_BLOB);
     }
 
     void paint(juce::Graphics& g) override
     {
-        const int W   = getWidth();
-        const int H   = getHeight();
-        const int pad = 8;
+        const int W = getWidth();
         computeColumns(W, leftX_, leftW_, rightX_, rightW_);
 
-        // ── Divider between columns ───────────────────────────────────────
-        const int divX = rightX_ - pad / 2;
-        g.setColour(juce::Colour(0x18ffffff));
-        g.fillRect(divX, 4, 1, H - 8);
-
-        // ── Left column section header: BLOB DETECTION ────────────────────
+        // ── Section header: BLOB DETECTION ────────────────────────────────
         const int blobSectionY = rowY(4) + Sp3ctraTheme::kControlH + 2;
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
         g.setColour(juce::Colour(0xff8888e0).withAlpha(0.55f)); // SPCTR_BLOB accent
         g.drawText("--- BLOB DETECTION ---", leftX_, blobSectionY, leftW_, 12,
                    juce::Justification::centred);
-
-        // ── Right column: "Pipeline outputs" label above nodes ───────────
-        const auto accent = juce::Colour(0xff4fa3e0);
-        g.setColour(accent.withAlpha(0.6f));
-        const int prelimLabelY = nodeGray.getY() - 16;
-        if (prelimLabelY >= 0)
-            g.drawText("Pipeline outputs (click to visualize)",
-                       rightX_, prelimLabelY, rightW_, 14,
-                       juce::Justification::centred);
     }
 
     void resized() override
     {
         const int W = getWidth();
-        const int H = getHeight();
         computeColumns(W, leftX_, leftW_, rightX_, rightW_);
 
         // ── Left column: all controls ─────────────────────────────────────
@@ -221,18 +176,6 @@ public:
         blobMinWidthLabel.setBounds(lb(6));    blobMinWidthSlider.setBounds(cb(6));
         blobMergeGapLabel.setBounds(lb(7));    blobMergeGapSlider.setBounds(cb(7));
         blobColorSplitLabel.setBounds(lb(8));  blobColorSplitSlider.setBounds(cb(8));
-
-        // ── Right column: 3 output nodes, vertically centred ─────────────
-        constexpr int kNH = 28;   // node height
-        constexpr int kNG = 6;    // gap between nodes
-        constexpr int kLH = 16;   // "Pipeline outputs" label height
-        const int totalH  = kLH + 3 * kNH + 2 * kNG;
-        int ny = juce::jmax(4, (H - totalH) / 2);
-
-        ny += kLH;   // space for the section label
-        nodeGray.setBounds (rightX_, ny, rightW_, kNH);   ny += kNH + kNG;
-        nodeColor.setBounds(rightX_, ny, rightW_, kNH);   ny += kNH + kNG;
-        nodeBlob.setBounds (rightX_, ny, rightW_, kNH);
     }
 
 private:
@@ -263,9 +206,6 @@ private:
                                                                              blobMergeGapAttach,
                                                                              blobColorSplitAttach;
 
-    // Pipeline output nodes
-    PipelineNodeComponent nodeGray, nodeColor, nodeBlob;
-
     // Cached column geometry — updated by computeColumns() in paint() / resized()
     mutable int leftX_  = 0;
     mutable int leftW_  = 0;
@@ -274,19 +214,17 @@ private:
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /** Splits the available width into left (controls) and right (nodes) columns.
-     *  Left column: ~55% of width; right column: remainder minus divider gap.
-     *  Identical split ratio to LuxSynthTabComponent. */
+    /** Controls now span the full width (pipeline-output nodes removed — the
+     *  visualizer shows all outputs simultaneously). */
     static void computeColumns(int totalW,
                                 int& lx, int& lw,
                                 int& rx, int& rw) noexcept
     {
         constexpr int kPad = 8;
-        constexpr int kDiv = 8;   // gap around the divider
         lx = kPad;
-        lw = totalW * 55 / 100 - kPad - kDiv / 2;
-        rx = lx + lw + kDiv;
-        rw = totalW - rx - kPad;
+        lw = totalW - 2 * kPad;
+        rx = totalW - kPad;   // unused (no right column)
+        rw = 0;
     }
 
     void initLabel(juce::Label& lbl, const juce::String& text)

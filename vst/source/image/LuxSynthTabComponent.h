@@ -16,21 +16,13 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
-#include "PipelineNodeComponent.h"
 #include "VisualizerMode.h"
-#include <functional>
 
 class LuxSynthTabComponent : public juce::Component
 {
 public:
-    std::function<void(VisualizerMode)> onNodeClicked;
-
     explicit LuxSynthTabComponent(Sp3ctraAudioProcessor& p)
-        : processor(p),
-          nodeGray     ("LUXSYNTH GRAY",  juce::Colour(0xffe0a84a), VisualizerMode::SYNTH_GRAY),
-          nodeColor    ("LUXSYNTH COLOR", juce::Colour(0xffe0c864), VisualizerMode::SYNTH_COLOR),
-          nodeBlob     ("LUXSYNTH BLOB",  juce::Colour(0xffd07040), VisualizerMode::SYNTH_BLOB),
-          nodeFftColor ("LUXSYNTH FFT",   juce::Colour(0xffcc88cc), VisualizerMode::SYNTH_FFT_COLOR)
+        : processor(p)
     {
         auto& apvts = p.getAPVTS();
 
@@ -145,44 +137,14 @@ public:
         addAndMakeVisible(fftSmoothingSlider);
         fftSmoothingAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
             apvts, "lxFftSmoothing", fftSmoothingSlider));
-
-        // ── All output nodes ──────────────────────────────────────────────
-        for (auto* n : { &nodeGray, &nodeColor, &nodeBlob, &nodeFftColor })
-        {
-            addAndMakeVisible(n);
-            n->onClick = [this](VisualizerMode m)
-            {
-                setActiveMode(m);
-                if (onNodeClicked) onNodeClicked(m);
-            };
-        }
-    }
-
-    void setActiveMode(VisualizerMode m)
-    {
-        nodeGray.setActive     (m == VisualizerMode::SYNTH_GRAY);
-        nodeColor.setActive    (m == VisualizerMode::SYNTH_COLOR);
-        nodeBlob.setActive     (m == VisualizerMode::SYNTH_BLOB);
-        nodeFftColor.setActive (m == VisualizerMode::SYNTH_FFT_COLOR);
-        nodeGray.setShowEye     (m == VisualizerMode::SYNTH_GRAY);
-        nodeColor.setShowEye    (m == VisualizerMode::SYNTH_COLOR);
-        nodeBlob.setShowEye     (m == VisualizerMode::SYNTH_BLOB);
-        nodeFftColor.setShowEye (m == VisualizerMode::SYNTH_FFT_COLOR);
     }
 
     void paint(juce::Graphics& g) override
     {
-        const int W   = getWidth();
-        const int H   = getHeight();
-        const int pad = 8;
+        const int W = getWidth();
         computeColumns(W, leftX_, leftW_, rightX_, rightW_);
 
-        // ── Divider line between columns ──────────────────────────────────
-        const int divX = rightX_ - pad / 2;
-        g.setColour(juce::Colour(0x18ffffff));
-        g.fillRect(divX, 4, 1, H - 8);
-
-        // ── Left column section headers ───────────────────────────────────
+        // ── Section headers ───────────────────────────────────────────────
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
 
         const int blobSectionY = rowY(4) + Sp3ctraTheme::kControlH + 2;
@@ -194,30 +156,11 @@ public:
         g.setColour(juce::Colour(0xffe06868).withAlpha(0.55f));
         g.drawText("--- FFT PARAMETERS ---", leftX_, fftSectionY, leftW_, 12,
                    juce::Justification::centred);
-
-        // ── Right column node section labels ──────────────────────────────
-        const auto accent = juce::Colour(0xffe08844);
-        g.setColour(accent.withAlpha(0.6f));
-
-        // "Preliminary outputs" label sits above nodeGray
-        const int prelimLabelY = nodeGray.getY() - 16;
-        if (prelimLabelY >= 0)
-            g.drawText("Preliminary outputs",
-                       rightX_, prelimLabelY, rightW_, 14,
-                       juce::Justification::centred);
-
-        // "Spectral analysis (FFT)" label sits above nodeFftColor
-        const int fftLabelY = nodeFftColor.getY() - 16;
-        if (fftLabelY >= 0)
-            g.drawText("Spectral analysis (FFT)",
-                       rightX_, fftLabelY, rightW_, 14,
-                       juce::Justification::centred);
     }
 
     void resized() override
     {
         const int W = getWidth();
-        const int H = getHeight();
         computeColumns(W, leftX_, leftW_, rightX_, rightW_);
 
         // ── Left column: all controls ─────────────────────────────────────
@@ -258,31 +201,6 @@ public:
         // Rows 9-10: FFT Parameters
         fftBinsLabel.setBounds(lb(9));         fftBinsCombo.setBounds(cb(9));
         fftSmoothingLabel.setBounds(lb(10));   fftSmoothingSlider.setBounds(cb(10));
-
-        // ── Right column: 5 output nodes, vertically distributed ──────────
-        // Layout (top → bottom):
-        //   [16 px: "Preliminary outputs" label – drawn in paint()]
-        //   nodeGray  (28px)
-        //   nodeColor (28px)
-        //   nodeBlob  (28px)
-        //   [16 px: "Spectral analysis (FFT)" label – drawn in paint()]
-        //   nodeFftColor (28px)
-        constexpr int kNH  = 28;   // node height
-        constexpr int kNG  = 5;    // gap between consecutive nodes
-        constexpr int kLH  = 16;   // section label height
-        constexpr int kSG  = 14;   // extra gap between the two sections
-        // Total content height: 2 labels + 4 nodes + 3 intra-node gaps + 1 section gap
-        const int totalH = 2 * kLH + 4 * kNH + 3 * kNG + kSG;
-        // Centre the block vertically in the right column
-        int ny = juce::jmax(4, (H - totalH) / 2);
-
-        ny += kLH;   // space for "Preliminary outputs" label
-        nodeGray.setBounds (rightX_, ny, rightW_, kNH);   ny += kNH + kNG;
-        nodeColor.setBounds(rightX_, ny, rightW_, kNH);   ny += kNH + kNG;
-        nodeBlob.setBounds (rightX_, ny, rightW_, kNH);   ny += kNH + kSG;
-
-        ny += kLH;   // space for "Spectral analysis (FFT)" label
-        nodeFftColor.setBounds(rightX_, ny, rightW_, kNH);
     }
 
 private:
@@ -320,9 +238,6 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> fftBinsAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   fftSmoothingAttach;
 
-    // Pipeline output nodes
-    PipelineNodeComponent nodeGray, nodeColor, nodeBlob, nodeFftColor;
-
     // Cached column geometry — updated by computeColumns() in paint() / resized()
     mutable int leftX_  = 0;
     mutable int leftW_  = 0;
@@ -331,18 +246,17 @@ private:
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /** Splits the available width into left (controls) and right (nodes) columns.
-     *  Left column: ~55% of width; right column: remainder minus divider gap. */
+    /** Controls now span the full width (pipeline-output nodes removed — the
+     *  visualizer shows all outputs simultaneously). */
     static void computeColumns(int totalW,
                                 int& lx, int& lw,
                                 int& rx, int& rw) noexcept
     {
-        constexpr int kPad    = 8;
-        constexpr int kDiv    = 8;   // gap around the divider
+        constexpr int kPad = 8;
         lx = kPad;
-        lw = totalW * 55 / 100 - kPad - kDiv / 2;
-        rx = lx + lw + kDiv;
-        rw = totalW - rx - kPad;
+        lw = totalW - 2 * kPad;
+        rx = totalW - kPad;   // unused (no right column)
+        rw = 0;
     }
 
     void initLabel(juce::Label& lbl, const juce::String& text)

@@ -9,6 +9,7 @@
 
 #include "vst_adapters_c.h"
 #include "synth_luxstral_threading.h"
+#include "luxstral_engine.h"
 #include <errno.h>
 #include <string.h>
 
@@ -53,26 +54,23 @@ int barrier_init(barrier_t *barrier, int count) {
   return 0;
 }
 
-int barrier_wait(barrier_t *barrier) {
-  // 🔧 CRITICAL FIX: Check exit flag before waiting
-  extern _Atomic int synth_workers_must_exit;
-  extern _Atomic int synth_pool_shutdown;
-  
-  if (synth_workers_must_exit || synth_pool_shutdown) {
+int barrier_wait(LuxStralEngine *eng, barrier_t *barrier) {
+  // 🔧 CRITICAL FIX: Check exit flag before waiting (per-engine flags)
+  if (eng->workers_must_exit || eng->pool_shutdown) {
     return -1;  // Early exit - thread should terminate
   }
-  
+
   pthread_mutex_lock(&barrier->mutex);
-  
+
   // Check again under lock
-  if (synth_workers_must_exit || synth_pool_shutdown) {
+  if (eng->workers_must_exit || eng->pool_shutdown) {
     pthread_mutex_unlock(&barrier->mutex);
     return -1;
   }
-  
+
   int gen = barrier->generation;
   barrier->waiting++;
-  
+
   if (barrier->waiting >= barrier->count) {
     // Last thread to arrive - wake everyone up
     barrier->waiting = 0;
@@ -81,16 +79,16 @@ int barrier_wait(barrier_t *barrier) {
     pthread_mutex_unlock(&barrier->mutex);
     return PTHREAD_BARRIER_SERIAL_THREAD;  // Special return for last thread
   }
-  
+
   // Wait for all threads to arrive, but check exit flags on each wakeup
   while (gen == barrier->generation) {
     pthread_cond_wait(&barrier->cond, &barrier->mutex);
-    
+
     // 🔧 FIX: Check exit flags after wakeup from broadcast
     // If generation has already advanced (last thread reset waiting=0),
     // do NOT decrement waiting — it's already 0 and would underflow to -1,
     // corrupting the barrier for any subsequent reuse.
-    if (synth_workers_must_exit || synth_pool_shutdown) {
+    if (eng->workers_must_exit || eng->pool_shutdown) {
       if (gen == barrier->generation) {
         // Generation hasn't advanced yet: we're still in the wait set
         barrier->waiting--;
@@ -100,7 +98,7 @@ int barrier_wait(barrier_t *barrier) {
       return -1;  // Early exit
     }
   }
-  
+
   pthread_mutex_unlock(&barrier->mutex);
   return 0;
 }
@@ -115,47 +113,49 @@ int barrier_destroy(barrier_t *barrier) {
 
 /**
  * @brief  Initialize barrier synchronization system
+ * @param  eng Engine instance
  * @param  num_threads Number of threads (workers + main thread)
  * @retval 0 on success, -1 on error
  */
-int synth_init_barriers(int num_threads) {
+int synth_init_barriers(LuxStralEngine *eng, int num_threads) {
 #ifdef __linux__
-  if (pthread_barrier_init(&g_worker_start_barrier, NULL, num_threads) != 0) {
+  if (pthread_barrier_init(&eng->worker_start_barrier, NULL, num_threads) != 0) {
     log_error("SYNTH_RT", "Failed to initialize start barrier");
     return -1;
   }
-  if (pthread_barrier_init(&g_worker_end_barrier, NULL, num_threads) != 0) {
+  if (pthread_barrier_init(&eng->worker_end_barrier, NULL, num_threads) != 0) {
     log_error("SYNTH_RT", "Failed to initialize end barrier");
-    pthread_barrier_destroy(&g_worker_start_barrier);
+    pthread_barrier_destroy(&eng->worker_start_barrier);
     return -1;
   }
 #else
-  if (barrier_init(&g_worker_start_barrier, num_threads) != 0) {
+  if (barrier_init(&eng->worker_start_barrier, num_threads) != 0) {
     log_error("SYNTH_RT", "Failed to initialize start barrier");
     return -1;
   }
-  if (barrier_init(&g_worker_end_barrier, num_threads) != 0) {
+  if (barrier_init(&eng->worker_end_barrier, num_threads) != 0) {
     log_error("SYNTH_RT", "Failed to initialize end barrier");
-    barrier_destroy(&g_worker_start_barrier);
+    barrier_destroy(&eng->worker_start_barrier);
     return -1;
   }
 #endif
-  
+
   log_info("SYNTH_RT", "Barrier synchronization initialized for %d threads", num_threads);
   return 0;
 }
 
 /**
  * @brief  Cleanup barrier synchronization system
+ * @param  eng Engine instance
  * @retval None
  */
-void synth_cleanup_barriers(void) {
+void synth_cleanup_barriers(LuxStralEngine *eng) {
 #ifdef __linux__
-  pthread_barrier_destroy(&g_worker_start_barrier);
-  pthread_barrier_destroy(&g_worker_end_barrier);
+  pthread_barrier_destroy(&eng->worker_start_barrier);
+  pthread_barrier_destroy(&eng->worker_end_barrier);
 #else
-  barrier_destroy(&g_worker_start_barrier);
-  barrier_destroy(&g_worker_end_barrier);
+  barrier_destroy(&eng->worker_start_barrier);
+  barrier_destroy(&eng->worker_end_barrier);
 #endif
   log_info("SYNTH_RT", "Barrier synchronization cleaned up");
 }
@@ -284,13 +284,15 @@ int synth_set_rt_priority(pthread_t thread, int priority) {
 
 /**
  * @brief  Wrapper for barrier wait (cross-platform)
+ * @param  eng Engine instance (exit flags checked on macOS path)
  * @param  barrier Barrier to wait on
  * @retval 0 on success, PTHREAD_BARRIER_SERIAL_THREAD for last thread
  */
-int synth_barrier_wait(void *barrier) {
+int synth_barrier_wait(LuxStralEngine *eng, void *barrier) {
 #ifdef __linux__
+  (void)eng;
   return pthread_barrier_wait((pthread_barrier_t*)barrier);
 #else
-  return barrier_wait((barrier_t*)barrier);
+  return barrier_wait(eng, (barrier_t*)barrier);
 #endif
 }

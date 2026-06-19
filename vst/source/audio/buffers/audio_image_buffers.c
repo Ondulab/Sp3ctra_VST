@@ -61,6 +61,13 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
   buffers->modulated_G = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
   buffers->modulated_B = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
 
+  // Allocate per-insert visual tap buffers
+  for (i = 0; i < AUDIO_IMAGE_NUM_INSERT_TAPS; i++) {
+    buffers->insert_tap_R[i] = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
+    buffers->insert_tap_G[i] = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
+    buffers->insert_tap_B[i] = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
+  }
+
   // Check all allocations
   if (!buffers->buffer0_R   || !buffers->buffer0_G   || !buffers->buffer0_B   ||
       !buffers->buffer1_R   || !buffers->buffer1_G   || !buffers->buffer1_B   ||
@@ -71,6 +78,14 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
     fprintf(stderr, "ERROR: Failed to allocate audio image buffers\n");
     audio_image_buffers_cleanup(buffers);
     return -1;
+  }
+  for (i = 0; i < AUDIO_IMAGE_NUM_INSERT_TAPS; i++) {
+    if (!buffers->insert_tap_R[i] || !buffers->insert_tap_G[i] ||
+        !buffers->insert_tap_B[i]) {
+      fprintf(stderr, "ERROR: Failed to allocate insert tap buffers\n");
+      audio_image_buffers_cleanup(buffers);
+      return -1;
+    }
   }
 
   // Initialize buffers with test pattern to ensure audio synthesis works
@@ -103,6 +118,13 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
   memset(buffers->modulated_R, 255, nb_pixels);
   memset(buffers->modulated_G, 255, nb_pixels);
   memset(buffers->modulated_B, 255, nb_pixels);
+
+  // Initialize insert taps with white (no chain run yet)
+  for (i = 0; i < AUDIO_IMAGE_NUM_INSERT_TAPS; i++) {
+    memset(buffers->insert_tap_R[i], 255, nb_pixels);
+    memset(buffers->insert_tap_G[i], 255, nb_pixels);
+    memset(buffers->insert_tap_B[i], 255, nb_pixels);
+  }
 
 
   log_info("BUFFERS", "Audio image buffers initialized with test pattern for immediate audio feedback");
@@ -200,6 +222,15 @@ void audio_image_buffers_cleanup(AudioImageBuffers *buffers) {
   if (buffers->modulated_B) {
     free(buffers->modulated_B);
     buffers->modulated_B = NULL;
+  }
+
+  {
+    int t;
+    for (t = 0; t < AUDIO_IMAGE_NUM_INSERT_TAPS; t++) {
+      if (buffers->insert_tap_R[t]) { free(buffers->insert_tap_R[t]); buffers->insert_tap_R[t] = NULL; }
+      if (buffers->insert_tap_G[t]) { free(buffers->insert_tap_G[t]); buffers->insert_tap_G[t] = NULL; }
+      if (buffers->insert_tap_B[t]) { free(buffers->insert_tap_B[t]); buffers->insert_tap_B[t] = NULL; }
+    }
   }
 
   // Destroy mutex if initialized
@@ -573,5 +604,46 @@ void audio_image_buffers_get_modulated_pointers(const AudioImageBuffers *buffers
   *out_R = buffers->modulated_R;
   *out_G = buffers->modulated_G;
   *out_B = buffers->modulated_B;
+}
+
+/**
+ * @brief Snapshot the output frame of one insert (synthesis thread only).
+ *
+ * Called by the image chain executor when a visual consumer declared demand
+ * for this tap (image_chain_set_tap_demand).  Single producer / multi reader.
+ */
+void audio_image_buffers_snapshot_insert_tap(AudioImageBuffers *buffers,
+                                             int tap,
+                                             const uint8_t *srcR,
+                                             const uint8_t *srcG,
+                                             const uint8_t *srcB,
+                                             int nb_pixels) {
+  if (!buffers || !buffers->initialized || tap < 0 ||
+      tap >= AUDIO_IMAGE_NUM_INSERT_TAPS || !srcR || !srcG || !srcB ||
+      nb_pixels <= 0)
+    return;
+
+  memcpy(buffers->insert_tap_R[tap], srcR, nb_pixels);
+  memcpy(buffers->insert_tap_G[tap], srcG, nb_pixels);
+  memcpy(buffers->insert_tap_B[tap], srcB, nb_pixels);
+}
+
+/**
+ * @brief Get pointers to the last published tap frame (lock-free, read-only).
+ * @return 0 on success, -1 on invalid tap / uninitialized buffers.
+ */
+int audio_image_buffers_get_insert_tap_pointers(const AudioImageBuffers *buffers,
+                                                int tap,
+                                                uint8_t **out_R,
+                                                uint8_t **out_G,
+                                                uint8_t **out_B) {
+  if (!buffers || !buffers->initialized || tap < 0 ||
+      tap >= AUDIO_IMAGE_NUM_INSERT_TAPS || !out_R || !out_G || !out_B)
+    return -1;
+
+  *out_R = buffers->insert_tap_R[tap];
+  *out_G = buffers->insert_tap_G[tap];
+  *out_B = buffers->insert_tap_B[tap];
+  return 0;
 }
 

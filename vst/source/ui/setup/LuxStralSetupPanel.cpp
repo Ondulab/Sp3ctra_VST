@@ -1,27 +1,23 @@
-#include "LuxStralSettingsTab.h"
-#include "../Sp3ctraConstants.h"
-#include "../UITheme.h"
+#include "LuxStralSetupPanel.h"
+#include "SetupHeader.h"
+#include "../../Sp3ctraConstants.h"
+#include "../../UITheme.h"
 #include <cmath>
 
 //==============================================================================
-LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
-    : apvts(processor.getAPVTS())
+LuxStralSetupPanel::LuxStralSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour)
+    : apvts(processor.getAPVTS()), accent(accentColour)
 {
-    // Setup viewport for scrolling
-    addAndMakeVisible(viewport);
-    viewport.setViewedComponent(&contentComponent, false);
-    viewport.setScrollBarsShown(true, false);
-
     // ========================================================================
     // Engine Enable
     // ========================================================================
     enableLabel.setText("LuxStral Enabled:", juce::dontSendNotification);
     enableLabel.setJustificationType(juce::Justification::centredRight);
     enableLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
-    contentComponent.addAndMakeVisible(enableLabel);
+    addAndMakeVisible(enableLabel);
 
     enableToggle.setButtonText("Active");
-    contentComponent.addAndMakeVisible(enableToggle);
+    addAndMakeVisible(enableToggle);
     enableAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "deviceEnabled", enableToggle);
 
@@ -29,20 +25,20 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     // Section: Musical Tuning (eliminates frequency jumps)
     // ========================================================================
     tuningRangeSectionLabel.setText("Musical Tuning", juce::dontSendNotification);
-    tuningRangeSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
+    tuningRangeSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
     tuningRangeSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
-    contentComponent.addAndMakeVisible(tuningRangeSectionLabel);
+    addAndMakeVisible(tuningRangeSectionLabel);
 
     // Tuning (A4 reference)
     tuningLabel.setText("Tuning (A4):", juce::dontSendNotification);
     tuningLabel.setJustificationType(juce::Justification::centredRight);
     tuningLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-    contentComponent.addAndMakeVisible(tuningLabel);
+    addAndMakeVisible(tuningLabel);
 
     tuningSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     tuningSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     tuningSlider.setTextValueSuffix(" Hz");
-    contentComponent.addAndMakeVisible(tuningSlider);
+    addAndMakeVisible(tuningSlider);
     tuningAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralTuning", tuningSlider);
 
@@ -50,7 +46,7 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     rootNoteLabel.setText("Root Note:", juce::dontSendNotification);
     rootNoteLabel.setJustificationType(juce::Justification::centredRight);
     rootNoteLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-    contentComponent.addAndMakeVisible(rootNoteLabel);
+    addAndMakeVisible(rootNoteLabel);
 
     const char* noteLetters[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
     for (int octave = 1; octave <= 6; octave++) {
@@ -59,7 +55,7 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
                                      (octave - 1) * 12 + note + 1);
         }
     }
-    contentComponent.addAndMakeVisible(rootNoteComboBox);
+    addAndMakeVisible(rootNoteComboBox);
     rootNoteAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         apvts, "luxstralRootNote", rootNoteComboBox);
 
@@ -67,12 +63,12 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     numOctavesLabel.setText("Octaves:", juce::dontSendNotification);
     numOctavesLabel.setJustificationType(juce::Justification::centredRight);
     numOctavesLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-    contentComponent.addAndMakeVisible(numOctavesLabel);
+    addAndMakeVisible(numOctavesLabel);
 
     numOctavesSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     numOctavesSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
     numOctavesSlider.setRange(1, 10, 1);
-    contentComponent.addAndMakeVisible(numOctavesSlider);
+    addAndMakeVisible(numOctavesSlider);
     numOctavesAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralNumOctaves", numOctavesSlider);
 
@@ -80,13 +76,13 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     freqRangeInfoLabel.setText("Range: -- Hz to -- Hz", juce::dontSendNotification);
     freqRangeInfoLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).italicised());
     freqRangeInfoLabel.setColour(juce::Label::textColourId, juce::Colours::grey);
-    contentComponent.addAndMakeVisible(freqRangeInfoLabel);
+    addAndMakeVisible(freqRangeInfoLabel);
 
     // Equal-Loudness Compensation (Physiological Filter)
     physiologicalFilterLabel.setText("Equal-Loudness:", juce::dontSendNotification);
     physiologicalFilterLabel.setJustificationType(juce::Justification::centredRight);
     physiologicalFilterLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-    contentComponent.addAndMakeVisible(physiologicalFilterLabel);
+    addAndMakeVisible(physiologicalFilterLabel);
 
     physiologicalFilterToggle.setButtonText("Compensate (A-weighting)");
     physiologicalFilterToggle.setTooltip(
@@ -94,23 +90,24 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
         "Boosts bass frequencies and attenuates mid frequencies (~1-5 kHz)\n"
         "so all frequencies are perceived at equal loudness.\n\n"
         "Regenerates wavetables automatically when toggled.");
-    contentComponent.addAndMakeVisible(physiologicalFilterToggle);
+    addAndMakeVisible(physiologicalFilterToggle);
     physiologicalFilterAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "luxstralPhysiologicalFilter", physiologicalFilterToggle);
 
     // Correction depth
     physiologicalDepthLabel.setText("Correction Depth:", juce::dontSendNotification);
     physiologicalDepthLabel.setJustificationType(juce::Justification::centredRight);
+    physiologicalDepthLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     physiologicalDepthLabel.setTooltip(
         "Intensity of the equal-loudness correction.\n"
         "0.0 = flat (no correction), 1.0 = full inverse A-weighting.\n"
         "0.5 is a balanced starting point.");
-    contentComponent.addAndMakeVisible(physiologicalDepthLabel);
+    addAndMakeVisible(physiologicalDepthLabel);
 
     physiologicalDepthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     physiologicalDepthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbXNarrow, Sp3ctraTheme::kTextBoxH);
     physiologicalDepthSlider.setTooltip(physiologicalDepthLabel.getTooltip());
-    contentComponent.addAndMakeVisible(physiologicalDepthSlider);
+    addAndMakeVisible(physiologicalDepthSlider);
     physiologicalDepthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralPhysiologicalDepth", physiologicalDepthSlider);
 
@@ -118,79 +115,63 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     // Section: Dynamics Processing (Soft Limit only)
     // ========================================================================
     dynamicsSectionLabel.setText("Dynamics Processing", juce::dontSendNotification);
-    dynamicsSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
+    dynamicsSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
     dynamicsSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
-    contentComponent.addAndMakeVisible(dynamicsSectionLabel);
+    addAndMakeVisible(dynamicsSectionLabel);
 
     softLimitThresholdLabel.setText("Soft Limit Threshold:", juce::dontSendNotification);
     softLimitThresholdLabel.setJustificationType(juce::Justification::centredRight);
     softLimitThresholdLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-    contentComponent.addAndMakeVisible(softLimitThresholdLabel);
+    addAndMakeVisible(softLimitThresholdLabel);
 
     softLimitThresholdSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     softLimitThresholdSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
-    contentComponent.addAndMakeVisible(softLimitThresholdSlider);
+    addAndMakeVisible(softLimitThresholdSlider);
     softLimitThresholdAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralSoftLimitThreshold", softLimitThresholdSlider);
 
     softLimitKneeLabel.setText("Soft Limit Knee:", juce::dontSendNotification);
     softLimitKneeLabel.setJustificationType(juce::Justification::centredRight);
     softLimitKneeLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-    contentComponent.addAndMakeVisible(softLimitKneeLabel);
+    addAndMakeVisible(softLimitKneeLabel);
 
     softLimitKneeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     softLimitKneeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
-    contentComponent.addAndMakeVisible(softLimitKneeSlider);
+    addAndMakeVisible(softLimitKneeSlider);
     softLimitKneeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralSoftLimitKnee", softLimitKneeSlider);
 
     // ========================================================================
     // Section: StrokeForge Advanced Blob Detection
     // ========================================================================
-    sfBlobSectionLabel.setText("StrokeForge - Advanced Blob Detection", juce::dontSendNotification);
-    sfBlobSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
+    sfBlobSectionLabel.setText("StrokeForge — Advanced Blob Detection", juce::dontSendNotification);
+    sfBlobSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
     sfBlobSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightyellow);
-    contentComponent.addAndMakeVisible(sfBlobSectionLabel);
+    addAndMakeVisible(sfBlobSectionLabel);
 
     contrastAdaptiveLabel.setText("Contrast Adaptive:", juce::dontSendNotification);
     contrastAdaptiveLabel.setJustificationType(juce::Justification::centredRight);
     contrastAdaptiveLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-    contentComponent.addAndMakeVisible(contrastAdaptiveLabel);
+    addAndMakeVisible(contrastAdaptiveLabel);
 
     contrastAdaptiveToggle.setButtonText("Enable");
-    contentComponent.addAndMakeVisible(contrastAdaptiveToggle);
+    addAndMakeVisible(contrastAdaptiveToggle);
     contrastAdaptiveAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "sfBlobContrastAdaptive", contrastAdaptiveToggle);
 
     contrastSensLabel.setText("Contrast Sensitivity:", juce::dontSendNotification);
     contrastSensLabel.setJustificationType(juce::Justification::centredRight);
     contrastSensLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-    contentComponent.addAndMakeVisible(contrastSensLabel);
+    addAndMakeVisible(contrastSensLabel);
 
     contrastSensSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     contrastSensSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
-    contentComponent.addAndMakeVisible(contrastSensSlider);
+    addAndMakeVisible(contrastSensSlider);
     contrastSensAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "sfBlobContrastSensitivity", contrastSensSlider);
 
-    // ========================================================================
-    // Section: Performance
-    // ========================================================================
-    performanceSectionLabel.setText("Performance", juce::dontSendNotification);
-    performanceSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
-    performanceSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
-    contentComponent.addAndMakeVisible(performanceSectionLabel);
-
-    numWorkersLabel.setText("Worker Threads:", juce::dontSendNotification);
-    numWorkersLabel.setJustificationType(juce::Justification::centredRight);
-    numWorkersLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-    contentComponent.addAndMakeVisible(numWorkersLabel);
-
-    numWorkersSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    numWorkersSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
-    contentComponent.addAndMakeVisible(numWorkersSlider);
-    numWorkersAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "luxstralNumWorkers", numWorkersSlider);
+    // NOTE: the former "Performance / Worker Threads" section intentionally
+    // stays in the gear-wheel SYSTEM tab (luxstralNumWorkers is machine-level).
 
     // Add listeners for dynamic octave limitation
     rootNoteComboBox.addListener(this);
@@ -200,37 +181,21 @@ LuxStralSettingsTab::LuxStralSettingsTab(Sp3ctraAudioProcessor& processor)
     // Initial update
     updateOctavesSliderRange();
     updateFrequencyRangeInfo();
-
-    layoutContentComponent();
 }
 
-LuxStralSettingsTab::~LuxStralSettingsTab()
+LuxStralSetupPanel::~LuxStralSetupPanel()
 {
 }
 
-void LuxStralSettingsTab::paint(juce::Graphics& g)
+void LuxStralSetupPanel::paint(juce::Graphics& g)
 {
-    g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
-
-    g.setColour(juce::Colours::white);
-    g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
-    g.drawText("LuxStral Additive Synthesis", getLocalBounds().removeFromTop(30),
-               juce::Justification::centred, true);
+    SetupUI::paintHeader(g, *this, "LUXSTRAL -- SETUP", accent);
 }
 
-void LuxStralSettingsTab::resized()
-{
-    auto bounds = getLocalBounds();
-    bounds.removeFromTop(35);
-
-    viewport.setBounds(bounds);
-    layoutContentComponent();
-}
-
-void LuxStralSettingsTab::layoutContentComponent()
+void LuxStralSetupPanel::resized()
 {
     constexpr int labelWidth = Sp3ctraTheme::kLabelWide;
-    const int sliderWidth = 200;
+    const int sliderWidth = juce::jmin(280, juce::jmax(160, getWidth() - labelWidth - 3 * Sp3ctraTheme::kHPad));
     constexpr int rowHeight = Sp3ctraTheme::kRowStep;
     const int sectionSpacing = 15;
     constexpr int itemSpacing = Sp3ctraTheme::kRowGap;
@@ -238,8 +203,8 @@ void LuxStralSettingsTab::layoutContentComponent()
     constexpr int ctrlH = Sp3ctraTheme::kControlH;
     constexpr int vc = (rowHeight - ctrlH) / 2;
 
-    int yPos = padding;
-    int contentWidth = viewport.getWidth() - 40;
+    int yPos = SetupUI::kHeaderH + Sp3ctraTheme::kSectionGap;
+    const int contentWidth = juce::jmax(120, getWidth() - 2 * padding);
 
     // ========================================================================
     // Engine Enable
@@ -303,27 +268,13 @@ void LuxStralSettingsTab::layoutContentComponent()
 
     contrastSensLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
     contrastSensSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
-    yPos += rowHeight + sectionSpacing;
-
-    // ========================================================================
-    // Section: Performance
-    // ========================================================================
-    performanceSectionLabel.setBounds(padding, yPos, contentWidth, 25);
-    yPos += 30;
-
-    numWorkersLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
-    numWorkersSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
-    yPos += rowHeight + padding;
-
-    // Set content component size for scrolling
-    contentComponent.setSize(viewport.getWidth(), yPos);
 }
 
 //==============================================================================
 // Listener implementations
 //==============================================================================
 
-void LuxStralSettingsTab::comboBoxChanged(juce::ComboBox* comboBoxThatHasChanged)
+void LuxStralSetupPanel::comboBoxChanged(juce::ComboBox* comboBoxThatHasChanged)
 {
     if (comboBoxThatHasChanged == &rootNoteComboBox)
     {
@@ -332,7 +283,7 @@ void LuxStralSettingsTab::comboBoxChanged(juce::ComboBox* comboBoxThatHasChanged
     }
 }
 
-void LuxStralSettingsTab::sliderValueChanged(juce::Slider* slider)
+void LuxStralSetupPanel::sliderValueChanged(juce::Slider* slider)
 {
     if (slider == &tuningSlider || slider == &numOctavesSlider)
     {
@@ -348,7 +299,7 @@ void LuxStralSettingsTab::sliderValueChanged(juce::Slider* slider)
 // Helper functions for dynamic octave limitation
 //==============================================================================
 
-float LuxStralSettingsTab::getRootNoteFrequency() const
+float LuxStralSetupPanel::getRootNoteFrequency() const
 {
     float tuning = static_cast<float>(tuningSlider.getValue());
     int rootNoteIndex = rootNoteComboBox.getSelectedId() - 1;
@@ -359,7 +310,7 @@ float LuxStralSettingsTab::getRootNoteFrequency() const
     return rootFreq;
 }
 
-int LuxStralSettingsTab::getMaxOctavesForRootNote() const
+int LuxStralSetupPanel::getMaxOctavesForRootNote() const
 {
     constexpr float MAX_FREQUENCY = 20000.0f;
     float rootFreq = getRootNoteFrequency();
@@ -373,7 +324,7 @@ int LuxStralSettingsTab::getMaxOctavesForRootNote() const
     return maxOctaves;
 }
 
-void LuxStralSettingsTab::updateOctavesSliderRange()
+void LuxStralSetupPanel::updateOctavesSliderRange()
 {
     int maxOctaves = getMaxOctavesForRootNote();
 
@@ -393,7 +344,7 @@ void LuxStralSettingsTab::updateOctavesSliderRange()
                            juce::dontSendNotification);
 }
 
-void LuxStralSettingsTab::updateFrequencyRangeInfo()
+void LuxStralSetupPanel::updateFrequencyRangeInfo()
 {
     float rootFreq = getRootNoteFrequency();
     int numOctaves = static_cast<int>(numOctavesSlider.getValue());

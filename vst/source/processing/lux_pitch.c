@@ -22,10 +22,10 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-/* ── Global instances ──────────────────────────────────────────────────────── */
-LuxPitchState g_lux_pitch;
+/* ── Global instance ───────────────────────────────────────────────────────────
+ * Single simulation (M2): the synthesis-thread instance is the only one.
+ * Visualizers read the insert taps published by the chain executor. */
 LuxPitchState g_lux_pitch_proc;
-LuxPitchState g_lux_pitch_vid;
 
 /* ── Timestamp helper ──────────────────────────────────────────────────────── */
 static uint64_t lux_pitch_get_timestamp_us(void)
@@ -75,15 +75,19 @@ void lux_pitch_init(LuxPitchState *state)
 
     for (v = 0; v < LUX_PITCH_MAX_VOICES; v++)
     {
-        atomic_init(&state->midi.voices[v].active,   0);
-        atomic_init(&state->midi.voices[v].note,     57);
+        atomic_init(&state->midi.voices[v].active,    0);
+        atomic_init(&state->midi.voices[v].note,      57);
         atomic_init(&state->midi.voices[v].velocity,  0);
+        atomic_init(&state->midi.voices[v].retrigger, 0);
+        atomic_init(&state->midi.voices[v].sustained, 0);
         state->voices[v].envelope_stage = LUX_PITCH_ENV_IDLE;
         state->voices[v].envelope_level = 0.0f;
         state->voices[v].age = 0;
     }
     atomic_init(&state->midi.pitch_bend,   0);
     atomic_init(&state->midi.voice_count,  0);
+    atomic_init(&state->midi.sustain,      0);
+    atomic_init(&state->midi.mod_wheel,    0);
 
     state->next_age       = 1;
     state->lfo_phase      = 0.0f;
@@ -124,9 +128,11 @@ void lux_pitch_note_on(LuxPitchState *state, int note, float velocity)
 
     if (!state->config.polyphony_enabled)
     {
-        /* Mono mode: always use voice 0 */
+        /* Mono mode: always use voice 0.  Re-pressing while held is legato
+         * (no retrigger) — glide covers the transition. */
         atomic_store_explicit(&state->midi.voices[0].note, note, memory_order_relaxed);
         atomic_store_explicit(&state->midi.voices[0].velocity, vel, memory_order_relaxed);
+        atomic_store_explicit(&state->midi.voices[0].sustained, 0, memory_order_relaxed);
         atomic_store_explicit(&state->midi.voices[0].active, 1, memory_order_release);
         atomic_store_explicit(&state->midi.voice_count, 1, memory_order_relaxed);
         return;
@@ -172,11 +178,17 @@ void lux_pitch_note_on(LuxPitchState *state, int note, float velocity)
                 best = v;
             }
         }
+        /* The stolen voice never sees an inactive edge, so the envelope
+         * would otherwise keep its level and the shift would silently
+         * teleport. Flag a forced re-ATTACK (consumed by process_frame). */
+        atomic_store_explicit(&state->midi.voices[best].retrigger, 1,
+                              memory_order_relaxed);
     }
 
     state->voices[best].age = state->next_age++;
     atomic_store_explicit(&state->midi.voices[best].note, note, memory_order_relaxed);
     atomic_store_explicit(&state->midi.voices[best].velocity, vel, memory_order_relaxed);
+    atomic_store_explicit(&state->midi.voices[best].sustained, 0, memory_order_relaxed);
     atomic_store_explicit(&state->midi.voices[best].active, 1, memory_order_release);
 
     /* Update voice count */
@@ -192,14 +204,22 @@ void lux_pitch_note_on(LuxPitchState *state, int note, float velocity)
 void lux_pitch_note_off(LuxPitchState *state, int note)
 {
     int v;
+    int sustain;
     if (!state) return;
+
+    sustain = atomic_load_explicit(&state->midi.sustain, memory_order_relaxed);
 
     if (!state->config.polyphony_enabled)
     {
         /* Mono: release voice 0 if matching */
         int cur = atomic_load_explicit(&state->midi.voices[0].note, memory_order_relaxed);
         if (cur == note)
-            atomic_store_explicit(&state->midi.voices[0].active, 0, memory_order_release);
+        {
+            if (sustain)
+                atomic_store_explicit(&state->midi.voices[0].sustained, 1, memory_order_relaxed);
+            else
+                atomic_store_explicit(&state->midi.voices[0].active, 0, memory_order_release);
+        }
         return;
     }
 
@@ -209,7 +229,10 @@ void lux_pitch_note_off(LuxPitchState *state, int note)
         if (atomic_load_explicit(&state->midi.voices[v].active, memory_order_relaxed) &&
             atomic_load_explicit(&state->midi.voices[v].note, memory_order_relaxed) == note)
         {
-            atomic_store_explicit(&state->midi.voices[v].active, 0, memory_order_release);
+            if (sustain)
+                atomic_store_explicit(&state->midi.voices[v].sustained, 1, memory_order_relaxed);
+            else
+                atomic_store_explicit(&state->midi.voices[v].active, 0, memory_order_release);
             break;  /* Release first matching voice only */
         }
     }
@@ -233,6 +256,36 @@ void lux_pitch_set_pitch_bend(LuxPitchState *state, float bend)
     atomic_store_explicit(&state->midi.pitch_bend, pb, memory_order_release);
 }
 
+void lux_pitch_set_sustain(LuxPitchState *state, int on)
+{
+    int v;
+    if (!state) return;
+
+    atomic_store_explicit(&state->midi.sustain, on ? 1 : 0, memory_order_relaxed);
+
+    if (!on)
+    {
+        /* Pedal up: release every voice whose note-off was deferred. */
+        for (v = 0; v < LUX_PITCH_MAX_VOICES; v++)
+        {
+            if (atomic_exchange_explicit(&state->midi.voices[v].sustained, 0,
+                                         memory_order_relaxed))
+                atomic_store_explicit(&state->midi.voices[v].active, 0,
+                                      memory_order_release);
+        }
+    }
+}
+
+void lux_pitch_set_mod_wheel(LuxPitchState *state, float wheel)
+{
+    int w;
+    if (!state) return;
+    w = (int)(wheel * 127.0f);
+    if (w < 0)   w = 0;
+    if (w > 127) w = 127;
+    atomic_store_explicit(&state->midi.mod_wheel, w, memory_order_relaxed);
+}
+
 void lux_pitch_all_notes_off(LuxPitchState *state)
 {
     int v;
@@ -245,6 +298,8 @@ void lux_pitch_all_notes_off(LuxPitchState *state)
      * curve is preserved, including the new exponential decay). */
     for (v = 0; v < LUX_PITCH_MAX_VOICES; v++)
     {
+        atomic_store_explicit(&state->midi.voices[v].sustained, 0,
+                              memory_order_relaxed);
         atomic_store_explicit(&state->midi.voices[v].active, 0,
                               memory_order_release);
     }
@@ -402,15 +457,22 @@ void lux_pitch_process_frame(
         pps = state->config.free_pixels_per_semitone;
     }
 
-    /* ── LFO (shared across all voices) ───────────────────────────────── */
+    /* ── LFO (shared across all voices) ───────────────────────────────────
+     * Effective depth = configured depth + mod wheel (CC1) contribution of
+     * up to +1 semitone, so the wheel gives instant vibrato even when the
+     * configured depth is 0. */
     lfo_px = 0.0f;
-    if (state->config.lfo_depth_semitones > 0.001f &&
-        state->config.lfo_rate_hz > 0.001f)
     {
-        state->lfo_phase += 2.0f * (float)M_PI * state->config.lfo_rate_hz * dt_s;
-        if (state->lfo_phase > 2.0f * (float)M_PI)
-            state->lfo_phase -= 2.0f * (float)M_PI;
-        lfo_px = sinf(state->lfo_phase) * state->config.lfo_depth_semitones * pps;
+        float wheel = (float)atomic_load_explicit(&state->midi.mod_wheel,
+                                                  memory_order_relaxed) / 127.0f;
+        float depth = state->config.lfo_depth_semitones + wheel * 1.0f;
+        if (depth > 0.001f && state->config.lfo_rate_hz > 0.001f)
+        {
+            state->lfo_phase += 2.0f * (float)M_PI * state->config.lfo_rate_hz * dt_s;
+            if (state->lfo_phase > 2.0f * (float)M_PI)
+                state->lfo_phase -= 2.0f * (float)M_PI;
+            lfo_px = sinf(state->lfo_phase) * depth * pps;
+        }
     }
 
     /* ── Background ───────────────────────────────────────────────────── */
@@ -427,9 +489,17 @@ void lux_pitch_process_frame(
         int midi_active = atomic_load_explicit(&state->midi.voices[v].active, memory_order_acquire);
         int midi_note   = atomic_load_explicit(&state->midi.voices[v].note,   memory_order_relaxed);
         int midi_vel    = atomic_load_explicit(&state->midi.voices[v].velocity, memory_order_relaxed);
+        int retrig      = atomic_exchange_explicit(&state->midi.voices[v].retrigger, 0,
+                                                   memory_order_relaxed);
 
         state->voices[v].note          = midi_note;
         state->voices[v].velocity_norm = (float)midi_vel / 127.0f;
+
+        /* Stolen voice: force a fresh ATTACK from the current level (no
+         * click) — without this the envelope never sees an edge and the
+         * shift teleports silently mid-sustain. */
+        if (retrig)
+            state->voices[v].envelope_stage = LUX_PITCH_ENV_ATTACK;
 
         /* Target shift */
         {
@@ -477,7 +547,7 @@ void lux_pitch_process_frame(
     /* ── Render and blend each active voice ───────────────────────────── */
     for (v = 0; v < max_voices; v++)
     {
-        float env, inv_env, total_shift;
+        float env, inv_env, total_shift, shift_frac;
         int shift_int;
 
         if (state->voices[v].envelope_level <= 0.001f)
@@ -486,12 +556,20 @@ void lux_pitch_process_frame(
         env     = state->voices[v].envelope_level;
         inv_env = 1.0f - env;
         total_shift = state->voices[v].current_shift + lfo_px;
-        shift_int   = (int)roundf(total_shift);
+
+        /* Sub-pixel shift: split into integer part + fraction and lerp the
+         * two neighbouring source pixels.  Glide / vibrato / pitch-bend move
+         * continuously instead of jumping pixel by pixel — each integer jump
+         * was a discrete spectral step in the synthesis downstream. */
+        shift_int  = (int)floorf(total_shift);
+        shift_frac = total_shift - (float)shift_int;
 
         for (i = 0; i < pixel_count; i++)
         {
-            int src_idx = i - shift_int;
+            int src_idx = i - shift_int;       /* upper neighbour  */
+            int src_im1 = src_idx - 1;         /* lower neighbour  */
             float r_val, g_val, b_val;
+            float r1, g1, b1;
             uint8_t vr, vg, vb;
 
             if (src_idx >= 0 && src_idx < pixel_count)
@@ -505,6 +583,26 @@ void lux_pitch_process_frame(
                 r_val = bg_f;
                 g_val = bg_f;
                 b_val = bg_f;
+            }
+
+            if (shift_frac > 0.0001f)
+            {
+                if (src_im1 >= 0 && src_im1 < pixel_count)
+                {
+                    r1 = (float)in_r[src_im1];
+                    g1 = (float)in_g[src_im1];
+                    b1 = (float)in_b[src_im1];
+                }
+                else
+                {
+                    r1 = bg_f;
+                    g1 = bg_f;
+                    b1 = bg_f;
+                }
+                /* out(i) = lerp(src(i - floor(s)), src(i - floor(s) - 1), frac) */
+                r_val += (r1 - r_val) * shift_frac;
+                g_val += (g1 - g_val) * shift_frac;
+                b_val += (b1 - b_val) * shift_frac;
             }
 
             /* Apply envelope fade (blend with background) */
