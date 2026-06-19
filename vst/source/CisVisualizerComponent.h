@@ -65,29 +65,54 @@ public:
 
     // ── Pipeline source selection API ─────────────────────────────────────────
     /**
-     * Set which pipeline node is currently being visualized.
-     * Called by PluginEditor when the user clicks a pipeline node.
+     * Set the list of pipeline outputs displayed simultaneously.
+     * Called by PluginEditor when the selected chain block changes; the
+     * visualizer stacks one panel per source (top-to-bottom) in its fixed
+     * height.  The FIRST entry is the module's "primary" output and drives the
+     * synthesis side-effects (final-gray publish, insert-tap demand).
+     * Message thread only.
      */
-    void setActiveSource(VisualizerMode mode) noexcept;
-
-    /** Get the currently active pipeline source. */
-    VisualizerMode getActiveSource() const noexcept;
+    void setActiveSources(const std::vector<VisualizerMode>& sources);
 
 private:
+    // ── Per-panel frame buffers ────────────────────────────────────────────────
+    /**
+     * One displayed pipeline output.  Each panel owns the CIS frame it renders
+     * so that several sources (e.g. RAW / Modulated / Live) can be shown at the
+     * same time.  Sources that derive from the same underlying frame (LuxStral
+     * GRAY/COLOR/BLOB) simply hold identical copies — cheap and keeps the paint
+     * helpers, which read the localData* members, unchanged.
+     */
+    struct PanelData
+    {
+        VisualizerMode       mode { VisualizerMode::RAW };
+        std::vector<uint8_t> r, g, b, gray;
+    };
+
     // ── Timer callback ────────────────────────────────────────────────────────
     void timerCallback() override;
 
     // ── Data acquisition and helpers ──────────────────────────────────────────
     void    updateCisData();
+    /** Fill one panel's buffers from its source (freeze gates + processing).
+     *  Side-effects that feed synthesis (final-gray publish) only run for the
+     *  primary panel. */
+    void    fillSourceBuffers(PanelData& out, bool isPrimary);
     uint8_t interpolateCisPixel(const uint8_t* buffer, int displayX, int displayWidth) const;
 
+    /** Mode of the stacked panel under display-Y (−1 → none). */
+    VisualizerMode panelModeAtY(int y) const noexcept;
+
     // ── Paint helpers ─────────────────────────────────────────────────────────
+    /** Render a single source into the current (already clipped/translated)
+     *  graphics context.  Reads localData* (set by paint() per panel). */
+    void paintSource             (juce::Graphics& g, VisualizerMode source, int W, int H);
     void paintImageMode          (juce::Graphics& g, int W, int H) const;
     void paintRawImageMode       (juce::Graphics& g, int W, int H) const;
     void paintWaveformMode       (juce::Graphics& g, int W, int H, bool inverted, bool useGray = false) const;
     void paintColorTemperatureMode(juce::Graphics& g, int W, int H) const;
     void paintBlobOverlay        (juce::Graphics& g, int W, int H) const;
-    void paintSourceLabel        (juce::Graphics& g, int W, int H) const;
+    void paintSourceLabel        (juce::Graphics& g, VisualizerMode source, int W, int H) const;
 
     // ── FFT spectrum visualization ────────────────────────────────────────────
     /**
@@ -223,7 +248,7 @@ private:
     void*              fftCfg_  { nullptr };
 
     // ── Right-click context menu ──────────────────────────────────────────────
-    void showDisplayModeMenu();
+    void showDisplayModeMenu(VisualizerMode source);
 
     // ── Processor reference ───────────────────────────────────────────────────
     Sp3ctraAudioProcessor& processor;
@@ -246,8 +271,11 @@ private:
     // ── Suspend flag (prevents CoreGraphics crash during prepareToPlay) ───────
     std::atomic<bool> isSuspended { false };
 
-    // ── Active pipeline source (selected via pipeline node clicks) ────────────
-    std::atomic<int> activeSource_ { static_cast<int>(VisualizerMode::MIX) };
+    // ── Active pipeline outputs (one stacked panel each) ──────────────────────
+    // Set by PluginEditor on block selection; rendered top-to-bottom.
+    // Message thread only (like blobRegions).  Defaults to a single MODULATED
+    // panel until PluginEditor selects the initial block.
+    std::vector<PanelData> panels_ = std::vector<PanelData>(1);
 
     // ── Blob overlay ──────────────────────────────────────────────────────────
     bool blobOverlayVisible = false;

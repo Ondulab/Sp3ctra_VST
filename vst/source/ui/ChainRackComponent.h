@@ -1,0 +1,151 @@
+/**
+ * @file ChainRackComponent.h
+ * @brief ZONE 2 — vertical chain rack (M4 four-zone shell).
+ *
+ * Shows the two image chains as stacked block lists:
+ *
+ *   CHAIN 1 - MODULATED          CHAIN 2 - LIVE
+ *     SOURCE CIS                   SOURCE CIS
+ *     PITCH  ⇅  MASK  (order =     ♪ LUXSYNTH
+ *       "chainInsertOrder")        ♪ LUXWAVE
+ *     SAMPLER
+ *     ♪ LUXSTRAL
+ *
+ * Each block carries an identity colour, a 3-state LED
+ * (● active / ◐ enabled-but-idle / ○ disabled, refreshed at 10 Hz) and is
+ * clickable: clicking fires onBlockSelected so the editor can drive the
+ * single selection model (zone 1 view + zone 3 editor).
+ *
+ * The topology is FIXED for now — M6 makes it editable (palette drag & drop).
+ */
+#pragma once
+
+#include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_audio_processors/juce_audio_processors.h>
+#include "../PluginProcessor.h"
+#include "../UITheme.h"
+#include <functional>
+#include <vector>
+
+//==============================================================================
+/** Identifies one block of the (fixed) two-chain topology. */
+enum class ChainBlockId
+{
+    Chain1Source = 0,   ///< CHAIN 1 — SOURCE CIS
+    Pitch,              ///< CHAIN 1 — PITCH insert
+    Mask,               ///< CHAIN 1 — MASK insert
+    Sampler,            ///< CHAIN 1 — SAMPLER
+    LuxStral,           ///< CHAIN 1 — ♪ LUXSTRAL engine
+    Chain2Source,       ///< CHAIN 2 — SOURCE CIS
+    LuxSynth,           ///< CHAIN 2 — ♪ LUXSYNTH engine
+    LuxWave             ///< CHAIN 2 — ♪ LUXWAVE engine
+};
+
+//==============================================================================
+class ChainRackComponent : public juce::Component,
+                           private juce::Timer,
+                           private juce::AudioProcessorValueTreeState::Listener
+{
+public:
+    explicit ChainRackComponent(Sp3ctraAudioProcessor& p);
+    ~ChainRackComponent() override;
+
+    /** Fired when the user clicks a block (selection is owned by the editor). */
+    std::function<void(ChainBlockId)> onBlockSelected;
+
+    /** Identity colour of a block — single source of truth for the rack,
+     *  the zone-3 PLAY/SETUP switcher and the SETUP-face headers (M5). */
+    static juce::Colour blockColour(ChainBlockId id) noexcept;
+
+    /** Updates the highlighted block (called back by the editor). */
+    void setSelectedBlock(ChainBlockId id);
+
+    /** Natural content height — the editor's viewport sizes us with this. */
+    int preferredHeight() const noexcept;
+
+    void paint(juce::Graphics& g) override;
+    void resized() override;
+
+private:
+    //==========================================================================
+    enum class LedState { Off, Idle, Active };
+
+    class BlockComponent : public juce::Component
+    {
+    public:
+        BlockComponent(ChainBlockId idIn, const juce::String& nameIn, juce::Colour colourIn)
+            : id(idIn), name(nameIn), colour(colourIn)
+        {
+            setRepaintsOnMouseActivity(true);
+        }
+
+        std::function<void(ChainBlockId)> onClick;
+
+        void setLed(LedState s)       { if (led != s)      { led = s;        repaint(); } }
+        void setSelected(bool sel)    { if (selected != sel){ selected = sel; repaint(); } }
+
+        void paint(juce::Graphics& g) override;
+        void mouseUp(const juce::MouseEvent& e) override
+        {
+            if (e.mouseWasClicked() && onClick)
+                onClick(id);
+        }
+
+    private:
+        ChainBlockId id;
+        juce::String name;
+        juce::Colour colour;
+        LedState     led      { LedState::Off };
+        bool         selected { false };
+
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(BlockComponent)
+    };
+
+    /** Small ⇅ button drawn with paths (no font dependency). */
+    class SwapOrderButton : public juce::Button
+    {
+    public:
+        SwapOrderButton() : juce::Button("swapInsertOrder") {}
+        void paintButton(juce::Graphics& g, bool isMouseOver, bool isButtonDown) override;
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SwapOrderButton)
+    };
+
+    //==========================================================================
+    void timerCallback() override;                                    // 10 Hz LED refresh
+    void parameterChanged(const juce::String& paramID, float) override;
+
+    void toggleInsertOrder();
+    bool isMaskFirst() const;
+    void updateLeds();
+
+    /** Blocks of each chain in current display order (Pitch/Mask may swap). */
+    std::vector<BlockComponent*> chain1Order();
+    std::vector<BlockComponent*> chain2Order();
+
+    //==========================================================================
+    Sp3ctraAudioProcessor& processor;
+
+    BlockComponent srcABlock, pitchBlock, maskBlock, samplerBlock, stralBlock;
+    BlockComponent srcBBlock, synthBlock, waveBlock;
+    SwapOrderButton swapBtn;
+
+    // Source-activity tracking (UDP feed advancing → LED active)
+    juce::uint64 lastLinesSeen { 0 };
+    LedState     sourceLed     { LedState::Idle };
+
+    // Vertical positions of the two group headers (set in resized, used in paint)
+    int header1Y { 0 };
+    int header2Y { 0 };
+
+    // ── Geometry ──────────────────────────────────────────────────────────────
+    static constexpr int kTopPad   = 6;
+    static constexpr int kPadX     = 8;
+    static constexpr int kHeaderH  = 18;
+    static constexpr int kBlockH   = 32;
+    static constexpr int kBlockGap = 12;   // connector arrow lives here
+    static constexpr int kSwapGap  = 22;   // wider gap between PITCH and MASK (⇅ button)
+    static constexpr int kChainGap = 18;
+    static constexpr int kBottomPad= 8;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ChainRackComponent)
+};

@@ -1,7 +1,8 @@
-#include "LuxSamplerSettingsTab.h"
-#include "../Sp3ctraConstants.h"
-#include "../UITheme.h"
-#include "../luxsampler/LuxSampler.h"
+#include "SamplerSetupPanel.h"
+#include "SetupHeader.h"
+#include "../../Sp3ctraConstants.h"
+#include "../../UITheme.h"
+#include "../../luxsampler/LuxSampler.h"
 
 // Note names for slot index labels (C0..B0 for REC, C1..B1 for PLAY)
 static const char* const kNoteNames[] = {
@@ -35,9 +36,10 @@ static const char* stateText(SlotState s)
 // Constructor
 // =============================================================================
 
-LuxSamplerSettingsTab::LuxSamplerSettingsTab(Sp3ctraAudioProcessor& processor)
+SamplerSetupPanel::SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour)
     : audioProcessor(processor),
-      apvts(processor.getAPVTS())
+      apvts(processor.getAPVTS()),
+      accent(accentColour)
 {
     // ── Enable toggle ─────────────────────────────────────────────────────
     enableLabel.setText("LuxSampler:", juce::dontSendNotification);
@@ -199,10 +201,7 @@ LuxSamplerSettingsTab::LuxSamplerSettingsTab(Sp3ctraAudioProcessor& processor)
                    "luxSamplerSaveBindType", "luxSamplerSaveBindNum", 2);
 
     // ── Slot rows ─────────────────────────────────────────────────────────
-
-
     for (int i = 0; i < NUM_SLOTS; ++i)
-
     {
         // Index label: "C0 / C1"
         juce::String idxText = juce::String(kNoteNames[i]) + "0 / "
@@ -238,7 +237,7 @@ LuxSamplerSettingsTab::LuxSamplerSettingsTab(Sp3ctraAudioProcessor& processor)
     startTimerHz(10); // Refresh at 10 Hz
 }
 
-LuxSamplerSettingsTab::~LuxSamplerSettingsTab()
+SamplerSetupPanel::~SamplerSetupPanel()
 {
     stopTimer();
 }
@@ -250,11 +249,11 @@ LuxSamplerSettingsTab::~LuxSamplerSettingsTab()
 // ─────────────────────────────────────────────────────────────────────────────
 // initBindingRow — wire one REC/PLAY/SAVE row to the matching APVTS params.
 // ─────────────────────────────────────────────────────────────────────────────
-void LuxSamplerSettingsTab::initBindingRow(ActionBindingRow& row,
-                                           const juce::String& title,
-                                           const juce::String& typeParamId,
-                                           const juce::String& numParamId,
-                                           int learnTargetId)
+void SamplerSetupPanel::initBindingRow(ActionBindingRow& row,
+                                       const juce::String& title,
+                                       const juce::String& typeParamId,
+                                       const juce::String& numParamId,
+                                       int learnTargetId)
 {
     row.title.setText(title, juce::dontSendNotification);
     row.title.setJustificationType(juce::Justification::centredRight);
@@ -310,7 +309,7 @@ void LuxSamplerSettingsTab::initBindingRow(ActionBindingRow& row,
     addAndMakeVisible(row.learnBtn);
 }
 
-void LuxSamplerSettingsTab::timerCallback()
+void SamplerSetupPanel::timerCallback()
 {
     updateSlotDisplays();
 
@@ -368,7 +367,7 @@ void LuxSamplerSettingsTab::timerCallback()
 }
 
 
-void LuxSamplerSettingsTab::updateSlotDisplays()
+void SamplerSetupPanel::updateSlotDisplays()
 {
     auto* fs = audioProcessor.getLuxSampler();
     if (fs == nullptr) return;
@@ -409,26 +408,17 @@ void LuxSamplerSettingsTab::updateSlotDisplays()
 // paint
 // =============================================================================
 
-void LuxSamplerSettingsTab::paint(juce::Graphics& g)
+void SamplerSetupPanel::paint(juce::Graphics& g)
 {
-    g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
-
-    // Title
-    g.setColour(juce::Colours::white);
-    g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
-    g.drawText("LuxSampler", getLocalBounds().removeFromTop(30),
-               juce::Justification::centred, true);
+    SetupUI::paintHeader(g, *this, "SAMPLER -- SETUP", accent);
 
     // Column headers for slot grid — position must match resized() exactly:
-    //   titleH(30) + 5 + 7 control rows (Enable, MIDI, Octave, MaxDur,
-    //   ExportToggle, ExportFormat, OutputDir) + 3 binding rows
-    //   (REC / PLAY / SAVE) * kRowStep + kHPad
-    const int titleH  = 30;
-    const int headerY = titleH + 5 + 10 * Sp3ctraTheme::kRowStep + Sp3ctraTheme::kHPad;
-
-
+    //   headerH(30) + 10 control rows (Enable, MIDI, Octave, MaxDur,
+    //   ExportToggle, ExportFormat, OutputDir, REC / PLAY / SAVE bindings)
+    //   * kRowStep + kHPad
+    const int titleH  = SetupUI::kHeaderH + Sp3ctraTheme::kSectionGap;
+    const int headerY = titleH + 10 * Sp3ctraTheme::kRowStep + Sp3ctraTheme::kHPad;
     const int headerH = 20;
-
 
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
     g.setColour(juce::Colours::lightgrey);
@@ -449,24 +439,24 @@ void LuxSamplerSettingsTab::paint(juce::Graphics& g)
 // resized
 // =============================================================================
 
-void LuxSamplerSettingsTab::resized()
+void SamplerSetupPanel::resized()
 {
     const int w        = getWidth();
-    const int titleH   = 30;
+    const int titleH   = SetupUI::kHeaderH + Sp3ctraTheme::kSectionGap;
     constexpr int rowH   = Sp3ctraTheme::kRowStep;   // 32
     constexpr int pad    = Sp3ctraTheme::kHPad;       // 10
     constexpr int labelW = Sp3ctraTheme::kLabelW;     // 110
-    const int ctrlX    = 20 + labelW;
-    const int ctrlW    = w - ctrlX - 20;
+    const int ctrlX    = pad + labelW + Sp3ctraTheme::kGap;
+    const int ctrlW    = juce::jmax(120, w - ctrlX - 20);
 
-    int y = titleH + 5;
+    int y = titleH;
 
     // ── Controls ──────────────────────────────────────────────────────────
     constexpr int ctrlH = Sp3ctraTheme::kControlH;
     auto row = [&](juce::Label& lbl, juce::Component& ctrl)
     {
         const int vc = (rowH - ctrlH) / 2; // vertical centre offset
-        lbl .setBounds(20,    y + vc, labelW, ctrlH);
+        lbl .setBounds(pad,   y + vc, labelW, ctrlH);
         ctrl.setBounds(ctrlX, y + vc, ctrlW,  ctrlH);
         y += rowH;
     };
@@ -486,7 +476,7 @@ void LuxSamplerSettingsTab::resized()
         const int btnGap   = 4;
         const int valueW   = ctrlW - browseW - clearW - 2 * btnGap;
 
-        outputDirLabel.setBounds(20, y + vc, labelW, ctrlH);
+        outputDirLabel.setBounds(pad, y + vc, labelW, ctrlH);
         outputDirValueLabel.setBounds(ctrlX, y + vc, valueW, ctrlH);
         outputDirBrowseBtn .setBounds(ctrlX + valueW + btnGap, y + vc, browseW, ctrlH);
         outputDirClearBtn  .setBounds(ctrlX + valueW + btnGap + browseW + btnGap,
@@ -504,7 +494,7 @@ void LuxSamplerSettingsTab::resized()
         const int gap      = 4;
         const int numberW  = ctrlW - typeW - learnW - 2 * gap;
 
-        br.title       .setBounds(20,                            y + vc, labelW,  ctrlH);
+        br.title       .setBounds(pad,                           y + vc, labelW,  ctrlH);
         br.typeBox     .setBounds(ctrlX,                         y + vc, typeW,   ctrlH);
         br.numberSlider.setBounds(ctrlX + typeW + gap,           y + vc, numberW, ctrlH);
         br.learnBtn    .setBounds(ctrlX + typeW + gap + numberW + gap,
@@ -516,9 +506,6 @@ void LuxSamplerSettingsTab::resized()
     bindingRow(saveBinding);
 
     y += pad; // gap before slot grid
-
-
-
 
     // ── Slot grid header placeholder (painted) ───────────────────────────
     const int headerH = 20;
@@ -537,5 +524,4 @@ void LuxSamplerSettingsTab::resized()
         slotClearBtn[i]  .setBounds(x + 4, y + 2, colW - 12, slotRowH - 4);
         y += slotRowH;
     }
-
 }

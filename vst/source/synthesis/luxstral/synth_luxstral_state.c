@@ -10,6 +10,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "vst_adapters_c.h"
 #include "synth_luxstral_state.h"
+#include "luxstral_engine.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,19 +18,12 @@
 
 /* Global variables ----------------------------------------------------------*/
 
-/* Synth Data Freeze Feature - Definitions */
-volatile int g_is_synth_data_frozen = 0;
-float *g_frozen_grayscale_buffer = NULL;  // Dynamic allocation
-volatile int g_is_synth_data_fading_out = 0;
-double g_synth_data_fade_start_time = 0.0;
+/* Synth Data Freeze Feature - immutable constant (shared by all instances) */
 const double G_SYNTH_DATA_FADE_DURATION_SECONDS = 5.0; // Corresponds to visual fade
-pthread_mutex_t g_synth_data_freeze_mutex;
 
-/* Buffers for display to reflect synth data (grayscale converted to RGB) - Definitions */
-uint8_t *g_displayable_synth_R = NULL;  // Dynamic allocation
-uint8_t *g_displayable_synth_G = NULL;  // Dynamic allocation
-uint8_t *g_displayable_synth_B = NULL;  // Dynamic allocation
-pthread_mutex_t g_displayable_synth_mutex;
+/* NOTE: freeze/fade flags, frozen grayscale buffer and displayable RGB buffers
+ * now live in LuxStralEngine (luxstral_engine.h). The public functions below
+ * are thin wrappers operating on the single instance g_luxstral_engine_a.    */
 
 /* Private function implementations ------------------------------------------*/
 
@@ -40,82 +34,122 @@ double synth_getCurrentTimeInSeconds(void) {
   return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
-void synth_data_freeze_init(void) {
+static void synth_data_freeze_init_impl(LuxStralEngine *eng) {
   int nb_pixels = get_cis_pixels_nb();
-  
-  if (pthread_mutex_init(&g_synth_data_freeze_mutex, NULL) != 0) {
+
+  if (pthread_mutex_init(&eng->synth_data_freeze_mutex, NULL) != 0) {
     perror("Failed to initialize synth data freeze mutex");
     // Handle error appropriately, e.g., exit or log
     return;
   }
-  
+
   // Allocate frozen grayscale buffer
-  g_frozen_grayscale_buffer = (float *)calloc(nb_pixels, sizeof(float));
-  if (g_frozen_grayscale_buffer == NULL) {
+  eng->frozen_grayscale_buffer = (float *)calloc(nb_pixels, sizeof(float));
+  if (eng->frozen_grayscale_buffer == NULL) {
     perror("Failed to allocate frozen grayscale buffer");
-    pthread_mutex_destroy(&g_synth_data_freeze_mutex);
+    pthread_mutex_destroy(&eng->synth_data_freeze_mutex);
     return;
   }
 }
 
-void synth_data_freeze_cleanup(void) {
-  pthread_mutex_destroy(&g_synth_data_freeze_mutex);
-  
+static void synth_data_freeze_cleanup_impl(LuxStralEngine *eng) {
+  pthread_mutex_destroy(&eng->synth_data_freeze_mutex);
+
   // Free frozen grayscale buffer
-  if (g_frozen_grayscale_buffer != NULL) {
-    free(g_frozen_grayscale_buffer);
-    g_frozen_grayscale_buffer = NULL;
+  if (eng->frozen_grayscale_buffer != NULL) {
+    free(eng->frozen_grayscale_buffer);
+    eng->frozen_grayscale_buffer = NULL;
   }
 }
 
-void displayable_synth_buffers_init(void) {
+static void displayable_synth_buffers_init_impl(LuxStralEngine *eng) {
   int nb_pixels = get_cis_pixels_nb();
-  
-  if (pthread_mutex_init(&g_displayable_synth_mutex, NULL) != 0) {
+
+  if (pthread_mutex_init(&eng->displayable_synth_mutex, NULL) != 0) {
     perror("Failed to initialize displayable synth data mutex");
     return;
   }
-  
+
   // Allocate displayable RGB buffers
-  g_displayable_synth_R = (uint8_t *)calloc(nb_pixels, sizeof(uint8_t));
-  g_displayable_synth_G = (uint8_t *)calloc(nb_pixels, sizeof(uint8_t));
-  g_displayable_synth_B = (uint8_t *)calloc(nb_pixels, sizeof(uint8_t));
-  
-  if (g_displayable_synth_R == NULL || g_displayable_synth_G == NULL || g_displayable_synth_B == NULL) {
+  eng->displayable_synth_R = (uint8_t *)calloc(nb_pixels, sizeof(uint8_t));
+  eng->displayable_synth_G = (uint8_t *)calloc(nb_pixels, sizeof(uint8_t));
+  eng->displayable_synth_B = (uint8_t *)calloc(nb_pixels, sizeof(uint8_t));
+
+  if (eng->displayable_synth_R == NULL || eng->displayable_synth_G == NULL || eng->displayable_synth_B == NULL) {
     perror("Failed to allocate displayable synth RGB buffers");
-    pthread_mutex_destroy(&g_displayable_synth_mutex);
-    
+    pthread_mutex_destroy(&eng->displayable_synth_mutex);
+
     // Clean up any successful allocations
-    if (g_displayable_synth_R != NULL) {
-      free(g_displayable_synth_R);
-      g_displayable_synth_R = NULL;
+    if (eng->displayable_synth_R != NULL) {
+      free(eng->displayable_synth_R);
+      eng->displayable_synth_R = NULL;
     }
-    if (g_displayable_synth_G != NULL) {
-      free(g_displayable_synth_G);
-      g_displayable_synth_G = NULL;
+    if (eng->displayable_synth_G != NULL) {
+      free(eng->displayable_synth_G);
+      eng->displayable_synth_G = NULL;
     }
-    if (g_displayable_synth_B != NULL) {
-      free(g_displayable_synth_B);
-      g_displayable_synth_B = NULL;
+    if (eng->displayable_synth_B != NULL) {
+      free(eng->displayable_synth_B);
+      eng->displayable_synth_B = NULL;
     }
     return;
   }
 }
 
-void displayable_synth_buffers_cleanup(void) {
-  pthread_mutex_destroy(&g_displayable_synth_mutex);
-  
+static void displayable_synth_buffers_cleanup_impl(LuxStralEngine *eng) {
+  pthread_mutex_destroy(&eng->displayable_synth_mutex);
+
   // Free displayable RGB buffers
-  if (g_displayable_synth_R != NULL) {
-    free(g_displayable_synth_R);
-    g_displayable_synth_R = NULL;
+  if (eng->displayable_synth_R != NULL) {
+    free(eng->displayable_synth_R);
+    eng->displayable_synth_R = NULL;
   }
-  if (g_displayable_synth_G != NULL) {
-    free(g_displayable_synth_G);
-    g_displayable_synth_G = NULL;
+  if (eng->displayable_synth_G != NULL) {
+    free(eng->displayable_synth_G);
+    eng->displayable_synth_G = NULL;
   }
-  if (g_displayable_synth_B != NULL) {
-    free(g_displayable_synth_B);
-    g_displayable_synth_B = NULL;
+  if (eng->displayable_synth_B != NULL) {
+    free(eng->displayable_synth_B);
+    eng->displayable_synth_B = NULL;
   }
+}
+
+/* Public wrappers (signatures unchanged, operate on g_luxstral_engine_a) ----*/
+
+void synth_data_freeze_init(void) {
+  synth_data_freeze_init_impl(&g_luxstral_engine_a);
+}
+
+void synth_data_freeze_cleanup(void) {
+  synth_data_freeze_cleanup_impl(&g_luxstral_engine_a);
+}
+
+void displayable_synth_buffers_init(void) {
+  displayable_synth_buffers_init_impl(&g_luxstral_engine_a);
+}
+
+void displayable_synth_buffers_cleanup(void) {
+  displayable_synth_buffers_cleanup_impl(&g_luxstral_engine_a);
+}
+
+/* Display buffer accessors for external consumers (multithreading.c, UI) ----*/
+
+void luxstral_engine_displayable_lock(void) {
+  pthread_mutex_lock(&g_luxstral_engine_a.displayable_synth_mutex);
+}
+
+void luxstral_engine_displayable_unlock(void) {
+  pthread_mutex_unlock(&g_luxstral_engine_a.displayable_synth_mutex);
+}
+
+uint8_t *luxstral_engine_displayable_R(void) {
+  return g_luxstral_engine_a.displayable_synth_R;
+}
+
+uint8_t *luxstral_engine_displayable_G(void) {
+  return g_luxstral_engine_a.displayable_synth_G;
+}
+
+uint8_t *luxstral_engine_displayable_B(void) {
+  return g_luxstral_engine_a.displayable_synth_B;
 }

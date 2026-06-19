@@ -8,7 +8,9 @@
  *
  * ── Channel model (since "Modulated/Live" refactor) ─────────────────────────
  * LuxPitch no longer has a Source selector.  It now lives permanently as an
- * insert inside the Modulated channel : Live ► LuxSampler ► LuxPitch ► LuxMask.
+ * insert inside the Modulated channel : Live ► [LuxPitch ⇄ LuxMask] ► LuxSampler
+ * (insert order set by the chainInsertOrder parameter; the sampler records
+ * the post-insert frame and its playback bypasses the inserts).
  * When disabled or when no MIDI notes are active, it auto-bypasses to the
  * upstream signal (zero-cost pass-through).
  */
@@ -17,20 +19,22 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
-#include "PipelineNodeComponent.h"
+#include "../ui/EnvelopeEditorComponent.h"
 #include "VisualizerMode.h"
-#include <functional>
 
 class LuxPitchTabComponent : public juce::Component
 {
 public:
-    std::function<void(VisualizerMode)> onNodeClicked;
-
     explicit LuxPitchTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p),
-          nodeOutput("LUXPITCH OUTPUT", juce::Colour(0xffe06bb8), VisualizerMode::LUXPITCH_OUTPUT)
+          envelopeEditor(p.getAPVTS(), juce::Colour(0xffe06bb8),
+                         "luxpitchAttackMs", "luxpitchDecayMs",
+                         "luxpitchSustainLevel", "luxpitchReleaseMs")
     {
         auto& apvts = p.getAPVTS();
+
+        // ── Graphic ADSR editor (M5) — sliders below stay as numeric fallback
+        addAndMakeVisible(envelopeEditor);
 
         // ── Enable toggle ──────────────────────────────────────────────
         initLabel(enableLabel, "Enable");
@@ -138,31 +142,12 @@ public:
         addAndMakeVisible(velCouplingToggle);
         velCouplingAttach.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(
             apvts, "luxpitchVelocityCoupling", velCouplingToggle));
-
-        // ── Pipeline output node ───────────────────────────────────────
-        addAndMakeVisible(nodeOutput);
-        nodeOutput.onClick = [this](VisualizerMode m)
-        {
-            setActiveMode(m);
-            if (onNodeClicked) onNodeClicked(m);
-        };
-    }
-
-    void setActiveMode(VisualizerMode m)
-    {
-        nodeOutput.setActive (m == VisualizerMode::LUXPITCH_OUTPUT);
-        nodeOutput.setShowEye(m == VisualizerMode::LUXPITCH_OUTPUT);
     }
 
     void paint(juce::Graphics& g) override
     {
         const int W = getWidth();
-        const int H = getHeight();
         computeColumns(W, leftX_, leftW_, rightX_, rightW_);
-
-        // Divider
-        g.setColour(juce::Colour(0x18ffffff));
-        g.fillRect(rightX_ - 4, 4, 1, H - 8);
 
         // ADSR section header (now at row 5 — Source row removed)
         const int adsrSectionY = rowY(5) - 4;
@@ -170,21 +155,11 @@ public:
         g.setColour(juce::Colour(0xffe06bb8).withAlpha(0.55f));
         g.drawText("--- ADSR / MODULATION ---", leftX_, adsrSectionY, leftW_, 12,
                    juce::Justification::centred);
-
-        // Right column label
-        const auto accent = juce::Colour(0xffe06bb8);
-        g.setColour(accent.withAlpha(0.6f));
-        const int labelY = nodeOutput.getY() - 16;
-        if (labelY >= 0)
-            g.drawText("Pipeline output (click to visualize)",
-                       rightX_, labelY, rightW_, 14,
-                       juce::Justification::centred);
     }
 
     void resized() override
     {
         const int W = getWidth();
-        const int H = getHeight();
         computeColumns(W, leftX_, leftW_, rightX_, rightW_);
 
         const int labelW = 80;
@@ -195,6 +170,11 @@ public:
         { return { leftX_, rowY(row), labelW, ch }; };
         auto cb = [&](int row) -> juce::Rectangle<int>
         { return { leftX_ + labelW + gap, rowY(row), leftW_ - labelW - gap, ch }; };
+
+        // Graphic envelope editor — top of the left column (rows shifted down
+        // by kEnvHeaderH, see rowY()).
+        envelopeEditor.setBounds(leftX_, 4, leftW_,
+                                 EnvelopeEditorComponent::kPreferredH);
 
         // Row 0: Enable
         enableLabel.setBounds(lb(0));
@@ -236,12 +216,6 @@ public:
         // Row 12: Velocity
         velCouplingLabel.setBounds(lb(12));
         velCouplingToggle.setBounds(cb(12).withWidth(80));
-
-        // Right column: single output node, vertically centred
-        constexpr int kNH = 28;
-        constexpr int kLH = 16;
-        int ny = juce::jmax(4, (H - kNH - kLH) / 2) + kLH;
-        nodeOutput.setBounds(rightX_, ny, rightW_, kNH);
     }
 
 private:
@@ -269,17 +243,20 @@ private:
         attackAttach, decayAttach, sustainAttach, releaseAttach,
         glideAttach, lfoRateAttach, lfoDepthAttach;
 
-    PipelineNodeComponent nodeOutput;
+    // Graphic ADSR editor (M5) — binds the same four envelope params as the
+    // slider rows; both stay in sync through the APVTS.
+    EnvelopeEditorComponent envelopeEditor;
 
     mutable int leftX_ = 0, leftW_ = 0, rightX_ = 0, rightW_ = 0;
 
+    // Controls span the full width (pipeline-output node removed).
     static void computeColumns(int totalW, int& lx, int& lw, int& rx, int& rw) noexcept
     {
-        constexpr int kPad = 8, kDiv = 8;
+        constexpr int kPad = 8;
         lx = kPad;
-        lw = totalW * 55 / 100 - kPad - kDiv / 2;
-        rx = lx + lw + kDiv;
-        rw = totalW - rx - kPad;
+        lw = totalW - 2 * kPad;
+        rx = totalW - kPad;   // unused
+        rw = 0;
     }
 
     void initLabel(juce::Label& lbl, const juce::String& text)
@@ -290,8 +267,11 @@ private:
         addAndMakeVisible(lbl);
     }
 
+    /** Vertical offset reserved for the graphic envelope editor (96 px + gap). */
+    static constexpr int kEnvHeaderH = EnvelopeEditorComponent::kPreferredH + 4;
+
     int rowY(int row) const noexcept
-    { return 6 + row * (Sp3ctraTheme::kControlH + 6); }
+    { return kEnvHeaderH + 6 + row * (Sp3ctraTheme::kControlH + 6); }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxPitchTabComponent)
 };

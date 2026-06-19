@@ -12,7 +12,18 @@
 #include "image/LuxSynthTabComponent.h"
 #include "image/VisualizerMode.h"
 #include "sampler/SamplerPageComponent.h"
-#include "video/VideoScrollTab.h"
+#include "ui/ChainRackComponent.h"
+#include "ui/KeyboardRulerComponent.h"
+#include "ui/EngineAudioPanels.h"
+#include "ui/WaterfallColumnComponent.h"
+#include "ui/PaletteRailComponent.h"
+#include "ui/SplitterBar.h"
+#include "ui/setup/PitchSetupPanel.h"
+#include "ui/setup/MaskSetupPanel.h"
+#include "ui/setup/LuxStralSetupPanel.h"
+#include "ui/setup/LuxSynthSetupPanel.h"
+#include "ui/setup/LuxWaveSetupPanel.h"
+#include "ui/setup/SamplerSetupPanel.h"
 #include "UITheme.h"
 #include "Sp3ctraLookAndFeel.h"
 
@@ -76,24 +87,135 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(GearButton)
 };
 
+// ============================================================================
+// FaceSwitchBar — slim PLAY | SETUP switcher above the zone-3 block editor.
+// Segmented look: the active face is highlighted with the selected block's
+// accent colour. Self-contained (painting in the header, like GearButton).
+// ============================================================================
+class FaceSwitchBar : public juce::Component
+{
+public:
+    FaceSwitchBar() { setRepaintsOnMouseActivity(true); }
+
+    /** Fired when the user clicks the non-active segment. */
+    std::function<void(bool setupFace)> onFaceChanged;
+
+    void setFace(bool setupFaceIn, bool notify)
+    {
+        if (setupFace != setupFaceIn)
+        {
+            setupFace = setupFaceIn;
+            repaint();
+            if (notify && onFaceChanged)
+                onFaceChanged(setupFace);
+        }
+    }
+
+    bool isSetupFace() const noexcept { return setupFace; }
+
+    void setAccent(juce::Colour c)
+    {
+        if (accent != c) { accent = c; repaint(); }
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        // Bar background + bottom separator
+        g.fillAll(juce::Colour(0xff1f1f28));
+        g.setColour(juce::Colour(Sp3ctraTheme::kColBorder));
+        g.fillRect(0, getHeight() - 1, getWidth(), 1);
+
+        const auto mouse = getMouseXYRelative();
+        drawSegment(g, segmentBounds(false), "PLAY",  !setupFace, mouse);
+        drawSegment(g, segmentBounds(true),  "SETUP",  setupFace, mouse);
+    }
+
+    void mouseUp(const juce::MouseEvent& e) override
+    {
+        if (!e.mouseWasClicked())
+            return;
+        if (segmentBounds(false).contains(e.getPosition()))
+            setFace(false, true);
+        else if (segmentBounds(true).contains(e.getPosition()))
+            setFace(true, true);
+    }
+
+private:
+    juce::Rectangle<int> segmentBounds(bool setupSegment) const
+    {
+        const int segW = 58;
+        const int h    = getHeight() - 7;
+        const int x0   = 8;
+        return setupSegment ? juce::Rectangle<int>(x0 + segW + 3, 3, segW, h)
+                            : juce::Rectangle<int>(x0,            3, segW, h);
+    }
+
+    void drawSegment(juce::Graphics& g, juce::Rectangle<int> r,
+                     const juce::String& text, bool active,
+                     juce::Point<int> mouse) const
+    {
+        const auto rf = r.toFloat();
+        const bool hovered = r.contains(mouse);
+
+        if (active)
+        {
+            g.setColour(accent.withAlpha(0.22f));
+            g.fillRoundedRectangle(rf, 3.f);
+            g.setColour(accent.withAlpha(0.95f));
+            g.drawRoundedRectangle(rf, 3.f, 1.2f);
+        }
+        else
+        {
+            g.setColour(hovered ? juce::Colour(0xff2c2c3a) : juce::Colour(0xff232330));
+            g.fillRoundedRectangle(rf, 3.f);
+            g.setColour(juce::Colour(0xff3a3a4a));
+            g.drawRoundedRectangle(rf, 3.f, 1.f);
+        }
+
+        g.setColour(active ? juce::Colours::white
+                  : hovered ? juce::Colour(0xffb8c0d0)
+                  :           juce::Colour(0xff8890a0));
+        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontTiny)).boldened());
+        g.drawText(text, r, juce::Justification::centred, false);
+    }
+
+    bool setupFace { false };
+    juce::Colour accent { juce::Colour(0xff4fa3e0) };
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FaceSwitchBar)
+};
+
 //==============================================================================
 /**
- * @brief Main VST editor with three-tab navigation (IMAGE / SYNTH / SAMPLER).
+ * @brief Main VST editor — M4 four-zone shell (resizable, no tab bar).
  *
- * Header bar:
- *   Left  : "Sp3ctra" logo
- *   Centre: version string (v0.1.5)
- *   Right : GearButton — opens the full settings window
+ *   ┌────────────────────────────────────────────────────────────────┐
+ *   │ Header (logo / version / ⚙ settings)                           │
+ *   ├────────────────────────────────────────────────────────────────┤
+ *   │ ZONE 1 — CisVisualizerComponent (full width, selection-driven) │
+ *   ├──┬───────────┬──────────────────────────────┬──────────────────┤
+ *   │▌P│ ZONE 2    │ ZONE 3 — block editor        │ ZONE 4           │
+ *   │▌A│ chain     │ (vertical viewport hosting   │ video scroll     │
+ *   │▌L│ rack      │  the selected block's page)  │ column           │
+ *   │▌ │ (scroll↕) │                              │ (collapsible)    │
+ *   └──┴───────────┴──────────────────────────────┴──────────────────┘
  *
- * IMAGE tab — ImagePageComponent (two-column layout):
- *   Left  : Image processing (Gamma, Contrast Min, Opacities, Transport)
- *   Right : Blob detection (StrokeForge detection params — moved from Synth)
+ * Selection model: ChainRackComponent fires onBlockSelected(ChainBlockId);
+ * selectBlock() then (1) highlights the rack block, (2) swaps the hosted
+ * page(s) in zone 3, (3) switches the zone 1 visualizer source.
+ * Pipeline-node clicks inside hosted pages may still override the
+ * visualizer source ("last click wins").
  *
- * SYNTH tab — single left column (audio-only params):
- *   Device On, Volume, Attack, Release, Stereo Temp., Sum. Exp., Noise Gate
- *   No image pre-processing parameters in this tab.
+ * M5: zone 3 has two faces per block — PLAY (the M4 pages) and SETUP
+ * (per-block settings migrated from the gear-wheel window, same APVTS IDs).
+ * A slim FaceSwitchBar above the zone-3 viewport toggles between them;
+ * blocks without a setup face (SOURCE CIS) hide the bar. Selecting another
+ * block always resets to PLAY.
  *
- * SAMPLER tab — SamplerPageComponent
+ * Layout persistence (APVTS state ValueTree properties, survive reload):
+ *   "editorW"/"editorH"  — window size
+ *   "zone2W"/"zone4W"    — splitter positions
+ *   "scrollCollapsed"    — zone 4 collapse state
  */
 class Sp3ctraAudioProcessorEditor : public juce::AudioProcessorEditor
 {
@@ -108,192 +230,124 @@ public:
     void resumeVisualizer();
 
 private:
-    // ── Active tab ────────────────────────────────────────────────────────────
-    // Top-level tabs (row 1): SOURCES | PITCH | MASK | SAMPLER | SYNTH | VIDEO
-    enum class Tab { Sources, Pitch, Mask, Sampler, Synth, Video };
-    // SYNTH sub-tabs (row 2):
-    //   ImgLuxStral / ImgLuxSynth — image pipeline pages moved from IMAGE
-    //   AudioStral / AudioSynth / AudioWave — original audio parameter pages
-    enum class SynthSub
-    {
-        ImgLuxStral,
-        ImgLuxSynth,
-        AudioStral,
-        AudioSynth,
-        AudioWave
-    };
-
     // ── Layout constants ──────────────────────────────────────────────────────
-    static constexpr int kHeaderH    = 52;
-    static constexpr int kVisY       = kHeaderH + 8;
-    static constexpr int kVisH       = 64;
-    static constexpr int kTabsY      = kVisY + kVisH + 6;
-    static constexpr int kTabsH      = 26;
-    static constexpr int kSubTabsY   = kTabsY + kTabsH + 6;
-    static constexpr int kSubTabsH   = 22;
-    static constexpr int kPageTop    = kSubTabsY + kSubTabsH + 4;
-    static constexpr int kColGap     = 18;
-    static constexpr int kCtrlW      = 210;
-    // SYNTH tab left col: 8 audio-only rows
-    static constexpr int kLS_ROWS    = 8;
-    // SYNTH tab right col: 8 StrokeForge rows
-    static constexpr int kSF_ROWS    = 5;  // Enable + Square at Width + Focus Sigma + Spectral Thr. + Focus Only
+    static constexpr int kHeaderH   = 52;
+    static constexpr int kVisY      = kHeaderH + 8;
+    // ZONE 1 stacks one panel per active visualizer output; its total height
+    // grows with the panel count so each stays readable.
+    static constexpr int kVisPanelH = 60;   // per-panel height
+    static constexpr int kRulerH    = KeyboardRulerComponent::kPreferredH; // 26 (M5)
 
-    static constexpr int kHPad       = Sp3ctraTheme::kHPad;
-    static constexpr int kSectionH   = Sp3ctraTheme::kSectionH;
-    static constexpr int kSectionGap = Sp3ctraTheme::kSectionGap;
-    static constexpr int kRowH       = Sp3ctraTheme::kControlH;
-    static constexpr int kRowStep    = Sp3ctraTheme::kRowStep;
-    static constexpr int kLabelW     = Sp3ctraTheme::kLabelW;
-    static constexpr int kCtrlOffset = kLabelW + 8;
+    /** Current ZONE 1 height = one row per active visualizer panel. */
+    int visHeight() const noexcept { return juce::jmax(1, visPanelCount_) * kVisPanelH; }
 
-    int colWidth()   const noexcept { return (getWidth() - 2*kHPad - kColGap) / 2; }
-    int colLX()      const noexcept { return kHPad; }
-    int colRX()      const noexcept { return kHPad + colWidth() + kColGap; }
-    int rowsStartY() const noexcept { return kPageTop + kSectionH + kSectionGap; }
+    /** Top of zones 2/3/4 (below the visualizer strip), before the keyboard
+     *  ruler offset. */
+    int zonesBaseY() const noexcept { return kVisY + visHeight() + 6; }
 
+    static constexpr int kPaletteW  = PaletteRailComponent::kRailW;   // 36
+    static constexpr int kSplitterW = 6;
+    static constexpr int kStackGap  = 12;    // gap between stacked zone-3 pages
+    static constexpr int kFaceBarH  = 24;    // PLAY | SETUP switcher height
+
+    // Zone width limits (spec §8) + defaults
+    static constexpr int kZone2MinW     = 160;
+    static constexpr int kZone3MinW     = 480;
+    static constexpr int kZone4MinW     = 220;
+    static constexpr int kZone2DefaultW = 200;
+    static constexpr int kZone4DefaultW = 300;
+
+    // Default / limit window sizes (spec §1)
+    static constexpr int kDefaultW = 1280, kDefaultH = 820;
+    static constexpr int kMinW = 1024, kMinH = 700, kMaxW = 4096, kMaxH = 2400;
+
+    static constexpr int kHPad = Sp3ctraTheme::kHPad;
+
+    // ── Behaviour ─────────────────────────────────────────────────────────────
     void openSettings();
-    void switchToTab(Tab tab);
+
+    /** Single selection model — drives zones 1 + 2 + 3. */
+    void selectBlock(ChainBlockId id);
+
+    /** True if the block exposes a SETUP face (everything except SOURCE CIS). */
+    static bool blockHasSetup(ChainBlockId id) noexcept;
+
+    /** Shows/hides zone-3 PLAY pages vs SETUP panels for the current
+     *  selection + face. */
+    void applyZone3Visibility();
+
+    /** Lays out zones 2/3/4 below the visualizer strip. */
+    void layoutZones();
+
+    /** Sizes zone3Content + positions the visible page(s) inside it. */
+    void layoutZone3();
+
+    /** Writes editorW/H, zone2W/zone4W, scrollCollapsed into apvts.state. */
+    void persistLayoutProps();
+
+    /** Top of the zones row — shifted down by the keyboard ruler when the
+     *  selected block is PITCH or MASK (M5). Zone 1 height is unchanged. */
+    int zonesTopY() const noexcept
+    {
+        return zonesBaseY() + (keyboardRuler != nullptr && keyboardRuler->isVisible()
+                              ? kRulerH : 0);
+    }
 
     Sp3ctraAudioProcessor& audioProcessor;
 
-    // ── State ─────────────────────────────────────────────────────────────────
-    Tab currentTab { Tab::Sources };
-    SynthSub currentSynthSub { SynthSub::AudioStral };
+    // ── Selection / splitter state ────────────────────────────────────────────
+    ChainBlockId selectedBlock { ChainBlockId::Chain1Source };
+    int  visPanelCount_ { 1 };         // ZONE 1 stacked-panel count (drives its height)
+    bool setupFace { false };          // false = PLAY, true = SETUP (per M5)
+    int zone2Width { kZone2DefaultW };
+    int zone4Width { kZone4DefaultW };
+    int splitterDragStartW { 0 };
 
-    // ── Tab navigation (6 tabs: SOURCES | PITCH | MASK | SAMPLER | SYNTH | VIDEO)
-    juce::TextButton sourcesTabBtn { "SOURCES" };
-    juce::TextButton pitchTabBtn   { "PITCH" };
-    juce::TextButton maskTabBtn    { "MASK" };
-    juce::TextButton samplerTabBtn { "SAMPLER" };
-    juce::TextButton synthTabBtn   { "SYNTH" };
-    juce::TextButton videoTabBtn   { "VIDEO" };
-
-    // ── Synth sub-tab buttons ────────────────────────────────────────────────
-    juce::TextButton imgLuxStralSubBtn { "LUXSTRAL" };
-    juce::TextButton imgLuxSynthSubBtn { "LUXSYNTH" };
-    juce::TextButton audioStralSubBtn  { "AUDIOSTRAL" };
-    juce::TextButton audioSynthSubBtn  { "AUDIOSYNTH" };
-    juce::TextButton audioWaveSubBtn   { "AUDIOWAVE" };
-
-    void switchSynthSubTab(SynthSub sub);
-
-    /** Forwards a node-click event from any image pipeline tab to the
-     *  CIS visualiser so the selected source is rendered live. */
-    void handleNodeClicked(VisualizerMode mode);
-
-    // ── CIS Visualizer ────────────────────────────────────────────────────────
+    // ── ZONE 1: CIS Visualizer ────────────────────────────────────────────────
     std::unique_ptr<CisVisualizerComponent> cisVisualizer;
 
-    // ── Image pipeline pages (moved out of the former IMAGE tab) ─────────────
-    // SOURCES / PITCH / MASK are now top-level tabs.
-    // ImgLuxStral / ImgLuxSynth are SYNTH sub-tabs.
+    // ── Keyboard ruler strip under zone 1 (M5 — PITCH / MASK only) ───────────
+    std::unique_ptr<KeyboardRulerComponent> keyboardRuler;
+
+    // ── Palette rail (M6 stub) ────────────────────────────────────────────────
+    PaletteRailComponent paletteRail;
+
+    // ── ZONE 2: chain rack (in a vertical viewport) ───────────────────────────
+    juce::Viewport rackViewport;
+    std::unique_ptr<ChainRackComponent> chainRack;
+
+    // ── Splitters ─────────────────────────────────────────────────────────────
+    SplitterBar splitterLeft;    // zone2 | zone3
+    SplitterBar splitterRight;   // zone3 | zone4
+
+    // ── ZONE 3: block editor host (vertical viewport + content container) ─────
+    FaceSwitchBar   faceSwitch;        // PLAY | SETUP (hidden for SOURCE CIS)
+    juce::Viewport  zone3Viewport;
+    juce::Component zone3Content;
+
+    // Hosted PLAY pages — children of zone3Content, one (or one stack) visible
     std::unique_ptr<SourcesTabComponent>  sourcesPage;
     std::unique_ptr<LuxPitchTabComponent> pitchPage;
     std::unique_ptr<LuxMaskTabComponent>  maskPage;
     std::unique_ptr<LuxStralTabComponent> imgLuxStralPage;
     std::unique_ptr<LuxSynthTabComponent> imgLuxSynthPage;
-
-    // ── SYNTH page — LuxStral audio params (image params removed) ─────────────
-    juce::ToggleButton deviceOnToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> deviceOnAttachment;
-
-    juce::Slider luxstralVolumeSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> luxstralVolumeAttachment;
-
-    juce::Slider attackSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attackAttachment;
-
-    juce::Slider releaseSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> releaseAttachment;
-
-    juce::ToggleButton stereoEnableToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> stereoEnableAttachment;
-
-    juce::Slider stereoTempSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> stereoTempAttachment;
-
-    juce::Slider sumExpSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sumExpAttachment;
-
-    juce::Slider noiseGateSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> noiseGateAttachment;
-
-    // ── SYNTH right column — StrokeForge synthesis controls ───────────────────
-    juce::ToggleButton sfEnabledToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfEnabledAttachment;
-
-    juce::Slider sfMorphWidthSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfMorphWidthAttachment;
-
-    juce::Slider sfFocusSigmaSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfFocusSigmaAttachment;
-
-    juce::Slider sfSpectralThreshSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sfSpectralThreshAttachment;
-
-    juce::ToggleButton sfFocusOnlyToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> sfFocusOnlyAttachment;
-
-    // ── SYNTH page — LuxSynth audio params ──────────────────────────────────
-    juce::ToggleButton lxEnableToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> lxEnableAttachment;
-
-    juce::Slider luxsynthVolumeSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> luxsynthVolumeAttachment;
-
-    juce::Slider lxAttackSlider, lxDecaySlider, lxSustainSlider, lxReleaseSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
-        lxAttackAttach, lxDecayAttach, lxSustainAttach, lxReleaseAttach;
-
-    juce::Slider lxFltAttackSlider, lxFltDecaySlider, lxFltSustainSlider, lxFltReleaseSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
-        lxFltAttackAttach, lxFltDecayAttach, lxFltSustainAttach, lxFltReleaseAttach;
-
-    juce::Slider lxFltCutoffSlider, lxFltDepthSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
-        lxFltCutoffAttach, lxFltDepthAttach;
-
-    juce::Slider lxNumOscSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
-        lxNumOscAttach;
-
-    juce::Slider lxLfoRateSlider, lxLfoDepthSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
-        lxLfoRateAttach, lxLfoDepthAttach;
-
-    // ── SYNTH page — LuxWave audio params ───────────────────────────────────
-    juce::ToggleButton lwEnableToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> lwEnableAttachment;
-
-    juce::Slider luxwaveVolumeSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> luxwaveVolumeAttachment;
-
-    juce::Slider lwAttackSlider, lwDecaySlider, lwSustainSlider, lwReleaseSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
-        lwAttackAttach, lwDecayAttach, lwSustainAttach, lwReleaseAttach;
-
-    juce::Slider lwFltCutoffSlider, lwFltDepthSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
-        lwFltCutoffAttach, lwFltDepthAttach;
-
-    juce::Slider lwLfoRateSlider, lwLfoDepthSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
-        lwLfoRateAttach, lwLfoDepthAttach;
-
-    juce::Slider lwAmplitudeSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
-        lwAmplitudeAttach;
-
-    juce::ComboBox lwScanModeCombo;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>
-        lwScanModeAttach;
-
-    // ── SAMPLER page ──────────────────────────────────────────────────────────
     std::unique_ptr<SamplerPageComponent> samplerPage;
+    std::unique_ptr<AudioStralPanel>      audioStralPanel;
+    std::unique_ptr<AudioSynthPanel>      audioSynthPanel;
+    std::unique_ptr<AudioWavePanel>       audioWavePanel;
 
-    // ── VIDEO page ────────────────────────────────────────────────────────────
-    std::unique_ptr<VideoScrollTab> videoScrollPage;
+    // Hosted SETUP faces (M5 — migrated gear-wheel settings, same APVTS IDs)
+    std::unique_ptr<PitchSetupPanel>      pitchSetup;
+    std::unique_ptr<MaskSetupPanel>       maskSetup;
+    std::unique_ptr<LuxStralSetupPanel>   stralSetup;
+    std::unique_ptr<LuxSynthSetupPanel>   synthSetup;
+    std::unique_ptr<LuxWaveSetupPanel>    waveSetup;
+    std::unique_ptr<SamplerSetupPanel>    samplerSetup;
+
+    // ── ZONE 4: video scroll column (collapsible, detachable window) ──────────
+    std::unique_ptr<WaterfallColumnComponent> waterfallColumn;
+
+    // ZONE 5 — reserved (output / master / monitoring): collapsed strip h=0.
 
     // ── LookAndFeel (declared before all JUCE components that use it) ─────────
     Sp3ctraLookAndFeel sp3ctraLaf;
@@ -301,6 +355,9 @@ private:
     // ── Header: gear settings button ──────────────────────────────────────────
     GearButton settingsButton;
     std::unique_ptr<SettingsWindow> settingsWindow;
+
+    // Tooltip support (palette rail stub + existing component tooltips)
+    juce::TooltipWindow tooltipWindow { this };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Sp3ctraAudioProcessorEditor)
 };

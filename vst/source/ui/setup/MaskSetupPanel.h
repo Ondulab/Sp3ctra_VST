@@ -1,25 +1,33 @@
+/**
+ * @file MaskSetupPanel.h
+ * @brief SETUP face of the MASK block (zone 3, M5).
+ *
+ * Migrated 1:1 from the former gear-wheel LuxMaskSettingsTab —
+ * same controls, same APVTS parameter IDs:
+ *   luxmaskMidiChannel / luxmaskOctaveOffset /
+ *   luxmaskReferenceNote / luxmaskPolyphony
+ */
 #pragma once
 
-#include <juce_gui_extra/juce_gui_extra.h>
-#include "../PluginProcessor.h"
+#include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_audio_processors/juce_audio_processors.h>
+#include "../../PluginProcessor.h"
 
-/**
- * @brief LuxPitch settings tab — MIDI channel, octave offset, reference note.
- *
- * Infrastructure parameters (not gameplay controls).
- * Mirrors the pattern of LuxSynthSettingsTab / LuxSamplerSettingsTab.
- */
-class LuxPitchSettingsTab : public juce::Component
+class MaskSetupPanel : public juce::Component
 {
 public:
-    LuxPitchSettingsTab(Sp3ctraAudioProcessor& processor);
-    ~LuxPitchSettingsTab() override;
+    MaskSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour);
+    ~MaskSetupPanel() override;
+
+    /** Natural content height (header + 4 rows). */
+    static constexpr int kPreferredH = 190;
 
     void paint(juce::Graphics&) override;
     void resized() override;
 
 private:
     juce::AudioProcessorValueTreeState& apvts;
+    juce::Colour accent;
 
     // MIDI Channel (1-16)
     juce::Label    midiChannelLabel;
@@ -41,5 +49,5 @@ private:
     juce::ToggleButton polyphonyToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> polyphonyAttachment;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxPitchSettingsTab)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MaskSetupPanel)
 };

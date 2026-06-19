@@ -10,6 +10,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "vst_adapters.h"
 #include "synth_luxstral_threading.h"
+#include "luxstral_engine.h"
 #include "synth_luxstral_algorithms.h"
 #include "synth_luxstral_math.h"
 #include "pow_approx.h"
@@ -97,92 +98,75 @@ extern debug_luxstral_osc_config_t g_debug_osc_config;
 
 /* Global variables ----------------------------------------------------------*/
 
-// Pool of persistent threads (dynamically allocated)
-synth_thread_worker_t *thread_pool = NULL;
-pthread_t *worker_threads = NULL;
-int num_workers = 0;  // Actual number of workers from config
-_Atomic int synth_pool_initialized = 0;  // RT-SAFE: C11 atomic instead of volatile
-_Atomic int synth_pool_shutdown = 0;     // RT-SAFE: C11 atomic instead of volatile
+/* NOTE: the worker pool, barriers and RT-safe double buffers now live in
+ * LuxStralEngine (luxstral_engine.h). The engine instance is defined in
+ * synth_luxstral.c and passed down to every function in this file.          */
 
-// 🔧 CRITICAL FIX: Signal to unblock workers during prepareToPlay()
-// When DAW changes buffer size, we need to wake up barrier-blocked workers
-_Atomic int synth_workers_must_exit = 0;  // RT-SAFE: C11 atomic instead of volatile
-
-// Barrier synchronization for deterministic execution
-#ifdef __linux__
-pthread_barrier_t g_worker_start_barrier;
-pthread_barrier_t g_worker_end_barrier;
-#else
-barrier_t g_worker_start_barrier;
-barrier_t g_worker_end_barrier;
-#endif
-_Atomic int g_use_barriers = 1;  // RT-SAFE: Enable barriers by default for deterministic execution
-
-/* RT-safe double buffering system */
-rt_safe_buffer_t g_rt_luxstral_buffer = {0};
-rt_safe_buffer_t g_rt_stereo_L_buffer = {0};  
-rt_safe_buffer_t g_rt_stereo_R_buffer = {0};
+/* Private function prototypes -----------------------------------------------*/
+static void synth_shutdown_thread_pool_impl(LuxStralEngine *eng);
 
 /* Private function implementations ------------------------------------------*/
 
 /**
  * @brief  Initialize the persistent thread pool
+ * @param  eng Engine instance
  * @retval 0 on success, -1 on error
  */
-int synth_init_thread_pool(void) {
+int synth_init_thread_pool(LuxStralEngine *eng) {
   // If pool was shutdown but not fully cleaned, force cleanup first
-  if (synth_pool_shutdown) {
+  if (eng->pool_shutdown) {
     log_warning("SYNTH", "Pool was in shutdown state, forcing cleanup before re-init");
-    synth_shutdown_thread_pool();
+    synth_shutdown_thread_pool_impl(eng);
   }
 
-  if (synth_pool_initialized)
+  if (eng->pool_initialized)
     return 0;
-    
+
   // Reset shutdown flags for new session
-  synth_pool_shutdown = 0;
-  synth_workers_must_exit = 0;
+  eng->pool_shutdown = 0;
+  eng->workers_must_exit = 0;
 
   // Get number of workers from config (with validation)
-  num_workers = g_sp3ctra_config.num_workers;
-  if (num_workers < 1 || num_workers > MAX_WORKERS) {
-    log_warning("SYNTH", "Invalid num_workers=%d, clamping to range [1, %d]", num_workers, MAX_WORKERS);
-    num_workers = (num_workers < 1) ? 1 : MAX_WORKERS;
+  eng->num_workers = g_sp3ctra_config.num_workers;
+  if (eng->num_workers < 1 || eng->num_workers > MAX_WORKERS) {
+    log_warning("SYNTH", "Invalid num_workers=%d, clamping to range [1, %d]", eng->num_workers, MAX_WORKERS);
+    eng->num_workers = (eng->num_workers < 1) ? 1 : MAX_WORKERS;
   }
-  
-  log_info("SYNTH", "Initializing thread pool with %d workers", num_workers);
-  
+
+  log_info("SYNTH", "Initializing thread pool with %d workers", eng->num_workers);
+
   // Allocate thread pool and worker threads arrays
-  thread_pool = (synth_thread_worker_t*)calloc(num_workers, sizeof(synth_thread_worker_t));
-  worker_threads = (pthread_t*)calloc(num_workers, sizeof(pthread_t));
-  
-  if (!thread_pool || !worker_threads) {
+  eng->thread_pool = (synth_thread_worker_t*)calloc(eng->num_workers, sizeof(synth_thread_worker_t));
+  eng->worker_threads = (pthread_t*)calloc(eng->num_workers, sizeof(pthread_t));
+
+  if (!eng->thread_pool || !eng->worker_threads) {
     log_error("SYNTH", "Failed to allocate thread pool arrays");
-    if (thread_pool) { free(thread_pool); thread_pool = NULL; }
-    if (worker_threads) { free(worker_threads); worker_threads = NULL; }
+    if (eng->thread_pool) { free(eng->thread_pool); eng->thread_pool = NULL; }
+    if (eng->worker_threads) { free(eng->worker_threads); eng->worker_threads = NULL; }
     return -1;
   }
 
   // Initialize barrier synchronization (Phase 2: Deterministic execution)
-  if (g_use_barriers) {
+  if (eng->use_barriers) {
     // num_workers + 1 for main thread
-    if (synth_init_barriers(num_workers + 1) != 0) {
+    if (synth_init_barriers(eng, eng->num_workers + 1) != 0) {
       log_warning("SYNTH", "Failed to initialize barriers, falling back to condition variables");
-      g_use_barriers = 0;
+      eng->use_barriers = 0;
     }
   }
 
   int current_notes = get_current_number_of_notes();
-  int notes_per_thread = current_notes / num_workers;
+  int notes_per_thread = current_notes / eng->num_workers;
 
-  for (int i = 0; i < num_workers; i++) {
-    synth_thread_worker_t *worker = &thread_pool[i];
+  for (int i = 0; i < eng->num_workers; i++) {
+    synth_thread_worker_t *worker = &eng->thread_pool[i];
 
     // Worker configuration
+    worker->engine = eng;  // Back-pointer to owning engine
     worker->thread_id = i;
     worker->start_note = i * notes_per_thread;
     // Last worker handles all remaining notes (handles rounding)
-    worker->end_note = (i == num_workers - 1) ? current_notes : (i + 1) * notes_per_thread;
+    worker->end_note = (i == eng->num_workers - 1) ? current_notes : (i + 1) * notes_per_thread;
 
     // ✅ STATIC ALLOCATION: Use MAX_BUFFER_SIZE for all per-sample buffers
     // Industry standard: allocate once for maximum buffer size (4096)
@@ -262,7 +246,7 @@ int synth_init_thread_pool(void) {
     }
   }
 
-  synth_pool_initialized = 1;
+  eng->pool_initialized = 1;
   return 0;
 }
 
@@ -273,6 +257,7 @@ int synth_init_thread_pool(void) {
  */
 void *synth_persistent_worker_thread(void *arg) {
   synth_thread_worker_t *worker = (synth_thread_worker_t *)arg;
+  LuxStralEngine *eng = worker->engine;
 
   // 🔧 RT PRIORITY: Set QoS to USER_INTERACTIVE for this worker thread
   // Must be called from within the thread itself (pthread_set_qos_class_self_np)
@@ -282,32 +267,28 @@ void *synth_persistent_worker_thread(void *arg) {
   }
 #endif
 
-  while (!synth_pool_shutdown && !synth_workers_must_exit) {
+  while (!eng->pool_shutdown && !eng->workers_must_exit) {
     // Deterministic execution with barriers
     // Wait at start barrier for all workers + main thread
-    synth_barrier_wait(&g_worker_start_barrier);
-    
+    synth_barrier_wait(eng, &eng->worker_start_barrier);
+
     // 🔧 CRITICAL: Check exit flags immediately after barrier wakeup
-    if (synth_pool_shutdown || synth_workers_must_exit)
+    if (eng->pool_shutdown || eng->workers_must_exit)
       break;
-    
+
     // Perform the work (Float32 path)
     synth_process_worker_range(worker);
-    
+
     // Wait at end barrier for all workers to complete
-    synth_barrier_wait(&g_worker_end_barrier);
-    
+    synth_barrier_wait(eng, &eng->worker_end_barrier);
+
     // 🔧 CRITICAL: Check exit flags after end barrier too
-    if (synth_pool_shutdown || synth_workers_must_exit)
+    if (eng->pool_shutdown || eng->workers_must_exit)
       break;
   }
 
   return NULL;
 }
-
-
-// Global atomic flag to log Float32 path only once across all workers
-static _Atomic int g_f32_path_logged = 0;
 
 /**
  * @brief  Process a range of notes for a given worker (Float32 version)
@@ -316,10 +297,10 @@ static _Atomic int g_f32_path_logged = 0;
  */
 void synth_process_worker_range(synth_thread_worker_t *worker) {
   int32_t buff_idx, note, local_note_idx;
-  
-  // Thread-safe one-time log using atomic compare-exchange
+
+  // Thread-safe one-time log using atomic compare-exchange (per-engine flag)
   int expected = 0;
-  if (atomic_compare_exchange_strong(&g_f32_path_logged, &expected, 1)) {
+  if (atomic_compare_exchange_strong(&worker->engine->f32_path_logged, &expected, 1)) {
     log_info("SYNTH", "Float32 path active in worker threads");
   }
 
@@ -480,18 +461,19 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
 
 /**
  * @brief  Pre-compute waves[] data in parallel to avoid contention
+ * @param  eng Engine instance
  * @param  imageData Input image data
  * @param  db DoubleBuffer for accessing preprocessed stereo data
  * @retval None
  */
-void synth_precompute_wave_data(float *imageData, DoubleBuffer *db) {
+void synth_precompute_wave_data(LuxStralEngine *eng, float *imageData, DoubleBuffer *db) {
   // ✅ CRITICAL OPTIMIZATION: Batch read all preprocessed data in ONE mutex lock
   // BEFORE: 6912 mutex locks per buffer (2 locks × 3456 notes) = massive contention!
   // AFTER: 1 mutex lock per buffer = 6912x reduction in lock overhead
-  
+
   // Phase 1: Image data assignment (thread-safe, read-only)
-  for (int i = 0; i < num_workers; i++) {
-    thread_pool[i].imageData = imageData;
+  for (int i = 0; i < eng->num_workers; i++) {
+    eng->thread_pool[i].imageData = imageData;
   }
 
   // Phase 2: Batch copy ALL preprocessed data with a SINGLE mutex lock
@@ -509,8 +491,8 @@ void synth_precompute_wave_data(float *imageData, DoubleBuffer *db) {
   rt_profiler_mutex_lock_end(&g_rt_profiler, wait_us);
   
   // Copy all preprocessed data for all workers in one shot
-  for (int i = 0; i < num_workers; i++) {
-    synth_thread_worker_t *worker = &thread_pool[i];
+  for (int i = 0; i < eng->num_workers; i++) {
+    synth_thread_worker_t *worker = &eng->thread_pool[i];
     int notes_this_worker = worker->end_note - worker->start_note;
     
     // Batch copy volume data
@@ -596,21 +578,22 @@ void synth_precompute_wave_data(float *imageData, DoubleBuffer *db) {
 
 /**
  * @brief  Start worker threads with CPU affinity and RT priorities
+ * @param  eng Engine instance
  * @retval 0 on success, -1 on error
  */
-int synth_start_worker_threads(void) {
+int synth_start_worker_threads(LuxStralEngine *eng) {
   int rt_success_count = 0;  // Track how many workers got RT priority
-  
-  for (int i = 0; i < num_workers; i++) {
-    if (pthread_create(&worker_threads[i], NULL, synth_persistent_worker_thread,
-                       &thread_pool[i]) != 0) {
+
+  for (int i = 0; i < eng->num_workers; i++) {
+    if (pthread_create(&eng->worker_threads[i], NULL, synth_persistent_worker_thread,
+                       &eng->thread_pool[i]) != 0) {
       log_error("SYNTH", "Error creating worker thread %d", i);
       return -1;
     }
 
     // ✅ PHASE 1: Set RT priority for deterministic execution
 #if defined(__linux__) || defined(__APPLE__)
-    if (synth_set_rt_priority(worker_threads[i], 80) == 0) {
+    if (synth_set_rt_priority(eng->worker_threads[i], 80) == 0) {
       rt_success_count++;
     }
     // Note: Individual failure warnings are logged in synth_set_rt_priority()
@@ -622,11 +605,11 @@ int synth_start_worker_threads(void) {
     CPU_ZERO(&cpuset);
     // Distribute threads across available CPUs (leave CPU 0 for system if possible)
     // For num_workers <= 7, use CPUs 1-7; for num_workers == 8, use CPUs 0-7
-    int cpu_id = (num_workers <= 7) ? (i + 1) : i;
+    int cpu_id = (eng->num_workers <= 7) ? (i + 1) : i;
     CPU_SET(cpu_id, &cpuset);
 
     int result =
-        pthread_setaffinity_np(worker_threads[i], sizeof(cpu_set_t), &cpuset);
+        pthread_setaffinity_np(eng->worker_threads[i], sizeof(cpu_set_t), &cpuset);
     if (result == 0) {
       log_startup_detail("SYNTH", "Worker thread %d assigned to CPU %d", i, cpu_id);
     } else {
@@ -634,84 +617,85 @@ int synth_start_worker_threads(void) {
     }
 #endif
   }
-  
+
   // Condensed summary log (always shown in NORMAL mode)
 #if defined(__linux__) || defined(__APPLE__)
-  if (rt_success_count == num_workers) {
-    log_info("SYNTH", "RT priority enabled for all %d worker threads", num_workers);
+  if (rt_success_count == eng->num_workers) {
+    log_info("SYNTH", "RT priority enabled for all %d worker threads", eng->num_workers);
   } else if (rt_success_count > 0) {
-    log_info("SYNTH", "RT priority enabled for %d/%d worker threads", rt_success_count, num_workers);
+    log_info("SYNTH", "RT priority enabled for %d/%d worker threads", rt_success_count, eng->num_workers);
   } else {
-    log_info("SYNTH", "RT priority not available (continuing without RT for %d workers)", num_workers);
+    log_info("SYNTH", "RT priority not available (continuing without RT for %d workers)", eng->num_workers);
   }
 #endif
-  
+
   return 0;
 }
 
 /**
  * @brief  Stop the persistent thread pool
+ * @param  eng Engine instance
  * @retval None
  */
-void synth_shutdown_thread_pool(void) {
-  if (!synth_pool_initialized)
+static void synth_shutdown_thread_pool_impl(LuxStralEngine *eng) {
+  if (!eng->pool_initialized)
     return;
 
   log_info("SYNTH", "Initiating thread pool shutdown...");
-  
+
   // 🔧 CRITICAL FIX: Set shutdown flags FIRST
-  synth_pool_shutdown = 1;
-  synth_workers_must_exit = 1;
+  eng->pool_shutdown = 1;
+  eng->workers_must_exit = 1;
 
   // 🔧 ULTRA-CRITICAL FIX: If workers are blocked on barriers, we need to JOIN them
   // to unblock them. This simulates the main thread rejoining the barriers one last time.
-  if (g_use_barriers) {
+  if (eng->use_barriers) {
     log_info("SYNTH", "Performing final barrier sync to unblock workers...");
-    
+
     // Try to join start barrier (if workers are waiting there)
     // This will either:
     // - Succeed if workers are waiting (unblocks them)
     // - Return immediately if no one is waiting
     // - Return error if workers already passed (safe to ignore)
-    int start_result = synth_barrier_wait(&g_worker_start_barrier);
+    int start_result = synth_barrier_wait(eng, &eng->worker_start_barrier);
     if (start_result == 0 || start_result == -1) {
       log_info("SYNTH", "Joined start barrier, workers can proceed to exit check");
-      
+
       // Now join end barrier if they proceeded to work phase
-      int end_result = synth_barrier_wait(&g_worker_end_barrier);
+      int end_result = synth_barrier_wait(eng, &eng->worker_end_barrier);
       if (end_result == 0 || end_result == -1) {
         log_info("SYNTH", "Joined end barrier, workers should exit now");
       }
     }
-    
+
     // Additional broadcast to catch any edge cases
 #ifndef __linux__
     // macOS: Broadcast on barrier condition variables
-    pthread_mutex_lock(&g_worker_start_barrier.mutex);
-    g_worker_start_barrier.generation++;
-    g_worker_start_barrier.waiting = 0;
-    pthread_cond_broadcast(&g_worker_start_barrier.cond);
-    pthread_mutex_unlock(&g_worker_start_barrier.mutex);
-    
-    pthread_mutex_lock(&g_worker_end_barrier.mutex);
-    g_worker_end_barrier.generation++;
-    g_worker_end_barrier.waiting = 0;
-    pthread_cond_broadcast(&g_worker_end_barrier.cond);
-    pthread_mutex_unlock(&g_worker_end_barrier.mutex);
+    pthread_mutex_lock(&eng->worker_start_barrier.mutex);
+    eng->worker_start_barrier.generation++;
+    eng->worker_start_barrier.waiting = 0;
+    pthread_cond_broadcast(&eng->worker_start_barrier.cond);
+    pthread_mutex_unlock(&eng->worker_start_barrier.mutex);
+
+    pthread_mutex_lock(&eng->worker_end_barrier.mutex);
+    eng->worker_end_barrier.generation++;
+    eng->worker_end_barrier.waiting = 0;
+    pthread_cond_broadcast(&eng->worker_end_barrier.cond);
+    pthread_mutex_unlock(&eng->worker_end_barrier.mutex);
 #else
     // Linux: Destroy and recreate with count=1
-    pthread_barrier_destroy(&g_worker_start_barrier);
-    pthread_barrier_destroy(&g_worker_end_barrier);
-    pthread_barrier_init(&g_worker_start_barrier, NULL, 1);
-    pthread_barrier_init(&g_worker_end_barrier, NULL, 1);
+    pthread_barrier_destroy(&eng->worker_start_barrier);
+    pthread_barrier_destroy(&eng->worker_end_barrier);
+    pthread_barrier_init(&eng->worker_start_barrier, NULL, 1);
+    pthread_barrier_init(&eng->worker_end_barrier, NULL, 1);
 #endif
   }
 
   // Wake up all threads via condition variables (legacy/fallback)
-  for (int i = 0; i < num_workers; i++) {
-    pthread_mutex_lock(&thread_pool[i].work_mutex);
-    pthread_cond_signal(&thread_pool[i].work_cond);
-    pthread_mutex_unlock(&thread_pool[i].work_mutex);
+  for (int i = 0; i < eng->num_workers; i++) {
+    pthread_mutex_lock(&eng->thread_pool[i].work_mutex);
+    pthread_cond_signal(&eng->thread_pool[i].work_cond);
+    pthread_mutex_unlock(&eng->thread_pool[i].work_mutex);
   }
 
   // 🔧 CRITICAL: Give workers a moment to process the exit signal
@@ -719,46 +703,46 @@ void synth_shutdown_thread_pool(void) {
 
   // Wait for all threads to terminate
   log_info("SYNTH", "Waiting for worker threads to terminate...");
-  for (int i = 0; i < num_workers; i++) {
-    pthread_join(worker_threads[i], NULL);
+  for (int i = 0; i < eng->num_workers; i++) {
+    pthread_join(eng->worker_threads[i], NULL);
     log_info("SYNTH", "Worker thread %d terminated", i);
 
     // Free dynamically allocated worker buffers
-    free(thread_pool[i].thread_luxstralBuffer);    thread_pool[i].thread_luxstralBuffer = NULL;
-    free(thread_pool[i].thread_sumVolumeBuffer);   thread_pool[i].thread_sumVolumeBuffer = NULL;
-    free(thread_pool[i].thread_maxVolumeBuffer);   thread_pool[i].thread_maxVolumeBuffer = NULL;
-    free(thread_pool[i].thread_luxstralBuffer_L);  thread_pool[i].thread_luxstralBuffer_L = NULL;
-    free(thread_pool[i].thread_luxstralBuffer_R);  thread_pool[i].thread_luxstralBuffer_R = NULL;
-    free(thread_pool[i].waveBuffer);               thread_pool[i].waveBuffer = NULL;
-    free(thread_pool[i].volumeBuffer);             thread_pool[i].volumeBuffer = NULL;
-    free(thread_pool[i].imageBuffer_q31);          thread_pool[i].imageBuffer_q31 = NULL;
-    free(thread_pool[i].imageBuffer_f32);          thread_pool[i].imageBuffer_f32 = NULL;
-    free(thread_pool[i].precomputed_wave_data);    thread_pool[i].precomputed_wave_data = NULL;
-    free(thread_pool[i].precomputed_volume);       thread_pool[i].precomputed_volume = NULL;
-    free(thread_pool[i].precomputed_pan_position); thread_pool[i].precomputed_pan_position = NULL;
-    free(thread_pool[i].precomputed_left_gain);    thread_pool[i].precomputed_left_gain = NULL;
-    free(thread_pool[i].precomputed_right_gain);   thread_pool[i].precomputed_right_gain = NULL;
-    free(thread_pool[i].last_left_gain);           thread_pool[i].last_left_gain = NULL;
-    free(thread_pool[i].last_right_gain);          thread_pool[i].last_right_gain = NULL;
-    free(thread_pool[i].captured_current_volume);  thread_pool[i].captured_current_volume = NULL;
-    free(thread_pool[i].captured_target_volume);   thread_pool[i].captured_target_volume = NULL;
-    free(thread_pool[i].temp_waveBuffer_L);        thread_pool[i].temp_waveBuffer_L = NULL;
-    free(thread_pool[i].temp_waveBuffer_R);        thread_pool[i].temp_waveBuffer_R = NULL;
+    free(eng->thread_pool[i].thread_luxstralBuffer);    eng->thread_pool[i].thread_luxstralBuffer = NULL;
+    free(eng->thread_pool[i].thread_sumVolumeBuffer);   eng->thread_pool[i].thread_sumVolumeBuffer = NULL;
+    free(eng->thread_pool[i].thread_maxVolumeBuffer);   eng->thread_pool[i].thread_maxVolumeBuffer = NULL;
+    free(eng->thread_pool[i].thread_luxstralBuffer_L);  eng->thread_pool[i].thread_luxstralBuffer_L = NULL;
+    free(eng->thread_pool[i].thread_luxstralBuffer_R);  eng->thread_pool[i].thread_luxstralBuffer_R = NULL;
+    free(eng->thread_pool[i].waveBuffer);               eng->thread_pool[i].waveBuffer = NULL;
+    free(eng->thread_pool[i].volumeBuffer);             eng->thread_pool[i].volumeBuffer = NULL;
+    free(eng->thread_pool[i].imageBuffer_q31);          eng->thread_pool[i].imageBuffer_q31 = NULL;
+    free(eng->thread_pool[i].imageBuffer_f32);          eng->thread_pool[i].imageBuffer_f32 = NULL;
+    free(eng->thread_pool[i].precomputed_wave_data);    eng->thread_pool[i].precomputed_wave_data = NULL;
+    free(eng->thread_pool[i].precomputed_volume);       eng->thread_pool[i].precomputed_volume = NULL;
+    free(eng->thread_pool[i].precomputed_pan_position); eng->thread_pool[i].precomputed_pan_position = NULL;
+    free(eng->thread_pool[i].precomputed_left_gain);    eng->thread_pool[i].precomputed_left_gain = NULL;
+    free(eng->thread_pool[i].precomputed_right_gain);   eng->thread_pool[i].precomputed_right_gain = NULL;
+    free(eng->thread_pool[i].last_left_gain);           eng->thread_pool[i].last_left_gain = NULL;
+    free(eng->thread_pool[i].last_right_gain);          eng->thread_pool[i].last_right_gain = NULL;
+    free(eng->thread_pool[i].captured_current_volume);  eng->thread_pool[i].captured_current_volume = NULL;
+    free(eng->thread_pool[i].captured_target_volume);   eng->thread_pool[i].captured_target_volume = NULL;
+    free(eng->thread_pool[i].temp_waveBuffer_L);        eng->thread_pool[i].temp_waveBuffer_L = NULL;
+    free(eng->thread_pool[i].temp_waveBuffer_R);        eng->thread_pool[i].temp_waveBuffer_R = NULL;
 
-    pthread_mutex_destroy(&thread_pool[i].work_mutex);
-    pthread_cond_destroy(&thread_pool[i].work_cond);
+    pthread_mutex_destroy(&eng->thread_pool[i].work_mutex);
+    pthread_cond_destroy(&eng->thread_pool[i].work_cond);
   }
 
   // Free the dynamically allocated arrays
-  if (thread_pool) {
-    free(thread_pool);
-    thread_pool = NULL;
+  if (eng->thread_pool) {
+    free(eng->thread_pool);
+    eng->thread_pool = NULL;
   }
-  if (worker_threads) {
-    free(worker_threads);
-    worker_threads = NULL;
+  if (eng->worker_threads) {
+    free(eng->worker_threads);
+    eng->worker_threads = NULL;
   }
-  num_workers = 0;
+  eng->num_workers = 0;
 
   if (g_sp3ctra_config.stereo_mode_enabled) {
     // Cleanup lock-free pan gains system
@@ -767,55 +751,65 @@ void synth_shutdown_thread_pool(void) {
   }
 
   // Cleanup barrier synchronization
-  if (g_use_barriers) {
-    synth_cleanup_barriers();
+  if (eng->use_barriers) {
+    synth_cleanup_barriers(eng);
     log_info("SYNTH", "Barrier synchronization cleaned up");
   }
 
-  synth_pool_initialized = 0;
+  eng->pool_initialized = 0;
   log_info("SYNTH", "Thread pool shutdown complete");
 }
 
 /**
+ * @brief  Stop the persistent thread pool (public entry point)
+ * @note   Signature kept for external callers (Sp3ctraSharedCore, atexit)
+ * @retval None
+ */
+void synth_shutdown_thread_pool(void) {
+  synth_shutdown_thread_pool_impl(&g_luxstral_engine_a);
+}
+
+/**
  * @brief  Initialize RT-safe double buffering system
+ * @param  eng Engine instance
  * @retval 0 on success, -1 on error
  */
-int init_rt_safe_buffers(void) {
+int init_rt_safe_buffers(LuxStralEngine *eng) {
   // ✅ STATIC ALLOCATION: Use MAX_BUFFER_SIZE for RT-safe buffers
   // No reallocation needed when DAW changes buffer size
-  
+
   // Initialize additive buffer with MAX_BUFFER_SIZE
-  g_rt_luxstral_buffer.buffers[0] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
-  g_rt_luxstral_buffer.buffers[1] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
-  if (!g_rt_luxstral_buffer.buffers[0] || !g_rt_luxstral_buffer.buffers[1]) {
+  eng->rt_luxstral_buffer.buffers[0] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
+  eng->rt_luxstral_buffer.buffers[1] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
+  if (!eng->rt_luxstral_buffer.buffers[0] || !eng->rt_luxstral_buffer.buffers[1]) {
     log_error("SYNTH", "Failed to allocate RT additive buffers");
     return -1;
   }
-  g_rt_luxstral_buffer.ready_buffer = 0;  // RT reads from buffer 0 initially
-  g_rt_luxstral_buffer.worker_buffer = 1; // Workers write to buffer 1 initially
-  pthread_mutex_init(&g_rt_luxstral_buffer.swap_mutex, NULL);
+  eng->rt_luxstral_buffer.ready_buffer = 0;  // RT reads from buffer 0 initially
+  eng->rt_luxstral_buffer.worker_buffer = 1; // Workers write to buffer 1 initially
+  pthread_mutex_init(&eng->rt_luxstral_buffer.swap_mutex, NULL);
 
   // Initialize stereo L buffer with MAX_BUFFER_SIZE
-  g_rt_stereo_L_buffer.buffers[0] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
-  g_rt_stereo_L_buffer.buffers[1] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
-  if (!g_rt_stereo_L_buffer.buffers[0] || !g_rt_stereo_L_buffer.buffers[1]) {
+  eng->rt_stereo_L_buffer.buffers[0] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
+  eng->rt_stereo_L_buffer.buffers[1] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
+  if (!eng->rt_stereo_L_buffer.buffers[0] || !eng->rt_stereo_L_buffer.buffers[1]) {
     log_error("SYNTH", "Failed to allocate RT stereo L buffers");
     return -1;
   }
-  g_rt_stereo_L_buffer.ready_buffer = 0;
-  g_rt_stereo_L_buffer.worker_buffer = 1;
-  pthread_mutex_init(&g_rt_stereo_L_buffer.swap_mutex, NULL);
+  eng->rt_stereo_L_buffer.ready_buffer = 0;
+  eng->rt_stereo_L_buffer.worker_buffer = 1;
+  pthread_mutex_init(&eng->rt_stereo_L_buffer.swap_mutex, NULL);
 
   // Initialize stereo R buffer with MAX_BUFFER_SIZE
-  g_rt_stereo_R_buffer.buffers[0] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
-  g_rt_stereo_R_buffer.buffers[1] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
-  if (!g_rt_stereo_R_buffer.buffers[0] || !g_rt_stereo_R_buffer.buffers[1]) {
+  eng->rt_stereo_R_buffer.buffers[0] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
+  eng->rt_stereo_R_buffer.buffers[1] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
+  if (!eng->rt_stereo_R_buffer.buffers[0] || !eng->rt_stereo_R_buffer.buffers[1]) {
     log_error("SYNTH", "Failed to allocate RT stereo R buffers");
     return -1;
   }
-  g_rt_stereo_R_buffer.ready_buffer = 0;
-  g_rt_stereo_R_buffer.worker_buffer = 1;
-  pthread_mutex_init(&g_rt_stereo_R_buffer.swap_mutex, NULL);
+  eng->rt_stereo_R_buffer.ready_buffer = 0;
+  eng->rt_stereo_R_buffer.worker_buffer = 1;
+  pthread_mutex_init(&eng->rt_stereo_R_buffer.swap_mutex, NULL);
 
   // ========================================================================
   // 🔧 RT OPTIMIZATION: Lock RT-safe buffers in memory to prevent page faults
@@ -823,70 +817,72 @@ int init_rt_safe_buffers(void) {
   size_t buffer_bytes = (size_t)MAX_BUFFER_SIZE * sizeof(float);
   int mlock_success = 0;
   int mlock_total = 6;  // 3 buffer types × 2 double-buffer slots
-  
-  if (mlock(g_rt_luxstral_buffer.buffers[0], buffer_bytes) == 0) mlock_success++;
-  if (mlock(g_rt_luxstral_buffer.buffers[1], buffer_bytes) == 0) mlock_success++;
-  if (mlock(g_rt_stereo_L_buffer.buffers[0], buffer_bytes) == 0) mlock_success++;
-  if (mlock(g_rt_stereo_L_buffer.buffers[1], buffer_bytes) == 0) mlock_success++;
-  if (mlock(g_rt_stereo_R_buffer.buffers[0], buffer_bytes) == 0) mlock_success++;
-  if (mlock(g_rt_stereo_R_buffer.buffers[1], buffer_bytes) == 0) mlock_success++;
-  
+
+  if (mlock(eng->rt_luxstral_buffer.buffers[0], buffer_bytes) == 0) mlock_success++;
+  if (mlock(eng->rt_luxstral_buffer.buffers[1], buffer_bytes) == 0) mlock_success++;
+  if (mlock(eng->rt_stereo_L_buffer.buffers[0], buffer_bytes) == 0) mlock_success++;
+  if (mlock(eng->rt_stereo_L_buffer.buffers[1], buffer_bytes) == 0) mlock_success++;
+  if (mlock(eng->rt_stereo_R_buffer.buffers[0], buffer_bytes) == 0) mlock_success++;
+  if (mlock(eng->rt_stereo_R_buffer.buffers[1], buffer_bytes) == 0) mlock_success++;
+
   if (mlock_success == mlock_total) {
     log_info("SYNTH", "RT-safe buffers locked in memory (mlock) - page faults prevented");
   } else if (mlock_success > 0) {
     log_warning("SYNTH", "Partial mlock: %d/%d RT-safe buffers locked", mlock_success, mlock_total);
   }
-  
+
   log_info("SYNTH", "RT-safe double buffering system initialized (MAX_BUFFER_SIZE=%d)", MAX_BUFFER_SIZE);
   return 0;
 }
 
 /**
  * @brief  Cleanup RT-safe double buffering system
+ * @param  eng Engine instance
  * @retval None
  */
-void cleanup_rt_safe_buffers(void) {
+void cleanup_rt_safe_buffers(LuxStralEngine *eng) {
   // Cleanup additive buffer
-  if (g_rt_luxstral_buffer.buffers[0]) { free(g_rt_luxstral_buffer.buffers[0]); g_rt_luxstral_buffer.buffers[0] = NULL; }
-  if (g_rt_luxstral_buffer.buffers[1]) { free(g_rt_luxstral_buffer.buffers[1]); g_rt_luxstral_buffer.buffers[1] = NULL; }
-  pthread_mutex_destroy(&g_rt_luxstral_buffer.swap_mutex);
+  if (eng->rt_luxstral_buffer.buffers[0]) { free(eng->rt_luxstral_buffer.buffers[0]); eng->rt_luxstral_buffer.buffers[0] = NULL; }
+  if (eng->rt_luxstral_buffer.buffers[1]) { free(eng->rt_luxstral_buffer.buffers[1]); eng->rt_luxstral_buffer.buffers[1] = NULL; }
+  pthread_mutex_destroy(&eng->rt_luxstral_buffer.swap_mutex);
 
   // Cleanup stereo L buffer
-  if (g_rt_stereo_L_buffer.buffers[0]) { free(g_rt_stereo_L_buffer.buffers[0]); g_rt_stereo_L_buffer.buffers[0] = NULL; }
-  if (g_rt_stereo_L_buffer.buffers[1]) { free(g_rt_stereo_L_buffer.buffers[1]); g_rt_stereo_L_buffer.buffers[1] = NULL; }
-  pthread_mutex_destroy(&g_rt_stereo_L_buffer.swap_mutex);
+  if (eng->rt_stereo_L_buffer.buffers[0]) { free(eng->rt_stereo_L_buffer.buffers[0]); eng->rt_stereo_L_buffer.buffers[0] = NULL; }
+  if (eng->rt_stereo_L_buffer.buffers[1]) { free(eng->rt_stereo_L_buffer.buffers[1]); eng->rt_stereo_L_buffer.buffers[1] = NULL; }
+  pthread_mutex_destroy(&eng->rt_stereo_L_buffer.swap_mutex);
 
   // Cleanup stereo R buffer
-  if (g_rt_stereo_R_buffer.buffers[0]) { free(g_rt_stereo_R_buffer.buffers[0]); g_rt_stereo_R_buffer.buffers[0] = NULL; }
-  if (g_rt_stereo_R_buffer.buffers[1]) { free(g_rt_stereo_R_buffer.buffers[1]); g_rt_stereo_R_buffer.buffers[1] = NULL; }
-  pthread_mutex_destroy(&g_rt_stereo_R_buffer.swap_mutex);
+  if (eng->rt_stereo_R_buffer.buffers[0]) { free(eng->rt_stereo_R_buffer.buffers[0]); eng->rt_stereo_R_buffer.buffers[0] = NULL; }
+  if (eng->rt_stereo_R_buffer.buffers[1]) { free(eng->rt_stereo_R_buffer.buffers[1]); eng->rt_stereo_R_buffer.buffers[1] = NULL; }
+  pthread_mutex_destroy(&eng->rt_stereo_R_buffer.swap_mutex);
 
   log_info("SYNTH", "RT-safe double buffering system cleaned up");
 }
 
 /**
  * @brief  Swap RT-safe buffers when workers are done (called from non-RT thread)
+ * @param  eng Engine instance
  * @retval None
  */
-void rt_safe_swap_buffers(void) {
+void rt_safe_swap_buffers(LuxStralEngine *eng) {
   // Swap additive buffer (non-blocking for non-RT thread)
-  pthread_mutex_lock(&g_rt_luxstral_buffer.swap_mutex);
-  int old_ready = g_rt_luxstral_buffer.ready_buffer;
-  g_rt_luxstral_buffer.ready_buffer = g_rt_luxstral_buffer.worker_buffer;
-  g_rt_luxstral_buffer.worker_buffer = old_ready;
-  pthread_mutex_unlock(&g_rt_luxstral_buffer.swap_mutex);
+  pthread_mutex_lock(&eng->rt_luxstral_buffer.swap_mutex);
+  int old_ready = eng->rt_luxstral_buffer.ready_buffer;
+  eng->rt_luxstral_buffer.ready_buffer = eng->rt_luxstral_buffer.worker_buffer;
+  eng->rt_luxstral_buffer.worker_buffer = old_ready;
+  pthread_mutex_unlock(&eng->rt_luxstral_buffer.swap_mutex);
 
-  // Swap stereo L buffer  
-  pthread_mutex_lock(&g_rt_stereo_L_buffer.swap_mutex);
-  old_ready = g_rt_stereo_L_buffer.ready_buffer;
-  g_rt_stereo_L_buffer.ready_buffer = g_rt_stereo_L_buffer.worker_buffer;
-  g_rt_stereo_L_buffer.worker_buffer = old_ready;
-  pthread_mutex_unlock(&g_rt_stereo_L_buffer.swap_mutex);
+  // Swap stereo L buffer
+  pthread_mutex_lock(&eng->rt_stereo_L_buffer.swap_mutex);
+  old_ready = eng->rt_stereo_L_buffer.ready_buffer;
+  eng->rt_stereo_L_buffer.ready_buffer = eng->rt_stereo_L_buffer.worker_buffer;
+  eng->rt_stereo_L_buffer.worker_buffer = old_ready;
+  pthread_mutex_unlock(&eng->rt_stereo_L_buffer.swap_mutex);
 
   // Swap stereo R buffer
-  pthread_mutex_lock(&g_rt_stereo_R_buffer.swap_mutex);
-  old_ready = g_rt_stereo_R_buffer.ready_buffer;
-  g_rt_stereo_R_buffer.ready_buffer = g_rt_stereo_R_buffer.worker_buffer;
-  g_rt_stereo_R_buffer.worker_buffer = old_ready;
-  pthread_mutex_unlock(&g_rt_stereo_R_buffer.swap_mutex);
+  pthread_mutex_lock(&eng->rt_stereo_R_buffer.swap_mutex);
+  old_ready = eng->rt_stereo_R_buffer.ready_buffer;
+  eng->rt_stereo_R_buffer.ready_buffer = eng->rt_stereo_R_buffer.worker_buffer;
+  eng->rt_stereo_R_buffer.worker_buffer = old_ready;
+  pthread_mutex_unlock(&eng->rt_stereo_R_buffer.swap_mutex);
 }

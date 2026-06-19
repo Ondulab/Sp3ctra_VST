@@ -52,13 +52,25 @@ typedef struct AudioImageBuffers {
   uint8_t *sampler_B;
 
   // ── Modulated snapshot (written by the synthesis thread) ─────────────────
-  // Holds the last frame after the full insert chain :
-  //     Live ► LuxSampler ► LuxPitch ► LuxMask
+  // Holds the last frame after the full insert chain.  Actual runtime order:
+  //     Live ► [LuxPitch ⇄ LuxMask, order = chainInsertOrder] ► LuxSampler
+  // (the sampler records the post-insert frame; during playback the sampler
+  // frame IS the modulated output — inserts are already "printed").
   // This is the buffer consumed by the synth engines when their source is
   // set to MODULATED, and the buffer mirrored by the video waterfall.
   uint8_t *modulated_R;
   uint8_t *modulated_G;
   uint8_t *modulated_B;
+
+  // ── Per-insert visual taps (written by the synthesis thread) ─────────────
+  // tap[i] holds the last output frame of insert i (see IMAGE_CHAIN_INSERT_*
+  // in processing/image_chain.h).  Only snapshotted when a visual consumer
+  // declared demand (image_chain_set_tap_demand) — zero cost otherwise.
+  // Single producer (synthesis thread) / multi reader (UI visualizers).
+#define AUDIO_IMAGE_NUM_INSERT_TAPS 2
+  uint8_t *insert_tap_R[AUDIO_IMAGE_NUM_INSERT_TAPS];
+  uint8_t *insert_tap_G[AUDIO_IMAGE_NUM_INSERT_TAPS];
+  uint8_t *insert_tap_B[AUDIO_IMAGE_NUM_INSERT_TAPS];
 
 
   // Statistics and monitoring
@@ -147,6 +159,24 @@ void audio_image_buffers_snapshot_modulated(AudioImageBuffers *buffers,
 // Lock-free read of the last modulated frame.  Mirrors what the synth
 // engines consume when their source is set to MODULATED.
 void audio_image_buffers_get_modulated_pointers(const AudioImageBuffers *buffers,
+                                                uint8_t **out_R,
+                                                uint8_t **out_G,
+                                                uint8_t **out_B);
+
+// ── Per-insert visual taps (written by the synthesis thread) ──────────────
+// Snapshot the output of insert `tap` (IMAGE_CHAIN_INSERT_*).  Called by the
+// chain executor only when a visual consumer declared demand.
+void audio_image_buffers_snapshot_insert_tap(AudioImageBuffers *buffers,
+                                             int tap,
+                                             const uint8_t *srcR,
+                                             const uint8_t *srcG,
+                                             const uint8_t *srcB,
+                                             int nb_pixels);
+
+// Lock-free read of the last published tap frame.  Returns 0 on success,
+// -1 if the tap index is invalid or buffers are not initialized.
+int audio_image_buffers_get_insert_tap_pointers(const AudioImageBuffers *buffers,
+                                                int tap,
                                                 uint8_t **out_R,
                                                 uint8_t **out_G,
                                                 uint8_t **out_B);

@@ -60,23 +60,46 @@ target_sources(Sp3ctraVST
         source/UdpReceiverThread.h
         source/global_stubs.c
         
-        # Settings tabs
-        source/settings/GeneralSettingsTab.cpp
-        source/settings/GeneralSettingsTab.h
+        # Settings tabs (gear wheel — machine-level only since M5)
         source/settings/NetworkSettingsTab.cpp
         source/settings/NetworkSettingsTab.h
-        source/settings/ImageSettingsTab.cpp
-        source/settings/ImageSettingsTab.h
-        source/settings/LuxStralSettingsTab.cpp
-        source/settings/LuxStralSettingsTab.h
-        source/settings/LuxSamplerSettingsTab.cpp
-        source/settings/LuxSamplerSettingsTab.h
+        source/settings/SystemSettingsTab.cpp
+        source/settings/SystemSettingsTab.h
 
         # Image pipeline UI
-        source/image/ImagePageComponent.cpp
-        source/image/ImagePageComponent.h
         source/image/BlobVisualizerComponent.cpp
         source/image/BlobVisualizerComponent.h
+
+        # M4 — four-zone shell UI (chain rack / engine panels / waterfall column)
+        source/ui/ChainRackComponent.cpp
+        source/ui/ChainRackComponent.h
+        source/ui/EngineAudioPanels.cpp
+        source/ui/EngineAudioPanels.h
+        source/ui/WaterfallColumnComponent.cpp
+        source/ui/WaterfallColumnComponent.h
+        source/ui/PaletteRailComponent.h
+        source/ui/SplitterBar.h
+
+        # M5 — musical graphical editors (keyboard ruler + draggable ADSR)
+        source/ui/KeyboardRulerComponent.cpp
+        source/ui/KeyboardRulerComponent.h
+        source/ui/EnvelopeEditorComponent.cpp
+        source/ui/EnvelopeEditorComponent.h
+
+        # M5 — zone-3 SETUP faces (per-block settings, ex gear-wheel tabs)
+        source/ui/setup/SetupHeader.h
+        source/ui/setup/PitchSetupPanel.cpp
+        source/ui/setup/PitchSetupPanel.h
+        source/ui/setup/MaskSetupPanel.cpp
+        source/ui/setup/MaskSetupPanel.h
+        source/ui/setup/LuxStralSetupPanel.cpp
+        source/ui/setup/LuxStralSetupPanel.h
+        source/ui/setup/LuxSynthSetupPanel.cpp
+        source/ui/setup/LuxSynthSetupPanel.h
+        source/ui/setup/LuxWaveSetupPanel.cpp
+        source/ui/setup/LuxWaveSetupPanel.h
+        source/ui/setup/SamplerSetupPanel.cpp
+        source/ui/setup/SamplerSetupPanel.h
 
         # LuxSampler subsystem
         source/luxsampler/LuxSampler.cpp
@@ -101,6 +124,7 @@ target_sources(Sp3ctraVST
         # 🎵 PHASE 3: LuxStral Synthesis Engine (VST-adapted)
         source/synthesis/luxstral/vst_adapters.cpp
         source/synthesis/luxstral/vst_adapters.h
+        source/synthesis/luxstral/luxstral_engine.h
         source/synthesis/luxstral/synth_luxstral.c
         source/synthesis/luxstral/synth_luxstral.h
         source/synthesis/luxstral/synth_luxstral_algorithms.c
@@ -139,20 +163,10 @@ target_sources(Sp3ctraVST
         source/synthesis/luxwave/luxwave_vst_adapter.c
         source/synthesis/luxwave/luxwave_vst_adapter.h
 
-        # LuxSynth Settings Tab
-        source/settings/LuxSynthSettingsTab.cpp
-        source/settings/LuxSynthSettingsTab.h
-        source/settings/LuxWaveSettingsTab.cpp
-        source/settings/LuxWaveSettingsTab.h
-
-        # LuxPitch Settings Tab + UI Tab
-        source/settings/LuxPitchSettingsTab.cpp
-        source/settings/LuxPitchSettingsTab.h
+        # LuxPitch UI Tab
         source/image/LuxPitchTabComponent.h
 
-        # LuxMask Settings Tab + UI Tab
-        source/settings/LuxMaskSettingsTab.cpp
-        source/settings/LuxMaskSettingsTab.h
+        # LuxMask UI Tab
         source/image/LuxMaskTabComponent.h
 
         # Video scroll system
@@ -163,8 +177,6 @@ target_sources(Sp3ctraVST
         source/video/VideoWindow.h
         source/video/VideoScrollTab.cpp
         source/video/VideoScrollTab.h
-        source/settings/VideoScrollSettingsTab.cpp
-        source/settings/VideoScrollSettingsTab.h
 )
 
 # ✨ BRICK 1: UDP Reception - Add C sources
@@ -193,6 +205,7 @@ target_sources(Sp3ctraVST
         source/processing/image_blend.c
         source/processing/image_pipeline_stages.c
         source/processing/image_pipeline.c
+        source/processing/image_chain.c
         source/processing/lux_pitch.c
         source/processing/lux_mask.c
 

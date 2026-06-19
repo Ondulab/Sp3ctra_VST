@@ -1,39 +1,41 @@
+/**
+ * @file LuxStralSetupPanel.h
+ * @brief SETUP face of the ♪ LUXSTRAL block (zone 3, M5).
+ *
+ * Migrated from the former gear-wheel LuxStralSettingsTab — same controls,
+ * same APVTS parameter IDs:
+ *   deviceEnabled / luxstralTuning / luxstralRootNote / luxstralNumOctaves /
+ *   luxstralPhysiologicalFilter / luxstralPhysiologicalDepth /
+ *   luxstralSoftLimitThreshold / luxstralSoftLimitKnee /
+ *   sfBlobContrastAdaptive / sfBlobContrastSensitivity
+ *
+ * NOTE: the "Worker Threads" slider (luxstralNumWorkers) did NOT move here —
+ * it lives in the gear-wheel SYSTEM tab (machine-level setting, cf. C9).
+ */
 #pragma once
 
-#include <juce_gui_extra/juce_gui_extra.h>
-#include "../PluginProcessor.h"
+#include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_audio_processors/juce_audio_processors.h>
+#include "../../PluginProcessor.h"
 
-//==============================================================================
-/**
- * @brief LuxStral Synthesis Settings Tab
- *
- * Contains ONLY parameters that are NOT already exposed in the main
- * SYNTH → LuxStral or IMAGE → LuxStral interfaces:
- * - Engine Enable
- * - Musical Tuning
- * - Dynamics Processing (Soft Limit only)
- * - Performance (Worker Threads)
- *
- * Parameters already in the main UI (Envelope, Image Processing, Stereo,
- * StrokeForge) have been intentionally removed to avoid duplication.
- */
-class LuxStralSettingsTab : public juce::Component,
-                            public juce::ComboBox::Listener,
-                            public juce::Slider::Listener
+class LuxStralSetupPanel : public juce::Component,
+                           public juce::ComboBox::Listener,
+                           public juce::Slider::Listener
 {
 public:
-    LuxStralSettingsTab(Sp3ctraAudioProcessor& processor);
-    ~LuxStralSettingsTab() override;
+    LuxStralSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour);
+    ~LuxStralSetupPanel() override;
+
+    /** Natural content height (header + 3 sections, no internal viewport —
+     *  the zone-3 viewport scrolls). */
+    static constexpr int kPreferredH = 552;
 
     void paint(juce::Graphics&) override;
     void resized() override;
 
 private:
     juce::AudioProcessorValueTreeState& apvts;
-
-    // Viewport for scrolling
-    juce::Viewport viewport;
-    juce::Component contentComponent;
+    juce::Colour accent;
 
     // Section: Engine Enable
     juce::Label enableLabel;
@@ -77,14 +79,6 @@ private:
     juce::Slider contrastSensSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> contrastSensAttachment;
 
-    // Section: Performance
-    juce::Label performanceSectionLabel;
-    juce::Label numWorkersLabel;
-    juce::Slider numWorkersSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> numWorkersAttachment;
-
-    void layoutContentComponent();
-
     // Listener callbacks
     void comboBoxChanged(juce::ComboBox* comboBoxThatHasChanged) override;
     void sliderValueChanged(juce::Slider* slider) override;
@@ -95,5 +89,5 @@ private:
     void updateOctavesSliderRange();
     void updateFrequencyRangeInfo();
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxStralSettingsTab)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxStralSetupPanel)
 };

@@ -10,7 +10,8 @@
  *
  * Two fixed channels feed the synthesis engines:
  *
- *   Channel Modulated : Live ► LuxSampler ► LuxPitch ► LuxMask ► OUT
+ *   Channel Modulated : Live ► [LuxPitch ⇄ LuxMask] ► LuxSampler ► OUT
+ *   (insert order = chainInsertOrder param; sampler playback bypasses inserts)
  *                       Each insert auto-bypasses when inactive:
  *                         - LuxSampler  : pass-through when not playing
  *                         - LuxPitch    : pass-through when no shift active
@@ -46,7 +47,7 @@ extern "C" {
  * automatically baked into the modulated chain.
  * ============================================================================ */
 typedef enum {
-    IMAGE_SOURCE_MODULATED = 0,  /* Channel A : Live ► LuxSampler ► LuxPitch ► LuxMask */
+    IMAGE_SOURCE_MODULATED = 0,  /* Channel A : Live ► [Pitch ⇄ Mask] ► Sampler */
     IMAGE_SOURCE_LIVE      = 1,  /* Channel B : direct live UDP feed */
 
     /* ── Deprecated aliases — kept so any leftover preset/code keeps compiling.

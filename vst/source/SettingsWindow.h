@@ -2,25 +2,20 @@
 
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "PluginProcessor.h"
-#include "settings/GeneralSettingsTab.h"
 #include "settings/NetworkSettingsTab.h"
-#include "settings/LuxStralSettingsTab.h"
-#include "settings/LuxSamplerSettingsTab.h"
-#include "settings/LuxSynthSettingsTab.h"
-#include "settings/LuxWaveSettingsTab.h"
-#include "settings/LuxPitchSettingsTab.h"
-#include "settings/LuxMaskSettingsTab.h"
-#include "settings/VideoScrollSettingsTab.h"
+#include "settings/SystemSettingsTab.h"
 
 //==============================================================================
 /**
- * @brief Settings window for Sp3ctra VST parameters
+ * @brief Settings window for Sp3ctra machine-level parameters (M5 / C9).
  *
- * Organised in 5 tabs (ordered by pipeline stage):
- *   General      — Visualizer Mode, Log Level
- *   Network      — UDP configuration, Sensor DPI
- *   LuxStral     — Additive synthesis parameters + StrokeForge waveform morphing
- *   LuxSampler — Slot configuration and MIDI mapping
+ * Organised in 2 tabs:
+ *   Network — UDP configuration, Sensor DPI
+ *   System  — Log level, LuxStral worker threads, detached video window size
+ *
+ * Per-block musical settings (MIDI channel, octave, tuning, sampler slots,
+ * bindings…) live in the zone-3 SETUP face of each block; the waterfall
+ * display settings (brightness / invert / colour) live in the zone-4 toolbar.
  *
  * All changes are automatically saved via APVTS to DAW projects.
  */
@@ -38,15 +33,8 @@ private:
     juce::TabbedComponent tabbedComponent;
 
     // Tab content (owned by TabbedComponent — raw pointers intentional)
-    GeneralSettingsTab*      generalTab;
-    NetworkSettingsTab*      networkTab;
-    LuxStralSettingsTab*     luxstralTab;
-    LuxSynthSettingsTab*     luxsynthTab;
-    LuxWaveSettingsTab*      luxwaveTab;
-    LuxSamplerSettingsTab*   luxSamplerTab;
-    LuxPitchSettingsTab*     luxPitchTab;
-    LuxMaskSettingsTab*      luxMaskTab;
-    VideoScrollSettingsTab*  videoScrollSettingsTab;
+    NetworkSettingsTab* networkTab;
+    SystemSettingsTab*  systemTab;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SettingsComponent)
 };

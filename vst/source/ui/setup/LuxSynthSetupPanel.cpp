@@ -1,10 +1,10 @@
-#include "LuxSynthSettingsTab.h"
-#include "../Sp3ctraConstants.h"
-#include "../UITheme.h"
+#include "LuxSynthSetupPanel.h"
+#include "SetupHeader.h"
+#include "../../UITheme.h"
 
 //==============================================================================
-LuxSynthSettingsTab::LuxSynthSettingsTab(Sp3ctraAudioProcessor& processor)
-    : apvts(processor.getAPVTS())
+LuxSynthSetupPanel::LuxSynthSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour)
+    : apvts(processor.getAPVTS()), accent(accentColour)
 {
     // ── Enable toggle ─────────────────────────────────────────────────────
     enableLabel.setText("LuxSynth:", juce::dontSendNotification);
@@ -48,38 +48,31 @@ LuxSynthSettingsTab::LuxSynthSettingsTab(Sp3ctraAudioProcessor& processor)
         apvts, "luxsynthOctaveOffset", octaveOffsetCombo);
 }
 
-LuxSynthSettingsTab::~LuxSynthSettingsTab() = default;
+LuxSynthSetupPanel::~LuxSynthSetupPanel() = default;
 
 //==============================================================================
-void LuxSynthSettingsTab::paint(juce::Graphics& g)
+void LuxSynthSetupPanel::paint(juce::Graphics& g)
 {
-    g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
-
-    // Title
-    g.setColour(juce::Colours::white);
-    g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSection)).boldened());
-    g.drawText("LuxSynth", getLocalBounds().removeFromTop(30),
-               juce::Justification::centred, true);
+    SetupUI::paintHeader(g, *this, "LUXSYNTH -- SETUP", accent);
 }
 
 //==============================================================================
-void LuxSynthSettingsTab::resized()
+void LuxSynthSetupPanel::resized()
 {
     const int w        = getWidth();
-    const int titleH   = 30;
     constexpr int rowH   = Sp3ctraTheme::kRowStep;
     constexpr int labelW = Sp3ctraTheme::kLabelW;
-    const int ctrlX    = 20 + labelW;
-    const int ctrlW    = w - ctrlX - 20;
+    const int ctrlX    = Sp3ctraTheme::kHPad + labelW + Sp3ctraTheme::kGap;
+    const int ctrlW    = juce::jmin(260, w - ctrlX - Sp3ctraTheme::kHPad);
 
-    int y = titleH + 5;
+    int y = SetupUI::kHeaderH + Sp3ctraTheme::kSectionGap;
 
     constexpr int ctrlH = Sp3ctraTheme::kControlH;
     auto row = [&](juce::Label& lbl, juce::Component& ctrl)
     {
         const int vc = (rowH - ctrlH) / 2;
-        lbl .setBounds(20,    y + vc, labelW, ctrlH);
-        ctrl.setBounds(ctrlX, y + vc, ctrlW,  ctrlH);
+        lbl .setBounds(Sp3ctraTheme::kHPad, y + vc, labelW, ctrlH);
+        ctrl.setBounds(ctrlX,               y + vc, ctrlW,  ctrlH);
         y += rowH;
     };
 

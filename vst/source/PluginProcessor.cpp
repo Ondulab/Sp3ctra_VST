@@ -10,8 +10,9 @@ extern "C" {
     #include "synthesis/luxstral/synth_luxstral_algorithms.h" // update_gap_limiter_coefficients()
     #include "synthesis/luxstral/vst_adapters.h"              // luxstral_are_audio_buffers_ready(), buffers
     #include "synthesis/luxstral/wave_generation.h"           // request_frequency_reinit() hot-reload
-    #include "processing/lux_pitch.h"                         // LuxPitch engine + g_lux_pitch
-    #include "processing/lux_mask.h"                          // LuxMask engine + g_lux_mask, g_lux_mask_proc, g_lux_mask_vid
+    #include "processing/lux_pitch.h"                         // LuxPitch engine (g_lux_pitch_proc)
+    #include "processing/lux_mask.h"                          // LuxMask engine (g_lux_mask_proc)
+    #include "processing/image_chain.h"                       // Insert chain executor (order + taps)
     #include "synthesis/luxsynth/luxsynth_vst_adapter.h"      // luxsynth_push_midi_event(), buffers, engine
     #include "synthesis/luxwave/luxwave_vst_adapter.h"        // luxwave_push_midi_event(), g_luxwave_engine
 }
@@ -232,18 +233,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, kHiddenFloat));
 
     // ── Pipeline routing — per-path source selection & toggles ────────────────
-    //
-    // Channel model (since "Modulated/Live" refactor):
-    //   index 0 = "Modulated" : Live ► LuxSampler ► LuxPitch ► LuxMask
-    //                           (each insert auto-bypasses when inactive)
-    //   index 1 = "Live"      : raw UDP feed, no processing
-    //
-    // LuxWave shares the LuxSynth source (path B).  LuxPitch / LuxMask no
-    // longer have their own source selector — they are now permanent inserts
-    // in the Modulated chain.
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"luxstralSource", 1}, "LuxStral Source",
-        juce::StringArray{"Modulated", "Live"}, 0));
+        juce::StringArray{"S - Sampler", "M - Mix", "L - Live", "P - LuxPitch", "K - LuxMask"}, 1));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"luxstralInversion", 1}, "LuxStral Inversion", true));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
@@ -251,7 +243,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
 
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"luxsynthSource", 1}, "LuxSynth Source",
-        juce::StringArray{"Modulated", "Live"}, 0));
+        juce::StringArray{"S - Sampler", "M - Mix", "L - Live", "P - LuxPitch", "K - LuxMask"}, 1));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"luxsynthInversion", 1}, "LuxSynth Inversion", true));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
@@ -469,6 +461,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"luxpitchEnabled", 1}, "LuxPitch Enabled", false));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"luxpitchPolyphony", 1}, "LuxPitch Polyphony", false));
+    // Insert chain order (M1 — modular pipeline core): which insert runs
+    // first inside the Modulated channel.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"chainInsertOrder", 1}, "Chain Insert Order",
+        juce::StringArray{"Pitch > Mask", "Mask > Pitch"}, 0));
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"luxpitchBackgroundMode", 1}, "LuxPitch Background",
         juce::StringArray{"Black", "White"}, 0, kHiddenChoice));
@@ -511,12 +508,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::AudioParameterFloatAttributes{}.withLabel("st")));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"luxpitchVelocityCoupling", 1}, "LP Velocity", false));
-    // LuxPitch source selector — DEPRECATED (kept hidden for preset compatibility).
-    // LuxPitch is now a permanent insert in the Modulated chain; this parameter
-    // has no runtime effect.  Marked hidden so it does not appear in DAW automation.
+    // LuxPitch source selector (S/M/L — cannot take itself)
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID{"luxpitchSource", 1}, "LuxPitch Source (deprecated)",
-        juce::StringArray{"Modulated", "Live"}, 0, kHiddenChoice));
+        juce::ParameterID{"luxpitchSource", 1}, "LuxPitch Source",
+        juce::StringArray{"S - Sampler", "M - Mix", "L - Live"}, 1));
     // LuxPitch MIDI infrastructure (settings tab)
     {
         juce::StringArray lpMidiChNames;
@@ -625,12 +620,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"luxmaskVelocityCoupling", 1}, "LM Velocity", false));
 
-    // LuxMask source selector — DEPRECATED (kept hidden for preset compatibility).
-    // LuxMask is now a permanent insert in the Modulated chain; this parameter
-    // has no runtime effect.  Marked hidden so it does not appear in DAW automation.
+    // LuxMask source selector (S/M/L)
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID{"luxmaskSource", 1}, "LuxMask Source (deprecated)",
-        juce::StringArray{"Modulated", "Live"}, 0, kHiddenChoice));
+        juce::ParameterID{"luxmaskSource", 1}, "LuxMask Source",
+        juce::StringArray{"S - Sampler", "M - Mix", "L - Live"}, 1));
 
     // LuxMask MIDI infrastructure (settings tab)
     {
@@ -1053,15 +1046,13 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     // We defer startWithConfig() to prepareToPlay() so we have the correct
     // sample rate and buffer size when initializing LuxStral.
     
-    // Initialize LuxPitch instances (UI/visualizer, processing thread, video tab)
-    lux_pitch_init(&g_lux_pitch);
+    // Initialize the LuxPitch / LuxMask processing instances.
+    // Since the single-snapshot refactor (M2) there is ONE simulation per
+    // insert: the synthesis-thread instance.  Visualizers read the published
+    // insert taps (audio_image_buffers_get_insert_tap_pointers) instead of
+    // re-simulating.
     lux_pitch_init(&g_lux_pitch_proc);
-    lux_pitch_init(&g_lux_pitch_vid);
-
-    // Initialize LuxMask instances (UI/visualizer, processing thread, video tab)
-    lux_mask_init(&g_lux_mask);
     lux_mask_init(&g_lux_mask_proc);
-    lux_mask_init(&g_lux_mask_vid);
 
     // Just update g_sp3ctra_config with current APVTS defaults (no socket/buffer creation)
     applyConfigurationToCore(false);
@@ -1446,41 +1437,21 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             if (msg.getChannel() != lpCh) continue;
             const int shifted = msg.getNoteNumber() + lpOct * 12;
             if (msg.isNoteOn())
-            {
-                lux_pitch_note_on(&g_lux_pitch, shifted, msg.getFloatVelocity());
                 lux_pitch_note_on(&g_lux_pitch_proc, shifted, msg.getFloatVelocity());
-                lux_pitch_note_on(&g_lux_pitch_vid,  shifted, msg.getFloatVelocity());
-            }
             else if (msg.isNoteOff())
-            {
-                lux_pitch_note_off(&g_lux_pitch, shifted);
                 lux_pitch_note_off(&g_lux_pitch_proc, shifted);
-                lux_pitch_note_off(&g_lux_pitch_vid,  shifted);
-            }
             else if (msg.isPitchWheel())
-            {
-                float bend = (msg.getPitchWheelValue() - 8192) / 8192.0f;
-                lux_pitch_set_pitch_bend(&g_lux_pitch, bend);
-                lux_pitch_set_pitch_bend(&g_lux_pitch_proc, bend);
-                lux_pitch_set_pitch_bend(&g_lux_pitch_vid,  bend);
-            }
-            // MIDI "All Notes Off" (CC 123) and "All Sound Off" (CC 120).
-            // We trigger the standard exponential release for every voice.
-            // isAllNotesOff() also matches CC 123. We additionally handle
-            // CC 120 explicitly so the host's panic / stop-sound message
-            // also clears LuxPitch voices musically.
-            else if (msg.isController() &&
-                     (msg.getControllerNumber() == 123 || msg.getControllerNumber() == 120))
-            {
-                lux_pitch_all_notes_off(&g_lux_pitch);
-                lux_pitch_all_notes_off(&g_lux_pitch_proc);
-                lux_pitch_all_notes_off(&g_lux_pitch_vid);
-            }
+                lux_pitch_set_pitch_bend(&g_lux_pitch_proc,
+                                         (msg.getPitchWheelValue() - 8192) / 8192.0f);
+            else if (msg.isSustainPedalOn() || msg.isSustainPedalOff())
+                lux_pitch_set_sustain(&g_lux_pitch_proc, msg.isSustainPedalOn() ? 1 : 0);
+            else if (msg.isControllerOfType(1)) // CC1 mod wheel → vibrato depth
+                lux_pitch_set_mod_wheel(&g_lux_pitch_proc,
+                                        (float)msg.getControllerValue() / 127.0f);
         }
     }
 
     // ── LuxMask MIDI (RT-safe: lock-free mask center from notes/pitch-bend) ──
-
     {
         const int lmCh  = static_cast<int>(apvts.getRawParameterValue("luxmaskMidiChannel")->load()) + 1;
         const int lmOct = static_cast<int>(apvts.getRawParameterValue("luxmaskOctaveOffset")->load()) - 2;
@@ -1490,39 +1461,19 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             if (msg.getChannel() != lmCh) continue;
             const int shifted = msg.getNoteNumber() + lmOct * 12;
             if (msg.isNoteOn())
-            {
-                lux_mask_note_on(&g_lux_mask,      shifted, msg.getFloatVelocity());
                 lux_mask_note_on(&g_lux_mask_proc, shifted, msg.getFloatVelocity());
-                lux_mask_note_on(&g_lux_mask_vid,  shifted, msg.getFloatVelocity());
-            }
             else if (msg.isNoteOff())
-            {
-                lux_mask_note_off(&g_lux_mask,      shifted);
                 lux_mask_note_off(&g_lux_mask_proc, shifted);
-                lux_mask_note_off(&g_lux_mask_vid,  shifted);
-            }
             else if (msg.isPitchWheel())
-            {
-                float bend = (msg.getPitchWheelValue() - 8192) / 8192.0f;
-                lux_mask_set_pitch_bend(&g_lux_mask,      bend);
-                lux_mask_set_pitch_bend(&g_lux_mask_proc, bend);
-                lux_mask_set_pitch_bend(&g_lux_mask_vid,  bend);
-            }
-            // MIDI "All Notes Off" (CC 123) and "All Sound Off" (CC 120).
-            // We trigger the standard exponential release for every voice.
-            // CC 123 = All Notes Off; CC 120 = All Sound Off (host panic).
-            // Both are routed to the standard release path so the configured
-            // ADSR (and the width-bloom envelope) stays musical.
-            else if (msg.isController() &&
-                     (msg.getControllerNumber() == 123 || msg.getControllerNumber() == 120))
-            {
-                lux_mask_all_notes_off(&g_lux_mask);
-                lux_mask_all_notes_off(&g_lux_mask_proc);
-                lux_mask_all_notes_off(&g_lux_mask_vid);
-            }
+                lux_mask_set_pitch_bend(&g_lux_mask_proc,
+                                        (msg.getPitchWheelValue() - 8192) / 8192.0f);
+            else if (msg.isSustainPedalOn() || msg.isSustainPedalOff())
+                lux_mask_set_sustain(&g_lux_mask_proc, msg.isSustainPedalOn() ? 1 : 0);
+            else if (msg.isControllerOfType(1)) // CC1 mod wheel → vibrato depth
+                lux_mask_set_mod_wheel(&g_lux_mask_proc,
+                                       (float)msg.getControllerValue() / 127.0f);
         }
     }
-
 
     // ── LuxSynth MIDI (RT-safe: push into lock-free ring buffer) ─────────────
     {
@@ -1827,7 +1778,7 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
             // on construction to auto-reload the session.
             lastSessionPath = apvts.state
                 .getProperty("lastSessionPath", "").toString();
-            // Restore sampler output directory — LuxSamplerSettingsTab and
+            // Restore sampler output directory — SamplerSetupPanel and
             // SAVE SESSION read this to bypass the file chooser when set.
             samplerOutputDir = apvts.state
                 .getProperty("samplerOutputDir", "").toString();
@@ -2221,32 +2172,29 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         static_cast<int>(apvts.getRawParameterValue("rawFadeInMs")->load());
 
     // ========================================================================
-    // Per-path pipeline routing — channel selection, inversion, AC removal
+    // Per-path pipeline routing — source selection, inversion, AC removal
     //
-    // Channel model (since "Modulated/Live" refactor):
-    //   APVTS choice 0 = "Modulated" → IMAGE_SOURCE_MODULATED (0)
-    //   APVTS choice 1 = "Live"      → IMAGE_SOURCE_LIVE      (1)
-    //
-    // The enum ImageSourceType is now a direct 1:1 mapping with the choice
-    // index, so no conversion table is required.  LuxPitch / LuxMask sources
-    // are deprecated and forced to MODULATED at runtime.
+    // APVTS choice indices:  0="S - Sampler", 1="M - Mix", 2="L - Live", 3="P - LuxPitch"
+    // ImageSourceType enum:  SAMPLER=0, LIVE=1, MIX=2, LUXPITCH=3
+    // Mapping table: choice → enum
     // ========================================================================
     {
-        // LuxStral path A — channel selector
+        // 5 choices: S=Sampler(0), M=Mix(2), L=Live(1), P=LuxPitch(3), K=LuxMask(4)
+        static const int kChoiceToSource[5] = { 0, 2, 1, 3, 4 };
+
         int lsChoice = static_cast<int>(
             apvts.getRawParameterValue("luxstralSource")->load());
-        if (lsChoice < 0 || lsChoice > 1) lsChoice = 0; // default Modulated
-        g_sp3ctra_config.luxstral_source_type = lsChoice;
+        if (lsChoice < 0 || lsChoice > 4) lsChoice = 1; // default M
+        g_sp3ctra_config.luxstral_source_type = kChoiceToSource[lsChoice];
         g_sp3ctra_config.luxstral_inversion   =
             static_cast<int>(apvts.getRawParameterValue("luxstralInversion")->load());
         g_sp3ctra_config.luxstral_ac_removal  =
             static_cast<int>(apvts.getRawParameterValue("luxstralAcRemoval")->load());
 
-        // LuxSynth+LuxWave path B — channel selector (LuxWave follows LuxSynth)
         int lxChoice = static_cast<int>(
             apvts.getRawParameterValue("luxsynthSource")->load());
-        if (lxChoice < 0 || lxChoice > 1) lxChoice = 0; // default Modulated
-        g_sp3ctra_config.luxsynth_source_type = lxChoice;
+        if (lxChoice < 0 || lxChoice > 4) lxChoice = 1;
+        g_sp3ctra_config.luxsynth_source_type = kChoiceToSource[lxChoice];
         g_sp3ctra_config.luxsynth_inversion   =
             static_cast<int>(apvts.getRawParameterValue("luxsynthInversion")->load());
         g_sp3ctra_config.luxsynth_ac_removal  =
@@ -2256,17 +2204,29 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         g_sp3ctra_config.luxsynth_gamma_value =
             apvts.getRawParameterValue("luxsynthGammaValue")->load();
 
-        // ── LuxPitch source (DEPRECATED) ─────────────────────────────────
-        // LuxPitch is now a permanent insert in the Modulated chain.
-        // Force routing to MODULATED so any legacy code path stays consistent.
-        g_sp3ctra_config.luxpitch_source_type = 0; /* IMAGE_SOURCE_MODULATED */
+        // ── LuxPitch source routing (S/M/L — no P option for its own source) ──
+        {
+            static const int kLpChoiceToSrc[3] = { 0, 2, 1 }; // S→SAMPLER, M→MIX, L→LIVE
+            int lpSrcChoice = static_cast<int>(
+                apvts.getRawParameterValue("luxpitchSource")->load());
+            if (lpSrcChoice < 0 || lpSrcChoice > 2) lpSrcChoice = 1;
+            g_sp3ctra_config.luxpitch_source_type = kLpChoiceToSrc[lpSrcChoice];
+        }
 
-        // ── LuxMask source (DEPRECATED) ──────────────────────────────────
-        // LuxMask is now a permanent insert in the Modulated chain.
-        // Force routing to MODULATED so any legacy code path stays consistent.
-        g_sp3ctra_config.luxmask_source_type  = 0; /* IMAGE_SOURCE_MODULATED */
+        // ── LuxMask source routing (S/M/L — no K option for its own source) ──
+        {
+            static const int kLmChoiceToSrc[3] = { 0, 2, 1 }; // S→SAMPLER, M→MIX, L→LIVE
+            int lmSrcChoice = static_cast<int>(
+                apvts.getRawParameterValue("luxmaskSource")->load());
+            if (lmSrcChoice < 0 || lmSrcChoice > 2) lmSrcChoice = 1;
+            g_sp3ctra_config.luxmask_source_type = kLmChoiceToSrc[lmSrcChoice];
+        }
 
-        // ── Sync LuxPitch config to BOTH instances (UI + processing thread) ──
+        // ── Insert chain order (M1 — modular pipeline core) ──
+        image_chain_set_order(static_cast<int>(
+            apvts.getRawParameterValue("chainInsertOrder")->load()));
+
+        // ── Sync LuxPitch config to the processing instance ──
         {
             LuxPitchConfig lpc;
             lpc.enabled                 = static_cast<int>(apvts.getRawParameterValue("luxpitchEnabled")->load());
@@ -2284,12 +2244,10 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
             lpc.lfo_depth_semitones     = apvts.getRawParameterValue("luxpitchLfoDepth")->load();
             lpc.velocity_coupling       = static_cast<int>(apvts.getRawParameterValue("luxpitchVelocityCoupling")->load());
             lpc.reference_note          = 24 + static_cast<int>(apvts.getRawParameterValue("luxpitchReferenceNote")->load());
-            g_lux_pitch.config      = lpc;  /* UI / visualizer thread */
-            g_lux_pitch_proc.config = lpc;  /* processing / synthesis thread */
-            g_lux_pitch_vid.config  = lpc;  /* VIDEO tab (image scroll) thread */
+            g_lux_pitch_proc.config = lpc;  /* single simulation (synthesis thread) */
         }
 
-        // ── Sync LuxMask config to ALL instances (UI + processing + video) ──
+        // ── Sync LuxMask config to the processing instance ──
         {
             LuxMaskConfig lmc;
             lmc.enabled                  = static_cast<int>(apvts.getRawParameterValue("luxmaskEnabled")->load());
@@ -2310,9 +2268,7 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
             lmc.lfo_pos_depth_semitones  = apvts.getRawParameterValue("luxmaskLfoPosDepth")->load();
             lmc.velocity_coupling        = static_cast<int>(apvts.getRawParameterValue("luxmaskVelocityCoupling")->load());
             lmc.reference_note           = 24 + static_cast<int>(apvts.getRawParameterValue("luxmaskReferenceNote")->load());
-            g_lux_mask.config      = lmc;  /* UI / visualizer thread */
-            g_lux_mask_proc.config = lmc;  /* processing / synthesis thread */
-            g_lux_mask_vid.config  = lmc;  /* VIDEO tab (image scroll) thread */
+            g_lux_mask_proc.config = lmc;  /* single simulation (synthesis thread) */
         }
 
         log_debug("VST", "Per-path routing: LS source=%d inv=%d ac=%d  |  LX source=%d inv=%d ac=%d gamma=%.2f",
