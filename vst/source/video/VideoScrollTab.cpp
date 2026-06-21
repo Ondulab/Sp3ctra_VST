@@ -19,6 +19,62 @@ namespace
         s.setTextBoxStyle(juce::Slider::TextBoxRight, false, kTbW, kTbH);
         if (suffix.isNotEmpty()) s.setTextValueSuffix(suffix);
     }
+
+    // ── Responsive vertical layout ──────────────────────────────────────────
+    // The panel must survive a large reduction of its host zone — in BOTH
+    // axes — without clipping rows (vertically) or controls (horizontally).
+    // Every metric is derived from the available width/height so paint() and
+    // resized() stay byte-for-byte in sync and the whole stack always fits.
+    struct VScrollLayout
+    {
+        int top, secH, secG, step, ch, secExtra, btnExtra;
+        int labelW, ctrlX, ctrlW;
+        int yEnable;
+        int secSrc, ySource;
+        int secScroll, yMode, ySpeed, yDir, yMax;
+        int secDisplay, yZoom, yBlend;
+        int secWin, yButtons;
+    };
+
+    VScrollLayout computeLayout(int width, int height)
+    {
+        // Natural (un-scaled) full height of the stack, used as the reference
+        // point — below this the layout compresses; above it, it sits at top.
+        constexpr float kFullH = 498.0f;
+        const float f = juce::jlimit(0.5f, 1.0f, (float) height / kFullH);
+        auto S = [f](int v) { return juce::roundToInt((float) v * f); };
+
+        VScrollLayout L;
+        L.top      = S(10);
+        L.secH     = S(kSecH);  // 24
+        L.secG     = S(kSecG);  // kSectionGap (4)
+        L.step     = S(kStep);  // 32
+        L.ch       = S(kCH);    // 22
+        L.secExtra = S(10);     // gap above each section heading
+        L.btnExtra = S(4);      // action buttons are slightly taller than kCH
+
+        // ── Horizontal: condense the label column and let controls fill all
+        //    remaining width up to the right margin, so nothing is truncated
+        //    when the panel is docked narrow.
+        L.labelW = juce::jlimit(64, kLW, width / 3);          // shrinks from 110
+        L.ctrlX  = kHP + L.labelW + kGap;
+        L.ctrlW  = juce::jmax(70, width - kHP - L.ctrlX);     // fill to right edge
+
+        L.yEnable    = L.top + L.secH + L.secG;
+        L.secSrc     = L.yEnable + L.step + L.secExtra;
+        L.ySource    = L.secSrc + L.step;
+        L.secScroll  = L.secSrc + 2 * L.step + L.secExtra;
+        L.yMode      = L.secScroll + L.step;
+        L.ySpeed     = L.secScroll + 2 * L.step;
+        L.yDir       = L.secScroll + 3 * L.step;
+        L.yMax       = L.secScroll + 4 * L.step;
+        L.secDisplay = L.secScroll + 5 * L.step + L.secExtra;
+        L.yZoom      = L.secDisplay + L.step;
+        L.yBlend     = L.secDisplay + 2 * L.step;
+        L.secWin     = L.secDisplay + 3 * L.step + L.secExtra;
+        L.yButtons   = L.secWin + L.step;
+        return L;
+    }
 } // namespace
 
 //==============================================================================
@@ -58,10 +114,10 @@ VideoScrollTab::VideoScrollTab(Sp3ctraAudioProcessor& processor)
         apvts, "videoScrollSource", sourceCombo_);
 
     // Scroll Orientation
-    modeCombo_.addItem("0 deg   - scroll up      (new data at bottom)", 1);
-    modeCombo_.addItem("90 deg  - scroll left    (new data at right)",  2);
-    modeCombo_.addItem("180 deg - scroll down    (new data at top)",    3);
-    modeCombo_.addItem("270 deg - scroll right   (new data at left)",   4);
+    modeCombo_.addItem("Scroll up",    1);
+    modeCombo_.addItem("Scroll left",  2);
+    modeCombo_.addItem("Scroll down",  3);
+    modeCombo_.addItem("Scroll right", 4);
     modeCombo_.setTooltip(
         "Orientation of the waterfall scroll.\n"
         "90 deg is the classic L->R scanner view.\n"
@@ -200,21 +256,22 @@ void VideoScrollTab::updateUIFromState()
 void VideoScrollTab::paint(juce::Graphics& g)
 {
     const int W = getWidth();
+    const VScrollLayout L = computeLayout(W, getHeight());
 
     // Badge
     g.setColour(juce::Colour(0xff1a3020u));
-    g.fillRoundedRectangle(juce::Rectangle<int>(kHP, 10, W - 2*kHP, kSecH).toFloat(), 3.f);
+    g.fillRoundedRectangle(juce::Rectangle<int>(kHP, L.top, W - 2*kHP, L.secH).toFloat(), 3.f);
     g.setColour(juce::Colour(0xff66cc88u));
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
     g.drawText("VIDEO SCROLL  --  Image Scroll Visualization",
-               kHP+6, 10, W - 2*kHP - 12, kSecH, juce::Justification::centredLeft, true);
+               kHP+6, L.top, W - 2*kHP - 12, L.secH, juce::Justification::centredLeft, true);
 
     // Label helper
     auto drawLabel = [&](const juce::String& txt, int y)
     {
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
         g.setColour(juce::Colour(Sp3ctraTheme::kColText));
-        g.drawText(txt, juce::Rectangle<int>(kHP, y, kLW, kCH),
+        g.drawText(txt, juce::Rectangle<int>(kHP, y, L.labelW, L.ch),
                    juce::Justification::centredRight, true);
     };
 
@@ -223,66 +280,72 @@ void VideoScrollTab::paint(juce::Graphics& g)
     {
         g.setColour(juce::Colour(0xff66cc88u));
         g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
-        g.drawText(txt, kHP, y, 160, kCH, juce::Justification::centredLeft, true);
+        g.drawText(txt, kHP, y, juce::jmin(160, W - 2*kHP), L.ch,
+                   juce::Justification::centredLeft, true);
     };
 
     // Layout mirrors resized()
-    const int secEnable = 10 + kSecH + kSecG;
-    drawLabel("Enable", secEnable);
+    drawLabel("Enable", L.yEnable);
 
-    const int secSrc = secEnable + kStep + 10;
-    drawSection("SOURCE", secSrc);
-    drawLabel("Source", secSrc + kStep);
+    drawSection("SOURCE", L.secSrc);
+    drawLabel("Source", L.ySource);
 
-    const int secScroll = secSrc + 2*kStep + 10;
-    drawSection("SCROLL", secScroll);
-    drawLabel("Mode",       secScroll + kStep);
-    drawLabel("Speed",      secScroll + 2*kStep);
-    drawLabel("Direction",  secScroll + 3*kStep);
-    drawLabel("Max Frames", secScroll + 4*kStep);
+    drawSection("SCROLL", L.secScroll);
+    drawLabel("Mode",       L.yMode);
+    drawLabel("Speed",      L.ySpeed);
+    drawLabel("Direction",  L.yDir);
+    drawLabel("Max Frames", L.yMax);
 
-    const int secDisplay = secScroll + 5*kStep + 10;
-    drawSection("DISPLAY", secDisplay);
-    drawLabel("Zoom",  secDisplay + kStep);
-    drawLabel("Blend", secDisplay + 2*kStep);
+    drawSection("DISPLAY", L.secDisplay);
+    drawLabel("Zoom",  L.yZoom);
+    drawLabel("Blend", L.yBlend);
 
     // Window section status dot
-    const int secWin = secDisplay + 3*kStep + 10;
-    drawSection("WINDOW", secWin);
+    drawSection("WINDOW", L.secWin);
     const bool open = (videoWindow_ != nullptr && videoWindow_->isVisible());
     g.setColour(open ? juce::Colour(0xff44cc66u) : juce::Colour(0xff666666u));
-    g.fillEllipse(kHP + 80.f, (float)secWin + 7.f, 8.f, 8.f);
+    g.fillEllipse(kHP + 80.f, (float)L.secWin + (L.ch - 8) * 0.5f, 8.f, 8.f);
     g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
     g.setColour(juce::Colour(Sp3ctraTheme::kColTextMuted));
-    g.drawText(open ? "open" : "closed", kHP + 92, secWin, 60, kCH,
+    g.drawText(open ? "open" : "closed", kHP + 92, L.secWin, 60, L.ch,
                juce::Justification::centredLeft, true);
 }
 
 //==============================================================================
 void VideoScrollTab::resized()
 {
-    const int ctrlX = kHP + kLW + kGap;
-    const int ctrlW = juce::jmax(160, getWidth() / 2 - ctrlX + kHP);
+    const int W = getWidth();
+    const VScrollLayout L = computeLayout(W, getHeight());
 
-    const int secEnable = 10 + kSecH + kSecG;
-    enableToggle_.setBounds(ctrlX, secEnable, 90, kCH);
+    // Every combo and slider spans from the label column to the right margin,
+    // so all dropdowns/value-boxes line up and nothing overflows when narrow.
+    const int ctrlX = L.ctrlX;
+    const int ctrlW = L.ctrlW;
 
-    const int secSrc = secEnable + kStep + 10;
-    sourceCombo_.setBounds(ctrlX, secSrc + kStep, ctrlW + 50, kCH);
+    // Value boxes shrink with the row so the slider track always has room.
+    const int tbW = juce::jlimit(48, kTbW, ctrlW / 3);
+    auto setTb = [&](juce::Slider& s) {
+        s.setTextBoxStyle(juce::Slider::TextBoxRight, false, tbW, L.ch);
+    };
+    setTb(speedSlider_);
+    setTb(maxDurSlider_);
+    setTb(zoomSlider_);
 
-    const int secScroll = secSrc + 2*kStep + 10;
-    modeCombo_     .setBounds(ctrlX, secScroll + kStep,   ctrlW + 50, kCH);
-    speedSlider_   .setBounds(ctrlX, secScroll + 2*kStep, ctrlW,      kCH);
-    directionCombo_.setBounds(ctrlX, secScroll + 3*kStep, ctrlW,      kCH);
-    maxDurSlider_  .setBounds(ctrlX, secScroll + 4*kStep, ctrlW,      kCH);
+    enableToggle_.setBounds(ctrlX, L.yEnable, juce::jmin(90, ctrlW), L.ch);
 
-    const int secDisplay = secScroll + 5*kStep + 10;
-    zoomSlider_    .setBounds(ctrlX, secDisplay + kStep,   ctrlW, kCH);
-    blendModeCombo_.setBounds(ctrlX, secDisplay + 2*kStep, ctrlW, kCH);
+    sourceCombo_.setBounds(ctrlX, L.ySource, ctrlW, L.ch);
 
-    const int secWin = secDisplay + 3*kStep + 10;
-    const int btnY   = secWin + kStep;
-    const int btnW   = 140;
-    windowBtn_    .setBounds(kHP,             btnY, btnW, kCH + 4);
-    fullscreenBtn_.setBounds(kHP + btnW + 8,  btnY, btnW, kCH + 4);
+    modeCombo_     .setBounds(ctrlX, L.yMode,  ctrlW, L.ch);
+    speedSlider_   .setBounds(ctrlX, L.ySpeed, ctrlW, L.ch);
+    directionCombo_.setBounds(ctrlX, L.yDir,   ctrlW, L.ch);
+    maxDurSlider_  .setBounds(ctrlX, L.yMax,   ctrlW, L.ch);
+
+    zoomSlider_    .setBounds(ctrlX, L.yZoom,  ctrlW, L.ch);
+    blendModeCombo_.setBounds(ctrlX, L.yBlend, ctrlW, L.ch);
+
+    // Two action buttons share the full width so the second never clips.
+    const int btnGap = 8;
+    const int btnW   = juce::jmax(60, (W - 2*kHP - btnGap) / 2);
+    windowBtn_    .setBounds(kHP,              L.yButtons, btnW, L.ch + L.btnExtra);
+    fullscreenBtn_.setBounds(kHP + btnW + btnGap, L.yButtons, btnW, L.ch + L.btnExtra);
 }
