@@ -29,19 +29,16 @@ public:
         : processor(p),
           envelopeEditor(p.getAPVTS(), juce::Colour(0xffe06bb8),
                          "luxpitchAttackMs", "luxpitchDecayMs",
-                         "luxpitchSustainLevel", "luxpitchReleaseMs")
+                         "luxpitchSustainLevel", "luxpitchReleaseMs",
+                         "luxpitchAttackCurve", "luxpitchDecayCurve",
+                         "luxpitchReleaseCurve")
     {
         auto& apvts = p.getAPVTS();
 
-        // ── Graphic ADSR editor (M5) — sliders below stay as numeric fallback
+        // ── Integrated ADSR editor — owns the A/D/S/R value boxes too
         addAndMakeVisible(envelopeEditor);
 
-        // ── Enable toggle ──────────────────────────────────────────────
-        initLabel(enableLabel, "Enable");
-        enableToggle.setButtonText("Active");
-        addAndMakeVisible(enableToggle);
-        enableAttach.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(
-            apvts, "luxpitchEnabled", enableToggle));
+        // ── Enable toggle ── moved to the rack LED + zone-3 header power switch
 
         // ── Background mode ────────────────────────────────────────────
         initLabel(bgLabel, "Background");
@@ -51,64 +48,9 @@ public:
         bgAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
             apvts, "luxpitchBackgroundMode", bgCombo));
 
-        // ── Coupling mode ──────────────────────────────────────────────
-        initLabel(couplingLabel, "Step Mode");
-        addAndMakeVisible(couplingCombo);
-        couplingCombo.addItem("LuxStral", 1);
-        couplingCombo.addItem("Free",     2);
-        couplingAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            apvts, "luxpitchCouplingMode", couplingCombo));
+        // ── Step Mode / px-per-semitone / PB Range ── moved to PITCH SETUP ──
 
-        // ── Free pixels per semitone ───────────────────────────────────
-        initLabel(freeStepLabel, "px/semitone");
-        freeStepSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        freeStepSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                       50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(freeStepSlider);
-        freeStepAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxpitchFreePixelsPerST", freeStepSlider));
-
-        // ── Pitch Bend Range ───────────────────────────────────────────
-        initLabel(pbRangeLabel, "PB Range");
-        pbRangeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        pbRangeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                      50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(pbRangeSlider);
-        pbRangeAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxpitchPitchBendRange", pbRangeSlider));
-
-        // ── ADSR ───────────────────────────────────────────────────────
-        initLabel(attackLabel, "Attack");
-        attackSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        attackSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                     50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(attackSlider);
-        attackAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxpitchAttackMs", attackSlider));
-
-        initLabel(decayLabel, "Decay");
-        decaySlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        decaySlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                    50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(decaySlider);
-        decayAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxpitchDecayMs", decaySlider));
-
-        initLabel(sustainLabel, "Sustain");
-        sustainSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        sustainSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                      50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(sustainSlider);
-        sustainAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxpitchSustainLevel", sustainSlider));
-
-        initLabel(releaseLabel, "Release");
-        releaseSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        releaseSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                      50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(releaseSlider);
-        releaseAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxpitchReleaseMs", releaseSlider));
+        // ── ADSR ── moved into the graphic editor (curve + value boxes) ──
 
         // ── Glide ──────────────────────────────────────────────────────
         initLabel(glideLabel, "Glide");
@@ -149,11 +91,11 @@ public:
         const int W = getWidth();
         computeColumns(W, leftX_, leftW_, rightX_, rightW_);
 
-        // ADSR section header (now at row 5 — Source row removed)
-        const int adsrSectionY = rowY(5) - 4;
+        // MODULATION section header (above the first control row below the editor)
+        const int sectionY = rowY(1) - 4;
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
         g.setColour(juce::Colour(0xffe06bb8).withAlpha(0.55f));
-        g.drawText("--- ADSR / MODULATION ---", leftX_, adsrSectionY, leftW_, 12,
+        g.drawText("--- MODULATION ---", leftX_, sectionY, leftW_, 12,
                    juce::Justification::centred);
     }
 
@@ -174,73 +116,46 @@ public:
         // Graphic envelope editor — top of the left column (rows shifted down
         // by kEnvHeaderH, see rowY()).
         envelopeEditor.setBounds(leftX_, 4, leftW_,
-                                 EnvelopeEditorComponent::kPreferredH);
+                                 envelopeEditor.preferredHeight());
 
-        // Row 0: Enable
-        enableLabel.setBounds(lb(0));
-        enableToggle.setBounds(cb(0).withWidth(80));
-        // Row 1: Background  (Source row removed — channel routing is automatic)
-        bgLabel.setBounds(lb(1));
-        bgCombo.setBounds(cb(1));
-        // Row 2: Step mode
-        couplingLabel.setBounds(lb(2));
-        couplingCombo.setBounds(cb(2));
-        // Row 3: Free px/semitone
-        freeStepLabel.setBounds(lb(3));
-        freeStepSlider.setBounds(cb(3));
-        // Row 4: PB Range
-        pbRangeLabel.setBounds(lb(4));
-        pbRangeSlider.setBounds(cb(4));
-        // [ADSR section header drawn in paint at rowY(5)-4]
-        // Row 5: Attack
-        attackLabel.setBounds(lb(5));
-        attackSlider.setBounds(cb(5));
-        // Row 6: Decay
-        decayLabel.setBounds(lb(6));
-        decaySlider.setBounds(cb(6));
-        // Row 7: Sustain
-        sustainLabel.setBounds(lb(7));
-        sustainSlider.setBounds(cb(7));
-        // Row 8: Release
-        releaseLabel.setBounds(lb(8));
-        releaseSlider.setBounds(cb(8));
-        // Row 9: Glide
-        glideLabel.setBounds(lb(9));
-        glideSlider.setBounds(cb(9));
-        // Row 10: LFO Rate
-        lfoRateLabel.setBounds(lb(10));
-        lfoRateSlider.setBounds(cb(10));
-        // Row 11: LFO Depth
-        lfoDepthLabel.setBounds(lb(11));
-        lfoDepthSlider.setBounds(cb(11));
-        // Row 12: Velocity
-        velCouplingLabel.setBounds(lb(12));
-        velCouplingToggle.setBounds(cb(12).withWidth(80));
+        // Row 0: Background  (Enable row removed — power lives in rack/header)
+        bgLabel.setBounds(lb(0));
+        bgCombo.setBounds(cb(0));
+        // [Step mode / px-per-semitone / PB Range moved to PITCH SETUP]
+        // [MODULATION section header drawn in paint at rowY(1)-4]
+        // Row 1: Glide
+        glideLabel.setBounds(lb(1));
+        glideSlider.setBounds(cb(1));
+        // Row 2: LFO Rate
+        lfoRateLabel.setBounds(lb(2));
+        lfoRateSlider.setBounds(cb(2));
+        // Row 3: LFO Depth
+        lfoDepthLabel.setBounds(lb(3));
+        lfoDepthSlider.setBounds(cb(3));
+        // Row 4: Velocity
+        velCouplingLabel.setBounds(lb(4));
+        velCouplingToggle.setBounds(cb(4).withWidth(80));
     }
 
 private:
     [[maybe_unused]] Sp3ctraAudioProcessor& processor;
 
-    // Labels (no Source label — channel routing is now automatic)
-    juce::Label enableLabel, bgLabel, couplingLabel, freeStepLabel, pbRangeLabel;
-    juce::Label attackLabel, decayLabel, sustainLabel, releaseLabel;
+    // Labels — ADSR labels removed (now inside the graphic editor);
+    //          Step Mode / px-per-semitone / PB Range moved to PITCH SETUP.
+    juce::Label bgLabel;
     juce::Label glideLabel, lfoRateLabel, lfoDepthLabel, velCouplingLabel;
 
-    // Controls (no source combo — channel routing is now automatic)
-    juce::ToggleButton enableToggle, velCouplingToggle;
-    juce::ComboBox     bgCombo, couplingCombo;
-    juce::Slider       freeStepSlider, pbRangeSlider;
-    juce::Slider       attackSlider, decaySlider, sustainSlider, releaseSlider;
+    // Controls — ADSR sliders removed (now inside the graphic editor)
+    juce::ToggleButton velCouplingToggle;
+    juce::ComboBox     bgCombo;
     juce::Slider       glideSlider, lfoRateSlider, lfoDepthSlider;
 
-    // Attachments (sourceAttach removed)
+    // Attachments — ADSR attachments removed (handled by the editor)
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>
-        enableAttach, velCouplingAttach;
+        velCouplingAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>
-        bgAttach, couplingAttach;
+        bgAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
-        freeStepAttach, pbRangeAttach,
-        attackAttach, decayAttach, sustainAttach, releaseAttach,
         glideAttach, lfoRateAttach, lfoDepthAttach;
 
     // Graphic ADSR editor (M5) — binds the same four envelope params as the

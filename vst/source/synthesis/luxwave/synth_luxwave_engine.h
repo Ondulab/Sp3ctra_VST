@@ -64,6 +64,8 @@ typedef enum {
 typedef struct {
     LwAdsrStage stage;
     float       level;
+    float       phase;       /* 0..1 within the current segment (for shaping) */
+    float       seg_start;   /* level at the start of the current segment */
 } LwAdsrEnv;
 
 /* ============================================================================
@@ -101,6 +103,9 @@ typedef struct {
     float decay_ms;
     float sustain_level;
     float release_ms;
+    float attack_curve;          /* [-1,1] segment curvature, 0 = linear */
+    float decay_curve;
+    float release_curve;
 
     /* Filter ADSR */
     float filter_attack_ms;

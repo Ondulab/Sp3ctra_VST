@@ -9,6 +9,7 @@
 // C headers for RT profiling
 extern "C" {
     #include "utils/rt_profiler.h"
+    #include "processing/score_engine.h"   // ScoreSettings (offline SCORE generation)
 }
 
 //==============================================================================
@@ -105,6 +106,34 @@ public:
     }
     LuxSampler*    getLuxSampler()    { return luxSampler.get();    }
     FrameSequencer*  getFrameSequencer()  { return frameSequencer.get();  }
+
+    // -------------------------------------------------------------------------
+    // SCORE module — shared generation settings (offline, message-thread only).
+    // Owned here so the PLAY page (Generate) and the SETUP panel (parameters)
+    // edit the SAME settings. NOT in the APVTS (offline, not host-automatable).
+    // -------------------------------------------------------------------------
+    ScoreSettings& getScoreSettings() noexcept { return scoreSettings_; }
+
+    /** SCORE frequency-range override. When `manual` is false the SCORE follows
+     *  LuxStral's musical Tuning + Root Note + Octaves (read-only mirror in the
+     *  UI). When true, the SCORE uses its OWN tuning/root/octaves below. Message
+     *  thread only (UI + GENERATE). */
+    struct ScoreFreqOverride
+    {
+        bool   manual    = false;
+        double tuning    = 440.0;   ///< A4 reference (Hz), like luxstralTuning
+        int    rootIndex = 12;      ///< 0 = C1 … 12 = C2 (luxstralRootNote index)
+        int    octaves   = 8;       ///< span in octaves above the root note
+    };
+    ScoreFreqOverride& getScoreFreqOverride() noexcept { return scoreFreq_; }
+
+    /** Musical frequency range (Hz) driven by LuxStral's Tuning + Root Note +
+     *  Octaves (the values LuxStral itself uses). */
+    void getMusicalFrequencyRange(double& lowHz, double& highHz) const noexcept;
+
+    /** Frequency range (Hz) the SCORE generation should use: the manual override
+     *  when enabled, otherwise the LuxStral range. */
+    void getScoreFrequencyRange(double& lowHz, double& highHz) const noexcept;
     
     // Helper to build UDP address string from 4 bytes
     juce::String getUdpAddressString() const;
@@ -137,6 +166,10 @@ public:
     bool consumeSamplerPlayPressed()  noexcept { return samplerPlayPressed .exchange(false, std::memory_order_acquire); }
     bool consumeSamplerPlayReleased() noexcept { return samplerPlayReleased.exchange(false, std::memory_order_acquire); }
     bool consumeSamplerSaveTrigger()  noexcept { return samplerSaveTriggered.exchange(false, std::memory_order_acquire); }
+
+    /** All Notes Off (panic): ask the audio thread to release every held/stuck
+     *  note next block. Safe to call from the UI (message) thread. */
+    void requestAllNotesOff() noexcept { panicRequested.store(true, std::memory_order_release); }
 
     void startSamplerMidiLearn(int target) noexcept
     {
@@ -190,6 +223,10 @@ private:
     std::shared_ptr<Sp3ctraSharedCore> sharedCore;
     std::unique_ptr<LuxSampler>   luxSampler;
     std::unique_ptr<FrameSequencer> frameSequencer;
+
+    // SCORE generation settings — shared between PLAY page and SETUP panel.
+    ScoreSettings     scoreSettings_ {};
+    ScoreFreqOverride scoreFreq_ {};
     
     // ✨ VST Parameters via AudioProcessorValueTreeState
     juce::AudioProcessorValueTreeState apvts;
@@ -234,6 +271,10 @@ private:
     // UDP Batch Update state (prevents multiple UDP restarts)
     std::atomic<bool> udpBatchUpdateActive{false};
     std::atomic<bool> udpNeedsRestart{false};
+
+    // All Notes Off (panic): set by the UI (message thread), consumed and
+    // cleared by processBlock (audio thread) to release every held/stuck note.
+    std::atomic<bool> panicRequested{false};
 
     // -------------------------------------------------------------------------
     // Sampler action button MIDI bindings — RT-safe trigger pulses

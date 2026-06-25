@@ -2065,6 +2065,18 @@ void CisVisualizerComponent::computeFftMagnitudes()
     inBuf.resize(static_cast<size_t>(N));
     outBuf.resize(static_cast<size_t>(nBins));
 
+    // ── Chain 2 transport gate (image_freeze_mode) ───────────────────────────
+    // LuxSynth sits on Chain 2, so its spectrum follows the Chain 2 SOURCE CIS
+    // transport — exactly like LuxWave and (for Chain 1) LuxStral.
+    //   PLAY → recompute the spectrum from the live CIS feed
+    //   HOLD → keep the last PLAY spectrum (frozen timbre)
+    //   STOP → silence (zero magnitudes)
+    const int kChain2Freeze = juce::jmax(
+        static_cast<int>(g_sp3ctra_config.image_freeze_mode),
+        static_cast<int>(g_sp3ctra_config.raw_freeze_mode));
+
+    if (kChain2Freeze == 0)   // PLAY
+    {
     // ── Hann window ───────────────────────────────────────────────────────────
     const float kTwoPiOverN =
         2.0f * static_cast<float>(M_PI) / static_cast<float>(juce::jmax(1, N - 1));
@@ -2153,6 +2165,13 @@ void CisVisualizerComponent::computeFftMagnitudes()
                 0.40f * newH + 0.60f * fftHarmonicity_[static_cast<size_t>(k)];
         }
     }
+    }   // end PLAY (Chain 2 transport)
+    else if (kChain2Freeze == 2)   // STOP — silence the spectrum
+    {
+        std::fill(fftMagnitudesSmoothed_.begin(), fftMagnitudesSmoothed_.end(), 0.0f);
+    }
+    // HOLD (1): leave fftMagnitudesSmoothed_ / fftHarmonicity_ at their last
+    // PLAY values so the frozen timbre keeps sounding while MIDI notes play.
 
     // ========================================================================
     // 🎯 BRIDGE: Feed spectral data to the LuxSynth additive synthesis engine.
@@ -2184,10 +2203,16 @@ void CisVisualizerComponent::computeFftMagnitudes()
         cfg.decay_ms             = apvts.getRawParameterValue("luxsynthDecayMs")->load();
         cfg.sustain_level        = apvts.getRawParameterValue("luxsynthSustainLevel")->load();
         cfg.release_ms           = apvts.getRawParameterValue("luxsynthReleaseMs")->load();
+        cfg.attack_curve         = apvts.getRawParameterValue("luxsynthAttackCurve")->load();
+        cfg.decay_curve          = apvts.getRawParameterValue("luxsynthDecayCurve")->load();
+        cfg.release_curve        = apvts.getRawParameterValue("luxsynthReleaseCurve")->load();
         cfg.filter_attack_ms     = apvts.getRawParameterValue("luxsynthFilterAttackMs")->load();
         cfg.filter_decay_ms      = apvts.getRawParameterValue("luxsynthFilterDecayMs")->load();
         cfg.filter_sustain       = apvts.getRawParameterValue("luxsynthFilterSustain")->load();
         cfg.filter_release_ms    = apvts.getRawParameterValue("luxsynthFilterReleaseMs")->load();
+        cfg.filter_attack_curve  = apvts.getRawParameterValue("luxsynthFilterAttackCurve")->load();
+        cfg.filter_decay_curve   = apvts.getRawParameterValue("luxsynthFilterDecayCurve")->load();
+        cfg.filter_release_curve = apvts.getRawParameterValue("luxsynthFilterReleaseCurve")->load();
         cfg.filter_cutoff        = apvts.getRawParameterValue("luxsynthFilterCutoff")->load();
         cfg.filter_env_depth     = apvts.getRawParameterValue("luxsynthFilterEnvDepth")->load();
         cfg.lfo_rate_hz          = apvts.getRawParameterValue("luxsynthLfoRate")->load();

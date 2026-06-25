@@ -4,12 +4,13 @@
  * LuxMask — MIDI-driven mobile spotlight implementation.
  *
  * Per-frame pipeline:
- *   1. Read MIDI atomics → update per-voice runtime state.
+ *   1. Read MIDI atomics -> update per-voice runtime state.
  *   2. Advance ADSR envelopes and glide.
- *   3. Update two independent LFOs (position / width).
- *   4. Accumulate alpha(i) = clamp(Σ_v env_v · shape_v(i), 0, 1).
- *   5. weight(i) = floor + (gain - floor) * alpha(i).
- *   6. out(i,c) = src(i,c) * weight(i)  (clamped, optional bg fade).
+ *   3. Update the position LFO (vibrato).
+ *   4. For each voice the ADSR output sets the openness of a spatial LP/HP/BP
+ *      filter (cutoff anchored on the note); accumulate the soft-edged passband
+ *      reveal: alpha(i) = clamp(Σ_v gate_v(i), 0, 1).
+ *   5. out(i,c) = lerp(bg, src(i,c), alpha(i)).
  *
  * RT-safety: Pure C, allocation-free, bounded O(N * MAX_VOICES).
  *
@@ -18,6 +19,7 @@
  */
 
 #include "lux_mask.h"
+#include "lux_env_shape.h"
 #include <string.h>
 #include <math.h>
 #include <sys/time.h>
@@ -31,9 +33,6 @@
  * Visualizers read the insert taps published by the chain executor. */
 LuxMaskState g_lux_mask_proc;
 
-/* LUT domain: d ∈ [0, LUT_DMAX] mapped onto [0, LUT_SIZE-1]. */
-#define LUX_MASK_LUT_DMAX 4.0f
-
 /* ── Timestamp helper ──────────────────────────────────────────────────────── */
 static uint64_t lux_mask_get_timestamp_us(void)
 {
@@ -42,31 +41,14 @@ static uint64_t lux_mask_get_timestamp_us(void)
     return (uint64_t)tv.tv_sec * 1000000ULL + (uint64_t)tv.tv_usec;
 }
 
-/* ── Gauss shape LUT init ──────────────────────────────────────────────────── */
-static void lux_mask_build_luts(LuxMaskState *state)
+/* Soft step in [0,1]: 0 for x << 0, 1 for x >> 0, smooth tanh edge around 0.
+ * `x` is already normalised by the soft-edge half-width, so the ±4 guards skip
+ * the expensive tanhf() outside the transition band. */
+static inline float lux_mask_soft_gate(float x)
 {
-    int k;
-    const float inv = LUX_MASK_LUT_DMAX / (float)(LUX_MASK_LUT_SIZE - 1);
-    for (k = 0; k < LUX_MASK_LUT_SIZE; k++)
-    {
-        float d = (float)k * inv;        /* d in [0, LUT_DMAX] */
-        /* Gauss: exp(-0.5 * (d*2)^2)  — σ = width/2 */
-        state->shape_lut_gauss[k] = expf(-0.5f * (d * 2.0f) * (d * 2.0f));
-    }
-}
-
-/* O(1) gauss sampling with linear interpolation.  Returns α in [0, 1]. */
-static inline float lux_mask_sample_gauss(const LuxMaskState *state, float d)
-{
-    if (d < 0.0f) d = -d;
-    if (d >= LUX_MASK_LUT_DMAX) return 0.0f;
-
-    const float fk = d * ((float)(LUX_MASK_LUT_SIZE - 1) / LUX_MASK_LUT_DMAX);
-    int   ki = (int)fk;
-    float fr = fk - (float)ki;
-    if (ki >= LUX_MASK_LUT_SIZE - 1) return 0.0f;
-    return state->shape_lut_gauss[ki] * (1.0f - fr)
-         + state->shape_lut_gauss[ki + 1] * fr;
+    if (x >  4.0f) return 1.0f;
+    if (x < -4.0f) return 0.0f;
+    return 0.5f * (1.0f + tanhf(x));
 }
 
 /* ── Default config ────────────────────────────────────────────────────────── */
@@ -83,18 +65,18 @@ LuxMaskConfig lux_mask_config_default(void)
     cfg.free_pixels_per_semitone = 36.0f;
     cfg.pitch_bend_range         = 2.0f;
 
-    cfg.width_base               = 256.0f;
+    cfg.filter_width_pct         = 30.0f;
+    cfg.filter_offset_pct        = 0.0f;
+    cfg.filter_slope             = 0.5f;
 
     cfg.attack_ms                = 20.0f;
     cfg.decay_ms                 = 120.0f;
     cfg.sustain_level            = 1.0f;
     cfg.release_ms               = 200.0f;
 
-    /* Width horizon defaults — absolute widths in px, can go up to full image.
-     * Attack opens wide (1024 px) and the spotlight focuses during DECAY.
-     * Release blooms back to 1024 px as the envelope fades. */
-    cfg.width_attack_px          = 1024.0f;
-    cfg.width_release_px         = 1024.0f;
+    cfg.attack_curve             = 0.0f;   /* linear by default */
+    cfg.decay_curve              = 0.0f;
+    cfg.release_curve            = 0.5f;   /* gentle convex — approximates the old musical exp release */
 
     cfg.glide_time_ms            = 0.0f;
 
@@ -113,7 +95,6 @@ void lux_mask_init(LuxMaskState *state)
 
     memset(state, 0, sizeof(LuxMaskState));
     state->config = lux_mask_config_default();
-    lux_mask_build_luts(state);
 
     for (v = 0; v < LUX_MASK_MAX_VOICES; v++)
     {
@@ -131,7 +112,6 @@ void lux_mask_init(LuxMaskState *state)
     atomic_init(&state->midi.pitch_bend,  0);
     atomic_init(&state->midi.voice_count, 0);
     atomic_init(&state->midi.sustain,     0);
-    atomic_init(&state->midi.mod_wheel,   0);
 
     state->next_age         = 1;
     state->lfo_pos_phase    = 0.0f;
@@ -315,16 +295,6 @@ void lux_mask_set_sustain(LuxMaskState *state, int on)
     }
 }
 
-void lux_mask_set_mod_wheel(LuxMaskState *state, float wheel)
-{
-    int w;
-    if (!state) return;
-    w = (int)(wheel * 127.0f);
-    if (w < 0)   w = 0;
-    if (w > 127) w = 127;
-    atomic_store_explicit(&state->midi.mod_wheel, w, memory_order_relaxed);
-}
-
 void lux_mask_all_notes_off(LuxMaskState *state)
 {
     int v;
@@ -353,21 +323,24 @@ static void advance_voice_envelope(
     float                dt_s,
     const LuxMaskConfig *cfg)
 {
-    float peak_level, sustain_target, rate;
+    float peak_level, sustain_target, seg_s, s;
 
+    /* The envelope is phase-shaped (lux_env_shape per segment).  Its 0..1 output
+     * later drives the spatial filter openness in process_frame(). */
     if (midi_active && !voice->prev_active)
     {
-        voice->envelope_stage    = LUX_MASK_ENV_ATTACK;
-        voice->decay_progress_s  = 0.0f;   /* fresh attack -> reset width tracker */
-        voice->release_progress_s = 0.0f;
+        voice->envelope_stage     = LUX_MASK_ENV_ATTACK;
+        voice->env_phase          = 0.0f;
+        voice->seg_start_level    = voice->envelope_level;
     }
     else if (!midi_active && voice->prev_active)
     {
-        /* Snapshot the level at the moment release starts so the width-bloom
-         * envelope knows how far the alpha has to drop. */
+        /* Snapshot the level at the moment release starts so the RELEASE
+         * segment knows how far the envelope has to drop. */
         voice->release_start_level = voice->envelope_level;
+        voice->seg_start_level     = voice->envelope_level;
         voice->envelope_stage      = LUX_MASK_ENV_RELEASE;
-        voice->release_progress_s  = 0.0f; /* start tracking release time */
+        voice->env_phase           = 0.0f;
     }
     voice->prev_active = midi_active;
 
@@ -380,35 +353,37 @@ static void advance_voice_envelope(
         case LUX_MASK_ENV_IDLE:
             break;
         case LUX_MASK_ENV_ATTACK:
-            rate = (cfg->attack_ms > 0.1f) ? dt_s / (cfg->attack_ms / 1000.0f) : 100.0f;
-            voice->envelope_level += rate;
-            if (voice->envelope_level >= peak_level)
+            seg_s = (cfg->attack_ms > 0.1f) ? cfg->attack_ms / 1000.0f : 1e-4f;
+            voice->env_phase += dt_s / seg_s;
+            if (voice->env_phase >= 1.0f)
             {
-                voice->envelope_level = peak_level;
-                voice->envelope_stage = LUX_MASK_ENV_DECAY;
+                voice->envelope_level  = peak_level;
+                voice->envelope_stage  = LUX_MASK_ENV_DECAY;
+                voice->env_phase       = 0.0f;
+                voice->seg_start_level = peak_level;
+            }
+            else
+            {
+                s = lux_env_shape(voice->env_phase, cfg->attack_curve);
+                voice->envelope_level =
+                    voice->seg_start_level + (peak_level - voice->seg_start_level) * s;
             }
             break;
         case LUX_MASK_ENV_DECAY:
         {
             float decay_s = (cfg->decay_ms > 0.1f) ? cfg->decay_ms / 1000.0f : 1e-4f;
             sustain_target = cfg->sustain_level * peak_level;
-            rate = dt_s / decay_s;
-            voice->envelope_level -= rate;
-            /* Advance the *time* progress of the DECAY segment, independent
-             * of the audio level — width modulation tracks this, not the
-             * envelope amplitude (which is squeezed by Sustain Level). */
-            voice->decay_progress_s += dt_s;
-            /* Clamp envelope at sustain but DO NOT leave the DECAY stage
-             * until the *time* axis is exhausted — otherwise the width ramp
-             * (driven by decay_progress_s) would be truncated and the width
-             * would jump at the DECAY → SUSTAIN transition when Sustain
-             * Level is high. */
-            if (voice->envelope_level < sustain_target)
-                voice->envelope_level = sustain_target;
-            if (voice->decay_progress_s >= decay_s)
+            voice->env_phase += dt_s / decay_s;
+            if (voice->env_phase >= 1.0f)
             {
                 voice->envelope_level = sustain_target;
                 voice->envelope_stage = LUX_MASK_ENV_SUSTAIN;
+            }
+            else
+            {
+                s = lux_env_shape(voice->env_phase, cfg->decay_curve);
+                voice->envelope_level =
+                    sustain_target + (voice->seg_start_level - sustain_target) * (1.0f - s);
             }
             break;
         }
@@ -418,28 +393,17 @@ static void advance_voice_envelope(
             break;
         case LUX_MASK_ENV_RELEASE:
         {
-            /* Exponential decay: musically natural release shape.
-             * The envelope level is multiplied by k each frame, with k
-             * chosen so that the level drops to ~-60 dB (≈ 0.001) over
-             * the user-defined release_ms window. This yields a steep
-             * initial fall followed by a long, smooth tail — much more
-             * musical than the previous linear ramp (which sounded like
-             * a mechanical "brake").
-             *
-             * tau = release_ms / ln(1000) ≈ release_ms / 6.9078
-             * k   = exp(-dt_s / tau) = exp(-dt_s * 6.9078 / release_s) */
-            const float release_s = (cfg->release_ms > 0.1f)
-                                  ? cfg->release_ms / 1000.0f
-                                  : 1e-4f;
-            const float k = expf(-dt_s * 6.9078f / release_s);
-            voice->envelope_level *= k;
-            /* Time-based progress for the width interpolation (see above). */
-            voice->release_progress_s += dt_s;
-            /* Snap to zero once the level is inaudible. */
-            if (voice->envelope_level <= 1e-4f)
+            seg_s = (cfg->release_ms > 0.1f) ? cfg->release_ms / 1000.0f : 1e-4f;
+            voice->env_phase += dt_s / seg_s;
+            if (voice->env_phase >= 1.0f)
             {
                 voice->envelope_level = 0.0f;
                 voice->envelope_stage = LUX_MASK_ENV_IDLE;
+            }
+            else
+            {
+                s = lux_env_shape(voice->env_phase, cfg->release_curve);
+                voice->envelope_level = voice->release_start_level * (1.0f - s);
             }
             break;
         }
@@ -484,6 +448,8 @@ void lux_mask_process_frame(
     if (pixel_count > LUX_MASK_MAX_PIXELS)
         pixel_count = LUX_MASK_MAX_PIXELS;
 
+    state->last_pixel_count = pixel_count;   /* publish for the UI overlay */
+
     if (!state->config.enabled)
     {
         if (out_r) *out_r = in_r;
@@ -519,14 +485,13 @@ void lux_mask_process_frame(
     }
 
     /* ── LFOs (shared across voices) ──────────────────────────────────────
-     * Effective depth = configured depth + mod wheel (CC1) contribution of
-     * up to +1 semitone — instant expressive vibrato from the wheel even
-     * when the configured depth is 0. */
+     * Effective depth = the single configured depth. The CC1 mod wheel and
+     * the on-screen "LFO Pos Depth" slider drive this same parameter (the
+     * wheel moves the slider in the host), so there is no separate additive
+     * contribution to combine here. */
     lfo_pos_px = 0.0f;
     {
-        float wheel = (float)atomic_load_explicit(&state->midi.mod_wheel,
-                                                  memory_order_relaxed) / 127.0f;
-        float depth = state->config.lfo_pos_depth_semitones + wheel * 1.0f;
+        float depth = state->config.lfo_pos_depth_semitones;
         if (depth > 0.001f && state->config.lfo_pos_rate_hz > 0.001f)
         {
             state->lfo_pos_phase += 2.0f * (float)M_PI * state->config.lfo_pos_rate_hz * dt_s;
@@ -557,13 +522,13 @@ void lux_mask_process_frame(
         state->voices[v].velocity_norm = (float)midi_vel / 127.0f;
 
         /* Stolen voice: force a fresh ATTACK from the current level (no
-         * flash) and restart the width-bloom trackers — without this the
-         * envelope never sees an edge and the spotlight teleports. */
+         * flash) — without this the envelope never sees an edge and the
+         * spotlight teleports. */
         if (retrig)
         {
-            state->voices[v].envelope_stage     = LUX_MASK_ENV_ATTACK;
-            state->voices[v].decay_progress_s   = 0.0f;
-            state->voices[v].release_progress_s = 0.0f;
+            state->voices[v].envelope_stage  = LUX_MASK_ENV_ATTACK;
+            state->voices[v].env_phase       = 0.0f;
+            state->voices[v].seg_start_level = state->voices[v].envelope_level;
         }
 
         /* Target position: image centered on reference note + offset in px. */
@@ -585,6 +550,8 @@ void lux_mask_process_frame(
 
         advance_voice_envelope(&state->voices[v], midi_active, dt_s, &state->config);
 
+        /* A voice contributes while its envelope is non-negligible.  At env ~ 0
+         * the band has collapsed to nothing, so it can be skipped. */
         if (state->voices[v].envelope_level > 0.001f)
             num_active_voices++;
     }
@@ -607,111 +574,60 @@ void lux_mask_process_frame(
     /* ── Accumulate alpha across all voices ───────────────────────────── */
     memset(state->alpha_buf, 0, sizeof(float) * (size_t)pixel_count);
 
-    for (v = 0; v < max_voices; v++)
+    /* Soft-edge half-width (pixels): slope=1 -> ~1 px (sharp), slope=0 ->
+     * 15 % of the image (very soft).  Shared by every voice this frame. */
     {
-        float env, pos, width_eff, inv_width;
-        int   ii, i0, i1, support_px;
+        float soft_px;
+        float full_w_px;
+        float offset_px;
+        float slope = state->config.filter_slope;
+        if (slope < 0.0f) slope = 0.0f;
+        if (slope > 1.0f) slope = 1.0f;
+        soft_px = (1.0f - slope) * 0.15f * (float)pixel_count + 1.0f;
 
-        if (state->voices[v].envelope_level <= 0.001f)
-            continue;
+        /* Band width + centre offset at full open (openness = 1), in pixels. */
+        full_w_px = (state->config.filter_width_pct * 0.01f) * (float)pixel_count;
+        if (full_w_px < 0.0f) full_w_px = 0.0f;
+        offset_px = (state->config.filter_offset_pct * 0.01f) * (float)pixel_count;
 
-        env = state->voices[v].envelope_level;
-        pos = state->voices[v].current_pos + lfo_pos_px;
+        const float inv_soft = 1.0f / soft_px;
 
-        /* ── Width envelope — ADSR-driven absolute width in pixels ───────
-         *
-         * Time-based interpolation (decoupled from envelope amplitude so the
-         * Sustain Level does NOT affect the width transition):
-         *
-         *   ATTACK  : width = w_attack                  (held throughout)
-         *   DECAY   : width = lerp(w_attack, w_base, p_decay)
-         *                     p_decay = decay_progress_s / decay_ms*1e-3
-         *                     → 0 at decay start, 1 at decay end.
-         *   SUSTAIN : width = w_base
-         *   RELEASE : width = lerp(w_base, w_release, p_release)
-         *                     p_release = release_progress_s / release_ms*1e-3
-         *                     → 0 at release start, 1 at release end.
-         *
-         * Velocity coupling:
-         *   When ON the horizons are pondered between w_base (vel=0) and
-         *   the configured horizon (vel=1).
-         * ──────────────────────────────────────────────────────────────── */
+        for (v = 0; v < max_voices; v++)
         {
-            float w_base   = state->config.width_base;
-            float w_attack = state->config.width_attack_px;
-            float w_rel    = state->config.width_release_px;
+            float openness, pos, velf, w, centre, lo, hi;
+            int   ii, i0, i1;
 
+            openness = state->voices[v].envelope_level;   /* ADSR -> openness */
+            if (openness <= 0.001f)
+                continue;
+            if (openness > 1.0f) openness = 1.0f;
+
+            pos = state->voices[v].current_pos + lfo_pos_px;
+
+            /* Velocity coupling scales the whole filter (width + offset). */
+            velf = 1.0f;
             if (state->config.velocity_coupling)
+                velf = state->voices[v].velocity_norm;
+
+            /* Bandpass whose width AND centre offset are openness-scaled, so the
+             * band collapses to the note at env == 0 (smooth release) and sweeps
+             * out to its offset position as env opens (glide-like attack). */
+            w      = openness * full_w_px * velf;
+            centre = pos + openness * offset_px * velf;
+            lo     = centre - w * 0.5f;
+            hi     = centre + w * 0.5f;
+
+            /* Transition bands extend ~4*soft beyond each edge. */
+            i0 = (int)(lo - 4.0f * soft_px);
+            i1 = (int)(hi + 4.0f * soft_px);
+            if (i0 < 0)            i0 = 0;
+            if (i1 >= pixel_count) i1 = pixel_count - 1;
+            for (ii = i0; ii <= i1; ii++)
             {
-                const float vel = state->voices[v].velocity_norm;
-                w_attack = w_base + (w_attack - w_base) * vel;
-                w_rel    = w_base + (w_rel    - w_base) * vel;
+                float a = lux_mask_soft_gate(((float)ii - lo) * inv_soft)
+                        * lux_mask_soft_gate((hi - (float)ii) * inv_soft);
+                state->alpha_buf[ii] += a;
             }
-
-            float w;
-            switch (state->voices[v].envelope_stage)
-            {
-                case LUX_MASK_ENV_ATTACK:
-                    w = w_attack;
-                    break;
-                case LUX_MASK_ENV_DECAY:
-                {
-                    /* Time-based progress through the DECAY segment.
-                     * Independent of Sustain Level — width always traverses
-                     * the full w_attack -> w_base ramp over `decay_ms`. */
-                    float decay_s = state->config.decay_ms * 1e-3f;
-                    if (decay_s < 1e-4f) decay_s = 1e-4f;
-                    float t = state->voices[v].decay_progress_s / decay_s;
-                    if (t < 0.0f) t = 0.0f;
-                    if (t > 1.0f) t = 1.0f;
-                    /* lerp(w_attack, w_base, t) */
-                    w = w_attack + (w_base - w_attack) * t;
-                    break;
-                }
-                case LUX_MASK_ENV_RELEASE:
-                {
-                    /* Time-based progress through the RELEASE segment.
-                     * Independent of release_start_level → the visible bloom
-                     * always spans the full `release_ms` window. */
-                    float rel_s = state->config.release_ms * 1e-3f;
-                    if (rel_s < 1e-4f) rel_s = 1e-4f;
-                    float t = state->voices[v].release_progress_s / rel_s;
-                    if (t < 0.0f) t = 0.0f;
-                    if (t > 1.0f) t = 1.0f;
-                    /* lerp(w_base, w_rel, t) */
-                    w = w_base + (w_rel - w_base) * t;
-                    break;
-                }
-                case LUX_MASK_ENV_SUSTAIN:
-                case LUX_MASK_ENV_IDLE:
-                default:
-                    w = w_base;
-                    break;
-            }
-
-            if (w < 1.0f) w = 1.0f;
-            width_eff = w;
-        }
-        inv_width = 1.0f / width_eff;
-
-        /* Gauss support extends to d ≈ LUT_DMAX.
-         * With σ = width/2 and d in units of width, d=LUT_DMAX means 2*LUT_DMAX
-         * standard deviations — far enough for alpha to be negligible.
-         * Clamp by pixel_count to avoid pathological iteration when width is
-         * very large (e.g. width = full image). */
-        support_px = (int)(width_eff * LUX_MASK_LUT_DMAX + 1.0f);
-        if (support_px > pixel_count) support_px = pixel_count;
-
-        i0 = (int)pos - support_px;
-        i1 = (int)pos + support_px;
-        if (i0 < 0)            i0 = 0;
-        if (i1 >= pixel_count) i1 = pixel_count - 1;
-
-        for (ii = i0; ii <= i1; ii++)
-        {
-            float d = ((float)ii - pos) * inv_width;
-            float a = lux_mask_sample_gauss(state, d);
-            state->alpha_buf[ii] += env * a;
         }
     }
 

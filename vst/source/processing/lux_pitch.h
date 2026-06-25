@@ -70,6 +70,8 @@ typedef struct {
     float    target_shift;      /* Target shift from note + bend */
     float    envelope_level;    /* Current ADSR level [0, 1] */
     int      envelope_stage;    /* LUX_PITCH_ENV_* */
+    float    env_phase;         /* Normalised progress [0,1] through current segment */
+    float    seg_start_level;   /* Envelope level captured at segment entry (click-free) */
     int      prev_active;       /* Previous active state (edge detection) */
     uint32_t age;               /* Incremented each note-on (for voice stealing) */
 } LuxPitchVoiceState;
@@ -82,7 +84,6 @@ typedef struct {
     LP_ATOMIC(int)    pitch_bend;   /* Pitch bend (-8192..+8191), center = 0 */
     LP_ATOMIC(int)    voice_count;  /* Number of currently allocated voices (informational) */
     LP_ATOMIC(int)    sustain;      /* CC64 sustain pedal: 1 = held */
-    LP_ATOMIC(int)    mod_wheel;    /* CC1 modulation wheel (0-127) → extra vibrato depth */
 } LuxPitchMidiState;
 
 /* ============================================================================
@@ -102,6 +103,12 @@ typedef struct {
     float decay_ms;
     float sustain_level;            /* [0.0, 1.0] */
     float release_ms;
+
+    /* Per-segment curvature [-1,1] (0 = linear, >0 convex, <0 concave).
+     * Drives lux_env_shape() for the attack / decay / release segments. */
+    float attack_curve;
+    float decay_curve;
+    float release_curve;
 
     /* Glide (portamento) */
     float glide_time_ms;
@@ -151,11 +158,6 @@ void lux_pitch_set_pitch_bend(LuxPitchState *state, float bend);
  * sounding); releasing the pedal releases every deferred voice through the
  * normal RELEASE envelope. RT-safe. */
 void lux_pitch_set_sustain(LuxPitchState *state, int on);
-
-/* CC1 modulation wheel [0, 1]. Adds up to +1 semitone of vibrato depth on
- * top of the configured LFO depth (instant expressive vibrato even when the
- * configured depth is 0). RT-safe. */
-void lux_pitch_set_mod_wheel(LuxPitchState *state, float wheel);
 
 /* MIDI CC 123 "All Notes Off": mark every active voice as released.
  * Voices enter their normal RELEASE phase (exponential decay), so the

@@ -5,6 +5,47 @@
 PitchSetupPanel::PitchSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour)
     : apvts(processor.getAPVTS()), accent(accentColour)
 {
+    // ── Step Mode (LuxStral / Free) ─────────────────────────────────────
+    couplingLabel.setText("Step Mode", juce::dontSendNotification);
+    couplingLabel.setJustificationType(juce::Justification::centredRight);
+    couplingLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+    addAndMakeVisible(couplingLabel);
+
+    couplingCombo.addItem("LuxStral", 1);
+    couplingCombo.addItem("Free",     2);
+    addAndMakeVisible(couplingCombo);
+    couplingAttachment.reset(
+        new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
+            apvts, "luxpitchCouplingMode", couplingCombo));
+
+    // ── Free pixels per semitone ────────────────────────────────────────
+    freeStepLabel.setText("px/semitone", juce::dontSendNotification);
+    freeStepLabel.setJustificationType(juce::Justification::centredRight);
+    freeStepLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+    addAndMakeVisible(freeStepLabel);
+
+    freeStepSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    freeStepSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                   50, Sp3ctraTheme::kControlH);
+    addAndMakeVisible(freeStepSlider);
+    freeStepAttachment.reset(
+        new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, "luxpitchFreePixelsPerST", freeStepSlider));
+
+    // ── Pitch Bend Range ────────────────────────────────────────────────
+    pbRangeLabel.setText("PB Range", juce::dontSendNotification);
+    pbRangeLabel.setJustificationType(juce::Justification::centredRight);
+    pbRangeLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+    addAndMakeVisible(pbRangeLabel);
+
+    pbRangeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    pbRangeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                  50, Sp3ctraTheme::kControlH);
+    addAndMakeVisible(pbRangeSlider);
+    pbRangeAttachment.reset(
+        new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, "luxpitchPitchBendRange", pbRangeSlider));
+
     // ── MIDI Channel (1-16) ────────────────────────────────────────────
     midiChannelLabel.setText("MIDI Channel", juce::dontSendNotification);
     midiChannelLabel.setJustificationType(juce::Justification::centredRight);
@@ -87,28 +128,49 @@ void PitchSetupPanel::resized()
         return r;
     };
 
-    // Row 1: MIDI Channel
+    // Row 1: Step Mode
+    {
+        auto r = row();
+        couplingLabel.setBounds(r.removeFromLeft(labelW));
+        r.removeFromLeft(Sp3ctraTheme::kGap);
+        couplingCombo.setBounds(r.removeFromLeft(ctrlW));
+    }
+    // Row 2: px/semitone
+    {
+        auto r = row();
+        freeStepLabel.setBounds(r.removeFromLeft(labelW));
+        r.removeFromLeft(Sp3ctraTheme::kGap);
+        freeStepSlider.setBounds(r.removeFromLeft(ctrlW));
+    }
+    // Row 3: PB Range
+    {
+        auto r = row();
+        pbRangeLabel.setBounds(r.removeFromLeft(labelW));
+        r.removeFromLeft(Sp3ctraTheme::kGap);
+        pbRangeSlider.setBounds(r.removeFromLeft(ctrlW));
+    }
+    // Row 4: MIDI Channel
     {
         auto r = row();
         midiChannelLabel.setBounds(r.removeFromLeft(labelW));
         r.removeFromLeft(Sp3ctraTheme::kGap);
         midiChannelCombo.setBounds(r.removeFromLeft(ctrlW));
     }
-    // Row 2: Octave Offset
+    // Row 5: Octave Offset
     {
         auto r = row();
         octaveOffsetLabel.setBounds(r.removeFromLeft(labelW));
         r.removeFromLeft(Sp3ctraTheme::kGap);
         octaveOffsetCombo.setBounds(r.removeFromLeft(ctrlW));
     }
-    // Row 3: Reference Note
+    // Row 6: Reference Note
     {
         auto r = row();
         refNoteLabel.setBounds(r.removeFromLeft(labelW));
         r.removeFromLeft(Sp3ctraTheme::kGap);
         refNoteCombo.setBounds(r.removeFromLeft(ctrlW));
     }
-    // Row 4: Polyphony
+    // Row 7: Polyphony
     {
         auto r = row();
         polyphonyLabel.setBounds(r.removeFromLeft(labelW));

@@ -91,7 +91,7 @@ void pipeline_path_luxsynth_luxwave(
     const uint8_t  *raw_r,
     const uint8_t  *raw_g,
     const uint8_t  *raw_b,
-    const PathConfig *path_cfg,
+    const PipelineConfig *config,
     PreprocessedImageData *out
 );
 

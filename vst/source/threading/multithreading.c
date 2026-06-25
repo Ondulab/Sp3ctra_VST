@@ -734,32 +734,19 @@ void *udpThread(void *arg) {
           log_error("THREAD", "Pipeline processing failed");
         }
 
-        /* ── LuxSynth polyphonic independent channel path ────────────────────
-         * pipeline_process_frame() computed polyphonic.* from LuxStral's
-         * channel.  When LuxSynth selects a different channel, recompute
-         * polyphonic.* from its own designated channel. */
+        /* ── CHAIN 2 (LuxSynth + LuxWave) = raw live CIS ─────────────────────
+         * Placement defines the source: Chain 2 carries the live feed, with no
+         * sampler/inserts upstream.  pipeline_process_frame() above ran Path B
+         * on Chain 1's frame (src_R); re-run it here on the raw live buffer so
+         * polyphonic.* and the LuxWave wavetable use Chain 2's own signal and
+         * the Chain 2 freeze envelope (image_freeze_mode) gates them.
+         * (live_cfg.envelope_id == ENVELOPE_LIVE, so the Chain 2 side-effects
+         * inside Path B run here — and are skipped on the sampler worker.) */
 #ifdef VST_MODE
-        {
-          ImageSourceType luxsynth_src = live_cfg.luxsynth_luxwave_path.source;
-          ImageSourceType luxstral_src = live_cfg.luxstral_path.source;
-          if (luxsynth_src != luxstral_src)
-          {
-            const uint8_t *syn_R, *syn_G, *syn_B;
-            if (luxsynth_src == IMAGE_SOURCE_LIVE)
-            {
-              syn_R = db->activeBuffer_R;
-              syn_G = db->activeBuffer_G;
-              syn_B = db->activeBuffer_B;
-            }
-            else /* IMAGE_SOURCE_MODULATED */
-            {
-              syn_R = mod_R;
-              syn_G = mod_G;
-              syn_B = mod_B;
-            }
-            preprocess_luxsynth(syn_R, syn_G, syn_B, &preprocessed_temp);
-          }
-        }
+        pipeline_path_luxsynth_luxwave(db->activeBuffer_R,
+                                       db->activeBuffer_G,
+                                       db->activeBuffer_B,
+                                       &live_cfg, &preprocessed_temp);
 #endif
       }
 

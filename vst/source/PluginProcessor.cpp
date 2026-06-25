@@ -348,6 +348,26 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"luxsynthFilterEnvDepth", 1}, "LS Flt Depth",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
 
+    // ADSR segment curvature ([-1,1], 0 = linear) — volume + filter envelopes
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthAttackCurve", 1}, "LS Attack Curve",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthDecayCurve", 1}, "LS Decay Curve",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthReleaseCurve", 1}, "LS Release Curve",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthFilterAttackCurve", 1}, "LS Flt Attack Curve",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthFilterDecayCurve", 1}, "LS Flt Decay Curve",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxsynthFilterReleaseCurve", 1}, "LS Flt Release Curve",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
+
     // Spectral
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxsynthGamma", 1}, "LS Gamma",
@@ -407,6 +427,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"luxwaveReleaseMs", 1}, "LW Release",
         juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 200.0f,
         juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    // ADSR segment curvature ([-1,1], 0 = linear)
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxwaveAttackCurve", 1}, "LW Attack Curve",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxwaveDecayCurve", 1}, "LW Decay Curve",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxwaveReleaseCurve", 1}, "LW Release Curve",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
 
     // LuxWave Filter ADSR
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -494,6 +524,17 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"luxpitchReleaseMs", 1}, "LP Release",
         juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 100.0f,
         juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    // Per-segment curvature [-1,1] (0 = linear). Set visually by bending each
+    // envelope segment; MIDI-mappable like every other param.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxpitchAttackCurve", 1}, "LP Attack Curve",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxpitchDecayCurve", 1}, "LP Decay Curve",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxpitchReleaseCurve", 1}, "LP Release Curve",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.5f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxpitchGlideMs", 1}, "LP Glide",
         juce::NormalisableRange<float>(0.0f, 5000.0f, 1.0f, 0.3f), 0.0f,
@@ -558,13 +599,27 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::NormalisableRange<float>(0.0f, 24.0f, 0.5f), 2.0f,
         juce::AudioParameterFloatAttributes{}.withLabel("st")));
 
-    // Mask width (gauss profile only — alternative shapes had no perceptible
-    // musical impact and were removed to keep the UI focused).
+    // ── Spatial bandpass filter driven by the ADSR ──────────────────────────
+    // Always a bandpass centred on the played note (keyboard tracking).  The
+    // ADSR output is the openness (0 = closed to nothing, 1 = full width).
+    //   Width : band width at full open, % of image.
+    //   Offset: band-centre offset from the note, % of image, decoupled from
+    //           width.  Openness-scaled, so the band sweeps from the note out to
+    //           the offset as the ADSR opens (glide-like attack).
+    //   Slope : edge steepness (1 = sharp, 0 = soft).
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxmaskWidth", 1}, "LM Width",
-        juce::NormalisableRange<float>(8.0f, 8192.0f, 1.0f, 0.5f), 256.0f,
-        juce::AudioParameterFloatAttributes{}.withLabel("px")));
-    // ADSR (acts on alpha) + width-env amount
+        juce::ParameterID{"luxmaskFilterWidth", 1}, "LM Filter Width",
+        juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 30.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("%")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxmaskFilterOffset", 1}, "LM Filter Offset",
+        juce::NormalisableRange<float>(-100.0f, 100.0f, 0.1f), 0.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("%")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxmaskFilterSlope", 1}, "LM Filter Slope",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+
+    // ADSR (drives the filter cutoff/openness)
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxmaskAttackMs", 1}, "LM Attack",
         juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 20.0f,
@@ -580,25 +635,17 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"luxmaskReleaseMs", 1}, "LM Release",
         juce::NormalisableRange<float>(0.5f, 10000.0f, 0.1f, 0.3f), 200.0f,
         juce::AudioParameterFloatAttributes{}.withLabel("ms")));
-    // Width horizons — absolute widths in pixels, fully ADSR-driven.
-    //   Width @ Attack  : width at note-on (8..8192 px, up to full image).
-    //                     Held during ATTACK, then collapses to base during
-    //                     DECAY following the audio decay slope.
-    //   Width @ Release : width at full release (8..8192 px).  During RELEASE
-    //                     width grows from base up to this horizon as the
-    //                     envelope fades to zero — visual analogue of a
-    //                     sustain-pedal-lift bloom.
-    // When Velocity → Alpha is on, horizons are pondered between base
-    // (velocity=0) and the configured horizon (velocity=1).
+    // Per-segment curvature [-1,1] (0 = linear). Set visually by bending each
+    // alpha-envelope segment; MIDI-mappable like every other param.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxmaskWidthAttackPx", 1}, "LM Width @ Attack",
-        juce::NormalisableRange<float>(8.0f, 8192.0f, 1.0f, 0.5f), 1024.0f,
-        juce::AudioParameterFloatAttributes{}.withLabel("px")));
+        juce::ParameterID{"luxmaskAttackCurve", 1}, "LM Attack Curve",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxmaskWidthReleasePx", 1}, "LM Width @ Release",
-        juce::NormalisableRange<float>(8.0f, 8192.0f, 1.0f, 0.5f), 1024.0f,
-        juce::AudioParameterFloatAttributes{}.withLabel("px")));
-
+        juce::ParameterID{"luxmaskDecayCurve", 1}, "LM Decay Curve",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxmaskReleaseCurve", 1}, "LM Release Curve",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.5f));
     // Glide
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxmaskGlideMs", 1}, "LM Glide",
@@ -780,16 +827,43 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             "0 deg", "90 deg", "180 deg", "270 deg"
         }, 0, kHiddenChoice));
 
+    // Bipolar scroll speed (legacy birth-line model): negative = reverse,
+    // 0 = frozen, positive = forward.  Magnitude maps exponentially in the
+    // renderer (px = sign(s) * (2^(3*|s|) - 1)), giving ±7 px/frame at the ends.
+    // This single control replaces the old Speed slider + Direction dropdown.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"videoScrollSpeed", 1}, "Video Scroll Speed",
-        juce::NormalisableRange<float>(0.1f, 20.0f, 0.1f, 0.4f),
-        3.0f, kHiddenFloat.withLabel("x")));
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f),
+        0.33f, kHiddenFloat));
 
     // ── Video Scroll — display configuration (Settings window) ────────────────
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"videoScrollZoom", 1}, "Video Scroll Zoom",
         juce::NormalisableRange<float>(0.5f, 4.0f, 0.05f),
         1.0f, kHiddenFloat.withLabel("x")));
+
+    // Birth-line position: -1 = far edge (top), 0 = centre (symmetric
+    // bidirectional scroll), +1 = near edge (bottom → classic upward waterfall).
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"videoScrollLinePos", 1}, "Video Line Position",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f),
+        1.0f, kHiddenFloat));
+
+    // Thickness of each freshly-drawn scanline: 0 = single pixel,
+    // 1 = full viewport ("barcode" mode).
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"videoScrollLineThickness", 1}, "Video Line Thickness",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f),
+        0.0f, kHiddenFloat));
+
+    // Progressive aging with distance from the birth line: the farther a
+    // scanline has scrolled, the more it desaturates and dims.  Applied at
+    // display time in paint() (NOT baked into the history buffer), so it is
+    // instant and never affects the scroll.  0 = none, 1 = strong.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"videoScrollFade", 1}, "Video Fade",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f),
+        0.0f, kHiddenFloat));
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"videoScrollBrightness", 1}, "Video Brightness",
@@ -845,9 +919,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"videoScrollMidiSync", 1}, "Video MIDI Sync",
         false, kHiddenBool));
 
+    // Non-linear temporal compression: applied at display time in paint() as a
+    // progressive vertical squish with distance from the birth line — content
+    // is full-scale at the source and packed ever tighter as it ages (the rows
+    // it swallows are averaged, giving a soft blur).  1 = linear (no squish),
+    // higher = more history squeezed on screen.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"videoScrollMaxDuration", 1}, "Video Max Seq. Duration (s)",
-        juce::NormalisableRange<float>(1.0f, 30.0f, 0.5f), 10.0f, kHiddenFloat));
+        juce::ParameterID{"videoScrollMaxDuration", 1}, "Video Compression (time squish)",
+        juce::NormalisableRange<float>(1.0f, 64.0f, 1.0f), 1.0f, kHiddenFloat));
 
     return { params.begin(), params.end() };
 }
@@ -974,6 +1053,9 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("luxpitchDecayMs",          this);
     apvts.addParameterListener("luxpitchSustainLevel",     this);
     apvts.addParameterListener("luxpitchReleaseMs",        this);
+    apvts.addParameterListener("luxpitchAttackCurve",      this);
+    apvts.addParameterListener("luxpitchDecayCurve",       this);
+    apvts.addParameterListener("luxpitchReleaseCurve",     this);
     apvts.addParameterListener("luxpitchGlideMs",          this);
     apvts.addParameterListener("luxpitchLfoRate",          this);
     apvts.addParameterListener("luxpitchLfoDepth",         this);
@@ -990,13 +1072,16 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("luxmaskCouplingMode",      this);
     apvts.addParameterListener("luxmaskFreePixelsPerST",   this);
     apvts.addParameterListener("luxmaskPitchBendRange",    this);
-    apvts.addParameterListener("luxmaskWidth",             this);
+    apvts.addParameterListener("luxmaskFilterWidth",       this);
+    apvts.addParameterListener("luxmaskFilterOffset",      this);
+    apvts.addParameterListener("luxmaskFilterSlope",       this);
     apvts.addParameterListener("luxmaskAttackMs",          this);
     apvts.addParameterListener("luxmaskDecayMs",           this);
     apvts.addParameterListener("luxmaskSustainLevel",      this);
     apvts.addParameterListener("luxmaskReleaseMs",         this);
-    apvts.addParameterListener("luxmaskWidthAttackPx",     this);
-    apvts.addParameterListener("luxmaskWidthReleasePx",    this);
+    apvts.addParameterListener("luxmaskAttackCurve",       this);
+    apvts.addParameterListener("luxmaskDecayCurve",        this);
+    apvts.addParameterListener("luxmaskReleaseCurve",      this);
     apvts.addParameterListener("luxmaskGlideMs",           this);
     apvts.addParameterListener("luxmaskLfoPosRate",        this);
     apvts.addParameterListener("luxmaskLfoPosDepth",       this);
@@ -1008,6 +1093,10 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
 
     // Create LuxSampler (always active, no lazy init needed)
     luxSampler = std::make_unique<LuxSampler>();
+
+    // SCORE generation defaults (shared by the PLAY page and the SETUP panel).
+    score_settings_defaults(&scoreSettings_);
+    scoreSettings_.writingSpeed = 2.5;   // page maps to a sensible default duration
 
     // Create FrameSequencer and wire it to the LuxSampler
     frameSequencer = std::make_unique<FrameSequencer>();
@@ -1061,6 +1150,41 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     log_info("VST", "  - Shared core acquired (ref-count now %ld)",
              sharedCore.use_count());
     log_info("VST", "  - Pipeline start deferred to prepareToPlay()");
+}
+
+void Sp3ctraAudioProcessor::getMusicalFrequencyRange(double& lowHz, double& highHz) const noexcept
+{
+    // Mirror the LuxStral range driven by Tuning + Root Note + Octaves, kept in
+    // sync in g_sp3ctra_config whenever those musical params change.
+    extern sp3ctra_config_t g_sp3ctra_config;
+    double lo = (double) g_sp3ctra_config.low_frequency;
+    double hi = (double) g_sp3ctra_config.high_frequency;
+    // Defensive fallback if the config has not been synced yet.
+    if (!(lo > 0.0) || !(hi > lo))
+    {
+        lo = 65.41;       // C2
+        hi = 16744.04;    // ~8 octaves above C2
+    }
+    lowHz  = lo;
+    highHz = hi;
+}
+
+void Sp3ctraAudioProcessor::getScoreFrequencyRange(double& lowHz, double& highHz) const noexcept
+{
+    if (!scoreFreq_.manual)
+    {
+        getMusicalFrequencyRange(lowHz, highHz);
+        return;
+    }
+
+    // Manual override — same formula LuxStral uses (root MIDI = 24 + index).
+    const int    rootMidi = 24 + scoreFreq_.rootIndex;
+    double low  = scoreFreq_.tuning * pow(2.0, (double)(rootMidi - 69) / 12.0);
+    double high = low * pow(2.0, (double) scoreFreq_.octaves);
+    if (high > 20000.0) high = 20000.0;
+    if (!(low > 0.0) || !(high > low)) { low = 65.41; high = 16744.04; }
+    lowHz  = low;
+    highHz = high;
 }
 
 Sp3ctraAudioProcessor::~Sp3ctraAudioProcessor()
@@ -1427,6 +1551,22 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     }
 
 
+    // ── All Notes Off (panic): release every held/stuck note across engines ───
+    // Triggered by the header panic button. RT-safe: lux_pitch/lux_mask use a
+    // musical release; LuxSynth/LuxWave receive note-off for every note via the
+    // same lock-free ring the audio thread already feeds (consumed below).
+    if (panicRequested.exchange(false, std::memory_order_acq_rel))
+    {
+        lux_pitch_all_notes_off(&g_lux_pitch_proc);
+        lux_mask_all_notes_off(&g_lux_mask_proc);
+        if (g_luxsynth_engine.initialized)
+            for (int n = 0; n < 128; ++n)
+                luxsynth_push_midi_event(0x80, (uint8_t)n, 0);
+        if (g_luxwave_engine.initialized)
+            for (int n = 0; n < 128; ++n)
+                luxwave_push_midi_event(0x80, (uint8_t)n, 0);
+    }
+
     // ── LuxPitch MIDI (RT-safe: lock-free pitch shift from notes/pitch-bend) ──
     {
         const int lpCh  = static_cast<int>(apvts.getRawParameterValue("luxpitchMidiChannel")->load()) + 1;
@@ -1445,9 +1585,14 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                                          (msg.getPitchWheelValue() - 8192) / 8192.0f);
             else if (msg.isSustainPedalOn() || msg.isSustainPedalOff())
                 lux_pitch_set_sustain(&g_lux_pitch_proc, msg.isSustainPedalOn() ? 1 : 0);
-            else if (msg.isControllerOfType(1)) // CC1 mod wheel → vibrato depth
-                lux_pitch_set_mod_wheel(&g_lux_pitch_proc,
-                                        (float)msg.getControllerValue() / 127.0f);
+            else if (msg.isControllerOfType(1)) // CC1 mod wheel → drives the LFO Depth slider
+            {
+                // The wheel and the on-screen "LFO Depth" slider are a single
+                // control: the wheel sweeps the full slider range so both stay
+                // in sync (no separate additive contribution).
+                if (auto* p = apvts.getParameter("luxpitchLfoDepth"))
+                    p->setValueNotifyingHost((float)msg.getControllerValue() / 127.0f);
+            }
         }
     }
 
@@ -1469,9 +1614,14 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                                         (msg.getPitchWheelValue() - 8192) / 8192.0f);
             else if (msg.isSustainPedalOn() || msg.isSustainPedalOff())
                 lux_mask_set_sustain(&g_lux_mask_proc, msg.isSustainPedalOn() ? 1 : 0);
-            else if (msg.isControllerOfType(1)) // CC1 mod wheel → vibrato depth
-                lux_mask_set_mod_wheel(&g_lux_mask_proc,
-                                       (float)msg.getControllerValue() / 127.0f);
+            else if (msg.isControllerOfType(1)) // CC1 mod wheel → drives the LFO Pos Depth slider
+            {
+                // The wheel and the on-screen "LFO Pos Depth" slider are a
+                // single control: the wheel sweeps the full slider range so
+                // both stay in sync (no separate additive contribution).
+                if (auto* p = apvts.getParameter("luxmaskLfoPosDepth"))
+                    p->setValueNotifyingHost((float)msg.getControllerValue() / 127.0f);
+            }
         }
     }
 
@@ -1687,6 +1837,9 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             lwCfg.decay_ms            = apvts.getRawParameterValue("luxwaveDecayMs")->load();
             lwCfg.sustain_level       = apvts.getRawParameterValue("luxwaveSustainLevel")->load();
             lwCfg.release_ms          = apvts.getRawParameterValue("luxwaveReleaseMs")->load();
+            lwCfg.attack_curve        = apvts.getRawParameterValue("luxwaveAttackCurve")->load();
+            lwCfg.decay_curve         = apvts.getRawParameterValue("luxwaveDecayCurve")->load();
+            lwCfg.release_curve       = apvts.getRawParameterValue("luxwaveReleaseCurve")->load();
             lwCfg.filter_attack_ms    = 20.0f;
             lwCfg.filter_decay_ms     = 150.0f;
             lwCfg.filter_sustain      = 0.5f;
@@ -2179,22 +2332,23 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     // Mapping table: choice → enum
     // ========================================================================
     {
-        // 5 choices: S=Sampler(0), M=Mix(2), L=Live(1), P=LuxPitch(3), K=LuxMask(4)
-        static const int kChoiceToSource[5] = { 0, 2, 1, 3, 4 };
+        // ── Source follows CHAIN PLACEMENT (chains are fixed for now) ─────────
+        // The per-engine "Source" dropdown is retired: an engine reads the
+        // signal of the chain it sits on, and is gated by that chain's transport.
+        //   • Chain 1 (Source ► Pitch ► Mask ► Sampler ► LuxStral)
+        //         → LuxStral reads the modulated frame      (IMAGE_SOURCE_MODULATED = 0)
+        //   • Chain 2 (Source ► LuxSynth ► LuxWave)
+        //         → LuxSynth + LuxWave read the raw live CIS (IMAGE_SOURCE_LIVE = 1)
+        // The luxstralSource / luxsynthSource params are kept (plumbing) for the
+        // future modular-chain routing, but their value no longer drives audio.
+        g_sp3ctra_config.luxstral_source_type = 0; /* Chain 1 — modulated */
+        g_sp3ctra_config.luxsynth_source_type = 1; /* Chain 2 — live       */
 
-        int lsChoice = static_cast<int>(
-            apvts.getRawParameterValue("luxstralSource")->load());
-        if (lsChoice < 0 || lsChoice > 4) lsChoice = 1; // default M
-        g_sp3ctra_config.luxstral_source_type = kChoiceToSource[lsChoice];
         g_sp3ctra_config.luxstral_inversion   =
             static_cast<int>(apvts.getRawParameterValue("luxstralInversion")->load());
         g_sp3ctra_config.luxstral_ac_removal  =
             static_cast<int>(apvts.getRawParameterValue("luxstralAcRemoval")->load());
 
-        int lxChoice = static_cast<int>(
-            apvts.getRawParameterValue("luxsynthSource")->load());
-        if (lxChoice < 0 || lxChoice > 4) lxChoice = 1;
-        g_sp3ctra_config.luxsynth_source_type = kChoiceToSource[lxChoice];
         g_sp3ctra_config.luxsynth_inversion   =
             static_cast<int>(apvts.getRawParameterValue("luxsynthInversion")->load());
         g_sp3ctra_config.luxsynth_ac_removal  =
@@ -2239,6 +2393,9 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
             lpc.decay_ms                = apvts.getRawParameterValue("luxpitchDecayMs")->load();
             lpc.sustain_level           = apvts.getRawParameterValue("luxpitchSustainLevel")->load();
             lpc.release_ms              = apvts.getRawParameterValue("luxpitchReleaseMs")->load();
+            lpc.attack_curve            = apvts.getRawParameterValue("luxpitchAttackCurve")->load();
+            lpc.decay_curve             = apvts.getRawParameterValue("luxpitchDecayCurve")->load();
+            lpc.release_curve           = apvts.getRawParameterValue("luxpitchReleaseCurve")->load();
             lpc.glide_time_ms           = apvts.getRawParameterValue("luxpitchGlideMs")->load();
             lpc.lfo_rate_hz             = apvts.getRawParameterValue("luxpitchLfoRate")->load();
             lpc.lfo_depth_semitones     = apvts.getRawParameterValue("luxpitchLfoDepth")->load();
@@ -2256,13 +2413,16 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
             lmc.coupling_mode            = static_cast<int>(apvts.getRawParameterValue("luxmaskCouplingMode")->load());
             lmc.free_pixels_per_semitone = apvts.getRawParameterValue("luxmaskFreePixelsPerST")->load();
             lmc.pitch_bend_range         = apvts.getRawParameterValue("luxmaskPitchBendRange")->load();
-            lmc.width_base               = apvts.getRawParameterValue("luxmaskWidth")->load();
+            lmc.filter_width_pct         = apvts.getRawParameterValue("luxmaskFilterWidth")->load();
+            lmc.filter_offset_pct        = apvts.getRawParameterValue("luxmaskFilterOffset")->load();
+            lmc.filter_slope             = apvts.getRawParameterValue("luxmaskFilterSlope")->load();
             lmc.attack_ms                = apvts.getRawParameterValue("luxmaskAttackMs")->load();
             lmc.decay_ms                 = apvts.getRawParameterValue("luxmaskDecayMs")->load();
             lmc.sustain_level            = apvts.getRawParameterValue("luxmaskSustainLevel")->load();
             lmc.release_ms               = apvts.getRawParameterValue("luxmaskReleaseMs")->load();
-            lmc.width_attack_px          = apvts.getRawParameterValue("luxmaskWidthAttackPx")->load();
-            lmc.width_release_px         = apvts.getRawParameterValue("luxmaskWidthReleasePx")->load();
+            lmc.attack_curve             = apvts.getRawParameterValue("luxmaskAttackCurve")->load();
+            lmc.decay_curve              = apvts.getRawParameterValue("luxmaskDecayCurve")->load();
+            lmc.release_curve            = apvts.getRawParameterValue("luxmaskReleaseCurve")->load();
             lmc.glide_time_ms            = apvts.getRawParameterValue("luxmaskGlideMs")->load();
             lmc.lfo_pos_rate_hz          = apvts.getRawParameterValue("luxmaskLfoPosRate")->load();
             lmc.lfo_pos_depth_semitones  = apvts.getRawParameterValue("luxmaskLfoPosDepth")->load();

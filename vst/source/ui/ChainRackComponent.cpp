@@ -18,9 +18,11 @@ namespace
     const juce::Colour kColLuxStral { 0xff4fa3e0 };  // blue   (Sp3ctraTheme accent Lux)
     const juce::Colour kColLuxSynth { 0xffb07af0 };  // purple
     const juce::Colour kColLuxWave  { 0xff8fd05a };  // yellow-green
+    const juce::Colour kColScore    { 0xffe0a24a };  // amber  (SCORE export identity)
 
     const juce::Colour kColChain1Hdr { 0xffe0b84a }; // amber  ("A - Modulated" identity)
     const juce::Colour kColChain2Hdr { 0xff4ae0a0 }; // green  ("B - Live" identity)
+    const juce::Colour kColToolsHdr  { 0xffc0c4cc }; // grey   ("TOOLS" identity)
     const juce::Colour kColConnector { 0xff3a4250 };
 
     juce::String noteName(const char* s) { return juce::String::fromUTF8(s); }
@@ -39,9 +41,30 @@ juce::Colour ChainRackComponent::blockColour(ChainBlockId id) noexcept
         case ChainBlockId::LuxStral: return kColLuxStral;
         case ChainBlockId::LuxSynth: return kColLuxSynth;
         case ChainBlockId::LuxWave:  return kColLuxWave;
+        case ChainBlockId::Score:    return kColScore;
         case ChainBlockId::Chain1Source:
         case ChainBlockId::Chain2Source:
         default:                     return kColSource;
+    }
+}
+
+//==============================================================================
+// Block enable parameter — shared accessor (rack LED + zone-3 power toggle)
+//==============================================================================
+juce::String ChainRackComponent::enableParamId(ChainBlockId id) noexcept
+{
+    switch (id)
+    {
+        case ChainBlockId::Pitch:    return "luxpitchEnabled";
+        case ChainBlockId::Mask:     return "luxmaskEnabled";
+        case ChainBlockId::Sampler:  return "luxSamplerEnabled";
+        case ChainBlockId::LuxStral: return "deviceEnabled";
+        case ChainBlockId::LuxSynth: return "luxsynthEnabled";
+        case ChainBlockId::LuxWave:  return "luxwaveEnabled";
+        case ChainBlockId::Chain1Source:   // sources: no power switch (UDP feed)
+        case ChainBlockId::Chain2Source:
+        case ChainBlockId::Score:          // score: play-state, not an enable
+        default:                     return {};
     }
 }
 
@@ -75,6 +98,13 @@ void ChainRackComponent::BlockComponent::paint(juce::Graphics& g)
         const float cx = b.getRight() - 11.f;
         const float cy = b.getCentreY();
         const juce::Rectangle<float> dot(cx - r, cy - r, 2*r, 2*r);
+
+        // Power-toggle affordance: faint ring around the dot while hovered.
+        if (overDot && enableParam.isNotEmpty())
+        {
+            g.setColour(colour.withAlpha(0.45f));
+            g.drawEllipse(dot.expanded(3.5f), 1.2f);
+        }
 
         switch (led)
         {
@@ -164,10 +194,11 @@ ChainRackComponent::ChainRackComponent(Sp3ctraAudioProcessor& p)
       stralBlock (ChainBlockId::LuxStral,     noteName("\xE2\x99\xAA LUXSTRAL"), kColLuxStral),
       srcBBlock  (ChainBlockId::Chain2Source, "SOURCE CIS", kColSource),
       synthBlock (ChainBlockId::LuxSynth,     noteName("\xE2\x99\xAA LUXSYNTH"), kColLuxSynth),
-      waveBlock  (ChainBlockId::LuxWave,      noteName("\xE2\x99\xAA LUXWAVE"),  kColLuxWave)
+      waveBlock  (ChainBlockId::LuxWave,      noteName("\xE2\x99\xAA LUXWAVE"),  kColLuxWave),
+      scoreBlock (ChainBlockId::Score,        "SCORE",        kColScore)
 {
     for (auto* blk : { &srcABlock, &pitchBlock, &maskBlock, &samplerBlock, &stralBlock,
-                       &srcBBlock, &synthBlock, &waveBlock })
+                       &srcBBlock, &synthBlock, &waveBlock, &scoreBlock })
     {
         addAndMakeVisible(blk);
         blk->onClick = [this](ChainBlockId id)
@@ -175,6 +206,14 @@ ChainRackComponent::ChainRackComponent(Sp3ctraAudioProcessor& p)
             setSelectedBlock(id);
             if (onBlockSelected) onBlockSelected(id);
         };
+
+        // Clicking the LED dot powers the module on/off (mixer-channel style).
+        blk->enableParam = enableParamId(blk->getId());
+        if (blk->enableParam.isNotEmpty())
+        {
+            blk->setTooltip("Click the LED to enable/disable this module");
+            blk->onToggleEnable = [this, blk] { toggleEnable(blk->enableParam); };
+        }
     }
 
     swapBtn.setTooltip("Swap insert order (Pitch <-> Mask)");
@@ -198,7 +237,7 @@ ChainRackComponent::~ChainRackComponent()
 void ChainRackComponent::setSelectedBlock(ChainBlockId id)
 {
     for (auto* blk : { &srcABlock, &pitchBlock, &maskBlock, &samplerBlock, &stralBlock,
-                       &srcBBlock, &synthBlock, &waveBlock })
+                       &srcBBlock, &synthBlock, &waveBlock, &scoreBlock })
         blk->setSelected(false);
 
     switch (id)
@@ -211,6 +250,7 @@ void ChainRackComponent::setSelectedBlock(ChainBlockId id)
         case ChainBlockId::Chain2Source: srcBBlock  .setSelected(true); break;
         case ChainBlockId::LuxSynth:     synthBlock .setSelected(true); break;
         case ChainBlockId::LuxWave:      waveBlock  .setSelected(true); break;
+        case ChainBlockId::Score:        scoreBlock .setSelected(true); break;
     }
 }
 
@@ -236,6 +276,21 @@ void ChainRackComponent::toggleInsertOrder()
     repaint();
 }
 
+void ChainRackComponent::toggleEnable(const juce::String& paramId)
+{
+    if (paramId.isEmpty())
+        return;
+
+    if (auto* param = processor.getAPVTS().getParameter(paramId))
+    {
+        const float newNorm = (param->getValue() < 0.5f) ? 1.0f : 0.0f;
+        param->beginChangeGesture();
+        param->setValueNotifyingHost(newNorm);
+        param->endChangeGesture();
+    }
+    updateLeds();   // snappy LED refresh (the 10 Hz timer would also catch it)
+}
+
 void ChainRackComponent::parameterChanged(const juce::String& paramID, float)
 {
     if (paramID != "chainInsertOrder")
@@ -256,8 +311,8 @@ void ChainRackComponent::parameterChanged(const juce::String& paramID, float)
 std::vector<ChainRackComponent::BlockComponent*> ChainRackComponent::chain1Order()
 {
     if (isMaskFirst())
-        return { &srcABlock, &maskBlock, &pitchBlock, &samplerBlock, &stralBlock };
-    return     { &srcABlock, &pitchBlock, &maskBlock, &samplerBlock, &stralBlock };
+        return { &srcABlock, &maskBlock, &pitchBlock, &samplerBlock, &scoreBlock, &stralBlock };
+    return     { &srcABlock, &pitchBlock, &maskBlock, &samplerBlock, &scoreBlock, &stralBlock };
 }
 
 std::vector<ChainRackComponent::BlockComponent*> ChainRackComponent::chain2Order()
@@ -265,15 +320,22 @@ std::vector<ChainRackComponent::BlockComponent*> ChainRackComponent::chain2Order
     return { &srcBBlock, &synthBlock, &waveBlock };
 }
 
+std::vector<ChainRackComponent::BlockComponent*> ChainRackComponent::toolsOrder()
+{
+    // SCORE moved into CHAIN 1 (between Sampler and LuxStral) — TOOLS is now empty.
+    return {};
+}
+
 //==============================================================================
 int ChainRackComponent::preferredHeight() const noexcept
 {
     const int chain1H = (kHeaderH + 2)
-                      + 5 * kBlockH
-                      + 3 * kBlockGap + kSwapGap;   // 4 gaps: one is the swap gap
+                      + 6 * kBlockH
+                      + 4 * kBlockGap + kSwapGap;   // 5 gaps: one is the swap gap
     const int chain2H = (kHeaderH + 2)
                       + 3 * kBlockH
                       + 2 * kBlockGap;
+    // TOOLS section is empty (SCORE moved into CHAIN 1) — reserve no space.
     return kTopPad + chain1H + kChainGap + chain2H + kBottomPad;
 }
 
@@ -319,6 +381,27 @@ void ChainRackComponent::resized()
         if (i + 1 < c2.size())
             y += kBlockGap;
     }
+
+    // ── TOOLS ──────────────────────────────────────────────────────────────────
+    // Empty since SCORE moved into CHAIN 1 — lay out only if it has blocks.
+    const auto ct = toolsOrder();
+    if (!ct.empty())
+    {
+        y += kChainGap;
+        header3Y = y;
+        y += kHeaderH + 2;
+        for (size_t i = 0; i < ct.size(); ++i)
+        {
+            ct[i]->setBounds(bx, y, bw, kBlockH);
+            y += kBlockH;
+            if (i + 1 < ct.size())
+                y += kBlockGap;
+        }
+    }
+    else
+    {
+        header3Y = -1;   // hidden — no TOOLS header drawn
+    }
 }
 
 //==============================================================================
@@ -329,11 +412,17 @@ void ChainRackComponent::paint(juce::Graphics& g)
     // Group headers
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
     g.setColour(kColChain1Hdr);
-    g.drawText("CHAIN 1 - MODULATED", kPadX + 2, header1Y, getWidth() - 2 * kPadX, kHeaderH,
+    g.drawText("CHAIN 1", kPadX + 2, header1Y, getWidth() - 2 * kPadX, kHeaderH,
                juce::Justification::centredLeft, true);
     g.setColour(kColChain2Hdr);
-    g.drawText("CHAIN 2 - LIVE", kPadX + 2, header2Y, getWidth() - 2 * kPadX, kHeaderH,
+    g.drawText("CHAIN 2", kPadX + 2, header2Y, getWidth() - 2 * kPadX, kHeaderH,
                juce::Justification::centredLeft, true);
+    if (header3Y >= 0)
+    {
+        g.setColour(kColToolsHdr);
+        g.drawText("TOOLS", kPadX + 2, header3Y, getWidth() - 2 * kPadX, kHeaderH,
+                   juce::Justification::centredLeft, true);
+    }
 
     // Flow connectors (top → bottom) between consecutive blocks
     auto drawConnectors = [&g](const std::vector<BlockComponent*>& order)
@@ -413,6 +502,14 @@ void ChainRackComponent::updateLeds()
     // ── Sampler + engines: driven by their Enabled APVTS parameters ──────────
     samplerBlock.setLed(paramOn("luxSamplerEnabled") ? LedState::Active : LedState::Off);
     stralBlock  .setLed(paramOn("deviceEnabled")     ? LedState::Active : LedState::Off);
+
+    // ── Score: Active while playing, Idle when a generated image is loaded ────
+    if (auto* fs = processor.getLuxSampler())
+        scoreBlock.setLed(fs->isScorePlaying() ? LedState::Active
+                         : fs->scoreHasContent() ? LedState::Idle
+                         :                         LedState::Off);
+    else
+        scoreBlock.setLed(LedState::Off);
     synthBlock  .setLed(paramOn("luxsynthEnabled")   ? LedState::Active : LedState::Off);
     waveBlock   .setLed(paramOn("luxwaveEnabled")    ? LedState::Active : LedState::Off);
 }

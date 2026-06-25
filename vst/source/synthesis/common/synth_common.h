@@ -51,6 +51,15 @@ typedef struct {
     float attack_s;
     float decay_s;
     float release_s;
+
+    // Per-segment curvature (bipolar [-1,1], 0 = linear) — applied via the
+    // shared lux_env_shape() so the UI bend handles match the DSP exactly.
+    float attack_curve;
+    float decay_curve;
+    float release_curve;
+    // Segment start levels for click-free shaping (captured on trigger/release).
+    float attack_start_level;   // level when ATTACK began
+    float release_start_level;  // level when RELEASE began
 } AdsrEnvelope;
 
 /* ============================================================================

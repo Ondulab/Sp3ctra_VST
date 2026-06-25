@@ -4,7 +4,6 @@
  *
  * The whole former gear-wheel LuxSamplerSettingsTab component, moved and
  * re-parented (same logic, same APVTS parameter IDs):
- *   - Enable toggle                      (luxSamplerEnabled)
  *   - MIDI Channel (1-16)                (luxSamplerMidiChannel)
  *   - Octave Offset (-2..+2)             (luxSamplerOctaveOffset)
  *   - Max Duration (1..60 s)             (luxSamplerMaxDuration)
@@ -27,8 +26,9 @@ public:
     SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour);
     ~SamplerSetupPanel() override;
 
-    /** Natural content height (header + 10 control rows + 12-slot grid). */
-    static constexpr int kPreferredH = 690;
+    /** Natural content height (header + 9 control rows + 12-slot grid).
+     *  (Enable row removed — power lives in the rack LED + zone-3 header.) */
+    static constexpr int kPreferredH = 658;
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -42,11 +42,6 @@ private:
     Sp3ctraAudioProcessor&              audioProcessor;
     juce::AudioProcessorValueTreeState& apvts;
     juce::Colour                        accent;
-
-    // Enable
-    juce::Label        enableLabel;
-    juce::ToggleButton enableToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> enableAttachment;
 
     // MIDI Channel
     juce::Label    midiChannelLabel;

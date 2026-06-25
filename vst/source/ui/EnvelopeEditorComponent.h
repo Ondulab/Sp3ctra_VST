@@ -1,29 +1,28 @@
 /**
  * @file EnvelopeEditorComponent.h
- * @brief M5 — draggable ADSR envelope editor (~96 px tall).
+ * @brief Integrated ADSR editor — shaped curve + segment bending + compact boxes.
  *
- * Sits at the top of the PITCH / MASK PLAY pages and binds the module's four
- * envelope parameters (attack / decay / sustain / release).  The numeric
- * slider rows below remain the fallback — both stay in sync automatically
- * through the APVTS parameters.
+ * One self-contained widget that replaces the old "graph + slider rows" pair on
+ * the PITCH / MASK pages.  It owns BOTH the graphical curve and the compact
+ * numeric boxes underneath, so the tab no longer needs duplicate sliders.  All
+ * controls bind to APVTS parameters → everything stays host-automatable and
+ * MIDI-mappable.
  *
- * Display mapping: the time axis of each A/D/R segment uses a "log-ish"
- * sqrt(ms / maxMs) mapping so short times stay editable; the sustain plateau
- * has a fixed display width.
+ * ── Alpha lane (always) ─────────────────────────────────────────────────────
+ *   • A / D / S / R node handles set time / sustain (drag).
+ *   • A / D / R *bend* handles (segment midpoints) set per-segment curvature
+ *     by dragging the segment up/down — exactly the shape the DSP applies
+ *     (shared lux_env_shape()).  curve ∈ [-1,1], 0 = linear.
+ *   • Compact value boxes (Atck / Dcay / Sus / Rel) below — drag or double-click
+ *     to type.  Bound through SliderAttachment to the same parameters.
  *
- * Handles (hover highlights + cursor change, host-correct gestures through
- * juce::ParameterAttachment beginGesture/endGesture):
- *   • A node — x sets the attack time              (y pinned to peak)
- *   • D node — x sets the decay time               (y locked to sustain)
- *   • S node — y sets the sustain level            (mid-plateau)
- *   • R node — x sets the release time             (y pinned to zero)
- * A small value readout ("A 12 ms") follows the handle while dragging.
+ * ── Width lane (MASK only) ──────────────────────────────────────────────────
+ *   A second editable lane on the SAME time axis with three draggable nodes —
+ *   Width @ Attack → Width → Width @ Release — plus its own value boxes.  This
+ *   replaces the old read-only dashed overlay and the separate width sliders.
  *
- * MASK extra: a read-only dashed curve (50 % alpha) overlays the width-bloom
- * trajectory — starts at widthAttackPx, lerps to width over the D segment,
- * holds, then goes to widthReleasePx over R.  Levels are normalised through
- * the width parameters' own 8..8192 px range.  Pure display, refreshed by a
- * 4 Hz poll of the current parameter values.
+ * Display mapping: each A/D/R segment's time axis uses a sqrt(ms/maxMs) "log-ish"
+ * mapping so short times stay editable; the sustain plateau has a fixed width.
  */
 #pragma once
 
@@ -32,27 +31,40 @@
 #include "../UITheme.h"
 #include <memory>
 
-class EnvelopeEditorComponent : public juce::Component,
-                                private juce::Timer
+class EnvelopeEditorComponent : public juce::Component
 {
 public:
-    /** Natural strip height — tab pages reserve this + a small gap. */
-    static constexpr int kPreferredH = 96;
+    /** Natural strip heights — tab pages reserve preferredHeight() + a small gap. */
+    static constexpr int kPreferredH          = 124; // alpha lane + box row
+    static constexpr int kPreferredHWithWidth = 196; // + width lane + width box row
 
-    /** widthBase/widthAttack/widthRelease IDs are optional (MASK only):
-     *  when provided, the read-only width-bloom curve is overlaid. */
+    /** decay/sustain IDs are OPTIONAL: pass empty for an AR envelope (rise to
+     *  peak then release, no decay/sustain plateau) — used by LuxStral.
+     *  Curve IDs drive the per-segment bend handles — OPTIONAL: when omitted
+     *  (empty), the segments render linear and no bend handles are shown
+     *  (used for audio ADSRs that have no curvature parameters).
+     *  widthBase/widthAttack/widthRelease IDs are optional too (MASK only):
+     *  when provided, the editable width lane is shown. */
     EnvelopeEditorComponent(juce::AudioProcessorValueTreeState& apvts,
                             juce::Colour accentColour,
                             const juce::String& attackParamId,
                             const juce::String& decayParamId,
                             const juce::String& sustainParamId,
                             const juce::String& releaseParamId,
+                            const juce::String& attackCurveParamId  = {},
+                            const juce::String& decayCurveParamId   = {},
+                            const juce::String& releaseCurveParamId = {},
                             const juce::String& widthBaseParamId    = {},
                             const juce::String& widthAttackParamId  = {},
                             const juce::String& widthReleaseParamId = {});
     ~EnvelopeEditorComponent() override;
 
+    /** Natural height for this instance (depends on whether the width lane exists). */
+    int preferredHeight() const noexcept
+    { return hasWidth ? kPreferredHWithWidth : kPreferredH; }
+
     void paint(juce::Graphics& g) override;
+    void resized() override;
     void mouseMove(const juce::MouseEvent& e) override;
     void mouseExit(const juce::MouseEvent& e) override;
     void mouseDown(const juce::MouseEvent& e) override;
@@ -60,15 +72,19 @@ public:
     void mouseUp(const juce::MouseEvent& e) override;
 
 private:
-    enum class Handle { None, Attack, Decay, Sustain, Release };
+    enum class Handle { None,
+                        Attack, Decay, Sustain, Release,   // alpha nodes
+                        BendA, BendD, BendR,               // alpha segment curvature
+                        WAttack, WBase, WRelease };        // width-lane nodes
 
-    /** Screen-space layout of the envelope for the current values. */
+    /** Screen-space layout shared by both lanes (identical time axis). */
     struct Geometry
     {
-        juce::Rectangle<float> inner;
+        juce::Rectangle<float> alpha, width;
         float segMaxW = 0, susW = 0;
         float xStart = 0, xA = 0, xD = 0, xSusEnd = 0, xR = 0;
-        float yBase = 0, yPeak = 0, ySus = 0;
+        float aYBase = 0, aYPeak = 0, aYSus = 0;   // alpha lane
+        float wYAtk = 0, wYBase = 0, wYRel = 0;    // width lane (mask)
         bool  valid = false;
     };
 
@@ -76,36 +92,53 @@ private:
     juce::Point<float> handlePos(Handle h, const Geometry& geo) const;
     Handle handleAt(juce::Point<float> p, const Geometry& geo) const;
     void   updateCursor(Handle h);
+    void   beginHandleGesture(Handle h);
+    void   endHandleGesture(Handle h);
+    void   applyDrag(Handle h, juce::Point<float> p, const Geometry& geo);
 
-    void timerCallback() override;          // 4 Hz width-curve poll (MASK only)
+    /** Curve solved from a desired shape value at phase 0.5 (segment bending). */
+    static float curveFromHalfValue(float targetS) noexcept;
 
     /** sqrt time mapping helpers (segment-local). */
     static float timeToX(float ms, float maxMs, float segMaxW) noexcept;
     static float xToTime(float dx, float maxMs, float segMaxW) noexcept;
 
+    /** Append a shaped segment (phase 0→1) to a path in screen space. */
+    static void appendShapedSegment(juce::Path& p, float x0, float x1,
+                                    float v0, float v1, float curve,
+                                    float yTop, float yBot);
+
     juce::AudioProcessorValueTreeState& apvts;
     juce::Colour accent;
+    bool hasWidth = false;
+    bool hasCurve = false;   ///< per-segment bend handles shown only when curve IDs given
+    bool isAR     = false;   ///< AR mode (no decay/sustain): rise to peak then release
 
-    // ── Bound parameters (attachments manage begin/endChangeGesture) ─────────
-    juce::RangedAudioParameter* aParam = nullptr;
-    juce::RangedAudioParameter* dParam = nullptr;
-    juce::RangedAudioParameter* sParam = nullptr;
-    juce::RangedAudioParameter* rParam = nullptr;
-    std::unique_ptr<juce::ParameterAttachment> aAttach, dAttach, sAttach, rAttach;
+    // ── Bound parameters (ParameterAttachment manages begin/endGesture) ──────
+    struct Bound
+    {
+        juce::RangedAudioParameter* param = nullptr;
+        std::unique_ptr<juce::ParameterAttachment> attach;
+        float value = 0.0f, min = 0.0f, max = 1.0f;
+    };
+    Bound a, d, s, r;          // attack ms / decay ms / sustain lvl / release ms
+    Bound aCurve, dCurve, rCurve;
+    Bound wBase, wAtk, wRel;   // mask widths (px)
 
-    // Cached denormalised values (updated by the attachments' callbacks)
-    float aMs = 10.0f, dMs = 50.0f, sLvl = 1.0f, rMs = 100.0f;
-    float aMin = 0.5f, aMax = 5000.0f;
-    float dMin = 0.5f, dMax = 5000.0f;
-    float rMin = 0.5f, rMax = 5000.0f;
+    void bind(Bound& b, const juce::String& id, bool readRange = true);
 
-    // ── Optional MASK width-bloom curve (read-only display) ──────────────────
-    juce::RangedAudioParameter* wBaseParam = nullptr;
-    juce::RangedAudioParameter* wAtkParam  = nullptr;
-    juce::RangedAudioParameter* wRelParam  = nullptr;
-    float wBase = 256.0f, wAtk = 1024.0f, wRel = 1024.0f;
+    // ── Compact numeric boxes (SliderAttachment) ────────────────────────────
+    juce::Slider boxA, boxD, boxS, boxR;
+    juce::Slider boxWAtk, boxW, boxWRel;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
+        boxAAtt, boxDAtt, boxSAtt, boxRAtt, boxWAtkAtt, boxWAtt, boxWRelAtt;
+    void initBox(juce::Slider& box, const juce::String& paramId,
+                 std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>& att);
 
-    // ── Interaction state ─────────────────────────────────────────────────────
+    // Lane rectangles (set in resized(), consumed by computeGeometry()/paint()).
+    juce::Rectangle<float> alphaLaneRect_, widthLaneRect_;
+
+    // ── Interaction state ────────────────────────────────────────────────────
     Handle hovered  { Handle::None };
     Handle dragging { Handle::None };
 

@@ -100,6 +100,8 @@ target_sources(Sp3ctraVST
         source/ui/setup/LuxWaveSetupPanel.h
         source/ui/setup/SamplerSetupPanel.cpp
         source/ui/setup/SamplerSetupPanel.h
+        source/ui/setup/ScoreSetupPanel.cpp
+        source/ui/setup/ScoreSetupPanel.h
 
         # LuxSampler subsystem
         source/luxsampler/LuxSampler.cpp
@@ -169,6 +171,12 @@ target_sources(Sp3ctraVST
         # LuxMask UI Tab
         source/image/LuxMaskTabComponent.h
 
+        # SCORE — offline printable spectrogram generator (ex Sp3ctraGen)
+        source/image/ScoreGenTabComponent.h
+        source/image/ScoreGenThread.h
+        source/image/ScoreGenRenderer.h
+        source/image/ScoreGenRenderer.cpp
+
         # Video scroll system
         source/video/VideoScrollMode.h
         source/video/VideoDisplayComponent.cpp
@@ -208,6 +216,9 @@ target_sources(Sp3ctraVST
         source/processing/image_chain.c
         source/processing/lux_pitch.c
         source/processing/lux_mask.c
+
+        # SCORE — offline spectrogram engine (KissFFT port of Sp3ctraGen)
+        source/processing/score_engine.c
 
         # Pan system (required for stereo mode)
         source/audio/pan/lock_free_pan.c

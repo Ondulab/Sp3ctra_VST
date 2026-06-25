@@ -19,8 +19,8 @@ public:
     MaskSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour);
     ~MaskSetupPanel() override;
 
-    /** Natural content height (header + 4 rows). */
-    static constexpr int kPreferredH = 190;
+    /** Natural content height (header + 7 rows). */
+    static constexpr int kPreferredH = 295;
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -28,6 +28,21 @@ public:
 private:
     juce::AudioProcessorValueTreeState& apvts;
     juce::Colour accent;
+
+    // Step Mode (LuxStral / Free)
+    juce::Label    couplingLabel;
+    juce::ComboBox couplingCombo;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> couplingAttachment;
+
+    // Free pixels per semitone
+    juce::Label  freeStepLabel;
+    juce::Slider freeStepSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> freeStepAttachment;
+
+    // Pitch Bend Range
+    juce::Label  pbRangeLabel;
+    juce::Slider pbRangeSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> pbRangeAttachment;
 
     // MIDI Channel (1-16)
     juce::Label    midiChannelLabel;
