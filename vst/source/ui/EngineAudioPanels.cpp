@@ -1,51 +1,98 @@
 #include "EngineAudioPanels.h"
 
-// ── Shared layout helpers (mirrors the former PluginEditor SYNTH-page math,
-//    with kPageTop folded out: panel-local y starts at 0) ─────────────────────
+// ── Shared layout helpers — rotary-knob grid (mockup-validated layout) ────────
+//    Sections stack full-width; continuous params are knobs in a fixed-column
+//    grid, on/off params sit in a toggle strip under the section badge.
 namespace
 {
-    constexpr int kHPad       = Sp3ctraTheme::kHPad;
-    constexpr int kColGap     = 18;
-    constexpr int kSectionH   = Sp3ctraTheme::kSectionH;
-    constexpr int kSectionGap = Sp3ctraTheme::kSectionGap;
-    constexpr int kRowH       = Sp3ctraTheme::kControlH;
-    constexpr int kRowStep    = Sp3ctraTheme::kRowStep;
-    constexpr int kLabelW     = Sp3ctraTheme::kLabelW;
-    constexpr int kCtrlOffset = kLabelW + 8;
+    using namespace AudioPanelLayout;
 
-    int colWidth(int totalW) noexcept { return (totalW - 2 * kHPad - kColGap) / 2; }
-    int colLX()              noexcept { return kHPad; }
-    int colRX(int totalW)    noexcept { return kHPad + colWidth(totalW) + kColGap; }
-    int rowsStartY()         noexcept { return kSectionH + kSectionGap; }
+    constexpr int kHPad     = Sp3ctraTheme::kHPad;
+    constexpr int kSectionH = Sp3ctraTheme::kSectionH;
+    constexpr int kSecGap   = Sp3ctraTheme::kSectionGap;
+    constexpr int kCtrlH    = Sp3ctraTheme::kControlH;
 
-    void initSlider(juce::Slider& s, const char* suffix = nullptr)
+    /** Rotary knob: accent-arc cadran + value text-box below (Sp3ctraLookAndFeel). */
+    void initKnob(juce::Slider& s, const char* suffix = nullptr)
     {
-        s.setSliderStyle(juce::Slider::LinearHorizontal);
-        s.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                          Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
+        s.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        s.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, kKnobValH);
+        s.setColour(juce::Slider::textBoxOutlineColourId,    juce::Colours::transparentBlack);
+        s.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
+        s.setColour(juce::Slider::textBoxTextColourId,       juce::Colour(0xffa0c4e8));
         if (suffix) s.setTextValueSuffix(suffix);
     }
 
-    void drawBadge(juce::Graphics& g, int x, int w,
+    /** Cell rectangle for knob #idx in a grid starting at (gx, gy) of width gw. */
+    juce::Rectangle<int> knobCell(int gx, int gw, int gy, int idx)
+    {
+        const int cellW = (gw - (kKnobCols - 1) * kKnobGapX) / kKnobCols;
+        const int col = idx % kKnobCols;
+        const int row = idx / kKnobCols;
+        return { gx + col * (cellW + kKnobGapX), gy + row * kKnobRowStep, cellW, kKnobCellH };
+    }
+
+    /** Place a knob slider (rotary + value box) into its grid cell. */
+    void placeKnob(juce::Slider& s, int gx, int gw, int gy, int idx)
+    {
+        const auto c = knobCell(gx, gw, gy, idx);
+        s.setBounds(c.getX(), c.getY(), c.getWidth(), kKnobArea + kKnobValH);
+    }
+
+    /** Draw the name label under knob #idx (the cell's bottom strip). */
+    void drawKnobLabel(juce::Graphics& g, int gx, int gw, int gy, int idx, const char* text)
+    {
+        const auto c = knobCell(gx, gw, gy, idx);
+        g.setColour(juce::Colour(0xffb8c4d0));
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
+        g.drawText(text,
+                   juce::Rectangle<int>(c.getX(), c.getY() + kKnobArea + kKnobValH,
+                                        c.getWidth(), kKnobLblH),
+                   juce::Justification::centred, true);
+    }
+
+    /** Subtle rounded backdrop grouping one stacked section. */
+    void drawSectionBg(juce::Graphics& g, int x, int y, int w, int h)
+    {
+        const auto r = juce::Rectangle<int>(x, y, w, h).toFloat();
+        g.setColour(juce::Colour(0xff131320));
+        g.fillRoundedRectangle(r, 4.f);
+        g.setColour(juce::Colour(0xff2a2a40));
+        g.drawRoundedRectangle(r, 4.f, 1.f);
+    }
+
+    /** Coloured section badge at (x, y). */
+    void drawBadge(juce::Graphics& g, int x, int y, int w,
                    juce::uint32 bg, juce::uint32 fg, const char* text)
     {
         g.setColour(juce::Colour(bg));
-        g.fillRoundedRectangle(juce::Rectangle<int>(x, 0, w, kSectionH).toFloat(), 3.f);
+        g.fillRoundedRectangle(juce::Rectangle<int>(x, y, w, kSectionH).toFloat(), 3.f);
         g.setColour(juce::Colour(fg));
         g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
-        g.drawText(text, juce::Rectangle<int>(x + 6, 0, w - 12, kSectionH),
+        g.drawText(text, juce::Rectangle<int>(x + 8, y, w - 16, kSectionH),
                    juce::Justification::centredLeft, true);
     }
 
-    void drawRowLabels(juce::Graphics& g, int x, int count, const char* const* labels)
+    /** Small accented caption above an envelope editor. */
+    void drawEnvCaption(juce::Graphics& g, int x, int y, int w,
+                        juce::uint32 fg, const char* text)
     {
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
-        g.setColour(juce::Colour(0xffb8c4d0));
-        for (int i = 0; i < count; ++i)
-            g.drawText(labels[i],
-                       juce::Rectangle<int>(x, rowsStartY() + i * kRowStep, kLabelW, kRowH),
-                       juce::Justification::centredRight, true);
+        g.setColour(juce::Colour(fg).withAlpha(0.85f));
+        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
+        g.drawText(text, x + 2, y, w - 4, kEnvCaptionH,
+                   juce::Justification::centredLeft, true);
     }
+
+    // Section geometry: y offsets relative to the section's top.
+    int stripY(int secTop) { return secTop + kSectionH + kSecGap; }
+    int gridYWithToggles(int secTop) { return stripY(secTop) + kToggleStripH + kToggleGap; }
+
+    // Vertical anatomy of a section that hosts an envelope editor (top at 0):
+    // badge → enable strip → caption → editor → knob grid.
+    int shStripY()   { return kSectionH + kSecGap; }
+    int shCaptionY() { return shStripY() + kCtrlH + kToggleGap; }
+    int shEnvY()     { return shCaptionY() + kEnvCaptionH; }
+    int shGridY()    { return shEnvY() + kEnvH + kEnvGap; }
 }
 
 //==============================================================================
@@ -55,134 +102,109 @@ AudioStralPanel::AudioStralPanel(Sp3ctraAudioProcessor& p)
 {
     auto& apvts = p.getAPVTS();
 
-    deviceOnToggle.setButtonText("Active");
-    addAndMakeVisible(deviceOnToggle);
-    deviceOnAttachment = std::make_unique<BtnAttach>(apvts, "deviceEnabled", deviceOnToggle);
-
-    initSlider(luxstralVolumeSlider);
-    addAndMakeVisible(luxstralVolumeSlider);
-    luxstralVolumeAttachment = std::make_unique<SldAttach>(apvts, "luxstralVolume", luxstralVolumeSlider);
-
-    initSlider(attackSlider, " ms");
-    addAndMakeVisible(attackSlider);
-    attackAttachment = std::make_unique<SldAttach>(apvts, "luxstralAttackMs", attackSlider);
-
-    initSlider(releaseSlider, " ms");
-    addAndMakeVisible(releaseSlider);
-    releaseAttachment = std::make_unique<SldAttach>(apvts, "luxstralReleaseMs", releaseSlider);
-
-    stereoEnableToggle.setButtonText("Active");
+    // Device-On toggle removed — power lives in the rack LED + zone-3 header.
+    stereoEnableToggle.setButtonText("Stereo");
     addAndMakeVisible(stereoEnableToggle);
     stereoEnableAttachment = std::make_unique<BtnAttach>(apvts, "luxstralStereoEnable", stereoEnableToggle);
 
-    initSlider(stereoTempSlider);
+    // Attack/Release as a draggable AR envelope editor (empty decay/sustain IDs).
+    arEnv = std::make_unique<EnvelopeEditorComponent>(
+        apvts, juce::Colour(0xff7ab0f0),
+        "luxstralAttackMs", juce::String(), juce::String(), "luxstralReleaseMs");
+    addAndMakeVisible(*arEnv);
+
+    initKnob(luxstralVolumeSlider);
+    addAndMakeVisible(luxstralVolumeSlider);
+    luxstralVolumeAttachment = std::make_unique<SldAttach>(apvts, "luxstralVolume", luxstralVolumeSlider);
+
+    initKnob(stereoTempSlider);
     addAndMakeVisible(stereoTempSlider);
     stereoTempAttachment = std::make_unique<SldAttach>(apvts, "luxstralStereoTempAmp", stereoTempSlider);
 
-    initSlider(sumExpSlider);
+    initKnob(sumExpSlider);
     addAndMakeVisible(sumExpSlider);
     sumExpAttachment = std::make_unique<SldAttach>(apvts, "luxstralSummationResponseExp", sumExpSlider);
 
-    initSlider(noiseGateSlider);
+    initKnob(noiseGateSlider);
     addAndMakeVisible(noiseGateSlider);
     noiseGateAttachment = std::make_unique<SldAttach>(apvts, "luxstralNoiseGateThreshold", noiseGateSlider);
 
-    // ── StrokeForge (right column) ────────────────────────────────────────────
-    sfEnabledToggle.setButtonText("StrokeForge Active");
+    // ── StrokeForge (stacked section) ─────────────────────────────────────────
+    sfEnabledToggle.setButtonText("StrokeForge");
     addAndMakeVisible(sfEnabledToggle);
     sfEnabledAttachment = std::make_unique<BtnAttach>(apvts, "sfEnabled", sfEnabledToggle);
 
-    initSlider(sfMorphWidthSlider);
+    initKnob(sfMorphWidthSlider);
     addAndMakeVisible(sfMorphWidthSlider);
     sfMorphWidthAttachment = std::make_unique<SldAttach>(apvts, "sfMorphWidthScale", sfMorphWidthSlider);
 
-    initSlider(sfFocusSigmaSlider, " notes");
+    initKnob(sfFocusSigmaSlider, " notes");
     addAndMakeVisible(sfFocusSigmaSlider);
     sfFocusSigmaAttachment = std::make_unique<SldAttach>(apvts, "sfBlobFocusSigma", sfFocusSigmaSlider);
 
-    initSlider(sfSpectralThreshSlider, " notes");
+    initKnob(sfSpectralThreshSlider, " notes");
     addAndMakeVisible(sfSpectralThreshSlider);
     sfSpectralThreshAttachment = std::make_unique<SldAttach>(apvts, "sfSpectralWidthThreshold", sfSpectralThreshSlider);
 
-    sfFocusOnlyToggle.setButtonText("Focus Without Morph");
+    sfFocusOnlyToggle.setButtonText("Focus Only");
     addAndMakeVisible(sfFocusOnlyToggle);
     sfFocusOnlyAttachment = std::make_unique<BtnAttach>(apvts, "sfFocusOnly", sfFocusOnlyToggle);
 }
 
 void AudioStralPanel::paint(juce::Graphics& g)
 {
-    const int W   = getWidth();
-    const int cw  = colWidth(W);
-    const int lxp = colLX();
-    const int rxp = colRX(W);
+    const int gx = kHPad;
+    const int gw = getWidth() - 2 * kHPad;
 
-    // AUDIOSTRAL section badge (left column)
-    drawBadge(g, lxp, cw, 0xff1c3755, 0xff7ab0f0, "AUDIOSTRAL");
+    // Section A — AUDIOSTRAL (AR envelope + knobs)
+    const int secAH = shGridY() + gridH(4);
+    drawSectionBg(g, gx - 2, 0, gw + 4, secAH);
+    drawBadge(g, gx, 0, gw, 0xff1c3755, 0xff7ab0f0, "AUDIOSTRAL");
+    drawEnvCaption(g, gx, shCaptionY(), gw, 0xff7ab0f0, "ATTACK / RELEASE");
+    {
+        const int gy = shGridY();
+        static const char* const lbls[] = { "Volume", "Stereo Temp", "Sum Exp", "Noise Gate" };
+        for (int i = 0; i < 4; ++i) drawKnobLabel(g, gx, gw, gy, i, lbls[i]);
+    }
 
-    static const char* const lsLbls[] = {
-        "Device On", "Volume", "Attack", "Release",
-        "Stereo", "Stereo Temp.", "Sum. Exp.", "Noise Gate"
-    };
-    drawRowLabels(g, lxp, 8, lsLbls);
-
-    // ── StrokeForge section (right column) ────────────────────────────────────
-    constexpr int kSF_ROWS = 5;
-    const auto sfBox = juce::Rectangle<int>(rxp, 0, cw,
-        kSectionH + kSectionGap + kSF_ROWS * kRowStep + kSectionGap).toFloat();
-
-    g.setColour(juce::Colour(0xff131320));
-    g.fillRoundedRectangle(sfBox, 4.f);
-    g.setColour(juce::Colour(0xff2a2a40));
-    g.drawRoundedRectangle(sfBox, 4.f, 1.f);
-
-    g.setColour(juce::Colour(0xff2c1f4a));
-    g.fillRoundedRectangle(
-        juce::Rectangle<int>(rxp + 4, 4, cw - 8, kSectionH - 2).toFloat(), 3.f);
-    g.setColour(juce::Colour(0xffb07af0));
-    g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
-    g.drawText("STROKEFORGE  --  Waveform Morphing  (Sine -> Square)",
-               juce::Rectangle<int>(rxp + 10, 4, cw - 20, kSectionH - 2),
-               juce::Justification::centredLeft, true);
-
-    static const char* const sfLbls[kSF_ROWS] = {
-        "Enable", "Square at Width", "Focus Sigma",
-        "Spectral Threshold", "Focus Only (spectral)"
-    };
-    drawRowLabels(g, rxp + 4, kSF_ROWS, sfLbls);
+    // Section B — STROKEFORGE
+    const int bTop = secAH + kSecGapV;
+    drawSectionBg(g, gx - 2, bTop, gw + 4, sectionH(3, true));
+    drawBadge(g, gx, bTop, gw, 0xff2c1f4a, 0xffb07af0,
+              "STROKEFORGE  --  Waveform Morphing (Sine -> Square)");
+    {
+        const int gy = gridYWithToggles(bTop);
+        static const char* const lbls[] = { "Square @W", "Focus Sigma", "Spectral Thr" };
+        for (int i = 0; i < 3; ++i) drawKnobLabel(g, gx, gw, gy, i, lbls[i]);
+    }
 }
 
 void AudioStralPanel::resized()
 {
-    const int W   = getWidth();
-    const int cw  = colWidth(W);
-    const int rsy = rowsStartY();
+    const int gx = kHPad;
+    const int gw = getWidth() - 2 * kHPad;
 
-    // Left column
+    // Section A — AUDIOSTRAL
+    stereoEnableToggle.setBounds(gx, shStripY(), kToggleW, kCtrlH);
+    arEnv->setBounds(gx, shEnvY(), gw, kEnvH);
     {
-        const int cx = colLX() + kCtrlOffset;
-        const int cwL = juce::jmax(80, cw - kCtrlOffset);
-        int cy = rsy;
-        deviceOnToggle      .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        luxstralVolumeSlider.setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        attackSlider        .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        releaseSlider       .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        stereoEnableToggle  .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        stereoTempSlider    .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        sumExpSlider        .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        noiseGateSlider     .setBounds(cx, cy, cwL, kRowH);
+        const int gy = shGridY();
+        placeKnob(luxstralVolumeSlider, gx, gw, gy, 0);
+        placeKnob(stereoTempSlider,     gx, gw, gy, 1);
+        placeKnob(sumExpSlider,         gx, gw, gy, 2);
+        placeKnob(noiseGateSlider,      gx, gw, gy, 3);
     }
 
-    // Right column (StrokeForge)
+    // Section B — STROKEFORGE
+    const int secAH = shGridY() + gridH(4);
+    const int bTop  = secAH + kSecGapV;
+    sfEnabledToggle  .setBounds(gx,               stripY(bTop), kToggleW, kCtrlH);
+    sfFocusOnlyToggle.setBounds(gx + kToggleW + 6, stripY(bTop), kToggleW, kCtrlH);
     {
-        const int rxp = colRX(W);
-        const int cx  = rxp + kCtrlOffset + 4;
-        const int cw2 = juce::jmax(80, cw - kCtrlOffset - 12);
-        int cy = rsy;
-        sfEnabledToggle       .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
-        sfMorphWidthSlider    .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
-        sfFocusSigmaSlider    .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
-        sfSpectralThreshSlider.setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
-        sfFocusOnlyToggle     .setBounds(cx, cy, cw2, kRowH);
+        const int gy = gridYWithToggles(bTop);
+        placeKnob(sfMorphWidthSlider,    gx, gw, gy, 0);
+        placeKnob(sfFocusSigmaSlider,    gx, gw, gy, 1);
+        placeKnob(sfSpectralThreshSlider, gx, gw, gy, 2);
     }
 }
 
@@ -193,106 +215,75 @@ AudioSynthPanel::AudioSynthPanel(Sp3ctraAudioProcessor& p)
 {
     auto& apvts = p.getAPVTS();
 
-    lxEnableToggle.setButtonText("Active");
-    addAndMakeVisible(lxEnableToggle);
-    lxEnableAttachment = std::make_unique<BtnAttach>(apvts, "luxsynthEnabled", lxEnableToggle);
+    // Enable toggle removed — power lives in the rack LED + zone-3 header.
 
-    initSlider(luxsynthVolumeSlider);
+    // Volume & Filter ADSRs as draggable envelope editors with curve bend handles.
+    volEnv = std::make_unique<EnvelopeEditorComponent>(
+        apvts, juce::Colour(0xff66ccaa),
+        "luxsynthAttackMs", "luxsynthDecayMs", "luxsynthSustainLevel", "luxsynthReleaseMs",
+        "luxsynthAttackCurve", "luxsynthDecayCurve", "luxsynthReleaseCurve");
+    addAndMakeVisible(*volEnv);
+    fltEnv = std::make_unique<EnvelopeEditorComponent>(
+        apvts, juce::Colour(0xffcc88cc),
+        "luxsynthFilterAttackMs", "luxsynthFilterDecayMs", "luxsynthFilterSustain", "luxsynthFilterReleaseMs",
+        "luxsynthFilterAttackCurve", "luxsynthFilterDecayCurve", "luxsynthFilterReleaseCurve");
+    addAndMakeVisible(*fltEnv);
+
+    // Continuous params remain rotary knobs.
+    initKnob(luxsynthVolumeSlider);
     addAndMakeVisible(luxsynthVolumeSlider);
     luxsynthVolumeAttachment = std::make_unique<SldAttach>(apvts, "luxsynthVolume", luxsynthVolumeSlider);
 
-    initSlider(lxAttackSlider, " ms");   addAndMakeVisible(lxAttackSlider);
-    lxAttackAttach = std::make_unique<SldAttach>(apvts, "luxsynthAttackMs", lxAttackSlider);
-    initSlider(lxDecaySlider, " ms");    addAndMakeVisible(lxDecaySlider);
-    lxDecayAttach = std::make_unique<SldAttach>(apvts, "luxsynthDecayMs", lxDecaySlider);
-    initSlider(lxSustainSlider);         addAndMakeVisible(lxSustainSlider);
-    lxSustainAttach = std::make_unique<SldAttach>(apvts, "luxsynthSustainLevel", lxSustainSlider);
-    initSlider(lxReleaseSlider, " ms");  addAndMakeVisible(lxReleaseSlider);
-    lxReleaseAttach = std::make_unique<SldAttach>(apvts, "luxsynthReleaseMs", lxReleaseSlider);
-
-    initSlider(lxFltAttackSlider, " ms");  addAndMakeVisible(lxFltAttackSlider);
-    lxFltAttackAttach = std::make_unique<SldAttach>(apvts, "luxsynthFilterAttackMs", lxFltAttackSlider);
-    initSlider(lxFltDecaySlider, " ms");   addAndMakeVisible(lxFltDecaySlider);
-    lxFltDecayAttach = std::make_unique<SldAttach>(apvts, "luxsynthFilterDecayMs", lxFltDecaySlider);
-    initSlider(lxFltSustainSlider);        addAndMakeVisible(lxFltSustainSlider);
-    lxFltSustainAttach = std::make_unique<SldAttach>(apvts, "luxsynthFilterSustain", lxFltSustainSlider);
-    initSlider(lxFltReleaseSlider, " ms"); addAndMakeVisible(lxFltReleaseSlider);
-    lxFltReleaseAttach = std::make_unique<SldAttach>(apvts, "luxsynthFilterReleaseMs", lxFltReleaseSlider);
-    initSlider(lxFltCutoffSlider, " Hz");  addAndMakeVisible(lxFltCutoffSlider);
+    initKnob(lxFltCutoffSlider, " Hz");  addAndMakeVisible(lxFltCutoffSlider);
     lxFltCutoffAttach = std::make_unique<SldAttach>(apvts, "luxsynthFilterCutoff", lxFltCutoffSlider);
-    initSlider(lxFltDepthSlider);          addAndMakeVisible(lxFltDepthSlider);
+    initKnob(lxFltDepthSlider);          addAndMakeVisible(lxFltDepthSlider);
     lxFltDepthAttach = std::make_unique<SldAttach>(apvts, "luxsynthFilterEnvDepth", lxFltDepthSlider);
 
-    initSlider(lxNumOscSlider);   addAndMakeVisible(lxNumOscSlider);
+    initKnob(lxNumOscSlider);   addAndMakeVisible(lxNumOscSlider);
     lxNumOscAttach = std::make_unique<SldAttach>(apvts, "luxsynthNumOscillators", lxNumOscSlider);
 
-    initSlider(lxLfoRateSlider, " Hz");  addAndMakeVisible(lxLfoRateSlider);
+    initKnob(lxLfoRateSlider, " Hz");  addAndMakeVisible(lxLfoRateSlider);
     lxLfoRateAttach = std::make_unique<SldAttach>(apvts, "luxsynthLfoRate", lxLfoRateSlider);
-    initSlider(lxLfoDepthSlider);        addAndMakeVisible(lxLfoDepthSlider);
+    initKnob(lxLfoDepthSlider);        addAndMakeVisible(lxLfoDepthSlider);
     lxLfoDepthAttach = std::make_unique<SldAttach>(apvts, "luxsynthLfoDepth", lxLfoDepthSlider);
 }
 
 void AudioSynthPanel::paint(juce::Graphics& g)
 {
-    const int W   = getWidth();
-    const int cw  = colWidth(W);
-    const int lxp = colLX();
-    const int rxp = colRX(W);
+    const int gx = kHPad;
+    const int gw = getWidth() - 2 * kHPad;
+    const int half = (gw - 10) / 2;
+    const int dy = kToggleStripH + kToggleGap;  // empty enable strip reclaimed
 
-    // Left column badge — VOLUME ADSR (teal)
-    drawBadge(g, lxp, cw, 0xff1a3a3a, 0xff66ccaa, "AUDIOSYNTH  --  Volume ADSR + Spectral");
+    drawSectionBg(g, gx - 2, 0, gw + 4, getHeight() - 2);
+    drawBadge(g, gx, 0, gw, 0xff1a3a3a, 0xff66ccaa, "AUDIOSYNTH");
 
-    static const char* const lxLeftLbls[] = {
-        "Enable", "Volume", "Attack", "Decay", "Sustain", "Release",
-        "Oscillators", "LFO Rate"
-    };
-    drawRowLabels(g, lxp, 8, lxLeftLbls);
+    drawEnvCaption(g, gx,            shCaptionY() - dy, half, 0xff66ccaa, "VOLUME  ADSR");
+    drawEnvCaption(g, gx + half + 10, shCaptionY() - dy, half, 0xffcc88cc, "FILTER  ADSR");
 
-    // Right column badge — FILTER ADSR (purple-pink)
-    drawBadge(g, rxp, cw, 0xff2a1a3a, 0xffcc88cc, "FILTER ADSR + LFO");
-
-    static const char* const lxRightLbls[] = {
-        "Flt. Attack", "Flt. Decay", "Flt. Sustain", "Flt. Release",
-        "Cutoff", "Env Depth", "LFO Depth"
-    };
-    drawRowLabels(g, rxp + 4, 7, lxRightLbls);
+    const int gy = shGridY() - dy;
+    static const char* const lbls[] = { "Volume", "Cutoff", "Env Depth",
+                                        "Oscill.", "LFO Rate", "LFO Depth" };
+    for (int i = 0; i < 6; ++i) drawKnobLabel(g, gx, gw, gy, i, lbls[i]);
 }
 
 void AudioSynthPanel::resized()
 {
-    const int W   = getWidth();
-    const int cw  = colWidth(W);
-    const int rsy = rowsStartY();
+    const int gx = kHPad;
+    const int gw = getWidth() - 2 * kHPad;
+    const int half = (gw - 10) / 2;
+    const int dy = kToggleStripH + kToggleGap;  // empty enable strip reclaimed
 
-    // Left column = vol ADSR + spectral
-    {
-        const int cx  = colLX() + kCtrlOffset;
-        const int cwL = juce::jmax(80, cw - kCtrlOffset);
-        int cy = rsy;
-        lxEnableToggle      .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        luxsynthVolumeSlider.setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        lxAttackSlider      .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        lxDecaySlider       .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        lxSustainSlider     .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        lxReleaseSlider     .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        lxNumOscSlider      .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        lxLfoRateSlider     .setBounds(cx, cy, cwL, kRowH);
-    }
+    volEnv->setBounds(gx,             shEnvY() - dy, half, kEnvH);
+    fltEnv->setBounds(gx + half + 10, shEnvY() - dy, half, kEnvH);
 
-    // Right column = filter ADSR + LFO
-    {
-        const int rxp = colRX(W);
-        const int cx  = rxp + kCtrlOffset + 4;
-        const int cw2 = juce::jmax(80, cw - kCtrlOffset - 12);
-        int cy = rsy;
-        lxFltAttackSlider .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
-        lxFltDecaySlider  .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
-        lxFltSustainSlider.setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
-        lxFltReleaseSlider.setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
-        lxFltCutoffSlider .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
-        lxFltDepthSlider  .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
-        lxLfoDepthSlider  .setBounds(cx, cy, cw2, kRowH);
-    }
+    const int gy = shGridY() - dy;
+    placeKnob(luxsynthVolumeSlider, gx, gw, gy, 0);
+    placeKnob(lxFltCutoffSlider,    gx, gw, gy, 1);
+    placeKnob(lxFltDepthSlider,     gx, gw, gy, 2);
+    placeKnob(lxNumOscSlider,       gx, gw, gy, 3);
+    placeKnob(lxLfoRateSlider,      gx, gw, gy, 4);
+    placeKnob(lxLfoDepthSlider,     gx, gw, gy, 5);
 }
 
 //==============================================================================
@@ -302,98 +293,75 @@ AudioWavePanel::AudioWavePanel(Sp3ctraAudioProcessor& p)
 {
     auto& apvts = p.getAPVTS();
 
-    lwEnableToggle.setButtonText("Active");
-    addAndMakeVisible(lwEnableToggle);
-    lwEnableAttachment = std::make_unique<BtnAttach>(apvts, "luxwaveEnabled", lwEnableToggle);
-
-    initSlider(luxwaveVolumeSlider);
-    addAndMakeVisible(luxwaveVolumeSlider);
-    luxwaveVolumeAttachment = std::make_unique<SldAttach>(apvts, "luxwaveVolume", luxwaveVolumeSlider);
-
-    initSlider(lwAttackSlider, " ms");   addAndMakeVisible(lwAttackSlider);
-    lwAttackAttach = std::make_unique<SldAttach>(apvts, "luxwaveAttackMs", lwAttackSlider);
-    initSlider(lwDecaySlider, " ms");    addAndMakeVisible(lwDecaySlider);
-    lwDecayAttach = std::make_unique<SldAttach>(apvts, "luxwaveDecayMs", lwDecaySlider);
-    initSlider(lwSustainSlider);         addAndMakeVisible(lwSustainSlider);
-    lwSustainAttach = std::make_unique<SldAttach>(apvts, "luxwaveSustainLevel", lwSustainSlider);
-    initSlider(lwReleaseSlider, " ms");  addAndMakeVisible(lwReleaseSlider);
-    lwReleaseAttach = std::make_unique<SldAttach>(apvts, "luxwaveReleaseMs", lwReleaseSlider);
-
-    initSlider(lwFltCutoffSlider, " Hz"); addAndMakeVisible(lwFltCutoffSlider);
-    lwFltCutoffAttach = std::make_unique<SldAttach>(apvts, "luxwaveFilterCutoff", lwFltCutoffSlider);
-    initSlider(lwFltDepthSlider, " Hz");  addAndMakeVisible(lwFltDepthSlider);
-    lwFltDepthAttach = std::make_unique<SldAttach>(apvts, "luxwaveFilterEnvDepth", lwFltDepthSlider);
-
-    initSlider(lwLfoRateSlider, " Hz");  addAndMakeVisible(lwLfoRateSlider);
-    lwLfoRateAttach = std::make_unique<SldAttach>(apvts, "luxwaveLfoRate", lwLfoRateSlider);
-    initSlider(lwLfoDepthSlider);        addAndMakeVisible(lwLfoDepthSlider);
-    lwLfoDepthAttach = std::make_unique<SldAttach>(apvts, "luxwaveLfoDepth", lwLfoDepthSlider);
-
-    initSlider(lwAmplitudeSlider);       addAndMakeVisible(lwAmplitudeSlider);
-    lwAmplitudeAttach = std::make_unique<SldAttach>(apvts, "luxwaveAmplitude", lwAmplitudeSlider);
-
+    // Enable toggle removed — power lives in the rack LED + zone-3 header.
     addAndMakeVisible(lwScanModeCombo);
     lwScanModeCombo.addItem("Forward",   1);
     lwScanModeCombo.addItem("Ping-Pong", 2);
     lwScanModeCombo.addItem("Random",    3);
     lwScanModeAttach = std::make_unique<CmbAttach>(apvts, "luxwaveScanMode", lwScanModeCombo);
+
+    // Amplitude ADSR as a draggable envelope editor with curve bend handles.
+    volEnv = std::make_unique<EnvelopeEditorComponent>(
+        apvts, juce::Colour(0xffddaa44),
+        "luxwaveAttackMs", "luxwaveDecayMs", "luxwaveSustainLevel", "luxwaveReleaseMs",
+        "luxwaveAttackCurve", "luxwaveDecayCurve", "luxwaveReleaseCurve");
+    addAndMakeVisible(*volEnv);
+
+    // Continuous params remain rotary knobs.
+    initKnob(luxwaveVolumeSlider);
+    addAndMakeVisible(luxwaveVolumeSlider);
+    luxwaveVolumeAttachment = std::make_unique<SldAttach>(apvts, "luxwaveVolume", luxwaveVolumeSlider);
+
+    initKnob(lwAmplitudeSlider);       addAndMakeVisible(lwAmplitudeSlider);
+    lwAmplitudeAttach = std::make_unique<SldAttach>(apvts, "luxwaveAmplitude", lwAmplitudeSlider);
+
+    initKnob(lwFltCutoffSlider, " Hz"); addAndMakeVisible(lwFltCutoffSlider);
+    lwFltCutoffAttach = std::make_unique<SldAttach>(apvts, "luxwaveFilterCutoff", lwFltCutoffSlider);
+    initKnob(lwFltDepthSlider, " Hz");  addAndMakeVisible(lwFltDepthSlider);
+    lwFltDepthAttach = std::make_unique<SldAttach>(apvts, "luxwaveFilterEnvDepth", lwFltDepthSlider);
+
+    initKnob(lwLfoRateSlider, " Hz");  addAndMakeVisible(lwLfoRateSlider);
+    lwLfoRateAttach = std::make_unique<SldAttach>(apvts, "luxwaveLfoRate", lwLfoRateSlider);
+    initKnob(lwLfoDepthSlider);        addAndMakeVisible(lwLfoDepthSlider);
+    lwLfoDepthAttach = std::make_unique<SldAttach>(apvts, "luxwaveLfoDepth", lwLfoDepthSlider);
 }
 
 void AudioWavePanel::paint(juce::Graphics& g)
 {
-    const int W   = getWidth();
-    const int cw  = colWidth(W);
-    const int lxp = colLX();
-    const int rxp = colRX(W);
+    const int gx = kHPad;
+    const int gw = getWidth() - 2 * kHPad;
 
-    // Left column badge — Wavetable ADSR (orange-gold)
-    drawBadge(g, lxp, cw, 0xff3a2a1a, 0xffddaa44, "AUDIOWAVE  --  Wavetable ADSR + Scan");
+    drawSectionBg(g, gx - 2, 0, gw + 4, getHeight() - 2);
+    drawBadge(g, gx, 0, gw, 0xff3a2a1a, 0xffddaa44, "AUDIOWAVE");
 
-    static const char* const lwLeftLbls[] = {
-        "Enable", "Volume", "Amplitude", "Attack", "Decay", "Sustain", "Release",
-        "Scan Mode"
-    };
-    drawRowLabels(g, lxp, 8, lwLeftLbls);
+    // "Scan" caption before the combo (now at the left of the strip).
+    g.setColour(juce::Colour(0xff888888));
+    g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
+    g.drawText("Scan", juce::Rectangle<int>(gx, shStripY() - 1, 40, kCtrlH),
+               juce::Justification::centredLeft, true);
 
-    // Right column badge — Filter + LFO (teal-dark)
-    drawBadge(g, rxp, cw, 0xff1a2a3a, 0xff66aacc, "FILTER + LFO");
+    drawEnvCaption(g, gx, shCaptionY(), gw, 0xffddaa44, "AMPLITUDE  ADSR");
 
-    static const char* const lwRightLbls[] = {
-        "Flt. Cutoff", "Flt. Env Depth", "LFO Rate", "LFO Depth"
-    };
-    drawRowLabels(g, rxp + 4, 4, lwRightLbls);
+    const int gy = shGridY();
+    static const char* const lbls[] = { "Volume", "Amplitude", "Flt Cutoff",
+                                        "Flt Env Depth", "LFO Rate", "LFO Depth" };
+    for (int i = 0; i < 6; ++i) drawKnobLabel(g, gx, gw, gy, i, lbls[i]);
 }
 
 void AudioWavePanel::resized()
 {
-    const int W   = getWidth();
-    const int cw  = colWidth(W);
-    const int rsy = rowsStartY();
+    const int gx = kHPad;
+    const int gw = getWidth() - 2 * kHPad;
 
-    // Left column = ADSR + Volume
-    {
-        const int cx  = colLX() + kCtrlOffset;
-        const int cwL = juce::jmax(80, cw - kCtrlOffset);
-        int cy = rsy;
-        lwEnableToggle     .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        luxwaveVolumeSlider.setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        lwAmplitudeSlider  .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        lwAttackSlider     .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        lwDecaySlider      .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        lwSustainSlider    .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        lwReleaseSlider    .setBounds(cx, cy, cwL, kRowH); cy += kRowStep;
-        lwScanModeCombo    .setBounds(cx, cy, cwL, kRowH);
-    }
+    lwScanModeCombo.setBounds(gx + 40, shStripY(), 130, kCtrlH);
 
-    // Right column = Filter + LFO
-    {
-        const int rxp = colRX(W);
-        const int cx  = rxp + kCtrlOffset + 4;
-        const int cw2 = juce::jmax(80, cw - kCtrlOffset - 12);
-        int cy = rsy;
-        lwFltCutoffSlider.setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
-        lwFltDepthSlider .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
-        lwLfoRateSlider  .setBounds(cx, cy, cw2, kRowH); cy += kRowStep;
-        lwLfoDepthSlider .setBounds(cx, cy, cw2, kRowH);
-    }
+    volEnv->setBounds(gx, shEnvY(), gw, kEnvH);
+
+    const int gy = shGridY();
+    placeKnob(luxwaveVolumeSlider, gx, gw, gy, 0);
+    placeKnob(lwAmplitudeSlider,   gx, gw, gy, 1);
+    placeKnob(lwFltCutoffSlider,   gx, gw, gy, 2);
+    placeKnob(lwFltDepthSlider,    gx, gw, gy, 3);
+    placeKnob(lwLfoRateSlider,     gx, gw, gy, 4);
+    placeKnob(lwLfoDepthSlider,    gx, gw, gy, 5);
 }

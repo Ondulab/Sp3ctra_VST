@@ -8,18 +8,7 @@
 LuxStralSetupPanel::LuxStralSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour)
     : apvts(processor.getAPVTS()), accent(accentColour)
 {
-    // ========================================================================
-    // Engine Enable
-    // ========================================================================
-    enableLabel.setText("LuxStral Enabled:", juce::dontSendNotification);
-    enableLabel.setJustificationType(juce::Justification::centredRight);
-    enableLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
-    addAndMakeVisible(enableLabel);
-
-    enableToggle.setButtonText("Active");
-    addAndMakeVisible(enableToggle);
-    enableAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        apvts, "deviceEnabled", enableToggle);
+    // Engine Enable moved to the rack LED + zone-3 header power switch.
 
     // ========================================================================
     // Section: Musical Tuning (eliminates frequency jumps)
@@ -207,14 +196,7 @@ void LuxStralSetupPanel::resized()
     const int contentWidth = juce::jmax(120, getWidth() - 2 * padding);
 
     // ========================================================================
-    // Engine Enable
-    // ========================================================================
-    enableLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
-    enableToggle.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, 150, ctrlH);
-    yPos += rowHeight + sectionSpacing;
-
-    // ========================================================================
-    // Section: Musical Tuning
+    // Section: Musical Tuning  (Engine Enable removed — power lives in rack/header)
     // ========================================================================
     tuningRangeSectionLabel.setBounds(padding, yPos, contentWidth, 25);
     yPos += 30;

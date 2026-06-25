@@ -14,6 +14,7 @@
  */
 
 #include "lux_pitch.h"
+#include "lux_env_shape.h"
 #include <string.h>
 #include <math.h>
 #include <sys/time.h>
@@ -54,6 +55,10 @@ LuxPitchConfig lux_pitch_config_default(void)
     cfg.sustain_level           = 1.0f;
     cfg.release_ms              = 100.0f;
 
+    cfg.attack_curve            = 0.0f;   /* linear by default */
+    cfg.decay_curve             = 0.0f;
+    cfg.release_curve           = 0.5f;   /* gentle convex — approximates the old musical exp release */
+
     cfg.glide_time_ms           = 0.0f;
 
     cfg.lfo_rate_hz             = 5.0f;
@@ -87,7 +92,6 @@ void lux_pitch_init(LuxPitchState *state)
     atomic_init(&state->midi.pitch_bend,   0);
     atomic_init(&state->midi.voice_count,  0);
     atomic_init(&state->midi.sustain,      0);
-    atomic_init(&state->midi.mod_wheel,    0);
 
     state->next_age       = 1;
     state->lfo_phase      = 0.0f;
@@ -276,16 +280,6 @@ void lux_pitch_set_sustain(LuxPitchState *state, int on)
     }
 }
 
-void lux_pitch_set_mod_wheel(LuxPitchState *state, float wheel)
-{
-    int w;
-    if (!state) return;
-    w = (int)(wheel * 127.0f);
-    if (w < 0)   w = 0;
-    if (w > 127) w = 127;
-    atomic_store_explicit(&state->midi.mod_wheel, w, memory_order_relaxed);
-}
-
 void lux_pitch_all_notes_off(LuxPitchState *state)
 {
     int v;
@@ -313,13 +307,24 @@ static void advance_voice_envelope(
     float               dt_s,
     const LuxPitchConfig *cfg)
 {
-    float peak_level, sustain_target, rate;
+    float peak_level, sustain_target, seg_s, s;
 
-    /* Detect note on/off edges */
+    /* Detect note on/off edges.  Each segment is driven by a normalised phase
+     * [0,1] advanced by dt/segment-duration, then shaped by lux_env_shape()
+     * with the per-segment curvature.  Endpoints are captured at entry so the
+     * curve always starts from the current level (click-free retrigger). */
     if (midi_active && !voice->prev_active)
-        voice->envelope_stage = LUX_PITCH_ENV_ATTACK;
+    {
+        voice->envelope_stage  = LUX_PITCH_ENV_ATTACK;
+        voice->env_phase       = 0.0f;
+        voice->seg_start_level = voice->envelope_level;
+    }
     else if (!midi_active && voice->prev_active)
-        voice->envelope_stage = LUX_PITCH_ENV_RELEASE;
+    {
+        voice->envelope_stage  = LUX_PITCH_ENV_RELEASE;
+        voice->env_phase       = 0.0f;
+        voice->seg_start_level = voice->envelope_level;
+    }
     voice->prev_active = midi_active;
 
     peak_level = cfg->velocity_coupling ? voice->velocity_norm : 1.0f;
@@ -330,24 +335,36 @@ static void advance_voice_envelope(
         case LUX_PITCH_ENV_IDLE:
             break;
         case LUX_PITCH_ENV_ATTACK:
-            rate = (cfg->attack_ms > 0.1f)
-                ? dt_s / (cfg->attack_ms / 1000.0f) : 100.0f;
-            voice->envelope_level += rate;
-            if (voice->envelope_level >= peak_level)
+            seg_s = (cfg->attack_ms > 0.1f) ? cfg->attack_ms / 1000.0f : 1e-4f;
+            voice->env_phase += dt_s / seg_s;
+            if (voice->env_phase >= 1.0f)
             {
-                voice->envelope_level = peak_level;
-                voice->envelope_stage = LUX_PITCH_ENV_DECAY;
+                voice->envelope_level  = peak_level;
+                voice->envelope_stage  = LUX_PITCH_ENV_DECAY;
+                voice->env_phase       = 0.0f;
+                voice->seg_start_level = peak_level;
+            }
+            else
+            {
+                s = lux_env_shape(voice->env_phase, cfg->attack_curve);
+                voice->envelope_level =
+                    voice->seg_start_level + (peak_level - voice->seg_start_level) * s;
             }
             break;
         case LUX_PITCH_ENV_DECAY:
             sustain_target = cfg->sustain_level * peak_level;
-            rate = (cfg->decay_ms > 0.1f)
-                ? dt_s / (cfg->decay_ms / 1000.0f) : 100.0f;
-            voice->envelope_level -= rate;
-            if (voice->envelope_level <= sustain_target)
+            seg_s = (cfg->decay_ms > 0.1f) ? cfg->decay_ms / 1000.0f : 1e-4f;
+            voice->env_phase += dt_s / seg_s;
+            if (voice->env_phase >= 1.0f)
             {
                 voice->envelope_level = sustain_target;
                 voice->envelope_stage = LUX_PITCH_ENV_SUSTAIN;
+            }
+            else
+            {
+                s = lux_env_shape(voice->env_phase, cfg->decay_curve);
+                voice->envelope_level =
+                    sustain_target + (voice->seg_start_level - sustain_target) * (1.0f - s);
             }
             break;
         case LUX_PITCH_ENV_SUSTAIN:
@@ -355,32 +372,19 @@ static void advance_voice_envelope(
             voice->envelope_level = sustain_target;
             break;
         case LUX_PITCH_ENV_RELEASE:
-        {
-            /* Exponential decay: musically natural release shape.
-             * The level is multiplied by k each step, with k chosen so
-             * that the envelope drops to ~-60 dB (≈ 0.001) over the
-             * user-defined release_ms window. This produces a steep
-             * initial fall followed by a long, smooth tail — far more
-             * musical than the previous linear ramp (which felt like
-             * a mechanical "brake").
-             *
-             * Tau derivation: e^(-release_ms / tau) = 1/1000
-             *  =>  tau = release_ms / ln(1000) ≈ release_ms / 6.9078
-             *  =>  per-step coefficient k = exp(-dt_s / tau)
-             *                            = exp(-dt_s * 6.9078 / release_s) */
-            const float release_s = (cfg->release_ms > 0.1f)
-                                  ? cfg->release_ms / 1000.0f
-                                  : 1e-4f;
-            const float k = expf(-dt_s * 6.9078f / release_s);
-            voice->envelope_level *= k;
-            /* Snap to zero once the level is inaudible. */
-            if (voice->envelope_level <= 1e-4f)
+            seg_s = (cfg->release_ms > 0.1f) ? cfg->release_ms / 1000.0f : 1e-4f;
+            voice->env_phase += dt_s / seg_s;
+            if (voice->env_phase >= 1.0f)
             {
                 voice->envelope_level = 0.0f;
                 voice->envelope_stage = LUX_PITCH_ENV_IDLE;
             }
+            else
+            {
+                s = lux_env_shape(voice->env_phase, cfg->release_curve);
+                voice->envelope_level = voice->seg_start_level * (1.0f - s);
+            }
             break;
-        }
     }
 
     if (voice->envelope_level < 0.0f) voice->envelope_level = 0.0f;
@@ -458,14 +462,13 @@ void lux_pitch_process_frame(
     }
 
     /* ── LFO (shared across all voices) ───────────────────────────────────
-     * Effective depth = configured depth + mod wheel (CC1) contribution of
-     * up to +1 semitone, so the wheel gives instant vibrato even when the
-     * configured depth is 0. */
+     * Effective depth = the single configured depth. The CC1 mod wheel and
+     * the on-screen "LFO Depth" slider drive this same parameter (the wheel
+     * moves the slider in the host), so there is no separate additive
+     * contribution to combine here. */
     lfo_px = 0.0f;
     {
-        float wheel = (float)atomic_load_explicit(&state->midi.mod_wheel,
-                                                  memory_order_relaxed) / 127.0f;
-        float depth = state->config.lfo_depth_semitones + wheel * 1.0f;
+        float depth = state->config.lfo_depth_semitones;
         if (depth > 0.001f && state->config.lfo_rate_hz > 0.001f)
         {
             state->lfo_phase += 2.0f * (float)M_PI * state->config.lfo_rate_hz * dt_s;
@@ -499,7 +502,11 @@ void lux_pitch_process_frame(
          * click) — without this the envelope never sees an edge and the
          * shift teleports silently mid-sustain. */
         if (retrig)
-            state->voices[v].envelope_stage = LUX_PITCH_ENV_ATTACK;
+        {
+            state->voices[v].envelope_stage  = LUX_PITCH_ENV_ATTACK;
+            state->voices[v].env_phase       = 0.0f;
+            state->voices[v].seg_start_level = state->voices[v].envelope_level;
+        }
 
         /* Target shift */
         {

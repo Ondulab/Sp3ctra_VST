@@ -4,7 +4,7 @@
  *
  * Migrated from the former gear-wheel LuxStralSettingsTab — same controls,
  * same APVTS parameter IDs:
- *   deviceEnabled / luxstralTuning / luxstralRootNote / luxstralNumOctaves /
+ *   luxstralTuning / luxstralRootNote / luxstralNumOctaves /
  *   luxstralPhysiologicalFilter / luxstralPhysiologicalDepth /
  *   luxstralSoftLimitThreshold / luxstralSoftLimitKnee /
  *   sfBlobContrastAdaptive / sfBlobContrastSensitivity
@@ -27,8 +27,8 @@ public:
     ~LuxStralSetupPanel() override;
 
     /** Natural content height (header + 3 sections, no internal viewport —
-     *  the zone-3 viewport scrolls). */
-    static constexpr int kPreferredH = 552;
+     *  the zone-3 viewport scrolls). Enable row removed (−47 px). */
+    static constexpr int kPreferredH = 505;
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -36,11 +36,6 @@ public:
 private:
     juce::AudioProcessorValueTreeState& apvts;
     juce::Colour accent;
-
-    // Section: Engine Enable
-    juce::Label enableLabel;
-    juce::ToggleButton enableToggle;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> enableAttachment;
 
     // Section: Musical Tuning
     juce::Label tuningRangeSectionLabel;

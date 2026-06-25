@@ -16,22 +16,24 @@ class VideoWindow;
  *
  * Dissociation of concerns:
  *   - This component = live controls only:
- *       source selection (L / Sample / Mix / LuxPitch Output)
- *       scroll mode, speed, direction, zoom, exposure, blend mode
+ *       source selection (LuxStral / LuxSynth / AllSynth)
+ *       orientation, bipolar speed, birth-line position, thickness, zoom,
+ *       fade/persistence, temporal compression
  *       open/close window, fullscreen toggle
  *   - Display configuration (brightness, invert, color mode) lives in the
  *     zone-4 toolbar (WaterfallColumnComponent header area, M5); the detached
  *     window default size lives in the gear Settings window → System tab.
  *
- * APVTS parameters used here:
- *   "videoScrollEnabled"    bool   — master enable (opens/closes the VideoWindow)
- *   "videoScrollSource"     choice — L / Sample / Mix / LuxPitch / LuxMask
- *   "videoScrollMode"       choice — scroll direction + loop mode
- *   "videoScrollSpeed"      float  — scroll speed factor [0.1 .. 20 x]
- *   "videoScrollDirection"  choice — Forward / Reverse
- *   "videoScrollZoom"       float  — zoom factor [0.5 .. 4 x]
- *   "videoScrollExposure"   float  — exposure [0.0 .. 1.0]
- *   "videoScrollBlendMode"  choice — Mix / Add / Screen / Mask
+ * APVTS parameters used here (legacy birth-line scroll model):
+ *   "videoScrollEnabled"        bool  — master enable (opens/closes the VideoWindow)
+ *   "videoScrollSource"         choice— LuxStral / LuxSynth-LuxWave / AllSynth
+ *   "videoScrollMode"           choice— orientation (0/90/180/270 deg)
+ *   "videoScrollSpeed"          float — bipolar scroll speed [-1 reverse .. +1 forward]
+ *   "videoScrollLinePos"        float — birth-line position [-1 .. +1]
+ *   "videoScrollLineThickness"  float — scanline thickness [0 .. 1]
+ *   "videoScrollZoom"           float — zoom factor [0.5 .. 4 x]
+ *   "videoScrollFade"           float — progressive aging w/ distance [0 .. 1]
+ *   "videoScrollMaxDuration"    float — progressive time-squish [1 .. 64]
  */
 class VideoScrollTab : public juce::Component,
                        private juce::AudioProcessorValueTreeState::Listener
@@ -80,25 +82,29 @@ private:
     juce::ComboBox modeCombo_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> modeAttach_;
 
-    // ── SPEED ────────────────────────────────────────────────────────────────
+    // ── SPEED (bipolar: reverse ◄ freeze ► forward) ──────────────────────────
     juce::Slider speedSlider_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> speedAttach_;
 
-    // ── DIRECTION ────────────────────────────────────────────────────────────
-    juce::ComboBox directionCombo_;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> directionAttach_;
+    // ── LINE POSITION (birth line, enables bidirectional scroll) ──────────────
+    juce::Slider linePosSlider_;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> linePosAttach_;
 
-    // ── SEQ MAX FRAMES ────────────────────────────────────────────────────────
-    juce::Slider maxDurSlider_;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> maxDurAttach_;
+    // ── LINE THICKNESS (1 px → barcode) ───────────────────────────────────────
+    juce::Slider thicknessSlider_;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> thicknessAttach_;
 
     // ── ZOOM (live control) ───────────────────────────────────────────────────
     juce::Slider zoomSlider_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> zoomAttach_;
 
-    // ── BLEND MODE ───────────────────────────────────────────────────────────
-    juce::ComboBox blendModeCombo_;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> blendModeAttach_;
+    // ── FADE / PERSISTENCE (trails) ───────────────────────────────────────────
+    juce::Slider fadeSlider_;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> fadeAttach_;
+
+    // ── COMPRESSION (temporal — CIS frames averaged per painted line) ─────────
+    juce::Slider maxDurSlider_;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> maxDurAttach_;
 
     // ── ACTION BUTTONS ───────────────────────────────────────────────────────
     juce::TextButton windowBtn_;

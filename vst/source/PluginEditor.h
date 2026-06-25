@@ -10,6 +10,7 @@
 #include "image/LuxMaskTabComponent.h"
 #include "image/LuxStralTabComponent.h"
 #include "image/LuxSynthTabComponent.h"
+#include "image/ScoreGenTabComponent.h"
 #include "image/VisualizerMode.h"
 #include "sampler/SamplerPageComponent.h"
 #include "ui/ChainRackComponent.h"
@@ -24,6 +25,7 @@
 #include "ui/setup/LuxSynthSetupPanel.h"
 #include "ui/setup/LuxWaveSetupPanel.h"
 #include "ui/setup/SamplerSetupPanel.h"
+#include "ui/setup/ScoreSetupPanel.h"
 #include "UITheme.h"
 #include "Sp3ctraLookAndFeel.h"
 
@@ -85,6 +87,97 @@ private:
     }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(GearButton)
+};
+
+// ============================================================================
+// PanicButton — "All Notes Off" panic, rendered as a red "PANIC" label (the
+// de-facto standard on MIDI hardware and plugins). Releases every held/stuck
+// MIDI note across all synth engines. Self-contained (painting in the header,
+// like GearButton).
+// ============================================================================
+class PanicButton : public juce::Button
+{
+public:
+    PanicButton() : juce::Button("panic")
+    {
+        setTooltip("All Notes Off (panic) - release every held/stuck note");
+    }
+
+    void paintButton(juce::Graphics& g, bool isMouseOver, bool isButtonDown) override
+    {
+        const auto b = getLocalBounds().toFloat().reduced(2.f);
+
+        // Background
+        const juce::Colour bg(0xff2a2a2a);
+        g.setColour(isButtonDown ? bg.brighter(0.3f)
+                  : isMouseOver  ? bg.brighter(0.12f)
+                  :                bg);
+        g.fillRoundedRectangle(b, 4.f);
+
+        // Red outline + "PANIC" label
+        const juce::Colour red = isButtonDown ? juce::Colour(0xffff6b6b)
+                               : isMouseOver  ? juce::Colour(0xffff4d4d)
+                               :                juce::Colour(0xffd83a3a);
+        g.setColour(red.withAlpha(isMouseOver || isButtonDown ? 0.9f : 0.6f));
+        g.drawRoundedRectangle(b, 4.f, 1.2f);
+
+        g.setColour(red);
+        g.setFont(juce::Font(juce::jmin(b.getHeight() * 0.46f, 15.f),
+                             juce::Font::bold));
+        g.drawText("PANIC", getLocalBounds(), juce::Justification::centred, false);
+    }
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PanicButton)
+};
+
+// ============================================================================
+// ModulePowerButton — power switch for the selected module, sitting at the
+// right end of the zone-3 PLAY|SETUP header row. A real toggle Button (so an
+// APVTS ButtonAttachment keeps it in sync with the rack LED + host automation).
+// Draws the universal power glyph, lit in the block's accent colour when on.
+// ============================================================================
+class ModulePowerButton : public juce::Button
+{
+public:
+    ModulePowerButton() : juce::Button("modulePower")
+    {
+        setClickingTogglesState(true);
+        setTooltip("Enable / disable this module");
+    }
+
+    void setAccent(juce::Colour c) { if (accent != c) { accent = c; repaint(); } }
+
+    void paintButton(juce::Graphics& g, bool isMouseOver, bool isButtonDown) override
+    {
+        const auto b   = getLocalBounds().toFloat().reduced(2.f);
+        const bool on  = getToggleState();
+
+        const juce::Colour bg(0xff222836);
+        g.setColour(isButtonDown ? bg.brighter(0.30f)
+                  : isMouseOver  ? bg.brighter(0.12f)
+                  :                bg);
+        g.fillRoundedRectangle(b, 3.f);
+        g.setColour(on ? accent.withAlpha(0.90f) : juce::Colour(0xff3a4250));
+        g.drawRoundedRectangle(b, 3.f, on ? 1.4f : 1.f);
+
+        // Power glyph: open ring (gap at top) + vertical stem through the gap.
+        const float cx = b.getCentreX();
+        const float cy = b.getCentreY() + 0.5f;
+        const float r  = juce::jmin(b.getWidth(), b.getHeight()) * 0.26f;
+        g.setColour(on ? accent.brighter(0.20f) : juce::Colour(0xff6b7280));
+
+        juce::Path ring;
+        ring.addCentredArc(cx, cy, r, r, 0.f,
+                           juce::MathConstants<float>::pi * 0.30f,
+                           juce::MathConstants<float>::pi * 1.70f, true);
+        g.strokePath(ring, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved,
+                                                      juce::PathStrokeType::rounded));
+        g.drawLine(cx, cy - r - 1.5f, cx, cy - 0.5f, 1.6f);
+    }
+
+private:
+    juce::Colour accent { juce::Colour(0xff4fa3e0) };
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ModulePowerButton)
 };
 
 // ============================================================================
@@ -322,6 +415,8 @@ private:
 
     // ── ZONE 3: block editor host (vertical viewport + content container) ─────
     FaceSwitchBar   faceSwitch;        // PLAY | SETUP (hidden for SOURCE CIS)
+    ModulePowerButton modulePowerButton; // power switch at the right of the face row
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> modulePowerAttachment;
     juce::Viewport  zone3Viewport;
     juce::Component zone3Content;
 
@@ -332,6 +427,7 @@ private:
     std::unique_ptr<LuxStralTabComponent> imgLuxStralPage;
     std::unique_ptr<LuxSynthTabComponent> imgLuxSynthPage;
     std::unique_ptr<SamplerPageComponent> samplerPage;
+    std::unique_ptr<ScoreGenTabComponent> scorePage;
     std::unique_ptr<AudioStralPanel>      audioStralPanel;
     std::unique_ptr<AudioSynthPanel>      audioSynthPanel;
     std::unique_ptr<AudioWavePanel>       audioWavePanel;
@@ -343,6 +439,7 @@ private:
     std::unique_ptr<LuxSynthSetupPanel>   synthSetup;
     std::unique_ptr<LuxWaveSetupPanel>    waveSetup;
     std::unique_ptr<SamplerSetupPanel>    samplerSetup;
+    std::unique_ptr<ScoreSetupPanel>      scoreSetup;
 
     // ── ZONE 4: video scroll column (collapsible, detachable window) ──────────
     std::unique_ptr<WaterfallColumnComponent> waterfallColumn;
@@ -354,6 +451,7 @@ private:
 
     // ── Header: gear settings button ──────────────────────────────────────────
     GearButton settingsButton;
+    PanicButton panicButton;   // All Notes Off (panic)
     std::unique_ptr<SettingsWindow> settingsWindow;
 
     // Tooltip support (palette rail stub + existing component tooltips)

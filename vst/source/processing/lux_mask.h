@@ -5,8 +5,10 @@
  *
  * Mirrors LuxPitch ownership patterns (3 global instances: visualizer / proc /
  * video) and voice-management rules, but instead of translating the image, it
- * reveals it through a mobile, shape-controlled mask whose center is driven by
- * MIDI note, width by env + LFO, and intensity by ADSR + velocity.
+ * reveals it through a spatial LP/HP/BP filter.  The played note anchors the
+ * cutoff (keyboard tracking) and the ADSR output drives the filter openness
+ * (optionally inverted → open by default).  The revealed passband is full
+ * opacity with a slope-controlled soft edge; position can wobble via the LFO.
  *
  * Polyphonic blend rule: additive on alpha, clamped to 1.
  *
@@ -53,10 +55,6 @@ extern "C" {
 #define LUX_MASK_ENV_SUSTAIN  3
 #define LUX_MASK_ENV_RELEASE  4
 
-/* Internal LUT size for gauss shape pre-computation.
- * Indexed by d ∈ [0, 4] (beyond that, shape ≈ 0). */
-#define LUX_MASK_LUT_SIZE 1024
-
 /* ============================================================================
  * LuxMaskVoiceMidi — Per-voice atomic MIDI state (audio → image thread).
  * ============================================================================ */
@@ -78,22 +76,13 @@ typedef struct {
     float    target_pos;         /* Target center (from note + bend). */
     float    envelope_level;     /* 0..1 ADSR level. */
     int      envelope_stage;
+    float    env_phase;          /* Normalised progress [0,1] through current segment (alpha shaping). */
+    float    seg_start_level;    /* Envelope level captured at segment entry (click-free). */
     int      prev_active;
     uint32_t age;
-    /* Snapshots for width-bloom envelope: */
+    /* Envelope snapshots (alpha -> cutoff envelope shaping): */
     float    peak_level;         /* Envelope peak at attack (velocity-scaled). */
     float    release_start_level;/* Envelope level at the moment release began. */
-
-    /* Time progress *per segment* (in seconds, normalised by segment duration
-     * to obtain t ∈ [0, 1]).  Used by the width interpolation so that the
-     * Width @ Attack → Width transition (DECAY segment) and the Width →
-     * Width @ Release transition (RELEASE segment) follow the *time* axis of
-     * the segment, NOT the audio amplitude.
-     *
-     * This decouples the width modulation from the Sustain Level — a high
-     * sustain no longer shrinks the visible width transition. */
-    float    decay_progress_s;
-    float    release_progress_s;
 } LuxMaskVoiceState;
 
 /* ============================================================================
@@ -104,7 +93,6 @@ typedef struct {
     LM_ATOMIC(int)   pitch_bend;
     LM_ATOMIC(int)   voice_count;
     LM_ATOMIC(int)   sustain;     /* CC64 sustain pedal: 1 = held */
-    LM_ATOMIC(int)   mod_wheel;   /* CC1 modulation wheel (0-127) → extra vibrato depth */
 } LuxMaskMidiState;
 
 /* ============================================================================
@@ -119,35 +107,38 @@ typedef struct {
     float free_pixels_per_semitone;
     float pitch_bend_range;         /* in semitones */
 
-    /* Mask shape — gauss only (other shapes had no perceptible musical impact). */
-    float width_base;               /* base width in pixels (8..8192) — width during SUSTAIN */
+    /* ── Spatial bandpass filter driven by the ADSR ─────────────────────────
+     * Always a bandpass centred on the played note (keyboard tracking).  The
+     * ADSR output (0..1, including Sustain) is the "openness": at 0 the band
+     * collapses to nothing (so the release fades to background); at 1 the band
+     * spans `filter_width_pct` of the image.
+     *
+     * `filter_offset_pct` shifts the band CENTRE away from the note, as a % of
+     * the image and decoupled from the width:
+     *     0   = band centred on the note,
+     *    >0   = band centred above the note, <0 = below.
+     * The offset is openness-scaled like the width, so at env == 0 the centre
+     * sits on the note (band collapsed) and sweeps out to its offset as env
+     * opens — a glide-like swept offset at the attack, independent of width.
+     *
+     *   W      = openness * filter_width_pct/100  * pixel_count
+     *   centre = note + openness * filter_offset_pct/100 * pixel_count
+     *   lo = centre - W/2,  hi = centre + W/2. */
+    float filter_width_pct;  /* 0..100  — band width at full open, % of image */
+    float filter_offset_pct; /* -100..100 — band-centre offset, % of image */
+    float filter_slope;      /* 0..1 — edge steepness (1 = sharp, 0 = soft) */
 
-    /* ADSR (acts on alpha) */
+    /* ADSR (drives the filter cutoff/openness) */
     float attack_ms;
     float decay_ms;
     float sustain_level;
     float release_ms;
 
-    /* Width horizons — absolute widths in pixels, fully ADSR-driven.
-     *
-     *   width_attack_px  : 8..8192 — width reached at note-on (during ATTACK stage).
-     *                                Then collapses to width_base during DECAY.
-     *                                Can be larger or smaller than width_base.
-     *
-     *   width_release_px : 8..8192 — width reached at full release (envelope = 0).
-     *                                During RELEASE width grows from width_base to
-     *                                width_release_px following the envelope decay.
-     *                                Can be larger or smaller than width_base.
-     *
-     * Velocity coupling:
-     *   When velocity_coupling is ON the *effective* horizon is pondered between
-     *   width_base (velocity=0) and the configured horizon (velocity=1):
-     *     w_attack_eff  = lerp(width_base, width_attack_px,  velocity)
-     *     w_release_eff = lerp(width_base, width_release_px, velocity)
-     *   When velocity_coupling is OFF the configured horizons are used as-is.
-     */
-    float width_attack_px;
-    float width_release_px;
+    /* Per-segment curvature [-1,1] (0 = linear, >0 convex, <0 concave).
+     * Drives lux_env_shape() for the attack / decay / release segments. */
+    float attack_curve;
+    float decay_curve;
+    float release_curve;
 
     /* Glide */
     float glide_time_ms;
@@ -176,9 +167,9 @@ typedef struct {
     float    lfo_pos_phase;
     uint64_t last_frame_ts_us;
 
-    /* Gauss shape LUT (precomputed at init, indexed by d = |i - pos| / width,
-     * clamped to [0, 4]). */
-    float    shape_lut_gauss[LUX_MASK_LUT_SIZE];
+    /* Last processed pixel count (image thread -> UI for the filter-response
+     * overlay; plain int, tear-free enough for a display read). */
+    int      last_pixel_count;
 
     /* Preallocated output buffers (mask applied per pixel). */
     uint8_t  out_r[LUX_MASK_MAX_PIXELS];
@@ -204,10 +195,6 @@ void lux_mask_set_pitch_bend(LuxMaskState *state, float bend); /* [-1, +1] */
  * shining); releasing the pedal releases every deferred voice through the
  * normal RELEASE envelope. RT-safe. */
 void lux_mask_set_sustain(LuxMaskState *state, int on);
-
-/* CC1 modulation wheel [0, 1]. Adds up to +1 semitone of position-vibrato
- * depth on top of the configured LFO depth. RT-safe. */
-void lux_mask_set_mod_wheel(LuxMaskState *state, float wheel);
 
 /* MIDI CC 123 "All Notes Off": mark every active voice as released.
  * Voices enter their normal RELEASE phase (exponential decay), so the

@@ -1,22 +1,17 @@
 /**
  * @file SourcesTabComponent.h
- * @brief Tab 1 — SOURCES: dual-channel pipeline view.
+ * @brief ZONE 3 (PLAY face) — SOURCE CIS transport, contextual to its chain.
  *
- * Channel model (refactor "Modulated / Live"):
- *   • RAW       — upstream UDP gate (transport + fade) feeding both channels.
- *   • MOD (A)   — modulated channel : Live ► LuxSampler ► LuxPitch ► LuxMask.
- *                 Each insert auto-bypasses when inactive (sampler not playing,
- *                 shift = 0, mask opacity = 0).  Transport = sampler transport.
- *   • LIVE (B)  — direct live frame (transport = image transport).
+ * Each SOURCE CIS block is bound to the chain it sits on.  Selecting it shows
+ * ONLY that chain's transport (play / hold / stop + fade-in):
+ *   • Chain 1  → sampler transport  (samplerFreezeMode / samplerFadeInMs)
+ *   • Chain 2  → live frame transport (imageFreezeMode  / imageFadeInMs)
  *
- * Both synthesis engines (LuxStral, LuxSynth + LuxWave) independently pick
- * which channel they consume via their own APVTS source parameter; nothing
- * else needs to be configured here.
+ * The RAW upstream UDP gate is the instrument's own signal and is no longer
+ * surfaced here — chains are migrating toward modular slots, so the source
+ * view only exposes the transport of the chain it is dropped into.
  *
- * Layout (top-to-bottom):
- *   Zone 1: RAW
- *     ↓↓
- *   Zone 2: A — Modulated (left)  |  B — Live (right)
+ * The active chain is set by the editor via setChain() on block selection.
  */
 #pragma once
 
@@ -34,201 +29,113 @@ public:
     explicit SourcesTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p)
     {
-        auto& apvts = p.getAPVTS();
+        playBtn.setIconPath(Icons::play());
+        holdBtn.setIconPath(Icons::pause());
+        stopBtn.setIconPath(Icons::stop());
 
-        // ── RAW transport ─────────────────────────────────────────────────────
-        rawPlayBtn.setIconPath(Icons::play());
-        rawHoldBtn.setIconPath(Icons::pause());
-        rawStopBtn.setIconPath(Icons::stop());
+        playBtn.onClick = [this]{ setFreezeMode(0.f);  };
+        holdBtn.onClick = [this]{ setFreezeMode(0.5f); };
+        stopBtn.onClick = [this]{ setFreezeMode(1.f);  };
 
-        rawPlayBtn.onClick  = [&apvts]{ if (auto* param = apvts.getParameter("rawFreezeMode")) param->setValueNotifyingHost(0.f); };
-        rawHoldBtn.onClick  = [&apvts]{ if (auto* param = apvts.getParameter("rawFreezeMode")) param->setValueNotifyingHost(0.5f); };
-        rawStopBtn.onClick  = [&apvts]{ if (auto* param = apvts.getParameter("rawFreezeMode")) param->setValueNotifyingHost(1.f); };
+        addAndMakeVisible(playBtn);
+        addAndMakeVisible(holdBtn);
+        addAndMakeVisible(stopBtn);
 
-        addAndMakeVisible(rawPlayBtn);
-        addAndMakeVisible(rawHoldBtn);
-        addAndMakeVisible(rawStopBtn);
+        fadeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        fadeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 62, 16);
+        fadeSlider.setTextValueSuffix(" ms");
+        fadeSlider.setNumDecimalPlacesToDisplay(0);
+        addAndMakeVisible(fadeSlider);
 
-        initFadeSlider(rawFadeSlider);
-        addAndMakeVisible(rawFadeSlider);
-        rawFadeAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "rawFadeInMs", rawFadeSlider));
-
-        // ── Modulated (A) transport — drives the sampler stage of the chain ──
-        modPlayBtn.setIconPath(Icons::play());
-        modHoldBtn.setIconPath(Icons::pause());
-        modStopBtn.setIconPath(Icons::stop());
-
-        modPlayBtn.onClick  = [&apvts]{ if (auto* param = apvts.getParameter("samplerFreezeMode")) param->setValueNotifyingHost(0.f); };
-        modHoldBtn.onClick  = [&apvts]{ if (auto* param = apvts.getParameter("samplerFreezeMode")) param->setValueNotifyingHost(0.5f); };
-        modStopBtn.onClick  = [&apvts]{ if (auto* param = apvts.getParameter("samplerFreezeMode")) param->setValueNotifyingHost(1.f); };
-
-        addAndMakeVisible(modPlayBtn);
-        addAndMakeVisible(modHoldBtn);
-        addAndMakeVisible(modStopBtn);
-
-        initFadeSlider(modFadeSlider);
-        addAndMakeVisible(modFadeSlider);
-        modFadeAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "samplerFadeInMs", modFadeSlider));
-
-        // ── Live (B) transport ────────────────────────────────────────────────
-        livePlayBtn.setIconPath(Icons::play());
-        liveHoldBtn.setIconPath(Icons::pause());
-        liveStopBtn.setIconPath(Icons::stop());
-
-        livePlayBtn.onClick  = [&apvts]{ if (auto* param = apvts.getParameter("imageFreezeMode")) param->setValueNotifyingHost(0.f); };
-        liveHoldBtn.onClick  = [&apvts]{ if (auto* param = apvts.getParameter("imageFreezeMode")) param->setValueNotifyingHost(0.5f); };
-        liveStopBtn.onClick  = [&apvts]{ if (auto* param = apvts.getParameter("imageFreezeMode")) param->setValueNotifyingHost(1.f); };
-
-        addAndMakeVisible(livePlayBtn);
-        addAndMakeVisible(liveHoldBtn);
-        addAndMakeVisible(liveStopBtn);
-
-        initFadeSlider(liveFadeSlider);
-        addAndMakeVisible(liveFadeSlider);
-        liveFadeAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "imageFadeInMs", liveFadeSlider));
-
-        updateAllTransportButtons();
+        setChain(1);   // default; the editor re-sets this on block selection
         startTimer(200);
     }
 
     ~SourcesTabComponent() override { stopTimer(); }
 
+    /** Bind the transport to chain 1 (Modulated) or chain 2 (Live). */
+    void setChain(int chain)
+    {
+        activeChain_ = (chain == 2) ? 2 : 1;
+
+        auto& apvts = processor.getAPVTS();
+        fadeAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, fadeParamId(), fadeSlider));
+
+        updateTransportButtons();
+        repaint();
+    }
+
     void paint(juce::Graphics& g) override
     {
         const int w = getWidth();
 
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
+        // Chain header — centred, identity colour matching the rack.
+        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
+        g.setColour(activeChain_ == 1 ? juce::Colour(0xffe0b84a)
+                                      : juce::Colour(0xff4ae0a0));
+        g.drawText(activeChain_ == 1 ? "CHAIN 1" : "CHAIN 2",
+                   0, 4, w, 14, juce::Justification::centred);
 
-        // Zone 1 header — centred over full width
-        g.setColour(juce::Colour(0xff68788f));
-        g.drawText("UDP Input", 0, 2, w, 14, juce::Justification::centred);
-
-        // Zone 2 headers — centred over their respective halves
-        const int z2Y = zone2Y();
-        g.setColour(juce::Colour(0xffe0b84a));
-        g.drawText("A - Modulated  (Live > Sampler > Pitch > Mask)",
-                   0, z2Y, w / 2, 14, juce::Justification::centred);
-        g.setColour(juce::Colour(0xff4ae0a0));
-        g.drawText("B - Live  (direct)",
-                   w / 2, z2Y, w / 2, 14, juce::Justification::centred);
-
-        // Fade In labels (Synth-page style: kFontSettings, right-justified)
+        // Fade In label (Synth-page style: kFontSettings, right-justified).
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
         g.setColour(juce::Colour(0xffd2d8e8));
-        g.drawText("Fade In", fadeLabel1X(), fadeLabelY(0), 50, 18, juce::Justification::centredRight);
-        g.drawText("Fade In", fadeLabel2X(0), fadeLabelY(1), 50, 18, juce::Justification::centredRight);
-        g.drawText("Fade In", fadeLabel2X(1), fadeLabelY(1), 50, 18, juce::Justification::centredRight);
+        g.drawText("Fade In", fadeX(), fadeY(), 50, 18, juce::Justification::centredRight);
     }
 
     void resized() override
     {
-        const int w    = getWidth();
+        const int w = getWidth();
         constexpr int btnSz = Sp3ctraTheme::kIconBtnSize;
         constexpr int gap   = Sp3ctraTheme::kGap;
-        constexpr int nodeH = Sp3ctraTheme::kControlH + 6;
 
-        // Standard node width: all nodes same size.
-        const int stdNodeW = juce::jmin(w * 2 / 5, 360);
+        // Transport row — centred.
+        const int tY = 24;
+        const int totalW = btnSz * 3 + gap * 2;
+        const int startX = w / 2 - totalW / 2;
+        playBtn.setBounds(startX,                  tY, btnSz, btnSz);
+        holdBtn.setBounds(startX + btnSz + gap,    tY, btnSz, btnSz);
+        stopBtn.setBounds(startX + 2*(btnSz+gap),  tY, btnSz, btnSz);
 
-        // ── Zone 1: RAW (centred) ────────────────────────────────────────────
-        {
-            const int tY = 18 + nodeH + 4;
-            const int totalW = btnSz * 3 + gap * 2;
-            const int startX = w / 2 - totalW / 2;
-            rawPlayBtn.setBounds(startX,                  tY, btnSz, btnSz);
-            rawHoldBtn.setBounds(startX + btnSz + gap,    tY, btnSz, btnSz);
-            rawStopBtn.setBounds(startX + 2*(btnSz+gap),  tY, btnSz, btnSz);
-        }
-
-        {
-            const int fY = fadeLabelY(0);
-            const int fadeX = w / 2 - stdNodeW / 2;
-            rawFadeSlider.setBounds(fadeX + 56, fY, stdNodeW - 56, 18);
-        }
-
-        // ── Zone 2: A — Modulated (left)  |  B — Live (right) ────────────────
-        const int z2 = zone2Y();
-        const int z2NodeY = z2 + 16;
-        const int modX  = w / 4     - stdNodeW / 2;
-        const int liveX = w * 3 / 4 - stdNodeW / 2;
-
-        auto placeTransport2 = [&](int centreX,
-                                   IconTextButton& play, IconTextButton& hold, IconTextButton& stop)
-        {
-            const int tY = z2NodeY + nodeH + 4;
-            const int totalW = btnSz * 3 + gap * 2;
-            const int startX = centreX - totalW / 2;
-            play.setBounds(startX,                  tY, btnSz, btnSz);
-            hold.setBounds(startX + btnSz + gap,    tY, btnSz, btnSz);
-            stop.setBounds(startX + 2*(btnSz+gap),  tY, btnSz, btnSz);
-        };
-        placeTransport2(w / 4,     modPlayBtn,  modHoldBtn,  modStopBtn);
-        placeTransport2(w * 3 / 4, livePlayBtn, liveHoldBtn, liveStopBtn);
-
-        {
-            const int fY = fadeLabelY(1);
-            modFadeSlider .setBounds(modX  + 56, fY, stdNodeW - 56, 18);
-            liveFadeSlider.setBounds(liveX + 56, fY, stdNodeW - 56, 18);
-        }
+        // Fade slider — under the transport, label to its left.
+        fadeSlider.setBounds(fadeX() + 56, fadeY(), stdNodeW() - 56, 18);
     }
 
 private:
     Sp3ctraAudioProcessor& processor;
+    int activeChain_ { 1 };
 
-    // ── RAW transport ─────────────────────────────────────────────────────────
-    IconTextButton rawPlayBtn, rawHoldBtn, rawStopBtn;
-    juce::Slider rawFadeSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> rawFadeAttach;
+    IconTextButton playBtn, holdBtn, stopBtn;
+    juce::Slider   fadeSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> fadeAttach;
 
-    // ── Modulated (A) transport — bound to samplerFreezeMode ──────────────────
-    IconTextButton modPlayBtn, modHoldBtn, modStopBtn;
-    juce::Slider modFadeSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> modFadeAttach;
-
-    // ── Live (B) transport — bound to imageFreezeMode ─────────────────────────
-    IconTextButton livePlayBtn, liveHoldBtn, liveStopBtn;
-    juce::Slider liveFadeSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> liveFadeAttach;
-
-    // ── Layout helpers ────────────────────────────────────────────────────────
-    // 2-zone vertical layout (RAW on top, two-column A/B below).
-    int zoneH()  const { return getHeight() / 2; }
-    int zone2Y() const { return zoneH(); }
-
-    int fadeLabel1X() const { return getWidth() / 2 - stdNodeW() / 2; }
-    int fadeLabel2X(int col) const
+    // ── Per-chain APVTS parameter ids ───────────────────────────────────────────
+    const char* freezeParamId() const noexcept
     {
-        const int nw = stdNodeW();
-        return col == 0 ? (getWidth() / 4 - nw / 2)
-                        : (getWidth() * 3 / 4 - nw / 2);
+        return activeChain_ == 1 ? "samplerFreezeMode" : "imageFreezeMode";
     }
+    const char* fadeParamId() const noexcept
+    {
+        return activeChain_ == 1 ? "samplerFadeInMs" : "imageFadeInMs";
+    }
+
+    void setFreezeMode(float v)
+    {
+        if (auto* param = processor.getAPVTS().getParameter(freezeParamId()))
+            param->setValueNotifyingHost(v);
+    }
+
+    // ── Layout helpers ──────────────────────────────────────────────────────────
     int stdNodeW() const { return juce::jmin(getWidth() * 2 / 5, 360); }
-
-    int fadeLabelY(int zone) const
+    int fadeX()    const { return getWidth() / 2 - stdNodeW() / 2; }
+    int fadeY()    const
     {
-        constexpr int nodeH = Sp3ctraTheme::kControlH + 6;
         constexpr int btnSz = Sp3ctraTheme::kIconBtnSize;
-        if (zone == 0)
-            return 18 + nodeH + 4 + btnSz + 4;
-        return zone2Y() + 16 + nodeH + 4 + btnSz + 4;
-    }
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    static void initFadeSlider(juce::Slider& s)
-    {
-        s.setSliderStyle(juce::Slider::LinearHorizontal);
-        s.setTextBoxStyle(juce::Slider::TextBoxRight, false, 62, 16);
-        s.setTextValueSuffix(" ms");
-        s.setNumDecimalPlacesToDisplay(0);
+        return 24 + btnSz + 8;
     }
 
     // ── Transport button state highlighting ───────────────────────────────────
-    static void styleTransportGroup(IconTextButton& play, IconTextButton& hold,
-                                    IconTextButton& stop, int mode)
+    void updateTransportButtons()
     {
         static const juce::Colour kPlay  { 0xff2a6040 };
         static const juce::Colour kHold  { 0xff6040a0 };
@@ -237,35 +144,24 @@ private:
         static const juce::Colour kFgOn  = juce::Colours::white;
         static const juce::Colour kFgOff { 0xff888888 };
 
+        int mode = 0;
+        if (auto* raw = processor.getAPVTS().getRawParameterValue(freezeParamId()))
+            mode = juce::roundToInt(raw->load());
+
         auto style = [](IconTextButton& btn, bool active, juce::Colour col)
         {
             btn.setColour(juce::TextButton::buttonColourId,   active ? col : kOff);
             btn.setColour(juce::TextButton::textColourOffId,  active ? kFgOn : kFgOff);
         };
 
-        style(play, mode == 0, kPlay);
-        style(hold, mode == 1, kHold);
-        style(stop, mode == 2, kStop);
-    }
-
-    void updateAllTransportButtons()
-    {
-        auto& apvts = processor.getAPVTS();
-        auto readMode = [&](const char* paramId) -> int
-        {
-            if (auto* raw = apvts.getRawParameterValue(paramId))
-                return juce::roundToInt(raw->load());
-            return 0;
-        };
-
-        styleTransportGroup(rawPlayBtn,  rawHoldBtn,  rawStopBtn,  readMode("rawFreezeMode"));
-        styleTransportGroup(modPlayBtn,  modHoldBtn,  modStopBtn,  readMode("samplerFreezeMode"));
-        styleTransportGroup(livePlayBtn, liveHoldBtn, liveStopBtn, readMode("imageFreezeMode"));
+        style(playBtn, mode == 0, kPlay);
+        style(holdBtn, mode == 1, kHold);
+        style(stopBtn, mode == 2, kStop);
     }
 
     void timerCallback() override
     {
-        updateAllTransportButtons();
+        updateTransportButtons();
     }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SourcesTabComponent)

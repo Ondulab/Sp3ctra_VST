@@ -46,8 +46,8 @@ inline const char* visualizerModeLabel(VisualizerMode m)
     switch (m)
     {
         case VisualizerMode::RAW:             return "RAW";
-        case VisualizerMode::LIVE:            return "LIVE";
-        case VisualizerMode::MODULATED:       return "MODULATED";
+        case VisualizerMode::LIVE:            return "CHAIN 2";
+        case VisualizerMode::MODULATED:       return "CHAIN 1";
         case VisualizerMode::SPCTR_GRAY:      return "LUXSTRAL GRAY";
         case VisualizerMode::SYNTH_GRAY:      return "LUXSYNTH GRAY";
         case VisualizerMode::SPCTR_COLOR:     return "LUXSTRAL COLOR";

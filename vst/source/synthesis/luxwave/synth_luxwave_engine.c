@@ -13,6 +13,7 @@
  */
 
 #include "synth_luxwave_engine.h"
+#include "../../processing/lux_env_shape.h"   /* shared ADSR segment shaping */
 #include <string.h>
 #include <math.h>
 
@@ -35,43 +36,66 @@ static void lw_adsr_init(LwAdsrEnv *env)
 {
     env->stage = LW_ADSR_IDLE;
     env->level = 0.0f;
+    env->phase = 0.0f;
+    env->seg_start = 0.0f;
 }
 
 static void lw_adsr_gate_on(LwAdsrEnv *env)
 {
     env->stage = LW_ADSR_ATTACK;
+    env->phase = 0.0f;
+    env->seg_start = env->level;   /* click-free retrigger from current level */
 }
 
 static void lw_adsr_gate_off(LwAdsrEnv *env)
 {
     if (env->stage != LW_ADSR_IDLE)
+    {
         env->stage = LW_ADSR_RELEASE;
+        env->phase = 0.0f;
+        env->seg_start = env->level;   /* release from wherever we are */
+    }
 }
 
+/* Phase-based ADSR with shared lux_env_shape() curvature.
+ * curve = 0 reproduces the previous linear behaviour. */
 static float lw_adsr_process(LwAdsrEnv *env,
                               float attack_ms, float decay_ms,
                               float sustain, float release_ms,
-                              float inv_sr)
+                              float inv_sr,
+                              float attack_curve, float decay_curve,
+                              float release_curve)
 {
     float rate;
     switch (env->stage)
     {
     case LW_ADSR_ATTACK:
         rate = (attack_ms > 0.1f) ? inv_sr * 1000.0f / attack_ms : 1.0f;
-        env->level += rate;
-        if (env->level >= 1.0f)
+        env->phase += rate;
+        if (env->phase >= 1.0f)
         {
             env->level = 1.0f;
             env->stage = LW_ADSR_DECAY;
+            env->phase = 0.0f;
+        }
+        else
+        {
+            float s = lux_env_shape(env->phase, attack_curve);
+            env->level = env->seg_start + (1.0f - env->seg_start) * s;
         }
         break;
     case LW_ADSR_DECAY:
         rate = (decay_ms > 0.1f) ? inv_sr * 1000.0f / decay_ms : 1.0f;
-        env->level -= rate * (1.0f - sustain);
-        if (env->level <= sustain)
+        env->phase += rate;
+        if (env->phase >= 1.0f)
         {
             env->level = sustain;
             env->stage = LW_ADSR_SUSTAIN;
+        }
+        else
+        {
+            float s = lux_env_shape(env->phase, decay_curve);
+            env->level = 1.0f - (1.0f - sustain) * s;
         }
         break;
     case LW_ADSR_SUSTAIN:
@@ -79,11 +103,16 @@ static float lw_adsr_process(LwAdsrEnv *env,
         break;
     case LW_ADSR_RELEASE:
         rate = (release_ms > 0.1f) ? inv_sr * 1000.0f / release_ms : 1.0f;
-        env->level -= rate;
-        if (env->level <= 0.0f)
+        env->phase += rate;
+        if (env->phase >= 1.0f)
         {
             env->level = 0.0f;
             env->stage = LW_ADSR_IDLE;
+        }
+        else
+        {
+            float s = lux_env_shape(env->phase, release_curve);
+            env->level = env->seg_start * (1.0f - s);
         }
         break;
     case LW_ADSR_IDLE:
@@ -191,6 +220,9 @@ int luxwave_engine_init(LuxWaveEngine *engine, float sample_rate, int buffer_siz
     engine->config.decay_ms         = 100.0f;
     engine->config.sustain_level    = 0.7f;
     engine->config.release_ms       = 200.0f;
+    engine->config.attack_curve     = 0.0f;
+    engine->config.decay_curve      = 0.0f;
+    engine->config.release_curve    = 0.0f;
     engine->config.filter_attack_ms = 20.0f;
     engine->config.filter_decay_ms  = 150.0f;
     engine->config.filter_sustain   = 0.5f;
@@ -411,11 +443,14 @@ void luxwave_engine_process(LuxWaveEngine *engine, int num_samples,
             float vol_env = lw_adsr_process(&voice->volume_env,
                                           cfg->attack_ms, cfg->decay_ms,
                                           cfg->sustain_level, cfg->release_ms,
-                                          inv_sr);
+                                          inv_sr,
+                                          cfg->attack_curve, cfg->decay_curve,
+                                          cfg->release_curve);
             float flt_env = lw_adsr_process(&voice->filter_env,
                                           cfg->filter_attack_ms, cfg->filter_decay_ms,
                                           cfg->filter_sustain, cfg->filter_release_ms,
-                                          inv_sr);
+                                          inv_sr,
+                                          0.0f, 0.0f, 0.0f);  /* filter ADSR: linear (no UI) */
 
             if (vol_env < LUXWAVE_MIN_AUDIBLE)
                 continue;

@@ -31,8 +31,8 @@ namespace
         int labelW, ctrlX, ctrlW;
         int yEnable;
         int secSrc, ySource;
-        int secScroll, yMode, ySpeed, yDir, yMax;
-        int secDisplay, yZoom, yBlend;
+        int secScroll, yMode, ySpeed, yLinePos;
+        int secDisplay, yThickness, yZoom, yFade, yCompress;
         int secWin, yButtons;
     };
 
@@ -40,7 +40,7 @@ namespace
     {
         // Natural (un-scaled) full height of the stack, used as the reference
         // point — below this the layout compresses; above it, it sits at top.
-        constexpr float kFullH = 498.0f;
+        constexpr float kFullH = 556.0f;
         const float f = juce::jlimit(0.5f, 1.0f, (float) height / kFullH);
         auto S = [f](int v) { return juce::roundToInt((float) v * f); };
 
@@ -63,15 +63,18 @@ namespace
         L.yEnable    = L.top + L.secH + L.secG;
         L.secSrc     = L.yEnable + L.step + L.secExtra;
         L.ySource    = L.secSrc + L.step;
+        // SCROLL: heading + Mode, Speed, Line Pos
         L.secScroll  = L.secSrc + 2 * L.step + L.secExtra;
         L.yMode      = L.secScroll + L.step;
         L.ySpeed     = L.secScroll + 2 * L.step;
-        L.yDir       = L.secScroll + 3 * L.step;
-        L.yMax       = L.secScroll + 4 * L.step;
-        L.secDisplay = L.secScroll + 5 * L.step + L.secExtra;
-        L.yZoom      = L.secDisplay + L.step;
-        L.yBlend     = L.secDisplay + 2 * L.step;
-        L.secWin     = L.secDisplay + 3 * L.step + L.secExtra;
+        L.yLinePos   = L.secScroll + 3 * L.step;
+        // DISPLAY: heading + Thickness, Zoom, Fade, Compression
+        L.secDisplay = L.secScroll + 4 * L.step + L.secExtra;
+        L.yThickness = L.secDisplay + L.step;
+        L.yZoom      = L.secDisplay + 2 * L.step;
+        L.yFade      = L.secDisplay + 3 * L.step;
+        L.yCompress  = L.secDisplay + 4 * L.step;
+        L.secWin     = L.secDisplay + 5 * L.step + L.secExtra;
         L.yButtons   = L.secWin + L.step;
         return L;
     }
@@ -127,46 +130,65 @@ VideoScrollTab::VideoScrollTab(Sp3ctraAudioProcessor& processor)
     modeAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         apvts, "videoScrollMode", modeCombo_);
 
-    // ── Speed ─────────────────────────────────────────────────────────────────
-    styleSliderH(speedSlider_, " x");
-    speedSlider_.setTooltip("Scroll speed multiplier.");
+    // ── Speed (bipolar) ───────────────────────────────────────────────────────
+    // One control replaces the old Speed slider + Direction dropdown:
+    //   negative = reverse, 0 = frozen, positive = forward (exponential feel).
+    styleSliderH(speedSlider_, "");
+    speedSlider_.setTooltip(
+        "Scroll speed AND direction in one control.\n"
+        "  < 0  reverse   |   0  frozen   |   > 0  forward\n"
+        "The magnitude is exponential (gentle near the centre).");
     addAndMakeVisible(speedSlider_);
     speedAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "videoScrollSpeed", speedSlider_);
 
-    // ── Direction ─────────────────────────────────────────────────────────────
-    directionCombo_.addItem("Forward", 1);
-    directionCombo_.addItem("Reverse", 2);
-    directionCombo_.setTooltip("Playback direction.");
-    addAndMakeVisible(directionCombo_);
-    directionAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-        apvts, "videoScrollDirection", directionCombo_);
+    // ── Line Position (birth line) ────────────────────────────────────────────
+    styleSliderH(linePosSlider_, "");
+    linePosSlider_.setTooltip(
+        "Where new scanlines are born, and the axis the image scrolls around.\n"
+        "  -1  far edge   |   0  centre (symmetric bidirectional)   |   +1  near edge\n"
+        "+1 reproduces the classic single-direction waterfall.");
+    addAndMakeVisible(linePosSlider_);
+    linePosAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "videoScrollLinePos", linePosSlider_);
 
-    // ── Max Frames (seq recording limit) ──────────────────────────────────────
-    styleSliderH(maxDurSlider_, " fr");
-    maxDurSlider_.setTooltip(
-        "Maximum number of frames recorded before Seq playback starts.\n"
-        "~1000 fr = 1 second of CIS data at real-time speed.");
-    addAndMakeVisible(maxDurSlider_);
-    maxDurAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "videoScrollMaxDuration", maxDurSlider_);
+    // ── Line Thickness ────────────────────────────────────────────────────────
+    styleSliderH(thicknessSlider_, "");
+    thicknessSlider_.setTooltip(
+        "Thickness of each freshly-drawn scanline.\n"
+        "0 = single pixel, 1 = full viewport (barcode mode).");
+    addAndMakeVisible(thicknessSlider_);
+    thicknessAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "videoScrollLineThickness", thicknessSlider_);
 
     // ── Zoom (live) ───────────────────────────────────────────────────────────
     styleSliderH(zoomSlider_, " x");
-    zoomSlider_.setTooltip("Zoom factor (1.0 = fit, >1 = zoomed).");
+    zoomSlider_.setTooltip("Zoom factor (1.0 = fit, >1 = zoomed in around centre).");
     addAndMakeVisible(zoomSlider_);
     zoomAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "videoScrollZoom", zoomSlider_);
 
-    // ── Blend Mode ────────────────────────────────────────────────────────────
-    blendModeCombo_.addItem("Mix    (weighted average)", 1);
-    blendModeCombo_.addItem("Add    (luminosity boost)", 2);
-    blendModeCombo_.addItem("Screen (Photoshop screen)", 3);
-    blendModeCombo_.addItem("Mask   (multiplicative)",   4);
-    blendModeCombo_.setTooltip("Blend mode for mixing sequenced frames.");
-    addAndMakeVisible(blendModeCombo_);
-    blendModeAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-        apvts, "videoScrollBlendMode", blendModeCombo_);
+    // ── Fade / persistence ────────────────────────────────────────────────────
+    styleSliderH(fadeSlider_, "");
+    fadeSlider_.setTooltip(
+        "Progressive aging of the image as it moves AWAY from the source line:\n"
+        "the farther a scanline has travelled, the more it desaturates (loses\n"
+        "colour) and dims (loses brightness).\n"
+        "0 = no aging (uniform), 1 = strong fade to dark grey at the far edge.");
+    addAndMakeVisible(fadeSlider_);
+    fadeAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "videoScrollFade", fadeSlider_);
+
+    // ── Compression (temporal) ────────────────────────────────────────────────
+    styleSliderH(maxDurSlider_, " fr");
+    maxDurSlider_.setTooltip(
+        "Non-linear time squish: the image stays at full scale near the source\n"
+        "line and is progressively COMPRESSED as it moves away, so older time\n"
+        "is packed tighter toward the far edge (and softly blurred).\n"
+        "1 = linear (no squish), higher = more history squeezed on screen.");
+    addAndMakeVisible(maxDurSlider_);
+    maxDurAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "videoScrollMaxDuration", maxDurSlider_);
 
     // ── Action buttons ────────────────────────────────────────────────────────
     windowBtn_.setButtonText("Open Window");
@@ -291,14 +313,15 @@ void VideoScrollTab::paint(juce::Graphics& g)
     drawLabel("Source", L.ySource);
 
     drawSection("SCROLL", L.secScroll);
-    drawLabel("Mode",       L.yMode);
-    drawLabel("Speed",      L.ySpeed);
-    drawLabel("Direction",  L.yDir);
-    drawLabel("Max Frames", L.yMax);
+    drawLabel("Mode",     L.yMode);
+    drawLabel("Speed",    L.ySpeed);
+    drawLabel("Line Pos", L.yLinePos);
 
     drawSection("DISPLAY", L.secDisplay);
-    drawLabel("Zoom",  L.yZoom);
-    drawLabel("Blend", L.yBlend);
+    drawLabel("Thickness",   L.yThickness);
+    drawLabel("Zoom",        L.yZoom);
+    drawLabel("Fade",        L.yFade);
+    drawLabel("Compression", L.yCompress);
 
     // Window section status dot
     drawSection("WINDOW", L.secWin);
@@ -328,20 +351,24 @@ void VideoScrollTab::resized()
         s.setTextBoxStyle(juce::Slider::TextBoxRight, false, tbW, L.ch);
     };
     setTb(speedSlider_);
-    setTb(maxDurSlider_);
+    setTb(linePosSlider_);
+    setTb(thicknessSlider_);
     setTb(zoomSlider_);
+    setTb(fadeSlider_);
+    setTb(maxDurSlider_);
 
     enableToggle_.setBounds(ctrlX, L.yEnable, juce::jmin(90, ctrlW), L.ch);
 
     sourceCombo_.setBounds(ctrlX, L.ySource, ctrlW, L.ch);
 
-    modeCombo_     .setBounds(ctrlX, L.yMode,  ctrlW, L.ch);
-    speedSlider_   .setBounds(ctrlX, L.ySpeed, ctrlW, L.ch);
-    directionCombo_.setBounds(ctrlX, L.yDir,   ctrlW, L.ch);
-    maxDurSlider_  .setBounds(ctrlX, L.yMax,   ctrlW, L.ch);
+    modeCombo_      .setBounds(ctrlX, L.yMode,    ctrlW, L.ch);
+    speedSlider_    .setBounds(ctrlX, L.ySpeed,   ctrlW, L.ch);
+    linePosSlider_  .setBounds(ctrlX, L.yLinePos, ctrlW, L.ch);
 
-    zoomSlider_    .setBounds(ctrlX, L.yZoom,  ctrlW, L.ch);
-    blendModeCombo_.setBounds(ctrlX, L.yBlend, ctrlW, L.ch);
+    thicknessSlider_.setBounds(ctrlX, L.yThickness, ctrlW, L.ch);
+    zoomSlider_     .setBounds(ctrlX, L.yZoom,      ctrlW, L.ch);
+    fadeSlider_     .setBounds(ctrlX, L.yFade,      ctrlW, L.ch);
+    maxDurSlider_   .setBounds(ctrlX, L.yCompress,  ctrlW, L.ch);
 
     // Two action buttons share the full width so the second never clips.
     const int btnGap = 8;

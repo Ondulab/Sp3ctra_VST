@@ -6,17 +6,7 @@
 LuxSynthSetupPanel::LuxSynthSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour)
     : apvts(processor.getAPVTS()), accent(accentColour)
 {
-    // ── Enable toggle ─────────────────────────────────────────────────────
-    enableLabel.setText("LuxSynth:", juce::dontSendNotification);
-    enableLabel.setJustificationType(juce::Justification::centredRight);
-    enableLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-    addAndMakeVisible(enableLabel);
-
-    enableToggle.setButtonText("Enabled");
-    addAndMakeVisible(enableToggle);
-    enableAttachment = std::make_unique<
-        juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        apvts, "luxsynthEnabled", enableToggle);
+    // ── Enable toggle ── moved to the rack LED + zone-3 header power switch
 
     // ── MIDI Channel ──────────────────────────────────────────────────────
     midiChannelLabel.setText("MIDI Channel:", juce::dontSendNotification);
@@ -76,7 +66,6 @@ void LuxSynthSetupPanel::resized()
         y += rowH;
     };
 
-    row(enableLabel,       enableToggle);
     row(midiChannelLabel,  midiChannelCombo);
     row(octaveOffsetLabel, octaveOffsetCombo);
 }

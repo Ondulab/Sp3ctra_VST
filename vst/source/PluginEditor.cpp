@@ -52,6 +52,10 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     samplerPage = std::make_unique<SamplerPageComponent>(audioProcessor);
     zone3Content.addChildComponent(samplerPage.get());
 
+    // SCORE — offline printable-spectrogram export tool (no SETUP face)
+    scorePage = std::make_unique<ScoreGenTabComponent>(audioProcessor);
+    zone3Content.addChildComponent(scorePage.get());
+
     // Engine audio panels — the former SYNTH AUDIOSTRAL/AUDIOSYNTH/AUDIOWAVE
     // sub-pages, repackaged as components (same params & attachments).
     audioStralPanel = std::make_unique<AudioStralPanel>(audioProcessor);
@@ -75,12 +79,15 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         audioProcessor, ChainRackComponent::blockColour(ChainBlockId::LuxWave));
     samplerSetup = std::make_unique<SamplerSetupPanel>(
         audioProcessor, ChainRackComponent::blockColour(ChainBlockId::Sampler));
+    scoreSetup   = std::make_unique<ScoreSetupPanel>(
+        audioProcessor, ChainRackComponent::blockColour(ChainBlockId::Score));
     zone3Content.addChildComponent(pitchSetup.get());
     zone3Content.addChildComponent(maskSetup.get());
     zone3Content.addChildComponent(stralSetup.get());
     zone3Content.addChildComponent(synthSetup.get());
     zone3Content.addChildComponent(waveSetup.get());
     zone3Content.addChildComponent(samplerSetup.get());
+    zone3Content.addChildComponent(scoreSetup.get());
 
     // PLAY | SETUP face switcher (above the zone-3 viewport; hidden when the
     // selected block has no setup face — i.e. SOURCE CIS).
@@ -92,6 +99,7 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         zone3Viewport.setViewPosition(0, 0);
     };
     addChildComponent(faceSwitch);
+    addChildComponent(modulePowerButton);
 
     // ── ZONE 4: video scroll column (hosts the former VIDEO tab) ──────────────
     waterfallColumn = std::make_unique<WaterfallColumnComponent>(audioProcessor);
@@ -125,6 +133,14 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     settingsButton.onClick = [this] { openSettings(); };
     addAndMakeVisible(settingsButton);
 
+    // ── Header panic button (All Notes Off) ───────────────────────────────────
+    panicButton.onClick = [this]
+    {
+        // Signal the audio thread to release every held/stuck note next block.
+        audioProcessor.requestAllNotesOff();
+    };
+    addAndMakeVisible(panicButton);
+
     // ── Restore persisted layout (survives session reload) ────────────────────
     auto& state = apvts.state;
     zone2Width = (int) state.getProperty("zone2W", kZone2DefaultW);
@@ -132,7 +148,7 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     if ((bool) state.getProperty("scrollCollapsed", false))
         waterfallColumn->setCollapsed(true, false);
 
-    // Initial selection: chain 1 source (zone 1 → RAW view)
+    // Initial selection: chain 1 source (zone 1 → Chain 1 view)
     selectBlock(ChainBlockId::Chain1Source);
 
     juce::LookAndFeel::setDefaultLookAndFeel(&sp3ctraLaf);
@@ -155,7 +171,8 @@ Sp3ctraAudioProcessorEditor::~Sp3ctraAudioProcessorEditor()
 bool Sp3ctraAudioProcessorEditor::blockHasSetup(ChainBlockId id) noexcept
 {
     // Every block has a SETUP face except the sources (SOURCE CIS).
-    return id != ChainBlockId::Chain1Source && id != ChainBlockId::Chain2Source;
+    return id != ChainBlockId::Chain1Source
+        && id != ChainBlockId::Chain2Source;
 }
 
 //==============================================================================
@@ -176,11 +193,13 @@ void Sp3ctraAudioProcessorEditor::applyZone3Visibility()
     if (imgLuxSynthPage) imgLuxSynthPage->setVisible(play && id == ChainBlockId::LuxSynth);
     if (audioSynthPanel) audioSynthPanel->setVisible(play && id == ChainBlockId::LuxSynth);
     if (audioWavePanel)  audioWavePanel ->setVisible(play && id == ChainBlockId::LuxWave);
+    if (scorePage)       scorePage      ->setVisible(play && id == ChainBlockId::Score);
 
     // ── SETUP face: the per-block settings panel ──────────────────────────────
     if (pitchSetup)   pitchSetup  ->setVisible(setupFace && id == ChainBlockId::Pitch);
     if (maskSetup)    maskSetup   ->setVisible(setupFace && id == ChainBlockId::Mask);
     if (samplerSetup) samplerSetup->setVisible(setupFace && id == ChainBlockId::Sampler);
+    if (scoreSetup)   scoreSetup  ->setVisible(setupFace && id == ChainBlockId::Score);
     if (stralSetup)   stralSetup  ->setVisible(setupFace && id == ChainBlockId::LuxStral);
     if (synthSetup)   synthSetup  ->setVisible(setupFace && id == ChainBlockId::LuxSynth);
     if (waveSetup)    waveSetup   ->setVisible(setupFace && id == ChainBlockId::LuxWave);
@@ -206,11 +225,15 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
     std::vector<VisualizerMode> sources;
     switch (id)
     {
+        // Each SOURCE CIS is contextual to the chain it sits on: it shows ONLY
+        // that chain's output (Chain 1 = Modulated, Chain 2 = Live).  The RAW
+        // upstream feed is the instrument's own signal and no longer surfaces
+        // here — the migration treats chains as modular slots.
         case ChainBlockId::Chain1Source:
+            sources = { VisualizerMode::MODULATED };   // Chain 1
+            break;
         case ChainBlockId::Chain2Source:
-            sources = { VisualizerMode::RAW,
-                        VisualizerMode::MODULATED,
-                        VisualizerMode::LIVE };
+            sources = { VisualizerMode::LIVE };         // Chain 2
             break;
         case ChainBlockId::Pitch:
             sources = { VisualizerMode::LUXPITCH_OUTPUT };
@@ -237,7 +260,18 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
         case ChainBlockId::LuxWave:
             sources = { VisualizerMode::SYNTH_GRAY };
             break;
+        // SCORE is an offline export tool — keep a neutral live view in zone 1.
+        case ChainBlockId::Score:
+            sources = { VisualizerMode::MODULATED };
+            break;
     }
+    // The SOURCES page transport follows the selected chain (1 or 2).
+    if (sourcesPage)
+    {
+        if (id == ChainBlockId::Chain1Source)      sourcesPage->setChain(1);
+        else if (id == ChainBlockId::Chain2Source) sourcesPage->setChain(2);
+    }
+
     visPanelCount_ = juce::jmax(1, static_cast<int>(sources.size()));
     if (cisVisualizer)
     {
@@ -255,6 +289,22 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
     faceSwitch.setVisible(blockHasSetup(id));
     faceSwitch.setAccent(ChainRackComponent::blockColour(id));
     faceSwitch.setFace(setupFace, false);
+
+    // Module power toggle (right of the face row) — rebind to this block's enable
+    // param, or hide for blocks without a power switch (SOURCE CIS, SCORE).
+    {
+        const juce::String enableId = ChainRackComponent::enableParamId(id);
+        const bool showPower = blockHasSetup(id) && enableId.isNotEmpty();
+        modulePowerAttachment.reset();   // detach before rebinding to a new param
+        if (showPower)
+        {
+            modulePowerButton.setAccent(ChainRackComponent::blockColour(id));
+            modulePowerAttachment = std::make_unique<
+                juce::AudioProcessorValueTreeState::ButtonAttachment>(
+                    audioProcessor.getAPVTS(), enableId, modulePowerButton);
+        }
+        modulePowerButton.setVisible(showPower);
+    }
 
     // ── Keyboard ruler under zone 1 (M5): PITCH / MASK only ──────────────────
     if (keyboardRuler)
@@ -324,6 +374,8 @@ void Sp3ctraAudioProcessorEditor::resized()
     // ── Header gear button (top-right) ────────────────────────────────────────
     const int btnSz = kHeaderH - 8;
     settingsButton.setBounds(getWidth() - btnSz - 4, 4, btnSz, btnSz);
+    const int panicW = btnSz * 3 / 2;   // wider, rectangular: holds "PANIC"
+    panicButton.setBounds(getWidth() - btnSz - 8 - panicW, 4, panicW, btnSz);
 
     // ── ZONE 1: CIS Visualizer — full window width; height = panel count ─────
     if (cisVisualizer)
@@ -394,6 +446,12 @@ void Sp3ctraAudioProcessorEditor::layoutZones()
     int z3y = zonesY;
     int z3h = zonesH;
     faceSwitch.setBounds(x, z3y, z3w, kFaceBarH);
+    if (modulePowerButton.isVisible())   // power switch at the right end of the row
+    {
+        const int pw = 36;
+        const int ph = kFaceBarH - 8;
+        modulePowerButton.setBounds(x + z3w - pw - 8, z3y + (kFaceBarH - ph) / 2, pw, ph);
+    }
     if (faceSwitch.isVisible())          // PLAY | SETUP bar shifts the viewport
     {
         z3y += kFaceBarH;
@@ -452,9 +510,11 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
                 top = synthSetup.get();   topMinH = LuxSynthSetupPanel::kPreferredH; break;
             case ChainBlockId::LuxWave:
                 top = waveSetup.get();    topMinH = LuxWaveSetupPanel::kPreferredH;  break;
+            case ChainBlockId::Score:
+                top = scoreSetup.get();   topMinH = ScoreSetupPanel::kPreferredH;    break;
             case ChainBlockId::Chain1Source:
             case ChainBlockId::Chain2Source:
-                break;   // sources have no SETUP face (switcher hidden)
+                break;   // these blocks have no SETUP face (switcher hidden)
         }
     }
     else
@@ -463,7 +523,7 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
         {
             case ChainBlockId::Chain1Source:
             case ChainBlockId::Chain2Source:
-                top = sourcesPage.get();     topMinH = 420; break;
+                top = sourcesPage.get();     topMinH = 130; break;
             case ChainBlockId::Pitch:
                 top = pitchPage.get();       topMinH = 510; break;  // +100 env editor
             case ChainBlockId::Mask:
@@ -480,6 +540,8 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
                 break;
             case ChainBlockId::LuxWave:
                 top = audioWavePanel.get();  topMinH = AudioWavePanel::kPreferredH; break;
+            case ChainBlockId::Score:
+                top = scorePage.get();       topMinH = 360; break;  // actions + transport only
         }
     }
 

@@ -88,12 +88,18 @@ typedef struct {
     float decay_ms;
     float sustain_level;
     float release_ms;
+    float attack_curve;          /* [-1,1] segment curvature, 0 = linear */
+    float decay_curve;
+    float release_curve;
 
     /* ADSR filter envelope */
     float filter_attack_ms;
     float filter_decay_ms;
     float filter_sustain;
     float filter_release_ms;
+    float filter_attack_curve;   /* [-1,1] */
+    float filter_decay_curve;
+    float filter_release_curve;
     float filter_cutoff;        /* Base cutoff as fraction of Nyquist [0,1] */
     float filter_env_depth;     /* How much envelope modulates cutoff [0,1] */
 

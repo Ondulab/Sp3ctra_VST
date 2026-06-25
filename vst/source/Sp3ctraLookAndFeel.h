@@ -96,6 +96,57 @@ public:
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // ToggleButton — iOS-style sliding switch (track + knob) + label on the right.
+    // Replaces JUCE's default tick-box for every boolean/enable toggle.
+    // ─────────────────────────────────────────────────────────────────────────
+    void drawToggleButton(juce::Graphics& g,
+                          juce::ToggleButton& button,
+                          bool shouldDrawButtonAsHighlighted,
+                          bool /*shouldDrawButtonAsDown*/) override
+    {
+        const bool on      = button.getToggleState();
+        const bool enabled = button.isEnabled();
+
+        // Switch geometry — vertically centred, left-aligned within the bounds.
+        const float h = juce::jmin(20.0f, (float)button.getHeight());
+        const float w = h * 1.9f;
+        const float y = ((float)button.getHeight() - h) * 0.5f;
+        const auto  track  = juce::Rectangle<float>(0.0f, y, w, h);
+        const float radius = h * 0.5f;
+
+        // Track
+        juce::Colour trackCol = on ? juce::Colour(0xff4fa3e0) : juce::Colour(0xff33373f);
+        if (! enabled) trackCol = trackCol.withMultipliedAlpha(0.5f);
+        g.setColour(trackCol);
+        g.fillRoundedRectangle(track, radius);
+        if (shouldDrawButtonAsHighlighted)
+        {
+            g.setColour(juce::Colours::white.withAlpha(0.06f));
+            g.fillRoundedRectangle(track, radius);
+        }
+
+        // Sliding knob
+        constexpr float pad = 2.0f;
+        const float knobD = h - 2.0f * pad;
+        const float knobX = on ? (track.getRight() - pad - knobD)
+                               : (track.getX() + pad);
+        g.setColour(juce::Colour(enabled ? 0xffeaf3fb : 0xff888888));
+        g.fillEllipse(knobX, y + pad, knobD, knobD);
+
+        // Label
+        const auto text = button.getButtonText();
+        if (text.isNotEmpty())
+        {
+            g.setColour(button.findColour(juce::ToggleButton::textColourId)
+                            .withMultipliedAlpha(enabled ? 1.0f : 0.5f));
+            g.setFont(juce::Font { juce::FontOptions(Sp3ctraTheme::kFontBtn) });
+            const int tx = static_cast<int>(w + 8.0f);
+            g.drawText(text, tx, 0, button.getWidth() - tx, button.getHeight(),
+                       juce::Justification::centredLeft, true);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Linear Slider — explicit filled/unfilled colours so the "value" portion
     // (left of thumb) is always brighter than the unfilled portion (right).
     // ─────────────────────────────────────────────────────────────────────────
@@ -141,6 +192,69 @@ public:
             g.fillEllipse(thumbX - thumbR - 2.f, trackY - thumbR - 2.f,
                           (thumbR + 2.f) * 2.f, (thumbR + 2.f) * 2.f);
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Rotary Slider — dark knob body with an accent-blue value arc + pointer.
+    // Visual language matches drawLinearSlider: track #1a1f2a, accent #4fa3e0,
+    // pointer #a0c4e8. Used by the audio-parameter knob grids.
+    // ─────────────────────────────────────────────────────────────────────────
+    void drawRotarySlider(juce::Graphics& g,
+                          int x, int y, int width, int height,
+                          float sliderPos,
+                          float rotaryStartAngle, float rotaryEndAngle,
+                          juce::Slider& slider) override
+    {
+        const auto bounds = juce::Rectangle<int>(x, y, width, height).toFloat();
+        const float radius = juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.5f - 3.0f;
+        const float cx = bounds.getCentreX();
+        const float cy = bounds.getCentreY();
+        const float angle = rotaryStartAngle + sliderPos * (rotaryEndAngle - rotaryStartAngle);
+        constexpr float arcW = 3.5f;
+
+        const juce::PathStrokeType arcStroke(
+            arcW, juce::PathStrokeType::curved, juce::PathStrokeType::rounded);
+
+        // Unfilled arc (full sweep) — very dark
+        juce::Path bgArc;
+        bgArc.addCentredArc(cx, cy, radius, radius, 0.0f,
+                            rotaryStartAngle, rotaryEndAngle, true);
+        g.setColour(juce::Colour(0xff1a1f2a));
+        g.strokePath(bgArc, arcStroke);
+
+        // Filled arc (start → value) — accent blue
+        if (slider.isEnabled() && angle > rotaryStartAngle)
+        {
+            juce::Path valArc;
+            valArc.addCentredArc(cx, cy, radius, radius, 0.0f,
+                                 rotaryStartAngle, angle, true);
+            g.setColour(juce::Colour(0xff4fa3e0));
+            g.strokePath(valArc, arcStroke);
+        }
+
+        // Knob body
+        const float knobR = radius - 5.0f;
+        g.setColour(juce::Colour(0xff22272f));
+        g.fillEllipse(cx - knobR, cy - knobR, knobR * 2.f, knobR * 2.f);
+        g.setColour(juce::Colour(0xff33373f));
+        g.drawEllipse(cx - knobR, cy - knobR, knobR * 2.f, knobR * 2.f, 1.0f);
+
+        // Hover halo
+        if (slider.isMouseOverOrDragging())
+        {
+            g.setColour(juce::Colours::white.withAlpha(0.06f));
+            g.fillEllipse(cx - knobR, cy - knobR, knobR * 2.f, knobR * 2.f);
+        }
+
+        // Pointer line — from inner radius outward, rotated to the value angle
+        juce::Path pointer;
+        pointer.startNewSubPath(0.0f, -knobR * 0.35f);
+        pointer.lineTo(0.0f, -knobR * 0.92f);
+        g.setColour(juce::Colour(slider.isEnabled() ? 0xffa0c4e8 : 0xff555a62));
+        g.strokePath(pointer,
+                     juce::PathStrokeType(2.5f, juce::PathStrokeType::curved,
+                                          juce::PathStrokeType::rounded),
+                     juce::AffineTransform::rotation(angle).translated(cx, cy));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -36,6 +36,12 @@ extern "C"
 namespace LuxSamplerConstants
 {
     constexpr int     NUM_SLOTS           = 12;
+    // Sentinel "slot" index for the SCORE module's internal playback slot.
+    // Equals NUM_SLOTS so it never collides with a real slot index. It is used
+    // ONLY as the value of activePlaySlot / startPlayCmd and to resolve the
+    // dedicated scoreSlot in FramePlayerThread — it must NEVER be used to index
+    // any of the NUM_SLOTS-sized arrays (slotState[], currentPlayHead[], …).
+    constexpr int     SCORE_SLOT          = NUM_SLOTS;
     // Max frames per slot — sized for the slot duration cap below:
     //   200 DPI sensor → ~2000 fps, 60 s × 2000 = 120 000, ×1.5 safety margin = 180 000.
     // Memory cost: lazy-allocated, ~1.87 GB per actively-used slot (sizeof(CapturedFrame)
@@ -491,11 +497,15 @@ public:
     }
     float    getSlotSpeed(int i) const noexcept
     {
+        if (i == LuxSamplerConstants::SCORE_SLOT)
+            return scoreParams.speed.load(std::memory_order_relaxed);
         if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 1.0f;
         return slotParams[i].speed.load(std::memory_order_relaxed);
     }
     LoopMode getSlotLoopMode(int i) const noexcept
     {
+        if (i == LuxSamplerConstants::SCORE_SLOT)
+            return static_cast<LoopMode>(scoreParams.loopMode.load(std::memory_order_relaxed));
         if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return LoopMode::LOOP;
         return static_cast<LoopMode>(slotParams[i].loopMode.load(std::memory_order_relaxed));
     }
@@ -571,6 +581,69 @@ public:
      *  If the slot is already PLAYING, stop it (restore passthrough).
      *  No-op if the slot is empty or currently recording. */
     void uiPlaySlot(int slotIndex) noexcept;
+
+    // =========================================================================
+    // SCORE module playback (Non-RT) — reuses FramePlayerThread via the
+    // dedicated internal scoreSlot (sentinel activePlaySlot == SCORE_SLOT).
+    // The SCORE block in CHAIN 1 plays a generated spectrogram image exactly
+    // like a sampler slot, but with its own transport (Play/Stop/Loop/Speed).
+    // =========================================================================
+    /** Convert a generated spectrogram into playable frames. ONLY the `band`
+     *  region (the part a CIS sensor would scan — see ScoreGenRenderer) is read:
+     *  each band COLUMN → one CapturedFrame.
+     *
+     *  The band's vertical axis is LINEAR in frequency over [scoreMinHz,
+     *  scoreMaxHz] (bottom = min). The synthesis maps pixel index LOGARITHMICALLY
+     *  over the instrument's range; so each output pixel is sampled from the band
+     *  at the band row whose linear frequency equals the synth's LOG frequency
+     *  for that pixel — making the reconstructed pitches faithful. Frequencies
+     *  outside the band map to white (silence).
+     *
+     *  Passing an empty band falls back to the full image; passing scoreMax<=min
+     *  falls back to a plain flipped linear resample. Non-RT — stops any score
+     *  playback first. Safe to call from the message thread. */
+    void loadScoreFramesFromImage(const juce::Image& image,
+                                  juce::Rectangle<int> band = {},
+                                  double scoreMinHz = 0.0,
+                                  double scoreMaxHz = 0.0);
+
+    /** Toggle SCORE playback: start if idle (taking over the Modulated channel
+     *  like the sampler), stop if already playing. No-op if no frames loaded. */
+    void uiPlayScore() noexcept;
+    /** Stop SCORE playback and restore live passthrough. */
+    void uiStopScore() noexcept;
+    /** True while the SCORE module is playing (drives the PLAY/STOP button + LED). */
+    bool isScorePlaying() const noexcept
+    {
+        return scorePlaying.load(std::memory_order_acquire);
+    }
+    /** True once a generated image has been loaded into the score slot. */
+    bool scoreHasContent() const noexcept { return scoreSlot.has_content; }
+    /** Number of frames (time columns) loaded into the score slot. */
+    int  getScoreFrameCount() const noexcept { return scoreSlot.frame_count; }
+    /** Current score playback head (frame index). Non-RT safe (atomic). */
+    int  getScorePlayHead() const noexcept
+    {
+        return scorePlayHead.load(std::memory_order_relaxed);
+    }
+    /** Internal: called by FramePlayerThread to publish the score play head. */
+    void notifyScorePlayHead(int head) noexcept
+    {
+        scorePlayHead.store(head, std::memory_order_relaxed);
+    }
+    void setScoreSpeed(float v) noexcept
+    {
+        scoreParams.speed.store(juce::jlimit(0.01f, 32.0f, v), std::memory_order_relaxed);
+    }
+    void setScoreLoopMode(LoopMode m) noexcept
+    {
+        scoreParams.loopMode.store(static_cast<int>(m), std::memory_order_relaxed);
+    }
+    /** Internal: called by FramePlayerThread when score playback ends on its own
+     *  (LoopMode::NONE reached the end). Non-RT. */
+    void notifyScoreStopped() noexcept { scorePlaying.store(false, std::memory_order_release); }
+    /** Internal access for FramePlayerThread to the dedicated score slot. */
+    FrameSlot& getScoreSlot() noexcept { return scoreSlot; }
 
     // =========================================================================
     // Timeline / playhead queries (Non-RT, for UI display)
@@ -778,6 +851,16 @@ private:
     };
 
     SlotPlayParams slotParams[LuxSamplerConstants::NUM_SLOTS];
+
+    // -------------------------------------------------------------------------
+    // SCORE module — dedicated internal slot + params, played by the same
+    // FramePlayerThread via the SCORE_SLOT sentinel. Independent of the 12
+    // sampler slots (never indexes the NUM_SLOTS-sized arrays).
+    // -------------------------------------------------------------------------
+    FrameSlot         scoreSlot;
+    SlotPlayParams    scoreParams;
+    std::atomic<bool> scorePlaying  { false };
+    std::atomic<int>  scorePlayHead { 0 };
 
     // Per-slot playhead atomics — written by FramePlayerThread, read by UI.
     // Per-slot playhead atomics — written by FramePlayerThread, read by UI.

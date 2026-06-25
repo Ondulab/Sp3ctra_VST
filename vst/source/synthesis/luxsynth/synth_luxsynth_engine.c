@@ -22,6 +22,7 @@
 
 #include "synth_luxsynth_engine.h"
 #include "voice_manager.h"
+#include "../../processing/lux_env_shape.h"   /* shared ADSR segment shaping */
 #include <math.h>
 #include <string.h>
 
@@ -36,7 +37,8 @@
  * ========================================================================== */
 
 static void adsr_init(AdsrEnvelope *env, float attack_ms, float decay_ms,
-                       float sustain, float release_ms, float sample_rate)
+                       float sustain, float release_ms, float sample_rate,
+                       float attack_curve, float decay_curve, float release_curve)
 {
     env->state = ADSR_STATE_IDLE;
     env->current_output = 0.0f;
@@ -55,16 +57,24 @@ static void adsr_init(AdsrEnvelope *env, float attack_ms, float decay_ms,
     env->decay_time_samples   = decay_samples;
     env->release_time_samples = release_samples;
 
+    /* Kept for compatibility (unused by the phase-based process). */
     env->attack_increment  = (attack_samples  > 0.0f) ? (1.0f / attack_samples)  : 1.0f;
     env->decay_decrement   = (decay_samples   > 0.0f) ? ((1.0f - sustain) / decay_samples) : 1.0f;
     env->release_decrement = (release_samples > 0.0f) ? (sustain / release_samples) : 1.0f;
+
+    env->attack_curve  = attack_curve;
+    env->decay_curve   = decay_curve;
+    env->release_curve = release_curve;
+    env->attack_start_level  = 0.0f;
+    env->release_start_level = 0.0f;
 }
 
 static void adsr_trigger(AdsrEnvelope *env)
 {
     env->state = ADSR_STATE_ATTACK;
     env->current_samples = 0;
-    /* Don't reset current_output to allow retriggering without click */
+    /* Shape the attack from the current level → 1 (click-free retrigger). */
+    env->attack_start_level = env->current_output;
 }
 
 static void adsr_release(AdsrEnvelope *env)
@@ -73,36 +83,63 @@ static void adsr_release(AdsrEnvelope *env)
     {
         env->state = ADSR_STATE_RELEASE;
         env->current_samples = 0;
-        /* Release decrement from current output level */
-        if (env->release_time_samples > 0.0f)
-            env->release_decrement = env->current_output / env->release_time_samples;
-        else
-            env->release_decrement = env->current_output;
+        /* Shape the release from wherever the level currently is → 0. */
+        env->release_start_level = env->current_output;
     }
 }
 
+/* Phase-based ADSR with shared lux_env_shape() curvature.
+ * curve = 0 reproduces the previous linear behaviour exactly. */
 static float adsr_process(AdsrEnvelope *env)
 {
     switch (env->state)
     {
     case ADSR_STATE_ATTACK:
-        env->current_output += env->attack_increment;
-        env->current_samples++;
-        if (env->current_output >= 1.0f)
+        if (env->attack_time_samples <= 0.0f)
         {
             env->current_output = 1.0f;
             env->state = ADSR_STATE_DECAY;
             env->current_samples = 0;
         }
+        else
+        {
+            float ph = (float)env->current_samples / env->attack_time_samples;
+            env->current_samples++;
+            if (ph >= 1.0f)
+            {
+                env->current_output = 1.0f;
+                env->state = ADSR_STATE_DECAY;
+                env->current_samples = 0;
+            }
+            else
+            {
+                const float s = lux_env_shape(ph, env->attack_curve);
+                env->current_output = env->attack_start_level
+                                    + (1.0f - env->attack_start_level) * s;
+            }
+        }
         break;
 
     case ADSR_STATE_DECAY:
-        env->current_output -= env->decay_decrement;
-        env->current_samples++;
-        if (env->current_output <= env->sustain_level)
+        if (env->decay_time_samples <= 0.0f)
         {
             env->current_output = env->sustain_level;
             env->state = ADSR_STATE_SUSTAIN;
+        }
+        else
+        {
+            float ph = (float)env->current_samples / env->decay_time_samples;
+            env->current_samples++;
+            if (ph >= 1.0f)
+            {
+                env->current_output = env->sustain_level;
+                env->state = ADSR_STATE_SUSTAIN;
+            }
+            else
+            {
+                const float s = lux_env_shape(ph, env->decay_curve);
+                env->current_output = 1.0f - (1.0f - env->sustain_level) * s;
+            }
         }
         break;
 
@@ -111,12 +148,25 @@ static float adsr_process(AdsrEnvelope *env)
         break;
 
     case ADSR_STATE_RELEASE:
-        env->current_output -= env->release_decrement;
-        env->current_samples++;
-        if (env->current_output <= 0.0f)
+        if (env->release_time_samples <= 0.0f)
         {
             env->current_output = 0.0f;
             env->state = ADSR_STATE_IDLE;
+        }
+        else
+        {
+            float ph = (float)env->current_samples / env->release_time_samples;
+            env->current_samples++;
+            if (ph >= 1.0f)
+            {
+                env->current_output = 0.0f;
+                env->state = ADSR_STATE_IDLE;
+            }
+            else
+            {
+                const float s = lux_env_shape(ph, env->release_curve);
+                env->current_output = env->release_start_level * (1.0f - s);
+            }
         }
         break;
 
@@ -222,10 +272,16 @@ int luxsynth_engine_init(LuxSynthEngine *engine, float sample_rate, int buffer_s
     engine->config.decay_ms = 100.0f;
     engine->config.sustain_level = 0.7f;
     engine->config.release_ms = 200.0f;
+    engine->config.attack_curve = 0.0f;
+    engine->config.decay_curve = 0.0f;
+    engine->config.release_curve = 0.0f;
     engine->config.filter_attack_ms = 20.0f;
     engine->config.filter_decay_ms = 150.0f;
     engine->config.filter_sustain = 0.5f;
     engine->config.filter_release_ms = 300.0f;
+    engine->config.filter_attack_curve = 0.0f;
+    engine->config.filter_decay_curve = 0.0f;
+    engine->config.filter_release_curve = 0.0f;
     engine->config.filter_cutoff = 1.0f;
     engine->config.filter_env_depth = 0.5f;
     engine->config.lfo_rate_hz = 5.0f;
@@ -399,13 +455,17 @@ int luxsynth_engine_note_on(LuxSynthEngine *engine, uint8_t note, uint8_t veloci
     adsr_init(&v->volume_env,
               engine->config.attack_ms, engine->config.decay_ms,
               engine->config.sustain_level, engine->config.release_ms,
-              engine->sample_rate);
+              engine->sample_rate,
+              engine->config.attack_curve, engine->config.decay_curve,
+              engine->config.release_curve);
     adsr_trigger(&v->volume_env);
 
     adsr_init(&v->filter_env,
               engine->config.filter_attack_ms, engine->config.filter_decay_ms,
               engine->config.filter_sustain, engine->config.filter_release_ms,
-              engine->sample_rate);
+              engine->sample_rate,
+              engine->config.filter_attack_curve, engine->config.filter_decay_curve,
+              engine->config.filter_release_curve);
     adsr_trigger(&v->filter_env);
 
     return best_idx;

@@ -41,17 +41,7 @@ SamplerSetupPanel::SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Col
       apvts(processor.getAPVTS()),
       accent(accentColour)
 {
-    // ── Enable toggle ─────────────────────────────────────────────────────
-    enableLabel.setText("LuxSampler:", juce::dontSendNotification);
-    enableLabel.setJustificationType(juce::Justification::centredRight);
-    enableLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-    addAndMakeVisible(enableLabel);
-
-    enableToggle.setButtonText("Enabled");
-    addAndMakeVisible(enableToggle);
-    enableAttachment = std::make_unique<
-        juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        apvts, "luxSamplerEnabled", enableToggle);
+    // ── Enable toggle ── moved to the rack LED + zone-3 header power switch
 
     // ── MIDI Channel ──────────────────────────────────────────────────────
     midiChannelLabel.setText("MIDI Channel:", juce::dontSendNotification);
@@ -413,11 +403,11 @@ void SamplerSetupPanel::paint(juce::Graphics& g)
     SetupUI::paintHeader(g, *this, "SAMPLER -- SETUP", accent);
 
     // Column headers for slot grid — position must match resized() exactly:
-    //   headerH(30) + 10 control rows (Enable, MIDI, Octave, MaxDur,
-    //   ExportToggle, ExportFormat, OutputDir, REC / PLAY / SAVE bindings)
-    //   * kRowStep + kHPad
+    //   headerH(30) + 9 control rows (MIDI, Octave, MaxDur, ExportToggle,
+    //   ExportFormat, OutputDir, REC / PLAY / SAVE bindings) * kRowStep + kHPad
+    //   (Enable row removed — power lives in the rack LED + zone-3 header.)
     const int titleH  = SetupUI::kHeaderH + Sp3ctraTheme::kSectionGap;
-    const int headerY = titleH + 10 * Sp3ctraTheme::kRowStep + Sp3ctraTheme::kHPad;
+    const int headerY = titleH + 9 * Sp3ctraTheme::kRowStep + Sp3ctraTheme::kHPad;
     const int headerH = 20;
 
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
@@ -461,7 +451,6 @@ void SamplerSetupPanel::resized()
         y += rowH;
     };
 
-    row(enableLabel,      enableToggle);
     row(midiChannelLabel, midiChannelCombo);
     row(octaveOffsetLabel,octaveOffsetCombo);
     row(maxDurationLabel, maxDurationSlider);

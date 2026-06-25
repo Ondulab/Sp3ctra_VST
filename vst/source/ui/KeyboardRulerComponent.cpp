@@ -164,9 +164,11 @@ void KeyboardRulerComponent::refreshSnapshot()
         {
             const LuxMaskVoiceState& vs = g_lux_mask_proc.voices[v];
             voices[v].posPx   = vs.current_pos;
-            // Approximate visible width with the configured base width — the
-            // exact per-stage bloom width is not required for the overlay.
-            voices[v].widthPx = cfg.width_base;
+            // Approximate the live band width: full-open width (% of image)
+            // scaled by the current ADSR openness.  Exact bias skew is not
+            // needed for this overlay.
+            voices[v].widthPx = cfg.filter_width_pct * 0.01f * (float) pixN
+                                  * juce::jlimit(0.0f, 1.0f, vs.envelope_level);
             voices[v].env     = vs.envelope_level;
             voices[v].note    = vs.note;
         }

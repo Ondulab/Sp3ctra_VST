@@ -22,6 +22,7 @@
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "../ui/EnvelopeEditorComponent.h"
+#include "../ui/MaskFilterEditorComponent.h"
 #include "VisualizerMode.h"
 
 class LuxMaskTabComponent : public juce::Component
@@ -32,24 +33,26 @@ public:
 
     explicit LuxMaskTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p),
+          // Alpha-only editor: the ADSR now drives the filter cutoff, so the
+          // separate width lane is gone (no width param IDs passed).
           envelopeEditor(p.getAPVTS(), juce::Colour(kAccentARGB),
                          "luxmaskAttackMs", "luxmaskDecayMs",
                          "luxmaskSustainLevel", "luxmaskReleaseMs",
-                         // Width-bloom trajectory (read-only dashed overlay)
-                         "luxmaskWidth", "luxmaskWidthAttackPx",
-                         "luxmaskWidthReleasePx")
+                         "luxmaskAttackCurve", "luxmaskDecayCurve",
+                         "luxmaskReleaseCurve"),
+          filterEditor(p.getAPVTS(), juce::Colour(kAccentARGB),
+                       "luxmaskFilterWidth", "luxmaskFilterOffset",
+                       "luxmaskFilterSlope")
     {
         auto& apvts = p.getAPVTS();
 
-        // ── Graphic ADSR editor (M5) — sliders below stay as numeric fallback
+        // ── Integrated ADSR editor — owns the value boxes too
         addAndMakeVisible(envelopeEditor);
 
-        // ── Enable toggle ──────────────────────────────────────────────
-        initLabel(enableLabel, "Enable");
-        enableToggle.setButtonText("Active");
-        addAndMakeVisible(enableToggle);
-        enableAttach.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(
-            apvts, "luxmaskEnabled", enableToggle));
+        // ── Interactive filter editor (Width / Bias / Slope + live fill) ─
+        addAndMakeVisible(filterEditor);
+
+        // ── Enable toggle ── moved to the rack LED + zone-3 header power switch
 
         // ── Background mode ────────────────────────────────────────────
         initLabel(bgLabel, "Background");
@@ -59,66 +62,10 @@ public:
         bgAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
             apvts, "luxmaskBackgroundMode", bgCombo));
 
-        // ── Coupling mode ──────────────────────────────────────────────
-        initLabel(couplingLabel, "Step Mode");
-        addAndMakeVisible(couplingCombo);
-        couplingCombo.addItem("LuxStral", 1);
-        couplingCombo.addItem("Free",     2);
-        couplingAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            apvts, "luxmaskCouplingMode", couplingCombo));
+        // ── Step Mode / px-per-semitone / PB Range ── moved to MASK SETUP ──
 
-        // ── Free pixels per semitone ───────────────────────────────────
-        initLabel(freeStepLabel, "px/semitone");
-        initSlider(freeStepSlider);
-        freeStepAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxmaskFreePixelsPerST", freeStepSlider));
-
-        // ── Pitch Bend Range ───────────────────────────────────────────
-        initLabel(pbRangeLabel, "PB Range");
-        initSlider(pbRangeSlider);
-        pbRangeAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxmaskPitchBendRange", pbRangeSlider));
-
-        // ── Width (base) ───────────────────────────────────────────────
-        // Sustain width — what the mask collapses to during ATTACK and what
-        // it grows from during RELEASE.  The two horizons below define the
-        // peak ratios at note-on and full-release.
-        initLabel(widthLabel, "Width");
-        initSlider(widthSlider);
-        widthAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxmaskWidth", widthSlider));
-
-        // ── ADSR (on mask alpha) ───────────────────────────────────────
-        initLabel(attackLabel, "Attack");
-        initSlider(attackSlider);
-        attackAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxmaskAttackMs", attackSlider));
-
-        initLabel(decayLabel, "Decay");
-        initSlider(decaySlider);
-        decayAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxmaskDecayMs", decaySlider));
-
-        initLabel(sustainLabel, "Sustain");
-        initSlider(sustainSlider);
-        sustainAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxmaskSustainLevel", sustainSlider));
-
-        initLabel(releaseLabel, "Release");
-        initSlider(releaseSlider);
-        releaseAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxmaskReleaseMs", releaseSlider));
-
-        // ── Width horizons (absolute pixel widths, fully ADSR-coupled) ──
-        initLabel(widthAttackMaxLabel, "Width @ Attack");
-        initSlider(widthAttackMaxSlider);
-        widthAttackMaxAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxmaskWidthAttackPx", widthAttackMaxSlider));
-
-        initLabel(widthReleaseMaxLabel, "Width @ Release");
-        initSlider(widthReleaseMaxSlider);
-        widthReleaseMaxAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxmaskWidthReleasePx", widthReleaseMaxSlider));
+        // ── ADSR + Filter ── both moved into graphic editors (curve/handles
+        //    + value boxes).  The ADSR output drives the filter openness.
 
         // ── Glide ──────────────────────────────────────────────────────
         initLabel(glideLabel, "Glide");
@@ -152,22 +99,16 @@ public:
 
         const juce::Colour accent (kAccentARGB);
 
-        // WIDTH section header (above row 5 = Width — Source row removed)
+        auto sectionHeader = [&](int row, const char* text)
         {
-            const int y = rowY(5) - 4;
             g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
             g.setColour(accent.withAlpha(0.55f));
-            g.drawText("--- MASK WIDTH ---", leftX_, y, leftW_, 12,
+            g.drawText(text, leftX_, rowY(row) + 2, leftW_, 12,
                        juce::Justification::centred);
-        }
-        // ADSR section header (above row 6 = Attack)
-        {
-            const int y = rowY(6) - 4;
-            g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
-            g.setColour(accent.withAlpha(0.55f));
-            g.drawText("--- ADSR / MODULATION ---", leftX_, y, leftW_, 12,
-                       juce::Justification::centred);
-        }
+        };
+
+        // Filter lives in its own graphic editor now; only MODULATION remains.
+        sectionHeader(1, "--- MODULATION ---");
     }
 
     void resized() override
@@ -185,100 +126,62 @@ public:
         { return { leftX_ + labelW + gap, rowY(row), leftW_ - labelW - gap, ch }; };
 
         // Graphic envelope editor — top of the left column (rows shifted down
-        // by kEnvHeaderH, see rowY()).
+        // by kEnvHeaderH, see rowY()).  The live filter-response strip sits
+        // right below it, mirroring the old ADSR + width two-lane layout.
         envelopeEditor.setBounds(leftX_, 4, leftW_,
-                                 EnvelopeEditorComponent::kPreferredH);
+                                 envelopeEditor.preferredHeight());
+        filterEditor.setBounds(leftX_, 4 + envelopeEditor.preferredHeight() + 4,
+                               leftW_, filterEditor.preferredHeight());
 
-        // Row 0: Enable
-        enableLabel  .setBounds(lb(0));
-        enableToggle .setBounds(cb(0).withWidth(80));
-        // Row 1: Background  (Source row removed)
-        bgLabel      .setBounds(lb(1));
-        bgCombo      .setBounds(cb(1));
-        // Row 2: Step mode
-        couplingLabel.setBounds(lb(2));
-        couplingCombo.setBounds(cb(2));
-        // Row 3: Free px/semitone
-        freeStepLabel .setBounds(lb(3));
-        freeStepSlider.setBounds(cb(3));
-        // Row 4: PB Range
-        pbRangeLabel  .setBounds(lb(4));
-        pbRangeSlider .setBounds(cb(4));
-        // [WIDTH section header drawn in paint at rowY(5)-4]
-        // Row 5: Width (base)
-        widthLabel    .setBounds(lb(5));
-        widthSlider   .setBounds(cb(5));
-        // [ADSR section header drawn in paint at rowY(6)-4]
-        // Row 6: Attack
-        attackLabel   .setBounds(lb(6));
-        attackSlider  .setBounds(cb(6));
-        // Row 7: Decay
-        decayLabel    .setBounds(lb(7));
-        decaySlider   .setBounds(cb(7));
-        // Row 8: Sustain
-        sustainLabel  .setBounds(lb(8));
-        sustainSlider .setBounds(cb(8));
-        // Row 9: Release
-        releaseLabel  .setBounds(lb(9));
-        releaseSlider .setBounds(cb(9));
-        // Row 10: Width @ Attack
-        widthAttackMaxLabel .setBounds(lb(10));
-        widthAttackMaxSlider.setBounds(cb(10));
-        // Row 11: Width @ Release
-        widthReleaseMaxLabel .setBounds(lb(11));
-        widthReleaseMaxSlider.setBounds(cb(11));
-        // Row 12: Glide
-        glideLabel    .setBounds(lb(12));
-        glideSlider   .setBounds(cb(12));
-        // Row 13: LFO Pos Rate
-        lfoPosRateLabel  .setBounds(lb(13));
-        lfoPosRateSlider .setBounds(cb(13));
-        // Row 14: LFO Pos Depth
-        lfoPosDepthLabel .setBounds(lb(14));
-        lfoPosDepthSlider.setBounds(cb(14));
-        // Row 15: Velocity
-        velCouplingLabel .setBounds(lb(15));
-        velCouplingToggle.setBounds(cb(15).withWidth(80));
+        // Row 0: Background  (Enable row removed — power lives in rack/header)
+        bgLabel      .setBounds(lb(0));
+        bgCombo      .setBounds(cb(0));
+        // [Step mode / px-per-semitone / PB Range moved to MASK SETUP]
+        // [MODULATION section header drawn in paint at row 1]
+        // Row 2: Glide
+        glideLabel    .setBounds(lb(2));
+        glideSlider   .setBounds(cb(2));
+        // Row 3: LFO Pos Rate
+        lfoPosRateLabel  .setBounds(lb(3));
+        lfoPosRateSlider .setBounds(cb(3));
+        // Row 4: LFO Pos Depth
+        lfoPosDepthLabel .setBounds(lb(4));
+        lfoPosDepthSlider.setBounds(cb(4));
+        // Row 5: Velocity
+        velCouplingLabel .setBounds(lb(5));
+        velCouplingToggle.setBounds(cb(5).withWidth(80));
     }
 
 private:
     [[maybe_unused]] Sp3ctraAudioProcessor& processor;
 
-    // Labels (no Source label — channel routing is now automatic)
-    juce::Label enableLabel, bgLabel, couplingLabel, freeStepLabel, pbRangeLabel;
-    juce::Label widthLabel;
-    juce::Label attackLabel, decayLabel, sustainLabel, releaseLabel;
-    juce::Label widthAttackMaxLabel, widthReleaseMaxLabel;
+    // Labels — ADSR labels removed (now inside the graphic editor);
+    //          Step Mode / px-per-semitone / PB Range moved to MASK SETUP.
+    juce::Label bgLabel;
     juce::Label glideLabel;
     juce::Label lfoPosRateLabel, lfoPosDepthLabel;
     juce::Label velCouplingLabel;
 
-    // Controls (no source combo — channel routing is now automatic)
-    juce::ToggleButton enableToggle, velCouplingToggle;
-    juce::ComboBox     bgCombo, couplingCombo;
-    juce::Slider       freeStepSlider, pbRangeSlider;
-    juce::Slider       widthSlider;
-    juce::Slider       attackSlider, decaySlider, sustainSlider, releaseSlider;
-    juce::Slider       widthAttackMaxSlider, widthReleaseMaxSlider;
+    // Controls — ADSR + filter controls are inside the graphic editors.
+    juce::ToggleButton velCouplingToggle;
+    juce::ComboBox     bgCombo;
     juce::Slider       glideSlider;
     juce::Slider       lfoPosRateSlider, lfoPosDepthSlider;
 
-    // Attachments (sourceAttach removed)
+    // Attachments — ADSR + filter attachments handled by the editors.
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>
-        enableAttach, velCouplingAttach;
+        velCouplingAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>
-        bgAttach, couplingAttach;
+        bgAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
-        freeStepAttach, pbRangeAttach,
-        widthAttach,
-        attackAttach, decayAttach, sustainAttach, releaseAttach,
-        widthAttackMaxAttach, widthReleaseMaxAttach,
         glideAttach,
         lfoPosRateAttach, lfoPosDepthAttach;
 
-    // Graphic ADSR editor (M5) — binds the same four envelope params as the
-    // slider rows (plus the read-only width-bloom overlay curve).
+    // Graphic ADSR editor — binds the four envelope params + per-segment curves.
     EnvelopeEditorComponent envelopeEditor;
+
+    // Interactive filter editor (Width / Bias / Slope) — sits below the ADSR.
+    MaskFilterEditorComponent filterEditor;
 
     mutable int leftX_ = 0, leftW_ = 0, rightX_ = 0, rightW_ = 0;
 
@@ -308,8 +211,12 @@ private:
         addAndMakeVisible(s);
     }
 
-    /** Vertical offset reserved for the graphic envelope editor (96 px + gap). */
-    static constexpr int kEnvHeaderH = EnvelopeEditorComponent::kPreferredH + 4;
+    /** Vertical offset reserved for the two graphic editors (ADSR + filter).
+     *  The ADSR editor is alpha-only (it drives the filter openness); the
+     *  filter shape is edited in the interactive strip below it. */
+    static constexpr int kEnvHeaderH =
+        EnvelopeEditorComponent::kPreferredH + 4
+            + MaskFilterEditorComponent::kPreferredH + 4;
 
     int rowY(int row) const noexcept
     { return kEnvHeaderH + 6 + row * (Sp3ctraTheme::kControlH + 6); }

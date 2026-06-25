@@ -35,9 +35,20 @@ static uint64_t pipeline_get_timestamp_us(void)
  * Identified by envelope_id: 0 = live, 1 = sampler.
  * ============================================================================ */
 
-#define ENVELOPE_LIVE    0
-#define ENVELOPE_SAMPLER 1
-#define ENVELOPE_COUNT   2
+/* Per-chain freeze envelopes — one held-frame state each.
+ *
+ * The two image chains are gated by their OWN transport, independent of which
+ * worker thread (live UDP / sampler player) drives the pipeline:
+ *   • Chain 1 (Source ► Pitch ► Mask ► Sampler ► LuxStral) → sampler_freeze_mode
+ *   • Chain 2 (Source ► LuxSynth ► LuxWave)                → image_freeze_mode
+ *
+ * LuxStral (Path A, Chain 1) keeps separate live/sampler held states so the
+ * live thread never corrupts the sampler hold during playback.  LuxSynth +
+ * LuxWave (Path B, Chain 2) read the raw live feed only, so a single state. */
+#define ENVELOPE_LIVE      0   /* Chain 1 — additive, live thread   */
+#define ENVELOPE_SAMPLER   1   /* Chain 1 — additive, sampler thread */
+#define ENVELOPE_CHAIN2    2   /* Chain 2 — polyphonic (LuxSynth/LuxWave) */
+#define ENVELOPE_COUNT     3
 
 typedef struct {
     float    held_notes[PREPROCESS_MAX_NOTES];
@@ -50,8 +61,9 @@ typedef struct {
 } EnvelopeState;
 
 static EnvelopeState g_envelope[ENVELOPE_COUNT] = {
-    { .prev_freeze = -1 },
-    { .prev_freeze = -1 }
+    { .prev_freeze = -1 },   /* ENVELOPE_LIVE    */
+    { .prev_freeze = -1 },   /* ENVELOPE_SAMPLER */
+    { .prev_freeze = -1 }    /* ENVELOPE_CHAIN2  */
 };
 
 /**
@@ -362,22 +374,39 @@ void pipeline_path_luxstral(
         out->additive.notes,
         &num_notes);
 
-    /* Stage 7: Freeze / Opacity / Fade envelope
+    /* Stage 7: Freeze / Opacity / Fade envelope — Path A = CHAIN 1 (LuxStral).
      *
-     * RAW upstream gate: raw_freeze_mode overrides per-stream freeze when more
-     * restrictive (HOLD > PLAY, STOP > HOLD), but ONLY for LIVE and MIX sources.
+     * Chain 1 (Source ► Pitch ► Mask ► Sampler ► LuxStral) is gated by the
+     * Chain 1 transport (sampler_freeze_mode), NEVER by the Chain 2 / live
+     * transport — independent of the placement-vs-source distinction.
      *
-     * FIX(routing): SAMPLER and SEQUENCER transports are independent of the
-     * RAW/Live transport.  Applying raw_freeze_mode to IMAGE_SOURCE_SAMPLER would
-     * silence sequencer and sampler playback whenever the RAW input is on STOP —
-     * exactly the bug described (sequencer running + RAW stopped → no sound).
-     * The sampler's own freeze_mode (set by pipeline_build_config_sampler() from
-     * sampler_freeze_mode, or overridden to 0 by FramePlayerThread when seqDriven)
-     * is the sole authority for the SAMPLER envelope.
+     *   • Sampler worker thread (envelope_id == ENVELOPE_SAMPLER):
+     *       keep config->freeze_mode.  The builder set it from
+     *       sampler_freeze_mode, and FramePlayerThread overrides it to PLAY when
+     *       the sequencer drives playback — that authority must be preserved.
+     *   • Live/idle thread (envelope_id == ENVELOPE_LIVE):
+     *       the builder put image_freeze_mode here (the old Chain 2 value).
+     *       Re-gate to sampler_freeze_mode so pausing Chain 1 freezes LuxStral
+     *       while idle, and pausing Chain 2 no longer affects it.
+     *
+     * RAW upstream gate: raw_freeze_mode overrides when more restrictive, but
+     * ONLY for non-SAMPLER sources (applying it to a playing sampler/sequencer
+     * would silence it whenever the RAW input is stopped).
      */
     {
-        int effective_freeze = config->freeze_mode;
-        int effective_fade   = config->fade_in_ms;
+        int effective_freeze;
+        int effective_fade;
+
+        if (config->envelope_id == ENVELOPE_LIVE)
+        {
+            effective_freeze = g_sp3ctra_config.sampler_freeze_mode;
+            effective_fade   = g_sp3ctra_config.sampler_fade_in_ms;
+        }
+        else
+        {
+            effective_freeze = config->freeze_mode;
+            effective_fade   = config->fade_in_ms;
+        }
 
         /* Apply RAW upstream gate only for non-SAMPLER sources */
         if (config->luxstral_path.source != IMAGE_SOURCE_SAMPLER)
@@ -441,12 +470,13 @@ void pipeline_path_luxsynth_luxwave(
     const uint8_t  *raw_r,
     const uint8_t  *raw_g,
     const uint8_t  *raw_b,
-    const PathConfig *path_cfg,
+    const PipelineConfig *config,
     PreprocessedImageData *out)
 {
     int nb_pixels = get_cis_pixels_nb();
 
-    if (raw_r == NULL || raw_g == NULL || raw_b == NULL || out == NULL)
+    if (raw_r == NULL || raw_g == NULL || raw_b == NULL ||
+        config == NULL || out == NULL)
         return;
 
     /* LuxSynth path: delegate to existing FFT pipeline */
@@ -454,15 +484,47 @@ void pipeline_path_luxsynth_luxwave(
     preprocess_luxsynth(raw_r, raw_g, raw_b, out);
 #endif
 
-    /* LuxWave path: feed LuxSynth grayscale line as wavetable source.
-     * polyphonic.grayscale is filled by preprocess_luxsynth() above.
-     * luxwave_engine_set_image_line() is a non-owning pointer assignment
-     * (O(1), RT-safe). The engine reads the data during processBlock. */
-    if (g_luxwave_engine.initialized && nb_pixels > 0)
+    /* CHAIN 2 side-effects (LuxSynth + LuxWave) — LIVE worker only.
+     *
+     * Chain 2 is the raw-live CIS path: it is gated by the Chain 2 transport
+     * (image_freeze_mode) ALONE, and its wavetable feed must come from the live
+     * frame.  The sampler worker also drives this function (to fill the additive
+     * sibling path), but with envelope_id == ENVELOPE_SAMPLER — in that case we
+     * skip the Chain 2 envelope AND the LuxWave feed so the sampler frame never
+     * gates Chain 2 nor clobbers LuxWave's wavetable.  preprocess_luxsynth()
+     * above still runs in both workers (harmless; its output is only published
+     * for Chain 2 from the live worker).
+     *
+     * Envelope operates on the grayscale only (num_notes = 0 ⇒
+     * pipeline_apply_envelope never touches the notes array). */
+    if (config->envelope_id == ENVELOPE_LIVE)
     {
-        luxwave_engine_set_image_line(&g_luxwave_engine,
-                                       out->polyphonic.grayscale,
-                                       nb_pixels);
+        int effective_freeze = g_sp3ctra_config.image_freeze_mode;
+        int effective_fade   = g_sp3ctra_config.image_fade_in_ms;
+
+        /* RAW upstream gate (more-restrictive wins) — Chain 2 always reads live */
+        int raw_freeze = g_sp3ctra_config.raw_freeze_mode;
+        if (raw_freeze > effective_freeze)
+        {
+            effective_freeze = raw_freeze;
+            effective_fade   = g_sp3ctra_config.raw_fade_in_ms;
+        }
+
+        pipeline_apply_envelope(
+            ENVELOPE_CHAIN2,
+            effective_freeze,
+            1.0f,                 /* opacity already baked into preprocess_luxsynth */
+            effective_fade,
+            NULL, 0,              /* no notes array on this path */
+            out->polyphonic.grayscale, nb_pixels);
+
+        /* LuxWave wavetable feed (RT-safe O(1) double-buffer write). */
+        if (g_luxwave_engine.initialized && nb_pixels > 0)
+        {
+            luxwave_engine_set_image_line(&g_luxwave_engine,
+                                           out->polyphonic.grayscale,
+                                           nb_pixels);
+        }
     }
 
     /* LuxWave path: direct RGB copy (kept for future photowave use) */
@@ -496,7 +558,7 @@ int pipeline_process_frame(
     /* Path B: LuxSynth + LuxWave */
     pipeline_path_luxsynth_luxwave(
         raw_r, raw_g, raw_b,
-        &config->luxsynth_luxwave_path,
+        config,
         out);
 
     return 0;
