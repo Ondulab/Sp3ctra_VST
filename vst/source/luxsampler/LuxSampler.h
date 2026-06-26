@@ -167,6 +167,11 @@ struct LuxSamplerAtomicState
     std::atomic<int>  startPlayCmd { -1 };   // slot index, -1 = no command
     std::atomic<bool> stopPlayCmd  { false };
 
+    /** Manual SCORE scrub: UI posts a target frame (≥0); FramePlayerThread snaps
+     *  the score play head to it on its next tick and disarms (exchange → -1).
+     *  -1 = no pending seek. Only consulted for the dedicated score slot. */
+    std::atomic<int>  scoreSeekHead { -1 };
+
     /** Silence-injection command — posted from RT (triggerStep(STEP_EMPTY) or
      *  rtStop()) and consumed by FramePlayerThread (Non-RT).
      *  When set, FramePlayerThread writes a full-white (255) frame to
@@ -631,6 +636,32 @@ public:
     {
         scorePlayHead.store(head, std::memory_order_relaxed);
     }
+    /** Arm a one-shot resume frame for the NEXT uiPlayScore() so the play head
+     *  survives a frame reload (e.g. live EQ re-apply) instead of restarting at
+     *  0. Pass a frame index ≥0; cleared automatically once consumed. */
+    void setScoreResumeHead(int frame) noexcept
+    {
+        scoreResumeHead.store(frame, std::memory_order_relaxed);
+    }
+    /** Internal: FramePlayerThread takes the armed resume frame (returns -1 when
+     *  none) and disarms it, so a fresh PLAY always starts from the beginning. */
+    int consumeScoreResumeHead() noexcept
+    {
+        return scoreResumeHead.exchange(-1, std::memory_order_relaxed);
+    }
+    /** Manually move the score play head to @p frame (UI scrub).
+     *  • If playing, FramePlayerThread snaps the live head there on its next tick.
+     *  • Either way, arms it as the resume point so a subsequent PLAY starts there,
+     *    and publishes it immediately so the UI play-head line follows the drag. */
+    void uiSeekScore(int frame) noexcept
+    {
+        const int n = scoreSlot.frame_count;
+        if (n <= 0) return;
+        const int f = juce::jlimit(0, n - 1, frame);
+        atomicState.scoreSeekHead.store(f, std::memory_order_release); // live seek if playing
+        scoreResumeHead.store(f, std::memory_order_relaxed);           // start here on next PLAY
+        scorePlayHead.store(f, std::memory_order_relaxed);             // reflect immediately in UI
+    }
     void setScoreSpeed(float v) noexcept
     {
         scoreParams.speed.store(juce::jlimit(0.01f, 32.0f, v), std::memory_order_relaxed);
@@ -861,6 +892,10 @@ private:
     SlotPlayParams    scoreParams;
     std::atomic<bool> scorePlaying  { false };
     std::atomic<int>  scorePlayHead { 0 };
+    // One-shot resume frame for the NEXT score play start (-1 = from beginning).
+    // Lets the UI preserve the play head across a frame reload (e.g. EQ re-apply)
+    // instead of snapping back to 0. Consumed (reset to -1) by FramePlayerThread.
+    std::atomic<int>  scoreResumeHead { -1 };
 
     // Per-slot playhead atomics — written by FramePlayerThread, read by UI.
     // Per-slot playhead atomics — written by FramePlayerThread, read by UI.

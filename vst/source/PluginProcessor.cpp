@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <juce_audio_formats/juce_audio_formats.h>   // SCORE source-audio preview
 
 // C headers still used directly by this file
 extern "C" {
@@ -48,6 +49,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{PARAM_UDP_BYTE3, 1}, "UDP Byte 3", 0, 255, 100, kHiddenInt));
     params.push_back(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID{PARAM_UDP_BYTE4, 1}, "UDP Byte 4", 0, 255, 10, kHiddenInt));
+
+    // ── Infrastructure — Device HTTP host (config.html) ──────────────────────
+    // Persistent transport param: where Sp3ctraDeviceClient reaches the device's
+    // embedded web server. Default 192.168.100.1 (the config page host).
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{PARAM_DEVICE_IP_BYTE1, 1}, "Device IP 1", 0, 255, 192, kHiddenInt));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{PARAM_DEVICE_IP_BYTE2, 1}, "Device IP 2", 0, 255, 168, kHiddenInt));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{PARAM_DEVICE_IP_BYTE3, 1}, "Device IP 3", 0, 255, 100, kHiddenInt));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{PARAM_DEVICE_IP_BYTE4, 1}, "Device IP 4", 0, 255, 1, kHiddenInt));
 
     // ── Infrastructure — Sensor / Log / Visualizer ───────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
@@ -821,6 +834,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"videoScrollEnabled", 1}, "Video Scroll Enabled",
         false, kHiddenBool));
 
+    // Transport: when true the waterfall is frozen in place (Play/Pause); the
+    // renderer drains its capture ring but performs no scroll/stamp.  "Stop"
+    // sets this true AND clears the image via requestVideoScrollClear().
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"videoScrollPaused", 1}, "Video Scroll Paused",
+        true, kHiddenBool));   // start paused — the user presses Play to run
+
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"videoScrollMode", 1}, "Video Scroll Mode",
         juce::StringArray{
@@ -864,11 +884,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"videoScrollFade", 1}, "Video Fade",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f),
         0.0f, kHiddenFloat));
-
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"videoScrollBrightness", 1}, "Video Brightness",
-        juce::NormalisableRange<float>(0.1f, 3.0f, 0.05f),
-        1.0f, kHiddenFloat.withLabel("x")));
 
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"videoInvertColor", 1}, "Video Invert Color",
@@ -1425,6 +1440,98 @@ bool Sp3ctraAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) 
 }
 #endif
 
+//==============================================================================
+// SCORE source-audio preview
+//==============================================================================
+void Sp3ctraAudioProcessor::startScorePreview(const juce::File& wav,
+                                              double startSec, double lengthSec)
+{
+    stopScorePreview();
+    if (! wav.existsAsFile()) return;
+
+    juce::AudioFormatManager fm; fm.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(wav));
+    if (reader == nullptr || reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
+        return;
+
+    const double      fileRate    = reader->sampleRate;
+    const int         srcCh       = (int) juce::jmax((juce::uint32) 1, reader->numChannels);
+    const juce::int64 startSample = juce::jlimit((juce::int64) 0, reader->lengthInSamples,
+                                                 (juce::int64) (startSec * fileRate));
+    juce::int64 numFile = reader->lengthInSamples - startSample;
+    if (lengthSec > 0.0)
+        numFile = juce::jmin(numFile, (juce::int64) (lengthSec * fileRate));
+    if (numFile <= 0) return;
+
+    const int srcLen = (int) numFile;
+    juce::AudioBuffer<float> src(juce::jmin(srcCh, 2), srcLen);
+    if (! reader->read(&src, 0, srcLen, startSample, true, true))
+        return;
+
+    // Resample (linear) to the host rate so the preview plays at correct pitch.
+    const double hostRate = (getSampleRate() > 0.0) ? getSampleRate() : fileRate;
+    const double ratio    = hostRate / fileRate;
+    const int    outLen   = juce::jmax(1, (int) std::floor((double) srcLen * ratio));
+    const int    sc       = src.getNumChannels();
+
+    juce::AudioBuffer<float> out(2, outLen);
+    for (int i = 0; i < outLen; ++i)
+    {
+        const double sp = (double) i / ratio;
+        const int    i0 = juce::jmin((int) sp, srcLen - 1);
+        const int    i1 = juce::jmin(i0 + 1, srcLen - 1);
+        const float  fr = (float) (sp - (double) i0);
+        for (int c = 0; c < 2; ++c)
+        {
+            const int   cc = juce::jmin(c, sc - 1);
+            const float a  = src.getSample(cc, i0);
+            const float b  = src.getSample(cc, i1);
+            out.setSample(c, i, a + (b - a) * fr);
+        }
+    }
+
+    {
+        juce::SpinLock::ScopedLockType sl(scorePreviewLock_);
+        scorePreviewBuf_  = std::move(out);
+        scorePreviewPos_  = 0;
+        scorePreviewRate_ = hostRate;
+    }
+    scorePreviewPosAtomic_.store(0, std::memory_order_release);
+    scorePreviewPlaying_.store(true, std::memory_order_release);
+}
+
+void Sp3ctraAudioProcessor::pauseScorePreview() noexcept
+{
+    scorePreviewPlaying_.store(false, std::memory_order_release);
+}
+
+bool Sp3ctraAudioProcessor::resumeScorePreview() noexcept
+{
+    juce::SpinLock::ScopedLockType sl(scorePreviewLock_);
+    if (scorePreviewBuf_.getNumSamples() <= 0) return false;
+    if (scorePreviewPos_ >= scorePreviewBuf_.getNumSamples())
+        scorePreviewPos_ = 0;                 // finished → restart from the top
+    scorePreviewPosAtomic_.store(scorePreviewPos_, std::memory_order_release);
+    scorePreviewPlaying_.store(true, std::memory_order_release);
+    return true;
+}
+
+void Sp3ctraAudioProcessor::stopScorePreview() noexcept
+{
+    scorePreviewPlaying_.store(false, std::memory_order_release);
+    {
+        juce::SpinLock::ScopedLockType sl(scorePreviewLock_);
+        scorePreviewPos_ = 0;
+    }
+    scorePreviewPosAtomic_.store(0, std::memory_order_release);
+}
+
+double Sp3ctraAudioProcessor::getScorePreviewPositionSec() const noexcept
+{
+    const double r = (scorePreviewRate_ > 0.0) ? scorePreviewRate_ : 48000.0;
+    return (double) scorePreviewPosAtomic_.load(std::memory_order_acquire) / r;
+}
+
 void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     rt_profiler_callback_start(&g_vst_rt_profiler);
@@ -1880,6 +1987,28 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         }
     }
 
+    // ── SCORE source preview: mix the auditioned WAV region into the output ──
+    // RT-safe: try-lock (skip this block on contention), no I/O, no allocation.
+    if (scorePreviewPlaying_.load(std::memory_order_acquire))
+    {
+        const juce::SpinLock::ScopedTryLockType sl(scorePreviewLock_);
+        if (sl.isLocked())
+        {
+            const int n  = scorePreviewBuf_.getNumSamples();
+            const int pc = scorePreviewBuf_.getNumChannels();
+            int pos = scorePreviewPos_;
+            constexpr float kPreviewGain = 0.9f;
+            for (int i = 0; i < numSamples && pos < n; ++i, ++pos)
+                for (int ch = 0; ch < totalNumOutputChannels; ++ch)
+                    buffer.addSample(ch, i,
+                        scorePreviewBuf_.getSample(juce::jmin(ch, pc - 1), pos) * kPreviewGain);
+            scorePreviewPos_ = pos;
+            scorePreviewPosAtomic_.store(pos, std::memory_order_release);
+            if (pos >= n)
+                scorePreviewPlaying_.store(false, std::memory_order_release);
+        }
+    }
+
     // Apply master volume — RT-safe: atomic read, O(N) multiply, no lock, no allocation
     if (masterVolumeParam != nullptr)
     {
@@ -2172,6 +2301,20 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
 }
 
 //==============================================================================
+// M6 Phase 2 — chain-derived source routing (message thread → C config).
+// Stores the per-synth channel and pushes it straight into g_sp3ctra_config so
+// the change is audible immediately, without waiting for the next param sync.
+void Sp3ctraAudioProcessor::setChainSourceRouting(int luxstralSrc, int luxsynthSrc) noexcept
+{
+    luxstralSrc = (luxstralSrc == 1) ? 1 : 0;   // clamp to {MODULATED, LIVE}
+    luxsynthSrc = (luxsynthSrc == 1) ? 1 : 0;
+    chainSrcLuxstral.store(luxstralSrc, std::memory_order_relaxed);
+    chainSrcLuxsynth.store(luxsynthSrc, std::memory_order_relaxed);
+    g_sp3ctra_config.luxstral_source_type = luxstralSrc;
+    g_sp3ctra_config.luxsynth_source_type = luxsynthSrc;
+}
+
+//==============================================================================
 // Apply APVTS parameters to Sp3ctraCore and global C config
 // needsSocketRestart: true = full reinit (UDP change), false = just update g_sp3ctra_config
 void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
@@ -2303,8 +2446,8 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         (int)apvts.getRawParameterValue("sfFocusOnly")->load();
 
     /* ── Image Pipeline live controls ──────────────────────────────────────── */
-    /* Always enable blob detection so the BlobVisualizerComponent gets data.   */
-    /* sfEnabled controls only the StrokeForge synthesis application.            */
+    /* Blob detection now runs only when StrokeForge is in use (enabled or       */
+    /* focus-only) — see image_pipeline.c Stage 9 — to save CPU when unused.     */
     // ── Mix balance crossfader → derived live/sampler opacities ───────────────
     // balance=0.0 → smpOp=1.0, liveOp=0.0 (full Sampler)
     // balance=0.5 → smpOp=1.0, liveOp=1.0 (equal, full darken blend)
@@ -2350,8 +2493,11 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         //         → LuxSynth + LuxWave read the raw live CIS (IMAGE_SOURCE_LIVE = 1)
         // The luxstralSource / luxsynthSource params are kept (plumbing) for the
         // future modular-chain routing, but their value no longer drives audio.
-        g_sp3ctra_config.luxstral_source_type = 0; /* Chain 1 — modulated */
-        g_sp3ctra_config.luxsynth_source_type = 1; /* Chain 2 — live       */
+        // ── M6 Phase 2 — model-driven (ChainRackComponent → setChainSourceRouting).
+        // Read the chain-derived routing instead of hardcoding; defaults (0, 1)
+        // reproduce the legacy fixed topology before any edit.
+        g_sp3ctra_config.luxstral_source_type = chainSrcLuxstral.load(std::memory_order_relaxed);
+        g_sp3ctra_config.luxsynth_source_type = chainSrcLuxsynth.load(std::memory_order_relaxed);
 
         g_sp3ctra_config.luxstral_inversion   =
             static_cast<int>(apvts.getRawParameterValue("luxstralInversion")->load());

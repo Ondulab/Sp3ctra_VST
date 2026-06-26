@@ -2,20 +2,19 @@
 
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "PluginProcessor.h"
-#include "settings/NetworkSettingsTab.h"
 #include "settings/SystemSettingsTab.h"
 
 //==============================================================================
 /**
  * @brief Settings window for Sp3ctra machine-level parameters (M5 / C9).
  *
- * Organised in 2 tabs:
- *   Network — UDP configuration, Sensor DPI
- *   System  — Log level, LuxStral worker threads, detached video window size
+ * Holds the System tab — Log level, LuxStral worker threads, detached video
+ * window size. The UDP / Sensor-DPI network configuration moved to the SP3CTRA
+ * source block's zone-3 SETUP face (so it is no longer duplicated here).
  *
  * Per-block musical settings (MIDI channel, octave, tuning, sampler slots,
  * bindings…) live in the zone-3 SETUP face of each block; the waterfall
- * display settings (brightness / invert / colour) live in the zone-4 toolbar.
+ * display settings (invert / colour) live in the zone-4 toolbar.
  *
  * All changes are automatically saved via APVTS to DAW projects.
  */
@@ -33,7 +32,6 @@ private:
     juce::TabbedComponent tabbedComponent;
 
     // Tab content (owned by TabbedComponent — raw pointers intentional)
-    NetworkSettingsTab* networkTab;
     SystemSettingsTab*  systemTab;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SettingsComponent)

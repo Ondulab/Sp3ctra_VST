@@ -679,10 +679,12 @@ void LuxSampler::loadScoreFramesFromImage(const juce::Image& image,
 
     // ── Build the per-output-pixel band row LUT ───────────────────────────────
     // The synthesis maps pixel index px∈[0,kPx) LOGARITHMICALLY to frequency over
-    // the instrument's range [synthLo, synthHi]. The score band is LINEAR over
-    // [scoreMinHz, scoreMaxHz]. For each px we find the band row whose linear
-    // frequency equals the synth's log frequency for px. Rows outside the band
-    // (or freqs outside the score range) map to -1 → white (silence).
+    // the instrument's range [synthLo, synthHi]. The score band is ALSO drawn on a
+    // LOG axis over [scoreMinHz, scoreMaxHz] (see ScoreGenRenderer — matches
+    // PhonoPaper). So this is a log→log match: when the two ranges coincide it is a
+    // straight 1:1 row-per-oscillator readout, identical to how the physical CIS
+    // scanner reads a printed strip. This keeps the live preview equal to the
+    // print+scan result. Rows outside the band map to -1 → white (silence).
     constexpr int kPx = LuxSamplerConstants::MAX_PIXELS;
     const int denom = (kPx > 1) ? (kPx - 1) : 1;
 
@@ -699,12 +701,14 @@ void LuxSampler::loadScoreFramesFromImage(const juce::Image& image,
         {
             const double t = (double) px / (double) denom;             // 0..1 (px → note)
             const double f = synthLo * std::pow(synthHi / synthLo, t); // synth log freq
-            const double lin = (f - scoreMinHz) / (scoreMaxHz - scoreMinHz);
-            if (lin < 0.0 || lin > 1.0)
+            // Position of f on the band's LOG frequency axis (matches the image).
+            const double pos = std::log(f / scoreMinHz)
+                             / std::log(scoreMaxHz / scoreMinHz);
+            if (pos < 0.0 || pos > 1.0)
                 rowLut[(size_t) px] = -1;                              // outside band → silence
             else
                 rowLut[(size_t) px] = (bandY + bandH - 1)
-                    - (int) (lin * (double) (bandH - 1) + 0.5);        // flip: low freq → bottom
+                    - (int) (pos * (double) (bandH - 1) + 0.5);        // flip: low freq → bottom
         }
         else
         {
@@ -776,6 +780,15 @@ void LuxSampler::uiPlayScore() noexcept
     atomicState.seqControlledPlay.store(false, std::memory_order_release);
     scorePlaying.store(true, std::memory_order_release);
     atomicState.activePlaySlot.store(LuxSamplerConstants::SCORE_SLOT, std::memory_order_release);
+    // Clear any stale stop request BEFORE arming playback. loadScoreFramesFromImage()
+    // (run on every GENERATE / EQ reload) calls uiStopScore(), which leaves
+    // stopPlayCmd=true; because nothing is playing then, the idle FramePlayerThread
+    // never consumes it. Without this clear the first PLAY's inner loop would see the
+    // leftover flag on its very first iteration and break out immediately — that is
+    // the "must press PLAY twice to start" bug. Sequenced-before the startPlayCmd
+    // release store below, so the thread is guaranteed to observe stopPlayCmd=false
+    // once it picks up this play command.
+    atomicState.stopPlayCmd.store(false, std::memory_order_release);
     atomicState.startPlayCmd.store(LuxSamplerConstants::SCORE_SLOT,   std::memory_order_release);
     atomicState.passthroughEnabled.store(false, std::memory_order_release);
 }
@@ -784,6 +797,7 @@ void LuxSampler::uiStopScore() noexcept
 {
     scorePlaying.store(false, std::memory_order_release);
     scorePlayHead.store(0, std::memory_order_relaxed);
+    scoreResumeHead.store(-1, std::memory_order_relaxed); // drop any armed resume
     atomicState.stopPlayCmd.store(true, std::memory_order_release);
     // Only relinquish the channel if the score actually owns it.
     if (atomicState.activePlaySlot.load(std::memory_order_relaxed)
@@ -1884,6 +1898,16 @@ void FramePlayerThread::run()
         LoopMode prevLoopMode   = sampler.getSlotLoopMode(slotToPlay);
         int      direction      = (prevLoopMode == LoopMode::INVERSE) ? -1 : 1;
         slot.play_head          = 0; // set on first range init below
+        // SCORE resume: an armed resume frame (e.g. from a live EQ re-apply that
+        // reloaded the frames) takes over the initial head so playback continues
+        // where it left off instead of snapping back to 0. One-shot — consumed
+        // here, so a fresh PLAY still starts from the beginning.
+        if (isScore)
+        {
+            const int resume = sampler.consumeScoreResumeHead();
+            if (resume > 0 && slot.frame_count > 0)
+                slot.play_head = juce::jlimit(0, slot.frame_count - 1, resume);
+        }
         bool stoppedByNoneMode  = false; // tracks if NONE loop reached end
 
         // ── Inner playback loop ───────────────────────────────────────────
@@ -1971,6 +1995,18 @@ void FramePlayerThread::run()
                 // First frame of new range is due immediately
                 lastInjectUs = currentTimeUs();
                 frameAcc     = 0.0f;
+            }
+
+            // ── Manual scrub: UI dragged the score play head elsewhere ────
+            if (isScore)
+            {
+                const int seek = state.scoreSeekHead.exchange(-1, std::memory_order_acq_rel);
+                if (seek >= 0)
+                {
+                    slot.play_head = juce::jlimit(0, slot.frame_count - 1, seek);
+                    frameAcc       = 0.0f;
+                    lastInjectUs   = currentTimeUs(); // re-anchor: inject the new column next tick
+                }
             }
 
             // ── Wait for next 1ms injection tick ─────────────────────────

@@ -24,6 +24,10 @@ VideoDisplayComponent::VideoDisplayComponent(Sp3ctraAudioProcessor& proc)
 {
     setOpaque(true);
 
+    // Adopt the current transport clear-pulse so a freshly-created view doesn't
+    // spuriously clear on its first tick (it already starts blank).
+    lastClearGen_ = processor_.getVideoScrollClearGen();
+
     // Pre-allocate ring buffer entries with empty vectors.
     // Actual pixel count is set lazily in captureCurrentFrame().
     frameRing_.resize(kRingSize);
@@ -416,7 +420,18 @@ void VideoDisplayComponent::paint(juce::Graphics& g)
 void VideoDisplayComponent::timerCallback()
 {
     if (buffersInit_ && bufW_ > 0 && bufH_ > 0)
+    {
+        // Transport "Stop": blank the waterfall when the processor's clear pulse
+        // advances (polled here so every open view reacts without a back-pointer).
+        const uint32_t gen = processor_.getVideoScrollClearGen();
+        if (gen != lastClearGen_)
+        {
+            lastClearGen_ = gen;
+            clearHistory();
+        }
+
         scrollStep();
+    }
 
     repaint();
 }
@@ -440,6 +455,17 @@ void VideoDisplayComponent::timerCallback()
 void VideoDisplayComponent::scrollStep()
 {
     auto& apvts = processor_.getAPVTS();
+
+    // ── Transport: paused → freeze in place ──────────────────────────────────
+    // Keep the current image untouched and perform no scroll/stamp.  The capture
+    // ring is still drained so it never backs up while frozen; resuming picks up
+    // from the live stream rather than replaying stale frames.
+    if (apvts.getRawParameterValue("videoScrollPaused")->load() >= 0.5f)
+    {
+        ringReadIdx_       = ringWriteIdx_.load(std::memory_order_acquire);
+        scrollAccumulator_ = 0.f;
+        return;
+    }
 
     // The history buffer is kept as a CLEAN linear waterfall (one buffer row per
     // unit of CIS time).  The artistic time-squish (Compression) and aging
@@ -533,8 +559,8 @@ void VideoDisplayComponent::scrollStep()
 
 //==============================================================================
 // buildLineImage — average the `compression` most-recent CIS frames into a
-// single 1-px-tall RGB scanline (width bufW_), applying brightness / invert /
-// colour-mode.  Drains the ring up to the newest frame to avoid overflow.
+// single 1-px-tall RGB scanline (width bufW_), applying invert / colour-mode.
+// Drains the ring up to the newest frame to avoid overflow.
 //==============================================================================
 
 bool VideoDisplayComponent::buildLineImage(juce::Image& out, int coreH, int bandH,
@@ -545,7 +571,6 @@ bool VideoDisplayComponent::buildLineImage(juce::Image& out, int coreH, int band
     bandH = juce::jmax(coreH, bandH);
 
     auto& apvts = processor_.getAPVTS();
-    const float brightness = apvts.getRawParameterValue("videoScrollBrightness")->load();
     const bool  invert     = apvts.getRawParameterValue("videoInvertColor")->load() > 0.5f;
     const bool  colorMode  = apvts.getRawParameterValue("videoColorMode")->load()  > 0.5f;
 
@@ -633,12 +658,6 @@ bool VideoDisplayComponent::buildLineImage(juce::Image& out, int coreH, int band
         int gv = (int) (accG[x] * invUsed + 0.5f);
         int b  = (int) (accB[x] * invUsed + 0.5f);
         if (invert) { r = 255 - r; gv = 255 - gv; b = 255 - b; }
-        if (brightness != 1.f)
-        {
-            r  = (int) ((float) r  * brightness);
-            gv = (int) ((float) gv * brightness);
-            b  = (int) ((float) b  * brightness);
-        }
         auto* dp = reinterpret_cast<juce::PixelRGB*>(row0 + x * dps);
         dp->setARGB(255,
                     (juce::uint8) juce::jlimit(0, 255, r),
@@ -681,4 +700,15 @@ void VideoDisplayComponent::allocateScrollBuffer()
         scrollAccumulator_ = 0.f;
         buffersInit_       = true;
     }
+}
+
+//==============================================================================
+void VideoDisplayComponent::clearHistory()
+{
+    if (historyA_.isValid())
+        historyA_.clear(historyA_.getBounds(), juce::Colours::black);
+    if (historyB_.isValid())
+        historyB_.clear(historyB_.getBounds(), juce::Colours::black);
+    curBuf_            = 0;
+    scrollAccumulator_ = 0.f;
 }

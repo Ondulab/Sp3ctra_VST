@@ -149,10 +149,11 @@ void strokeforge_analyze_frame(
     for (int i = 0; i < num_notes && i < STROKEFORGE_MAX_NOTES; i++)
         out->note_attenuation[i] = 1.0f;
 
-    /* Early exit if both modes are disabled */
-    int do_focus = g_sp3ctra_config.strokeforge_enabled
-                   || g_sp3ctra_config.strokeforge_focus_only;
-    if (!do_focus)
+    /* StrokeForge is the MASTER switch.  When OFF the whole feature is inert —
+     * no blob detection, no focus, no morph — regardless of Focus Only (which is
+     * only a modifier of the ON state).  Early-return here (before the expensive
+     * blob scan) resets morph + attenuation so no stale state leaks to the synth. */
+    if (!g_sp3ctra_config.strokeforge_enabled)
     {
         g_waveform_morph = 0.0f;
         return;
@@ -174,11 +175,11 @@ void strokeforge_analyze_frame(
         return;
     }
 
-    /* Step 2: Waveform morph from the widest blob.
-     * morph = width / morph_width_scale  (clamped to [0, 1])
-     * 0.0 = pure sine | 1.0 = pure square
-     * In focus_only mode: morph stays 0.0 (pure sine), only Gaussian focus is active. */
-    if (g_sp3ctra_config.strokeforge_enabled)
+    /* Step 2: Waveform morph from the widest blob — FULL mode only.
+     * morph = width / morph_width_scale  (clamped to [0, 1]); 0 = sine, 1 = square.
+     * Focus Only disables the morph (pure sine), keeping only the Gaussian focus —
+     * so it is meaningful precisely BECAUSE StrokeForge is enabled here. */
+    if (!g_sp3ctra_config.strokeforge_focus_only)
     {
         float widest = 0.0f;
         for (int b = 0; b < out->blob_count; b++)
@@ -193,7 +194,7 @@ void strokeforge_analyze_frame(
     }
     else
     {
-        /* focus_only mode: Gaussian focus active but waveform stays pure sine */
+        /* Focus Only: Gaussian focus active but waveform stays pure sine */
         g_waveform_morph = 0.0f;
     }
 

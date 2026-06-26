@@ -54,6 +54,11 @@ struct WavInfo
 /** Reads basic metadata of a WAV/AIFF/FLAC file (cheap, no full decode). */
 WavInfo probeWav(const juce::File& file);
 
+/** Seconds of audio that fill one page at the given writing speed + page format
+ *  (DPI cancels out). Returns 0 when writingSpeed<=0 (⇒ whole file). This is the
+ *  width of the export region the user positions over the waveform. */
+double pageWindowSeconds(const ScoreSettings& settings);
+
 /** Full pipeline: load → filter → STFT → image. `progress` (0..1, optional) is
  *  called from the calling thread; `shouldAbort` lets a worker cancel early.
  *  Never throws; returns ok=false with a message on any failure. */

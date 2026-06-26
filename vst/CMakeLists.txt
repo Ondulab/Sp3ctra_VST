@@ -61,8 +61,6 @@ target_sources(Sp3ctraVST
         source/global_stubs.c
         
         # Settings tabs (gear wheel — machine-level only since M5)
-        source/settings/NetworkSettingsTab.cpp
-        source/settings/NetworkSettingsTab.h
         source/settings/SystemSettingsTab.cpp
         source/settings/SystemSettingsTab.h
 
@@ -75,10 +73,16 @@ target_sources(Sp3ctraVST
         source/ui/ChainRackComponent.h
         source/ui/EngineAudioPanels.cpp
         source/ui/EngineAudioPanels.h
+        source/ui/AudioPanelWidgets.h
         source/ui/WaterfallColumnComponent.cpp
         source/ui/WaterfallColumnComponent.h
-        source/ui/PaletteRailComponent.h
         source/ui/SplitterBar.h
+
+        # M6 — editable chain model + drag-and-drop module catalogue
+        source/ui/ModuleCatalog.h
+        source/ui/ChainModel.cpp
+        source/ui/ChainModel.h
+        source/ui/ModuleCatalogComponent.h
 
         # M5 — musical graphical editors (keyboard ruler + draggable ADSR)
         source/ui/KeyboardRulerComponent.cpp
@@ -88,6 +92,8 @@ target_sources(Sp3ctraVST
 
         # M5 — zone-3 SETUP faces (per-block settings, ex gear-wheel tabs)
         source/ui/setup/SetupHeader.h
+        source/ui/setup/SourceSetupPanel.cpp
+        source/ui/setup/SourceSetupPanel.h
         source/ui/setup/PitchSetupPanel.cpp
         source/ui/setup/PitchSetupPanel.h
         source/ui/setup/MaskSetupPanel.cpp
@@ -193,7 +199,10 @@ target_sources(Sp3ctraVST
     PRIVATE
         # UDP communication
         source/communication/network/udp.c
-        
+
+        # Device HTTP control-plane client (config.html API)
+        source/communication/device/Sp3ctraDeviceClient.cpp
+
         # Configuration system
         source/config/config_loader.c
         

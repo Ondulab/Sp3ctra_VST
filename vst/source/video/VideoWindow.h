@@ -2,6 +2,7 @@
 
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "VideoDisplayComponent.h"
+#include <functional>
 
 class Sp3ctraAudioProcessor;
 
@@ -13,8 +14,8 @@ class Sp3ctraAudioProcessor;
  *
  * Double-clicking the display area also toggles fullscreen.
  *
- * Opened from VideoScrollTab; destroyed when the user closes it or disables
- * the "Video Scroll" toggle in the main editor.
+ * Opened from VideoScrollTab (via the zone-4 column header window icons);
+ * destroyed when the user closes it (onCloseRequested fires back to the owner).
  *
  * Window dimensions are restored from APVTS parameters "videoWindowWidth" /
  * "videoWindowHeight" on construction and saved there on close.
@@ -26,6 +27,11 @@ public:
     ~VideoWindow() override;
 
     void closeButtonPressed() override;
+
+    /** Fired when the user closes the window (title-bar [✕] or toolbar Close).
+     *  The owner (VideoScrollTab) tears the window down — deferred, so we never
+     *  delete the window from inside its own callback. */
+    std::function<void()> onCloseRequested;
 
     /** Toggle fullscreen on/off. */
     void toggleFullscreen();

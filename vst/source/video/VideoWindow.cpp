@@ -139,12 +139,9 @@ VideoWindow::~VideoWindow()
 
 void VideoWindow::closeButtonPressed()
 {
-    // Notify processor that video scroll is disabled
-    auto& apvts = processor_.getAPVTS();
-    if (auto* p = apvts.getParameter("videoScrollEnabled"))
-        p->setValueNotifyingHost(0.0f);
-
     setVisible(false);
+    if (onCloseRequested)
+        onCloseRequested();
 }
 
 void VideoWindow::toggleFullscreen()

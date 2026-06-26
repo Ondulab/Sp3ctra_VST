@@ -92,6 +92,7 @@ typedef struct ScoreSettings
     int    highPassFilterOrder; /* 1..12 (passes)                           */
     int    enableNormalization; /* 0/1 — normalise to peak 1.0 before FFT    */
     int    fftSize;             /* useful window size; 0 ⇒ auto from bps     */
+    double startTimeSec;        /* offset into the WAV where extraction begins */
 } ScoreSettings;
 
 /* Fills *s with the legacy defaults. */

@@ -446,7 +446,10 @@ void pipeline_path_luxstral(
             out->stereo.right_gains);
     }
 
-    /* Stage 9: StrokeForge blob detection */
+    /* Stage 9: StrokeForge blob detection.  Always invoked: strokeforge_analyze_frame
+     * early-returns cheaply when StrokeForge is disabled (skipping the expensive
+     * blob scan to save CPU) AND resets the morph + attenuation, so no stale state
+     * leaks downstream.  The gating therefore lives in strokeforge.c, not here. */
     {
         int sf_num_notes = nb_pixels / pixels_per_note;
         if (sf_num_notes > PREPROCESS_MAX_NOTES)

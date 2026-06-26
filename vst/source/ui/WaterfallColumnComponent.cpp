@@ -1,4 +1,5 @@
 #include "WaterfallColumnComponent.h"
+#include <cmath>
 
 //==============================================================================
 // MiniButton — header glyphs drawn with paths
@@ -29,6 +30,23 @@ void WaterfallColumnComponent::MiniButton::paintButton(juce::Graphics& g,
             const float hq = inner.getHeight() * 0.62f;
             g.drawRect(juce::Rectangle<float>(inner.getX(), inner.getBottom() - hq, wq, hq), 1.2f);
             g.drawRect(juce::Rectangle<float>(inner.getRight() - wq, inner.getY(), wq, hq), 1.2f);
+            break;
+        }
+
+        case Glyph::Fullscreen:  // ⛶ — large frame with outward corner ticks
+        {
+            g.drawRect(inner, 1.2f);
+            const float t = juce::jmin(inner.getWidth(), inner.getHeight()) * 0.30f;
+            juce::Path p;
+            // top-left corner ticks pointing out
+            p.startNewSubPath(inner.getX(), inner.getY() + t);  p.lineTo(inner.getX(), inner.getY());  p.lineTo(inner.getX() + t, inner.getY());
+            // top-right
+            p.startNewSubPath(inner.getRight() - t, inner.getY());  p.lineTo(inner.getRight(), inner.getY());  p.lineTo(inner.getRight(), inner.getY() + t);
+            // bottom-right
+            p.startNewSubPath(inner.getRight(), inner.getBottom() - t);  p.lineTo(inner.getRight(), inner.getBottom());  p.lineTo(inner.getRight() - t, inner.getBottom());
+            // bottom-left
+            p.startNewSubPath(inner.getX() + t, inner.getBottom());  p.lineTo(inner.getX(), inner.getBottom());  p.lineTo(inner.getX(), inner.getBottom() - t);
+            g.strokePath(p, juce::PathStrokeType(1.6f));
             break;
         }
 
@@ -119,6 +137,55 @@ void WaterfallColumnComponent::IconToggleButton::paintButton(juce::Graphics& g,
 }
 
 //==============================================================================
+// TransportButton — scroll transport (Play/Pause toggle, momentary Stop)
+//==============================================================================
+void WaterfallColumnComponent::TransportButton::paintButton(juce::Graphics& g,
+                                                            bool isMouseOver,
+                                                            bool isButtonDown)
+{
+    const auto b = getLocalBounds().toFloat().reduced(1.f);
+
+    const juce::Colour bg(0xff222230);
+    g.setColour(isButtonDown ? bg.brighter(0.30f)
+              : isMouseOver  ? bg.brighter(0.12f)
+              :                bg);
+    g.fillRoundedRectangle(b, 3.f);
+
+    const auto inner = b.reduced(4.5f);
+
+    if (glyph == Glyph::PlayPause)
+    {
+        const bool paused = getToggleState();
+        if (paused)
+        {
+            // ▶ play (accent green = "press to resume")
+            g.setColour(juce::Colour(0xff66cc88));
+            juce::Path tri;
+            tri.addTriangle(inner.getX(), inner.getY(),
+                            inner.getX(), inner.getBottom(),
+                            inner.getRight(), inner.getCentreY());
+            g.fillPath(tri);
+        }
+        else
+        {
+            // ⏸ pause (two bars, neutral)
+            g.setColour(isMouseOver ? juce::Colour(0xffe8eef8) : juce::Colour(0xff9aa6ba));
+            const float bw = inner.getWidth() * 0.30f;
+            g.fillRect(inner.getX(),            inner.getY(), bw, inner.getHeight());
+            g.fillRect(inner.getRight() - bw,   inner.getY(), bw, inner.getHeight());
+        }
+    }
+    else // Stop
+    {
+        // ⏹ filled square (reddish = halt + clear)
+        g.setColour(isMouseOver ? juce::Colour(0xffe0a0a0) : juce::Colour(0xffb88a8a));
+        const float s  = juce::jmin(inner.getWidth(), inner.getHeight());
+        const auto  sq = inner.withSizeKeepingCentre(s, s);
+        g.fillRoundedRectangle(sq, 1.5f);
+    }
+}
+
+//==============================================================================
 // WaterfallColumnComponent
 //==============================================================================
 WaterfallColumnComponent::WaterfallColumnComponent(Sp3ctraAudioProcessor& p)
@@ -131,12 +198,38 @@ WaterfallColumnComponent::WaterfallColumnComponent(Sp3ctraAudioProcessor& p)
     viewport.setScrollBarThickness(8);
     addAndMakeVisible(viewport);
 
-    detachBtn.setTooltip("Open detached video window");
+    // Window-open state drives the green status dot — refresh it (and repaint)
+    // whenever the detached window opens or closes (by any route, incl. its own
+    // [✕] close button).
+    videoTab->onWindowStateChanged = [this]
+    {
+        const bool open = videoTab && videoTab->isVideoWindowOpen();
+        if (open != windowOpen) { windowOpen = open; repaint(); }
+    };
+    windowOpen = videoTab->isVideoWindowOpen();
+
+    detachBtn.setTooltip("Open / close the detached video window");
     detachBtn.onClick = [this]
     {
-        if (videoTab) videoTab->openDetachedWindow();
+        if (videoTab) videoTab->toggleDetachedWindow();
     };
     addAndMakeVisible(detachBtn);
+
+    fullscreenBtn.setTooltip("Open the detached video window in full screen");
+    fullscreenBtn.onClick = [this]
+    {
+        if (videoTab) videoTab->requestFullscreenWindow();
+    };
+    addAndMakeVisible(fullscreenBtn);
+
+    // Collapsed-grip copies of the window-display controls (same actions).
+    detachGrip.setTooltip(detachBtn.getTooltip());
+    detachGrip.onClick = [this] { if (videoTab) videoTab->toggleDetachedWindow(); };
+    addChildComponent(detachGrip);
+
+    fullscreenGrip.setTooltip(fullscreenBtn.getTooltip());
+    fullscreenGrip.onClick = [this] { if (videoTab) videoTab->requestFullscreenWindow(); };
+    addChildComponent(fullscreenGrip);
 
     collapseBtn.setTooltip("Collapse column");
     collapseBtn.onClick = [this] { setCollapsed(true, true); };
@@ -146,19 +239,59 @@ WaterfallColumnComponent::WaterfallColumnComponent(Sp3ctraAudioProcessor& p)
     expandBtn.onClick = [this] { setCollapsed(false, true); };
     addChildComponent(expandBtn);
 
-    // ── Display toolbar (M5 — migrated from the gear "Video Scroll" tab) ──────
     auto& apvts = processor.getAPVTS();
 
-    brightnessSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    brightnessSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
-    brightnessSlider.setPopupDisplayEnabled(true, true, this);
-    brightnessSlider.setTooltip(
-        "Brightness multiplier applied before display.\n"
-        "1.0 = neutral, >1.0 = brighter, <1.0 = darker.");
-    addAndMakeVisible(brightnessSlider);
-    brightnessAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "videoScrollBrightness", brightnessSlider);
+    // ── Transport (play/pause/stop) — drives the scroll engine ────────────────
+    // Play/Pause is a toggle bound to "videoScrollPaused" (shared with the grip
+    // copy and any other view).  Stop freezes AND clears the waterfall.
+    auto doStop = [this]
+    {
+        if (auto* prm = processor.getAPVTS().getParameter("videoScrollPaused"))
+            prm->setValueNotifyingHost(1.0f);   // freeze
+        processor.requestVideoScrollClear();     // blank the image
+    };
 
+    // Pressing PLAY (un-pausing) must guarantee the waterfall is on screen: if
+    // the detached window is closed, open it. Covers the case where the engine
+    // reads as "playing" yet no window is showing. The play/pause buttons keep
+    // their APVTS attachment (a Listener); onClick fires AFTER it, so the toggle
+    // state / param already reflect the new value when we read it here.
+    auto openWindowWhenPlaying = [this](const juce::Button& b)
+    {
+        const bool paused = b.getToggleState();
+        if (!paused && videoTab && !videoTab->isVideoWindowOpen())
+            videoTab->openDetachedWindow();
+    };
+
+    playPauseBtn.setTooltip("Play / Pause the scroll (freezes the waterfall in place).\n"
+                            "Pressing Play also opens the video window if it is closed.");
+    addAndMakeVisible(playPauseBtn);
+    playPauseAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "videoScrollPaused", playPauseBtn);
+    playPauseBtn.onClick = [this, openWindowWhenPlaying]
+    {
+        openWindowWhenPlaying(playPauseBtn);
+    };
+
+    stopBtn.setTooltip("Stop: freeze and clear the waterfall (restart blank).");
+    stopBtn.onClick = doStop;
+    addAndMakeVisible(stopBtn);
+
+    // Collapsed-grip copies (same param / action; visible only when collapsed).
+    playPauseGrip.setTooltip(playPauseBtn.getTooltip());
+    addChildComponent(playPauseGrip);
+    playPauseGripAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "videoScrollPaused", playPauseGrip);
+    playPauseGrip.onClick = [this, openWindowWhenPlaying]
+    {
+        openWindowWhenPlaying(playPauseGrip);
+    };
+
+    stopGrip.setTooltip(stopBtn.getTooltip());
+    stopGrip.onClick = doStop;
+    addChildComponent(stopGrip);
+
+    // ── Display toggles (M5 — migrated from the gear "Video Scroll" tab) ──────
     invertBtn.setTooltip("Invert RGB values of each pixel (negative image).");
     addAndMakeVisible(invertBtn);
     invertAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
@@ -170,8 +303,8 @@ WaterfallColumnComponent::WaterfallColumnComponent(Sp3ctraAudioProcessor& p)
     colorModeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "videoColorMode", colorModeBtn);
 
-    // The column is visible by default ⇒ behave like entering the old VIDEO
-    // tab (re-opens the detached window when "videoScrollEnabled" is on).
+    // The column is visible by default. The detached window is no longer
+    // auto-opened — it opens on demand from the header window icons.
     videoTab->onTabActivated();
 }
 
@@ -183,13 +316,19 @@ void WaterfallColumnComponent::setCollapsed(bool shouldCollapse, bool notify)
 
     collapsed = shouldCollapse;
 
-    viewport   .setVisible(!collapsed);
-    detachBtn  .setVisible(!collapsed);
-    collapseBtn.setVisible(!collapsed);
-    brightnessSlider.setVisible(!collapsed);
+    viewport     .setVisible(!collapsed);
+    detachBtn    .setVisible(!collapsed);
+    fullscreenBtn.setVisible(!collapsed);
+    collapseBtn  .setVisible(!collapsed);
     invertBtn  .setVisible(!collapsed);
     colorModeBtn.setVisible(!collapsed);
+    playPauseBtn.setVisible(!collapsed);
+    stopBtn    .setVisible(!collapsed);
     expandBtn  .setVisible(collapsed);
+    playPauseGrip.setVisible(collapsed);
+    stopGrip   .setVisible(collapsed);
+    detachGrip    .setVisible(collapsed);
+    fullscreenGrip.setVisible(collapsed);
 
     if (videoTab)
     {
@@ -212,24 +351,44 @@ void WaterfallColumnComponent::resized()
 
     if (collapsed)
     {
-        expandBtn.setBounds(2, 4, W - 4, 18);
+        // Vertical grip: expand triangle, then stacked transport (▶/⏸ then ⏹),
+        // then the window-display controls (⧉ detach, ⛶ fullscreen), then (in
+        // paint) the dotted spine + centred rotated caption.
+        const int gw = juce::jmax(12, W - 6);     // square side (~18 at kGripW=24)
+        expandBtn     .setBounds(2, 4, W - 4, 18);
+        playPauseGrip .setBounds(3, 26,                gw, gw);
+        stopGrip      .setBounds(3, 26 + 1 * (gw + 4), gw, gw);
+        detachGrip    .setBounds(3, 26 + 2 * (gw + 4), gw, gw);
+        fullscreenGrip.setBounds(3, 26 + 3 * (gw + 4), gw, gw);
         return;
     }
 
-    // Header mini buttons (top-right)
+    // Header mini buttons: only the collapse button remains on the right. The
+    // centred "● VIDEO SCROLL" title is drawn in paint(); the window-display
+    // icons moved down into the control band.
     const int btn = kHeaderH - 4;
-    collapseBtn.setBounds(W - btn - 2,       2, btn, btn);
-    detachBtn  .setBounds(W - 2 * btn - 6,   2, btn, btn);
+    collapseBtn  .setBounds(W - btn - 2,    2, btn, btn);
 
-    // Display toolbar: [brightness ────] [◐] [▥]
+    // Combined control band — one bandeau grouping (left → right):
+    //   window-display [⧉][⛶] · transport [▶/⏸][⏹] CENTRED · colorimetry [◐][▥]
     {
-        const int tbBtn = kToolbarH - 6;
-        const int ty    = kHeaderH + (kToolbarH - tbBtn) / 2;
-        colorModeBtn.setBounds(W - tbBtn - 4,          ty, tbBtn, tbBtn);
-        invertBtn   .setBounds(W - 2 * tbBtn - 8,      ty, tbBtn, tbBtn);
-        brightnessSlider.setBounds(4, kHeaderH + 2,
-                                   juce::jmax(40, W - 2 * tbBtn - 16),
-                                   kToolbarH - 4);
+        const int top  = kHeaderH;
+        const int bsz  = kToolbarH - 8;
+        const int ty   = top + (kToolbarH - bsz) / 2;
+
+        // Window-display controls on the LEFT.
+        detachBtn    .setBounds(6,             ty, bsz, bsz);
+        fullscreenBtn.setBounds(6 + bsz + 4,   ty, bsz, bsz);
+
+        // Transport CENTRED (under the title).
+        const int pairW = 2 * bsz + 4;                 // play/pause + stop
+        const int px    = juce::jmax(6, (W - pairW) / 2);
+        playPauseBtn.setBounds(px,           ty, bsz, bsz);
+        stopBtn     .setBounds(px + bsz + 4, ty, bsz, bsz);
+
+        // Colorimetry toggles on the RIGHT.
+        colorModeBtn.setBounds(W - bsz - 4,      ty, bsz, bsz);
+        invertBtn   .setBounds(W - 2 * bsz - 8,  ty, bsz, bsz);
     }
 
     // Content viewport
@@ -249,44 +408,79 @@ void WaterfallColumnComponent::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colour(0xff181820));
 
+    const int W = getWidth();
+
     if (collapsed)
     {
-        // Vertical grip: dotted spine + rotated caption
+        // Vertical grip: stacked transport at the top (laid out in resized), a
+        // dotted spine, and the "VIDEO SCROLL" caption rotated and CENTRED in
+        // the column.
+        const float cx = W * 0.5f;
+        const float cy = getHeight() * 0.5f;
+
+        // Dotted spine starts below the four stacked grip buttons (transport +
+        // window-display), mirroring the layout in resized().
+        const int gw       = juce::jmax(12, W - 6);
+        const int spineTop = 26 + 3 * (gw + 4) + gw + 8;
+
         g.setColour(juce::Colour(0xff2c2c3a));
-        const float cx = getWidth() * 0.5f;
-        for (int y = 30; y < getHeight() - 12; y += 9)
-            g.fillEllipse(cx - 1.5f, (float)y, 3.f, 3.f);
+        for (int y = spineTop; y < getHeight() - 12; y += 9)
+            g.fillEllipse(cx - 1.5f, (float) y, 3.f, 3.f);
 
         g.setColour(juce::Colour(0xff7a86a0));
         g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontTiny)).boldened());
-        juce::GlyphArrangement ga;
-        ga.addLineOfText(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontTiny)).boldened(),
-                         "VIDEO SCROLL", 0.f, 0.f);
-        const auto t = juce::AffineTransform::rotation(juce::MathConstants<float>::halfPi)
-                           .translated(cx + 4.f, 36.f);
-        ga.draw(g, t);
+        g.saveState();
+        g.addTransform(juce::AffineTransform::rotation(
+            juce::MathConstants<float>::halfPi, cx, cy));
+        g.drawText("VIDEO SCROLL",
+                   juce::Rectangle<float>(cx - 130.f, cy - 9.f, 260.f, 18.f),
+                   juce::Justification::centred, false);
+        g.restoreState();
 
         g.setColour(juce::Colour(Sp3ctraTheme::kColBorder));
         g.fillRect(0, 0, 1, getHeight());
         return;
     }
 
-    // Header strip
+    // Header strip — centred "● VIDEO SCROLL" between the window icons (left)
+    // and the collapse button (right). The dot is green while the detached
+    // window is open, grey when closed.
     g.setColour(juce::Colour(0xff1f1f2c));
-    g.fillRect(0, 0, getWidth(), kHeaderH);
-    g.setColour(juce::Colour(0xff66cc88));
-    g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
-    g.drawText("VIDEO SCROLL", 8, 0, getWidth() - 60, kHeaderH,
-               juce::Justification::centredLeft, true);
+    g.fillRect(0, 0, W, kHeaderH);
+
+    {
+        const int btn   = kHeaderH - 4;
+        const int zoneX = 6;                          // left margin (icons moved to band)
+        const int zoneR = W - btn - 4;                // left edge of collapse btn
+        const int zoneW = juce::jmax(0, zoneR - zoneX);
+
+        const juce::Font font = juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened();
+        const float textW = font.getStringWidthFloat("VIDEO SCROLL");
+        const float dotD  = 8.f;
+        const float gap   = 6.f;
+        const float total = dotD + gap + textW;
+        const float startX = (float) zoneX + juce::jmax(0.f, (zoneW - total) * 0.5f);
+        const float cy     = kHeaderH * 0.5f;
+
+        g.setColour(windowOpen ? juce::Colour(0xff44cc66) : juce::Colour(0xff555a66));
+        g.fillEllipse(startX, cy - dotD * 0.5f, dotD, dotD);
+
+        g.setColour(juce::Colour(0xff66cc88));
+        g.setFont(font);
+        g.drawText("VIDEO SCROLL",
+                   juce::roundToInt(startX + dotD + gap), 0,
+                   juce::roundToInt(textW) + 4, kHeaderH,
+                   juce::Justification::centredLeft, true);
+    }
 
     g.setColour(juce::Colour(Sp3ctraTheme::kColBorder));
-    g.fillRect(0, kHeaderH - 1, getWidth(), 1);
+    g.fillRect(0, kHeaderH - 1, W, 1);
 
-    // Display toolbar strip (brightness / invert / colour mode)
-    g.setColour(juce::Colour(0xff1b1b26));
-    g.fillRect(0, kHeaderH, getWidth(), kToolbarH);
+    // Combined control band (transport + display toggles) — one bandeau.
+    g.setColour(juce::Colour(0xff181822));
+    g.fillRect(0, kHeaderH, W, kToolbarH);
     g.setColour(juce::Colour(Sp3ctraTheme::kColBorder));
-    g.fillRect(0, kHeaderH + kToolbarH - 1, getWidth(), 1);
+    g.fillRect(0, kHeaderH + kToolbarH - 1, W, 1);
 
     g.fillRect(0, 0, 1, getHeight());   // left border (separation from splitter)
 }

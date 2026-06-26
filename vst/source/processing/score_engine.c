@@ -48,6 +48,7 @@ void score_settings_defaults(ScoreSettings *s)
     s->highPassFilterOrder = 2;
     s->enableNormalization = 1;
     s->fftSize             = SCORE_DEFAULT_FFT_SIZE;  /* match PhonoPaper's 4096 window */
+    s->startTimeSec        = 0.0;
 }
 
 /*---------------------------------------------------------------------------

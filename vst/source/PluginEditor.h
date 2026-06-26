@@ -17,8 +17,9 @@
 #include "ui/KeyboardRulerComponent.h"
 #include "ui/EngineAudioPanels.h"
 #include "ui/WaterfallColumnComponent.h"
-#include "ui/PaletteRailComponent.h"
+#include "ui/ModuleCatalogComponent.h"
 #include "ui/SplitterBar.h"
+#include "ui/setup/SourceSetupPanel.h"
 #include "ui/setup/PitchSetupPanel.h"
 #include "ui/setup/MaskSetupPanel.h"
 #include "ui/setup/LuxStralSetupPanel.h"
@@ -301,16 +302,17 @@ private:
  *
  * M5: zone 3 has two faces per block — PLAY (the M4 pages) and SETUP
  * (per-block settings migrated from the gear-wheel window, same APVTS IDs).
- * A slim FaceSwitchBar above the zone-3 viewport toggles between them;
- * blocks without a setup face (SOURCE CIS) hide the bar. Selecting another
- * block always resets to PLAY.
+ * A slim FaceSwitchBar above the zone-3 viewport toggles between them; every
+ * block now has a SETUP face (the SP3CTRA source exposes the network/CIS
+ * config there). Selecting another block always resets to PLAY.
  *
  * Layout persistence (APVTS state ValueTree properties, survive reload):
  *   "editorW"/"editorH"  — window size
  *   "zone2W"/"zone4W"    — splitter positions
  *   "scrollCollapsed"    — zone 4 collapse state
  */
-class Sp3ctraAudioProcessorEditor : public juce::AudioProcessorEditor
+class Sp3ctraAudioProcessorEditor : public juce::AudioProcessorEditor,
+                                    public juce::DragAndDropContainer
 {
 public:
     Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor&);
@@ -321,6 +323,11 @@ public:
 
     void suspendVisualizer();
     void resumeVisualizer();
+
+    /** juce::DragAndDropContainer — internal module drags never export files. */
+    bool shouldDropFilesWhenDraggedExternally(
+        const juce::DragAndDropTarget::SourceDetails&,
+        juce::StringArray&, bool&) override { return false; }
 
 private:
     // ── Layout constants ──────────────────────────────────────────────────────
@@ -338,7 +345,7 @@ private:
      *  ruler offset. */
     int zonesBaseY() const noexcept { return kVisY + visHeight() + 6; }
 
-    static constexpr int kPaletteW  = PaletteRailComponent::kRailW;   // 36
+    static constexpr int kPaletteW  = ModuleCatalogComponent::kRailW;   // module catalogue rail
     static constexpr int kSplitterW = 6;
     static constexpr int kStackGap  = 12;    // gap between stacked zone-3 pages
     static constexpr int kFaceBarH  = 24;    // PLAY | SETUP switcher height
@@ -361,8 +368,15 @@ private:
 
     /** Single selection model — drives zones 1 + 2 + 3. */
     void selectBlock(ChainBlockId id);
+    /** Contextual top-bandeau panels for LUXSTRAL: GRAY always, COLOR only when
+     *  Stereo is on, BLOB only when StrokeForge is on. */
+    std::vector<VisualizerMode> luxStralVisualizerSources() const;
+    /** Re-apply the visualizer source list + Zone-1 height for the current block
+     *  (used when a LUXSTRAL toggle flips a contextual panel on/off). */
+    void refreshVisualizerSources();
 
-    /** True if the block exposes a SETUP face (everything except SOURCE CIS). */
+    /** True if the block exposes a SETUP face (every block does — the SP3CTRA
+     *  source hosts the network/CIS config there). */
     static bool blockHasSetup(ChainBlockId id) noexcept;
 
     /** Shows/hides zone-3 PLAY pages vs SETUP panels for the current
@@ -402,8 +416,9 @@ private:
     // ── Keyboard ruler strip under zone 1 (M5 — PITCH / MASK only) ───────────
     std::unique_ptr<KeyboardRulerComponent> keyboardRuler;
 
-    // ── Palette rail (M6 stub) ────────────────────────────────────────────────
-    PaletteRailComponent paletteRail;
+    // ── Module catalogue rail (M6 — drag source for the chain rack) ───────────
+    juce::Viewport         catalogViewport;
+    ModuleCatalogComponent moduleCatalog;
 
     // ── ZONE 2: chain rack (in a vertical viewport) ───────────────────────────
     juce::Viewport rackViewport;
@@ -414,7 +429,7 @@ private:
     SplitterBar splitterRight;   // zone3 | zone4
 
     // ── ZONE 3: block editor host (vertical viewport + content container) ─────
-    FaceSwitchBar   faceSwitch;        // PLAY | SETUP (hidden for SOURCE CIS)
+    FaceSwitchBar   faceSwitch;        // PLAY | SETUP (every block has a SETUP face)
     ModulePowerButton modulePowerButton; // power switch at the right of the face row
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> modulePowerAttachment;
     juce::Viewport  zone3Viewport;
@@ -428,11 +443,11 @@ private:
     std::unique_ptr<LuxSynthTabComponent> imgLuxSynthPage;
     std::unique_ptr<SamplerPageComponent> samplerPage;
     std::unique_ptr<ScoreGenTabComponent> scorePage;
-    std::unique_ptr<AudioStralPanel>      audioStralPanel;
     std::unique_ptr<AudioSynthPanel>      audioSynthPanel;
     std::unique_ptr<AudioWavePanel>       audioWavePanel;
 
     // Hosted SETUP faces (M5 — migrated gear-wheel settings, same APVTS IDs)
+    std::unique_ptr<SourceSetupPanel>     sourceSetup;   // SP3CTRA — network/CIS config
     std::unique_ptr<PitchSetupPanel>      pitchSetup;
     std::unique_ptr<MaskSetupPanel>       maskSetup;
     std::unique_ptr<LuxStralSetupPanel>   stralSetup;
