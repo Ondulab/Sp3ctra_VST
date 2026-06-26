@@ -1927,6 +1927,15 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
     if (xmlState.get() != nullptr) {
         if (xmlState->hasTagName(apvts.state.getType())) {
             apvts.replaceState(juce::ValueTree::fromXml(*xmlState));
+            // Transport must never auto-run on open: force the video scroll to
+            // STOP regardless of what the saved session had. A session stored
+            // while playing would otherwise resume scrolling the moment the
+            // plugin/window opens. setValueNotifyingHost keeps the Play/Pause
+            // button's toggle state in sync. Clearing makes it a true Stop
+            // (frozen + blank), not just a pause.
+            if (auto* p = apvts.getParameter("videoScrollPaused"))
+                p->setValueNotifyingHost(1.0f);
+            requestVideoScrollClear();
             // Restore last session path — SamplerPageComponent reads this
             // on construction to auto-reload the session.
             lastSessionPath = apvts.state
