@@ -83,6 +83,9 @@ private:
 
     // ── Bidirectional waterfall (legacy birth-line model) ─────────────────────
     void allocateScrollBuffer();
+    // Blanks both history buffers to black and resets the scroll accumulator —
+    // used by the transport "Stop" (clears the waterfall to a fresh start).
+    void clearHistory();
     // Performs one ping-pong scroll step: shifts the two zones around the birth
     // line, stamps the freshly-built scanline, and swaps the buffers.
     void scrollStep();
@@ -151,6 +154,10 @@ private:
 
     // Fractional scroll accumulator → smooth sub-pixel scroll speed.
     float scrollAccumulator_ { 0.f };
+
+    // Last "Stop" pulse seen from the processor; when it advances we blank the
+    // waterfall on the next timer tick (transport clear).
+    uint32_t lastClearGen_ { 0 };
 
     // ── Display refresh rate ──────────────────────────────────────────────────
     static constexpr int kTimerFps = 60; // raised from 30 for smoother display

@@ -5,6 +5,7 @@
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "VideoScrollMode.h"
+#include <functional>
 
 // Forward declaration — VideoWindow.h included in .cpp to avoid heavy includes
 class VideoWindow;
@@ -19,13 +20,13 @@ class VideoWindow;
  *       source selection (LuxStral / LuxSynth / AllSynth)
  *       orientation, bipolar speed, birth-line position, thickness, zoom,
  *       fade/persistence, temporal compression
- *       open/close window, fullscreen toggle
- *   - Display configuration (brightness, invert, color mode) lives in the
- *     zone-4 toolbar (WaterfallColumnComponent header area, M5); the detached
- *     window default size lives in the gear Settings window → System tab.
+ *     The detached window is opened/closed/fullscreened from the zone-4
+ *     column header (small/large window icons + green status dot).
+ *   - Display configuration (invert, color mode) lives in the zone-4 toolbar
+ *     (WaterfallColumnComponent header area, M5); the detached window default
+ *     size lives in the gear Settings window → System tab.
  *
  * APVTS parameters used here (legacy birth-line scroll model):
- *   "videoScrollEnabled"        bool  — master enable (opens/closes the VideoWindow)
  *   "videoScrollSource"         choice— LuxStral / LuxSynth-LuxWave / AllSynth
  *   "videoScrollMode"           choice— orientation (0/90/180/270 deg)
  *   "videoScrollSpeed"          float — bipolar scroll speed [-1 reverse .. +1 forward]
@@ -35,8 +36,7 @@ class VideoWindow;
  *   "videoScrollFade"           float — progressive aging w/ distance [0 .. 1]
  *   "videoScrollMaxDuration"    float — progressive time-squish [1 .. 64]
  */
-class VideoScrollTab : public juce::Component,
-                       private juce::AudioProcessorValueTreeState::Listener
+class VideoScrollTab : public juce::Component
 {
 public:
     explicit VideoScrollTab(Sp3ctraAudioProcessor& processor);
@@ -52,27 +52,33 @@ public:
     void onTabActivated();
 
     /** Opens (or re-shows) the detached VideoWindow — exposed for the
-     *  zone 4 waterfall column's [⧉] button (M4 layout). Same code path
-     *  the old VIDEO tab used internally. */
+     *  zone 4 waterfall column's [⧉] button (M4 layout). */
     void openDetachedWindow() { openVideoWindow(); }
 
-private:
-    // ── APVTS listener ───────────────────────────────────────────────────────
-    void parameterChanged(const juce::String& paramID, float newValue) override;
+    /** Toggles the detached VideoWindow: opens it if closed, closes it if open.
+     *  Driven by the column header's small-window [⧉] icon. */
+    void toggleDetachedWindow();
 
+    /** Opens the detached window (if needed) and toggles full screen.
+     *  Driven by the column header's large-window [⛶] icon. */
+    void requestFullscreenWindow();
+
+    /** True while the detached VideoWindow exists and is visible — drives the
+     *  column header's green status dot. */
+    bool isVideoWindowOpen() const noexcept;
+
+    /** Fired whenever the detached window opens or closes, so the host column
+     *  can refresh its status dot. */
+    std::function<void()> onWindowStateChanged;
+
+private:
     // ── Window management ─────────────────────────────────────────────────────
     void openVideoWindow();
     void closeVideoWindow();
-    void toggleVideoWindow();
-    void requestFullscreen();
     void updateUIFromState();
 
     // ── Reference ────────────────────────────────────────────────────────────
     Sp3ctraAudioProcessor& processor_;
-
-    // ── ACTIVATION ───────────────────────────────────────────────────────────
-    juce::ToggleButton enableToggle_ { "Enable" };
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> enableAttach_;
 
     // ── SOURCE ───────────────────────────────────────────────────────────────
     juce::ComboBox sourceCombo_;
@@ -105,10 +111,6 @@ private:
     // ── COMPRESSION (temporal — CIS frames averaged per painted line) ─────────
     juce::Slider maxDurSlider_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> maxDurAttach_;
-
-    // ── ACTION BUTTONS ───────────────────────────────────────────────────────
-    juce::TextButton windowBtn_;
-    juce::TextButton fullscreenBtn_;
 
     // ── VIDEO WINDOW (owned here) ─────────────────────────────────────────────
     std::unique_ptr<VideoWindow> videoWindow_;

@@ -28,8 +28,8 @@ public:
     ScoreSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour);
     ~ScoreSetupPanel() override;
 
-    /** Natural content height (freq-range section + 9 rows + 3 toggle rows). */
-    static constexpr int kPreferredH = 580;
+    /** Natural content height (freq-range section + dynamic-range row). */
+    static constexpr int kPreferredH = 300;
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -61,13 +61,12 @@ private:
     juce::Slider       octavesSlider;
     juce::Label        rangeInfoLabel;
 
-    // ── Image processing parameters ────────────────────────────────────────
-    juce::Label  dynLabel, gammaLabel, contrastLabel, boostLabel, hpLabel,
-                 gateLabel, pageLabel, overlapLabel, dpiLabel;
-    juce::Slider dynSlider, gammaSlider, contrastSlider, boostSlider, hpSlider,
-                 gateSlider;
-    juce::ComboBox pageCombo, overlapCombo, dpiCombo;
-    juce::ToggleButton boostToggle, hpToggle, normToggle, ditherToggle, gateToggle;
+    // ── Image processing — PhonoPaper-conforming controls only ─────────────
+    // Everything else (gamma, contrast, HF boost, high-pass, gate, dither,
+    // overlap) is fixed to PhonoPaper-neutral values and no longer exposed.
+    // Page Format / Printer DPI moved to the PLAY page (format options).
+    juce::Label  dynLabel;
+    juce::Slider dynSlider;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ScoreSetupPanel)
 };

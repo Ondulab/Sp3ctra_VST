@@ -525,11 +525,11 @@ void synth_precompute_wave_data(LuxStralEngine *eng, float *imageData, DoubleBuf
     // of each stroke plays at full volume.  The waveform morph (sine→square)
     // is controlled separately via g_waveform_morph (written by strokeforge.c).
     //
-    // Applies when either strokeforge_enabled OR strokeforge_focus_only is set:
-    //   strokeforge_enabled  = 1 → Gaussian focus + sine→square morph
-    //   strokeforge_focus_only = 1 → Gaussian focus only, pure sine (no morph)
-    if (g_sp3ctra_config.strokeforge_enabled
-        || g_sp3ctra_config.strokeforge_focus_only) {
+    // The Gaussian focus applies whenever StrokeForge is enabled (the master).
+    // Focus Only is a modifier that only toggles the morph (handled in
+    // strokeforge.c), so BOTH ON-modes apply the focus; when OFF, blob_count is
+    // 0 (strokeforge.c early-returns) so nothing is applied here.
+    if (g_sp3ctra_config.strokeforge_enabled) {
       const StrokeForgeFrameData *sf = &db->preprocessed_data.strokeforge;
       if (sf->blob_count > 0) {
         for (int n = 0; n < notes_this_worker; n++) {

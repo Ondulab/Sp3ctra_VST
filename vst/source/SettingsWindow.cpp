@@ -10,12 +10,12 @@ SettingsComponent::SettingsComponent(Sp3ctraAudioProcessor& processor)
     : tabbedComponent(juce::TabbedButtonBar::TabsAtTop)
 {
     // Machine-level settings only (M5 / C9): everything musical moved to the
-    // per-block SETUP faces (zone 3) and the waterfall toolbar (zone 4).
-    networkTab = new NetworkSettingsTab(processor);
-    systemTab  = new SystemSettingsTab(processor);
+    // per-block SETUP faces (zone 3) and the waterfall toolbar (zone 4). The
+    // UDP / Sensor-DPI network config now lives in the SP3CTRA source's SETUP
+    // face, so it is no longer shown here (avoids a duplicate).
+    systemTab = new SystemSettingsTab(processor);
 
-    tabbedComponent.addTab("Network", juce::Colours::darkgrey, networkTab, false);
-    tabbedComponent.addTab("System",  juce::Colours::darkgrey, systemTab,  false);
+    tabbedComponent.addTab("System", juce::Colours::darkgrey, systemTab, false);
 
     addAndMakeVisible(tabbedComponent);
 

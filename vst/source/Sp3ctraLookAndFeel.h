@@ -168,22 +168,23 @@ public:
         const float trackX  = (float)x;
         const float trackW  = (float)width;
         const float thumbX  = sliderPos;
+        const bool  en      = slider.isEnabled();
 
         // Unfilled portion (right of thumb) — very dark
         g.setColour(juce::Colour(0xff1a1f2a));
         g.fillRoundedRectangle(trackX, trackY - trackH * 0.5f, trackW, trackH, trackH * 0.5f);
 
-        // Filled portion (left of thumb) — accent blue
+        // Filled portion (left of thumb) — accent blue (muted when disabled)
         const float filledW = thumbX - trackX;
         if (filledW > 0.f)
         {
-            g.setColour(juce::Colour(0xff4fa3e0));
+            g.setColour(juce::Colour(en ? 0xff4fa3e0 : 0xff363f4d));
             g.fillRoundedRectangle(trackX, trackY - trackH * 0.5f, filledW, trackH, trackH * 0.5f);
         }
 
-        // Thumb — circle
+        // Thumb — circle (muted when disabled)
         constexpr float thumbR = 7.0f;
-        g.setColour(juce::Colour(0xffa0c4e8));
+        g.setColour(juce::Colour(en ? 0xffa0c4e8 : 0xff555a62));
         g.fillEllipse(thumbX - thumbR, trackY - thumbR, thumbR * 2.f, thumbR * 2.f);
 
         if (slider.isMouseOverOrDragging())

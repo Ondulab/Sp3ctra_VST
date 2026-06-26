@@ -1,0 +1,261 @@
+/**
+ * @file ScoreEqComponent.h
+ * @brief Graphic EQ curve editor for the SCORE image (PLAY page).
+ *
+ * Same visual idiom as the PITCH ADSR editor (EnvelopeEditorComponent): a dark
+ * rounded panel with a draggable accent curve and node handles. Here the X axis
+ * is FREQUENCY (logarithmic, like the instrument's oscillator bank) and the Y
+ * axis is GAIN in dB (±kGainRange, 0 dB at the vertical centre).
+ *
+ * It edits the GENERATED IMAGE, never the source WAV: the host queries
+ * gainDbAtFreq() per image row and shifts that row's darkness by gain/dynRange.
+ * One draggable node sits on each octave boundary of the current range.
+ */
+#pragma once
+
+#include <juce_gui_basics/juce_gui_basics.h>
+#include <vector>
+#include <cmath>
+#include <functional>
+#include "../UITheme.h"
+
+class ScoreEqComponent : public juce::Component
+{
+public:
+    static constexpr int   kPreferredH = 150;
+    static constexpr float kGainRange  = 24.0f;   // ± dB
+
+    explicit ScoreEqComponent(juce::Colour accentColour) : accent(accentColour)
+    {
+        setRange(65.41, 16744.04);
+    }
+
+    /** Called whenever the curve changes (drag / reset). */
+    std::function<void()> onChange;
+
+    /** Rebuild the octave node grid for a new frequency span (resets gains). */
+    void setRange(double minHz, double maxHz)
+    {
+        if (minHz <= 0.0 || maxHz <= minHz) return;
+        minF = minHz; maxF = maxHz;
+        const int oct = juce::jmax(1, (int) std::lround(std::log2(maxF / minF)));
+        freqs.clear();
+        for (int k = 0; k <= oct; ++k)
+            freqs.push_back(minF * std::pow(2.0, (double) k));
+        gains.assign(freqs.size(), 0.0f);
+        repaint();
+    }
+
+    /** Reset every band to 0 dB. */
+    void reset()
+    {
+        std::fill(gains.begin(), gains.end(), 0.0f);
+        repaint();
+        if (onChange) onChange();
+    }
+
+    bool isFlat() const noexcept
+    {
+        for (float g : gains) if (std::abs(g) > 0.01f) return false;
+        return true;
+    }
+
+    /** True while a node is being dragged — host defers the heavy image reapply. */
+    bool isDragging() const noexcept { return dragging != -1; }
+
+    /** Gain (dB) at an arbitrary frequency — linear interpolation in log-freq. */
+    float gainDbAtFreq(double hz) const noexcept
+    {
+        if (freqs.size() < 2) return 0.0f;
+        if (hz <= freqs.front()) return gains.front();
+        if (hz >= freqs.back())  return gains.back();
+        for (size_t i = 0; i + 1 < freqs.size(); ++i)
+        {
+            if (hz <= freqs[i + 1])
+            {
+                const double t = std::log(hz / freqs[i]) / std::log(freqs[i + 1] / freqs[i]);
+                return (float) (gains[i] + t * (gains[i + 1] - gains[i]));
+            }
+        }
+        return gains.back();
+    }
+
+    //==========================================================================
+    void paint(juce::Graphics& g) override
+    {
+        auto bf = getLocalBounds().toFloat();
+        g.setColour(juce::Colour(0xff20202a));
+        g.fillRoundedRectangle(bf.reduced(0.5f), 4.0f);
+        g.setColour(accent.withAlpha(0.25f));
+        g.drawRoundedRectangle(bf.reduced(0.5f), 4.0f, 1.0f);
+
+        const auto plot = plotArea();
+
+        // Horizontal gain grid: 0 dB centre (brighter) + ±12 / ±24.
+        for (int db = -24; db <= 24; db += 12)
+        {
+            const float y = gainToY(db, plot);
+            g.setColour(db == 0 ? juce::Colour(0x22ffffff) : juce::Colour(0x10ffffff));
+            g.drawHorizontalLine((int) y, plot.getX(), plot.getRight());
+            g.setColour(accent.withAlpha(0.35f));
+            g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
+            g.drawText((db > 0 ? "+" : "") + juce::String(db),
+                       (int) plot.getX() + 2, (int) y - 6, 26, 11,
+                       juce::Justification::left, false);
+        }
+
+        // Vertical octave grid + Hz labels.
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
+        for (size_t i = 0; i < freqs.size(); ++i)
+        {
+            const float x = freqToX(freqs[i], plot);
+            g.setColour(juce::Colour(0x0cffffff));
+            g.drawVerticalLine((int) x, plot.getY(), plot.getBottom());
+            if (i == 0 || i + 1 == freqs.size() || (i % 2 == 0))
+            {
+                const double f = freqs[i];
+                const juce::String lbl = (f >= 1000.0)
+                    ? juce::String(f / 1000.0, f >= 10000.0 ? 0 : 1) + "k"
+                    : juce::String((int) std::lround(f));
+                g.setColour(accent.withAlpha(0.4f));
+                g.drawText(lbl, (int) x - 16, (int) plot.getBottom() + 1, 32, 10,
+                           juce::Justification::centred, false);
+            }
+        }
+
+        // Curve + filled area to the 0 dB line.
+        juce::Path curve, fill;
+        const float y0 = gainToY(0.0f, plot);
+        for (size_t i = 0; i < freqs.size(); ++i)
+        {
+            const float x = freqToX(freqs[i], plot);
+            const float y = gainToY(gains[i], plot);
+            if (i == 0) { curve.startNewSubPath(x, y); fill.startNewSubPath(x, y0); fill.lineTo(x, y); }
+            else        { curve.lineTo(x, y); fill.lineTo(x, y); }
+        }
+        if (!freqs.empty())
+        {
+            fill.lineTo(freqToX(freqs.back(), plot), y0);
+            fill.closeSubPath();
+        }
+        g.setColour(accent.withAlpha(0.12f));
+        g.fillPath(fill);
+        g.setColour(accent.withAlpha(0.9f));
+        g.strokePath(curve, juce::PathStrokeType(1.6f));
+
+        // Node handles (ADSR style).
+        for (size_t i = 0; i < freqs.size(); ++i)
+        {
+            const float x = freqToX(freqs[i], plot);
+            const float y = gainToY(gains[i], plot);
+            const bool active = ((int) i == hovered || (int) i == dragging);
+            const float rad = 4.5f;
+            if (active)
+            {
+                g.setColour(accent.withAlpha(0.25f));
+                g.fillEllipse(x - rad - 2.5f, y - rad - 2.5f, 2 * (rad + 2.5f), 2 * (rad + 2.5f));
+            }
+            g.setColour(active ? accent.brighter(0.3f) : juce::Colour(0xff20202a));
+            g.fillEllipse(x - rad, y - rad, 2 * rad, 2 * rad);
+            g.setColour(active ? juce::Colours::white : accent.withAlpha(0.9f));
+            g.drawEllipse(x - rad, y - rad, 2 * rad, 2 * rad, 1.4f);
+        }
+
+        // Title + hint.
+        g.setColour(accent.withAlpha(0.75f));
+        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontTiny)).boldened());
+        g.drawText("IMAGE EQ", (int) plot.getX(), (int) bf.getY() + 2, 80, 10,
+                   juce::Justification::left, false);
+        if (isFlat())
+        {
+            g.setColour(juce::Colour(0xff55606f));
+            g.drawText("drag to shape  ·  double-click to reset",
+                       plot.getRight() - 220, (int) bf.getY() + 2, 220, 10,
+                       juce::Justification::right, false);
+        }
+    }
+
+    void mouseMove(const juce::MouseEvent& e) override
+    {
+        const int h = nodeAt(e.position);
+        if (h != hovered) { hovered = h; repaint(); }
+    }
+    void mouseExit(const juce::MouseEvent&) override
+    {
+        if (hovered != -1) { hovered = -1; repaint(); }
+    }
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        dragging = nearestNodeByX(e.position);
+        if (e.getNumberOfClicks() >= 2 && dragging >= 0)
+        {
+            gains[(size_t) dragging] = 0.0f;
+            repaint();
+            if (onChange) onChange();
+            return;
+        }
+        applyDrag(e);
+    }
+    void mouseDrag(const juce::MouseEvent& e) override { applyDrag(e); }
+    void mouseUp(const juce::MouseEvent&) override
+    {
+        if (dragging != -1) { dragging = -1; repaint(); }
+    }
+
+private:
+    juce::Rectangle<float> plotArea() const
+    {
+        return getLocalBounds().toFloat().reduced(6.0f).withTrimmedTop(12.0f).withTrimmedBottom(12.0f);
+    }
+    float freqToX(double hz, juce::Rectangle<float> p) const
+    {
+        const double t = std::log(hz / minF) / std::log(maxF / minF);
+        return p.getX() + (float) t * p.getWidth();
+    }
+    float gainToY(float db, juce::Rectangle<float> p) const
+    {
+        return p.getCentreY() - (db / kGainRange) * (p.getHeight() * 0.5f);
+    }
+    float yToGain(float y, juce::Rectangle<float> p) const
+    {
+        const float g = (p.getCentreY() - y) / (p.getHeight() * 0.5f) * kGainRange;
+        return juce::jlimit(-kGainRange, kGainRange, g);
+    }
+    int nearestNodeByX(juce::Point<float> pt) const
+    {
+        const auto p = plotArea();
+        int best = -1; float bd = 1e9f;
+        for (size_t i = 0; i < freqs.size(); ++i)
+        {
+            const float dx = std::abs(freqToX(freqs[i], p) - pt.x);
+            if (dx < bd) { bd = dx; best = (int) i; }
+        }
+        return best;
+    }
+    int nodeAt(juce::Point<float> pt) const
+    {
+        const auto p = plotArea();
+        for (size_t i = 0; i < freqs.size(); ++i)
+        {
+            const float x = freqToX(freqs[i], p), y = gainToY(gains[i], p);
+            if (pt.getDistanceFrom({ x, y }) <= 11.0f) return (int) i;
+        }
+        return -1;
+    }
+    void applyDrag(const juce::MouseEvent& e)
+    {
+        if (dragging < 0) return;
+        gains[(size_t) dragging] = yToGain(e.position.y, plotArea());
+        hovered = dragging;
+        repaint();
+        if (onChange) onChange();
+    }
+
+    juce::Colour accent;
+    double minF = 65.41, maxF = 16744.04;
+    std::vector<double> freqs;
+    std::vector<float>  gains;
+    int hovered = -1, dragging = -1;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ScoreEqComponent)
+};

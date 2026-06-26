@@ -1,23 +1,21 @@
 /**
  * @file ChainRackComponent.h
- * @brief ZONE 2 — vertical chain rack (M4 four-zone shell).
+ * @brief ZONE 2 — editable vertical chain rack (M6 drag & drop).
  *
- * Shows the two image chains as stacked block lists:
+ * Renders N chains from a ChainModel as stacked block lists. Modules are
+ * dragged in from the left ModuleCatalogComponent and reordered / moved /
+ * removed by dragging existing blocks. Placement rules (one source per chain,
+ * no duplicate type per chain, order matters) live in ChainModel::canInsert.
  *
- *   CHAIN 1                      CHAIN 2
- *     SOURCE CIS                   SOURCE CIS
- *     PITCH  ⇅  MASK  (order =     ♪ LUXSYNTH
- *       "chainInsertOrder")        ♪ LUXWAVE
- *     SAMPLER
- *     SCORE
- *     ♪ LUXSTRAL
+ * Each block carries an identity colour, a 3-state LED (● active / ◐ idle /
+ * ○ off, refreshed at 10 Hz) and is clickable: clicking fires onBlockSelected
+ * so the editor drives the single selection model (zone 1 view + zone 3 editor).
  *
- * Each block carries an identity colour, a 3-state LED
- * (● active / ◐ enabled-but-idle / ○ disabled, refreshed at 10 Hz) and is
- * clickable: clicking fires onBlockSelected so the editor can drive the
- * single selection model (zone 1 view + zone 3 editor).
+ * Selection is tracked internally per instance (Uuid) so duplicate types across
+ * chains highlight correctly; the editor-facing API stays ChainBlockId-keyed.
  *
- * The topology is FIXED for now — M6 makes it editable (palette drag & drop).
+ * The model's only Phase-1 audio effect is projecting module presence onto the
+ * existing APVTS enable params + chainInsertOrder (see applyModelToParams).
  */
 #pragma once
 
@@ -25,28 +23,30 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "ModuleCatalog.h"
+#include "ChainModel.h"
 #include <functional>
+#include <memory>
+#include <set>
 #include <vector>
 
 //==============================================================================
-/** Identifies one block of the (fixed) two-chain topology. */
+/** Editor-facing selection key (compatibility shim over ModuleType + chain).
+ *  Chain1Source / Chain2Source distinguish the source's chain so the editor's
+ *  zone-1 view (Modulated vs Live) and SOURCES transport keep working. */
 enum class ChainBlockId
 {
-    Chain1Source = 0,   ///< CHAIN 1 — SOURCE CIS
-    Pitch,              ///< CHAIN 1 — PITCH insert
-    Mask,               ///< CHAIN 1 — MASK insert
-    Sampler,            ///< CHAIN 1 — SAMPLER
-    Score,              ///< CHAIN 1 — SCORE (playable spectrogram)
-    LuxStral,           ///< CHAIN 1 — ♪ LUXSTRAL engine
-    Chain2Source,       ///< CHAIN 2 — SOURCE CIS
-    LuxSynth,           ///< CHAIN 2 — ♪ LUXSYNTH engine
-    LuxWave             ///< CHAIN 2 — ♪ LUXWAVE engine
+    Chain1Source = 0, Pitch, Mask, Sampler, Score, LuxStral,
+    Chain2Source, LuxSynth, LuxWave
 };
+
+/** Maps a selection key to its module type (sources → Sp3ctra). */
+ModuleType chainBlockToModuleType(ChainBlockId id) noexcept;
 
 //==============================================================================
 class ChainRackComponent : public juce::Component,
-                           private juce::Timer,
-                           private juce::AudioProcessorValueTreeState::Listener
+                           public juce::DragAndDropTarget,
+                           private juce::Timer
 {
 public:
     explicit ChainRackComponent(Sp3ctraAudioProcessor& p);
@@ -55,13 +55,15 @@ public:
     /** Fired when the user clicks a block (selection is owned by the editor). */
     std::function<void(ChainBlockId)> onBlockSelected;
 
-    /** Identity colour of a block — single source of truth for the rack,
-     *  the zone-3 PLAY/SETUP switcher and the SETUP-face headers (M5). */
+    /** Fired after a model mutation so the editor can re-run layoutZones()
+     *  (the rack's preferred height changed). Persistence + the audio-param
+     *  bridge are handled internally. */
+    std::function<void()> onModelChanged;
+
+    /** Identity colour of a block — shared with the zone-3 switcher + headers. */
     static juce::Colour blockColour(ChainBlockId id) noexcept;
 
-    /** APVTS enable/device-on parameter that powers a block on/off — shared by
-     *  the rack's clickable LED and the zone-3 header power toggle. Returns an
-     *  empty string for blocks that have no enable switch (SOURCE CIS, SCORE). */
+    /** APVTS enable/device-on parameter that powers a block on/off ("" = none). */
     static juce::String enableParamId(ChainBlockId id) noexcept;
 
     /** Updates the highlighted block (called back by the editor). */
@@ -72,135 +74,130 @@ public:
 
     void paint(juce::Graphics& g) override;
     void resized() override;
+    void mouseUp(const juce::MouseEvent& e) override;   // header × + "+ CHAIN" row
+
+    //── juce::DragAndDropTarget ───────────────────────────────────────────────
+    bool isInterestedInDragSource(const SourceDetails&) override;
+    void itemDragEnter(const SourceDetails&) override;
+    void itemDragMove (const SourceDetails&) override;
+    void itemDragExit (const SourceDetails&) override;
+    void itemDropped  (const SourceDetails&) override;
 
 private:
     //==========================================================================
     enum class LedState { Off, Idle, Active };
 
+    //── One block = one ModuleInstance ────────────────────────────────────────
     class BlockComponent : public juce::Component,
                            public juce::SettableTooltipClient
     {
     public:
-        BlockComponent(ChainBlockId idIn, const juce::String& nameIn, juce::Colour colourIn)
-            : id(idIn), name(nameIn), colour(colourIn)
+        BlockComponent(ModuleType t, juce::Uuid uidIn)
+            : type(t), uid(uidIn), name(moduleDisplayName(t)),
+              colour(moduleColour(t)), enableParam(moduleEnableParam(t))
         {
             setRepaintsOnMouseActivity(true);
         }
 
-        std::function<void(ChainBlockId)> onClick;       ///< click the body → select
-        std::function<void()>             onToggleEnable; ///< click the LED  → power on/off
+        std::function<void(juce::Uuid)> onClick;        ///< body → select
+        std::function<void()>           onToggleEnable; ///< LED → power on/off
+        std::function<void(juce::Uuid)> onRemove;       ///< × → remove from chain
 
-        /** APVTS enable param for this block ("" = no power switch). When set,
-         *  the LED dot becomes a clickable power button. */
-        juce::String enableParam;
+        ModuleType   getType()        const noexcept { return type; }
+        juce::Uuid   getUuid()        const noexcept { return uid; }
+        juce::String getEnableParam() const noexcept { return enableParam; }
 
-        ChainBlockId getId() const noexcept { return id; }
-
-        void setLed(LedState s)       { if (led != s)      { led = s;        repaint(); } }
-        void setSelected(bool sel)    { if (selected != sel){ selected = sel; repaint(); } }
+        void setLed(LedState s)    { if (led != s)       { led = s;        repaint(); } }
+        void setSelected(bool sel) { if (selected != sel) { selected = sel; repaint(); } }
 
         void paint(juce::Graphics& g) override;
-
-        void mouseUp(const juce::MouseEvent& e) override
-        {
-            if (! e.mouseWasClicked())
-                return;
-            if (enableParam.isNotEmpty() && dotBounds().contains(e.position) && onToggleEnable)
-                onToggleEnable();
-            else if (onClick)
-                onClick(id);
-        }
-
-        void mouseMove(const juce::MouseEvent& e) override
-        {
-            const bool over = enableParam.isNotEmpty() && dotBounds().contains(e.position);
-            if (over != overDot)
-            {
-                overDot = over;
-                setMouseCursor(over ? juce::MouseCursor::PointingHandCursor
-                                    : juce::MouseCursor::NormalCursor);
-                repaint();
-            }
-        }
-
-        void mouseExit(const juce::MouseEvent&) override
-        {
-            if (overDot)
-            {
-                overDot = false;
-                setMouseCursor(juce::MouseCursor::NormalCursor);
-                repaint();
-            }
-        }
+        void mouseDown(const juce::MouseEvent& e) override;
+        void mouseDrag(const juce::MouseEvent& e) override;
+        void mouseUp  (const juce::MouseEvent& e) override;
+        void mouseMove(const juce::MouseEvent& e) override;
+        void mouseExit(const juce::MouseEvent&) override;
 
     private:
-        /** Hit/draw rect of the LED dot (generous square for easy clicking). */
-        juce::Rectangle<float> dotBounds() const
-        {
-            const auto b = getLocalBounds().toFloat().reduced(2.f);
-            const float r = 9.f;
-            return { b.getRight() - 11.f - r, b.getCentreY() - r, 2 * r, 2 * r };
-        }
+        juce::Rectangle<float> dotBounds()   const;  ///< LED hit/draw rect
+        juce::Rectangle<float> closeBounds() const;  ///< × hit/draw rect (hover)
 
-        ChainBlockId id;
+        ModuleType   type;
+        juce::Uuid   uid;
         juce::String name;
         juce::Colour colour;
+        juce::String enableParam;
         LedState     led      { LedState::Off };
         bool         selected { false };
         bool         overDot  { false };
+        bool         overClose{ false };
+        bool         dragging { false };
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(BlockComponent)
     };
 
-    /** Small ⇅ button drawn with paths (no font dependency). */
-    class SwapOrderButton : public juce::Button
-    {
-    public:
-        SwapOrderButton() : juce::Button("swapInsertOrder") {}
-        void paintButton(juce::Graphics& g, bool isMouseOver, bool isButtonDown) override;
-        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SwapOrderButton)
-    };
+    //── Layout bookkeeping (built in resized, used for paint + hit-testing) ───
+    struct Slot  { int chainIdx; int moduleIdx; juce::Rectangle<int> bounds; };
+    struct Band  { int chainIdx; int headerY; int topY; int bottomY; bool empty; };
+    struct DropTarget { int chainIdx; int index; bool valid; bool newChain; };
 
     //==========================================================================
-    void timerCallback() override;                                    // 10 Hz LED refresh
-    void parameterChanged(const juce::String& paramID, float) override;
+    void timerCallback() override;        // 10 Hz LED refresh
 
-    void toggleInsertOrder();
+    void rebuild();                       // (re)create block components from model
+    void mutateAndRefresh(bool notifySelection); // after a model change: rebuild + bridge + persist + relayout
+    void scheduleRefresh(bool notifySelection);  // defer mutateAndRefresh to the next tick (lifetime-safe)
+
+    void loadModelFromState();            // read apvts.state child "CHAINS"
+    void persistModel();                  // write it back
+    void applyModelToParams(const std::set<ModuleType>& prevActive); // enable params + order bridge
+
     void toggleEnable(const juce::String& paramId);
-    bool isMaskFirst() const;
-    void updateLeds();
+    void removeInstance(const juce::Uuid& id);
 
-    /** Blocks of each chain in current display order (Pitch/Mask may swap). */
-    std::vector<BlockComponent*> chain1Order();
-    std::vector<BlockComponent*> chain2Order();
-    std::vector<BlockComponent*> toolsOrder();
+    void updateLeds();
+    LedState ledFor(ModuleType type) const;
+
+    void selectInstance(const juce::Uuid& id, bool notify);
+    juce::Uuid   firstInstanceId() const;
+    ChainBlockId instanceToBlockId(ModuleType type, int chainIdx) const noexcept;
+
+    DropTarget computeDrop(juce::Point<int> localPos, ModuleType type,
+                           const juce::Uuid* movingId) const;
+    void updateDropFromDetails(const SourceDetails&);
+
+    //── Geometry helpers ──────────────────────────────────────────────────────
+    juce::Rectangle<int> addChainRowBounds() const { return addRowRect; }
 
     //==========================================================================
     Sp3ctraAudioProcessor& processor;
 
-    BlockComponent srcABlock, pitchBlock, maskBlock, samplerBlock, stralBlock;
-    BlockComponent srcBBlock, synthBlock, waveBlock;
-    BlockComponent scoreBlock;
-    SwapOrderButton swapBtn;
+    ChainModel model;
+    std::vector<std::unique_ptr<BlockComponent>> blocks;   // one per ModuleInstance
 
-    // Source-activity tracking (UDP feed advancing → LED active)
+    std::set<ModuleType> activeTypes;     // last-known presence set (param-bridge diff)
+    juce::Uuid           selectedId;      // currently highlighted instance
+
+    // Source-activity tracking (UDP feed advancing → source LED active)
     juce::uint64 lastLinesSeen { 0 };
     LedState     sourceLed     { LedState::Idle };
 
-    // Vertical positions of the group headers (set in resized, used in paint)
-    int header1Y { 0 };
-    int header2Y { 0 };
-    int header3Y { -1 };  // TOOLS (-1 = hidden / empty section)
+    // Layout map + drag indicator state
+    std::vector<Slot>    slots;
+    std::vector<Band>    bands;
+    juce::Rectangle<int> addRowRect;
+    bool        dragActive { false };
+    DropTarget  dropTarget { -1, 0, false, false };
 
     // ── Geometry ──────────────────────────────────────────────────────────────
-    static constexpr int kTopPad   = 6;
-    static constexpr int kPadX     = 8;
-    static constexpr int kHeaderH  = 18;
-    static constexpr int kBlockH   = 32;
-    static constexpr int kBlockGap = 12;   // connector arrow lives here
-    static constexpr int kSwapGap  = 22;   // wider gap between PITCH and MASK (⇅ button)
-    static constexpr int kChainGap = 18;
-    static constexpr int kBottomPad= 8;
+    static constexpr int kTopPad    = 6;
+    static constexpr int kPadX      = 8;
+    static constexpr int kHeaderH   = 18;
+    static constexpr int kBlockH    = 32;
+    static constexpr int kBlockGap  = 12;   // connector arrow lives here
+    static constexpr int kChainGap  = 18;
+    static constexpr int kEmptyH    = 30;   // empty-chain drop zone height
+    static constexpr int kAddRowH   = 26;   // "+ CHAIN" row
+    static constexpr int kBottomPad = 8;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ChainRackComponent)
 };

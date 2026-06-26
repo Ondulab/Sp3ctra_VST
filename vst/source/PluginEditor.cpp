@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "IconPaths.h"
+#include "ui/ScrollWheelGuard.h"
 
 //==============================================================================
 Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& p)
@@ -18,12 +19,17 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     keyboardRuler = std::make_unique<KeyboardRulerComponent>(audioProcessor);
     addChildComponent(keyboardRuler.get());
 
-    // ── PALETTE rail (far left — static stub until M6 drag & drop) ────────────
-    addAndMakeVisible(paletteRail);
+    // ── MODULE CATALOGUE rail (far left — drag source for the chain rack) ─────
+    catalogViewport.setViewedComponent(&moduleCatalog, false);
+    catalogViewport.setScrollBarsShown(true, false);
+    catalogViewport.setScrollBarThickness(8);
+    addAndMakeVisible(catalogViewport);
 
     // ── ZONE 2: chain rack inside a vertical viewport ─────────────────────────
     chainRack = std::make_unique<ChainRackComponent>(audioProcessor);
     chainRack->onBlockSelected = [this](ChainBlockId id) { selectBlock(id); };
+    // A chain edit changes the rack's preferred height → re-run the zone layout.
+    chainRack->onModelChanged  = [this] { layoutZones(); };
     rackViewport.setViewedComponent(chainRack.get(), false);
     rackViewport.setScrollBarsShown(true, false);
     rackViewport.setScrollBarThickness(8);
@@ -40,6 +46,14 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     pitchPage       = std::make_unique<LuxPitchTabComponent>(audioProcessor);
     maskPage        = std::make_unique<LuxMaskTabComponent>(audioProcessor);
     imgLuxStralPage = std::make_unique<LuxStralTabComponent>(audioProcessor);
+    // Stereo / StrokeForge toggles flip contextual top-bandeau panels (COLOR /
+    // BLOB) on/off.  Defer to the next message tick so the APVTS attachment has
+    // committed the new value before we re-read it; SafePointer guards teardown.
+    imgLuxStralPage->onVisualizerSourcesChanged = [this]
+    {
+        juce::Component::SafePointer<Sp3ctraAudioProcessorEditor> sp(this);
+        juce::MessageManager::callAsync([sp] { if (sp != nullptr) sp->refreshVisualizerSources(); });
+    };
     imgLuxSynthPage = std::make_unique<LuxSynthTabComponent>(audioProcessor);
 
     zone3Content.addChildComponent(sourcesPage.get());
@@ -56,17 +70,18 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     scorePage = std::make_unique<ScoreGenTabComponent>(audioProcessor);
     zone3Content.addChildComponent(scorePage.get());
 
-    // Engine audio panels — the former SYNTH AUDIOSTRAL/AUDIOSYNTH/AUDIOWAVE
-    // sub-pages, repackaged as components (same params & attachments).
-    audioStralPanel = std::make_unique<AudioStralPanel>(audioProcessor);
+    // Engine audio panels — the former SYNTH AUDIOSYNTH/AUDIOWAVE sub-pages,
+    // repackaged as components (same params & attachments).  AUDIOSTRAL is now
+    // part of the LUXSTRAL module page (imgLuxStralPage) itself.
     audioSynthPanel = std::make_unique<AudioSynthPanel>(audioProcessor);
     audioWavePanel  = std::make_unique<AudioWavePanel>(audioProcessor);
-    zone3Content.addChildComponent(audioStralPanel.get());
     zone3Content.addChildComponent(audioSynthPanel.get());
     zone3Content.addChildComponent(audioWavePanel.get());
 
     // SETUP faces (M5) — per-block settings migrated from the gear-wheel
     // window (same params & attachments), accent-matched to the chain rack.
+    sourceSetup  = std::make_unique<SourceSetupPanel>(
+        audioProcessor, ChainRackComponent::blockColour(ChainBlockId::Chain1Source));
     pitchSetup   = std::make_unique<PitchSetupPanel>(
         audioProcessor, ChainRackComponent::blockColour(ChainBlockId::Pitch));
     maskSetup    = std::make_unique<MaskSetupPanel>(
@@ -81,6 +96,7 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         audioProcessor, ChainRackComponent::blockColour(ChainBlockId::Sampler));
     scoreSetup   = std::make_unique<ScoreSetupPanel>(
         audioProcessor, ChainRackComponent::blockColour(ChainBlockId::Score));
+    zone3Content.addChildComponent(sourceSetup.get());
     zone3Content.addChildComponent(pitchSetup.get());
     zone3Content.addChildComponent(maskSetup.get());
     zone3Content.addChildComponent(stralSetup.get());
@@ -89,8 +105,8 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     zone3Content.addChildComponent(samplerSetup.get());
     zone3Content.addChildComponent(scoreSetup.get());
 
-    // PLAY | SETUP face switcher (above the zone-3 viewport; hidden when the
-    // selected block has no setup face — i.e. SOURCE CIS).
+    // PLAY | SETUP face switcher (above the zone-3 viewport). Every block now
+    // has a SETUP face — the SP3CTRA source hosts the network/CIS config there.
     faceSwitch.onFaceChanged = [this](bool setup)
     {
         setupFace = setup;
@@ -159,6 +175,10 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     const int w = juce::jlimit(kMinW, kMaxW, (int) state.getProperty("editorW", kDefaultW));
     const int h = juce::jlimit(kMinH, kMaxH, (int) state.getProperty("editorH", kDefaultH));
     setSize(w, h);
+
+    // Scrolling a panel should never nudge the knob/slider under the cursor:
+    // disable wheel-driven value changes on every Slider in the editor tree.
+    Sp3ctraUI::disableSliderScrollWheel(*this);
 }
 
 Sp3ctraAudioProcessorEditor::~Sp3ctraAudioProcessorEditor()
@@ -168,11 +188,11 @@ Sp3ctraAudioProcessorEditor::~Sp3ctraAudioProcessorEditor()
 }
 
 //==============================================================================
-bool Sp3ctraAudioProcessorEditor::blockHasSetup(ChainBlockId id) noexcept
+bool Sp3ctraAudioProcessorEditor::blockHasSetup(ChainBlockId) noexcept
 {
-    // Every block has a SETUP face except the sources (SOURCE CIS).
-    return id != ChainBlockId::Chain1Source
-        && id != ChainBlockId::Chain2Source;
+    // Every block has a SETUP face — the SP3CTRA source hosts the network/CIS
+    // configuration there (formerly the gear-wheel Network tab).
+    return true;
 }
 
 //==============================================================================
@@ -189,13 +209,14 @@ void Sp3ctraAudioProcessorEditor::applyZone3Visibility()
     if (maskPage)        maskPage       ->setVisible(play && id == ChainBlockId::Mask);
     if (samplerPage)     samplerPage    ->setVisible(play && id == ChainBlockId::Sampler);
     if (imgLuxStralPage) imgLuxStralPage->setVisible(play && id == ChainBlockId::LuxStral);
-    if (audioStralPanel) audioStralPanel->setVisible(play && id == ChainBlockId::LuxStral);
     if (imgLuxSynthPage) imgLuxSynthPage->setVisible(play && id == ChainBlockId::LuxSynth);
     if (audioSynthPanel) audioSynthPanel->setVisible(play && id == ChainBlockId::LuxSynth);
     if (audioWavePanel)  audioWavePanel ->setVisible(play && id == ChainBlockId::LuxWave);
     if (scorePage)       scorePage      ->setVisible(play && id == ChainBlockId::Score);
 
     // ── SETUP face: the per-block settings panel ──────────────────────────────
+    if (sourceSetup)  sourceSetup ->setVisible(setupFace && (id == ChainBlockId::Chain1Source
+                                                          || id == ChainBlockId::Chain2Source));
     if (pitchSetup)   pitchSetup  ->setVisible(setupFace && id == ChainBlockId::Pitch);
     if (maskSetup)    maskSetup   ->setVisible(setupFace && id == ChainBlockId::Mask);
     if (samplerSetup) samplerSetup->setVisible(setupFace && id == ChainBlockId::Sampler);
@@ -247,9 +268,7 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
             sources = { VisualizerMode::MODULATED };
             break;
         case ChainBlockId::LuxStral:
-            sources = { VisualizerMode::SPCTR_GRAY,
-                        VisualizerMode::SPCTR_COLOR,
-                        VisualizerMode::SPCTR_BLOB };
+            sources = luxStralVisualizerSources();
             break;
         case ChainBlockId::LuxSynth:
             sources = { VisualizerMode::SYNTH_GRAY,
@@ -323,6 +342,39 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
     layoutZones();   // face-bar visibility changes the zone-3 viewport bounds
     zone3Viewport.setViewPosition(0, 0);
 
+    repaint();
+}
+
+//==============================================================================
+std::vector<VisualizerMode>
+Sp3ctraAudioProcessorEditor::luxStralVisualizerSources() const
+{
+    // Contextual top-bandeau panels.  GRAY (the additive base) is always shown;
+    // COLOR appears only when Stereo is on (colour-temperature extraction drives
+    // the per-oscillator panning); BLOB appears only when StrokeForge is on.
+    // When a panel is hidden its computation is skipped too — see image_pipeline.c
+    // Stage 8 (pan, gated on stereo) and Stage 9 (blob, gated on StrokeForge).
+    auto& apvts = audioProcessor.getAPVTS();
+    std::vector<VisualizerMode> s { VisualizerMode::SPCTR_GRAY };
+    if (apvts.getRawParameterValue("luxstralStereoEnable")->load() > 0.5f)
+        s.push_back(VisualizerMode::SPCTR_COLOR);
+    if (apvts.getRawParameterValue("sfEnabled")->load() > 0.5f)
+        s.push_back(VisualizerMode::SPCTR_BLOB);
+    return s;
+}
+
+//==============================================================================
+void Sp3ctraAudioProcessorEditor::refreshVisualizerSources()
+{
+    if (selectedBlock != ChainBlockId::LuxStral)
+        return;  // only LUXSTRAL has contextual (toggle-driven) panels
+
+    const auto sources = luxStralVisualizerSources();
+    visPanelCount_ = juce::jmax(1, static_cast<int>(sources.size()));
+    if (cisVisualizer)
+        cisVisualizer->setActiveSources(sources);
+
+    layoutZones();   // panel count drives ZONE 1 height → reflow zones 2/3/4
     repaint();
 }
 
@@ -415,8 +467,10 @@ void Sp3ctraAudioProcessorEditor::layoutZones()
     const int zonesY = zonesTopY();
     const int zonesH = juce::jmax(0, H - zonesY - zone5H);
 
-    // ── Palette rail (fixed) ──────────────────────────────────────────────────
-    paletteRail.setBounds(0, zonesY, kPaletteW, zonesH);
+    // ── Module catalogue rail (fixed width, far left; scrolls if tall) ────────
+    catalogViewport.setBounds(0, zonesY, kPaletteW, zonesH);
+    const int catW = juce::jmax(40, kPaletteW - catalogViewport.getScrollBarThickness());
+    moduleCatalog.setSize(catW, juce::jmax(moduleCatalog.preferredHeight(), zonesH));
 
     // ── Zone widths (clamped so zone 3 keeps at least kZone3MinW) ────────────
     const bool collapsed   = waterfallColumn->isCollapsed();
@@ -514,7 +568,7 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
                 top = scoreSetup.get();   topMinH = ScoreSetupPanel::kPreferredH;    break;
             case ChainBlockId::Chain1Source:
             case ChainBlockId::Chain2Source:
-                break;   // these blocks have no SETUP face (switcher hidden)
+                top = sourceSetup.get();  topMinH = SourceSetupPanel::kPreferredH;    break;
         }
     }
     else
@@ -531,8 +585,7 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
             case ChainBlockId::Sampler:
                 top = samplerPage.get();     topMinH = 560; break;
             case ChainBlockId::LuxStral:
-                top = imgLuxStralPage.get(); topMinH = 380;
-                bottom = audioStralPanel.get(); bottomH = AudioStralPanel::kPreferredH;
+                top = imgLuxStralPage.get(); topMinH = LuxStralTabComponent::kPreferredH;
                 break;
             case ChainBlockId::LuxSynth:
                 top = imgLuxSynthPage.get(); topMinH = 400;
@@ -588,7 +641,10 @@ void Sp3ctraAudioProcessorEditor::persistLayoutProps()
 void Sp3ctraAudioProcessorEditor::openSettings()
 {
     if (!settingsWindow)
+    {
         settingsWindow = std::make_unique<SettingsWindow>(audioProcessor);
+        Sp3ctraUI::disableSliderScrollWheel(*settingsWindow);
+    }
     settingsWindow->setVisible(true);
     settingsWindow->toFront(true);
 }

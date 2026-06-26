@@ -73,63 +73,10 @@ ScoreSetupPanel::ScoreSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
     rangeInfoLabel.setColour(juce::Label::textColourId, juce::Colours::grey);
     addAndMakeVisible(rangeInfoLabel);
 
-    // ── Image processing parameters ──────────────────────────────────────
-    initLabel(dynLabel,      "Dynamic Range (dB)");
-    initLabel(gammaLabel,    "Gamma");
-    initLabel(contrastLabel, "Contrast");
-    initLabel(boostLabel,    "HF Boost Alpha");
-    initLabel(hpLabel,       "High-Pass Cutoff (Hz)");
-    initLabel(gateLabel,     "Gate Threshold");
-
-    initSlider(dynSlider,      20.0, 120.0,  1.0,  settings.dynamicRangeDB);
-    initSlider(gammaSlider,    0.2, 3.0,     0.05, settings.gammaCorrection);
-    initSlider(contrastSlider, 0.5, 4.0,     0.05, settings.contrastFactor);
-    initSlider(boostSlider,    0.0, 1.0,     0.01, settings.highBoostAlpha);
-    initSlider(hpSlider,       20.0, 1000.0, 1.0,  settings.highPassCutoffFreq);
-    initSlider(gateSlider,     0.0, 0.9,     0.01, settings.noiseGateThreshold);
-
-    dynSlider.onValueChange      = [this] { settings.dynamicRangeDB     = dynSlider.getValue();      };
-    gammaSlider.onValueChange    = [this] { settings.gammaCorrection    = gammaSlider.getValue();    };
-    contrastSlider.onValueChange = [this] { settings.contrastFactor     = contrastSlider.getValue(); };
-    boostSlider.onValueChange    = [this] { settings.highBoostAlpha     = boostSlider.getValue();    };
-    hpSlider.onValueChange       = [this] { settings.highPassCutoffFreq = hpSlider.getValue();       };
-    gateSlider.onValueChange     = [this] { settings.noiseGateThreshold = gateSlider.getValue();     };
-
-    initLabel(pageLabel, "Page Format");
-    pageCombo.addItem("A4 Portrait", 1);
-    pageCombo.addItem("A3 Landscape", 2);
-    pageCombo.setSelectedId(settings.pageFormat == 1 ? 2 : 1, juce::dontSendNotification);
-    pageCombo.onChange = [this] { settings.pageFormat = (pageCombo.getSelectedId() == 2) ? 1 : 0; };
-    addAndMakeVisible(pageCombo);
-
-    initLabel(overlapLabel, "Overlap");
-    overlapCombo.addItem("Low",    1);
-    overlapCombo.addItem("Medium", 2);
-    overlapCombo.addItem("High",   3);
-    overlapCombo.setSelectedId(settings.overlapPreset + 1, juce::dontSendNotification);
-    overlapCombo.onChange = [this]
-    { settings.overlapPreset = juce::jlimit(0, 2, overlapCombo.getSelectedId() - 1); };
-    addAndMakeVisible(overlapCombo);
-
-    initLabel(dpiLabel, "Printer DPI");
-    for (int d : { 200, 300, 400, 600, 800 })
-        dpiCombo.addItem(juce::String(d), d);
-    dpiCombo.setSelectedId((int) settings.printerDpi, juce::dontSendNotification);
-    dpiCombo.onChange = [this]
-    { settings.printerDpi = (double) juce::jmax(72, dpiCombo.getSelectedId()); };
-    addAndMakeVisible(dpiCombo);
-
-    initToggle(boostToggle,  "HF Boost",   settings.enableHighBoost != 0);
-    initToggle(hpToggle,     "High-Pass",  settings.enableHighPassFilter != 0);
-    initToggle(normToggle,   "Normalize",  settings.enableNormalization != 0);
-    initToggle(ditherToggle, "Dither",     settings.enableDithering != 0);
-    initToggle(gateToggle,   "Noise Gate", settings.enableNoiseGate != 0);
-
-    boostToggle.onClick  = [this] { settings.enableHighBoost      = boostToggle.getToggleState()  ? 1 : 0; };
-    hpToggle.onClick     = [this] { settings.enableHighPassFilter = hpToggle.getToggleState()     ? 1 : 0; };
-    normToggle.onClick   = [this] { settings.enableNormalization  = normToggle.getToggleState()   ? 1 : 0; };
-    ditherToggle.onClick = [this] { settings.enableDithering      = ditherToggle.getToggleState() ? 1 : 0; };
-    gateToggle.onClick   = [this] { settings.enableNoiseGate      = gateToggle.getToggleState()   ? 1 : 0; };
+    // ── Image processing — only the PhonoPaper-conforming Dynamic Range ────
+    initLabel(dynLabel, "Dynamic Range (dB)");
+    initSlider(dynSlider, 20.0, 120.0, 1.0, settings.dynamicRangeDB);
+    dynSlider.onValueChange = [this] { settings.dynamicRangeDB = dynSlider.getValue(); };
 
     refreshFreqControls();
     startTimerHz(5);   // mirror live LuxStral values while not in manual mode
@@ -254,32 +201,6 @@ void ScoreSetupPanel::resized()
 
     area.removeFromTop(Sp3ctraTheme::kRowGap);   // small breather
 
-    // ── Image processing ──
-    labelled(dynLabel,      dynSlider);
-    labelled(gammaLabel,    gammaSlider);
-    labelled(contrastLabel, contrastSlider);
-    labelled(boostLabel,    boostSlider);
-    labelled(hpLabel,       hpSlider);
-    labelled(gateLabel,     gateSlider);
-    labelled(pageLabel,     pageCombo);
-    labelled(overlapLabel,  overlapCombo);
-    labelled(dpiLabel,      dpiCombo);
-
-    const int colW = juce::jmin(160, (area.getWidth() - Sp3ctraTheme::kGap) / 2);
-    {
-        auto r = row();
-        boostToggle.setBounds(r.removeFromLeft(colW));
-        r.removeFromLeft(Sp3ctraTheme::kGap);
-        hpToggle.setBounds(r.removeFromLeft(colW));
-    }
-    {
-        auto r = row();
-        normToggle.setBounds(r.removeFromLeft(colW));
-        r.removeFromLeft(Sp3ctraTheme::kGap);
-        ditherToggle.setBounds(r.removeFromLeft(colW));
-    }
-    {
-        auto r = row();
-        gateToggle.setBounds(r.removeFromLeft(colW));
-    }
+    // ── Image processing (PhonoPaper-conforming) ──
+    labelled(dynLabel, dynSlider);
 }

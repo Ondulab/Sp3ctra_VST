@@ -29,18 +29,16 @@ namespace
     {
         int top, secH, secG, step, ch, secExtra, btnExtra;
         int labelW, ctrlX, ctrlW;
-        int yEnable;
         int secSrc, ySource;
         int secScroll, yMode, ySpeed, yLinePos;
         int secDisplay, yThickness, yZoom, yFade, yCompress;
-        int secWin, yButtons;
     };
 
     VScrollLayout computeLayout(int width, int height)
     {
         // Natural (un-scaled) full height of the stack, used as the reference
         // point — below this the layout compresses; above it, it sits at top.
-        constexpr float kFullH = 556.0f;
+        constexpr float kFullH = 420.0f;
         const float f = juce::jlimit(0.5f, 1.0f, (float) height / kFullH);
         auto S = [f](int v) { return juce::roundToInt((float) v * f); };
 
@@ -60,8 +58,10 @@ namespace
         L.ctrlX  = kHP + L.labelW + kGap;
         L.ctrlW  = juce::jmax(70, width - kHP - L.ctrlX);     // fill to right edge
 
-        L.yEnable    = L.top + L.secH + L.secG;
-        L.secSrc     = L.yEnable + L.step + L.secExtra;
+        // SOURCE heading sits at the top of the scrollable control stack — the
+        // window controls (open/close/fullscreen + status dot) live in the
+        // column header above this viewport, not here.
+        L.secSrc     = L.top + L.secExtra;
         L.ySource    = L.secSrc + L.step;
         // SCROLL: heading + Mode, Speed, Line Pos
         L.secScroll  = L.secSrc + 2 * L.step + L.secExtra;
@@ -74,8 +74,6 @@ namespace
         L.yZoom      = L.secDisplay + 2 * L.step;
         L.yFade      = L.secDisplay + 3 * L.step;
         L.yCompress  = L.secDisplay + 4 * L.step;
-        L.secWin     = L.secDisplay + 5 * L.step + L.secExtra;
-        L.yButtons   = L.secWin + L.step;
         return L;
     }
 } // namespace
@@ -85,13 +83,6 @@ VideoScrollTab::VideoScrollTab(Sp3ctraAudioProcessor& processor)
     : processor_(processor)
 {
     auto& apvts = processor_.getAPVTS();
-
-    // ── Enable ────────────────────────────────────────────────────────────────
-    enableToggle_.setTooltip("Enable video scroll window.");
-    addAndMakeVisible(enableToggle_);
-    enableAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        apvts, "videoScrollEnabled", enableToggle_);
-    enableToggle_.onStateChange = [this] { updateUIFromState(); };
 
     // ── Source ────────────────────────────────────────────────────────────────
     // The waterfall now follows the IMAGE INPUT of a synthesis engine — not a
@@ -190,51 +181,19 @@ VideoScrollTab::VideoScrollTab(Sp3ctraAudioProcessor& processor)
     maxDurAttach_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "videoScrollMaxDuration", maxDurSlider_);
 
-    // ── Action buttons ────────────────────────────────────────────────────────
-    windowBtn_.setButtonText("Open Window");
-    windowBtn_.onClick = [this] { toggleVideoWindow(); };
-    addAndMakeVisible(windowBtn_);
-
-    fullscreenBtn_.setButtonText("[ ] Full Screen");
-    fullscreenBtn_.onClick = [this] { requestFullscreen(); };
-    addAndMakeVisible(fullscreenBtn_);
-
-    auto styleBtn = [](juce::TextButton& btn, juce::uint32 bg, juce::uint32 fg)
-    {
-        btn.setColour(juce::TextButton::buttonColourId,  juce::Colour(bg));
-        btn.setColour(juce::TextButton::textColourOffId, juce::Colour(fg));
-    };
-    styleBtn(windowBtn_,     0xff1e2e20u, 0xff88cc88u);
-    styleBtn(fullscreenBtn_, 0xff1e202eu, 0xff88aaccu);
-
-    apvts.addParameterListener("videoScrollEnabled", this);
     updateUIFromState();
 }
 
 VideoScrollTab::~VideoScrollTab()
 {
-    processor_.getAPVTS().removeParameterListener("videoScrollEnabled", this);
     videoWindow_.reset();
 }
 
 //==============================================================================
-void VideoScrollTab::parameterChanged(const juce::String& paramID, float newValue)
-{
-    if (paramID == "videoScrollEnabled")
-    {
-        juce::MessageManager::callAsync([this, newValue]
-        {
-            if (newValue < 0.5f) closeVideoWindow();
-            else if (!videoWindow_) openVideoWindow();
-            updateUIFromState();
-        });
-    }
-}
-
 void VideoScrollTab::onTabActivated()
 {
-    if (enableToggle_.getToggleState() && !videoWindow_)
-        openVideoWindow();
+    // The window is no longer auto-opened on activation — it is opened on
+    // demand from the column header's window icons. We only refresh state.
     updateUIFromState();
 }
 
@@ -244,7 +203,15 @@ void VideoScrollTab::onTabDeactivated() {}
 void VideoScrollTab::openVideoWindow()
 {
     if (!videoWindow_)
+    {
         videoWindow_ = std::make_unique<VideoWindow>(processor_);
+        // The window's own [✕] close button asks us to tear it down. Defer the
+        // reset so we never delete the window from inside its own callback.
+        videoWindow_->onCloseRequested = [this]
+        {
+            juce::MessageManager::callAsync([this] { closeVideoWindow(); });
+        };
+    }
     else { videoWindow_->setVisible(true); videoWindow_->toFront(true); }
     updateUIFromState();
 }
@@ -255,23 +222,27 @@ void VideoScrollTab::closeVideoWindow()
     updateUIFromState();
 }
 
-void VideoScrollTab::toggleVideoWindow()
+void VideoScrollTab::toggleDetachedWindow()
 {
-    if (videoWindow_ && videoWindow_->isVisible()) closeVideoWindow();
-    else openVideoWindow();
+    if (isVideoWindowOpen()) closeVideoWindow();
+    else                     openVideoWindow();
 }
 
-void VideoScrollTab::requestFullscreen()
+void VideoScrollTab::requestFullscreenWindow()
 {
     if (!videoWindow_) openVideoWindow();
     if (videoWindow_) videoWindow_->toggleFullscreen();
 }
 
+bool VideoScrollTab::isVideoWindowOpen() const noexcept
+{
+    return videoWindow_ != nullptr && videoWindow_->isVisible();
+}
+
 void VideoScrollTab::updateUIFromState()
 {
-    const bool open = (videoWindow_ != nullptr && videoWindow_->isVisible());
-    windowBtn_.setButtonText(open ? "Close Window" : "Open Window");
     repaint();
+    if (onWindowStateChanged) onWindowStateChanged();
 }
 
 //==============================================================================
@@ -279,14 +250,6 @@ void VideoScrollTab::paint(juce::Graphics& g)
 {
     const int W = getWidth();
     const VScrollLayout L = computeLayout(W, getHeight());
-
-    // Badge
-    g.setColour(juce::Colour(0xff1a3020u));
-    g.fillRoundedRectangle(juce::Rectangle<int>(kHP, L.top, W - 2*kHP, L.secH).toFloat(), 3.f);
-    g.setColour(juce::Colour(0xff66cc88u));
-    g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
-    g.drawText("VIDEO SCROLL  --  Image Scroll Visualization",
-               kHP+6, L.top, W - 2*kHP - 12, L.secH, juce::Justification::centredLeft, true);
 
     // Label helper
     auto drawLabel = [&](const juce::String& txt, int y)
@@ -307,8 +270,6 @@ void VideoScrollTab::paint(juce::Graphics& g)
     };
 
     // Layout mirrors resized()
-    drawLabel("Enable", L.yEnable);
-
     drawSection("SOURCE", L.secSrc);
     drawLabel("Source", L.ySource);
 
@@ -322,16 +283,6 @@ void VideoScrollTab::paint(juce::Graphics& g)
     drawLabel("Zoom",        L.yZoom);
     drawLabel("Fade",        L.yFade);
     drawLabel("Compression", L.yCompress);
-
-    // Window section status dot
-    drawSection("WINDOW", L.secWin);
-    const bool open = (videoWindow_ != nullptr && videoWindow_->isVisible());
-    g.setColour(open ? juce::Colour(0xff44cc66u) : juce::Colour(0xff666666u));
-    g.fillEllipse(kHP + 80.f, (float)L.secWin + (L.ch - 8) * 0.5f, 8.f, 8.f);
-    g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
-    g.setColour(juce::Colour(Sp3ctraTheme::kColTextMuted));
-    g.drawText(open ? "open" : "closed", kHP + 92, L.secWin, 60, L.ch,
-               juce::Justification::centredLeft, true);
 }
 
 //==============================================================================
@@ -357,8 +308,6 @@ void VideoScrollTab::resized()
     setTb(fadeSlider_);
     setTb(maxDurSlider_);
 
-    enableToggle_.setBounds(ctrlX, L.yEnable, juce::jmin(90, ctrlW), L.ch);
-
     sourceCombo_.setBounds(ctrlX, L.ySource, ctrlW, L.ch);
 
     modeCombo_      .setBounds(ctrlX, L.yMode,    ctrlW, L.ch);
@@ -369,10 +318,4 @@ void VideoScrollTab::resized()
     zoomSlider_     .setBounds(ctrlX, L.yZoom,      ctrlW, L.ch);
     fadeSlider_     .setBounds(ctrlX, L.yFade,      ctrlW, L.ch);
     maxDurSlider_   .setBounds(ctrlX, L.yCompress,  ctrlW, L.ch);
-
-    // Two action buttons share the full width so the second never clips.
-    const int btnGap = 8;
-    const int btnW   = juce::jmax(60, (W - 2*kHP - btnGap) / 2);
-    windowBtn_    .setBounds(kHP,              L.yButtons, btnW, L.ch + L.btnExtra);
-    fullscreenBtn_.setBounds(kHP + btnW + btnGap, L.yButtons, btnW, L.ch + L.btnExtra);
 }

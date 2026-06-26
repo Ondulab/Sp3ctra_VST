@@ -55,17 +55,19 @@ namespace
         }
     }
 
-    // Mono mix-down of a (possibly multichannel) reader into double[].
-    bool loadMono(juce::AudioFormatReader& reader, juce::int64 framesToLoad,
-                  std::vector<double>& out, bool normalize)
+    // Mono mix-down of a (possibly multichannel) reader into double[], starting
+    // at `startSample` in the file.
+    bool loadMono(juce::AudioFormatReader& reader, juce::int64 startSample,
+                  juce::int64 framesToLoad, std::vector<double>& out, bool normalize)
     {
         const int ch = juce::jmax(1, (int) reader.numChannels);
-        const int n  = (int) juce::jmin(framesToLoad, reader.lengthInSamples);
+        startSample = juce::jlimit((juce::int64) 0, reader.lengthInSamples, startSample);
+        const int n  = (int) juce::jmin(framesToLoad, reader.lengthInSamples - startSample);
         if (n <= 0)
             return false;
 
         juce::AudioBuffer<float> buf(ch, n);
-        if (! reader.read(&buf, 0, n, 0, true, true))
+        if (! reader.read(&buf, 0, n, startSample, true, true))
             return false;
 
         out.resize((size_t) n);
@@ -86,6 +88,15 @@ namespace
         }
         return true;
     }
+}
+
+//==============================================================================
+double pageWindowSeconds(const ScoreSettings& s)
+{
+    if (s.writingSpeed <= 0.0)
+        return 0.0;   // whole file
+    const double widthMM = (s.pageFormat == 1) ? SCORE_A3_WIDTH_MM : SCORE_A4_WIDTH_MM;
+    return (widthMM / 10.0) / s.writingSpeed;   // mm→cm, then cm / (cm/s)
 }
 
 //==============================================================================
@@ -148,22 +159,20 @@ RenderResult renderScore(const juce::File& wav,
     if (fftSize > SCORE_FFT_EFFECTIVE_SIZE)
         fftSize = SCORE_FFT_EFFECTIVE_SIZE;
 
-    // ── Duration to load (port of spectral_raster.c:436-454) ─────────────────
-    double duration = 0.0;     // 0 ⇒ whole file
-    if (s.writingSpeed > 0.0)
-    {
-        const double pageWcm = pageWidthPx(s.pageFormat, dpi) / (dpi / 2.54);
-        duration = pageWcm / s.writingSpeed;
-    }
+    // ── Region to extract: one page-width window starting at startTimeSec ─────
+    const double duration = pageWindowSeconds(s);   // 0 ⇒ whole file
+    const juce::int64 startSample = juce::jlimit(
+        (juce::int64) 0, reader->lengthInSamples,
+        (juce::int64) (s.startTimeSec * sampleRate));
 
-    juce::int64 framesToLoad = reader->lengthInSamples;
+    juce::int64 framesToLoad = reader->lengthInSamples - startSample;
     if (duration > 0.0)
         framesToLoad = juce::jmin(framesToLoad,
                                   (juce::int64) (duration * sampleRate));
 
     // ── Load + mono mix-down ─────────────────────────────────────────────────
     std::vector<double> signal;
-    if (! loadMono(*reader, framesToLoad, signal, s.enableNormalization != 0))
+    if (! loadMono(*reader, startSample, framesToLoad, signal, s.enableNormalization != 0))
         return fail("Failed to decode audio samples");
 
     const int totalSamples = (int) signal.size();
@@ -269,6 +278,44 @@ RenderResult renderScore(const juce::File& wav,
     yTop   = juce::jmax(0, yTop);
     yBot   = juce::jmin(imageH, yBot);
 
+    // ── Per-output-row FFT bin cell [lo,hi] (LOG frequency axis) ─────────────
+    // Matches PhonoPaper and the Sp3ctra reader (image row → oscillator on a
+    // LOG-distributed bank, equal vertical space per octave). Each output pixel
+    // covers a *band* of frequencies; at high frequency that band spans many FFT
+    // bins (~27 Hz/px @ 16 kHz vs ~11 Hz FFT resolution), so the old nearest-bin
+    // sampling read a single bin and MISSED peaks that fell between rows → faint
+    // / lost highs (visible on the calibration sweep & top octaves). We instead
+    // take the LOUDEST bin in each cell (peak-hold). data[] holds intensity where
+    // 0 = black = loud, so "loudest" = MIN intensity. The mapping is x-independent
+    // so it is computed once here. At low frequency a cell is sub-bin → one bin,
+    // identical to before.
+    const bool   logMap    = (s.minFreq > 0.0 && s.maxFreq > s.minFreq);
+    const double freqRatio = logMap ? (s.maxFreq / s.minFreq) : 1.0;
+    const int    rows      = (yBot > yTop) ? (yBot - yTop) : 0;
+    std::vector<int> rowBinLo((size_t) rows, -1);
+    std::vector<int> rowBinHi((size_t) rows, -1);
+    for (int y = yTop; y < yBot; ++y)
+    {
+        double posLo = (spectroBottom - (y + 1)) / spectroHeightPx; // bottom edge (lower freq)
+        double posHi = (spectroBottom -  y)      / spectroHeightPx; // top edge    (higher freq)
+        if (posHi < 0.0 || posLo > 1.0)
+            continue;                                                // pixel outside the band
+        posLo = juce::jlimit(0.0, 1.0, posLo);
+        posHi = juce::jlimit(0.0, 1.0, posHi);
+        const double fLo = logMap ? s.minFreq * std::pow(freqRatio, posLo)
+                                  : s.minFreq + posLo * freqRange;
+        const double fHi = logMap ? s.minFreq * std::pow(freqRatio, posHi)
+                                  : s.minFreq + posHi * freqRange;
+        int bLo = (int) std::floor(fLo / freqResolution);
+        int bHi = (int) std::ceil (fHi / freqResolution);
+        bLo = juce::jmax(bLo, spec.index_min);
+        bHi = juce::jmin(juce::jmin(bHi, spec.index_max), numBins - 1);
+        if (bLo > bHi)
+            continue;
+        rowBinLo[(size_t) (y - yTop)] = bLo;
+        rowBinHi[(size_t) (y - yTop)] = bHi;
+    }
+
     {
         juce::Image::BitmapData bmp(img, juce::Image::BitmapData::readWrite);
         const int span = juce::jmax(1, xEnd - xStart);
@@ -281,18 +328,16 @@ RenderResult renderScore(const juce::File& wav,
 
             for (int y = yTop; y < yBot; ++y)
             {
-                // Linear frequency mapping (USE_LOG_FREQUENCY = 0). The LuxSampler
-                // score loader remaps this linear axis onto the synth's log
-                // oscillator bank, so pitch is preserved.
-                const double lin = (spectroBottom - (y + 0.5)) / spectroHeightPx;
-                if (lin < 0.0 || lin > 1.0)
-                    continue;
-                const double binFreq = s.minFreq + lin * freqRange;
-                const int b = (int) (binFreq / freqResolution);
-                if (b < spec.index_min || b > spec.index_max || b >= numBins)
-                    continue;
+                const int bLo = rowBinLo[(size_t) (y - yTop)];
+                if (bLo < 0)
+                    continue;                                  // row outside the band
+                const int bHi = rowBinHi[(size_t) (y - yTop)];
 
-                const double intensity = col[b];
+                // Peak-hold over the cell: darkest (loudest) bin = MIN intensity.
+                double intensity = col[bLo];
+                for (int b = bLo + 1; b <= bHi; ++b)
+                    if (col[b] < intensity) intensity = col[b];
+
                 const auto v = (juce::uint8) juce::jlimit(0, 255, (int) (intensity * 255.0 + 0.5));
                 bmp.setPixelColour(x, y, juce::Colour(v, v, v));
             }

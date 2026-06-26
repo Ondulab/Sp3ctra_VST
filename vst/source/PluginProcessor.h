@@ -71,6 +71,13 @@ public:
     // Public accessors for UI
     juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
 
+    /** Video-scroll transport — momentary "Stop": freezes (videoScrollPaused)
+     *  and clears the waterfall.  The clear is a generation counter polled by
+     *  every live VideoDisplayComponent, so it reaches all open views without a
+     *  direct pointer and survives a view being (re)created. */
+    void     requestVideoScrollClear() noexcept { videoScrollClearGen.fetch_add(1, std::memory_order_release); }
+    uint32_t getVideoScrollClearGen() const noexcept { return videoScrollClearGen.load(std::memory_order_acquire); }
+
     /** Path of the last session saved or loaded by SamplerPageComponent.
      *  Persisted inside the APVTS state blob so the DAW project and
      *  the Standalone app both restore the session on next launch. */
@@ -113,6 +120,19 @@ public:
     // edit the SAME settings. NOT in the APVTS (offline, not host-automatable).
     // -------------------------------------------------------------------------
     ScoreSettings& getScoreSettings() noexcept { return scoreSettings_; }
+
+    // -------------------------------------------------------------------------
+    // SCORE source-audio preview — auditions the selected WAV region through the
+    // plugin output. Decoded + resampled on the message thread (start), then
+    // mixed RT-safe in processBlock (no file I/O or alloc on the audio thread).
+    // -------------------------------------------------------------------------
+    void   startScorePreview(const juce::File& wav, double startSec, double lengthSec);
+    void   pauseScorePreview() noexcept;   ///< stop output, keep position
+    bool   resumeScorePreview() noexcept;  ///< continue (restart if at end); false if nothing loaded
+    void   stopScorePreview()  noexcept;   ///< stop + rewind to region start
+    bool   isScorePreviewPlaying() const noexcept
+    { return scorePreviewPlaying_.load(std::memory_order_acquire); }
+    double getScorePreviewPositionSec() const noexcept;
 
     /** SCORE frequency-range override. When `manual` is false the SCORE follows
      *  LuxStral's musical Tuning + Root Note + Octaves (read-only mirror in the
@@ -171,6 +191,17 @@ public:
      *  note next block. Safe to call from the UI (message) thread. */
     void requestAllNotesOff() noexcept { panicRequested.store(true, std::memory_order_release); }
 
+    /** M6 Phase 2 — chain-derived source routing.
+     *  Each synth reads the channel its chain placement dictates: MODULATED (0)
+     *  when an image processor / utility sits upstream of it in its chain, LIVE
+     *  (1) otherwise. ChainRackComponent computes these from the model and pushes
+     *  them here; applyConfigurationToCore() then feeds g_sp3ctra_config
+     *  (replacing the old hardcoded "LuxStral=modulated / LuxSynth=live").
+     *  Safe to call from the UI (message) thread. */
+    void setChainSourceRouting(int luxstralSrc, int luxsynthSrc) noexcept;
+    int  chainLuxstralSource() const noexcept { return chainSrcLuxstral.load(std::memory_order_relaxed); }
+    int  chainLuxsynthSource() const noexcept { return chainSrcLuxsynth.load(std::memory_order_relaxed); }
+
     void startSamplerMidiLearn(int target) noexcept
     {
         samplerMidiLearnResult.store(-1, std::memory_order_relaxed);
@@ -227,6 +258,14 @@ private:
     // SCORE generation settings — shared between PLAY page and SETUP panel.
     ScoreSettings     scoreSettings_ {};
     ScoreFreqOverride scoreFreq_ {};
+
+    // SCORE source-audio preview (decoded on message thread, mixed RT-safe).
+    juce::SpinLock           scorePreviewLock_;
+    juce::AudioBuffer<float> scorePreviewBuf_;             // host-rate, up to 2 ch
+    int                      scorePreviewPos_ = 0;         // guarded by scorePreviewLock_
+    double                   scorePreviewRate_ = 48000.0;  // host rate at decode time
+    std::atomic<int>         scorePreviewPosAtomic_ { 0 }; // lock-free UI playhead
+    std::atomic<bool>        scorePreviewPlaying_   { false };
     
     // ✨ VST Parameters via AudioProcessorValueTreeState
     juce::AudioProcessorValueTreeState apvts;
@@ -238,6 +277,13 @@ private:
     static constexpr const char* PARAM_UDP_BYTE2 = "udpByte2";
     static constexpr const char* PARAM_UDP_BYTE3 = "udpByte3";
     static constexpr const char* PARAM_UDP_BYTE4 = "udpByte4";
+    // Device HTTP control-plane address (config.html host). Distinct from the
+    // UDP listen/multicast address above — the device's web server is a
+    // separate endpoint (default 192.168.100.1) reached by Sp3ctraDeviceClient.
+    static constexpr const char* PARAM_DEVICE_IP_BYTE1 = "deviceIpByte1";
+    static constexpr const char* PARAM_DEVICE_IP_BYTE2 = "deviceIpByte2";
+    static constexpr const char* PARAM_DEVICE_IP_BYTE3 = "deviceIpByte3";
+    static constexpr const char* PARAM_DEVICE_IP_BYTE4 = "deviceIpByte4";
     static constexpr const char* PARAM_SENSOR_DPI = "sensorDpi";
     static constexpr const char* PARAM_LOG_LEVEL = "logLevel";
     static constexpr const char* PARAM_VISUALIZER_MODE = "visualizerMode";
@@ -275,6 +321,15 @@ private:
     // All Notes Off (panic): set by the UI (message thread), consumed and
     // cleared by processBlock (audio thread) to release every held/stuck note.
     std::atomic<bool> panicRequested{false};
+
+    // M6 Phase 2 — chain-derived source routing (0 = MODULATED, 1 = LIVE).
+    // Defaults reproduce the legacy fixed topology (LuxStral=modulated, LuxSynth=live).
+    std::atomic<int> chainSrcLuxstral { 0 };
+    std::atomic<int> chainSrcLuxsynth { 1 };
+
+    // Video-scroll "Stop" pulse: incremented by the UI; each VideoDisplayComponent
+    // polls it (message thread) and clears its history buffer when it advances.
+    std::atomic<uint32_t> videoScrollClearGen{0};
 
     // -------------------------------------------------------------------------
     // Sampler action button MIDI bindings — RT-safe trigger pulses

@@ -1,26 +1,34 @@
 /**
  * @file LuxStralTabComponent.h
- * @brief Tab 2 — LUXSTRAL: pipeline visual, source selector, toggles, output nodes.
+ * @brief LUXSTRAL module — the WHOLE module UI on one page, laid out in 2 columns.
  *
- * Pipeline:  Source → [Negative] → [DC Blocking] → [Gamma] →
- *            LUXSTRAL_GRAY / LUXSTRAL_COLOR / LUXSTRAL_BLOB
+ *   ┌ Volume ════════════════════ ┐   (left column, master output)
+ *   │ LEFT                │ RIGHT  │
+ *   │ ┌ IMAGE ─────────┐  │ ┌ STEREO ──────┐
+ *   │ │ Negative/DC    │  │ │ [Stereo] Temp │
+ *   │ │ Gamma/Contrast │  │ └───────────────┘
+ *   │ └────────────────┘  │ ┌ STROKEFORGE ──┐
+ *   │ ┌ OSCILLATORS ───┐  │ │ BLOB DETECTION │
+ *   │ │ ATTACK/RELEASE │  │ │  Ampl/Pix/...  │
+ *   │ │  [ env curve ] │  │ │ MORPHING       │
+ *   │ │ Sum Exp / Gate │  │ │  Sq@W/Focus/.. │
+ *   │ └────────────────┘  │ └───────────────┘
  *
- * Two-column layout (mirrors LuxSynthTabComponent):
- *   Left  — image pipeline controls + blob detection parameters
- *   Right — pipeline output nodes
+ * The page was previously split across two stacked components (image page +
+ * AudioStralPanel); the 2-column request mixes image and audio content within
+ * each column, so the module is now a single self-contained component.
  *
- * Blob detection controls are wired to spctrBlob* APVTS parameters:
- *   spctrBlobThreshold / spctrBlobMinWidth / spctrBlobMergeGap / spctrBlobColorSplit
- * These have IDENTICAL labels, ranges and semantics as the lxBlob* params
- * used in IMAGE LUXSYNTH, ensuring a consistent cross-path UX.
- * They also drive the StrokeForge audio synthesis engine (via g_sp3ctra_config)
- * through PluginProcessor::applyConfigurationToCore().
+ * Signal flow: IMAGE conditioning → OSCILLATORS (additive voice + A/R) on the
+ * left; STEREO spatialisation + STROKEFORGE (blob-driven morphing) on the right.
  */
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <functional>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "../ui/AudioPanelWidgets.h"      // AudioPanelLayout + AudioPanelUI (shared look)
+#include "../ui/EnvelopeEditorComponent.h"
 #include "VisualizerMode.h"
 
 class LuxStralTabComponent : public juce::Component
@@ -32,196 +40,391 @@ public:
         auto& apvts = p.getAPVTS();
 
         // ── Source selector — RETIRED (source follows chain placement) ──────
-        // LuxStral lives on Chain 1, so it always reads the Chain 1 signal; the
-        // per-engine selector is no longer shown.  The combo + attachment are
-        // kept (not made visible) so the param plumbing survives for the future
-        // modular-chain routing.
         sourceCombo.addItem("Chain 1", 1);
         sourceCombo.addItem("Chain 2", 2);
-        sourceAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            apvts, "luxstralSource", sourceCombo));
+        sourceAttach.reset(new CmbAttach(apvts, "luxstralSource", sourceCombo));
 
-        // ── Negative (ToggleButton) ───────────────────────────────────────
-        initLabel(negativeLabel, "Negative");
-        negativeToggle.setButtonText("Active");
+        // ── Master Volume (top of left column) ────────────────────────────
+        initLabel(volumeLabel, "Volume");
+        initSlider(luxstralVolumeSlider);
+        volumeAttach.reset(new SldAttach(apvts, "luxstralVolume", luxstralVolumeSlider));
+
+        // ── IMAGE — conditioning (label is the toggle text itself) ──────────
+        negativeToggle.setButtonText("Negative");
         addAndMakeVisible(negativeToggle);
-        negativeAttach.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(
-            apvts, "luxstralInversion", negativeToggle));
+        negativeAttach.reset(new BtnAttach(apvts, "luxstralInversion", negativeToggle));
 
-        // ── DC Blocking (ToggleButton) ────────────────────────────────────
-        initLabel(dcBlockLabel, "DC Blocking");
-        dcBlockToggle.setButtonText("Active");
+        dcBlockToggle.setButtonText("DC Blocking");
         addAndMakeVisible(dcBlockToggle);
-        dcBlockAttach.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(
-            apvts, "luxstralAcRemoval", dcBlockToggle));
+        dcBlockAttach.reset(new BtnAttach(apvts, "luxstralAcRemoval", dcBlockToggle));
 
-        // ── Gamma Value (Slider) ──────────────────────────────────────────
         initLabel(gammaLabel, "Gamma");
-        gammaSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        gammaSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                    50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(gammaSlider);
-        gammaAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxstralGammaValue", gammaSlider));
+        initSlider(gammaSlider);
+        gammaAttach.reset(new SldAttach(apvts, "luxstralGammaValue", gammaSlider));
 
-        // ── Contrast Min (Slider) ───────────────────────────────────────────
         initLabel(contrastMinLabel, "Contrast Min");
-        contrastMinSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        contrastMinSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                          50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(contrastMinSlider);
-        contrastMinAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxstralContrastMin", contrastMinSlider));
+        initSlider(contrastMinSlider);
+        contrastMinAttach.reset(new SldAttach(apvts, "luxstralContrastMin", contrastMinSlider));
 
-        // ── BLOB DETECTION — spctrBlob* params ────────────────────────────
-        // Identical labels, ranges and semantics as lxBlob* (IMAGE LUXSYNTH).
-        // Also drives StrokeForge audio synthesis via g_sp3ctra_config.
-        // spctrBlobColorSplit is visualizer-only (no StrokeForge equivalent).
+        // ── OSCILLATORS — additive voice: A/R envelope + Sum Exp / Noise Gate ─
+        arEnv = std::make_unique<EnvelopeEditorComponent>(
+            apvts, juce::Colour(0xff7ab0f0),
+            "luxstralAttackMs", juce::String(), juce::String(), "luxstralReleaseMs");
+        addAndMakeVisible(*arEnv);
 
-        // Row 4: Amplitude threshold — normalised CIS brightness [0..1].
-        // Pixels brighter than this value are considered active strokes.
+        AudioPanelUI::initKnob(sumExpSlider);
+        addAndMakeVisible(sumExpSlider);
+        sumExpAttach.reset(new SldAttach(apvts, "luxstralSummationResponseExp", sumExpSlider));
+
+        AudioPanelUI::initKnob(noiseGateSlider);
+        addAndMakeVisible(noiseGateSlider);
+        noiseGateAttach.reset(new SldAttach(apvts, "luxstralNoiseGateThreshold", noiseGateSlider));
+
+        // ── STEREO — spatialisation (enable toggle lives in the badge) ───────
+        stereoEnableToggle.setButtonText({});
+        addAndMakeVisible(stereoEnableToggle);
+        stereoEnableAttach.reset(new BtnAttach(apvts, "luxstralStereoEnable", stereoEnableToggle));
+
+        AudioPanelUI::initKnob(stereoTempSlider);
+        addAndMakeVisible(stereoTempSlider);
+        stereoTempAttach.reset(new SldAttach(apvts, "luxstralStereoTempAmp", stereoTempSlider));
+
+        // ── STROKEFORGE — blob detection (sliders) ──────────────────────────
         initLabel(blobThreshLabel, "Ampl. Thr.");
-        blobThreshSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        blobThreshSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                         50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(blobThreshSlider);
-        blobThreshAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "spctrBlobThreshold", blobThreshSlider));
-
-        // Row 5: Pixel threshold — minimum blob span in CIS pixels.
-        // Blobs narrower than this value are discarded.
+        initSlider(blobThreshSlider);
+        blobThreshAttach.reset(new SldAttach(apvts, "spctrBlobThreshold", blobThreshSlider));
         initLabel(blobMinWidthLabel, "Pix. Thr.");
-        blobMinWidthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        blobMinWidthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                           50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(blobMinWidthSlider);
-        blobMinWidthAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "spctrBlobMinWidth", blobMinWidthSlider));
-
-        // Row 6: Merge Gap — maximum inactive-pixel gap that keeps two sub-blobs merged.
-        // 0 = strict (every gap splits), higher = more tolerant merging.
+        initSlider(blobMinWidthSlider);
+        blobMinWidthAttach.reset(new SldAttach(apvts, "spctrBlobMinWidth", blobMinWidthSlider));
         initLabel(blobMergeGapLabel, "Merge Gap");
-        blobMergeGapSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        blobMergeGapSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                            50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(blobMergeGapSlider);
-        blobMergeGapAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "spctrBlobMergeGap", blobMergeGapSlider));
-
-        // Row 7: Color Split — how aggressively color differences cause splits.
-        // 0% = no color-based split (pure gap-based merge, color ignored).
-        // 100% = maximum split: any color divergence breaks a blob, even within
-        //        a continuous active region (independent of Merge Gap).
+        initSlider(blobMergeGapSlider);
+        blobMergeGapAttach.reset(new SldAttach(apvts, "spctrBlobMergeGap", blobMergeGapSlider));
         initLabel(blobColorSplitLabel, "Color Split");
-        blobColorSplitSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        blobColorSplitSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                              50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(blobColorSplitSlider);
-        blobColorSplitAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "spctrBlobColorSplit", blobColorSplitSlider));
+        initSlider(blobColorSplitSlider);
+        blobColorSplitAttach.reset(new SldAttach(apvts, "spctrBlobColorSplit", blobColorSplitSlider));
+
+        // ── STROKEFORGE — morphing (enable toggle lives in the badge) ────────
+        sfEnabledToggle.setButtonText({});
+        addAndMakeVisible(sfEnabledToggle);
+        sfEnabledAttach.reset(new BtnAttach(apvts, "sfEnabled", sfEnabledToggle));
+
+        sfFocusOnlyToggle.setButtonText("Focus Only");
+        addAndMakeVisible(sfFocusOnlyToggle);
+        sfFocusOnlyAttach.reset(new BtnAttach(apvts, "sfFocusOnly", sfFocusOnlyToggle));
+
+        AudioPanelUI::initKnob(sfMorphWidthSlider);
+        addAndMakeVisible(sfMorphWidthSlider);
+        sfMorphWidthAttach.reset(new SldAttach(apvts, "sfMorphWidthScale", sfMorphWidthSlider));
+
+        AudioPanelUI::initKnob(sfFocusSigmaSlider, " notes");
+        addAndMakeVisible(sfFocusSigmaSlider);
+        sfFocusSigmaAttach.reset(new SldAttach(apvts, "sfBlobFocusSigma", sfFocusSigmaSlider));
+
+        AudioPanelUI::initKnob(sfSpectralThreshSlider, " notes");
+        addAndMakeVisible(sfSpectralThreshSlider);
+        sfSpectralThreshAttach.reset(new SldAttach(apvts, "sfSpectralWidthThreshold", sfSpectralThreshSlider));
+
+        // Dependent-control dimming.
+        stereoEnableToggle.onClick = [this] { updateStereoEnablement(); };
+        sfEnabledToggle.onClick     = [this] { updateStrokeForgeEnablement(); };
+        updateStereoEnablement();
+        updateStrokeForgeEnablement();
     }
 
+    //==========================================================================
     void paint(juce::Graphics& g) override
     {
-        const int W = getWidth();
-        computeColumns(W, leftX_, leftW_, rightX_, rightW_);
+        const auto L = computeGeom(getWidth());
+        using namespace AudioPanelUI;
 
-        // ── Section header: BLOB DETECTION ────────────────────────────────
-        const int blobSectionY = rowY(3) + Sp3ctraTheme::kControlH + 2;
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
-        g.setColour(juce::Colour(0xff8888e0).withAlpha(0.55f)); // SPCTR_BLOB accent
-        g.drawText("--- BLOB DETECTION ---", leftX_, blobSectionY, leftW_, 12,
-                   juce::Justification::centred);
+        // ── Master Volume strip ─────────────────────────────────────────────
+        {
+            const auto r = L.volStrip.toFloat();
+            g.setColour(juce::Colour(0xff182636));
+            g.fillRoundedRectangle(r, 4.f);
+            g.setColour(juce::Colour(0xff2c4055));
+            g.drawRoundedRectangle(r, 4.f, 1.f);
+        }
+
+        // ── LEFT: IMAGE ─────────────────────────────────────────────────────
+        drawSectionBg(g, L.imgBg.getX(), L.imgBg.getY(), L.imgBg.getWidth(), L.imgBg.getHeight());
+        drawBadge(g, L.imgBadge.getX(), L.imgBadge.getY(), L.imgBadge.getWidth(),
+                  0xff20303c, 0xff7aade0, "IMAGE");
+
+        // ── LEFT: OSCILLATORS ───────────────────────────────────────────────
+        drawSectionBg(g, L.oscBg.getX(), L.oscBg.getY(), L.oscBg.getWidth(), L.oscBg.getHeight());
+        drawBadge(g, L.oscBadge.getX(), L.oscBadge.getY(), L.oscBadge.getWidth(),
+                  0xff1c3755, 0xff7ab0f0, "OSCILLATORS");
+        drawEnvCaption(g, L.oscBadge.getX() + kSecInsetX, L.oscCaptionY,
+                       L.oscBadge.getWidth() - 2 * kSecInsetX, 0xff7ab0f0, "ATTACK / RELEASE");
+        {
+            static const char* const lbls[] = { "Sum Exp", "Noise Gate" };
+            for (int i = 0; i < 2; ++i) drawKnobLabel(g, L.oscGridX, L.oscGridW, L.oscGridY, i, lbls[i]);
+        }
+
+        // ── RIGHT: STEREO (enable toggle sits in the badge) ─────────────────
+        const bool stOn = stereoEnableToggle.getToggleState();
+        drawSectionBg(g, L.stBg.getX(), L.stBg.getY(), L.stBg.getWidth(), L.stBg.getHeight());
+        drawBadge(g, L.stBadge.getX(), L.stBadge.getY(), L.stBadge.getWidth(),
+                  0xff1c3755, 0xff7ab0f0, "STEREO");
+        drawKnobLabel(g, L.stGridX, L.stGridW, L.stGridY, 0, "Stereo Temp",
+                      stOn ? 0xffb8c4d0 : kDimText);
+
+        // ── RIGHT: STROKEFORGE (enable in badge; blob detection + morphing) ─
+        const bool sfOn = sfEnabledToggle.getToggleState();
+        const juce::uint32 cap1 = sfOn ? 0xff8888e0 : kDimText;   // BLOB DETECTION
+        const juce::uint32 cap2 = sfOn ? 0xffb07af0 : kDimText;   // MORPHING
+        const juce::uint32 klbl = sfOn ? 0xffb8c4d0 : kDimText;   // knob labels
+        drawSectionBg(g, L.sfBg.getX(), L.sfBg.getY(), L.sfBg.getWidth(), L.sfBg.getHeight());
+        drawBadge(g, L.sfBadge.getX(), L.sfBadge.getY(), L.sfBadge.getWidth(),
+                  0xff2a2a40, 0xff8888e0, "STROKEFORGE");
+
+        const int sdx = L.rightX + kSecInsetX;
+        const int sdw = L.colW - 2 * kSecInsetX;
+        drawEnvCaption(g, sdx, L.sfBlobCaptionY, sdw, cap1, "BLOB DETECTION");
+        g.setColour(juce::Colour(0xff2a2a40));
+        g.fillRect(sdx, L.sfDividerY, sdw, 1);
+        drawEnvCaption(g, sdx, L.sfMorphCaptionY, sdw, cap2, "MORPHING  --  Sine -> Square");
+        {
+            static const char* const lbls[] = { "Square @W", "Focus Sigma", "Spectral Thr" };
+            for (int i = 0; i < 3; ++i) drawKnobLabel(g, L.sfGridX, L.sfGridW, L.sfGridY, i, lbls[i], klbl);
+        }
     }
 
+    //==========================================================================
     void resized() override
     {
-        const int W = getWidth();
-        computeColumns(W, leftX_, leftW_, rightX_, rightW_);
+        const auto L = computeGeom(getWidth());
 
-        // ── Left column: all controls ─────────────────────────────────────
-        const int labelW = 80;
-        const int gap    = Sp3ctraTheme::kGap;
-        const int ch     = Sp3ctraTheme::kControlH;
+        // LEFT
+        volumeLabel.setBounds(L.volLabel);
+        luxstralVolumeSlider.setBounds(L.volSlider);
 
-        auto lb = [&](int row) -> juce::Rectangle<int>
-        {
-            return { leftX_, rowY(row), labelW, ch };
-        };
-        auto cb = [&](int row) -> juce::Rectangle<int>
-        {
-            return { leftX_ + labelW + gap, rowY(row),
-                     leftW_ - labelW - gap,  ch };
-        };
+        negativeToggle.setBounds(L.negToggle);
+        dcBlockToggle.setBounds(L.dcToggle);
+        gammaLabel.setBounds(L.gammaLabel);          gammaSlider.setBounds(L.gammaSlider);
+        contrastMinLabel.setBounds(L.contrastLabel); contrastMinSlider.setBounds(L.contrastSlider);
 
-        // Source row retired — controls start at row 0 (placement defines source).
-        // Row 0: Negative toggle
-        negativeLabel.setBounds(lb(0));
-        negativeToggle.setBounds(cb(0).withWidth(80));
-        // Row 1: DC Blocking toggle
-        dcBlockLabel.setBounds(lb(1));
-        dcBlockToggle.setBounds(cb(1).withWidth(80));
-        // Row 2: Gamma slider
-        gammaLabel.setBounds(lb(2));
-        gammaSlider.setBounds(cb(2));
-        // Row 3: Contrast Min slider
-        contrastMinLabel.setBounds(lb(3));
-        contrastMinSlider.setBounds(cb(3));
-        // [blobSectionY header drawn in paint() between row 3 and 4]
-        // Rows 4-7: Blob Detection
-        blobThreshLabel.setBounds(lb(4));      blobThreshSlider.setBounds(cb(4));
-        blobMinWidthLabel.setBounds(lb(5));    blobMinWidthSlider.setBounds(cb(5));
-        blobMergeGapLabel.setBounds(lb(6));    blobMergeGapSlider.setBounds(cb(6));
-        blobColorSplitLabel.setBounds(lb(7));  blobColorSplitSlider.setBounds(cb(7));
+        arEnv->setBounds(L.env);
+        AudioPanelUI::placeKnob(sumExpSlider,    L.oscGridX, L.oscGridW, L.oscGridY, 0);
+        AudioPanelUI::placeKnob(noiseGateSlider, L.oscGridX, L.oscGridW, L.oscGridY, 1);
+
+        // RIGHT
+        stereoEnableToggle.setBounds(L.stBadgeToggle);
+        AudioPanelUI::placeKnob(stereoTempSlider, L.stGridX, L.stGridW, L.stGridY, 0);
+
+        blobThreshLabel.setBounds(L.blobLabel[0]);     blobThreshSlider.setBounds(L.blobSlider[0]);
+        blobMinWidthLabel.setBounds(L.blobLabel[1]);   blobMinWidthSlider.setBounds(L.blobSlider[1]);
+        blobMergeGapLabel.setBounds(L.blobLabel[2]);   blobMergeGapSlider.setBounds(L.blobSlider[2]);
+        blobColorSplitLabel.setBounds(L.blobLabel[3]); blobColorSplitSlider.setBounds(L.blobSlider[3]);
+
+        sfEnabledToggle.setBounds(L.sfBadgeToggle);
+        sfFocusOnlyToggle.setBounds(L.sfFocusToggle);
+        AudioPanelUI::placeKnob(sfMorphWidthSlider,     L.sfGridX, L.sfGridW, L.sfGridY, 0);
+        AudioPanelUI::placeKnob(sfFocusSigmaSlider,     L.sfGridX, L.sfGridW, L.sfGridY, 1);
+        AudioPanelUI::placeKnob(sfSpectralThreshSlider, L.sfGridX, L.sfGridW, L.sfGridY, 2);
     }
+
+    /** Set by the editor: re-evaluate which contextual top-bandeau panels are
+     *  shown (COLOR ⟺ Stereo, BLOB ⟺ StrokeForge) when a toggle flips. */
+    std::function<void()> onVisualizerSourcesChanged;
 
 private:
     [[maybe_unused]] Sp3ctraAudioProcessor& processor;
 
-    // Labels — image pipeline
-    juce::Label sourceLabel, negativeLabel, dcBlockLabel, gammaLabel, contrastMinLabel;
-    // Labels — blob detection (same names as LuxSynthTabComponent for UX consistency)
-    juce::Label blobThreshLabel, blobMinWidthLabel, blobMergeGapLabel, blobColorSplitLabel;
+    // ── Vertical layout tokens ──────────────────────────────────────────────
+    static constexpr int kTopPad    = 6;
+    static constexpr int kColGap    = 16;                          // between columns
+    static constexpr int kHeaderH   = 30;                          // Volume strip
+    static constexpr int kBadgeH    = Sp3ctraTheme::kSectionH;     // 24
+    static constexpr int kBadgeGap  = Sp3ctraTheme::kSectionGap;   // 4
+    static constexpr int kRowH      = Sp3ctraTheme::kControlH;     // 22
+    static constexpr int kRowGap    = Sp3ctraTheme::kRowGap;       // 4
+    static constexpr int kSecGapV   = 10;                          // between sections
+    static constexpr int kSecPadB   = 8;                           // section bottom pad
+    static constexpr int kSecInsetX = 8;                           // content inset
+    static constexpr int kLabelW    = 96;                          // slider label column
+    static constexpr int kDivGap    = 10;                          // blob/morph divider gap
+    static constexpr int kCapH      = AudioPanelLayout::kEnvCaptionH; // 13
+    static constexpr int kToggleGap = AudioPanelLayout::kToggleGap;   // 6
+    static constexpr int kKnobH     = AudioPanelLayout::kKnobCellH;   // 71
+    static constexpr int kEnvH      = AudioPanelLayout::kEnvH;        // 124
+    static constexpr int kEnvGap    = AudioPanelLayout::kEnvGap;      // 10
+    static constexpr juce::uint32 kDimText = 0xff5a5a66;             // greyed labels/captions
 
-    // Controls — image pipeline
-    juce::ComboBox     sourceCombo;
-    juce::ToggleButton negativeToggle, dcBlockToggle;
-    juce::Slider       gammaSlider, contrastMinSlider;
-    // Controls — blob detection
-    juce::Slider blobThreshSlider, blobMinWidthSlider,
-                 blobMergeGapSlider, blobColorSplitSlider;
+    static constexpr int kImgSecH    = kBadgeH + kBadgeGap + (3 * kRowH + 2 * kRowGap) + kSecPadB;     // 110
+    static constexpr int kOscSecH    = kBadgeH + kBadgeGap + kCapH + kEnvH + kEnvGap + kKnobH + kSecPadB; // 254
+    static constexpr int kStereoSecH = kBadgeH + kBadgeGap + kKnobH + kSecPadB;                        // 107
+    static constexpr int kSfSecH     = kBadgeH + kBadgeGap + kCapH + (4 * kRowH + 3 * kRowGap) + kDivGap
+                                     + kCapH + kRowH + kToggleGap + kKnobH + kSecPadB;                 // 271
 
-    // Attachments — image pipeline
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> sourceAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   negativeAttach,
-                                                                             dcBlockAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   gammaAttach,
-                                                                             contrastMinAttach;
-    // Attachments — blob detection (spctrBlob* APVTS params)
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   blobThreshAttach,
-                                                                             blobMinWidthAttach,
-                                                                             blobMergeGapAttach,
-                                                                             blobColorSplitAttach;
+    static constexpr int kLeftColH   = kHeaderH + kSecGapV + kImgSecH + kSecGapV + kOscSecH;           // 414
+    static constexpr int kRightColH  = kStereoSecH + kSecGapV + kSfSecH;                               // 416
 
-    // Cached column geometry — updated by computeColumns() in paint() / resized()
-    mutable int leftX_  = 0;
-    mutable int leftW_  = 0;
-    mutable int rightX_ = 0;
-    mutable int rightW_ = 0;
+public:
+    /** Natural content height — the taller of the two columns. */
+    static constexpr int kPreferredH =
+        kTopPad + (kLeftColH > kRightColH ? kLeftColH : kRightColH) + kSecPadB;
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    /** Controls now span the full width (pipeline-output nodes removed — the
-     *  visualizer shows all outputs simultaneously). */
-    static void computeColumns(int totalW,
-                                int& lx, int& lw,
-                                int& rx, int& rw) noexcept
+private:
+    // ── Resolved layout (single source for paint + resized) ─────────────────
+    struct Geom
     {
-        constexpr int kPad = 8;
-        lx = kPad;
-        lw = totalW - 2 * kPad;
-        rx = totalW - kPad;   // unused (no right column)
-        rw = 0;
+        int gx = 0, gw = 0, colW = 0, leftX = 0, rightX = 0;
+        // left
+        juce::Rectangle<int> volStrip, volLabel, volSlider;
+        juce::Rectangle<int> imgBg, imgBadge, negToggle, dcToggle,
+                             gammaLabel, gammaSlider, contrastLabel, contrastSlider;
+        juce::Rectangle<int> oscBg, oscBadge, env;
+        int oscCaptionY = 0, oscGridX = 0, oscGridW = 0, oscGridY = 0;
+        // right
+        juce::Rectangle<int> stBg, stBadge, stBadgeToggle;
+        int stGridX = 0, stGridW = 0, stGridY = 0;
+        juce::Rectangle<int> sfBg, sfBadge, sfBadgeToggle;
+        int sfBlobCaptionY = 0, sfDividerY = 0, sfMorphCaptionY = 0;
+        juce::Rectangle<int> blobLabel[4], blobSlider[4];
+        juce::Rectangle<int> sfFocusToggle;
+        int sfGridX = 0, sfGridW = 0, sfGridY = 0;
+    };
+
+    Geom computeGeom(int w) const
+    {
+        Geom L{};
+        const int gx     = Sp3ctraTheme::kHPad;
+        const int gw     = w - 2 * Sp3ctraTheme::kHPad;
+        const int colW   = (gw - kColGap) / 2;
+        const int leftX  = gx;
+        const int rightX = gx + colW + kColGap;
+        const int gap    = Sp3ctraTheme::kGap;
+        L.gx = gx; L.gw = gw; L.colW = colW; L.leftX = leftX; L.rightX = rightX;
+
+        // Enable-toggle rectangle docked at the right edge of a section badge.
+        auto badgeToggle = [](juce::Rectangle<int> badge)
+        {
+            constexpr int tw = 44, th = 20;
+            return juce::Rectangle<int>(badge.getRight() - tw - 8,
+                                        badge.getY() + (badge.getHeight() - th) / 2, tw, th);
+        };
+
+        // ── LEFT COLUMN ─────────────────────────────────────────────────────
+        {
+            const int cx = leftX + kSecInsetX;
+            const int cw = colW - 2 * kSecInsetX;
+            int y = kTopPad;
+
+            // Volume strip
+            L.volStrip = { leftX - 2, y, colW + 4, kHeaderH };
+            {
+                const int vy = y + (kHeaderH - kRowH) / 2;
+                L.volLabel  = { cx, vy, kLabelW, kRowH };
+                L.volSlider = { cx + kLabelW + gap, vy, cw - kLabelW - gap, kRowH };
+            }
+            y += kHeaderH + kSecGapV;
+
+            // IMAGE
+            L.imgBg    = { leftX - 2, y, colW + 4, kImgSecH };
+            L.imgBadge = { leftX, y, colW, kBadgeH };
+            int cy = y + kBadgeH + kBadgeGap;
+            {
+                const int half = (cw - gap) / 2;
+                L.negToggle = { cx, cy, half, kRowH };
+                L.dcToggle  = { cx + half + gap, cy, half, kRowH };
+                cy += kRowH + kRowGap;
+            }
+            L.gammaLabel  = { cx, cy, kLabelW, kRowH };
+            L.gammaSlider = { cx + kLabelW + gap, cy, cw - kLabelW - gap, kRowH };
+            cy += kRowH + kRowGap;
+            L.contrastLabel  = { cx, cy, kLabelW, kRowH };
+            L.contrastSlider = { cx + kLabelW + gap, cy, cw - kLabelW - gap, kRowH };
+            y += kImgSecH + kSecGapV;
+
+            // OSCILLATORS
+            L.oscBg    = { leftX - 2, y, colW + 4, kOscSecH };
+            L.oscBadge = { leftX, y, colW, kBadgeH };
+            cy = y + kBadgeH + kBadgeGap;
+            L.oscCaptionY = cy;
+            cy += kCapH;
+            L.env = { cx, cy, cw, kEnvH };
+            cy += kEnvH + kEnvGap;
+            L.oscGridX = cx; L.oscGridW = cw; L.oscGridY = cy;
+        }
+
+        // ── RIGHT COLUMN ────────────────────────────────────────────────────
+        {
+            const int cx = rightX + kSecInsetX;
+            const int cw = colW - 2 * kSecInsetX;
+            int y = kTopPad;
+
+            // STEREO — enable toggle in the badge; content is just the knob.
+            L.stBg          = { rightX - 2, y, colW + 4, kStereoSecH };
+            L.stBadge       = { rightX, y, colW, kBadgeH };
+            L.stBadgeToggle = badgeToggle(L.stBadge);
+            int cy = y + kBadgeH + kBadgeGap;
+            L.stGridX = cx; L.stGridW = cw; L.stGridY = cy;
+            y += kStereoSecH + kSecGapV;
+
+            // STROKEFORGE — enable toggle in the badge; blob sliders, then
+            // morphing (Focus Only + knobs).
+            L.sfBg          = { rightX - 2, y, colW + 4, kSfSecH };
+            L.sfBadge       = { rightX, y, colW, kBadgeH };
+            L.sfBadgeToggle = badgeToggle(L.sfBadge);
+            cy = y + kBadgeH + kBadgeGap;
+            L.sfBlobCaptionY = cy;
+            cy += kCapH;
+            for (int i = 0; i < 4; ++i)
+            {
+                L.blobLabel[i]  = { cx, cy, kLabelW, kRowH };
+                L.blobSlider[i] = { cx + kLabelW + gap, cy, cw - kLabelW - gap, kRowH };
+                cy += kRowH + kRowGap;
+            }
+            cy += kDivGap - kRowGap;
+            L.sfDividerY      = cy - kDivGap / 2;
+            L.sfMorphCaptionY = cy;
+            cy += kCapH;
+            L.sfFocusToggle = { cx, cy, (cw - gap) / 2, kRowH };
+            cy += kRowH + kToggleGap;
+            L.sfGridX = cx; L.sfGridW = cw; L.sfGridY = cy;
+        }
+
+        return L;
+    }
+
+    void updateStereoEnablement()
+    {
+        stereoTempSlider.setEnabled(stereoEnableToggle.getToggleState());
+        repaint();  // refresh the Stereo Temp label tint
+        if (onVisualizerSourcesChanged) onVisualizerSourcesChanged();
+    }
+
+    void updateStrokeForgeEnablement()
+    {
+        const bool on = sfEnabledToggle.getToggleState();
+        // The whole StrokeForge section is inert when disabled (blob detection
+        // is gated off in the core too) — grey the blob sliders, morph knobs,
+        // and the Focus Only option (including their value text boxes, which
+        // JUCE does not dim on its own).
+        auto greySlider = [on](juce::Slider& s, juce::uint32 onText)
+        {
+            s.setEnabled(on);
+            s.setColour(juce::Slider::textBoxTextColourId,
+                        juce::Colour(on ? onText : kDimText));
+        };
+        greySlider(blobThreshSlider,      0xffd6dde6);
+        greySlider(blobMinWidthSlider,    0xffd6dde6);
+        greySlider(blobMergeGapSlider,    0xffd6dde6);
+        greySlider(blobColorSplitSlider,  0xffd6dde6);
+        greySlider(sfMorphWidthSlider,    0xffa0c4e8);
+        greySlider(sfFocusSigmaSlider,    0xffa0c4e8);
+        greySlider(sfSpectralThreshSlider,0xffa0c4e8);
+        sfFocusOnlyToggle.setEnabled(on);
+
+        juce::Label* labels[] = { &blobThreshLabel, &blobMinWidthLabel,
+                                  &blobMergeGapLabel, &blobColorSplitLabel };
+        for (auto* l : labels)
+            l->setColour(juce::Label::textColourId, juce::Colour(on ? 0xffb8c4d0 : kDimText));
+
+        repaint();  // refresh the painted captions / knob labels
+        if (onVisualizerSourcesChanged) onVisualizerSourcesChanged();
     }
 
     void initLabel(juce::Label& lbl, const juce::String& text)
@@ -232,11 +435,48 @@ private:
         addAndMakeVisible(lbl);
     }
 
-    /** Y coordinate of control row n (left column). */
-    int rowY(int row) const noexcept
+    void initSlider(juce::Slider& s)
     {
-        return 6 + row * (Sp3ctraTheme::kControlH + 14);
+        s.setSliderStyle(juce::Slider::LinearHorizontal);
+        s.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, Sp3ctraTheme::kControlH);
+        addAndMakeVisible(s);
     }
+
+    // ── Controls ────────────────────────────────────────────────────────────
+    juce::Slider       luxstralVolumeSlider;                       // master (left top)
+    juce::ComboBox     sourceCombo;                                // retired (plumbing only)
+    juce::ToggleButton negativeToggle, dcBlockToggle;
+    juce::Label        volumeLabel, gammaLabel, contrastMinLabel;
+    juce::Slider       gammaSlider, contrastMinSlider;
+
+    // OSCILLATORS (left)
+    std::unique_ptr<EnvelopeEditorComponent> arEnv;
+    juce::Slider       sumExpSlider, noiseGateSlider;
+
+    // STEREO (right)
+    juce::ToggleButton stereoEnableToggle;
+    juce::Slider       stereoTempSlider;
+
+    // STROKEFORGE — blob detection (right)
+    juce::Label  blobThreshLabel, blobMinWidthLabel, blobMergeGapLabel, blobColorSplitLabel;
+    juce::Slider blobThreshSlider, blobMinWidthSlider, blobMergeGapSlider, blobColorSplitSlider;
+    // STROKEFORGE — morphing (right)
+    juce::ToggleButton sfEnabledToggle, sfFocusOnlyToggle;
+    juce::Slider       sfMorphWidthSlider, sfFocusSigmaSlider, sfSpectralThreshSlider;
+
+    // ── Attachments ───────────────────────────────────────────────────────
+    using SldAttach = juce::AudioProcessorValueTreeState::SliderAttachment;
+    using BtnAttach = juce::AudioProcessorValueTreeState::ButtonAttachment;
+    using CmbAttach = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
+
+    std::unique_ptr<CmbAttach> sourceAttach;
+    std::unique_ptr<SldAttach> volumeAttach, gammaAttach, contrastMinAttach,
+                               sumExpAttach, noiseGateAttach, stereoTempAttach,
+                               blobThreshAttach, blobMinWidthAttach,
+                               blobMergeGapAttach, blobColorSplitAttach,
+                               sfMorphWidthAttach, sfFocusSigmaAttach, sfSpectralThreshAttach;
+    std::unique_ptr<BtnAttach> negativeAttach, dcBlockAttach, stereoEnableAttach,
+                               sfEnabledAttach, sfFocusOnlyAttach;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxStralTabComponent)
 };
