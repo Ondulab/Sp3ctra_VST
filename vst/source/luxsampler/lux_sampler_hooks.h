@@ -73,6 +73,24 @@ void lux_sampler_on_modulated_frame_ready(const uint8_t* R,
                                            uint32_t       line_id);
 
 /**
+ * @brief Resampling capture — record the FINAL modulated channel into every
+ *        sampler engine that has an armed recording slot.
+ *
+ * Called by udpThread() on the PLAYING path (a slot is playing into the
+ * modulated channel) so a downstream sampler records the combination
+ * (e.g. sampler B records sampler A's playback). Unlike
+ * lux_sampler_on_modulated_frame_ready(), it performs NO sampler-snapshot
+ * mirror — the engine that is playing owns the snapshot.
+ *
+ * Thread: UDP receiver thread (Non-RT).
+ */
+void lux_samplers_record_modulated(const uint8_t* R,
+                                   const uint8_t* G,
+                                   const uint8_t* B,
+                                   uint16_t       pixel_count,
+                                   uint32_t       line_id);
+
+/**
  * @brief Returns non-zero if any LuxSampler slot is currently in PLAYING state.
  *
  * Used by udpThread() to decide whether to bypass live UDP data to the

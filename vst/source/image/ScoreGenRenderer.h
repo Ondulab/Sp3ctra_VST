@@ -31,6 +31,8 @@ struct RenderResult
     juce::Image  image;          ///< the generated page (RGB), invalid on failure
     juce::String log;            ///< human-readable summary / error message
     bool         ok = false;
+    bool         stereo = false; ///< true when the image is a colour L/R composite
+                                 ///< (false ⇒ greyscale; e.g. stereo asked on a mono file)
     int          pixelWidth  = 0;
     int          pixelHeight = 0;
     /** The spectrogram band inside `image` (x,y,w,h) — the region a CIS sensor
@@ -67,7 +69,10 @@ RenderResult renderScore(const juce::File& wav,
                          std::function<void(float)> progress = {},
                          std::function<bool()>      shouldAbort = {});
 
-/** Writes `img` to `dest` as PNG (asPng=true) or JPEG (quality 0.9). */
-bool exportImage(const juce::Image& img, const juce::File& dest, bool asPng);
+/** Writes `img` to `dest` as PNG (asPng=true) or JPEG (quality 0.9), embedding
+ *  the physical resolution `dpi` so a print at "100%" reproduces the true size
+ *  (PNG pHYs chunk / JPEG JFIF density). Without this tag, viewers assume 72/96
+ *  DPI and a 400-DPI page prints ~5× too large. `dpi <= 0` ⇒ no tag written. */
+bool exportImage(const juce::Image& img, const juce::File& dest, bool asPng, double dpi);
 
 } // namespace scoregen

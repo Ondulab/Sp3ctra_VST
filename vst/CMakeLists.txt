@@ -128,7 +128,9 @@ target_sources(Sp3ctraVST
         source/sampler/TransportBarComponent.h
         source/sampler/SamplerPageComponent.cpp
         source/sampler/SamplerPageComponent.h
-        
+        source/sampler/SequencerPageComponent.cpp
+        source/sampler/SequencerPageComponent.h
+
         # 🎵 PHASE 3: LuxStral Synthesis Engine (VST-adapted)
         source/synthesis/luxstral/vst_adapters.cpp
         source/synthesis/luxstral/vst_adapters.h
@@ -191,6 +193,13 @@ target_sources(Sp3ctraVST
         source/video/VideoWindow.h
         source/video/VideoScrollTab.cpp
         source/video/VideoScrollTab.h
+        source/video/VideoScrollPage.h
+        source/video/VideoScrollRenderCore.cpp
+        source/video/VideoScrollRenderCore.h
+        source/ui/VideoMixerComponent.cpp
+        source/ui/VideoMixerComponent.h
+        source/ui/VideoMixerColumn.cpp
+        source/ui/VideoMixerColumn.h
 )
 
 # ✨ BRICK 1: UDP Reception - Add C sources
@@ -223,8 +232,12 @@ target_sources(Sp3ctraVST
         source/processing/image_pipeline_stages.c
         source/processing/image_pipeline.c
         source/processing/image_chain.c
+        source/processing/chain_plan.c
+        source/processing/chain_plan.h
         source/processing/lux_pitch.c
         source/processing/lux_mask.c
+        source/processing/video_scroll.c
+        source/processing/video_scroll.h
 
         # SCORE — offline spectrogram engine (KissFFT port of Sp3ctraGen)
         source/processing/score_engine.c

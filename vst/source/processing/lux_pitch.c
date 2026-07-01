@@ -23,10 +23,27 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-/* ── Global instance ───────────────────────────────────────────────────────────
- * Single simulation (M2): the synthesis-thread instance is the only one.
- * Visualizers read the insert taps published by the chain executor. */
+/* ── Instance pool (M6 Phase 2) ────────────────────────────────────────────────
+ * Slot 0 is g_lux_pitch_proc (legacy instance, also read by the UI LED/ruler).
+ * Slots 1.. are extra per-chain instances — each chain that uses Pitch owns an
+ * independent state so chains never share runtime data. */
 LuxPitchState g_lux_pitch_proc;
+static LuxPitchState s_lux_pitch_extra[CHAIN_MAX_CHAINS - 1];
+
+LuxPitchState *lux_pitch_instance(int idx)
+{
+    if (idx <= 0)
+        return &g_lux_pitch_proc;
+    if (idx >= CHAIN_MAX_CHAINS)
+        idx = CHAIN_MAX_CHAINS - 1;
+    return &s_lux_pitch_extra[idx - 1];
+}
+
+void lux_pitch_init_all(void)
+{
+    for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
+        lux_pitch_init(lux_pitch_instance(i));
+}
 
 /* ── Timestamp helper ──────────────────────────────────────────────────────── */
 static uint64_t lux_pitch_get_timestamp_us(void)

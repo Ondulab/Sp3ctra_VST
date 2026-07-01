@@ -134,6 +134,11 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
   atomic_init(&buffers->read_buffer_index, 0);
   atomic_init(&buffers->write_buffer_index, 1);
 
+  // Acquisition gate starts disabled (full-rate, legacy behaviour)
+  atomic_init(&buffers->gate_enabled, 0);
+  atomic_init(&buffers->gate_permit, 0);
+  buffers->gate_holds = 0;
+
   // Initialize write mutex
   if (pthread_mutex_init(&buffers->write_mutex, NULL) != 0) {
     fprintf(stderr, "ERROR: Failed to initialize write mutex\n");
@@ -323,6 +328,60 @@ void audio_image_buffers_complete_write(AudioImageBuffers *buffers) {
            atomic_load(&buffers->write_buffer_index), buffers->lines_received);
   }
 #endif
+}
+
+/**
+ * @brief Release the write mutex WITHOUT swapping buffers (acquisition gate hold)
+ *
+ * Used by the live UDP publish path when the acquisition gate decides to hold
+ * the current frame.  The freshly assembled line stays in the (un-rotated) write
+ * buffer and will be overwritten by the next line; the read buffer — and every
+ * downstream consumer — keeps the last published frame.  Sample-and-hold.
+ *
+ * @param buffers Pointer to AudioImageBuffers structure
+ */
+void audio_image_buffers_abort_write(AudioImageBuffers *buffers) {
+  if (!buffers || !buffers->initialized) {
+    fprintf(stderr, "ERROR: AudioImageBuffers not initialized\n");
+    return;
+  }
+
+  // No buffer rotation — hold the current read frame.
+  buffers->gate_holds++;
+
+  // Still must release the mutex acquired by start_write() (avoid deadlock).
+  pthread_mutex_unlock(&buffers->write_mutex);
+}
+
+/**
+ * @brief Enable/disable the acquisition gate (audio thread).
+ */
+void audio_image_buffers_gate_set_enabled(AudioImageBuffers *buffers, int enabled) {
+  if (!buffers || !buffers->initialized)
+    return;
+  atomic_store(&buffers->gate_enabled, enabled ? 1 : 0);
+}
+
+/**
+ * @brief Grant exactly one frame advance (audio thread, on each gate tick).
+ */
+void audio_image_buffers_gate_grant(AudioImageBuffers *buffers) {
+  if (!buffers || !buffers->initialized)
+    return;
+  atomic_store(&buffers->gate_permit, 1);
+}
+
+/**
+ * @brief Decide whether the live publish path may swap now (UDP thread).
+ * @return 1 if the gate is disabled or a permit was pending (consumed); 0 to hold.
+ */
+int audio_image_buffers_gate_should_publish(AudioImageBuffers *buffers) {
+  if (!buffers || !buffers->initialized)
+    return 1;
+  if (!atomic_load(&buffers->gate_enabled))
+    return 1;
+  // Consume one permit (max 1 — the gate only brakes, never fast-forwards).
+  return atomic_exchange(&buffers->gate_permit, 0);
 }
 
 /**

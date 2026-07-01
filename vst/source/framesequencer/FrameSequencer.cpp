@@ -24,14 +24,21 @@ FrameSequencer::FrameSequencer()
 void FrameSequencer::setStep(int stepIdx, int bankIdx) noexcept
 {
     if (stepIdx < 0 || stepIdx >= MAX_STEPS) return;
-    // Valid values: STEP_LIVE (-2), STEP_EMPTY (-1), or 0..11 (bank index).
+    // Valid values: STEP_LIVE (-2), STEP_EMPTY (-1), or an encoded (sampler,slot).
     int clamped;
     if (bankIdx == STEP_LIVE)
         clamped = STEP_LIVE;
     else if (bankIdx < 0)
         clamped = STEP_EMPTY;
     else
-        clamped = juce::jlimit(0, LuxSamplerConstants::NUM_SLOTS - 1, bankIdx);
+    {
+        // Clamp to the registered sampler count so a pattern can't address an
+        // engine that isn't wired yet (jmax(1,…) keeps sampler A loadable even
+        // before wiring).
+        const int n      = juce::jmax(1, numSamplers_.load(std::memory_order_relaxed));
+        const int maxEnc = n * LuxSamplerConstants::NUM_SLOTS - 1;
+        clamped = juce::jlimit(0, maxEnc, bankIdx);
+    }
     steps[stepIdx].store(clamped, std::memory_order_release);
 }
 
@@ -53,7 +60,7 @@ void FrameSequencer::uiPlay() noexcept
     held.store(false, std::memory_order_release);
     startCmd.store(true, std::memory_order_release);
     // Release FramePlayerThread: play_head may advance again.
-    if (luxSampler) luxSampler->setSeqPlayerHeld(false);
+    if (auto* s = primarySampler()) s->setSeqPlayerHeld(false);
 }
 
 void FrameSequencer::uiHold() noexcept
@@ -66,7 +73,7 @@ void FrameSequencer::uiHold() noexcept
     // holdCmd signals the audio thread (belt-and-suspenders + future RT side-effects).
     holdCmd.store(true, std::memory_order_release);
     // Freeze FramePlayerThread on the current frame until uiResume().
-    if (luxSampler) luxSampler->setSeqPlayerHeld(true);
+    if (auto* s = primarySampler()) s->setSeqPlayerHeld(true);
 }
 
 void FrameSequencer::uiStop() noexcept
@@ -74,7 +81,7 @@ void FrameSequencer::uiStop() noexcept
     held.store(false, std::memory_order_release);
     stopCmd.store(true, std::memory_order_release);
     // Ensure FramePlayerThread is not left in a frozen state after stop.
-    if (luxSampler) luxSampler->setSeqPlayerHeld(false);
+    if (auto* s = primarySampler()) s->setSeqPlayerHeld(false);
 }
 
 void FrameSequencer::uiResume() noexcept
@@ -87,7 +94,7 @@ void FrameSequencer::uiResume() noexcept
     held.store(false, std::memory_order_release);
     resumeCmd.store(true, std::memory_order_release);
     // Unfreeze FramePlayerThread: play_head resumes from where it stopped.
-    if (luxSampler) luxSampler->setSeqPlayerHeld(false);
+    if (auto* s = primarySampler()) s->setSeqPlayerHeld(false);
 }
 
 // ============================================================================
@@ -96,35 +103,52 @@ void FrameSequencer::uiResume() noexcept
 
 void FrameSequencer::triggerStep(int stepIdx) noexcept
 {
-    if (luxSampler == nullptr) return;
+    const int enc = steps[stepIdx].load(std::memory_order_relaxed);
 
-    const int bankIdx = steps[stepIdx].load(std::memory_order_relaxed);
-    auto& as = luxSampler->getAtomicState();
+    // Decode (sampler, slot). Sentinels (< 0) act on the primary engine — the
+    // single playback channel in step 1.
+    const int n          = numSamplers_.load(std::memory_order_relaxed);
+    const int samplerIdx = (enc < 0) ? 0 : (enc / LuxSamplerConstants::NUM_SLOTS);
+    const int bankIdx    = (enc < 0) ? enc : (enc % LuxSamplerConstants::NUM_SLOTS);
+
+    LuxSampler* tgt = (samplerIdx >= 0 && samplerIdx < n) ? samplers_[samplerIdx]
+                                                          : samplers_[0];
+    if (tgt == nullptr) return;
+    auto& as = tgt->getAtomicState();
 
     // ── 1. Finalise the PREVIOUS active bank (playing OR recording) ───────────
     // activePlaySlot only tracks PLAYING banks; rtPrevActiveBank covers RECORDING
-    // banks too (activePlaySlot is -1 while a bank is recording).
-    if (rtPrevActiveBank >= 0 && rtPrevActiveBank != bankIdx)
+    // banks too (activePlaySlot is -1 while a bank is recording). The previous
+    // bank may live on a DIFFERENT engine, so finalise it on rtPrevActiveSampler.
+    const bool sameAsPrev = (rtPrevActiveSampler == samplerIdx
+                             && rtPrevActiveBank  == bankIdx);
+    if (rtPrevActiveBank >= 0 && ! sameAsPrev)
     {
-        const auto prevSt = static_cast<SlotState>(
-            as.slotState[rtPrevActiveBank].load(std::memory_order_relaxed));
+        LuxSampler* prev = (rtPrevActiveSampler >= 0 && rtPrevActiveSampler < n)
+                              ? samplers_[rtPrevActiveSampler] : nullptr;
+        if (prev != nullptr)
+        {
+            auto& pas = prev->getAtomicState();
+            const auto prevSt = static_cast<SlotState>(
+                pas.slotState[rtPrevActiveBank].load(std::memory_order_relaxed));
 
-        if (prevSt == SlotState::RECORDING)
-        {
-            // Stop recording: onFrameAssembled() will finalise the slot.
-            as.stopRecCmd[rtPrevActiveBank].store(true, std::memory_order_release);
-            as.slotState[rtPrevActiveBank].store(static_cast<int>(SlotState::IDLE),
-                                                  std::memory_order_release);
+            if (prevSt == SlotState::RECORDING)
+            {
+                // Stop recording: onFrameAssembled() will finalise the slot.
+                pas.stopRecCmd[rtPrevActiveBank].store(true, std::memory_order_release);
+                pas.slotState[rtPrevActiveBank].store(static_cast<int>(SlotState::IDLE),
+                                                       std::memory_order_release);
+            }
+            else if (prevSt == SlotState::PLAYING)
+            {
+                pas.slotState[rtPrevActiveBank].store(static_cast<int>(SlotState::IDLE),
+                                                       std::memory_order_release);
+            }
+            // ARMED / IDLE → no action required
         }
-        else if (prevSt == SlotState::PLAYING)
-        {
-            as.slotState[rtPrevActiveBank].store(static_cast<int>(SlotState::IDLE),
-                                                  std::memory_order_release);
-        }
-        // ARMED / IDLE → no action required
     }
 
-    // Also stop any other slot that happens to be playing (safety net).
+    // Also stop any other slot that happens to be playing on the TARGET engine.
     const int curPlay = as.activePlaySlot.load(std::memory_order_relaxed);
     if (curPlay >= 0 && curPlay != bankIdx)
     {
@@ -136,45 +160,37 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
     if (bankIdx == STEP_LIVE)
     {
         // Explicit LIVE step: restore CIS live passthrough (old default behaviour).
-        // The live UDP signal flows through to AudioImageBuffers unhindered.
         if (as.activePlaySlot.load(std::memory_order_relaxed) >= 0)
             as.stopPlayCmd.store(true, std::memory_order_release);
         as.activePlaySlot.store(-1, std::memory_order_release);
         as.passthroughEnabled.store(true, std::memory_order_release);
         as.seqLiveStepActive.store(true, std::memory_order_release);  // STEP_LIVE only
-        luxSampler->setSeqSilentStep(false); // clear silence flag — live is active
-        rtPrevActiveBank = STEP_LIVE;
+        tgt->setSeqSilentStep(false); // clear silence flag — live is active
+        rtPrevActiveBank    = STEP_LIVE;
+        rtPrevActiveSampler = samplerIdx;
         return;
     }
 
     if (bankIdx == STEP_EMPTY)
     {
         // Empty / silence step: stop any playing slot AND suppress live passthrough.
-        // Both the visual display (CisVisualizerComponent) and synthesis engine
-        // will produce no signal (white frame = silence) for this step duration.
         if (as.activePlaySlot.load(std::memory_order_relaxed) >= 0)
             as.stopPlayCmd.store(true, std::memory_order_release);
         as.activePlaySlot.store(-1,    std::memory_order_release);
         as.passthroughEnabled.store(false, std::memory_order_release); // suppress live
         as.seqLiveStepActive.store(false, std::memory_order_release);  // not STEP_LIVE
-        luxSampler->setSeqSilentStep(true); // tell visualizer to show white
-        // FIX(silence): Signal FramePlayerThread to inject a full-white (255) frame
-        // immediately into AudioImageBuffers and preprocessed_data.
-        // Without this, the last sampler frame stays frozen in both buffers causing
-        // the synthesis engine to keep producing sound during a STEP_EMPTY step.
-        // Covers both cases:
-        //   • A slot was playing  — FramePlayerThread detects this after its inner
-        //     loop exits via stopPlayCmd (seqSilentStepActive check in run()).
-        //   • Nothing was playing — FramePlayerThread idle loop consumes this flag
-        //     (e.g. STEP_EMPTY immediately after a STEP_LIVE step).
+        tgt->setSeqSilentStep(true); // tell visualizer to show white
+        // FIX(silence): inject a full-white (255) frame so the last sampler frame
+        // does not freeze in AudioImageBuffers / preprocessed_data during silence.
         as.injectSilenceCmd.store(true, std::memory_order_release);
-        rtPrevActiveBank = STEP_EMPTY;
+        rtPrevActiveBank    = STEP_EMPTY;
+        rtPrevActiveSampler = samplerIdx;
         return;
     }
 
-    // bankIdx is a valid slot (0..11)
+    // bankIdx is a valid slot (0..11) on engine samplerIdx.
     // Clear the silent-step flag: a real slot is about to play.
-    luxSampler->setSeqSilentStep(false);
+    tgt->setSeqSilentStep(false);
 
     const auto curSt = static_cast<SlotState>(
         as.slotState[bankIdx].load(std::memory_order_relaxed));
@@ -183,8 +199,6 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
     {
         // ── Sequencer-triggered recording ─────────────────────────────────────
         // Bank was armed (user pressed REC) → start capturing frames now.
-        // Post startRecCmd so onFrameAssembled() sets activeRecSlot and resets
-        // the slot buffer.  Passthrough remains ON during recording.
         as.slotState[bankIdx].store(static_cast<int>(SlotState::RECORDING),
                                      std::memory_order_release);
         as.startRecCmd[bankIdx].store(true, std::memory_order_release);
@@ -193,17 +207,9 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
     else
     {
         // ── Normal bank playback ───────────────────────────────────────────────
-        // Clear any stale stopPlayCmd BEFORE posting startPlayCmd.
-        // A stale stop (from a previous empty/LIVE step) would otherwise
-        // immediately kill FramePlayerThread's inner playback loop.
-        // RT-safe: FramePlayerThread exits its inner loop via slotState!=PLAYING
-        // (set in §1 above) before we reach here, so there is no live consumer
-        // of stopPlayCmd that we could pre-empt.
-        //
         // Mark this play as sequencer-controlled BEFORE startPlayCmd so that
-        // FramePlayerThread never restores passthroughEnabled on its own when
-        // the sample finishes or the slot has no content.  Only the sequencer
-        // (STEP_LIVE or rtStop) is allowed to re-enable live passthrough.
+        // FramePlayerThread never restores passthroughEnabled on its own when the
+        // sample finishes; only the sequencer (STEP_LIVE / rtStop) re-enables live.
         as.seqLiveStepActive.store(false, std::memory_order_release);  // not STEP_LIVE
         as.seqControlledPlay.store(true,  std::memory_order_release);
         as.stopPlayCmd.store(false, std::memory_order_release);
@@ -214,7 +220,8 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
         as.passthroughEnabled.store(false, std::memory_order_release);
     }
 
-    rtPrevActiveBank = bankIdx;
+    rtPrevActiveBank    = bankIdx;
+    rtPrevActiveSampler = samplerIdx;
 }
 
 void FrameSequencer::rtStop() noexcept
@@ -225,10 +232,11 @@ void FrameSequencer::rtStop() noexcept
     rtInternalPhaseBeats = 0.0;
     rtLastPpqPosition    = -1.0;
     rtPrevActiveBank     = -1;
+    rtPrevActiveSampler  = 0;
 
-    if (luxSampler != nullptr)
+    if (auto* s = primarySampler())
     {
-        auto& as = luxSampler->getAtomicState();
+        auto& as = s->getAtomicState();
         const int cp = as.activePlaySlot.load(std::memory_order_relaxed);
         if (cp >= 0)
         {

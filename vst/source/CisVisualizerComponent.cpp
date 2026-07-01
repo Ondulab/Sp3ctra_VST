@@ -794,13 +794,16 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
     {
         audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
     }
-    else if (vizSource == VisualizerMode::SAMPLER)
+    else if (vizSource == VisualizerMode::MODULATED)  // == legacy SAMPLER / MIX aliases
     {
-        audio_image_buffers_get_sampler_pointers(buffers, &pR, &pG, &pB);
-    }
-    else if (vizSource == VisualizerMode::MIX)
-    {
-        audio_image_buffers_get_read_pointers(buffers, &pR, &pG, &pB);
+        // CHAIN 1 — the post-insert-chain frame the engines actually consume
+        // (Live ► LuxSampler ► LuxPitch ► LuxMask), published once per chain run.
+        // NB: VisualizerMode::SAMPLER and ::MIX are deprecated aliases sharing
+        // MODULATED's enum value, so this single branch covers all three.  The
+        // old code read the SAMPLER buffer here, which left CHAIN 1 blank
+        // whenever no slot was playing — even though the audio (which reads
+        // MODULATED) was working fine.
+        audio_image_buffers_get_modulated_pointers(buffers, &pR, &pG, &pB);
     }
     else if (vizSource == VisualizerMode::LUXPITCH_OUTPUT)
     {

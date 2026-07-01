@@ -27,7 +27,10 @@
 struct ModuleInstance
 {
     ModuleType  type;
-    juce::Uuid  id;   ///< stable identity (survives reordering; Phase 2: per-instance params)
+    juce::Uuid  id;       ///< stable identity (survives reordering)
+    int         slot{-1}; ///< per-instance index: VideoScroll bank (0..7),
+                          ///  sampler engine (0=A, 1=B) OR LuxStral engine
+                          ///  (0=A, 1=B); -1 for non-slotted types.
 };
 
 struct Chain
@@ -50,6 +53,39 @@ public:
      *  non-null, that instance is excluded from the duplicate/role counts (used
      *  for in-rack reordering / cross-chain moves of an existing block). */
     bool canInsert(int chainIdx, ModuleType type, const juce::Uuid* movingId = nullptr) const;
+
+    //── VideoScroll per-instance slot pool ─────────────────────────────────────
+    static constexpr int kMaxVideoSlots = 8;   // MUST equal CHAIN_MAX_CHAINS
+    static bool isSlottedType(ModuleType t) noexcept { return t == ModuleType::VideoScroll; }
+    /** Lowest free slot 0..kMaxVideoSlots-1 across ALL chains, or -1 if full.
+     *  `movingId` (if set) is excluded so a moved instance keeps its slot. */
+    int firstFreeVideoSlot(const juce::Uuid* movingId = nullptr) const;
+    /** Count of slotted instances across the whole model (optionally excluding one). */
+    int videoSlotCount(const juce::Uuid* exclude = nullptr) const;
+
+    //── Sampler engine slot pool (A=0, B=1) — INDEPENDENT of the VideoScroll pool ─
+    // A Sampler instance's `slot` is its engine index: first placed = A (0),
+    // second = B (1). Up to 2 may coexist (even in the same chain).
+    static constexpr int kMaxSamplerEngines = 2;
+    static bool isSamplerEngine(ModuleType t) noexcept { return t == ModuleType::Sampler; }
+    /** Lowest free sampler-engine slot 0..kMaxSamplerEngines-1, or -1 if full. */
+    int firstFreeSamplerSlot(const juce::Uuid* movingId = nullptr) const;
+
+    //── LuxStral engine slot pool (A=0, B=1) — INDEPENDENT of the pools above ────
+    // Like the Sampler, LuxStral has two independent engines. A LuxStral
+    // instance's `slot` is its engine index (first placed = A (0), second = B
+    // (1)). UNLIKE the Sampler, at most ONE LuxStral may sit in a given chain
+    // (the per-chain duplicate rule still applies) — the two engines live in
+    // different chains, each reading its own chain's processed input.
+    static constexpr int kMaxLuxStralEngines = 2;
+    static bool isLuxStralEngine(ModuleType t) noexcept { return t == ModuleType::LuxStral; }
+    /** Lowest free LuxStral-engine slot 0..kMaxLuxStralEngines-1, or -1 if full. */
+    int firstFreeLuxStralSlot(const juce::Uuid* movingId = nullptr) const;
+
+    /** Types that carry a per-instance `slot` (VideoScroll bank, sampler engine
+     *  OR LuxStral engine). */
+    static bool hasSlot(ModuleType t) noexcept
+        { return isSlottedType(t) || isSamplerEngine(t) || isLuxStralEngine(t); }
 
     //── Mutations (return false when the rule check fails) ─────────────────────
     bool insert(int chainIdx, ModuleType type, int dropIdx);
@@ -97,4 +133,5 @@ public:
     static const juce::Identifier kTypeProp;    // "type"
     static const juce::Identifier kUuidProp;    // "uuid"
     static const juce::Identifier kVersionProp; // "version"
+    static const juce::Identifier kSlotProp;    // "slot" (VideoScroll bank index)
 };

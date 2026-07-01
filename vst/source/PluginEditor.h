@@ -12,11 +12,13 @@
 #include "image/LuxSynthTabComponent.h"
 #include "image/ScoreGenTabComponent.h"
 #include "image/VisualizerMode.h"
+#include "video/VideoScrollPage.h"
 #include "sampler/SamplerPageComponent.h"
+#include "sampler/SequencerPageComponent.h"
 #include "ui/ChainRackComponent.h"
 #include "ui/KeyboardRulerComponent.h"
 #include "ui/EngineAudioPanels.h"
-#include "ui/WaterfallColumnComponent.h"
+#include "ui/VideoMixerColumn.h"
 #include "ui/ModuleCatalogComponent.h"
 #include "ui/SplitterBar.h"
 #include "ui/setup/SourceSetupPanel.h"
@@ -129,6 +131,56 @@ public:
     }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PanicButton)
+};
+
+// ============================================================================
+// RailToggleButton — collapse / expand control for the far-left module
+// catalogue rail (mirrors ZONE 4's collapse grip). Draws ✕ to collapse the
+// rail and ▶ (pointing right, into where the rail re-appears) to expand it.
+// Self-contained painting, like GearButton.
+// ============================================================================
+class RailToggleButton : public juce::Button
+{
+public:
+    enum class Glyph { Collapse, Expand };
+
+    explicit RailToggleButton(Glyph g) : juce::Button("railToggle"), glyph(g) {}
+
+    void paintButton(juce::Graphics& g, bool isMouseOver, bool isButtonDown) override
+    {
+        const auto b = getLocalBounds().toFloat().reduced(1.f);
+
+        const juce::Colour bg(0xff222230);
+        g.setColour(isButtonDown ? bg.brighter(0.30f)
+                  : isMouseOver  ? bg.brighter(0.12f)
+                  :                bg);
+        g.fillRoundedRectangle(b, 3.f);
+
+        g.setColour(isMouseOver ? juce::Colour(0xffe8eef8) : juce::Colour(0xff9aa6ba));
+        const auto inner = b.reduced(4.5f);   // matches ZONE 4's MiniButton exactly
+
+        if (glyph == Glyph::Collapse)   // ✕
+        {
+            juce::Path p;
+            p.startNewSubPath(inner.getX(),     inner.getY());
+            p.lineTo         (inner.getRight(), inner.getBottom());
+            p.startNewSubPath(inner.getRight(), inner.getY());
+            p.lineTo         (inner.getX(),     inner.getBottom());
+            g.strokePath(p, juce::PathStrokeType(1.6f));
+        }
+        else                            // ▶ — points right, into the rail
+        {
+            juce::Path p;
+            p.addTriangle(inner.getX(),     inner.getY(),
+                          inner.getX(),     inner.getBottom(),
+                          inner.getRight(), inner.getCentreY());
+            g.fillPath(p);
+        }
+    }
+
+private:
+    Glyph glyph;
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RailToggleButton)
 };
 
 // ============================================================================
@@ -345,7 +397,9 @@ private:
      *  ruler offset. */
     int zonesBaseY() const noexcept { return kVisY + visHeight() + 6; }
 
-    static constexpr int kPaletteW  = ModuleCatalogComponent::kRailW;   // module catalogue rail
+    static constexpr int kPaletteW   = ModuleCatalogComponent::kRailW;  // module catalogue rail
+    static constexpr int kCatHeaderH = 22;   // catalogue rail header band (title + ✕)
+    static constexpr int kCatGripW   = 24;   // collapsed catalogue grip width
     static constexpr int kSplitterW = 6;
     static constexpr int kStackGap  = 12;    // gap between stacked zone-3 pages
     static constexpr int kFaceBarH  = 24;    // PLAY | SETUP switcher height
@@ -383,6 +437,11 @@ private:
      *  selection + face. */
     void applyZone3Visibility();
 
+    /** Collapses / expands the far-left module catalogue rail. Collapsing locks
+     *  the chain rack (no module/chain deletion, reorder still allowed) and the
+     *  freed width flows to the block editor; the state persists across reloads. */
+    void setCatalogCollapsed(bool shouldCollapse, bool persist = true);
+
     /** Lays out zones 2/3/4 below the visualizer strip. */
     void layoutZones();
 
@@ -417,8 +476,13 @@ private:
     std::unique_ptr<KeyboardRulerComponent> keyboardRuler;
 
     // ── Module catalogue rail (M6 — drag source for the chain rack) ───────────
+    // Collapsible like ZONE 4: when collapsed it shrinks to a thin grip and the
+    // chain rack is locked (delete affordances off, reorder still allowed).
     juce::Viewport         catalogViewport;
     ModuleCatalogComponent moduleCatalog;
+    bool             catalogCollapsed { false };
+    RailToggleButton catalogCollapseBtn { RailToggleButton::Glyph::Collapse };
+    RailToggleButton catalogExpandBtn   { RailToggleButton::Glyph::Expand };
 
     // ── ZONE 2: chain rack (in a vertical viewport) ───────────────────────────
     juce::Viewport rackViewport;
@@ -442,7 +506,9 @@ private:
     std::unique_ptr<LuxStralTabComponent> imgLuxStralPage;
     std::unique_ptr<LuxSynthTabComponent> imgLuxSynthPage;
     std::unique_ptr<SamplerPageComponent> samplerPage;
+    std::unique_ptr<SequencerPageComponent> sequencerPage;
     std::unique_ptr<ScoreGenTabComponent> scorePage;
+    std::unique_ptr<VideoScrollPage>      videoScrollPage;   // OUT > VIDEO SCROLL (per-instance)
     std::unique_ptr<AudioSynthPanel>      audioSynthPanel;
     std::unique_ptr<AudioWavePanel>       audioWavePanel;
 
@@ -457,7 +523,7 @@ private:
     std::unique_ptr<ScoreSetupPanel>      scoreSetup;
 
     // ── ZONE 4: video scroll column (collapsible, detachable window) ──────────
-    std::unique_ptr<WaterfallColumnComponent> waterfallColumn;
+    std::unique_ptr<VideoMixerColumn> waterfallColumn;   // ZONE 4 — right-band VIDEO MIX
 
     // ZONE 5 — reserved (output / master / monitoring): collapsed strip h=0.
 

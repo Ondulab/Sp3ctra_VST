@@ -29,9 +29,7 @@ namespace
 SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
     : processor(proc),
       slotGrid  (proc),
-      slotEditor(proc),
-      sequencer (proc),
-      transport (proc)
+      slotEditor(proc)
 {
     slotGrid.onSlotSelected = [this](int idx) { onSlotSelected(idx); };
     slotGrid  .setSelectedSlot(0);
@@ -39,8 +37,6 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
 
     addAndMakeVisible(slotGrid);
     addAndMakeVisible(slotEditor);
-    addAndMakeVisible(sequencer);
-    addAndMakeVisible(transport);
 
     // ── Style helper ─────────────────────────────────────────────────────────
     auto styleBtn = [](juce::TextButton& btn, juce::Colour bg, juce::Colour fg)
@@ -84,7 +80,7 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
                 }
 
                 // Clear all recorded slots and reset play params to defaults
-                if (auto* fs = processor.getLuxSampler())
+                if (auto* fs = processor.getSampler(samplerIndex_))
                 {
                     fs->clearAllSlots();
                     for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
@@ -130,7 +126,6 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
                 // Refresh UI
                 slotGrid  .repaint();
                 slotEditor.setSelectedSlot(0);
-                sequencer .repaint();
             });
     };
 
@@ -260,13 +255,12 @@ void SamplerPageComponent::paint(juce::Graphics& g)
 void SamplerPageComponent::resized()
 {
     const int w      = getWidth();
-    const int h      = getHeight();
     constexpr int pad    = Sp3ctraTheme::kPad;
     constexpr int gap    = Sp3ctraTheme::kGap;
     constexpr int gridH  = 66;
-    constexpr int editH  = 210;
+    // Editor grew a full-width spectral-curve band at the bottom (+ Loop XF row).
+    constexpr int editH  = 430;
     constexpr int bankH  = Sp3ctraTheme::kControlH;
-    constexpr int transH = 44;
 
     // ── Zone 1: sample bank ───────────────────────────────────────────────────
     slotGrid.setBounds(pad, pad, w - 2 * pad, gridH);
@@ -275,22 +269,14 @@ void SamplerPageComponent::resized()
     const int editY = pad + gridH + gap;
     slotEditor.setBounds(pad, editY, w - 2 * pad, editH);
 
-    // ── Transport bar (pinned to bottom) ──────────────────────────────────────
-    const int transY = h - pad - transH;
-    transport.setBounds(pad, transY, w - 2 * pad, transH);
-
     // ── Session toolbar (NEW SESSION / SAVE SESSION / LOAD SESSION) ───────────
+    // The step sequencer + its transport bar now live in the SEQUENCER module.
     const int sessY  = editY + editH + gap;
     const int btnGap = 4;
     const int bW3    = (w - 2 * pad - 2 * btnGap) / 3;
     newSessionBtn .setBounds(pad,                      sessY, bW3, bankH);
     saveSessionBtn.setBounds(pad + bW3 + btnGap,       sessY, bW3, bankH);
     loadSessionBtn.setBounds(pad + 2 * (bW3 + btnGap), sessY, bW3, bankH);
-
-    // ── Zone 3: step sequencer (fills space between session row and transport)
-    const int seqY = sessY + bankH + gap;
-    const int seqH = transY - gap - seqY;
-    sequencer.setBounds(pad, seqY, w - 2 * pad, juce::jmax(80, seqH));
 }
 
 // =============================================================================
@@ -300,7 +286,7 @@ void SamplerPageComponent::resized()
 
 void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
 {
-    auto* fs  = processor.getLuxSampler();
+    auto* fs  = processor.getSampler(samplerIndex_);
     auto* seq = processor.getFrameSequencer();
     if (!fs || !seq) return;
 
@@ -429,7 +415,7 @@ void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
 
 void SamplerPageComponent::doLoadSession(const juce::File& sessionFile)
 {
-    auto* fs  = processor.getLuxSampler();
+    auto* fs  = processor.getSampler(samplerIndex_);
     auto* seq = processor.getFrameSequencer();
     if (!fs || !seq) return;
 
@@ -567,5 +553,4 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile)
     // ── Refresh UI ────────────────────────────────────────────────────────────
     slotGrid  .repaint();
     slotEditor.setSelectedSlot(0);
-    sequencer .repaint();
 }

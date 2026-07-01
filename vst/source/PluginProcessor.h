@@ -5,12 +5,25 @@
 #include "Sp3ctraConstants.h"
 #include "luxsampler/LuxSampler.h"
 #include "framesequencer/FrameSequencer.h"
+#include "processing/AcquisitionGate.h" // "Vitesse d'acquisition" — frame-advance brake clock
+#include "ui/ChainModel.h"      // M6 Phase 2 — editable chain topology (owned here)
 
 // C headers for RT profiling
 extern "C" {
     #include "utils/rt_profiler.h"
     #include "processing/score_engine.h"   // ScoreSettings (offline SCORE generation)
 }
+
+//==============================================================================
+// VideoScroll per-instance APVTS bank id helpers. A VideoScroll module instance
+// owns a slot 0..7 (ModuleInstance.slot); its params live under "videoScroll{slot}_*"
+// and its mixer voice under "videoMix{slot}_*". One source of truth shared by the
+// contextual panel, the per-instance renderer and the right-band mixer.
+inline juce::String vsParam(int slot, const char* suffix)
+{ return "videoScroll" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
+
+inline juce::String vsMixParam(int slot, const char* suffix)
+{ return "videoMix" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
 
 //==============================================================================
 /**
@@ -71,6 +84,11 @@ public:
     // Public accessors for UI
     juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
 
+    /** Slots (0..7) of every VIDEO SCROLL output instance currently patched into
+     *  a chain, ascending. Drives the right-band mixer's dynamic voice list.
+     *  Message-thread only (reads the editable chain model). */
+    std::vector<int> activeVideoSlots() const;
+
     /** Video-scroll transport — momentary "Stop": freezes (videoScrollPaused)
      *  and clears the waterfall.  The clear is a generation counter polled by
      *  every live VideoDisplayComponent, so it reaches all open views without a
@@ -112,6 +130,8 @@ public:
         return sharedCore && sharedCore->isReady();
     }
     LuxSampler*    getLuxSampler()    { return luxSampler.get();    }
+    /** Sampler engine by index: 0 = A, 1 = B. Out-of-range falls back to A. */
+    LuxSampler*    getSampler(int i)  { return (i == 1) ? luxSamplerB.get() : luxSampler.get(); }
     FrameSequencer*  getFrameSequencer()  { return frameSequencer.get();  }
 
     // -------------------------------------------------------------------------
@@ -202,6 +222,22 @@ public:
     int  chainLuxstralSource() const noexcept { return chainSrcLuxstral.load(std::memory_order_relaxed); }
     int  chainLuxsynthSource() const noexcept { return chainSrcLuxsynth.load(std::memory_order_relaxed); }
 
+    /** M6 Phase 2 — the editable chain topology lives here (not in the editor) so
+     *  per-chain routing applies headless and is reachable by the RT thread.
+     *  The ChainRackComponent edits this model directly and calls
+     *  onChainModelEdited() afterwards. */
+    ChainModel& getChainModel() noexcept { return chainModel_; }
+
+    /** Called by the UI after a model mutation: pushes module presence onto the
+     *  APVTS enable params, derives the per-synth source routing, and persists
+     *  the topology. (Message thread.) */
+    void onChainModelEdited();
+
+    /** Loads the topology from apvts.state (or the legacy default) and derives
+     *  routing — WITHOUT touching enable params (those are restored from state).
+     *  Headless-safe; called from the constructor and setStateInformation. */
+    void loadChainModelFromState();
+
     void startSamplerMidiLearn(int target) noexcept
     {
         samplerMidiLearnResult.store(-1, std::memory_order_relaxed);
@@ -239,6 +275,7 @@ private:
     // -1 = no buffer consumed yet (startup)
     int lastConsumedReadIdx = -1;
     int lastConsumedReadIdxLuxSynth = -1;
+    int lastConsumedReadIdxLuxstralB = -1;   // M8 — 2nd LuxStral engine consumer
     // pixels_per_note used during the last synth_IfftInit() call.
     // If it changes on SR switch (e.g. 96kHz→48kHz: ppn 4→2), the waves[]
     // array must be reallocated via synth_luxstral_cleanup() + synth_IfftInit().
@@ -252,8 +289,15 @@ private:
     // The shared_ptr keeps the singleton alive as long as this instance exists.
     // The last instance to be destroyed will tear down UDP + synthesis threads.
     std::shared_ptr<Sp3ctraSharedCore> sharedCore;
-    std::unique_ptr<LuxSampler>   luxSampler;
+    std::unique_ptr<LuxSampler>   luxSampler;    // engine A (sampler slot 0)
+    std::unique_ptr<LuxSampler>   luxSamplerB;   // engine B (sampler slot 1) — 2nd sampler
     std::unique_ptr<FrameSequencer> frameSequencer;
+
+    // "Vitesse d'acquisition" — brakes the live frame-advance rate (sample-and-
+    // hold) of the SP3CTRA source.  Clock only (audio thread); the buffer module
+    // enforces the hold.  Driven each block from processBlock by the acqGate*
+    // APVTS params.
+    AcquisitionGate acqGate_;
 
     // SCORE generation settings — shared between PLAY page and SETUP panel.
     ScoreSettings     scoreSettings_ {};
@@ -326,6 +370,26 @@ private:
     // Defaults reproduce the legacy fixed topology (LuxStral=modulated, LuxSynth=live).
     std::atomic<int> chainSrcLuxstral { 0 };
     std::atomic<int> chainSrcLuxsynth { 1 };
+
+    // M6 Phase 2 — authoritative editable topology + last-known presence set
+    // (used to diff the enable-param bridge). Message-thread owned.
+    ChainModel           chainModel_;
+    std::set<ModuleType> chainActiveTypes_;
+    // VideoScroll probe slots (0..7) present last edit — diffed to clear the
+    // capture ring of any probe that was just removed.
+    std::set<int>        videoScrollSlots_;
+    // Bit i set ⇒ chain i has a Pitch/Mask instance → fan MIDI to pool slot i.
+    // Default bit 0 reproduces the legacy single-instance behaviour.
+    std::atomic<uint32_t> chainPitchMask_ { 1 };
+    std::atomic<uint32_t> chainMaskMask_  { 1 };
+    // M8 — true when a 2nd LuxStral engine (slot B) is placed in the model; gates
+    // the additive engine-B mix in processBlock(). Set in deriveChainRouting().
+    std::atomic<bool>     luxstralBPresent_ { false };
+    void deriveChainRouting();              // model → setChainSourceRouting + chain plan
+    void deriveAndPublishChainPlan();       // model → RT-safe per-synth ChainPlan
+    void persistChainModel();              // model → apvts.state <CHAINS>
+    void applyChainEnableBridge();         // presence → enable params (diff vs chainActiveTypes_)
+    void teardownAbsentModules(const std::set<ModuleType>& now); // free state of removed modules
 
     // Video-scroll "Stop" pulse: incremented by the UI; each VideoDisplayComponent
     // polls it (message thread) and clears its history buffer when it advances.

@@ -78,7 +78,40 @@ ScoreSetupPanel::ScoreSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
     initSlider(dynSlider, 20.0, 120.0, 1.0, settings.dynamicRangeDB);
     dynSlider.onValueChange = [this] { settings.dynamicRangeDB = dynSlider.getValue(); };
 
+    // ── Print size — spectro band height = CIS sensor length ───────────────
+    printSectionLabel.setText("Print Size", juce::dontSendNotification);
+    printSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
+    printSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
+    addAndMakeVisible(printSectionLabel);
+
+    heightManualToggle.setButtonText("Manual (override CIS height)");
+    heightManualToggle.setTooltip(
+        "Locked to the Sp3ctra CIS sensor length (219.456 mm = 8.64\"). Print the\n"
+        "score at 100% / real size so the band height matches the sensor and plays\n"
+        "in tune. Enable only to compensate a printer that can't scale to 100%.");
+    heightManualToggle.setToggleState(settings.spectroHeightManual != 0, juce::dontSendNotification);
+    heightManualToggle.onClick = [this]
+    {
+        const bool man = heightManualToggle.getToggleState();
+        settings.spectroHeightManual = man ? 1 : 0;
+        if (! man)
+            settings.spectroHeightMM = SCORE_CIS_HEIGHT_MM;   // re-lock to the sensor
+        refreshHeightControls();
+    };
+    addAndMakeVisible(heightManualToggle);
+
+    initLabel(heightLabel, "Band Height (mm)");
+    initSlider(heightSlider, 180.0, 260.0, 0.001, settings.spectroHeightMM);
+    heightSlider.setNumDecimalPlacesToDisplay(3);
+    heightSlider.setTextValueSuffix(" mm");
+    heightSlider.onValueChange = [this]
+    {
+        if (settings.spectroHeightManual)
+            settings.spectroHeightMM = heightSlider.getValue();
+    };
+
     refreshFreqControls();
+    refreshHeightControls();
     startTimerHz(5);   // mirror live LuxStral values while not in manual mode
 }
 
@@ -146,6 +179,23 @@ void ScoreSetupPanel::refreshFreqControls()
     updateRangeInfo();
 }
 
+void ScoreSetupPanel::refreshHeightControls()
+{
+    const bool man = settings.spectroHeightManual != 0;
+
+    heightManualToggle.setToggleState(man, juce::dontSendNotification);
+    heightSlider.setEnabled(man);
+
+    // Grey the control when locked to the sensor length (read-only display).
+    const float a = man ? 1.0f : 0.45f;
+    heightSlider.setAlpha(a);
+    heightLabel.setAlpha(a);
+
+    // Show the live override, or the locked CIS length when following the sensor.
+    heightSlider.setValue(man ? settings.spectroHeightMM : SCORE_CIS_HEIGHT_MM,
+                          juce::dontSendNotification);
+}
+
 void ScoreSetupPanel::updateRangeInfo()
 {
     double lo = 0.0, hi = 0.0;
@@ -203,4 +253,11 @@ void ScoreSetupPanel::resized()
 
     // ── Image processing (PhonoPaper-conforming) ──
     labelled(dynLabel, dynSlider);
+
+    area.removeFromTop(Sp3ctraTheme::kRowGap);   // small breather
+
+    // ── Print size (CIS band height) ──
+    printSectionLabel.setBounds(row());
+    { auto r = row(); heightManualToggle.setBounds(r.removeFromLeft(labelW + Sp3ctraTheme::kGap + ctrlW)); }
+    labelled(heightLabel, heightSlider);
 }

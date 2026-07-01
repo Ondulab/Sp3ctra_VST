@@ -2,7 +2,20 @@
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 
-static const char* kLoopLabels[4] = { "NONE", "LOOP", "INV", "PING" };
+// Loop-mode buttons are now pictograms (see LoopModeButton). Order matches the
+// LoopMode enum: NONE / LOOP / INVERSE / PINGPONG.
+static const LoopModeButton::Glyph kLoopGlyphs[4] = {
+    LoopModeButton::Glyph::None,
+    LoopModeButton::Glyph::Loop,
+    LoopModeButton::Glyph::Inverse,
+    LoopModeButton::Glyph::PingPong
+};
+static const char* kLoopTips[4] = {
+    "No loop (play once, then stop)",
+    "Loop forward",
+    "Inverse (loop backward)",
+    "Ping-pong (bounce forward / backward)"
+};
 static const char* kNoteNamesEd[LuxSamplerConstants::NUM_SLOTS] = {
     "C1","C#1","D1","D#1","E1","F1","F#1","G1","G#1","A1","A#1","B1"
 };
@@ -20,7 +33,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     // ── Action buttons ────────────────────────────────────────────────────────
     recBtn.onClick = [this]
     {
-        if (auto* fs = processor.getLuxSampler())
+        if (auto* fs = processor.getSampler(samplerIndex_))
         {
             fs->uiToggleRecord(selectedSlot);
             timeline.markDirty(); // thumbnail may have changed after record
@@ -30,7 +43,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
 
     playBtn.onClick = [this]
     {
-        if (auto* fs = processor.getLuxSampler())
+        if (auto* fs = processor.getSampler(samplerIndex_))
         {
             fs->uiPlaySlot(selectedSlot);
             // Auto-activate sampler transport PLAY so the pipeline processes
@@ -44,7 +57,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
 
     clearBtn.onClick = [this]
     {
-        if (auto* fs = processor.getLuxSampler())
+        if (auto* fs = processor.getSampler(samplerIndex_))
         {
             fs->uiClearSlot(selectedSlot);
             timeline.markDirty();
@@ -52,11 +65,25 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     };
     addAndMakeVisible(clearBtn);
 
+    // ── CROP button — destructive trim to the current [start, end] region ─────
+    // Cuts everything outside the green/orange bounds, then resets the bounds to
+    // full so the kept part fills the timeline.
+    cropBtn.onClick = [this]
+    {
+        if (auto* fs = processor.getSampler(samplerIndex_))
+        {
+            fs->cropSlotToBounds(selectedSlot);
+            timeline.markDirty();   // waveform + bounds changed
+            refreshSliderValues();
+        }
+    };
+    addAndMakeVisible(cropBtn);
+
     // ── SAVE button — direct write (no dialog) ────────────────────────────────
     // Filename pattern: YYYYMMDD-HHMMSS_slotNN.fslot (+ optional .png/.jpg).
     saveBtn.onClick = [this]
     {
-        auto* fs = processor.getLuxSampler();
+        auto* fs = processor.getSampler(samplerIndex_);
         if (fs == nullptr || !fs->slotHasContent(selectedSlot))
             return;
 
@@ -103,7 +130,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     // ── LOAD button — file chooser, loads into selected slot ──────────────────
     loadBtn.onClick = [this]
     {
-        auto* fs = processor.getLuxSampler();
+        auto* fs = processor.getSampler(samplerIndex_);
         if (fs == nullptr) return;
 
         const juce::File startDir = resolveSaveDirectory();
@@ -119,7 +146,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
         {
             const juce::File picked = fc.getResult();
             if (picked == juce::File()) return;
-            auto* sampler = processor.getLuxSampler();
+            auto* sampler = processor.getSampler(samplerIndex_);
             if (sampler == nullptr) return;
 
             if (sampler->loadSlotFromFile(selectedSlot, picked))
@@ -133,7 +160,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     addAndMakeVisible(loadBtn);
 
     // ── Labels ────────────────────────────────────────────────────────────────
-    for (auto* lbl : { &speedLabel, &loopLabel })
+    for (auto* lbl : { &speedLabel, &loopLabel, &loopXfLabel })
     {
         lbl->setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
         lbl->setColour(juce::Label::textColourId, juce::Colour(0xffb0b0c0));
@@ -160,7 +187,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     brightnessSlider.onValueChange = [this]
     {
         // Slider 100% = full image (lift=0), 0% = white silence (lift=1)
-        if (auto* fs = processor.getLuxSampler())
+        if (auto* fs = processor.getSampler(samplerIndex_))
             fs->setSlotBrightnessLift(selectedSlot,
                 1.0f - static_cast<float>(brightnessSlider.getValue()) * 0.01f);
     };
@@ -181,31 +208,75 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     speedSlider.setValue(1.0, juce::dontSendNotification);
     speedSlider.onValueChange = [this]
     {
-        if (auto* fs = processor.getLuxSampler())
+        if (auto* fs = processor.getSampler(samplerIndex_))
             fs->setSlotSpeed(selectedSlot,
                              static_cast<float>(speedSlider.getValue()));
     };
     addAndMakeVisible(speedSlider);
 
-    // ── Loop mode buttons ─────────────────────────────────────────────────────
+    // ── Loop mode buttons (pictograms) ────────────────────────────────────────
     for (int k = 0; k < 4; ++k)
     {
-        loopBtns[k].setButtonText(kLoopLabels[k]);
+        loopBtns[k].setGlyph(kLoopGlyphs[k]);
+        loopBtns[k].setTooltip(kLoopTips[k]);
         loopBtns[k].onClick = [this, k] { applyLoopMode(static_cast<LoopMode>(k)); };
         addAndMakeVisible(loopBtns[k]);
     }
     refreshLoopButtons();
+
+    // ── Loop crossfade (overlap) slider — 0..50 % of the loop zone ────────────
+    loopXfSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    loopXfSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                 Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
+    loopXfSlider.setRange(0.0, 50.0, 1.0);
+    loopXfSlider.setTextValueSuffix("%");
+    loopXfSlider.setValue(0.0, juce::dontSendNotification);
+    loopXfSlider.setTooltip("Loop crossfade: fades tail into head at the wrap "
+                            "(LOOP / INVERSE)");
+    loopXfSlider.onValueChange = [this]
+    {
+        if (auto* fs = processor.getSampler(samplerIndex_))
+            fs->setSlotLoopOverlap(selectedSlot,
+                static_cast<float>(loopXfSlider.getValue()) * 0.01f);
+    };
+    addAndMakeVisible(loopXfSlider);
+
+    // ── Frequency-axis mirror curve editor (HF + LF bands) ────────────────────
+    freqCurveEditor.onChange = [this]
+    {
+        if (auto* fs = processor.getSampler(samplerIndex_))
+        {
+            SamplerSpectralPoint pts[LuxSamplerConstants::MAX_FREQ_PTS];
+            for (int band = 0; band < LuxSamplerConstants::NUM_FREQ_BANDS; ++band)
+            {
+                const int n = freqCurveEditor.getBandPoints(band, pts,
+                                                            LuxSamplerConstants::MAX_FREQ_PTS);
+                fs->setSlotFreqCurve(selectedSlot, band, pts, n);
+            }
+        }
+    };
+    addAndMakeVisible(freqCurveEditor);
 
     // ── Resume mode toggle ────────────────────────────────────────────────────
     resumeToggle.setColour(juce::ToggleButton::textColourId,
                            juce::Colour(0xffb0b0c0));
     resumeToggle.onStateChange = [this]
     {
-        if (auto* fs = processor.getLuxSampler())
+        if (auto* fs = processor.getSampler(samplerIndex_))
             fs->setSlotResumeMode(selectedSlot,
                                    resumeToggle.getToggleState());
     };
     addAndMakeVisible(resumeToggle);
+
+    // ── Overdub / extend toggle (engine-wide) ─────────────────────────────────
+    overdubToggle.setColour(juce::ToggleButton::textColourId,
+                            juce::Colour(0xffcc88ff)); // SAMPLER purple identity
+    overdubToggle.onStateChange = [this]
+    {
+        if (auto* fs = processor.getSampler(samplerIndex_))
+            fs->setOverdubMode(overdubToggle.getToggleState());
+    };
+    addAndMakeVisible(overdubToggle);
 
     // ── Fade curve type selector ─────────────────────────────────────────────
     fadeCurveLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
@@ -221,9 +292,10 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     fadeCurveTypeBox.setSelectedId(1, juce::dontSendNotification);
     fadeCurveTypeBox.onChange = [this]
     {
-        if (auto* fs = processor.getLuxSampler())
+        if (auto* fs = processor.getSampler(samplerIndex_))
             fs->setSlotFadeCurveType(selectedSlot,
                 static_cast<FadeCurveType>(fadeCurveTypeBox.getSelectedId() - 1));
+        timeline.repaint(); // curve shape changed → refresh the fade overlays
     };
     addAndMakeVisible(fadeCurveTypeBox);
 
@@ -243,9 +315,10 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     fadePowerSlider.setValue(1.0, juce::dontSendNotification);
     fadePowerSlider.onValueChange = [this]
     {
-        if (auto* fs = processor.getLuxSampler())
+        if (auto* fs = processor.getSampler(samplerIndex_))
             fs->setSlotFadeCurvePower(selectedSlot,
                 static_cast<float>(fadePowerSlider.getValue()));
+        timeline.repaint(); // curve intensity changed → refresh the fade overlays
     };
     addAndMakeVisible(fadePowerSlider);
 
@@ -276,7 +349,7 @@ void SlotEditorComponent::setSelectedSlot(int idx)
 void SlotEditorComponent::refreshSliderValues()
 
 {
-    auto* fs = processor.getLuxSampler();
+    auto* fs = processor.getSampler(samplerIndex_);
     if (fs == nullptr) return;
 
     // Start/End are no longer exposed as sliders — they are edited directly
@@ -291,6 +364,9 @@ void SlotEditorComponent::refreshSliderValues()
         juce::dontSendNotification);
     resumeToggle.setToggleState(fs->getSlotResumeMode(selectedSlot),
                                 juce::dontSendNotification);
+    // Overdub is engine-wide (not per-slot) — mirror the engine flag.
+    overdubToggle.setToggleState(fs->getOverdubMode(),
+                                 juce::dontSendNotification);
     // Fade curve controls
     fadeCurveTypeBox.setSelectedId(
         static_cast<int>(fs->getSlotFadeCurveType(selectedSlot)) + 1,
@@ -298,30 +374,44 @@ void SlotEditorComponent::refreshSliderValues()
     fadePowerSlider.setValue(
         static_cast<double>(fs->getSlotFadeCurvePower(selectedSlot)),
         juce::dontSendNotification);
+    loopXfSlider.setValue(
+        static_cast<double>(fs->getSlotLoopOverlap(selectedSlot)) * 100.0,
+        juce::dontSendNotification);
+    refreshFreqCurve();
+}
+
+void SlotEditorComponent::refreshFreqCurve()
+{
+    auto* fs = processor.getSampler(samplerIndex_);
+    if (fs == nullptr) return;
+    SamplerSpectralPoint pts[LuxSamplerConstants::MAX_FREQ_PTS];
+    for (int band = 0; band < LuxSamplerConstants::NUM_FREQ_BANDS; ++band)
+    {
+        const int n = fs->getSlotFreqCurve(selectedSlot, band, pts,
+                                           LuxSamplerConstants::MAX_FREQ_PTS);
+        freqCurveEditor.setBandPoints(band, pts, n);   // does not fire onChange
+    }
+    // Backdrop: the slot's energy-per-frequency profile (updates on slot switch /
+    // record stop / crop / load).
+    float prof[256];
+    fs->sampleFreqProfileForCurve(selectedSlot, prof, 256);
+    freqCurveEditor.setSpectralProfile(prof, 256);
 }
 
 void SlotEditorComponent::refreshLoopButtons()
 {
-    auto* fs = processor.getLuxSampler();
+    auto* fs = processor.getSampler(samplerIndex_);
     const int curMode = (fs != nullptr)
                         ? static_cast<int>(fs->getSlotLoopMode(selectedSlot))
                         : 1; // default LOOP
 
     for (int k = 0; k < 4; ++k)
-    {
-        const bool active = (k == curMode);
-        loopBtns[k].setColour(juce::TextButton::buttonColourId,
-                               active ? juce::Colour(0xff1a5a9a)
-                                      : juce::Colour(0xff2a2a2a));
-        loopBtns[k].setColour(juce::TextButton::textColourOffId,
-                               active ? juce::Colours::white
-                                      : juce::Colour(0xff888888));
-    }
+        loopBtns[k].setActive(k == curMode);
 }
 
 void SlotEditorComponent::applyLoopMode(LoopMode m)
 {
-    if (auto* fs = processor.getLuxSampler())
+    if (auto* fs = processor.getSampler(samplerIndex_))
         fs->setSlotLoopMode(selectedSlot, m);
     refreshLoopButtons();
 }
@@ -357,7 +447,7 @@ void SlotEditorComponent::paint(juce::Graphics& g)
                juce::Justification::centredLeft, false);
 
     // State indicator (right side of title badge)
-    auto* fs = processor.getLuxSampler();
+    auto* fs = processor.getSampler(samplerIndex_);
     const SlotState st = (fs != nullptr) ? fs->getSlotState(selectedSlot)
                                          : SlotState::IDLE;
     juce::String stateStr;
@@ -385,18 +475,19 @@ void SlotEditorComponent::paint(juce::Graphics& g)
     g.drawText(stateStr, juce::Rectangle<int>(8, 4, W - 16, 22),
                juce::Justification::centredRight, false);
 
-    // ── Vertical separator between left and right panels ─────────────────────
+    // ── Vertical separator between left and right panels (middle band only) ──
+    const int midBottom = H - pad - kCurveBandH - kCurveGap;
     const int leftW  = (W - 3 * pad - gap) * 63 / 100;
     const int sepX   = pad + leftW + gap / 2;
     g.setColour(juce::Colour(0xff2a2a3a));
-    g.fillRect(sepX, 30, 1, H - 34);
+    g.fillRect(sepX, 30, 1, midBottom - 30);
 
     // ── Right panel subtle background ─────────────────────────────────────────
     const int rightX = pad + leftW + gap + pad;
     g.setColour(juce::Colour(0xff141422));
     g.fillRoundedRectangle(
         juce::Rectangle<float>((float)rightX - 2.0f, 28.0f,
-                                (float)(W - rightX - pad + 2), (float)(H - 32)),
+                                (float)(W - rightX - pad + 2), (float)(midBottom - 28)),
         3.0f);
 }
 
@@ -427,29 +518,38 @@ void SlotEditorComponent::resized()
     const int leftX  = pad;
     const int rightX = leftX + leftW + gap + pad;
 
-    // ── Left: REC / PLAY / CLEAR / SAVE / LOAD (y=30, 5 buttons in one row) ──
+    // Bottom of the two-column band (above the full-width spectral-curve editor).
+    const int midBottom = H - pad - kCurveBandH - kCurveGap;
+
+    // ── Left: REC / PLAY / CLEAR / CROP / SAVE / LOAD (y=30, 6 buttons in a row) ─
     {
         const int btnY   = 30;
         constexpr int btnH   = Sp3ctraTheme::kControlH;
         const int btnGap = Sp3ctraTheme::kGap;
-        const int bW     = (leftW - 4 * btnGap) / 5;
+        const int bW     = (leftW - 5 * btnGap) / 6;
         recBtn  .setBounds(leftX,                     btnY, bW, btnH);
         playBtn .setBounds(leftX + 1 * (bW + btnGap), btnY, bW, btnH);
         clearBtn.setBounds(leftX + 2 * (bW + btnGap), btnY, bW, btnH);
-        saveBtn .setBounds(leftX + 3 * (bW + btnGap), btnY, bW, btnH);
-        loadBtn .setBounds(leftX + 4 * (bW + btnGap), btnY, bW, btnH);
+        cropBtn .setBounds(leftX + 3 * (bW + btnGap), btnY, bW, btnH);
+        saveBtn .setBounds(leftX + 4 * (bW + btnGap), btnY, bW, btnH);
+        loadBtn .setBounds(leftX + 5 * (bW + btnGap), btnY, bW, btnH);
     }
 
-    // ── Left: Timeline (y=64, fills remaining height) ─────────────────────────
+    // ── Left: Timeline (y=64, fills the middle band) ──────────────────────────
     {
         const int tlY = 64;
-        const int tlH = H - tlY - pad;
+        const int tlH = midBottom - tlY;
         timeline.setBounds(leftX, tlY, leftW, juce::jmax(40, tlH));
     }
 
+    // ── Full-width spectral-curve editor (bottom band) ────────────────────────
+    freqCurveEditor.setBounds(pad, midBottom + kCurveGap, W - 2 * pad, kCurveBandH);
+
     // ── Right panel controls ─────────────────────────────────────────────────
     constexpr int rowH = Sp3ctraTheme::kControlH; // unified control height
-    const int step = rowH + 4;
+    // rowH + 2 (was +4) so the panel fits 7 rows: IMG / Speed / Loop / Resume /
+    // Overdub / Curve / Power — all inside the fixed editor height.
+    const int step = rowH + 2;
     const int lW   = 46; // label column width
     const int ctrlX = rightX + lW + 4;
     const int ctrlW = rightW - lW - 4;
@@ -476,8 +576,17 @@ void SlotEditorComponent::resized()
     }
     ry += step;
 
+    // Loop crossfade (overlap)
+    loopXfLabel .setBounds(rightX, ry, lW, rowH);
+    loopXfSlider.setBounds(ctrlX,  ry, ctrlW, rowH);
+    ry += step;
+
     // Resume toggle
-    resumeToggle.setBounds(rightX, ry, rightW, 26);
+    resumeToggle.setBounds(rightX, ry, rightW, rowH);
+    ry += step;
+
+    // Overdub toggle
+    overdubToggle.setBounds(rightX, ry, rightW, rowH);
     ry += step;
 
     // Fade curve type
@@ -509,7 +618,7 @@ void SlotEditorComponent::timerCallback()
     // uiToggleRecord() / uiPlaySlot() while in the matching state stops the
     // action, calling it while in any other state starts it.  We therefore
     // check the current slot state before invoking the toggle.
-    auto* fs = processor.getLuxSampler();
+    auto* fs = processor.getSampler(samplerIndex_);
 
     const bool recPressed   = processor.consumeSamplerRecPressed();
     const bool recReleased  = processor.consumeSamplerRecReleased();
@@ -551,6 +660,12 @@ void SlotEditorComponent::timerCallback()
     if (st == SlotState::IDLE && hasContent)
         timeline.markDirty(); // markDirty is idempotent (NOP if already clean)
 
+    // Refresh the spectral-curve backdrop once when a recording finishes.
+    const bool nowRecording = (st == SlotState::RECORDING);
+    if (prevRecording_ && !nowRecording)
+        refreshFreqCurve();
+    prevRecording_ = nowRecording;
+
     // ── REC button ───────────────────────────────────────────────────────────
     switch (st)
     {
@@ -590,6 +705,16 @@ void SlotEditorComponent::timerCallback()
                                 : juce::Colour(0xff888888));
 
     clearBtn.setEnabled(hasContent);
+
+    // ── CROP button ──────────────────────────────────────────────────────────
+    // Only meaningful when there is content AND the bounds select a sub-region.
+    const bool canCrop = hasContent
+        && (fs->getSlotStartFrac(selectedSlot) > 0.001f
+            || fs->getSlotEndFrac(selectedSlot) < 0.999f);
+    cropBtn.setEnabled(canCrop);
+    cropBtn.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a2a4a));
+    cropBtn.setColour(juce::TextButton::textColourOffId,
+                      canCrop ? juce::Colour(0xffcc88ff) : juce::Colour(0xff665577));
 
     // ── SAVE / LOAD buttons ──────────────────────────────────────────────────
     saveBtn.setEnabled(hasContent);

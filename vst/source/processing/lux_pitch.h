@@ -18,6 +18,7 @@
 #define LUX_PITCH_H
 
 #include <stdint.h>
+#include "chain_plan.h"   /* CHAIN_MAX_CHAINS — per-chain instance pool size */
 
 #ifdef __cplusplus
   #include <atomic>
@@ -187,6 +188,14 @@ void lux_pitch_process_frame(
  * what you SEE is exactly what the engines CONSUME.
  */
 extern LuxPitchState g_lux_pitch_proc;
+
+/* ── Per-chain instance pool (M6 Phase 2) ──────────────────────────────────────
+ * Pitch is a pure processor, so each chain that uses it owns an INDEPENDENT
+ * state (own MIDI voices / envelopes / buffers) — chains never share runtime
+ * state. Slot 0 IS g_lux_pitch_proc (the legacy instance, also read by the UI
+ * LED / keyboard ruler). Slots 1.. are extra instances. */
+LuxPitchState *lux_pitch_instance(int idx);   /* idx clamped to [0, CHAIN_MAX_CHAINS) */
+void           lux_pitch_init_all(void);       /* init every pool instance */
 
 #ifdef __cplusplus
 }

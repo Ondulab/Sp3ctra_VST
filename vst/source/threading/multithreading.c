@@ -17,8 +17,10 @@
 #include "../processing/image_preprocessor.h"
 #include "../processing/image_pipeline.h"
 #include "../processing/image_chain.h"
+#include "../processing/chain_plan.h"
 #include "../processing/lux_pitch.h"
 #include "../processing/lux_mask.h"
+#include "../processing/video_scroll.h"
 #include "../processing/image_sequencer.h"
 #include "../synthesis/luxwave/synth_luxwave.h"
 #include <time.h>
@@ -32,6 +34,18 @@ extern void luxstral_wait_for_buffer_consumed(void);
 
 /* External sequencer instance */
 extern ImageSequencer *g_image_sequencer;
+
+/* ── M8: LuxStral engine B — independent input DoubleBuffer ──────────────────
+ * Both the UDP thread (producer: fills preprocessed_data from engine B's OWN
+ * chain) and audioProcessingThread (consumer: renders engine B) live in this
+ * translation unit, so a file-static DoubleBuffer keeps the whole 2nd-voice
+ * input path self-contained (no Context / Sp3ctraCore plumbing). Lazily
+ * initialised on first use in the UDP thread. */
+#ifdef VST_MODE
+static DoubleBuffer          s_luxstral_b_db;
+static PreprocessedImageData s_preprocessed_temp_b;   /* UDP-thread scratch (single writer) */
+static int                   s_luxstral_b_db_ready = 0;
+#endif
 
 #ifndef NO_SFML
 #include <SFML/Graphics.h>
@@ -278,7 +292,13 @@ void *udpThread(void *arg) {
   uint8_t *audio_write_G;
   uint8_t *audio_write_B;
   int audio_write_started;
-  
+  /* Acquisition-gate hold buffers: the last GRANTED line, repeated downstream
+   * while the gate holds so audio + video freeze together (no dropped lines). */
+  uint8_t *held_R;
+  uint8_t *held_G;
+  uint8_t *held_B;
+  int held_line_valid;
+
   /* Initialize variables */
   ctx = (Context *)arg;
   db = ctx->doubleBuffer;
@@ -296,6 +316,10 @@ void *udpThread(void *arg) {
   audio_write_G = NULL;
   audio_write_B = NULL;
   audio_write_started = 0;
+  held_R = NULL;
+  held_G = NULL;
+  held_B = NULL;
+  held_line_valid = 0;
 
   /* Allocate receivedFragments */
   receivedFragments = (int *)calloc(UDP_MAX_NB_PACKET_PER_LINE, sizeof(int));
@@ -314,6 +338,22 @@ void *udpThread(void *arg) {
     if (mixed_R) free(mixed_R);
     if (mixed_G) free(mixed_G);
     if (mixed_B) free(mixed_B);
+    free(receivedFragments);
+    exit(EXIT_FAILURE);
+  }
+
+  /* Allocate acquisition-gate hold buffers */
+  held_R = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
+  held_G = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
+  held_B = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
+  if (!held_R || !held_G || !held_B) {
+    log_error("THREAD", "Failed to allocate acquisition-gate hold buffers");
+    if (held_R) free(held_R);
+    if (held_G) free(held_G);
+    if (held_B) free(held_B);
+    free(mixed_R);
+    free(mixed_G);
+    free(mixed_B);
     free(receivedFragments);
     exit(EXIT_FAILURE);
   }
@@ -532,7 +572,41 @@ void *udpThread(void *arg) {
         }
         break;
       }
-      
+
+      /* ── Acquisition gate ("vitesse d'acquisition") ──────────────────────────
+       * FREEZE, don't cut.  Decide ONCE whether this freshly assembled line
+       * ADVANCES the stream or is HELD.  We never drop a held line: dropping
+       * "cuts" the waterfall (it scrolls black) and lets the audio thread's
+       * fallback keep re-preprocessing fresh data, so the freeze never reaches
+       * the sound.  Instead, on HOLD we overwrite the incoming line with the
+       * last GRANTED line in the single upstream source every consumer derives
+       * from — db->activeBuffer AND the AudioImageBuffers write buffer — then let
+       * the WHOLE pipeline run normally.  Audio and video therefore freeze on the
+       * exact same held frame until the next gate tick / trig.  Gate disabled
+       * (mode Off) ⇒ should_publish() always 1 = full rate (legacy). */
+      {
+        int gate_advance = audio_image_buffers_gate_should_publish(audioBuffers);
+        if (gate_advance || !held_line_valid) {
+          /* ADVANCE (or first line): latch this raw line as the new held frame. */
+          memcpy(held_R, db->activeBuffer_R, nb_pixels);
+          memcpy(held_G, db->activeBuffer_G, nb_pixels);
+          memcpy(held_B, db->activeBuffer_B, nb_pixels);
+          held_line_valid = 1;
+        } else {
+          /* HOLD: replace the incoming line with the latched frame so every
+           * downstream path (audio preprocessing, LuxSynth/LuxWave, video
+           * waterfall, display, AudioImageBuffers) sees the same held data. */
+          memcpy(db->activeBuffer_R, held_R, nb_pixels);
+          memcpy(db->activeBuffer_G, held_G, nb_pixels);
+          memcpy(db->activeBuffer_B, held_B, nb_pixels);
+          if (audio_write_started) {
+            memcpy(audio_write_R, held_R, nb_pixels);
+            memcpy(audio_write_G, held_G, nb_pixels);
+            memcpy(audio_write_B, held_B, nb_pixels);
+          }
+        }
+      }
+
 #ifdef DEBUG_UDP
       log_debug("UDP", "COMPLETE LINE RECEIVED! line_id=%u, %u fragments", packet.line_id, fragmentCount);
 #endif
@@ -676,9 +750,18 @@ void *udpThread(void *arg) {
                     audio_image_buffers_snapshot_modulated(audioBuffers,
                                                            mod_R, mod_G, mod_B,
                                                            nb_pixels);
+
+                    /* RESAMPLING: a slot is playing INTO the modulated channel.
+                     * Feed the final modulated frame to every sampler engine
+                     * with an armed rec slot so a downstream sampler records the
+                     * combination (e.g. sampler B records sampler A's playback).
+                     * No snapshot mirror — the playing engine owns the snapshot. */
+#ifdef VST_MODE
+                    lux_samplers_record_modulated(mod_R, mod_G, mod_B,
+                                                  (uint16_t)nb_pixels,
+                                                  packet.line_id);
+#endif
                 }
-                /* No phase-2 hook here: sampler IS the source, no recording
-                 * happens while playing back. */
             }
             else
 #endif
@@ -716,37 +799,182 @@ void *udpThread(void *arg) {
         }
 
 
-        /* ── Pick LuxStral's channel ─────────────────────────────────────── */
-        if (live_cfg.luxstral_path.source == IMAGE_SOURCE_LIVE)
+        /* ── Pick LuxStral's input (M6 Phase 2 — fed by ITS OWN chain) ────────
+         * • A chain holding the Sampler IS the modulated channel (mod) — it
+         *   carries the sampler playback frame + the recorded Pitch/Mask, so
+         *   reuse mod (handles playing + idle). This keeps the sampler/recording
+         *   path untouched.
+         * • Otherwise run LuxStral's own ordered inserts (its per-chain Pitch/
+         *   Mask instances) over the live frame, so LuxStral's processing is
+         *   independent of every other chain. No inserts → raw live. */
         {
-            src_R = db->activeBuffer_R;
-            src_G = db->activeBuffer_G;
-            src_B = db->activeBuffer_B;
-        }
-        else /* IMAGE_SOURCE_MODULATED */
-        {
-            src_R = mod_R;
-            src_G = mod_G;
-            src_B = mod_B;
+            ChainPlan planA;
+            chain_plan_get(&planA);
+            const SynthChainPlan *spA = &planA.synth[CHAIN_SYNTH_LUXSTRAL];
+
+            if (spA->present && spA->has_sampler && mod_R)
+            {
+                src_R = mod_R; src_G = mod_G; src_B = mod_B;   /* modulated/sampler channel */
+                /* This short-circuit skips image_chain_run (the sampler chain IS the
+                 * modulated channel). Feed VideoScroll probes by their POSITION
+                 * relative to the sampler: a probe ABOVE the sampler shows the live
+                 * source frame (what the sampler records); a probe BELOW shows the
+                 * modulated/sampler output. (Per-chain Pitch/Mask upstream of the
+                 * sampler aren't reflected in the pre-sampler tap — v1 limitation.) */
+                int after_sampler = 0;
+                for (int i = 0; i < spA->num_inserts; i++)
+                {
+                    if (spA->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER) { after_sampler = 1; continue; }
+                    if (spA->insert_id[i] == IMAGE_CHAIN_INSERT_VIDEOSCROLL)
+                    {
+                        const uint8_t *fr = after_sampler ? mod_R : db->activeBuffer_R;
+                        const uint8_t *fg = after_sampler ? mod_G : db->activeBuffer_G;
+                        const uint8_t *fb = after_sampler ? mod_B : db->activeBuffer_B;
+                        video_scroll_capture_line(
+                            video_scroll_instance(spA->insert_state_idx[i]),
+                            fr, fg, fb, nb_pixels);
+                    }
+                }
+            }
+            else if (spA->present && spA->num_inserts > 0)
+            {
+                void *states[CHAIN_PLAN_MAX_INSERTS];
+                for (int i = 0; i < spA->num_inserts; i++)
+                {
+                    switch (spA->insert_id[i])
+                    {
+                        case IMAGE_CHAIN_INSERT_LUXPITCH:
+                            states[i] = (void *)lux_pitch_instance(spA->insert_state_idx[i]); break;
+                        case IMAGE_CHAIN_INSERT_LUXMASK:
+                            states[i] = (void *)lux_mask_instance(spA->insert_state_idx[i]); break;
+                        case IMAGE_CHAIN_INSERT_VIDEOSCROLL:
+                            states[i] = (void *)video_scroll_instance(spA->insert_state_idx[i]); break;
+                        default: states[i] = NULL; break;
+                    }
+                }
+                image_chain_run(db->activeBuffer_R, db->activeBuffer_G, db->activeBuffer_B,
+                                nb_pixels, g_sp3ctra_config.num_octaves,
+                                spA->insert_id, states, spA->num_inserts,
+                                &src_R, &src_G, &src_B);
+            }
+            else
+            {
+                src_R = db->activeBuffer_R;   /* raw live (no inserts, no sampler) */
+                src_G = db->activeBuffer_G;
+                src_B = db->activeBuffer_B;
+            }
         }
 
         if (pipeline_process_frame(src_R, src_G, src_B, &live_cfg, &preprocessed_temp) != 0) {
           log_error("THREAD", "Pipeline processing failed");
         }
 
-        /* ── CHAIN 2 (LuxSynth + LuxWave) = raw live CIS ─────────────────────
-         * Placement defines the source: Chain 2 carries the live feed, with no
-         * sampler/inserts upstream.  pipeline_process_frame() above ran Path B
-         * on Chain 1's frame (src_R); re-run it here on the raw live buffer so
-         * polyphonic.* and the LuxWave wavetable use Chain 2's own signal and
-         * the Chain 2 freeze envelope (image_freeze_mode) gates them.
-         * (live_cfg.envelope_id == ENVELOPE_LIVE, so the Chain 2 side-effects
-         * inside Path B run here — and are skipped on the sampler worker.) */
 #ifdef VST_MODE
-        pipeline_path_luxsynth_luxwave(db->activeBuffer_R,
-                                       db->activeBuffer_G,
-                                       db->activeBuffer_B,
-                                       &live_cfg, &preprocessed_temp);
+        /* ── LuxStral engine B (M8) — fed by ITS OWN chain, into s_luxstral_b_db ─
+         * Computed HERE (before db->activeBuffer is overwritten with the display
+         * mix below) using the live frame, mirroring engine A's src selection.
+         * Committed to the file-static DoubleBuffer that audioProcessingThread
+         * hands to synth_AudioProcess_b(). Independent scratch so A's not-yet-
+         * committed preprocessed_temp is untouched. */
+        {
+            if (!s_luxstral_b_db_ready) {
+                initDoubleBuffer(&s_luxstral_b_db);
+                // RELEASE so the audio thread, on seeing ready=1 (ACQUIRE), also
+                // sees the fully-initialised DoubleBuffer (mutex, buffers).
+                __atomic_store_n(&s_luxstral_b_db_ready, 1, __ATOMIC_RELEASE);
+            }
+
+            ChainPlan planLB;
+            chain_plan_get(&planLB);
+            const SynthChainPlan *spLB = &planLB.synth[CHAIN_SYNTH_LUXSTRAL_B];
+            if (spLB->present)
+            {
+                const uint8_t *bxR, *bxG, *bxB;
+                if (spLB->has_sampler && mod_R)
+                {
+                    bxR = mod_R; bxG = mod_G; bxB = mod_B;   /* modulated/sampler channel */
+                }
+                else if (spLB->num_inserts > 0)
+                {
+                    void *states[CHAIN_PLAN_MAX_INSERTS];
+                    for (int i = 0; i < spLB->num_inserts; i++)
+                    {
+                        switch (spLB->insert_id[i])
+                        {
+                            case IMAGE_CHAIN_INSERT_LUXPITCH:
+                                states[i] = (void *)lux_pitch_instance(spLB->insert_state_idx[i]); break;
+                            case IMAGE_CHAIN_INSERT_LUXMASK:
+                                states[i] = (void *)lux_mask_instance(spLB->insert_state_idx[i]); break;
+                            case IMAGE_CHAIN_INSERT_VIDEOSCROLL:
+                                states[i] = (void *)video_scroll_instance(spLB->insert_state_idx[i]); break;
+                            default: states[i] = NULL; break;
+                        }
+                    }
+                    image_chain_run(db->activeBuffer_R, db->activeBuffer_G, db->activeBuffer_B,
+                                    nb_pixels, g_sp3ctra_config.num_octaves,
+                                    spLB->insert_id, states, spLB->num_inserts,
+                                    &bxR, &bxG, &bxB);
+                }
+                else
+                {
+                    bxR = db->activeBuffer_R; bxG = db->activeBuffer_G; bxB = db->activeBuffer_B;
+                }
+
+                if (pipeline_process_frame(bxR, bxG, bxB, &live_cfg, &s_preprocessed_temp_b) == 0)
+                {
+                    pthread_mutex_lock(&s_luxstral_b_db.mutex);
+                    s_luxstral_b_db.preprocessed_data = s_preprocessed_temp_b;
+                    s_luxstral_b_db.dataReady = 1;
+                    pthread_mutex_unlock(&s_luxstral_b_db.mutex);
+                }
+            }
+        }
+#endif
+
+        /* ── Path B (LuxSynth + LuxWave) — fed by ITS OWN chain (M6 Phase 2) ──
+         * Run only the inserts on LuxSynth's chain (its own per-chain Pitch/Mask
+         * instances, in its order) over the live frame, so a processor placed
+         * before LuxSynth affects ONLY LuxSynth — never LuxStral's modulated
+         * channel above. For the default topology LuxSynth's chain has no inserts
+         * → raw live, identical to before. LuxWave shares this Path-B input.
+         * pipeline_process_frame() above already ran Path B on LuxStral's frame;
+         * this call overrides polyphonic.* + the LuxWave wavetable with Chain B's
+         * own signal (live_cfg.envelope_id == ENVELOPE_LIVE gates the Chain B
+         * freeze envelope here, skipped on the sampler worker). */
+#ifdef VST_MODE
+        {
+            ChainPlan plan;
+            chain_plan_get(&plan);
+            const SynthChainPlan *spB = &plan.synth[CHAIN_SYNTH_LUXSYNTH];
+
+            const uint8_t *bR = db->activeBuffer_R;
+            const uint8_t *bG = db->activeBuffer_G;
+            const uint8_t *bB = db->activeBuffer_B;
+
+            if (spB->present && spB->num_inserts > 0)
+            {
+                void *states[CHAIN_PLAN_MAX_INSERTS];
+                for (int i = 0; i < spB->num_inserts; i++)
+                {
+                    switch (spB->insert_id[i])
+                    {
+                        case IMAGE_CHAIN_INSERT_LUXPITCH:
+                            states[i] = (void *)lux_pitch_instance(spB->insert_state_idx[i]); break;
+                        case IMAGE_CHAIN_INSERT_LUXMASK:
+                            states[i] = (void *)lux_mask_instance(spB->insert_state_idx[i]); break;
+                        case IMAGE_CHAIN_INSERT_VIDEOSCROLL:
+                            states[i] = (void *)video_scroll_instance(spB->insert_state_idx[i]); break;
+                        default: states[i] = NULL; break;
+                    }
+                }
+                image_chain_run(db->activeBuffer_R, db->activeBuffer_G, db->activeBuffer_B,
+                                nb_pixels, g_sp3ctra_config.num_octaves,
+                                spB->insert_id, states, spB->num_inserts,
+                                &bR, &bG, &bB);
+            }
+
+            pipeline_path_luxsynth_luxwave(bR, bG, bB, &live_cfg, &preprocessed_temp);
+        }
 #endif
       }
 
@@ -917,8 +1145,11 @@ void *udpThread(void *arg) {
   if (mixed_R) free(mixed_R);
   if (mixed_G) free(mixed_G);
   if (mixed_B) free(mixed_B);
+  if (held_R) free(held_R);
+  if (held_G) free(held_G);
+  if (held_B) free(held_B);
   free(receivedFragments);
-  
+
   return NULL;
 }
 
@@ -1064,6 +1295,24 @@ void *audioProcessingThread(void *arg) {
     // Call synthesis routine directly with stable image data
     // This will NEVER block, even if scanner disconnects!
     synth_AudioProcess(audio_read_R, audio_read_G, audio_read_B, context->doubleBuffer);
+
+#ifdef VST_MODE
+    /* M8 — render LuxStral engine B from its own DoubleBuffer, in the SAME
+     * iteration as A (so it is paced by A's consumed-buffer handshake). Only
+     * spun up when engine B is actually placed in a chain (plan.present); its
+     * worker pool + per-instance state initialise lazily on first render. */
+    {
+      static int s_engine_b_inited = 0;
+      ChainPlan planB_render;
+      chain_plan_get(&planB_render);
+      if (planB_render.synth[CHAIN_SYNTH_LUXSTRAL_B].present
+          && __atomic_load_n(&s_luxstral_b_db_ready, __ATOMIC_ACQUIRE))
+      {
+        if (!s_engine_b_inited) { synth_luxstral_init_engine_b(); s_engine_b_inited = 1; }
+        synth_AudioProcess_b(audio_read_R, audio_read_G, audio_read_B, &s_luxstral_b_db);
+      }
+    }
+#endif
 
     // Report iteration time to profiler (VST mode only - uses extern profiler)
 #ifdef VST_MODE

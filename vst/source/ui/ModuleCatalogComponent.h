@@ -49,9 +49,8 @@ public:
             g.drawText(moduleCatLabel(s.cat), kPadX + 1, s.y, getWidth() - 2 * kPadX, kHeaderH,
                        juce::Justification::centredLeft, false);
         }
-
-        g.setColour(juce::Colour(Sp3ctraTheme::kColBorder));
-        g.fillRect(getWidth() - 1, 0, 1, getHeight());
+        // The rail's right edge / separation from the chain rack is drawn by the
+        // editor (a groove), so no internal right border here.
     }
 
     void resized() override
@@ -62,7 +61,8 @@ public:
         int y = kTopPad;
 
         const ModuleCat order[] = { ModuleCat::SRC, ModuleCat::MIDI,
-                                    ModuleCat::UTILS, ModuleCat::SYNTH };
+                                    ModuleCat::UTILS, ModuleCat::SYNTH,
+                                    ModuleCat::OUT };
         for (auto cat : order)
         {
             sections.push_back({ cat, y });
@@ -81,7 +81,7 @@ public:
     /** Natural content height (for hosting in a viewport if ever needed). */
     int preferredHeight() const noexcept
     {
-        return kTopPad + 4 * (kHeaderH + 2 + kSecGap)
+        return kTopPad + 5 * (kHeaderH + 2 + kSecGap)
              + (int) chips.size() * (kChipH + kChipGap);
     }
 

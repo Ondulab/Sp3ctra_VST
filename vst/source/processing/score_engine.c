@@ -38,6 +38,7 @@ void score_settings_defaults(ScoreSettings *s)
     s->pageFormat          = 0;
     s->writingSpeed        = 0.0;
     s->spectroHeightMM     = SCORE_DEFAULT_SPECTRO_HEIGHT_MM;
+    s->spectroHeightManual = 0;   /* locked to the CIS sensor length by default */
     s->bottomMarginMM      = SCORE_DEFAULT_BOTTOM_MARGIN_MM;
     s->enableHighBoost     = 0;   /* PhonoPaper applies no HF pre-emphasis */
     s->highBoostAlpha      = SCORE_DEFAULT_HIGH_BOOST_ALPHA;
@@ -49,6 +50,7 @@ void score_settings_defaults(ScoreSettings *s)
     s->enableNormalization = 1;
     s->fftSize             = SCORE_DEFAULT_FFT_SIZE;  /* match PhonoPaper's 4096 window */
     s->startTimeSec        = 0.0;
+    s->enableStereoMode    = 0;
 }
 
 /*---------------------------------------------------------------------------

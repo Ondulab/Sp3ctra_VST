@@ -32,10 +32,20 @@ extern "C" {
 
 struct AudioImageBuffers;
 
-/* Insert identifiers — also the tap indices in AudioImageBuffers. */
-#define IMAGE_CHAIN_INSERT_LUXPITCH 0
-#define IMAGE_CHAIN_INSERT_LUXMASK  1
-#define IMAGE_CHAIN_NUM_INSERTS     2
+/* Insert identifiers.
+ * IDs 0..1 (LUXPITCH/LUXMASK) double as AudioImageBuffers tap indices
+ * (AUDIO_IMAGE_NUM_INSERT_TAPS == 2). VIDEOSCROLL (2) is a PASS-THROUGH PROBE
+ * with NO tap slot: it captures into its own VideoScrollState ring and forwards
+ * the frame unchanged. It is ONLY consumed by image_chain_run(), never by the
+ * tap path (image_chain_process_inserts). */
+#define IMAGE_CHAIN_INSERT_LUXPITCH    0
+#define IMAGE_CHAIN_INSERT_LUXMASK     1
+#define IMAGE_CHAIN_INSERT_VIDEOSCROLL 2
+#define IMAGE_CHAIN_INSERT_SAMPLER     3   /* position marker only — pass-through in
+                                            * image_chain_run; lets the executor know
+                                            * where the sampler sits so VideoScroll
+                                            * probes capture pre/post-sampler correctly */
+#define IMAGE_CHAIN_NUM_INSERTS        4
 
 /* Chain order (APVTS param "chainInsertOrder"). */
 #define IMAGE_CHAIN_ORDER_PITCH_MASK 0   /* default — historical order */
@@ -74,6 +84,26 @@ void image_chain_process_inserts(
     const uint8_t **out_g,
     const uint8_t **out_b,
     struct AudioImageBuffers *taps);
+
+/*
+ * M6 Phase 2 — generalised executor driven by an explicit ordered insert list
+ * with per-stage state pointers (no globals, no fixed order). Used by the
+ * per-chain synthesis loop: each chain runs its own Pitch/Mask instances in its
+ * own order. Auto-bypassing inserts stay O(1). `insert_states[i]` is a
+ * LuxPitchState* or LuxMaskState* matching `insert_ids[i]`.
+ */
+void image_chain_run(
+    const uint8_t  *in_r,
+    const uint8_t  *in_g,
+    const uint8_t  *in_b,
+    int             pixel_count,
+    int             luxstral_num_octaves,
+    const int      *insert_ids,
+    void   * const *insert_states,
+    int             num_inserts,
+    const uint8_t **out_r,
+    const uint8_t **out_g,
+    const uint8_t **out_b);
 
 #ifdef __cplusplus
 }

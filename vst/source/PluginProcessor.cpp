@@ -13,7 +13,9 @@ extern "C" {
     #include "synthesis/luxstral/wave_generation.h"           // request_frequency_reinit() hot-reload
     #include "processing/lux_pitch.h"                         // LuxPitch engine (g_lux_pitch_proc)
     #include "processing/lux_mask.h"                          // LuxMask engine (g_lux_mask_proc)
+    #include "processing/video_scroll.h"                      // VideoScroll capture-ring pool
     #include "processing/image_chain.h"                       // Insert chain executor (order + taps)
+    #include "processing/chain_plan.h"                         // M6 Phase 2 — RT chain descriptor
     #include "synthesis/luxsynth/luxsynth_vst_adapter.h"      // luxsynth_push_midi_event(), buffers, engine
     #include "synthesis/luxwave/luxwave_vst_adapter.h"        // luxwave_push_midi_event(), g_luxwave_engine
 }
@@ -160,6 +162,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     // Per-synth volume: independent gain for LuxStral and LuxSynth consumers.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxstralVolume", 1}, "LuxStral Vol.",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    // M8 — dual-engine: independent gain for the 2nd LuxStral engine (B).
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxstralBVolume", 1}, "LuxStral B Vol.",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxsynthVolume", 1}, "LuxSynth Vol.",
@@ -943,6 +949,77 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"videoScrollMaxDuration", 1}, "Video Compression (time squish)",
         juce::NormalisableRange<float>(1.0f, 64.0f, 1.0f), 1.0f, kHiddenFloat));
 
+    // ── SP3CTRA source — acquisition speed (frame-advance brake) ──────────────
+    // Brakes how often the live CIS line advances the active frame (audio +
+    // visual).  See AcquisitionGate.h.  Off = full-rate (no behaviour change).
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"acqGateMode", 1}, "Acquisition Gate",
+        juce::StringArray{"Off", "Internal (LFO)", "DAW Sync"}, 0, kHiddenChoice));
+    // Internal-mode period in ms (skewed for finer control at short periods).
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"acqGateRateMs", 1}, "Acquisition Rate",
+        juce::NormalisableRange<float>(1.0f, 5000.0f, 0.1f, 0.3f), 100.0f,
+        kHiddenFloat.withLabel("ms")));
+    // DAW-sync musical division (period per advance).  Index → beats in the
+    // kSyncDivBeats table consumed in processBlock.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"acqGateSyncDiv", 1}, "Acquisition Division",
+        juce::StringArray{"1/1", "1/2", "1/4", "1/8", "1/16", "1/32"}, 2, kHiddenChoice));
+    // Common refresh-rate multiplier/divider (stretches the period for very slow
+    // updates).  Index → factor in the kRefreshFactor table consumed in processBlock.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"acqGateMultDiv", 1}, "Acquisition Mult/Div",
+        juce::StringArray{"/32", "/16", "/8", "/4", "/2", "x1", "x2", "x4"}, 5, kHiddenChoice));
+
+    // ── VIDEO SCROLL output modules — per-instance automatable banks (×8) ──────
+    // Each VideoScroll module instance owns a slot 0..7 (ModuleInstance.slot) that
+    // keys both its RT capture ring (video_scroll_instance) and this APVTS bank.
+    // Same ranges/defaults as the legacy global controls; the contextual zone-3
+    // panel binds videoScroll{N}_* and the right-band mixer binds videoMix{N}_*.
+    for (int n = 0; n < 8; ++n)
+    {
+        const juce::String p  = "videoScroll" + juce::String(n) + "_";
+        const juce::String mx = "videoMix"    + juce::String(n) + "_";
+        const juce::String tag = "VS" + juce::String(n) + " ";
+
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{p + "mode", 1}, tag + "Mode",
+            juce::StringArray{"0 deg", "90 deg", "180 deg", "270 deg"}, 0));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{p + "speed", 1}, tag + "Speed",
+            juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.33f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{p + "linePos", 1}, tag + "Line Pos",
+            juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 1.0f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{p + "thickness", 1}, tag + "Thickness",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{p + "zoom", 1}, tag + "Zoom",
+            juce::NormalisableRange<float>(0.5f, 4.0f, 0.05f), 1.0f,
+            juce::AudioParameterFloatAttributes{}.withLabel("x")));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{p + "fade", 1}, tag + "Fade",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{p + "compress", 1}, tag + "Compression",
+            juce::NormalisableRange<float>(1.0f, 64.0f, 1.0f), 1.0f));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{p + "invert", 1}, tag + "Invert Color", false));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{p + "colorMode", 1}, tag + "Color (RGB)", false));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{p + "paused", 1}, tag + "Paused", false, kHiddenBool));
+
+        // Right-band mixer voice for this output.
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{mx + "level", 1}, "Mix " + tag + "Level",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{mx + "blend", 1}, "Mix " + tag + "Blend",
+            juce::StringArray{"Mix", "Add", "Screen"}, 0));
+    }
+
     return { params.begin(), params.end() };
 }
 
@@ -1106,16 +1183,22 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("luxmaskOctaveOffset",      this);
     apvts.addParameterListener("luxmaskReferenceNote",     this);
 
-    // Create LuxSampler (always active, no lazy init needed)
-    luxSampler = std::make_unique<LuxSampler>();
+    // Create the sampler engines: A (slot 0) + B (slot 1). Per-engine enable is
+    // driven by module presence in deriveChainRouting(); both share the single
+    // modulated playback channel (one plays at a time — see the arbiter).
+    luxSampler  = std::make_unique<LuxSampler>(0);
+    luxSamplerB = std::make_unique<LuxSampler>(1);
 
     // SCORE generation defaults (shared by the PLAY page and the SETUP panel).
     score_settings_defaults(&scoreSettings_);
     scoreSettings_.writingSpeed = 2.5;   // page maps to a sensible default duration
 
-    // Create FrameSequencer and wire it to the LuxSampler
+    // Create FrameSequencer and wire it to the ordered sampler engines (A, B).
     frameSequencer = std::make_unique<FrameSequencer>();
-    frameSequencer->setLuxSampler(luxSampler.get());
+    {
+        LuxSampler* engines[] = { luxSampler.get(), luxSamplerB.get() };
+        frameSequencer->setSamplers(engines, 2);
+    }
 
     // Register LuxSampler parameter listeners
     apvts.addParameterListener(PARAM_FS_ENABLED,    this);
@@ -1138,6 +1221,17 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
         static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_OCT_OFFSET)) - 2);
     luxSampler->setMaxDuration(*apvts.getRawParameterValue(PARAM_FS_MAX_DUR));
 
+    // Engine B: mirror the shared settings for now (per-B APVTS params land in
+    // Part B). Distinct MIDI channel so direct MIDI doesn't double-trigger.
+    // Per-engine enable is set authoritatively by deriveChainRouting().
+    if (luxSamplerB)
+    {
+        luxSamplerB->setOctaveOffset(
+            static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_OCT_OFFSET)) - 2);
+        luxSamplerB->setMaxDuration(*apvts.getRawParameterValue(PARAM_FS_MAX_DUR));
+        luxSamplerB->setMidiChannel(2);
+    }
+
     // ── Acquire the process-wide shared core ─────────────────────────────────
     // If this is the FIRST plugin instance in this DAW process → creates the
     // singleton (UDP socket, image pipeline, synthesis engine not yet started).
@@ -1155,12 +1249,18 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     // insert: the synthesis-thread instance.  Visualizers read the published
     // insert taps (audio_image_buffers_get_insert_tap_pointers) instead of
     // re-simulating.
-    lux_pitch_init(&g_lux_pitch_proc);
-    lux_mask_init(&g_lux_mask_proc);
+    // M6 Phase 2 — init the whole per-chain instance pool (slot 0 == legacy).
+    lux_pitch_init_all();
+    lux_mask_init_all();
+    video_scroll_init_all();   // init 8 VideoScroll capture rings (RT pool) before the synth thread starts
 
     // Just update g_sp3ctra_config with current APVTS defaults (no socket/buffer creation)
     applyConfigurationToCore(false);
-    
+
+    // M6 Phase 2 — build the default chain topology and derive routing. A saved
+    // session reloads it later in setStateInformation().
+    loadChainModelFromState();
+
     log_info("VST", "Sp3ctraAudioProcessor: Constructor complete (deferred init)");
     log_info("VST", "  - Shared core acquired (ref-count now %ld)",
              sharedCore.use_count());
@@ -1210,6 +1310,11 @@ Sp3ctraAudioProcessor::~Sp3ctraAudioProcessor()
 
     // ── LuxSampler FIRST (uses AudioImageBuffers / DoubleBuffer owned by sharedCore) ──
     // Must stop before releasing sharedCore to avoid use-after-free.
+    if (luxSamplerB)
+    {
+        luxSamplerB->stopPlayerThread();
+        luxSamplerB.reset();
+    }
     if (luxSampler)
     {
         log_info("VST", "Stopping LuxSampler player thread...");
@@ -1355,6 +1460,7 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     // ── Reset consumer tracking (prevent stale buffer re-output at startup) ──
     lastConsumedReadIdx = -1;
     lastConsumedReadIdxLuxSynth = -1;
+    lastConsumedReadIdxLuxstralB = -1;   // M8 — 2nd LuxStral engine
 
     // ── Start the shared pipeline (idempotent: no-op if already running) ─────
     if (coreNeedsInit)
@@ -1395,11 +1501,13 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
         log_info("VST", "Shared pipeline already running — connecting as additional consumer");
     }
 
-    // ── LuxSampler player thread (per-instance, non-RT) ────────────────────
-    if (luxSampler && sharedCore && sharedCore->getCore())
+    // ── LuxSampler player threads (per-instance, non-RT) ───────────────────
+    if (sharedCore && sharedCore->getCore())
     {
-        luxSampler->startPlayerThread(sharedCore->getCore()->getAudioImageBuffers(),
-                                        sharedCore->getCore()->getDoubleBuffer());
+        auto* aib = sharedCore->getCore()->getAudioImageBuffers();
+        auto* dbf = sharedCore->getCore()->getDoubleBuffer();
+        if (luxSampler)  luxSampler->startPlayerThread(aib, dbf);
+        if (luxSamplerB) luxSamplerB->startPlayerThread(aib, dbf);
     }
 
     log_info("VST", "=============================================================");
@@ -1664,8 +1772,11 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // same lock-free ring the audio thread already feeds (consumed below).
     if (panicRequested.exchange(false, std::memory_order_acq_rel))
     {
-        lux_pitch_all_notes_off(&g_lux_pitch_proc);
-        lux_mask_all_notes_off(&g_lux_mask_proc);
+        for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)   // every per-chain instance
+        {
+            lux_pitch_all_notes_off(lux_pitch_instance(i));
+            lux_mask_all_notes_off(lux_mask_instance(i));
+        }
         if (g_luxsynth_engine.initialized)
             for (int n = 0; n < 128; ++n)
                 luxsynth_push_midi_event(0x80, (uint8_t)n, 0);
@@ -1674,60 +1785,72 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                 luxwave_push_midi_event(0x80, (uint8_t)n, 0);
     }
 
-    // ── LuxPitch MIDI (RT-safe: lock-free pitch shift from notes/pitch-bend) ──
+    // ── LuxPitch MIDI (RT-safe) — fanned out to every active per-chain instance ──
     {
         const int lpCh  = static_cast<int>(apvts.getRawParameterValue("luxpitchMidiChannel")->load()) + 1;
         const int lpOct = static_cast<int>(apvts.getRawParameterValue("luxpitchOctaveOffset")->load()) - 2;
+        const uint32_t pitchBits = chainPitchMask_.load(std::memory_order_relaxed);
         for (const auto metadata : midiMessages)
         {
             const auto msg = metadata.getMessage();
             if (msg.getChannel() != lpCh) continue;
-            const int shifted = msg.getNoteNumber() + lpOct * 12;
-            if (msg.isNoteOn())
-                lux_pitch_note_on(&g_lux_pitch_proc, shifted, msg.getFloatVelocity());
-            else if (msg.isNoteOff())
-                lux_pitch_note_off(&g_lux_pitch_proc, shifted);
-            else if (msg.isPitchWheel())
-                lux_pitch_set_pitch_bend(&g_lux_pitch_proc,
-                                         (msg.getPitchWheelValue() - 8192) / 8192.0f);
-            else if (msg.isSustainPedalOn() || msg.isSustainPedalOff())
-                lux_pitch_set_sustain(&g_lux_pitch_proc, msg.isSustainPedalOn() ? 1 : 0);
-            else if (msg.isControllerOfType(1)) // CC1 mod wheel → drives the LFO Depth slider
+
+            if (msg.isControllerOfType(1)) // CC1 mod wheel → drives the LFO Depth slider
             {
                 // The wheel and the on-screen "LFO Depth" slider are a single
-                // control: the wheel sweeps the full slider range so both stay
-                // in sync (no separate additive contribution).
+                // control (shared param) — handle once, not per instance.
                 if (auto* p = apvts.getParameter("luxpitchLfoDepth"))
                     p->setValueNotifyingHost((float)msg.getControllerValue() / 127.0f);
+                continue;
+            }
+
+            const int shifted = msg.getNoteNumber() + lpOct * 12;
+            for (uint32_t bits = pitchBits, i = 0; bits != 0; bits >>= 1, ++i)
+            {
+                if ((bits & 1u) == 0) continue;
+                LuxPitchState* st = lux_pitch_instance((int) i);
+                if (msg.isNoteOn())
+                    lux_pitch_note_on(st, shifted, msg.getFloatVelocity());
+                else if (msg.isNoteOff())
+                    lux_pitch_note_off(st, shifted);
+                else if (msg.isPitchWheel())
+                    lux_pitch_set_pitch_bend(st, (msg.getPitchWheelValue() - 8192) / 8192.0f);
+                else if (msg.isSustainPedalOn() || msg.isSustainPedalOff())
+                    lux_pitch_set_sustain(st, msg.isSustainPedalOn() ? 1 : 0);
             }
         }
     }
 
-    // ── LuxMask MIDI (RT-safe: lock-free mask center from notes/pitch-bend) ──
+    // ── LuxMask MIDI (RT-safe) — fanned out to every active per-chain instance ──
     {
         const int lmCh  = static_cast<int>(apvts.getRawParameterValue("luxmaskMidiChannel")->load()) + 1;
         const int lmOct = static_cast<int>(apvts.getRawParameterValue("luxmaskOctaveOffset")->load()) - 2;
+        const uint32_t maskBits = chainMaskMask_.load(std::memory_order_relaxed);
         for (const auto metadata : midiMessages)
         {
             const auto msg = metadata.getMessage();
             if (msg.getChannel() != lmCh) continue;
-            const int shifted = msg.getNoteNumber() + lmOct * 12;
-            if (msg.isNoteOn())
-                lux_mask_note_on(&g_lux_mask_proc, shifted, msg.getFloatVelocity());
-            else if (msg.isNoteOff())
-                lux_mask_note_off(&g_lux_mask_proc, shifted);
-            else if (msg.isPitchWheel())
-                lux_mask_set_pitch_bend(&g_lux_mask_proc,
-                                        (msg.getPitchWheelValue() - 8192) / 8192.0f);
-            else if (msg.isSustainPedalOn() || msg.isSustainPedalOff())
-                lux_mask_set_sustain(&g_lux_mask_proc, msg.isSustainPedalOn() ? 1 : 0);
-            else if (msg.isControllerOfType(1)) // CC1 mod wheel → drives the LFO Pos Depth slider
+
+            if (msg.isControllerOfType(1)) // CC1 mod wheel → drives the LFO Pos Depth slider (shared param)
             {
-                // The wheel and the on-screen "LFO Pos Depth" slider are a
-                // single control: the wheel sweeps the full slider range so
-                // both stay in sync (no separate additive contribution).
                 if (auto* p = apvts.getParameter("luxmaskLfoPosDepth"))
                     p->setValueNotifyingHost((float)msg.getControllerValue() / 127.0f);
+                continue;
+            }
+
+            const int shifted = msg.getNoteNumber() + lmOct * 12;
+            for (uint32_t bits = maskBits, i = 0; bits != 0; bits >>= 1, ++i)
+            {
+                if ((bits & 1u) == 0) continue;
+                LuxMaskState* st = lux_mask_instance((int) i);
+                if (msg.isNoteOn())
+                    lux_mask_note_on(st, shifted, msg.getFloatVelocity());
+                else if (msg.isNoteOff())
+                    lux_mask_note_off(st, shifted);
+                else if (msg.isPitchWheel())
+                    lux_mask_set_pitch_bend(st, (msg.getPitchWheelValue() - 8192) / 8192.0f);
+                else if (msg.isSustainPedalOn() || msg.isSustainPedalOff())
+                    lux_mask_set_sustain(st, msg.isSustainPedalOn() ? 1 : 0);
             }
         }
     }
@@ -1780,21 +1903,57 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                                      buffer.getNumSamples(),
                                      getSampleRate());
 
-    // ── Sequencer-gated recording: update LuxSampler gate slot ─────────────
-    // seqGateSlot = bank the sequencer is currently playing, or -1 (no gate).
-    // Runs every audio block; onFrameAssembled() reads it atomically.
-    if (luxSampler != nullptr)
+    // ── Acquisition gate: brake the live frame-advance rate ──────────────────
+    // "Vitesse d'acquisition" — drive the gate clock once per block.  When Off
+    // it disables the gate (full-rate); otherwise it grants advances at the
+    // chosen rate and the UDP thread holds the frame between grants.
     {
-        int gateSlot = -1; // no gate: sequencer off / stopped / passthrough step
+        const int   mode    = static_cast<int> (apvts.getRawParameterValue("acqGateMode")->load());
+        const float rateMs  = apvts.getRawParameterValue("acqGateRateMs")->load();
+        const int   divIdx  = static_cast<int> (apvts.getRawParameterValue("acqGateSyncDiv")->load());
+        const int   mdIdx   = static_cast<int> (apvts.getRawParameterValue("acqGateMultDiv")->load());
+
+        // Index → period-in-beats (1/1 .. 1/32, assuming a quarter-note beat).
+        static constexpr double kSyncDivBeats[6]  = { 4.0, 2.0, 1.0, 0.5, 0.25, 0.125 };
+        // Index → refresh-rate factor (/32 .. x4); period = base / factor.
+        static constexpr double kRefreshFactor[8] = { 1.0/32, 1.0/16, 1.0/8, 1.0/4,
+                                                       1.0/2,  1.0,    2.0,   4.0 };
+        const double divBeats = kSyncDivBeats [juce::jlimit(0, 5, divIdx)];
+        const double refresh  = kRefreshFactor[juce::jlimit(0, 7, mdIdx)];
+
+        AudioImageBuffers* aib = nullptr;
+        if (auto* core = getSp3ctraCore())
+            aib = core->getAudioImageBuffers();
+
+        acqGate_.process(aib, mode, rateMs, divBeats, refresh,
+                         buffer.getNumSamples(), getSampleRate(), getPlayHead());
+    }
+
+    // ── Sequencer-gated recording: route the gate slot to the RIGHT engine ──
+    // getStep() encodes (sampler,slot): slot = enc % NUM_SLOTS, sampler = enc /
+    // NUM_SLOTS. Gate engine A or B with the decoded slot; ungate the other.
+    // Sentinels (< 0) ungate both.
+    {
+        int gateA = -1, gateB = -1;
         if (frameSequencer != nullptr
             && frameSequencer->isEnabled()
             && frameSequencer->isPlaying())
         {
             const int curStep = frameSequencer->getCurrentStep();
             if (curStep >= 0)
-                gateSlot = frameSequencer->getStep(curStep); // -1 = passthrough step
+            {
+                const int enc = frameSequencer->getStep(curStep);
+                if (enc >= 0)
+                {
+                    const int smp  = enc / LuxSamplerConstants::NUM_SLOTS;
+                    const int slot = enc % LuxSamplerConstants::NUM_SLOTS;
+                    if      (smp == 0) gateA = slot;
+                    else if (smp == 1) gateB = slot;
+                }
+            }
         }
-        luxSampler->setSeqGateSlot(gateSlot);
+        if (luxSampler)  luxSampler ->setSeqGateSlot(gateA);
+        if (luxSamplerB) luxSamplerB->setSeqGateSlot(gateB);
     }
 
     // ========================================================================
@@ -1882,7 +2041,53 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             rt_profiler_report_buffer_miss_luxstral(&g_vst_rt_profiler);
         }
     }
-    
+
+    // ========================================================================
+    // 🎯 LUXSTRAL ENGINE B (M8 — dual-engine, ADDITIVE mix)
+    //
+    // The 2nd LuxStral engine renders in the SAME audio-thread iteration as A
+    // (paced by A's consumed-buffer handshake), so it needs NO separate handshake
+    // here — we just read its own double-buffer and ADD it (engine A above WROTE
+    // the buffer; A + B + LuxSynth + LuxWave sum). Gated by model presence + its
+    // own volume. Independent chain input is prepared in multithreading.c.
+    // ========================================================================
+    if (luxstralBPresent_.load(std::memory_order_relaxed)
+        && sharedCore && sharedCore->isReady() && luxstral_are_audio_buffers_ready()) {
+        extern AudioImageBuffer luxstral_b_buffers_L[2];
+        extern AudioImageBuffer luxstral_b_buffers_R[2];
+        extern volatile int luxstral_b_buffer_index;
+        extern sp3ctra_config_t g_sp3ctra_config;
+
+        int readIdx = 1 - __atomic_load_n(&luxstral_b_buffer_index, __ATOMIC_ACQUIRE);
+        int leftReady  = __atomic_load_n(&luxstral_b_buffers_L[readIdx].ready, __ATOMIC_ACQUIRE);
+        int rightReady = __atomic_load_n(&luxstral_b_buffers_R[readIdx].ready, __ATOMIC_ACQUIRE);
+
+        const int synthBufferSize = g_sp3ctra_config.audio_buffer_size;
+        const int samplesToRead = (numSamples <= synthBufferSize) ? numSamples : synthBufferSize;
+
+        if (leftReady && rightReady) {
+            // New OR stale frame — either way, add it (continuous 2nd voice).
+            if (readIdx == lastConsumedReadIdxLuxstralB)
+                rt_profiler_report_stale_luxstral(&g_vst_rt_profiler);
+            float* leftData  = luxstral_b_buffers_L[readIdx].data;
+            float* rightData = luxstral_b_buffers_R[readIdx].data;
+            if (leftData && rightData) {
+                const float lsVolB = apvts.getRawParameterValue("luxstralBVolume")->load();
+                if (totalNumOutputChannels >= 1) {
+                    float* destLeft = buffer.getWritePointer(0);
+                    for (int i = 0; i < samplesToRead; ++i)
+                        destLeft[i] += leftData[i] * lsVolB;
+                }
+                if (totalNumOutputChannels >= 2) {
+                    float* destRight = buffer.getWritePointer(1);
+                    for (int i = 0; i < samplesToRead; ++i)
+                        destRight[i] += rightData[i] * lsVolB;
+                }
+                lastConsumedReadIdxLuxstralB = readIdx;
+            }
+        }
+    }
+
     // ========================================================================
     // 🎯 LUXSYNTH INLINE SYNTHESIS (RT-SAFE, ADDITIVE)
     //
@@ -2079,6 +2284,10 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
             // The actual pipeline start (if needed) happens in prepareToPlay().
             applyConfigurationToCore(false);
 
+            // M6 Phase 2 — restore the chain topology and derive per-chain
+            // routing (headless-correct; enable params are already restored).
+            loadChainModelFromState();
+
             if (!coreNeedsInit && sharedCore && sharedCore->isReady())
             {
                 // Pipeline already running: hot-reload UDP with restored config.
@@ -2122,16 +2331,22 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
     // LuxSampler parameters — update atomic config on LuxSampler
     if (parameterID.startsWith("luxSampler"))
     {
+        // NOTE: setEnabled is NOT applied here — per-engine sampler enable is
+        // owned by deriveChainRouting() (module presence drives A/B). The shared
+        // settings below apply to both engines (per-B params land in Part B).
+        const int midiCh = static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_MIDI_CH)) + 1;
+        const int oct    = static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_OCT_OFFSET)) - 2;
+        const float dur  = *apvts.getRawParameterValue(PARAM_FS_MAX_DUR);
         if (luxSampler != nullptr)
         {
-            luxSampler->setEnabled(
-                *apvts.getRawParameterValue(PARAM_FS_ENABLED) > 0.5f);
-            luxSampler->setMidiChannel(
-                static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_MIDI_CH)) + 1);
-            luxSampler->setOctaveOffset(
-                static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_OCT_OFFSET)) - 2);
-            luxSampler->setMaxDuration(
-                *apvts.getRawParameterValue(PARAM_FS_MAX_DUR));
+            luxSampler->setMidiChannel(midiCh);
+            luxSampler->setOctaveOffset(oct);
+            luxSampler->setMaxDuration(dur);
+        }
+        if (luxSamplerB != nullptr)
+        {
+            luxSamplerB->setOctaveOffset(oct);
+            luxSamplerB->setMaxDuration(dur);
         }
         return;
     }
@@ -2312,6 +2527,309 @@ void Sp3ctraAudioProcessor::setChainSourceRouting(int luxstralSrc, int luxsynthS
     chainSrcLuxsynth.store(luxsynthSrc, std::memory_order_relaxed);
     g_sp3ctra_config.luxstral_source_type = luxstralSrc;
     g_sp3ctra_config.luxsynth_source_type = luxsynthSrc;
+}
+
+//==============================================================================
+// M6 Phase 2 — chain topology ownership (model lives here, not in the editor)
+//==============================================================================
+void Sp3ctraAudioProcessor::loadChainModelFromState()
+{
+    auto& state = apvts.state;
+    auto t = state.getChildWithName(ChainModel::kChainsTag);
+    if (t.isValid())
+        chainModel_.fromValueTree(t);
+    else
+        chainModel_ = ChainModel::makeDefault();
+    chainModel_.validateAndRepair();
+
+    // Migration: the step sequencer became a dedicated SEQUENCER module. A model
+    // saved before that has no Sequencer block — inject one so the sequencer stays
+    // reachable in the UI (same spirit as "always keep ≥1 chain").
+    {
+        bool hasSeq = false;
+        for (const auto& ch : chainModel_.chains)
+            for (const auto& mod : ch.modules)
+                if (mod.type == ModuleType::Sequencer) { hasSeq = true; break; }
+        if (! hasSeq && ! chainModel_.chains.empty())
+            chainModel_.insert(0, ModuleType::Sequencer,
+                               (int) chainModel_.chains[0].modules.size());
+    }
+
+    // Presence baseline so the enable bridge only fires on real transitions.
+    chainActiveTypes_.clear();
+    chainModel_.deriveActiveTypes(chainActiveTypes_);
+    videoScrollSlots_.clear();
+    for (const auto& ch : chainModel_.chains)
+        for (const auto& mod : ch.modules)
+            if (mod.type == ModuleType::VideoScroll
+                && mod.slot >= 0 && mod.slot < CHAIN_MAX_CHAINS)
+                videoScrollSlots_.insert(mod.slot);
+
+    deriveChainRouting();   // headless-correct per-synth source routing
+}
+
+void Sp3ctraAudioProcessor::deriveChainRouting()
+{
+    const int luxstralSrc = chainModel_.sourceChannelForSynth(ModuleType::LuxStral, 0);
+    int       luxsynthSrc = chainModel_.sourceChannelForSynth(ModuleType::LuxSynth, 1);
+    if (luxsynthSrc == 1)   // LuxSynth absent/live → let a placed LuxWave decide
+        luxsynthSrc = chainModel_.sourceChannelForSynth(ModuleType::LuxWave, luxsynthSrc);
+    setChainSourceRouting(luxstralSrc, luxsynthSrc);
+
+    // Active per-chain Pitch/Mask instances → MIDI fan-out + config-sync mask.
+    uint32_t pitchMask = 0, maskMask = 0;
+    for (int c = 0; c < chainModel_.numChains() && c < CHAIN_MAX_CHAINS; ++c)
+        for (const auto& m : chainModel_.chains[(size_t) c].modules)
+        {
+            if (m.type == ModuleType::Pitch) pitchMask |= (1u << c);
+            if (m.type == ModuleType::Mask)  maskMask  |= (1u << c);
+        }
+    chainPitchMask_.store(pitchMask, std::memory_order_relaxed);
+    chainMaskMask_.store(maskMask,  std::memory_order_relaxed);
+
+    // Per-engine sampler enable: a Sampler instance carries its engine index in
+    // `slot` (0 = A, 1 = B). An engine is enabled iff its instance is present in
+    // the model. Authoritative — overrides the shared luxSamplerEnabled param.
+    bool samplerAPresent = false, samplerBPresent = false;
+    bool luxstralBPresent = false;                        // M8 — 2nd LuxStral engine
+    for (const auto& ch : chainModel_.chains)
+        for (const auto& m : ch.modules)
+        {
+            if (m.type == ModuleType::Sampler)
+            {
+                if (m.slot == 1) samplerBPresent = true;
+                else             samplerAPresent = true;   // slot 0 (or unhealed -1)
+            }
+            else if (m.type == ModuleType::LuxStral && m.slot == 1)
+                luxstralBPresent = true;
+        }
+    if (luxSampler)  luxSampler ->setEnabled(samplerAPresent);
+    if (luxSamplerB) luxSamplerB->setEnabled(samplerBPresent);
+    luxstralBPresent_.store(luxstralBPresent, std::memory_order_relaxed);
+
+    // Insert order for the GLOBAL Modulated channel (image_chain_process_inserts),
+    // which LuxStral consumes whenever a Sampler sits on its chain — the default
+    // topology. Applied here directly (RT-safe atomic store) because the
+    // "chainInsertOrder" APVTS param has no parameter listener, so a pure reorder
+    // would otherwise never refresh the global order until some unrelated param
+    // change triggered applyConfigurationToCore(). The setParam() in
+    // applyChainEnableBridge() still runs, for host display + persistence.
+    image_chain_set_order(chainModel_.isMaskBeforePitch()
+        ? IMAGE_CHAIN_ORDER_MASK_PITCH : IMAGE_CHAIN_ORDER_PITCH_MASK);
+
+    deriveAndPublishChainPlan();   // RT-safe per-chain recipe for the synth thread
+}
+
+//==============================================================================
+// Derive the per-synth chain recipe from the model and publish it RT-safely.
+// Each synth (≤1 chain) gets: its source kind, the ordered Pitch/Mask inserts
+// upstream of it (each bound to its chain's per-instance state pool slot), and
+// whether a sampler/score sits upstream. Consumed by the synthesis thread.
+//==============================================================================
+void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
+{
+    ChainPlan plan;
+    memset(&plan, 0, sizeof(plan));
+
+    auto sourceKind = [](const Chain& ch) -> int
+    {
+        for (const auto& m : ch.modules)
+        {
+            if (m.type == ModuleType::Sp3ctra) return CHAIN_SRC_LIVE;
+            if (m.type == ModuleType::Image)   return CHAIN_SRC_IMAGE;
+            if (m.type == ModuleType::Video)   return CHAIN_SRC_VIDEO;
+        }
+        return CHAIN_SRC_NONE;
+    };
+
+    // engineSlot >= 0 additionally matches ModuleInstance.slot — used to tell the
+    // two LuxStral engines apart (A = slot 0, B = slot 1); -1 = match by type only.
+    auto fill = [&](ModuleType synth, int slot, int engineSlot = -1)
+    {
+        int ci = -1, idx = -1;
+        for (int c = 0; c < chainModel_.numChains() && ci < 0; ++c)
+        {
+            const auto& mods = chainModel_.chains[(size_t) c].modules;
+            for (int i = 0; i < (int) mods.size(); ++i)
+                if (mods[(size_t) i].type == synth
+                    && (engineSlot < 0 || mods[(size_t) i].slot == engineSlot))
+                { ci = c; idx = i; break; }
+        }
+        SynthChainPlan& sp = plan.synth[slot];
+        if (ci < 0) { sp.present = 0; return; }
+
+        const auto& ch = chainModel_.chains[(size_t) ci];
+        sp.present     = 1;
+        sp.source_kind = sourceKind(ch);
+        const int stateIdx = (ci < CHAIN_MAX_CHAINS) ? ci : (CHAIN_MAX_CHAINS - 1);
+
+        for (int i = 0; i < idx; ++i)
+        {
+            const ModuleInstance& mi = ch.modules[(size_t) i];
+            const ModuleType t = mi.type;
+            if ((t == ModuleType::Pitch || t == ModuleType::Mask)
+                && sp.num_inserts < CHAIN_PLAN_MAX_INSERTS)
+            {
+                sp.insert_id[sp.num_inserts] = (t == ModuleType::Pitch)
+                    ? IMAGE_CHAIN_INSERT_LUXPITCH : IMAGE_CHAIN_INSERT_LUXMASK;
+                sp.insert_state_idx[sp.num_inserts] = stateIdx;   // chain-derived Pitch/Mask pool slot
+                sp.num_inserts++;
+            }
+            else if (t == ModuleType::VideoScroll
+                     && mi.slot >= 0 && mi.slot < CHAIN_MAX_CHAINS
+                     && sp.num_inserts < CHAIN_PLAN_MAX_INSERTS)
+            {
+                // PASS-THROUGH PROBE: insert_state_idx is the PER-INSTANCE slot (0..7).
+                sp.insert_id[sp.num_inserts]        = IMAGE_CHAIN_INSERT_VIDEOSCROLL;
+                sp.insert_state_idx[sp.num_inserts] = mi.slot;
+                sp.num_inserts++;
+            }
+            else if (t == ModuleType::Sampler)
+            {
+                sp.has_sampler = 1;
+                // Record the sampler's POSITION in the insert list so the executor
+                // can feed VideoScroll probes pre- vs post-sampler correctly.
+                if (sp.num_inserts < CHAIN_PLAN_MAX_INSERTS)
+                {
+                    sp.insert_id[sp.num_inserts]        = IMAGE_CHAIN_INSERT_SAMPLER;
+                    sp.insert_state_idx[sp.num_inserts] = 0;   // unused for the marker
+                    sp.num_inserts++;
+                }
+            }
+            else if (t == ModuleType::Score)   sp.has_score   = 1;
+        }
+    };
+
+    fill(ModuleType::LuxStral, CHAIN_SYNTH_LUXSTRAL,   0);  // engine A (slot 0)
+    fill(ModuleType::LuxSynth, CHAIN_SYNTH_LUXSYNTH);
+    fill(ModuleType::LuxWave,  CHAIN_SYNTH_LUXWAVE);
+    fill(ModuleType::LuxStral, CHAIN_SYNTH_LUXSTRAL_B, 1);  // engine B (slot 1)
+
+    chain_plan_publish(&plan);
+}
+
+std::vector<int> Sp3ctraAudioProcessor::activeVideoSlots() const
+{
+    std::vector<int> out;
+    for (const auto& ch : chainModel_.chains)
+        for (const auto& m : ch.modules)
+            if (m.type == ModuleType::VideoScroll && m.slot >= 0)
+                out.push_back(m.slot);
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+void Sp3ctraAudioProcessor::persistChainModel()
+{
+    auto& state = apvts.state;
+    auto existing = state.getChildWithName(ChainModel::kChainsTag);
+    if (existing.isValid())
+        state.removeChild(existing, nullptr);
+    state.appendChild(chainModel_.toValueTree(), nullptr);
+}
+
+void Sp3ctraAudioProcessor::applyChainEnableBridge()
+{
+    auto setParam = [this](const juce::String& id, bool on)
+    {
+        if (id.isEmpty())
+            return;
+        if (auto* param = apvts.getParameter(id))
+        {
+            const float v = on ? 1.0f : 0.0f;
+            if (param->getValue() != v)
+            {
+                param->beginChangeGesture();
+                param->setValueNotifyingHost(v);
+                param->endChangeGesture();
+            }
+        }
+    };
+
+    std::set<ModuleType> now;
+    chainModel_.deriveActiveTypes(now);
+
+    static const ModuleType kEnableTypes[] = {
+        ModuleType::Pitch, ModuleType::Mask, ModuleType::Sampler, ModuleType::Sequencer,
+        ModuleType::LuxStral, ModuleType::LuxSynth, ModuleType::LuxWave
+    };
+    for (auto t : kEnableTypes)
+    {
+        const bool isNow = now.count(t) > 0;
+        const bool was   = chainActiveTypes_.count(t) > 0;
+        if (isNow && ! was)
+            setParam(moduleEnableParam(t), true);    // newly added ⇒ enable
+        else if (! isNow)
+            setParam(moduleEnableParam(t), false);   // absent ⇒ force off
+    }
+    setParam("chainInsertOrder", chainModel_.isMaskBeforePitch());
+    chainActiveTypes_ = now;
+}
+
+// Free the state of every module that just disappeared from the topology. The
+// enable bridge (next call) silences modules that own an enable param, but some
+// modules keep state the bridge cannot reach: SCORE has NO enable param and its
+// has_score plan flag is never read by the RT thread, so removal alone never
+// stops it; VideoScroll keeps a captured waterfall ring; Pitch/Mask hold live
+// MIDI voices. Recorded content (sampler slots, sequencer pattern, synth params)
+// is intentionally preserved — removal only tears down transient/live state.
+// Runs AFTER deriveChainRouting() published the new plan (the synth thread has
+// stopped pulling the removed modules) and BEFORE applyChainEnableBridge()
+// overwrites chainActiveTypes_, so chainActiveTypes_ still holds the old set.
+void Sp3ctraAudioProcessor::teardownAbsentModules(const std::set<ModuleType>& now)
+{
+    auto removed = [&](ModuleType t)
+    { return chainActiveTypes_.count(t) > 0 && now.count(t) == 0; };
+
+    // SCORE: stop playback, free the frame buffer, reset settings to defaults.
+    if (removed(ModuleType::Score))
+    {
+        if (auto* ls = getLuxSampler())
+            ls->uiDiscardScore();
+        score_settings_defaults(&scoreSettings_);
+        scoreSettings_.writingSpeed = 2.5;   // match the constructor default
+    }
+
+    // Pitch / Mask: output already silenced by the enable bridge; drop any held
+    // live voices so a re-added instance starts clean (config is re-applied from
+    // APVTS on add). Type-level removal ⇒ no chain references these pools anymore.
+    if (removed(ModuleType::Pitch))
+        for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
+            lux_pitch_reset(lux_pitch_instance(i));
+    if (removed(ModuleType::Mask))
+        for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
+            lux_mask_reset(lux_mask_instance(i));
+
+    // VideoScroll: per-instance probe (slot 0..7), may repeat per chain, so diff
+    // at slot granularity. Re-init the capture ring of any removed probe so its
+    // waterfall image stops being displayed. We are on the message thread — the
+    // same thread that consumes the ring — so this cannot race the consumer, and
+    // the producer (synth thread) no longer captures to a dropped slot.
+    std::set<int> vsNow;
+    for (const auto& ch : chainModel_.chains)
+        for (const auto& m : ch.modules)
+            if (m.type == ModuleType::VideoScroll
+                && m.slot >= 0 && m.slot < CHAIN_MAX_CHAINS)
+                vsNow.insert(m.slot);
+    for (int slot : videoScrollSlots_)
+        if (vsNow.count(slot) == 0)
+            video_scroll_init(video_scroll_instance(slot));   // re-init = clear ring
+    videoScrollSlots_ = vsNow;
+}
+
+void Sp3ctraAudioProcessor::onChainModelEdited()
+{
+    // Routing/masks/plan FIRST: the enable bridge below flips APVTS params which
+    // trigger applyConfigurationToCore() (per-instance config sync) — that reads
+    // the freshly-computed chainPitch/MaskMask_.
+    deriveChainRouting();       // per-synth source routing + instance masks + RT plan
+
+    std::set<ModuleType> now;
+    chainModel_.deriveActiveTypes(now);
+    teardownAbsentModules(now); // free removed modules' state (uses old chainActiveTypes_)
+
+    applyChainEnableBridge();   // enable params + insert order (diff vs baseline)
+    persistChainModel();
 }
 
 //==============================================================================
@@ -2556,7 +3074,18 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
             lpc.lfo_depth_semitones     = apvts.getRawParameterValue("luxpitchLfoDepth")->load();
             lpc.velocity_coupling       = static_cast<int>(apvts.getRawParameterValue("luxpitchVelocityCoupling")->load());
             lpc.reference_note          = 24 + static_cast<int>(apvts.getRawParameterValue("luxpitchReferenceNote")->load());
-            g_lux_pitch_proc.config = lpc;  /* single simulation (synthesis thread) */
+            // M6 Phase 2 — settings are shared per type, but `enabled` is per
+            // instance (= presence in chain i) so a Pitch on one chain never
+            // processes another chain's image. Slot i is active iff chain i has Pitch.
+            {
+                const uint32_t pmask = chainPitchMask_.load(std::memory_order_relaxed);
+                for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
+                {
+                    LuxPitchConfig c = lpc;
+                    if (((pmask >> i) & 1u) == 0) c.enabled = 0;
+                    lux_pitch_instance(i)->config = c;
+                }
+            }
         }
 
         // ── Sync LuxMask config to the processing instance ──
@@ -2583,7 +3112,16 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
             lmc.lfo_pos_depth_semitones  = apvts.getRawParameterValue("luxmaskLfoPosDepth")->load();
             lmc.velocity_coupling        = static_cast<int>(apvts.getRawParameterValue("luxmaskVelocityCoupling")->load());
             lmc.reference_note           = 24 + static_cast<int>(apvts.getRawParameterValue("luxmaskReferenceNote")->load());
-            g_lux_mask_proc.config = lmc;  /* single simulation (synthesis thread) */
+            // M6 Phase 2 — settings shared per type, `enabled` per instance (presence).
+            {
+                const uint32_t mmask = chainMaskMask_.load(std::memory_order_relaxed);
+                for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
+                {
+                    LuxMaskConfig c = lmc;
+                    if (((mmask >> i) & 1u) == 0) c.enabled = 0;
+                    lux_mask_instance(i)->config = c;
+                }
+            }
         }
 
         log_debug("VST", "Per-path routing: LS source=%d inv=%d ac=%d  |  LX source=%d inv=%d ac=%d gamma=%.2f",

@@ -10,11 +10,13 @@
  * Categories (left catalogue sections):
  *   SRC   — SP3CTRA / IMAGE / VIDEO   (chain input, optional, at most one)
  *   MIDI  — PITCH / MASK              (image-space processors, order matters)
- *   UTILS — SAMPLER / SCORE           (advanced frame players)
+ *   UTILS — SAMPLER / SCORE / SEQUENCER (advanced frame players + step driver)
  *   SYNTH — LUXSTRAL / LUXSYNTH / LUXWAVE (audio engines)
+ *   OUT   — VIDEO SCROLL              (video output taps — multi-instance, slotted)
  *
  * Placement rules live in ChainModel (at most one Source role per chain; never
- * two instances of the same ModuleType in a chain; order is free).
+ * two instances of the same ModuleType in a chain — except multi-instance OUT
+ * taps like VideoScroll; order is free).
  */
 #pragma once
 
@@ -28,15 +30,16 @@ enum class ModuleType
 {
     Sp3ctra = 0, Image, Video,     // SRC
     Pitch, Mask,                   // MIDI
-    Sampler, Score,                // UTILS
-    LuxStral, LuxSynth, LuxWave    // SYNTH
+    Sampler, Score, Sequencer,     // UTILS
+    LuxStral, LuxSynth, LuxWave,   // SYNTH
+    VideoScroll                    // VIDEO (waterfall probe — pass-through, slotted)
 };
 
 /** Behavioural role — drives the placement constraints. */
 enum class ModuleRole { Source, Processor, Util, Synth };
 
 /** Catalogue section a module belongs to. */
-enum class ModuleCat  { SRC, MIDI, UTILS, SYNTH };
+enum class ModuleCat  { SRC, MIDI, UTILS, SYNTH, OUT };
 
 /** Immutable per-type metadata. */
 struct ModuleDesc
@@ -52,20 +55,22 @@ struct ModuleDesc
 
 //==============================================================================
 /** The whole catalogue, in canonical display order. */
-inline const std::array<ModuleDesc, 10>& moduleTable()
+inline const std::array<ModuleDesc, 12>& moduleTable()
 {
-    static const std::array<ModuleDesc, 10> table = {{
-        // type                 category          role                  name                       colour       enableParam          id
-        { ModuleType::Sp3ctra,  ModuleCat::SRC,   ModuleRole::Source,   "SP3CTRA",                 0xff68788f,  "",                  "Sp3ctra"  },
-        { ModuleType::Image,    ModuleCat::SRC,   ModuleRole::Source,   "IMAGE",                   0xff68788f,  "",                  "Image"    },
-        { ModuleType::Video,    ModuleCat::SRC,   ModuleRole::Source,   "VIDEO",                   0xff68788f,  "",                  "Video"    },
-        { ModuleType::Pitch,    ModuleCat::MIDI,  ModuleRole::Processor,"PITCH",                   0xffe06bb8,  "luxpitchEnabled",   "Pitch"    },
-        { ModuleType::Mask,     ModuleCat::MIDI,  ModuleRole::Processor,"MASK",                    0xff6be0d0,  "luxmaskEnabled",    "Mask"     },
-        { ModuleType::Sampler,  ModuleCat::UTILS, ModuleRole::Util,     "SAMPLER",                 0xffe09040,  "luxSamplerEnabled", "Sampler"  },
-        { ModuleType::Score,    ModuleCat::UTILS, ModuleRole::Util,     "SCORE",                   0xffe0a24a,  "",                  "Score"    },
-        { ModuleType::LuxStral, ModuleCat::SYNTH, ModuleRole::Synth,    "\xE2\x99\xAA LUXSTRAL",   0xff4fa3e0,  "deviceEnabled",     "LuxStral" },
-        { ModuleType::LuxSynth, ModuleCat::SYNTH, ModuleRole::Synth,    "\xE2\x99\xAA LUXSYNTH",   0xffb07af0,  "luxsynthEnabled",   "LuxSynth" },
-        { ModuleType::LuxWave,  ModuleCat::SYNTH, ModuleRole::Synth,    "\xE2\x99\xAA LUXWAVE",    0xff8fd05a,  "luxwaveEnabled",    "LuxWave"  },
+    static const std::array<ModuleDesc, 12> table = {{
+        // type                  category          role                  name                       colour       enableParam          id
+        { ModuleType::Sp3ctra,     ModuleCat::SRC,   ModuleRole::Source,   "SP3CTRA",                 0xff68788f,  "",                  "Sp3ctra"  },
+        { ModuleType::Image,       ModuleCat::SRC,   ModuleRole::Source,   "IMAGE",                   0xff68788f,  "",                  "Image"    },
+        { ModuleType::Video,       ModuleCat::SRC,   ModuleRole::Source,   "VIDEO",                   0xff68788f,  "",                  "Video"    },
+        { ModuleType::Pitch,       ModuleCat::MIDI,  ModuleRole::Processor,"PITCH",                   0xffe06bb8,  "luxpitchEnabled",   "Pitch"    },
+        { ModuleType::Mask,        ModuleCat::MIDI,  ModuleRole::Processor,"MASK",                    0xff6be0d0,  "luxmaskEnabled",    "Mask"     },
+        { ModuleType::Sampler,     ModuleCat::UTILS, ModuleRole::Util,     "SAMPLER",                 0xffe09040,  "luxSamplerEnabled", "Sampler"  },
+        { ModuleType::Score,       ModuleCat::UTILS, ModuleRole::Util,     "SCORE",                   0xffe0a24a,  "",                  "Score"    },
+        { ModuleType::Sequencer,   ModuleCat::UTILS, ModuleRole::Util,     "SEQUENCER",               0xff7ac0e0,  "seqEnabled",        "Sequencer" },
+        { ModuleType::LuxStral,    ModuleCat::SYNTH, ModuleRole::Synth,    "\xE2\x99\xAA LUXSTRAL",   0xff4fa3e0,  "deviceEnabled",     "LuxStral" },
+        { ModuleType::LuxSynth,    ModuleCat::SYNTH, ModuleRole::Synth,    "\xE2\x99\xAA LUXSYNTH",   0xffb07af0,  "luxsynthEnabled",   "LuxSynth" },
+        { ModuleType::LuxWave,     ModuleCat::SYNTH, ModuleRole::Synth,    "\xE2\x99\xAA LUXWAVE",    0xff8fd05a,  "luxwaveEnabled",    "LuxWave"  },
+        { ModuleType::VideoScroll, ModuleCat::OUT,   ModuleRole::Processor,"VIDEO SCROLL",            0xff5ad0c8,  "",                  "VideoScroll" },
     }};
     return table;
 }
@@ -106,6 +111,7 @@ inline const char* moduleCatLabel(ModuleCat c)
         case ModuleCat::MIDI:  return "MIDI";
         case ModuleCat::UTILS: return "UTILS";
         case ModuleCat::SYNTH: return "SYNTH";
+        case ModuleCat::OUT:   return "OUT";
     }
     return "";
 }

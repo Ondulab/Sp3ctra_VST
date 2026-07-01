@@ -54,6 +54,21 @@
  * former `_Atomic int g_use_barriers = 1;` static initializer).             */
 LuxStralEngine g_luxstral_engine_a = {
     .use_barriers = 1,
+    .out_L = luxstral_buffers_L,          /* legacy globals — A behaviour unchanged */
+    .out_R = luxstral_buffers_R,
+    .out_index = &luxstral_buffer_index,
+    .source_type_override = -1,           /* use global luxstral_source_type */
+};
+
+/* Engine B (M8 — dual-engine). Independent DSP/worker/output; publishes to its
+ * own second buffer set and reads its own DoubleBuffer (so it accepts either
+ * source tag → source_type_override = 2). Shares read-only waves[]/config. */
+LuxStralEngine g_luxstral_engine_b = {
+    .use_barriers = 1,
+    .out_L = luxstral_b_buffers_L,
+    .out_R = luxstral_b_buffers_R,
+    .out_index = &luxstral_b_buffer_index,
+    .source_type_override = 2,
 };
 
 /* Global context variables (moved from shared.c) */
@@ -73,6 +88,7 @@ static void synth_luxstral_cleanup_impl(LuxStralEngine *eng) {
 // Public wrapper (registered via atexit; called by Sp3ctraSharedCore)
 void synth_luxstral_cleanup(void) {
   synth_luxstral_cleanup_impl(&g_luxstral_engine_a);
+  synth_luxstral_cleanup_impl(&g_luxstral_engine_b);   // M8 — free engine B too
 }
 
 /* Public functions ----------------------------------------------------------*/
@@ -612,7 +628,13 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
     log_error("SYNTH", "One of the input buffers is NULL");
     return;
   }
-  int index = __atomic_load_n(&current_buffer_index, __ATOMIC_RELAXED);
+  /* De-globalised output target (M8): engine A → global luxstral_buffers,
+   * engine B → its own second set. Cast here to keep the heavy vst_adapters
+   * header out of the widely-included engine struct. */
+  AudioImageBuffer *obL   = (AudioImageBuffer*)eng->out_L;
+  AudioImageBuffer *obR   = (AudioImageBuffer*)eng->out_R;
+  volatile int     *obIdx = eng->out_index;
+  int index = __atomic_load_n(obIdx, __ATOMIC_RELAXED);
   int nb_pixels = get_cis_pixels_nb();
   // Grayscale staging buffers live in the engine struct (allocated on first call)
 
@@ -629,12 +651,12 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
   // LOCK-FREE DOUBLE BUFFERING with proper alternation:
   // Use the OTHER buffer if current one is still being read by processBlock.
   // This prevents overwriting data that hasn't been consumed yet.
-  if (__atomic_load_n(&buffers_L[index].ready, __ATOMIC_ACQUIRE) != 0 ||
-      __atomic_load_n(&buffers_R[index].ready, __ATOMIC_ACQUIRE) != 0) {
+  if (__atomic_load_n(&obL[index].ready, __ATOMIC_ACQUIRE) != 0 ||
+      __atomic_load_n(&obR[index].ready, __ATOMIC_ACQUIRE) != 0) {
     // Current buffer still in use - try the other one
     int alt_index = 1 - index;
-    if (__atomic_load_n(&buffers_L[alt_index].ready, __ATOMIC_ACQUIRE) == 0 &&
-        __atomic_load_n(&buffers_R[alt_index].ready, __ATOMIC_ACQUIRE) == 0) {
+    if (__atomic_load_n(&obL[alt_index].ready, __ATOMIC_ACQUIRE) == 0 &&
+        __atomic_load_n(&obR[alt_index].ready, __ATOMIC_ACQUIRE) == 0) {
       // Other buffer is free, use it
       index = alt_index;
     }
@@ -658,7 +680,9 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
      *   Source=S (0): accept only tag 2 (sampler)
      *   Source=L (1): accept only tag 1 (live)
      *   Source=M (2): accept either tag */
-    int src = g_sp3ctra_config.luxstral_source_type;
+    int src = (eng->source_type_override >= 0)
+                ? eng->source_type_override
+                : g_sp3ctra_config.luxstral_source_type;
     int tag = db->dataReady;
 
     /* Diagnostic: print source routing state every ~500 synth calls (~0.5s) */
@@ -700,7 +724,9 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
      * always contains LIVE data.  Only use this fallback when the selected
      * source includes live (L or M).  For Source=S, produce silence and wait
      * for FramePlayerThread to provide sampler preprocessed data. */
-    int fallback_src = g_sp3ctra_config.luxstral_source_type;
+    int fallback_src = (eng->source_type_override >= 0)
+                         ? eng->source_type_override
+                         : g_sp3ctra_config.luxstral_source_type;
     if (fallback_src == 0 /* IMAGE_SOURCE_SAMPLER */) {
       /* Source=S: silence until sampler data arrives */
       memset(eng->grayScale_live, 0, nb_pixels * sizeof(float));
@@ -789,8 +815,8 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
   // Unified mode: always pass both left and right buffers
   synth_IfftMode_impl(eng,
                  eng->processed_grayScale,
-                 buffers_L[index].data,
-                 buffers_R[index].data,
+                 obL[index].data,
+                 obR[index].data,
                  contrast_factor,
                  db);
 
@@ -843,21 +869,51 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
   gettimeofday(&tv, NULL);
   uint64_t timestamp_us = (uint64_t)tv.tv_sec * 1000000ULL + (uint64_t)tv.tv_usec;
   
-  buffers_L[index].write_timestamp_us = timestamp_us;
-  buffers_R[index].write_timestamp_us = timestamp_us;
-  
-  __atomic_store_n(&buffers_L[index].ready, 1, __ATOMIC_RELEASE);
-  __atomic_store_n(&buffers_R[index].ready, 1, __ATOMIC_RELEASE);
+  obL[index].write_timestamp_us = timestamp_us;
+  obR[index].write_timestamp_us = timestamp_us;
+
+  __atomic_store_n(&obL[index].ready, 1, __ATOMIC_RELEASE);
+  __atomic_store_n(&obR[index].ready, 1, __ATOMIC_RELEASE);
   // pthread_cond_signal removed - RT callback polls atomically
 
   // Change index so callback reads the filled buffer and next write goes to other buffer
-  __atomic_store_n(&current_buffer_index, 1 - index, __ATOMIC_RELEASE);
+  __atomic_store_n(obIdx, 1 - index, __ATOMIC_RELEASE);
 }
 
 // Public wrapper (signature unchanged for external callers, e.g. multithreading.c)
 void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
                         uint8_t *buffer_B, DoubleBuffer *db) {
   synth_AudioProcess_impl(&g_luxstral_engine_a, buffer_R, buffer_G, buffer_B, db);
+}
+
+// M8 — render engine B (dual-engine). Same entry as A but on g_luxstral_engine_b
+// + its own DoubleBuffer. Worker pool + RT output buffers self-init lazily.
+void synth_AudioProcess_b(uint8_t *buffer_R, uint8_t *buffer_G,
+                          uint8_t *buffer_B, DoubleBuffer *db) {
+  synth_AudioProcess_impl(&g_luxstral_engine_b, buffer_R, buffer_G, buffer_B, db);
+}
+
+// M8 — per-instance init for engine B. Runs ONLY the per-engine setup; the
+// global waves[]/sine-table/runtime-config were already initialised once by
+// synth_IfftInit() for engine A. Safe to call once, after synth_IfftInit().
+int32_t synth_luxstral_init_engine_b(void) {
+  LuxStralEngine *eng = &g_luxstral_engine_b;
+  if (eng->imageRef) return 0;   // already initialised
+
+  const int n = get_current_number_of_notes();
+  eng->imageRef = (int32_t*)calloc(n > 0 ? n : 1, sizeof(int32_t));
+  if (!eng->imageRef) {
+    log_error("SYNTH", "Failed to allocate imageRef (engine B)");
+    return -1;
+  }
+  fill_int32(1000000, eng->imageRef, n);
+
+  if (pthread_mutex_init(&eng->synth_process_mutex, NULL) != 0) {
+    log_error("SYNTH", "Failed to init synth_process_mutex (engine B)");
+    return -1;
+  }
+  log_info("SYNTH", "LuxStral engine B initialised (per-instance state ready)");
+  return 0;
 }
 
 /**
