@@ -137,6 +137,26 @@ public:
         { processor.getScoreSettings().printerDpi = (double) juce::jmax(72, dpiCombo.getSelectedId()); };
         addAndMakeVisible(dpiCombo);
 
+        // ── Stereo mode: two spectrograms (left=red, right=blue) ────────────
+        // Takes effect on the next GENERATE. Reuses LuxStral's colour-temperature
+        // panning (red→left ear, blue→right ear) — no synth code is touched.
+        stereoToggle.setButtonText("Stereo (L=red / R=blue)");
+        stereoToggle.setToggleState(processor.getScoreSettings().enableStereoMode != 0,
+                                    juce::dontSendNotification);
+        stereoToggle.onClick = [this]
+        {
+            const bool on = stereoToggle.getToggleState();
+            processor.getScoreSettings().enableStereoMode = on ? 1 : 0;
+            // The colour image only pans if LuxStral's stereo engine is enabled.
+            // Turn it on (its published APVTS switch — no LuxStral code touched) so
+            // the result isn't silently mono. Leave it untouched when toggling off,
+            // since the user may rely on it elsewhere (e.g. live CIS stereo).
+            if (on)
+                if (auto* p = processor.getAPVTS().getParameter("luxstralStereoEnable"))
+                    p->setValueNotifyingHost(1.0f);
+        };
+        addAndMakeVisible(stereoToggle);
+
         // ── Waveform region picker (which part of the WAV to extract) ───────
         waveform.onStartChange = [this](double startSec)
         { processor.getScoreSettings().startTimeSec = startSec; };
@@ -262,10 +282,25 @@ public:
     void mouseDown(const juce::MouseEvent& e) override
     {
         scrubbing = previewImage.isValid() && previewArea.contains(e.getPosition());
-        if (scrubbing) scrubTo(e);
+        if (! scrubbing) return;
+        scrubTo(e);  // arm the play head at the clicked column first
+        // When STOPPED, generate the flux live so the user hears the column under
+        // the cursor (sustained tone that follows the drag). While PLAYING, the
+        // scrubTo above already performed a live seek — leave the transport alone.
+        if (auto* fs = processor.getLuxSampler())
+            if (! fs->isScorePlaying())
+                scrubAuditioning = fs->uiBeginScoreScrub();
     }
     void mouseDrag(const juce::MouseEvent& e) override { if (scrubbing) scrubTo(e); }
-    void mouseUp  (const juce::MouseEvent&)      override { scrubbing = false; }
+    void mouseUp  (const juce::MouseEvent&)      override
+    {
+        scrubbing = false;
+        if (scrubAuditioning)
+        {
+            if (auto* fs = processor.getLuxSampler()) fs->uiEndScoreScrub();
+            scrubAuditioning = false;
+        }
+    }
 
     void scrubTo(const juce::MouseEvent& e)
     {
@@ -319,6 +354,8 @@ public:
             dpiCombo.setBounds(pad + half + gap + 34 + gap, y, half - 34 - gap, ch);
             y += ch + gap + 4;
         }
+
+        stereoToggle.setBounds(pad, y, colW, ch); y += ch + gap + 4;
 
         generateButton.setBounds(pad, y, colW, ch + 4); y += ch + 8;
         progressBar.setBounds(pad, y, colW, ch);        y += ch + gap;
@@ -420,7 +457,7 @@ private:
 
     /** Compact pictogram toggle for the loop controls.
      *   • Loop    → a "racetrack" loop with a left-pointing arrow (repeat).
-     *   • Inverse → a ⏮ skip-back glyph (bar + left triangle) = play backward.
+     *   • Inverse → the same loop, mirrored (right-pointing arrow) = play backward.
      *  Lights up amber when active. JUCE toggle — read in applyTransportMode(). */
     class ScoreIconToggle : public juce::Button
     {
@@ -447,19 +484,21 @@ private:
             const auto inner = b.reduced(b.getHeight() * 0.22f);
             const juce::Colour fg = on ? accent
                                        : juce::Colour(isEnabled() ? 0xff9aa6ba : 0xff555a62);
-            if (glyph == Glyph::Loop) drawLoopGlyph(g, inner, fg);
-            else                      drawReverseGlyph(g, inner, fg);
+            drawLoopGlyph(g, inner, fg, glyph == Glyph::Inverse);
         }
 
     private:
-        /** Stadium (racetrack) loop, open at the top, with a left-pointing arrow
-         *  capping the gap — reads as "repeat". The RING is what must look centred;
-         *  the arrow head overshoots the ring's top, so it is deliberately EXCLUDED
-         *  from the centring measurement (its overshoot must not bias placement). */
-        static void drawLoopGlyph(juce::Graphics& g, juce::Rectangle<float> r, juce::Colour col)
+        /** Stadium (racetrack) loop, open at the top, with an arrow capping the
+         *  gap — reads as "repeat". The RING is what must look centred; the arrow
+         *  head overshoots the ring's top, so it is deliberately EXCLUDED from the
+         *  centring measurement (its overshoot must not bias placement).
+         *  @p reversed mirrors it horizontally (arrow points right) = play backward.
+         *  Shared shape with the SAMPLER loop-mode pictograms (LoopModeButton). */
+        static void drawLoopGlyph(juce::Graphics& g, juce::Rectangle<float> r,
+                                  juce::Colour col, bool reversed)
         {
             const float h  = r.getHeight();
-            const float th = juce::jmax(2.0f, h * 0.14f);   // stroke thickness
+            const float th = juce::jmax(2.0f, h * 0.12f);   // stroke thickness
 
             // Ring built symmetric about r's centre → centred by construction.
             const float ringH  = h * 0.64f;
@@ -486,9 +525,9 @@ private:
             loop.lineTo(gx0, T);
 
             // Left-pointing arrow head straddling the top gap (modest overshoot).
-            const float aH    = radius * 0.7f;
-            const float aTipX = gx0 - th * 0.15f;
-            const float aBackX = gx1 + th * 0.15f;
+            const float aH    = radius * 0.85f;
+            const float aTipX = gx0 - th * 0.25f;
+            const float aBackX = gx1 + th * 0.25f;
             juce::Path arrow;
             arrow.addTriangle(aTipX, T, aBackX, T - aH, aBackX, T + aH);
 
@@ -500,29 +539,19 @@ private:
             loop.applyTransform(move);
             arrow.applyTransform(move);
 
+            // Inverse: mirror about r's vertical centre (x' = 2·cx − x).
+            if (reversed)
+            {
+                const auto flip = juce::AffineTransform::scale(-1.0f, 1.0f)
+                                      .translated(r.getCentreX() * 2.0f, 0.0f);
+                loop.applyTransform(flip);
+                arrow.applyTransform(flip);
+            }
+
             g.setColour(col);
             g.strokePath(loop, juce::PathStrokeType(th, juce::PathStrokeType::curved,
                                                         juce::PathStrokeType::rounded));
             g.fillPath(arrow);
-        }
-
-        /** ⏮ skip-back: a vertical bar + a left-pointing filled triangle = reverse. */
-        static void drawReverseGlyph(juce::Graphics& g, juce::Rectangle<float> r, juce::Colour col)
-        {
-            const float w = r.getWidth(), h = r.getHeight();
-            g.setColour(col);
-
-            const float barW = w * 0.17f;
-            const juce::Rectangle<float> bar(r.getX() + w * 0.05f, r.getY() + h * 0.10f,
-                                             barW, h * 0.80f);
-            g.fillRoundedRectangle(bar, barW * 0.4f);
-
-            const float tx = bar.getRight() + w * 0.05f;
-            juce::Path tri;
-            tri.addTriangle(tx,                      r.getCentreY(),               // tip (left)
-                            r.getRight() - w * 0.04f, r.getY() + h * 0.10f,         // top-right
-                            r.getRight() - w * 0.04f, r.getBottom() - h * 0.10f);   // bottom-right
-            g.fillPath(tri);
         }
 
         Glyph glyph;
@@ -637,6 +666,7 @@ private:
         s.maxFreq = hi;
         genMinFreq = lo;   // remembered so playback maps the band's LOG freq axis
         genMaxFreq = hi;   // 1:1 onto the synth's log oscillators (= CIS scan)
+        genDpi     = s.printerDpi;   // DPI actually rendered → stamped into the export
         busy = true;
         progress = 0.0;
         generateButton.setEnabled(false);
@@ -665,6 +695,7 @@ private:
         {
             baseImage     = r.image;           // raw render (EQ is applied on top)
             spectroBand   = r.spectroBand;
+            generatedStereo = r.stereo;        // authoritative: false if source was mono
             genDynRangeDB = processor.getScoreSettings().dynamicRangeDB;
 
             // Keep the EQ curve across regenerations; only rebuild its band grid
@@ -746,8 +777,20 @@ private:
             for (int xx = band.getX(); xx < band.getRight(); ++xx)
             {
                 juce::uint8* p = line + xx * bmp.pixelStride;
-                const juce::uint8 nv = lut[p[0]];
-                p[0] = p[1] = p[2] = nv;
+                if (generatedStereo)
+                {
+                    // Colour composite: each channel carries an independent energy
+                    // in the same inverted convention (255 = no energy), so the LUT
+                    // applies per channel — preserves the red/blue stereo image.
+                    p[0] = lut[p[0]];
+                    p[1] = lut[p[1]];
+                    p[2] = lut[p[2]];
+                }
+                else
+                {
+                    const juce::uint8 nv = lut[p[0]];
+                    p[0] = p[1] = p[2] = nv;
+                }
             }
         }
     }
@@ -763,7 +806,8 @@ private:
             // stops playback and zeroes it. The frame count is unchanged by an EQ
             // tweak (only pixel darkness changes), so the head stays valid.
             const int savedHead = wasPlaying ? fs->getScorePlayHead() : 0;
-            fs->loadScoreFramesFromImage(generatedImage, spectroBand, genMinFreq, genMaxFreq);
+            fs->loadScoreFramesFromImage(generatedImage, spectroBand, genMinFreq, genMaxFreq,
+                                         generatedStereo);
             if (wasPlaying)
             {
                 fs->setScoreResumeHead(savedHead);   // resume where we were…
@@ -810,6 +854,14 @@ private:
         // it reads grey. We lift the typical floor toward white for the PREVIEW
         // ONLY — playback and export are untouched. The measured stats below make
         // the cause visible in the log.
+        //
+        // Stereo (colour) skips this greyscale lift — it writes Colour(v,v,v) and
+        // would desaturate the red/blue image. The colour band is already legible.
+        if (generatedStereo)
+        {
+            previewStats = "Stereo preview (left=red, right=blue)";
+        }
+        else
         {
             juce::Image::BitmapData bd(tmp, juce::Image::BitmapData::readWrite);
             juce::int64 sum = 0;
@@ -860,7 +912,8 @@ private:
                 auto dest = fc.getResult();
                 if (dest.getFullPathName().isEmpty()) return;
                 dest = dest.withFileExtension(ext);
-                const bool ok = scoregen::exportImage(self->generatedImage, dest, asPng);
+                const bool ok = scoregen::exportImage(self->generatedImage, dest, asPng,
+                                                      self->genDpi);
                 self->logLabel.setText(ok ? ("Exported: " + dest.getFileName())
                                           : "Export failed",
                                        juce::dontSendNotification);
@@ -1018,11 +1071,13 @@ private:
     juce::Label         speedLabel, playHint;
     int                 scrubHead { -1 }; // armed/displayed score head when stopped (-1 = none)
     bool                scrubbing { false };
+    bool                scrubAuditioning { false }; // true while a stopped-score scrub plays audio
     juce::Rectangle<float> previewImgArea;  // where the preview image is blitted (for scrubbing)
 
     // Format options (moved from SETUP) + image EQ + waveform region picker.
     juce::Label      pageLabel, dpiLabel;
     juce::ComboBox   pageCombo, dpiCombo;
+    juce::ToggleButton stereoToggle;          // generate L/R spectrograms (red=L, blue=R)
     ScoreEqComponent eqEditor { juce::Colour(kAccentARGB) };
     WaveformSelectorComponent waveform { juce::Colour(kAccentARGB) };
     juce::TextButton previewButton;          // audition the selected source region
@@ -1037,12 +1092,14 @@ private:
     juce::Rectangle<int> spectroBand;  // band region inside generatedImage (played part)
     double genMinFreq { 0.0 };         // freq bounds used at GENERATE (Hz)
     double genMaxFreq { 0.0 };
+    bool   generatedStereo { false };  // last GENERATE used stereo (colour) mode
     juce::String previewStats;         // band grey diagnostics (shown in log)
     juce::Image generatedImage;   // full resolution (export source, EQ baked in)
     juce::Image baseImage;        // raw render before EQ (EQ re-applied from this)
     juce::Image previewImage;     // downscaled for painting (band crop)
     bool   eqDirty { false };     // EQ changed → reapply on next idle tick
     double genDynRangeDB { 50.0 };// dynamic range at GENERATE (EQ darkness math)
+    double genDpi { 400.0 };      // printer DPI used at GENERATE → embedded on export
     double lastEqMinFreq { 0.0 }, lastEqMaxFreq { 0.0 };
     bool busy { false };
 

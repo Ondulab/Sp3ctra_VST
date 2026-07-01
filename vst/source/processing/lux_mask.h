@@ -24,6 +24,7 @@
 #define LUX_MASK_H
 
 #include <stdint.h>
+#include "chain_plan.h"   /* CHAIN_MAX_CHAINS — per-chain instance pool size */
 
 #ifdef __cplusplus
   #include <atomic>
@@ -220,6 +221,12 @@ void lux_mask_process_frame(
 
 /* ── Global instance (mirrors LuxPitch single-simulation model, M2) ────────── */
 extern LuxMaskState g_lux_mask_proc;
+
+/* ── Per-chain instance pool (M6 Phase 2) ──────────────────────────────────────
+ * Like LuxPitch: each chain that uses Mask owns an independent state. Slot 0 IS
+ * g_lux_mask_proc (legacy instance, also read by the UI). Slots 1.. are extras. */
+LuxMaskState *lux_mask_instance(int idx);   /* idx clamped to [0, CHAIN_MAX_CHAINS) */
+void          lux_mask_init_all(void);       /* init every pool instance */
 
 #ifdef __cplusplus
 }

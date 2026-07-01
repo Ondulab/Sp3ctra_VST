@@ -42,10 +42,48 @@ public:
         addAndMakeVisible(stopBtn);
 
         fadeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        fadeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 62, 16);
+        fadeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, kTextBoxW, kCtrlH);
         fadeSlider.setTextValueSuffix(" ms");
         fadeSlider.setNumDecimalPlacesToDisplay(0);
         addAndMakeVisible(fadeSlider);
+
+        // ── Acquisition speed (frame-advance brake) — GLOBAL source control ──
+        // "Vitesse d'acquisition": brakes how often the live CIS line advances
+        // the active frame (audio + visual).  Not per-chain — bound once to the
+        // global acqGate* params (sample-and-hold between gate ticks).
+        auto& apvts = processor.getAPVTS();
+
+        acqModeCombo.addItem("Off",            1);
+        acqModeCombo.addItem("Internal (LFO)", 2);
+        acqModeCombo.addItem("DAW Sync",       3);
+        addAndMakeVisible(acqModeCombo);
+        acqModeAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
+            apvts, "acqGateMode", acqModeCombo));
+        acqModeCombo.onChange = [this]{ updateAcqEnabled(); };
+
+        acqRateSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        acqRateSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, kTextBoxW, kCtrlH);
+        acqRateSlider.setTextValueSuffix(" ms");
+        addAndMakeVisible(acqRateSlider);
+        acqRateAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, "acqGateRateMs", acqRateSlider));
+        // The attachment's setRange() (interval 0.1) forces 1-decimal display;
+        // override AFTER attaching so the readout stays integer ms like Fade In.
+        acqRateSlider.setNumDecimalPlacesToDisplay(0);
+
+        for (auto* s : { "1/1", "1/2", "1/4", "1/8", "1/16", "1/32" })
+            acqDivCombo.addItem(s, acqDivCombo.getNumItems() + 1);
+        addAndMakeVisible(acqDivCombo);
+        acqDivAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
+            apvts, "acqGateSyncDiv", acqDivCombo));
+
+        for (auto* s : { "/32", "/16", "/8", "/4", "/2", "x1", "x2", "x4" })
+            acqMultDivCombo.addItem(s, acqMultDivCombo.getNumItems() + 1);
+        addAndMakeVisible(acqMultDivCombo);
+        acqMultDivAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
+            apvts, "acqGateMultDiv", acqMultDivCombo));
+
+        updateAcqEnabled();
 
         setChain(1);   // default; the editor re-sets this on block selection
         startTimer(200);
@@ -77,10 +115,30 @@ public:
         g.drawText(activeChain_ == 1 ? "CHAIN 1" : "CHAIN 2",
                    0, 4, w, 14, juce::Justification::centred);
 
-        // Fade In label (Synth-page style: kFontSettings, right-justified).
+        // All row labels share one right-justified column (Fade In + Acquisition)
+        // so every control lines up on the same left edge.
+        auto rowLabel = [&] (const char* t, int rowY)
+        {
+            g.drawText(t, formX(), rowY, labelColW() - 8, kCtrlH,
+                       juce::Justification::centredRight);
+        };
+
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
         g.setColour(juce::Colour(0xffd2d8e8));
-        g.drawText("Fade In", fadeX(), fadeY(), 50, 18, juce::Justification::centredRight);
+        rowLabel("Fade In", fadeRowY());
+
+        // ── Acquisition speed section header ────────────────────────────────────
+        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
+        g.setColour(juce::Colour(0xff8aa0c0));
+        g.drawText("ACQUISITION SPEED", formX(), acqHeaderY(), formW(), 14,
+                   juce::Justification::centredLeft);
+
+        // ── Acquisition row labels ──────────────────────────────────────────────
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+        g.setColour(juce::Colour(0xffd2d8e8));
+        const char* names[] = { "Mode", "Rate", "Div", "Mult/Div" };
+        for (int i = 0; i < 4; ++i)
+            rowLabel(names[i], acqRowY(i));
     }
 
     void resized() override
@@ -90,15 +148,20 @@ public:
         constexpr int gap   = Sp3ctraTheme::kGap;
 
         // Transport row — centred.
-        const int tY = 24;
         const int totalW = btnSz * 3 + gap * 2;
         const int startX = w / 2 - totalW / 2;
-        playBtn.setBounds(startX,                  tY, btnSz, btnSz);
-        holdBtn.setBounds(startX + btnSz + gap,    tY, btnSz, btnSz);
-        stopBtn.setBounds(startX + 2*(btnSz+gap),  tY, btnSz, btnSz);
+        playBtn.setBounds(startX,                  transportY(), btnSz, btnSz);
+        holdBtn.setBounds(startX + btnSz + gap,    transportY(), btnSz, btnSz);
+        stopBtn.setBounds(startX + 2*(btnSz+gap),  transportY(), btnSz, btnSz);
 
-        // Fade slider — under the transport, label to its left.
-        fadeSlider.setBounds(fadeX() + 56, fadeY(), stdNodeW() - 56, 18);
+        // Unified form grid — every control fills the same column [ctrlX, +ctrlW].
+        const int cx = ctrlX();
+        const int cw = ctrlW();
+        fadeSlider     .setBounds(cx, fadeRowY(), cw, kCtrlH);
+        acqModeCombo   .setBounds(cx, acqRowY(0), cw, kCtrlH);
+        acqRateSlider  .setBounds(cx, acqRowY(1), cw, kCtrlH);
+        acqDivCombo    .setBounds(cx, acqRowY(2), cw, kCtrlH);
+        acqMultDivCombo.setBounds(cx, acqRowY(3), cw, kCtrlH);
     }
 
 private:
@@ -108,6 +171,14 @@ private:
     IconTextButton playBtn, holdBtn, stopBtn;
     juce::Slider   fadeSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> fadeAttach;
+
+    // ── Acquisition speed (global frame-advance brake) ──────────────────────────
+    juce::ComboBox acqModeCombo, acqDivCombo, acqMultDivCombo;
+    juce::Slider   acqRateSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> acqModeAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> acqDivAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> acqMultDivAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   acqRateAttach;
 
     // ── Per-chain APVTS parameter ids ───────────────────────────────────────────
     const char* freezeParamId() const noexcept
@@ -125,13 +196,38 @@ private:
             param->setValueNotifyingHost(v);
     }
 
-    // ── Layout helpers ──────────────────────────────────────────────────────────
-    int stdNodeW() const { return juce::jmin(getWidth() * 2 / 5, 360); }
-    int fadeX()    const { return getWidth() / 2 - stdNodeW() / 2; }
-    int fadeY()    const
+    // ── Unified form geometry ────────────────────────────────────────────────
+    // One column grid shared by the Fade In row and the whole Acquisition group,
+    // so labels and controls always line up.  Wider than the old 2/5 node: the
+    // form spans the panel width (minus padding), capped so it stays readable.
+    static constexpr int kPad      = 18;  // outer horizontal padding
+    static constexpr int kFormMaxW = 460; // cap so the form doesn't stretch absurdly
+    static constexpr int kLabelColW= 92;  // right-justified label column
+    static constexpr int kColGap   = 12;  // gap between label column and control
+    static constexpr int kCtrlH    = 24;  // control height (taller → easier to use)
+    static constexpr int kTextBoxW = 68;  // slider value box width (Fade + Rate)
+    static constexpr int kRowPitch = 32;  // row-to-row spacing
+
+    int formW()    const { return juce::jmin(getWidth() - 2 * kPad, kFormMaxW); }
+    int formX()    const { return (getWidth() - formW()) / 2; }
+    int labelColW()const { return kLabelColW; }
+    int ctrlX()    const { return formX() + kLabelColW + kColGap; }
+    int ctrlW()    const { return formW() - kLabelColW - kColGap; }
+
+    int transportY() const { return 24; }
+    int fadeRowY()   const { return transportY() + Sp3ctraTheme::kIconBtnSize + 14; }
+    int acqHeaderY() const { return fadeRowY() + kRowPitch + 6; }   // section header line
+    int acqRowY(int i) const { return acqHeaderY() + 22 + i * kRowPitch; }
+
+    // Grey out controls that don't apply to the current gate mode.
+    void updateAcqEnabled()
     {
-        constexpr int btnSz = Sp3ctraTheme::kIconBtnSize;
-        return 24 + btnSz + 8;
+        int mode = 0;
+        if (auto* raw = processor.getAPVTS().getRawParameterValue("acqGateMode"))
+            mode = juce::roundToInt(raw->load());
+        acqRateSlider  .setEnabled(mode == 1);  // Internal (LFO) only
+        acqDivCombo    .setEnabled(mode == 2);  // DAW Sync only
+        acqMultDivCombo.setEnabled(mode != 0);  // Internal + DAW Sync
     }
 
     // ── Transport button state highlighting ───────────────────────────────────
@@ -162,6 +258,7 @@ private:
     void timerCallback() override
     {
         updateTransportButtons();
+        updateAcqEnabled();   // reflect mode changes from presets / automation
     }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SourcesTabComponent)

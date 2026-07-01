@@ -33,6 +33,9 @@ public:
     void paint(juce::Graphics&) override;
     void resized() override;
 
+    /** Bind this panel to sampler engine 0 (A) or 1 (B). */
+    void setSamplerIndex(int i) noexcept { samplerIndex_ = i; }
+
 private:
     // Timer — refreshes slot display at 10 Hz
     void timerCallback() override;
@@ -42,6 +45,7 @@ private:
     Sp3ctraAudioProcessor&              audioProcessor;
     juce::AudioProcessorValueTreeState& apvts;
     juce::Colour                        accent;
+    int                                 samplerIndex_ = 0;  // 0 = engine A, 1 = engine B
 
     // MIDI Channel
     juce::Label    midiChannelLabel;

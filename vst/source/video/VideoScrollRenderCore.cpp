@@ -1,0 +1,684 @@
+#include "VideoScrollRenderCore.h"
+#include "../PluginProcessor.h"   // Sp3ctraAudioProcessor, vsParam(), getAPVTS()
+
+// Per-instance capture ring API. video_scroll.h already wraps its declarations in
+// its own extern "C" guard, so a plain include is correct (see file header note).
+#include "../processing/video_scroll.h"
+
+#include <cstring>
+#include <cmath>
+#include <cstdio>   // [VS-DIAG] temporary flicker instrumentation
+
+//==============================================================================
+// Construction
+//==============================================================================
+VideoScrollRenderCore::VideoScrollRenderCore(Sp3ctraAudioProcessor& proc, int slot)
+    : processor_(proc), slot_(juce::jlimit(0, CHAIN_MAX_CHAINS - 1, slot))
+{
+    // Preallocate the per-tick capture window (one row per possible ring slot).
+    // Matches the original frameRing_ window: at most RING_SLOTS fresh frames are
+    // ever drained in a single tick (newest-wins clamp inside the ring API).
+    capR_.resize(VIDEO_SCROLL_RING_SLOTS);
+    capG_.resize(VIDEO_SCROLL_RING_SLOTS);
+    capB_.resize(VIDEO_SCROLL_RING_SLOTS);
+    capPx_.assign(VIDEO_SCROLL_RING_SLOTS, 0);
+
+    tmpR_.resize(VIDEO_SCROLL_MAX_PIXELS);
+    tmpG_.resize(VIDEO_SCROLL_MAX_PIXELS);
+    tmpB_.resize(VIDEO_SCROLL_MAX_PIXELS);
+
+    // Anchor the ring cursor + generation so a freshly-created engine doesn't
+    // replay stale frames or spuriously clear on its first tick.
+    if (auto* st = video_scroll_instance(slot_))
+    {
+        cursor_  = video_scroll_ring_writepos(st);
+        lastGen_ = video_scroll_generation(st);
+        genInit_ = true;
+    }
+}
+
+VideoScrollRenderCore::~VideoScrollRenderCore() = default;
+
+//==============================================================================
+void VideoScrollRenderCore::setSlot(int slot)
+{
+    const int s = juce::jlimit(0, CHAIN_MAX_CHAINS - 1, slot);
+    if (s == slot_) return;
+    slot_ = s;
+
+    // Re-anchor on the new ring and treat the switch as a discontinuity.
+    if (auto* st = video_scroll_instance(slot_))
+    {
+        cursor_  = video_scroll_ring_writepos(st);
+        lastGen_ = video_scroll_generation(st);
+        genInit_ = true;
+    }
+    clear();
+}
+
+//==============================================================================
+// APVTS slot-scoped raw param load (null-guarded). Mirrors the legacy globals
+// the original read, but scoped to this engine's slot.
+//==============================================================================
+float VideoScrollRenderCore::param(const char* suffix, float defaultValue) const
+{
+    if (auto* p = processor_.getAPVTS().getRawParameterValue(vsParam(slot_, suffix)))
+        return p->load();
+    return defaultValue;
+}
+
+//==============================================================================
+// Buffer allocation — mirrors VideoDisplayComponent::allocateScrollBuffer().
+//==============================================================================
+void VideoScrollRenderCore::allocateScrollBuffer(int w, int h)
+{
+    if (w <= 0 || h <= 0) return;
+    if (w != compW_ || h != compH_)
+    {
+        // [VS-DIAG] Log every history reallocation. If this spams while paused,
+        // the display size is oscillating → the waterfall is reset to black every
+        // frame (the flicker + poor-quality root cause).
+        std::fprintf(stderr, "[VS-DIAG] REALLOC slot=%d  %dx%d -> %dx%d\n",
+                     slot_, compW_, compH_, w, h);
+        std::fflush(stderr);
+
+        compW_ = w;
+        compH_ = h;
+        bufW_  = w;
+        // 4× headroom: birth-line panning + extra history for the Compression
+        // time-squish to actually have older content to pack into the far field.
+        bufH_  = juce::jmax(2, h * 4);
+        // SoftwareImageType → guaranteed packed RGB (pixelStride 3) so the raw
+        // BitmapData pointer maths in renderInto()/buildLineImage is correct
+        // (the native macOS backend would store RGB as 4-byte ARGB).
+        historyA_ = juce::Image(juce::Image::RGB, bufW_, bufH_, true, juce::SoftwareImageType());
+        historyB_ = juce::Image(juce::Image::RGB, bufW_, bufH_, true, juce::SoftwareImageType());
+        historyA_.clear(historyA_.getBounds(), juce::Colours::black);
+        historyB_.clear(historyB_.getBounds(), juce::Colours::black);
+        curBuf_            = 0;
+        scrollAccumulator_ = 0.f;
+        buffersInit_       = true;
+        warpDirty_         = true;   // new buffers → force a warp rebuild.
+    }
+}
+
+void VideoScrollRenderCore::setDisplaySize(int w, int h)
+{
+    allocateScrollBuffer(w, h);
+}
+
+//==============================================================================
+void VideoScrollRenderCore::clear()
+{
+    if (historyA_.isValid())
+        historyA_.clear(historyA_.getBounds(), juce::Colours::black);
+    if (historyB_.isValid())
+        historyB_.clear(historyB_.getBounds(), juce::Colours::black);
+    curBuf_            = 0;
+    scrollAccumulator_ = 0.f;
+    warpDirty_         = true;   // history blanked → force a warp rebuild.
+}
+
+//==============================================================================
+// drainRing — replaces the original CaptureThread + the frameRing_ window that
+// scrollStep() snapshotted. Pulls up to RING_SLOTS fresh scanlines from the
+// per-instance ring into capR_/capG_/capB_ (oldest first → newest last, matching
+// the original base..wr ordering). Skips frames where ring_get returns 0 (the
+// slot was overwritten mid-copy — indeterminate, must not be rendered). Advances
+// cursor_ to writepos so the ring never backs up. Returns captured count.
+//==============================================================================
+int VideoScrollRenderCore::drainRing(int* outPixelCount)
+{
+    if (outPixelCount) *outPixelCount = 0;
+
+    auto* st = video_scroll_instance(slot_);
+    if (!st) return 0;
+
+    // Generation change → producer signalled a discontinuity. Blank history and
+    // re-anchor the cursor (mirror the original clear-pulse handling in
+    // timerCallback(), but driven by the ring's own generation counter).
+    const uint32_t gen = video_scroll_generation(st);
+    if (!genInit_) { lastGen_ = gen; genInit_ = true; }
+    else if (gen != lastGen_)
+    {
+        lastGen_ = gen;
+        clear();
+        cursor_ = video_scroll_ring_writepos(st);
+        return 0;
+    }
+
+    // Snapshot the write position ONCE (like the original read ringWriteIdx_
+    // once per scrollStep), so `available`, `base` and the final cursor advance
+    // all use a single coherent `wr`. Deriving available from this same `wr`
+    // avoids a skew if the producer advances between two separate acquire loads.
+    const uint32_t wr = video_scroll_ring_writepos(st);
+    uint32_t available = wr - cursor_;          // wrap-safe unsigned subtraction
+    if (available == 0)
+        return 0;
+    if (available > (uint32_t) VIDEO_SCROLL_RING_SLOTS)
+        available = (uint32_t) VIDEO_SCROLL_RING_SLOTS;   // overrun clamp: newest window
+
+    const uint32_t base = wr - available;   // absolute index of the oldest in-window frame
+
+    int captured = 0;
+    for (uint32_t k = 0; k < available; ++k)
+    {
+        int px = 0;
+        const int ok = video_scroll_ring_get(st, base + k,
+                                              tmpR_.data(), tmpG_.data(), tmpB_.data(), &px);
+        if (!ok || px <= 0)
+            continue;   // 0 return → indeterminate slot; skip it.
+
+        if (px > VIDEO_SCROLL_MAX_PIXELS) px = VIDEO_SCROLL_MAX_PIXELS;
+
+        auto& dr = capR_[captured];
+        auto& dg = capG_[captured];
+        auto& db = capB_[captured];
+        dr.assign(tmpR_.begin(), tmpR_.begin() + px);
+        dg.assign(tmpG_.begin(), tmpG_.begin() + px);
+        db.assign(tmpB_.begin(), tmpB_.begin() + px);
+        capPx_[captured] = px;
+        ++captured;
+
+        if (outPixelCount) *outPixelCount = px;   // newest valid pixel count wins
+    }
+
+    // Advance to writepos regardless of skips — capture never lags the display.
+    cursor_ = wr;
+    return captured;
+}
+
+//==============================================================================
+// tick — drains the ring and advances the scroll by one step (the original
+// timerCallback() body, minus the repaint() which the mixer owns).
+//==============================================================================
+void VideoScrollRenderCore::tick()
+{
+    if (!buffersInit_ || bufW_ <= 0 || bufH_ <= 0)
+        return;
+
+    scrollStep();
+}
+
+//==============================================================================
+// scrollStep — one ping-pong scroll generation (legacy birth-line model).
+// Verbatim port of VideoDisplayComponent::scrollStep(), with the ring snapshot
+// replaced by drainRing(). The capture window is now capR_/capG_/capB_ rather
+// than frameRing_; everything else (speed curve, birth line, geometry, the
+// ping-pong blit) is unchanged.
+//==============================================================================
+void VideoScrollRenderCore::scrollStep()
+{
+    // ── Transport: paused → freeze in place ──────────────────────────────────
+    // Keep the current image untouched and perform no scroll/stamp. The capture
+    // ring is still drained (cursor re-anchored to writepos) so it never backs up
+    // while frozen; resuming picks up the live stream rather than replaying stale
+    // frames — exactly the original pause behaviour.
+    if (param("paused", 0.f) >= 0.5f)
+    {
+        if (auto* st = video_scroll_instance(slot_))
+            cursor_ = video_scroll_ring_writepos(st);
+        scrollAccumulator_ = 0.f;
+        // [VS-DIAG] Confirm the pause branch is actually taken (frozen frame).
+        static int vsp = 0;
+        if ((vsp++ % 60) == 0)
+        { std::fprintf(stderr, "[VS-DIAG] scrollStep PAUSED slot=%d curBuf=%d\n", slot_, curBuf_); std::fflush(stderr); }
+        return;
+    }
+
+    // The history buffer is kept as a CLEAN linear waterfall (one buffer row per
+    // unit of CIS time). The artistic time-squish (Compression) and aging (Fade)
+    // are NOT baked in here — they are applied at display time in renderInto() as
+    // functions of the distance from the birth line.
+
+    // ── Speed → signed pixels this tick (absolute, exponential) ──────────────
+    //   px = sign(s) * (2^(3*|s|) - 1)  → s=0 frozen, s=±1 → ±7 px/tick.
+    const float speedParam = juce::jlimit(-1.f, 1.f, param("speed", 0.f));
+    const float mag    = std::pow(2.0f, 3.0f * std::abs(speedParam)) - 1.0f;
+    const float pxRate = (speedParam < 0.f) ? -mag : mag;
+    const bool  reverse = (pxRate < 0.f);
+
+    scrollAccumulator_ += std::abs(pxRate);
+    const int scroll = (int) scrollAccumulator_;
+    scrollAccumulator_ -= (float) scroll;
+
+    // Fresh CIS frames captured since the previous tick (drained every tick so
+    // capture never lags behind the display).
+    int newestPx = 0;
+    const int captured = drainRing(&newestPx);
+
+    // ── Birth-line position ──────────────────────────────────────────────────
+    const float posParam = juce::jlimit(-1.f, 1.f, param("linePos", 1.f));
+    const float posNorm  = (posParam + 1.f) * 0.5f;
+    const int   birthY   = juce::jlimit(0, bufH_, (int) (posNorm * (float) bufH_));
+
+    // ── Line geometry ────────────────────────────────────────────────────────
+    //   coreH : data rows that exactly fill the motion gap (2*scroll px) at a
+    //           fixed 1-row-per-time-slice scale (keeps the time-scale constant).
+    //   bandH : total stamped height. Thickness DUPLICATES the birth line onto
+    //           the rows above/below it (see buildLineImage): a clean fat bar.
+    const float thickParam  = juce::jlimit(0.f, 1.f, param("thickness", 0.f));
+    const int   thicknessPx = juce::jmax(1, (int) (1.0f + thickParam * (float) (compH_ - 1)));
+    const int   coreH = juce::jmax(1, 2 * scroll);
+    const int   bandH = juce::jmax(coreH, thicknessPx);
+
+    // Build the fresh content (newest `captured` frames, box-averaged on BOTH the
+    // CIS axis and the temporal axis).
+    juce::Image lineImg;
+    const bool haveLine = buildLineImage(lineImg, coreH, bandH, captured, newestPx);
+
+    // [VS-DIAG] Active-path summary: is it scrolling or re-stamping every frame?
+    {
+        static int vsa = 0;
+        if ((vsa++ % 60) == 0)
+        { std::fprintf(stderr,
+            "[VS-DIAG] scrollStep ACTIVE slot=%d speed=%.2f scroll=%d captured=%d haveLine=%d curBuf=%d\n",
+            slot_, (double) param("speed", 0.f), scroll, captured, haveLine ? 1 : 0, curBuf_);
+          std::fflush(stderr); }
+    }
+
+    // Nothing changed and not scrolling — keep last frame (renderInto() still
+    // re-applies the display effects each refresh).
+    if (scroll == 0 && !haveLine)
+        return;
+
+    juce::Image& src = (curBuf_ != 0) ? historyB_ : historyA_;
+    juce::Image& dst = (curBuf_ != 0) ? historyA_ : historyB_;
+
+    {
+        juce::Graphics g(dst);
+        g.fillAll(juce::Colours::black);
+
+        // Forward → zones move away from birth line; reverse → toward it.
+        const int s = reverse ? -scroll : scroll;
+
+        // Upper zone [0, birthY): shifts by -s (forward = up).
+        if (birthY > 0)
+            g.drawImage(src, 0, -s, bufW_, birthY,
+                             0,  0, bufW_, birthY);
+        // Lower zone [birthY, bufH_): shifts by +s (forward = down).
+        const int lowerH = bufH_ - birthY;
+        if (lowerH > 0)
+            g.drawImage(src, 0, birthY + s, bufW_, lowerH,
+                             0, birthY,     bufW_, lowerH);
+
+        // Stamp the fresh strip at the birth line (already bandH px tall).
+        if (haveLine && lineImg.isValid())
+        {
+            const int hPx  = lineImg.getHeight();
+            const int yPos = (int) ((float) birthY - (float) hPx * 0.5f);
+            g.drawImage(lineImg, 0, yPos, bufW_, hPx,
+                                 0, 0, lineImg.getWidth(), hPx);
+        }
+    }
+
+    curBuf_ = 1 - curBuf_;
+    warpDirty_ = true;   // history advanced → buildWarp() must rebuild this tick.
+}
+
+//==============================================================================
+// buildLineImage — average the `captured` most-recent CIS frames into a single
+// birth-line scanline (width bufW_) duplicated across the band, applying
+// invert / colour-mode. Verbatim port; the source is now capR_/capG_/capB_
+// (drained this tick) instead of the frameRing_ window.
+//   `captured`     = number of valid rows in capR_/capG_/capB_ this tick.
+//   `captureCount` = newest valid pixel count (the CIS width to box-average).
+//==============================================================================
+bool VideoScrollRenderCore::buildLineImage(juce::Image& out, int coreH, int bandH,
+                                           int captured, int captureCount)
+{
+    if (captured <= 0 || bufW_ <= 0) return false;
+    coreH = juce::jmax(1, coreH);
+    bandH = juce::jmax(coreH, bandH);
+
+    const bool invert    = param("invert",    0.f) > 0.5f;
+    const bool colorMode = param("colorMode", 0.f) > 0.5f;
+
+    // The reference width is the newest captured line's pixel count.
+    const int count = captureCount;
+    if (count <= 0) return false;
+
+    out = juce::Image(juce::Image::RGB, bufW_, bandH, false, juce::SoftwareImageType());
+    juce::Image::BitmapData bmp(out, juce::Image::BitmapData::writeOnly);
+    const int dps = bmp.pixelStride;
+
+    // ── Horizontal box-average map ───────────────────────────────────────────
+    // Output column x covers the CIS range [col0[x], col0[x+1]). Averaging the
+    // whole range removes the moiré / hatching when the CIS line is much wider
+    // than the display. Per-frame prefix sums make each column an O(1) lookup.
+    std::vector<int> col0(bufW_ + 1);
+    for (int x = 0; x <= bufW_; ++x)
+        col0[x] = juce::jlimit(0, count, (int) ((long long) x * count / bufW_));
+
+    std::vector<int>   pfR(count + 1), pfG(count + 1), pfB(count + 1);
+    std::vector<float> accR(bufW_, 0.f), accG(bufW_, 0.f), accB(bufW_, 0.f);
+
+    // The birth line is ONE scanline (the `captured` CIS frames this tick, box-
+    // averaged on both axes), duplicated across the whole band. No temporal
+    // gradient inside the stamp — every row identical → a clean fat band.
+    int used = 0;
+    for (int f = 0; f < captured; ++f)
+    {
+        if (capPx_[f] != count) continue;   // skip size mismatch
+        const uint8_t* fr = capR_[f].data();
+        const uint8_t* fg = capG_[f].data();
+        const uint8_t* fb = capB_[f].data();
+        ++used;
+        if (colorMode)
+        {
+            pfR[0] = pfG[0] = pfB[0] = 0;
+            for (int i = 0; i < count; ++i)
+            {
+                pfR[i + 1] = pfR[i] + fr[i];
+                pfG[i + 1] = pfG[i] + fg[i];
+                pfB[i + 1] = pfB[i] + fb[i];
+            }
+            for (int x = 0; x < bufW_; ++x)
+            {
+                int a = col0[x], b = col0[x + 1];
+                if (b <= a) b = juce::jmin(count, a + 1);
+                const float inv = 1.f / (float) (b - a);
+                accR[x] += (float) (pfR[b] - pfR[a]) * inv;
+                accG[x] += (float) (pfG[b] - pfG[a]) * inv;
+                accB[x] += (float) (pfB[b] - pfB[a]) * inv;
+            }
+        }
+        else
+        {
+            // Derive luma here (the ring stores r/g/b only; the original stored a
+            // precomputed gray channel — same 0.299/0.587/0.114 weights via the
+            // 77/150/29 fixed-point form used in captureCurrentFrame()).
+            pfR[0] = 0;
+            for (int i = 0; i < count; ++i)
+            {
+                const int gy = ((int) fr[i] * 77 + (int) fg[i] * 150 + (int) fb[i] * 29) >> 8;
+                pfR[i + 1] = pfR[i] + gy;
+            }
+            for (int x = 0; x < bufW_; ++x)
+            {
+                int a = col0[x], b = col0[x + 1];
+                if (b <= a) b = juce::jmin(count, a + 1);
+                const float gy = (float) (pfR[b] - pfR[a]) / (float) (b - a);
+                accR[x] += gy; accG[x] += gy; accB[x] += gy;
+            }
+        }
+    }
+    if (used == 0) used = 1;  // leave the line black rather than divide by 0
+    const float invUsed = 1.f / (float) used;
+
+    // Compose the birth line into the first row, then duplicate it everywhere.
+    auto* row0 = bmp.getLinePointer(0);
+    for (int x = 0; x < bufW_; ++x)
+    {
+        int r  = (int) (accR[x] * invUsed + 0.5f);
+        int gv = (int) (accG[x] * invUsed + 0.5f);
+        int b  = (int) (accB[x] * invUsed + 0.5f);
+        if (invert) { r = 255 - r; gv = 255 - gv; b = 255 - b; }
+        auto* dp = reinterpret_cast<juce::PixelRGB*>(row0 + x * dps);
+        dp->setARGB(255,
+                    (juce::uint8) juce::jlimit(0, 255, r),
+                    (juce::uint8) juce::jlimit(0, 255, gv),
+                    (juce::uint8) juce::jlimit(0, 255, b));
+    }
+
+    const size_t rowBytes = (size_t) bufW_ * (size_t) dps;
+    for (int r = 1; r < bandH; ++r)
+        std::memcpy(bmp.getLinePointer(r), row0, rowBytes);
+
+    return true;
+}
+
+//==============================================================================
+// renderInto — the original paint(), drawing into `dest` instead of a component
+// Graphics. Reproduces the warp/compression + fade + zoom + rotation(mode)
+// transform verbatim. `dest` is the full target area (its width/height drive the
+// final scale/rotate, replacing getWidth()/getHeight()).
+//==============================================================================
+void VideoScrollRenderCore::renderInto(juce::Image& dest)
+{
+    if (!dest.isValid()) return;
+    juce::Graphics g(dest);
+    renderInto(g, dest.getWidth(), dest.getHeight());
+}
+
+// Convenience wrapper — builds then draws. The mixer's hot path calls the two
+// halves separately (buildWarp once per tick, drawWarp once per destination) so
+// the heavy warp is not recomputed for every view.
+void VideoScrollRenderCore::renderInto(juce::Graphics& g, int destW, int destH)
+{
+    buildWarp();
+    drawWarp(g, destW, destH);
+}
+
+//==============================================================================
+// buildWarp — the expensive per-pixel pass: warp (compression time-squish) + age
+// (fade) the clean linear history into warpBuf_. Independent of the destination
+// size, so it is computed ONCE per tick and shared by every view (column + window).
+//==============================================================================
+void VideoScrollRenderCore::buildWarp()
+{
+    // No history yet (size 0 / slot has no frames) → nothing to warp.
+    if (!buffersInit_ || bufW_ <= 0 || bufH_ <= 0 || compH_ <= 0) { warpReady_ = false; return; }
+
+    // The freshly-drawn buffer is the one scrollStep() rendered into before the
+    // swap (see curBuf_ bookkeeping in scrollStep()).
+    const juce::Image& shown = (curBuf_ != 0) ? historyB_ : historyA_;
+    if (!shown.isValid()) { warpReady_ = false; return; }
+
+    // ── Cache: reuse the previous warpBuf_ when nothing that shapes it changed ──
+    // (frozen history + identical linePos/compress/fade + same render size). This
+    // is what makes a paused output free. zoom/mode are applied later in drawWarp,
+    // so they are deliberately NOT part of this signature.
+    const float pLinePos  = param("linePos",  1.f);
+    const float pCompress = param("compress", 1.f);
+    const float pFade     = param("fade",     0.f);
+    if (warpReady_ && !warpDirty_
+        && pLinePos == wsLinePos_ && pCompress == wsCompress_ && pFade == wsFade_
+        && bufW_ == wsBufW_ && compH_ == wsCompH_)
+        return;
+    wsLinePos_ = pLinePos; wsCompress_ = pCompress; wsFade_ = pFade;
+    wsBufW_ = bufW_; wsCompH_ = compH_; warpDirty_ = false;
+
+    // ── Birth line (the "source" the effects radiate from) ───────────────────
+    const float posParam = juce::jlimit(-1.f, 1.f, param("linePos", 1.f));
+    const float posNorm  = (posParam + 1.f) * 0.5f;
+    const int   birthBuf    = juce::jlimit(0, bufH_, (int) (posNorm * (float) bufH_));
+    const float birthScreen = posNorm * (float) compH_;
+    const float upSpan   = juce::jmax(1.0f, birthScreen);                 // px above
+    const float downSpan = juce::jmax(1.0f, (float) compH_ - birthScreen);// px below
+
+    // ── Distance-driven display effects (applied on a clean linear buffer) ───
+    //   Compression → non-linear deceleration / time-squish.
+    //   Fade        → progressive aging (dim + desaturate + horizontal blur).
+    // The legacy "videoScrollMaxDuration" (1..64) is now the per-instance
+    // "compress" param (same range/normalisation).
+    const float comp01 = juce::jlimit(0.f, 1.f, (param("compress", 1.f) - 1.0f) / 63.0f);
+    const float fade01 = juce::jlimit(0.f, 1.f, param("fade", 0.f));
+
+    if (warpBuf_.getWidth() != bufW_ || warpBuf_.getHeight() != compH_)
+        warpBuf_ = juce::Image(juce::Image::RGB, juce::jmax(1, bufW_),
+                               juce::jmax(1, compH_), false, juce::SoftwareImageType());
+
+    constexpr float kCompMax = 2.5f;   // squish strength (gentle, non-linear)
+    constexpr float kBlurMax = 8.0f;   // far-edge fade blur radius (px) at fade=1
+    const float cComp = comp01 * kCompMax;
+
+    // Aging factor a∈[0,1]: 0 at the source, 1 at the nearest viewport edge.
+    auto agingAt = [&](float y) -> float
+    {
+        const float d = y - birthScreen;
+        return juce::jmin(1.0f, std::abs(d) / ((d < 0.f) ? upSpan : downSpan));
+    };
+
+    // Screen→buffer edge map: signed offset that grows quadratically with the
+    // screen distance from the source (G'(0)=1 → full speed at the line).
+    auto bufEdge = [&](int y) -> int
+    {
+        const float d  = (float) y - birthScreen;
+        const float ad = std::abs(d);
+        const float sp = (d < 0.f) ? upSpan : downSpan;
+        const float gg = ad + cComp * ad * ad / sp;     // buffer px from birth
+        return birthBuf + (int) std::lround(d < 0.f ? -gg : gg);
+    };
+
+    // Precompute the compH_+1 buffer edges (one linear walk, not per pixel).
+    if ((int) warpEdge_.size() != compH_ + 1) warpEdge_.resize(compH_ + 1);
+    for (int y = 0; y <= compH_; ++y)
+        warpEdge_[y] = bufEdge(y);
+
+    if ((int) accR_.size() != bufW_)
+    { accR_.assign(bufW_, 0); accG_.assign(bufW_, 0); accB_.assign(bufW_, 0); }
+
+    {
+        const juce::Image::BitmapData srcBmp(shown,    juce::Image::BitmapData::readOnly);
+        juce::Image::BitmapData       dstBmp(warpBuf_, juce::Image::BitmapData::writeOnly);
+        const int dps = dstBmp.pixelStride;
+        const int sps = srcBmp.pixelStride;   // 3 (packed) or 4 (native ARGB) — must respect
+
+        for (int y = 0; y < compH_; ++y)
+        {
+            int lo = warpEdge_[y];
+            int hi = warpEdge_[y + 1];
+            if (hi < lo) { const int t = lo; lo = hi; hi = t; }
+            lo = juce::jlimit(0, bufH_, lo);
+            hi = juce::jlimit(0, bufH_, hi);
+            if (hi <= lo) hi = juce::jmin(bufH_, lo + 1);
+            const int cnt = juce::jmax(1, hi - lo);
+
+            // Box-average every buffer row this screen row covers (proper
+            // anti-aliased downsample — contiguous spans, each row read once).
+            int* aR = accR_.data();
+            int* aG = accG_.data();
+            int* aB = accB_.data();
+            for (int by = lo; by < hi; ++by)
+            {
+                const uint8_t* srcLine = srcBmp.getLinePointer(by);
+                if (by == lo)
+                    for (int x = 0; x < bufW_; ++x)
+                    {
+                        const auto* p = reinterpret_cast<const juce::PixelRGB*>(srcLine + x * sps);
+                        aR[x] = p->getRed(); aG[x] = p->getGreen(); aB[x] = p->getBlue();
+                    }
+                else
+                    for (int x = 0; x < bufW_; ++x)
+                    {
+                        const auto* p = reinterpret_cast<const juce::PixelRGB*>(srcLine + x * sps);
+                        aR[x] += p->getRed(); aG[x] += p->getGreen(); aB[x] += p->getBlue();
+                    }
+            }
+
+            const float a   = agingAt((float) y + 0.5f);
+            const float dim = 1.0f - fade01 * a;
+            const float sat = fade01 * a;
+            const float k   = dim / (float) cnt;   // fold averaging + dim
+
+            auto* dstLine = dstBmp.getLinePointer(y);
+            if (sat <= 0.f)
+            {
+                for (int x = 0; x < bufW_; ++x)
+                {
+                    auto* dp = reinterpret_cast<juce::PixelRGB*>(dstLine + x * dps);
+                    dp->setARGB(255,
+                        (juce::uint8) juce::jlimit(0, 255, (int) ((float) aR[x] * k + 0.5f)),
+                        (juce::uint8) juce::jlimit(0, 255, (int) ((float) aG[x] * k + 0.5f)),
+                        (juce::uint8) juce::jlimit(0, 255, (int) ((float) aB[x] * k + 0.5f)));
+                }
+            }
+            else
+            {
+                const float invCnt = 1.0f / (float) cnt;
+                for (int x = 0; x < bufW_; ++x)
+                {
+                    float r  = (float) aR[x] * invCnt;
+                    float gv = (float) aG[x] * invCnt;
+                    float bl = (float) aB[x] * invCnt;
+                    const float lum = 0.299f * r + 0.587f * gv + 0.114f * bl;
+                    r  = (r  + (lum - r ) * sat) * dim;
+                    gv = (gv + (lum - gv) * sat) * dim;
+                    bl = (bl + (lum - bl) * sat) * dim;
+                    auto* dp = reinterpret_cast<juce::PixelRGB*>(dstLine + x * dps);
+                    dp->setARGB(255,
+                        (juce::uint8) juce::jlimit(0, 255, (int) (r  + 0.5f)),
+                        (juce::uint8) juce::jlimit(0, 255, (int) (gv + 0.5f)),
+                        (juce::uint8) juce::jlimit(0, 255, (int) (bl + 0.5f)));
+                }
+            }
+        }
+    }
+
+    // ── Horizontal fade blur: per-row box blur whose radius grows with the
+    //    distance from the source. Running-sum prefix → O(width)/row. ─────────
+    if (fade01 > 0.f)
+    {
+        juce::Image::BitmapData bmp(warpBuf_, juce::Image::BitmapData::readWrite);
+        const int ps = bmp.pixelStride;
+        if ((int) psR_.size() != bufW_ + 1) { psR_.resize(bufW_ + 1); psG_.resize(bufW_ + 1); psB_.resize(bufW_ + 1); }
+
+        for (int y = 0; y < compH_; ++y)
+        {
+            const int hr = (int) std::lround(fade01 * agingAt((float) y + 0.5f) * kBlurMax);
+            if (hr <= 0) continue;
+
+            auto* line = bmp.getLinePointer(y);
+            psR_[0] = psG_[0] = psB_[0] = 0;
+            for (int x = 0; x < bufW_; ++x)
+            {
+                const auto* p = reinterpret_cast<const juce::PixelRGB*>(line + x * ps);
+                psR_[x + 1] = psR_[x] + p->getRed();
+                psG_[x + 1] = psG_[x] + p->getGreen();
+                psB_[x + 1] = psB_[x] + p->getBlue();
+            }
+            for (int x = 0; x < bufW_; ++x)
+            {
+                const int x0 = juce::jmax(0, x - hr);
+                const int x1 = juce::jmin(bufW_, x + hr + 1);   // exclusive
+                const int cnt = x1 - x0;
+                auto* dp = reinterpret_cast<juce::PixelRGB*>(line + x * ps);
+                dp->setARGB(255,
+                            (juce::uint8) ((psR_[x1] - psR_[x0]) / cnt),
+                            (juce::uint8) ((psG_[x1] - psG_[x0]) / cnt),
+                            (juce::uint8) ((psB_[x1] - psB_[x0]) / cnt));
+            }
+        }
+    }
+
+    warpReady_ = true;   // warpBuf_ now holds the current warped/aged frame.
+}
+
+//==============================================================================
+// drawWarp — the cheap per-destination pass: zoom / orientation / scale the
+// prebuilt warpBuf_ into `g`. Called once per view; does NO per-pixel warp work.
+//==============================================================================
+void VideoScrollRenderCore::drawWarp(juce::Graphics& g, int destW, int destH)
+{
+    g.fillAll(juce::Colours::black);
+    if (!warpReady_ || !warpBuf_.isValid() || bufW_ <= 0 || compH_ <= 0)
+        return;
+
+    // ── Zoom + orientation rotation (applied to the warped/aged image) ───────
+    //   Deg0 (0°) → vertical, Deg90/270 → horizontal, Deg180 → flipped vertical.
+    const float zoom = juce::jlimit(0.5f, 4.0f, param("zoom", 1.f));
+    const int modeVal = (int) param("mode", 0.f);
+    const float angle = static_cast<float>(juce::jlimit(0, 3, modeVal))
+                        * juce::MathConstants<float>::halfPi;
+
+    // The component dimensions are now the destination dimensions.
+    const float cw = (float) destW;
+    const float ch = (float) destH;
+    const float cx = cw * 0.5f;
+    const float cy = ch * 0.5f;
+
+    juce::AffineTransform t =
+        juce::AffineTransform::scale(cw / (float) bufW_, ch / (float) compH_)
+            .scaled(zoom, zoom, cx, cy);
+    if (modeVal != 0)
+        t = t.rotated(angle, cx, cy);
+
+    // Medium-quality resampling: the warp pass already did a proper box-average
+    // downsample, so the final blit is a mild rescale — medium is visually
+    // indistinguishable from high here but far cheaper than a high-quality
+    // resample of a multi-megapixel image every frame (the message-thread cost
+    // that was collapsing the frame-rate on a large/fullscreen window).
+    g.setImageResamplingQuality(juce::Graphics::mediumResamplingQuality);
+    g.drawImageTransformed(warpBuf_, t);
+}

@@ -8,8 +8,10 @@ static void cycleStep(FrameSequencer* seq, int stepIdx, int delta)
     if (!seq) return;
     if (stepIdx >= seq->getNumSteps()) return;
 
-    constexpr int kN         = LuxSamplerConstants::NUM_SLOTS; // 12
-    constexpr int kCycleSize = kN + 2; // 14: empty + 12 banks + LIVE
+    // All slots across every wired sampler engine: A1..A12, B1..B12, …
+    const int nSamplers  = juce::jmax(1, seq->getNumSamplers());
+    const int kN         = nSamplers * LuxSamplerConstants::NUM_SLOTS;
+    const int kCycleSize = kN + 2; // empty + N banks + LIVE
 
     const int cur = seq->getStep(stepIdx);
 
@@ -60,7 +62,6 @@ void SequencerComponent::updateButton(int i)
     if (i >= kDisplaySteps) return; // only first 16 are visible
 
     auto* seq = processor.getFrameSequencer();
-    auto* fs  = processor.getLuxSampler();
     if (!seq) return;
 
     const int  nSteps    = seq->getNumSteps();
@@ -101,10 +102,14 @@ void SequencerComponent::updateButton(int i)
     else
     {
         // Normal bank: slightly brightened when current (the thumbnail
-        // provides the main visual identity; the number is just a tag)
+        // provides the main visual identity; the tag is just an A1..B12 label).
         bg    = isCurrent ? juce::Colour(0xff1a6a1a) : juce::Colour(0xff1e3028);
         txt   = isCurrent ? juce::Colours::white     : juce::Colour(0xff66cc88);
-        label = juce::String(bank + 1);
+        const int samplerIdx = FrameSequencer::decodeSampler(bank); // 0=A, 1=B, …
+        const int slot       = FrameSequencer::decodeSlot(bank);    // 0..11
+        label = juce::String::charToString(
+                    static_cast<juce::juce_wchar>('A' + samplerIdx))
+                + juce::String(slot + 1);
     }
 
     if (!seqActive) { bg = bg.withAlpha(0.4f); txt = txt.withAlpha(0.4f); }
@@ -113,10 +118,12 @@ void SequencerComponent::updateButton(int i)
     stepBtns[i].setColour(juce::TextButton::buttonColourId,  bg);
     stepBtns[i].setColour(juce::TextButton::textColourOffId, txt);
 
-    // Hand off the bank index and LuxSampler pointer so paintButton
-    // can render the spectral thumbnail without any extra bookkeeping.
-    stepBtns[i].bankSlot     = bank; // >= 0 for normal banks; STEP_EMPTY / STEP_LIVE otherwise
-    stepBtns[i].luxSampler = fs;
+    // Hand off the DECODED slot + its resolved engine so paintButton can render
+    // the spectral thumbnail. Sentinels keep a negative bankSlot (no thumbnail).
+    stepBtns[i].bankSlot   = FrameSequencer::decodeSlot(bank);
+    stepBtns[i].luxSampler = (bank >= 0)
+        ? seq->getSampler(FrameSequencer::decodeSampler(bank))
+        : nullptr;
 }
 
 // =============================================================================

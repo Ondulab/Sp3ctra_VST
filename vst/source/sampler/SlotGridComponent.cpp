@@ -39,7 +39,7 @@ juce::Rectangle<int> SlotGridComponent::cellBounds(int i) const noexcept
 
 void SlotGridComponent::paint(juce::Graphics& g)
 {
-    auto* fs  = processor.getLuxSampler();
+    auto* fs  = processor.getSampler(samplerIndex_);
     auto* seq = processor.getFrameSequencer();
 
     // Determine which bank is currently sequencer-active
@@ -138,7 +138,7 @@ void SlotGridComponent::mouseDown(const juce::MouseEvent& e)
     if (e.mods.isRightButtonDown())
     {
         // ── Right-click context menu: Copy / Paste bank ───────────────────
-        auto* fs = processor.getLuxSampler();
+        auto* fs = processor.getSampler(samplerIndex_);
         const bool hasContent    = fs != nullptr && fs->slotHasContent(idx);
         const bool clipboardFull = clipboardSlot >= 0
                                    && fs != nullptr
@@ -161,7 +161,7 @@ void SlotGridComponent::mouseDown(const juce::MouseEvent& e)
                                    getScreenX(), getScreenY()).toFloat().toNearestInt()),
             [this, idx](int result)
             {
-                auto* fs2 = processor.getLuxSampler();
+                auto* fs2 = processor.getSampler(samplerIndex_);
                 if (fs2 == nullptr) return;
 
                 switch (result)

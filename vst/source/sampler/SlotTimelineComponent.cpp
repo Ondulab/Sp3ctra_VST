@@ -24,7 +24,7 @@ void SlotTimelineComponent::rebuildThumbnail()
 {
     thumbnailDirty = false;
     numSamples     = 0;
-    auto* fs = processor.getLuxSampler();
+    auto* fs = processor.getSampler(samplerIndex_);
     if (!fs || !fs->slotHasContent(selectedSlot)) return;
     const int w = getWidth();
     if (w <= 0) return;
@@ -48,7 +48,7 @@ void SlotTimelineComponent::paint(juce::Graphics& g)
     g.setColour(juce::Colour(0xff0a0a14));
     g.fillRoundedRectangle(getLocalBounds().toFloat(), 3.0f);
 
-    auto* fs = processor.getLuxSampler();
+    auto* fs = processor.getSampler(samplerIndex_);
     const bool hasContent = fs && fs->slotHasContent(selectedSlot);
 
     if (!hasContent || numSamples == 0)
@@ -97,78 +97,8 @@ void SlotTimelineComponent::paint(juce::Graphics& g)
     const int   sx = fracToX(sf);
     const int   ex = fracToX(ef);
 
-    // ── TrebleCut overlay + handle (drag over full height) ───────────────────
-    // trebleCut=0 → no fade; trebleCut=1 → full component height.
-    // The fade covers y=0 → trebleCut*h.  Handle tab at y=trebleCut*h.
-    {
-        const float tc   = fs->getSlotTrebleCut(selectedSlot);
-        const int   tcY  = static_cast<int>(tc * (float)h);  // cutoff y from top
-        const int   span = ex - sx;
-
-        // Gradient overlay (only when tc > 0)
-        if (tc > 0.001f && span > 0)
-        {
-            juce::ColourGradient grad(
-                juce::Colours::white.withAlpha(0.35f), 0.0f, 0.0f,
-                juce::Colours::white.withAlpha(0.0f),  0.0f, (float)tcY,
-                false);
-            g.setGradientFill(grad);
-            g.fillRect(sx, 0, span, tcY);
-            // Cutoff horizontal line
-            g.setColour(juce::Colour(0xff44ddaa).withAlpha(0.7f));
-            g.fillRect(sx, tcY, span, 1);
-        }
-
-        // Handle tab — centred between Start and End cursors
-        // Shape: small downward-pointing triangle (▼) at the cutoff line
-        const float tabCx = (float)((sx + ex) / 2);  // horizontal centre
-        const float tabX  = tabCx - 7.0f;
-        const float tabY  = (float)std::max(0, tcY);
-        juce::Path tab;
-        tab.addTriangle(tabX, tabY, tabX + 14.0f, tabY, tabCx, tabY + 9.0f);
-        g.setColour(juce::Colour(0xff44ddaa).withAlpha(0.85f));
-        g.fillPath(tab);
-        // Label just above the triangle
-        g.setColour(juce::Colour(0xff44ddaa).withAlpha(0.6f));
-        g.setFont(juce::FontOptions(7.0f));
-        g.drawText("HF", (int)tabX, std::max(0, (int)tabY - 8), 14, 8,
-                   juce::Justification::centred);
-    }
-
-    // ── BassCut overlay + handle (drag over full height) ─────────────────────
-    // bassCut=0 → no fade; bassCut=1 → full component height from bottom.
-    // Fade covers y=(h-bassCut*h) → h.  Handle tab at y=h-bassCut*h.
-    {
-        const float bc   = fs->getSlotBassCut(selectedSlot);
-        const int   bcY  = h - static_cast<int>(bc * (float)h); // cutoff y from bottom
-        const int   span = ex - sx;
-
-        if (bc > 0.001f && span > 0)
-        {
-            juce::ColourGradient grad(
-                juce::Colours::white.withAlpha(0.0f),  0.0f, (float)bcY,
-                juce::Colours::white.withAlpha(0.35f), 0.0f, (float)h,
-                false);
-            g.setGradientFill(grad);
-            g.fillRect(sx, bcY, span, h - bcY);
-            // Cutoff line
-            g.setColour(juce::Colour(0xff4488dd).withAlpha(0.7f));
-            g.fillRect(sx, bcY, span, 1);
-        }
-
-        // Handle tab — upward-pointing triangle (▲), centred between Start and End
-        const float tabBCx = (float)((sx + ex) / 2);
-        const float tabBX  = tabBCx - 7.0f;
-        const float tabY   = (float)std::min(h, h - static_cast<int>(bc * (float)h));
-        juce::Path tab;
-        tab.addTriangle(tabBX, tabY, tabBX + 14.0f, tabY, tabBCx, tabY - 9.0f);
-        g.setColour(juce::Colour(0xff4488dd).withAlpha(0.85f));
-        g.fillPath(tab);
-        // Label
-        g.setColour(juce::Colour(0xff4488dd).withAlpha(0.6f));
-        g.setFont(juce::FontOptions(7.0f));
-        g.drawText("LF", (int)tabBX, h - 9, 14, 8, juce::Justification::centred);
-    }
+    // Frequency shaping (HF/LF) moved to the dedicated SpectralCurveComponent —
+    // the timeline now only carries the time-domain handles (Start/End + fades).
 
     // ── Dim zones outside [start, end] ────────────────────────────────────────
     g.setColour(juce::Colour(0xaa080810));
@@ -185,20 +115,26 @@ void SlotTimelineComponent::paint(juce::Graphics& g)
 
     // ── Attack fade-in (Start → atkX) ─────────────────────────────────────────
     // Triangle handle ALWAYS drawn (visible even at 0).
-    // Gradient overlay only when attackLen > 0.
+    // Overlay only when attackLen > 0 — drawn column-by-column so its shape
+    // mirrors the ACTUAL playback exposure ramp (Curve type + Power), giving
+    // live visual feedback when those controls change. Matches the ramp used in
+    // FramePlayerThread: ramp = 1 - applyFadeCurve(t), white at t=0 → normal at t=1.
     {
         const float attackLen = fs->getSlotAttackLen(selectedSlot);
         const int   ax        = sx + static_cast<int>(attackLen * (float)(ex - sx));
 
-        // Gradient (only if > 0)
-        if (attackLen > 0.001f && ex > sx)
+        if (attackLen > 0.001f && ax > sx)
         {
-            juce::ColourGradient grad(
-                juce::Colours::white.withAlpha(0.30f), (float)sx, 0.0f,
-                juce::Colours::white.withAlpha(0.0f),  (float)ax, 0.0f,
-                false);
-            g.setGradientFill(grad);
-            g.fillRect(sx, 0, ax - sx, h);
+            const auto  curveType  = fs->getSlotFadeCurveType(selectedSlot);
+            const float curvePower = fs->getSlotFadeCurvePower(selectedSlot);
+            const float span       = (float)(ax - sx);
+            for (int x = sx; x < ax; ++x)
+            {
+                const float t    = (float)(x - sx) / span;              // 0 at start → 1 at atk end
+                const float ramp = 1.0f - applyFadeCurve(t, curveType, curvePower);
+                g.setColour(juce::Colours::white.withAlpha(ramp * 0.5f));
+                g.fillRect(x, 0, 1, h);
+            }
             g.setColour(juce::Colours::white.withAlpha(0.45f));
             g.drawVerticalLine(ax, 0.0f, (float)h);
         }
@@ -214,18 +150,24 @@ void SlotTimelineComponent::paint(juce::Graphics& g)
     }
 
     // ── Decay fade-out (decX → End) ───────────────────────────────────────────
+    // Mirror of the attack overlay, measured from the End bound: white at the
+    // end (t=0) → normal at the start of the decay zone (t=1), curve-shaped.
     {
         const float decayLen = fs->getSlotDecayLen(selectedSlot);
         const int   dx       = ex - static_cast<int>(decayLen * (float)(ex - sx));
 
-        if (decayLen > 0.001f && ex > sx)
+        if (decayLen > 0.001f && ex > dx)
         {
-            juce::ColourGradient grad(
-                juce::Colours::white.withAlpha(0.0f),  (float)dx, 0.0f,
-                juce::Colours::white.withAlpha(0.30f), (float)ex, 0.0f,
-                false);
-            g.setGradientFill(grad);
-            g.fillRect(dx, 0, ex - dx, h);
+            const auto  curveType  = fs->getSlotFadeCurveType(selectedSlot);
+            const float curvePower = fs->getSlotFadeCurvePower(selectedSlot);
+            const float span       = (float)(ex - dx);
+            for (int x = dx; x < ex; ++x)
+            {
+                const float t    = (float)(ex - x) / span;             // 0 at end → 1 at decay start
+                const float ramp = 1.0f - applyFadeCurve(t, curveType, curvePower);
+                g.setColour(juce::Colours::white.withAlpha(ramp * 0.5f));
+                g.fillRect(x, 0, 1, h);
+            }
             g.setColour(juce::Colours::white.withAlpha(0.45f));
             g.drawVerticalLine(dx, 0.0f, (float)h);
         }
@@ -277,7 +219,7 @@ void SlotTimelineComponent::paint(juce::Graphics& g)
 // ─────────────────────────────────────────────────────────────────────────────
 void SlotTimelineComponent::timerCallback()
 {
-    auto* fs = processor.getLuxSampler();
+    auto* fs = processor.getSampler(samplerIndex_);
     if (!fs) return;
     const SlotState st = fs->getSlotState(selectedSlot);
     if (st == SlotState::IDLE && thumbnailDirty) repaint();
@@ -289,7 +231,7 @@ void SlotTimelineComponent::timerCallback()
 // ─────────────────────────────────────────────────────────────────────────────
 void SlotTimelineComponent::updateCursor(const juce::MouseEvent& e)
 {
-    auto* fs = processor.getLuxSampler();
+    auto* fs = processor.getSampler(samplerIndex_);
     if (!fs || !fs->slotHasContent(selectedSlot))
     {
         setMouseCursor(juce::MouseCursor::NormalCursor); return;
@@ -299,32 +241,20 @@ void SlotTimelineComponent::updateCursor(const juce::MouseEvent& e)
     const int   sx = fracToX(fs->getSlotStartFrac(selectedSlot));
     const int   ex = fracToX(fs->getSlotEndFrac(selectedSlot));
 
-    // Same priority as mouseDown — triangles first, then bars.
+    // Same priority as mouseDown — triangles first (central band only), then bars.
+    const int  cy         = h / 2;
+    const bool inFadeBand = std::abs(e.y - cy) <= kAtkH;
 
-    // ── Attack triangle (handle centred at h/2 — detect anywhere vertically) ──
+    // ── Attack triangle (handle centred at h/2 — only within the central band) ─
     const float atkLen = fs->getSlotAttackLen(selectedSlot);
     const int   atkX   = sx + static_cast<int>(atkLen * (float)(ex - sx));
-    if (e.x >= sx && std::abs(e.x - atkX) <= kSnap)
+    if (inFadeBand && e.x >= sx && std::abs(e.x - atkX) <= kSnap)
         { setMouseCursor(juce::MouseCursor::PointingHandCursor); return; }
 
-    // ── Decay triangle (handle centred at h/2 — detect anywhere vertically) ───
+    // ── Decay triangle (handle centred at h/2 — only within the central band) ──
     const float decLen = fs->getSlotDecayLen(selectedSlot);
     const int   decX   = ex - static_cast<int>(decLen * (float)(ex - sx));
-    if (e.x <= ex && std::abs(e.x - decX) <= kSnap)
-        { setMouseCursor(juce::MouseCursor::PointingHandCursor); return; }
-
-    // ── TrebleCut tab (full height — drag line at tc*h from top) ─────────────
-    const float tc  = fs->getSlotTrebleCut(selectedSlot);
-    const int   tcY = static_cast<int>(tc * (float)h);
-    if (e.x >= sx && e.x <= ex
-        && (std::abs(e.y - tcY) <= kEdge || (tc < 0.01f && e.y <= kEdge)))
-        { setMouseCursor(juce::MouseCursor::PointingHandCursor); return; }
-
-    // ── BassCut tab (full height — drag line at h-bc*h from top) ─────────────
-    const float bc  = fs->getSlotBassCut(selectedSlot);
-    const int   bcY = h - static_cast<int>(bc * (float)h);
-    if (e.x >= sx && e.x <= ex
-        && (std::abs(e.y - bcY) <= kEdge || (bc < 0.01f && e.y >= h - kEdge)))
+    if (inFadeBand && e.x <= ex && std::abs(e.x - decX) <= kSnap)
         { setMouseCursor(juce::MouseCursor::PointingHandCursor); return; }
 
     // ── Start/End vertical bars — only if no triangle was hit ────────────────
@@ -338,11 +268,11 @@ void SlotTimelineComponent::mouseMove(const juce::MouseEvent& e) { updateCursor(
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Mouse — drag handles
-// Priority: Attack > Decay > TrebleCut > BassCut > Start > End > nearest
+// Priority: Attack > Decay > Start > End > nearest
 // ─────────────────────────────────────────────────────────────────────────────
 void SlotTimelineComponent::mouseDown(const juce::MouseEvent& e)
 {
-    auto* fs = processor.getLuxSampler();
+    auto* fs = processor.getSampler(samplerIndex_);
     if (!fs || !fs->slotHasContent(selectedSlot)) return;
 
     const int   h      = getHeight();
@@ -351,35 +281,26 @@ void SlotTimelineComponent::mouseDown(const juce::MouseEvent& e)
     const int   startX = fracToX(sf);
     const int   endX   = fracToX(ef);
 
-    // ── Attack (handle centred at h/2 — detect anywhere vertically near atkX) ─
+    // Attack/Decay triangles live in a central vertical band around h/2 (where
+    // they are drawn). Gating their hit-test to that band frees the top and
+    // bottom of the Start/End bars so those bounds stay grabbable even when a
+    // fade length is 0 (handle sitting exactly on the bar). Previously the fade
+    // hit-zone spanned the full height and shadowed the bounds until a fade was
+    // dragged away from the edge.
+    const int  cy         = h / 2;
+    const bool inFadeBand = std::abs(e.y - cy) <= kAtkH;
+
+    // ── Attack (triangle centred at h/2 — only within the central band) ───────
     const float atkLen = fs->getSlotAttackLen(selectedSlot);
     const int   atkX   = startX + static_cast<int>(atkLen * (float)(endX - startX));
-    if (e.x >= startX && std::abs(e.x - atkX) <= kSnap)
+    if (inFadeBand && e.x >= startX && std::abs(e.x - atkX) <= kSnap)
         { dragging = DragTarget::Attack; return; }
 
-    // ── Decay (handle centred at h/2 — detect anywhere vertically near decX) ──
+    // ── Decay (triangle centred at h/2 — only within the central band) ────────
     const float decLen = fs->getSlotDecayLen(selectedSlot);
     const int   decX   = endX - static_cast<int>(decLen * (float)(endX - startX));
-    if (e.x <= endX && std::abs(e.x - decX) <= kSnap)
+    if (inFadeBand && e.x <= endX && std::abs(e.x - decX) <= kSnap)
         { dragging = DragTarget::Decay; return; }
-
-    // ── TrebleCut (full height — drag line at tc*h from top) ─────────────────
-    const float tc  = fs->getSlotTrebleCut(selectedSlot);
-    const int   tcY = static_cast<int>(tc * (float)h);
-    if (e.x >= startX && e.x <= endX)
-    {
-        if (std::abs(e.y - tcY) <= kEdge || (tc < 0.01f && e.y <= kEdge))
-            { dragging = DragTarget::TrebleCut; return; }
-    }
-
-    // ── BassCut (full height — drag line at h-bc*h from top) ──────────────────
-    const float bc  = fs->getSlotBassCut(selectedSlot);
-    const int   bcY = h - static_cast<int>(bc * (float)h);
-    if (e.x >= startX && e.x <= endX)
-    {
-        if (std::abs(e.y - bcY) <= kEdge || (bc < 0.01f && e.y >= h - kEdge))
-            { dragging = DragTarget::BassCut; return; }
-    }
 
     // ── Start / End bars ─────────────────────────────────────────────────────
     if (std::abs(e.x - startX) <= kSnap)
@@ -395,10 +316,8 @@ void SlotTimelineComponent::mouseDown(const juce::MouseEvent& e)
 
 void SlotTimelineComponent::mouseDrag(const juce::MouseEvent& e)
 {
-    auto* fs = processor.getLuxSampler();
+    auto* fs = processor.getSampler(samplerIndex_);
     if (!fs) return;
-
-    const int   h  = getHeight();
 
     if (dragging == DragTarget::Attack)
     {
@@ -424,23 +343,6 @@ void SlotTimelineComponent::mouseDrag(const juce::MouseEvent& e)
                 juce::jlimit(0.0f, 1.0f, (float)(ex2 - e.x) / (float)span));
             repaint();
         }
-        return;
-    }
-    if (dragging == DragTarget::TrebleCut)
-    {
-        // e.y in [0..h] → trebleCut in [0..1] — full component height
-        const float tc = juce::jlimit(0.0f, 1.0f, (float)e.y / (float)std::max(1, h));
-        fs->setSlotTrebleCut(selectedSlot, tc);
-        repaint();
-        return;
-    }
-    if (dragging == DragTarget::BassCut)
-    {
-        // e.y in [0..h] → bassCut: 0 when e.y=h, 1 when e.y=0 — full component height
-        const float bc = juce::jlimit(0.0f, 1.0f,
-            (float)(h - e.y) / (float)std::max(1, h));
-        fs->setSlotBassCut(selectedSlot, bc);
-        repaint();
         return;
     }
     if (dragging == DragTarget::Start)

@@ -34,6 +34,9 @@ public:
     void setSelectedSlot(int idx) noexcept;
     int  getSelectedSlot() const noexcept { return selectedSlot; }
 
+    /** Bind this grid to sampler engine 0 (A) or 1 (B). */
+    void setSamplerIndex(int i) noexcept { samplerIndex_ = i; repaint(); }
+
     // juce::Component
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent& e) override;
@@ -46,6 +49,7 @@ private:
 
     Sp3ctraAudioProcessor& processor;
     int  selectedSlot  = 0;
+    int  samplerIndex_ = 0;   // 0 = engine A, 1 = engine B
     bool blinkOn       = false;
     int  clipboardSlot = -1; // index of the slot last copied, -1 = empty
 

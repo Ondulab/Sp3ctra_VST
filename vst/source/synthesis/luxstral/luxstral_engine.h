@@ -75,6 +75,20 @@ typedef struct LuxStralEngine {
   rt_safe_buffer_t rt_stereo_L_buffer;
   rt_safe_buffer_t rt_stereo_R_buffer;
 
+  /* ===== Output publish target (de-globalised, M8 — dual engine A/B) ======= */
+  /* Where synth_AudioProcess publishes its final stereo result. Engine A points
+   * at the historical globals (luxstral_buffers_L/R + luxstral_buffer_index);
+   * engine B points at its own second set. Kept as opaque pointers so the heavy
+   * vst_adapters header stays out of this widely-included struct - cast to
+   * AudioImageBuffer (and volatile int) in synth_luxstral.c.                    */
+  void         *out_L;       /* AudioImageBuffer[2] */
+  void         *out_R;       /* AudioImageBuffer[2] */
+  volatile int *out_index;   /* publish double-buffer index */
+  /* Source-type gating override: -1 = use the global luxstral_source_type
+   * (engine A, exact legacy behaviour); otherwise a fixed value (engine B reads
+   * its OWN DoubleBuffer which it fully controls, so it accepts either → 2).   */
+  int           source_type_override;
+
   /* ===== Freeze / display state ============================================ */
   volatile int is_synth_data_frozen;
   float *frozen_grayscale_buffer;      /* Dynamic allocation (nb_pixels)       */
@@ -108,10 +122,26 @@ typedef struct LuxStralEngine {
 
 /* Exported variables --------------------------------------------------------*/
 
-/* The single engine instance (M3 phase A). A second instance (M8) will be
- * added once the remaining shared subsystems (waves[], wave_generation
- * hot-reload state, runtime config) are made per-instance.                   */
+/* Engine A (M3 phase A). Shares the read-only waves[]/sine-table/runtime-config
+ * with engine B — see synth_luxstral_init_engine_b().                         */
 extern LuxStralEngine g_luxstral_engine_a;
+
+/* Engine B (M8 — dual-engine). Independent DSP buffers, worker pool and output
+ * target; reads its OWN chain's input from a second DoubleBuffer. It shares the
+ * read-only waves[]/config with A (Option A: independent input, shared timbre).*/
+extern LuxStralEngine g_luxstral_engine_b;
+
+/* Per-instance init for engine B: allocates imageRef + inits the synth mutex
+ * ONLY. The global waves[]/sine-table/runtime-config were already set up once
+ * by synth_IfftInit() for engine A and must not be re-run. The worker pool, RT
+ * output buffers and grayscale staging self-initialise lazily on first render.
+ * Safe to call once, after synth_IfftInit(). Returns 0 on success.            */
+int32_t synth_luxstral_init_engine_b(void);
+
+/* Render one frame on engine B, publishing to its own output buffers. Mirrors
+ * synth_AudioProcess() but for g_luxstral_engine_b + its own DoubleBuffer.     */
+void synth_AudioProcess_b(uint8_t *buffer_R, uint8_t *buffer_G,
+                          uint8_t *buffer_B, struct DoubleBuffer *db);
 
 /* Public accessors for external consumers ------------------------------------
  * These wrap the display buffers of g_luxstral_engine_a so external files

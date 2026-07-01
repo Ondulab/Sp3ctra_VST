@@ -130,6 +130,11 @@ extern AudioImageBuffer luxstral_buffers_L[2];
 extern AudioImageBuffer luxstral_buffers_R[2];
 extern volatile int luxstral_buffer_index;  /* ACCESS ONLY via __atomic_*_n! */
 
+/* M8 — LuxStral engine B: second independent publish target (dual-engine A/B). */
+extern AudioImageBuffer luxstral_b_buffers_L[2];
+extern AudioImageBuffer luxstral_b_buffers_R[2];
+extern volatile int luxstral_b_buffer_index;  /* ACCESS ONLY via __atomic_*_n! */
+
 /* VST Audio Callback Synchronization ----------------------------*/
 // 🔧 LOCK-FREE: Replaced pthread_cond with atomic flag polling
 // pthread_cond_signal() without mutex caused lost signals → 200ms audio gaps

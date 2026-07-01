@@ -13,21 +13,14 @@ class Sp3ctraAudioProcessor;
  *   Lower half  — bass energy  (left-pixel half, low  freq) falling downward.
  *   Gamma γ=0.4 compresses the scale so fine patterns are as visible as masses.
  *
- * Draggable handles (all kept at the top or bottom edge to avoid overlap):
- *
- *   ── Time handles (horizontal drag) ──────────────────────────────────────
+ * Draggable handles — TIME domain only (frequency shaping lives in the dedicated
+ * SpectralCurveComponent):
  *   Start bar  — green vertical bar, drag anywhere on the bar.
  *   End   bar  — orange vertical bar, same.
- *   Attack ▷  — white triangle at top (y ≤ 16), drags right from Start.
- *   Decay  ◁  — white triangle at top (y ≤ 16), drags left  from End.
+ *   Attack ▷  — white triangle centred at h/2, drags right from Start.
+ *   Decay  ◁  — white triangle centred at h/2, drags left  from End.
  *
- *   ── Frequency-cut handles (vertical drag) ───────────────────────────────
- *   TrebleCut ▼ — small tab at the TOP edge (y ≤ kEdge) right side.
- *                  Drag downward → fade the treble (upper) bars toward white.
- *   BassCut   ▲ — small tab at the BOTTOM edge (y ≥ h-kEdge) right side.
- *                  Drag upward  → fade the bass  (lower) bars toward white.
- *
- * Cursor feedback on hover (LeftRight for time handles, UpDown for freq cuts).
+ * Cursor feedback on hover (LeftRight for the bars, PointingHand for the fades).
  */
 class SlotTimelineComponent : public juce::Component,
                                private juce::Timer
@@ -38,6 +31,9 @@ public:
 
     void setSelectedSlot(int idx);
     void markDirty() noexcept { thumbnailDirty = true; repaint(); }
+
+    /** Bind this timeline to sampler engine 0 (A) or 1 (B). */
+    void setSamplerIndex(int i) noexcept { samplerIndex_ = i; thumbnailDirty = true; repaint(); }
 
     std::function<void(float)> onStartChanged;
     std::function<void(float)> onEndChanged;
@@ -50,7 +46,8 @@ public:
 
 private:
     Sp3ctraAudioProcessor& processor;
-    int selectedSlot = 0;
+    int selectedSlot  = 0;
+    int samplerIndex_ = 0;   // 0 = engine A, 1 = engine B
 
     // Spectral thumbnail — bass [0..1] (lower half) and treble [0..1] (upper half).
     static constexpr int kMaxSamples = 512;
@@ -60,13 +57,12 @@ private:
     bool  thumbnailDirty = true;
     void  rebuildThumbnail();
 
-    enum class DragTarget { None, Start, End, Attack, Decay, TrebleCut, BassCut };
+    enum class DragTarget { None, Start, End, Attack, Decay };
     DragTarget dragging = DragTarget::None;
 
     // Hit-test zones
-    static constexpr int kEdge   = 8;   // px from top/bottom for freq-cut tabs
     static constexpr int kSnap   = 12;  // px tolerance for time handles
-    static constexpr int kAtkH   = 16;  // y zone height for attack/decay handles
+    static constexpr int kAtkH   = 16;  // half-height of the central fade band
 
     void updateCursor(const juce::MouseEvent& e);
 

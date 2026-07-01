@@ -37,7 +37,7 @@
 enum class ChainBlockId
 {
     Chain1Source = 0, Pitch, Mask, Sampler, Score, LuxStral,
-    Chain2Source, LuxSynth, LuxWave
+    Chain2Source, LuxSynth, LuxWave, Sequencer, VideoScroll
 };
 
 /** Maps a selection key to its module type (sources → Sp3ctra). */
@@ -55,6 +55,16 @@ public:
     /** Fired when the user clicks a block (selection is owned by the editor). */
     std::function<void(ChainBlockId)> onBlockSelected;
 
+    /** Fired (BEFORE onBlockSelected) when the selected block is a VideoScroll
+     *  output, carrying its per-instance slot (0..7) so the editor can bind the
+     *  contextual panel / mixer voice to videoScroll{slot}_*. */
+    std::function<void(int)> onVideoBlockSelected;
+
+    /** Fired (BEFORE onBlockSelected) when the selected block is a SAMPLER,
+     *  carrying its engine index (slot: 0 = A, 1 = B) so the editor can bind the
+     *  sampler page + setup panel to the right engine. */
+    std::function<void(int)> onSamplerBlockSelected;
+
     /** Fired after a model mutation so the editor can re-run layoutZones()
      *  (the rack's preferred height changed). Persistence + the audio-param
      *  bridge are handled internally. */
@@ -68,6 +78,13 @@ public:
 
     /** Updates the highlighted block (called back by the editor). */
     void setSelectedBlock(ChainBlockId id);
+
+    /** Locks the rack (performance mode): hides every delete affordance — the
+     *  per-module × and the per-chain × — while keeping drag-to-reorder (within
+     *  a chain, across chains, into a new chain) and "+ CHAIN" fully usable.
+     *  Driven by the editor when the module catalogue rail is collapsed. */
+    void setLocked(bool shouldLock);
+    bool isLocked() const noexcept { return locked; }
 
     /** Natural content height — the editor's viewport sizes us with this. */
     int preferredHeight() const noexcept;
@@ -110,6 +127,21 @@ private:
         void setLed(LedState s)    { if (led != s)       { led = s;        repaint(); } }
         void setSelected(bool sel) { if (selected != sel) { selected = sel; repaint(); } }
 
+        /** Append an engine letter (e.g. "A"/"B") to the shown name — used to tell
+         *  the two LuxStral engines apart in the rack. */
+        void setEngineSuffix(const juce::String& letter)
+        {
+            name = moduleDisplayName(type) + " " + letter;
+            repaint();
+        }
+
+        /** When false the × remove glyph is hidden + its click is ignored
+         *  (the rack is locked). Reorder dragging is unaffected. */
+        void setRemovable(bool r)
+        {
+            if (removable != r) { removable = r; if (! r) overClose = false; repaint(); }
+        }
+
         void paint(juce::Graphics& g) override;
         void mouseDown(const juce::MouseEvent& e) override;
         void mouseDrag(const juce::MouseEvent& e) override;
@@ -126,11 +158,12 @@ private:
         juce::String name;
         juce::Colour colour;
         juce::String enableParam;
-        LedState     led      { LedState::Off };
-        bool         selected { false };
-        bool         overDot  { false };
-        bool         overClose{ false };
-        bool         dragging { false };
+        LedState     led       { LedState::Off };
+        bool         selected  { false };
+        bool         removable { true };
+        bool         overDot   { false };
+        bool         overClose { false };
+        bool         dragging  { false };
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(BlockComponent)
     };
@@ -144,18 +177,14 @@ private:
     void timerCallback() override;        // 10 Hz LED refresh
 
     void rebuild();                       // (re)create block components from model
-    void mutateAndRefresh(bool notifySelection); // after a model change: rebuild + bridge + persist + relayout
+    void mutateAndRefresh(bool notifySelection); // after a model change: processor bridge + rebuild + relayout
     void scheduleRefresh(bool notifySelection);  // defer mutateAndRefresh to the next tick (lifetime-safe)
-
-    void loadModelFromState();            // read apvts.state child "CHAINS"
-    void persistModel();                  // write it back
-    void applyModelToParams(const std::set<ModuleType>& prevActive); // enable params + order bridge
 
     void toggleEnable(const juce::String& paramId);
     void removeInstance(const juce::Uuid& id);
 
     void updateLeds();
-    LedState ledFor(ModuleType type) const;
+    LedState ledFor(ModuleType type, int chainIdx) const;
 
     void selectInstance(const juce::Uuid& id, bool notify);
     juce::Uuid   firstInstanceId() const;
@@ -171,11 +200,11 @@ private:
     //==========================================================================
     Sp3ctraAudioProcessor& processor;
 
-    ChainModel model;
+    ChainModel& model;   // owned by the processor (M6 Phase 2); the rack edits it in place
     std::vector<std::unique_ptr<BlockComponent>> blocks;   // one per ModuleInstance
 
-    std::set<ModuleType> activeTypes;     // last-known presence set (param-bridge diff)
     juce::Uuid           selectedId;      // currently highlighted instance
+    bool                 locked { false };// performance mode: delete affordances off
 
     // Source-activity tracking (UDP feed advancing → source LED active)
     juce::uint64 lastLinesSeen { 0 };

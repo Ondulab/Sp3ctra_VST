@@ -38,9 +38,11 @@ ModuleType chainBlockToModuleType(ChainBlockId id) noexcept
         case ChainBlockId::Mask:     return ModuleType::Mask;
         case ChainBlockId::Sampler:  return ModuleType::Sampler;
         case ChainBlockId::Score:    return ModuleType::Score;
+        case ChainBlockId::Sequencer:return ModuleType::Sequencer;
         case ChainBlockId::LuxStral: return ModuleType::LuxStral;
         case ChainBlockId::LuxSynth: return ModuleType::LuxSynth;
         case ChainBlockId::LuxWave:  return ModuleType::LuxWave;
+        case ChainBlockId::VideoScroll: return ModuleType::VideoScroll;
         case ChainBlockId::Chain1Source:
         case ChainBlockId::Chain2Source:
         default:                     return ModuleType::Sp3ctra;
@@ -137,8 +139,8 @@ void ChainRackComponent::BlockComponent::paint(juce::Graphics& g)
         }
     }
 
-    // ── Remove (×) — only while hovered ──────────────────────────────────────
-    if (isMouseOver())
+    // ── Remove (×) — only while hovered, and only when removable (rack unlocked)
+    if (removable && isMouseOver())
     {
         const auto x = closeBounds();
         g.setColour(overClose ? juce::Colour(0xffe06b6b) : juce::Colour(0xff6b7280));
@@ -183,7 +185,7 @@ void ChainRackComponent::BlockComponent::mouseUp(const juce::MouseEvent& e)
     if (wasDragging || ! e.mouseWasClicked())
         return;
 
-    if (closeBounds().contains(e.position) && onRemove)
+    if (removable && closeBounds().contains(e.position) && onRemove)
         onRemove(uid);
     else if (enableParam.isNotEmpty() && dotBounds().contains(e.position) && onToggleEnable)
         onToggleEnable();
@@ -194,7 +196,7 @@ void ChainRackComponent::BlockComponent::mouseUp(const juce::MouseEvent& e)
 void ChainRackComponent::BlockComponent::mouseMove(const juce::MouseEvent& e)
 {
     const bool od = enableParam.isNotEmpty() && dotBounds().contains(e.position);
-    const bool oc = closeBounds().contains(e.position);
+    const bool oc = removable && closeBounds().contains(e.position);
     if (od != overDot || oc != overClose)
     {
         overDot   = od;
@@ -219,21 +221,11 @@ void ChainRackComponent::BlockComponent::mouseExit(const juce::MouseEvent&)
 // ChainRackComponent
 //==============================================================================
 ChainRackComponent::ChainRackComponent(Sp3ctraAudioProcessor& p)
-    : processor(p)
+    : processor(p), model(p.getChainModel())   // model owned by the processor
 {
-    loadModelFromState();
-    model.validateAndRepair();
-
+    // The processor already loaded + validated the topology and derived routing
+    // (constructor / setStateInformation). We just render it.
     rebuild();
-
-    // Project the loaded topology onto the audio params: only force absent
-    // modules off (don't clobber the user's saved enable states for present
-    // modules). prevActive == current set ⇒ no present→on transitions.
-    std::set<ModuleType> now;
-    model.deriveActiveTypes(now);
-    activeTypes = now;
-    applyModelToParams(now);
-
     startTimerHz(10);   // LED refresh
 }
 
@@ -243,88 +235,18 @@ ChainRackComponent::~ChainRackComponent()
 }
 
 //==============================================================================
-// Model load / save
-//==============================================================================
-void ChainRackComponent::loadModelFromState()
-{
-    auto& state = processor.getAPVTS().state;
-    auto t = state.getChildWithName(ChainModel::kChainsTag);
-    if (t.isValid())
-        model.fromValueTree(t);
-    else
-        model = ChainModel::makeDefault();
-}
-
-void ChainRackComponent::persistModel()
-{
-    auto& state = processor.getAPVTS().state;
-    auto existing = state.getChildWithName(ChainModel::kChainsTag);
-    if (existing.isValid())
-        state.removeChild(existing, nullptr);
-    state.appendChild(model.toValueTree(), nullptr);
-}
-
-//==============================================================================
-// Audio-param bridge (Phase 1): present⇒on (on add), absent⇒off, Pitch/Mask order
-//==============================================================================
-void ChainRackComponent::applyModelToParams(const std::set<ModuleType>& prevActive)
-{
-    auto& apvts = processor.getAPVTS();
-    auto setParam = [&apvts](const juce::String& id, bool on)
-    {
-        if (id.isEmpty())
-            return;
-        if (auto* param = apvts.getParameter(id))
-        {
-            const float v = on ? 1.0f : 0.0f;
-            if (param->getValue() != v)
-            {
-                param->beginChangeGesture();
-                param->setValueNotifyingHost(v);
-                param->endChangeGesture();
-            }
-        }
-    };
-
-    std::set<ModuleType> now;
-    model.deriveActiveTypes(now);
-
-    static const ModuleType kEnableTypes[] = {
-        ModuleType::Pitch, ModuleType::Mask, ModuleType::Sampler,
-        ModuleType::LuxStral, ModuleType::LuxSynth, ModuleType::LuxWave
-    };
-    for (auto t : kEnableTypes)
-    {
-        const bool isNow = now.count(t) > 0;
-        const bool was   = prevActive.count(t) > 0;
-        if (isNow && ! was)
-            setParam(moduleEnableParam(t), true);    // newly added ⇒ enable
-        else if (! isNow)
-            setParam(moduleEnableParam(t), false);   // absent ⇒ force off
-        // present & was-present ⇒ leave the user's manual on/off untouched
-    }
-
-    // Pitch/Mask relative order → binary chainInsertOrder choice.
-    setParam("chainInsertOrder", model.isMaskBeforePitch());
-
-    // Phase 2 — each synth reads the channel its chain placement dictates.
-    // Defaults (LuxStral=MODULATED, LuxSynth/LuxWave=LIVE) match the legacy
-    // topology when a synth isn't placed. LuxWave shares LuxSynth's channel.
-    const int luxstralSrc = model.sourceChannelForSynth(ModuleType::LuxStral, 0);
-    int       luxsynthSrc = model.sourceChannelForSynth(ModuleType::LuxSynth, 1);
-    if (luxsynthSrc == 1)   // if LuxSynth absent/live, let a placed LuxWave decide
-        luxsynthSrc = model.sourceChannelForSynth(ModuleType::LuxWave, luxsynthSrc);
-    processor.setChainSourceRouting(luxstralSrc, luxsynthSrc);
-
-    activeTypes = now;
-}
-
-//==============================================================================
 // Build / mutate
 //==============================================================================
 void ChainRackComponent::rebuild()
 {
     blocks.clear();
+
+    // M8 — when both LuxStral engines (A/B) are placed, badge each block with its
+    // engine letter so they can be told apart. A lone engine stays plain "LUXSTRAL".
+    int luxstralCount = 0;
+    for (const auto& ch : model.chains)
+        for (const auto& m : ch.modules)
+            if (m.type == ModuleType::LuxStral) ++luxstralCount;
 
     for (int c = 0; c < model.numChains(); ++c)
     {
@@ -332,13 +254,17 @@ void ChainRackComponent::rebuild()
         {
             auto blk = std::make_unique<BlockComponent>(m.type, m.id);
             auto* bp = blk.get();
+            if (m.type == ModuleType::LuxStral && luxstralCount >= 2 && m.slot >= 0)
+                bp->setEngineSuffix(m.slot == 1 ? "B" : "A");
             bp->onClick        = [this](juce::Uuid id) { selectInstance(id, true); };
             bp->onToggleEnable = [this, bp]            { toggleEnable(bp->getEnableParam()); };
             bp->onRemove       = [this](juce::Uuid id) { removeInstance(id); };
-            if (bp->getEnableParam().isNotEmpty())
-                bp->setTooltip("Click the LED to enable/disable - drag to reorder - x to remove");
-            else
-                bp->setTooltip("Drag to reorder - x to remove");
+            bp->setRemovable(! locked);
+            const bool hasLed = bp->getEnableParam().isNotEmpty();
+            bp->setTooltip(hasLed
+                ? (locked ? "Click the LED to enable/disable - drag to reorder"
+                          : "Click the LED to enable/disable - drag to reorder - x to remove")
+                : (locked ? "Drag to reorder" : "Drag to reorder - x to remove"));
             bp->setSelected(m.id == selectedId);
             addAndMakeVisible(bp);
             blocks.push_back(std::move(blk));
@@ -352,7 +278,8 @@ void ChainRackComponent::rebuild()
 
 void ChainRackComponent::mutateAndRefresh(bool notifySelection)
 {
-    const std::set<ModuleType> prevActive = activeTypes;
+    // The processor owns the model: apply the enable/routing bridge + persist.
+    processor.onChainModelEdited();
 
     rebuild();
 
@@ -370,11 +297,14 @@ void ChainRackComponent::mutateAndRefresh(bool notifySelection)
     {
         int sc = -1, si = -1;
         if (auto* m = model.find(selectedId, sc, si))
+        {
+            if (m->type == ModuleType::VideoScroll && onVideoBlockSelected)
+                onVideoBlockSelected(m->slot);
+            if (m->type == ModuleType::Sampler && onSamplerBlockSelected)
+                onSamplerBlockSelected(m->slot);   // engine A (0) / B (1)
             onBlockSelected(instanceToBlockId(m->type, sc));
+        }
     }
-
-    applyModelToParams(prevActive);
-    persistModel();
 
     if (onModelChanged)
         onModelChanged();   // editor re-runs layoutZones (preferred height changed)
@@ -427,9 +357,11 @@ ChainBlockId ChainRackComponent::instanceToBlockId(ModuleType type, int chainIdx
         case ModuleType::Mask:     return ChainBlockId::Mask;
         case ModuleType::Sampler:  return ChainBlockId::Sampler;
         case ModuleType::Score:    return ChainBlockId::Score;
+        case ModuleType::Sequencer:return ChainBlockId::Sequencer;
         case ModuleType::LuxStral: return ChainBlockId::LuxStral;
         case ModuleType::LuxSynth: return ChainBlockId::LuxSynth;
         case ModuleType::LuxWave:  return ChainBlockId::LuxWave;
+        case ModuleType::VideoScroll: return ChainBlockId::VideoScroll;
         case ModuleType::Sp3ctra:
         case ModuleType::Image:
         case ModuleType::Video:
@@ -457,7 +389,13 @@ void ChainRackComponent::selectInstance(const juce::Uuid& id, bool notify)
     {
         int c = -1, i = -1;
         if (auto* m = model.find(id, c, i))
+        {
+            if (m->type == ModuleType::VideoScroll && onVideoBlockSelected)
+                onVideoBlockSelected(m->slot);   // bind the per-instance bank first
+            if (m->type == ModuleType::Sampler && onSamplerBlockSelected)
+                onSamplerBlockSelected(m->slot);   // engine A (0) / B (1)
             onBlockSelected(instanceToBlockId(m->type, c));
+        }
     }
 }
 
@@ -481,6 +419,16 @@ void ChainRackComponent::setSelectedBlock(ChainBlockId id)
                 selectInstance(m.id, false);
                 return;
             }
+}
+
+void ChainRackComponent::setLocked(bool shouldLock)
+{
+    if (locked == shouldLock)
+        return;
+    locked = shouldLock;
+
+    rebuild();   // re-creates blocks with the new removable state + tooltips
+    repaint();   // chain-level × is painted by the rack itself
 }
 
 //==============================================================================
@@ -717,7 +665,7 @@ void ChainRackComponent::paint(juce::Graphics& g)
                    kPadX + 2, band.headerY, getWidth() - 2 * kPadX, kHeaderH,
                    juce::Justification::centredLeft, true);
 
-        if (model.numChains() > 1)   // remove-chain ×
+        if (model.numChains() > 1 && ! locked)   // remove-chain × (hidden when locked)
         {
             const juce::Rectangle<float> x((float) (getWidth() - kPadX - 14),
                                            (float) band.headerY + 2.f, 12.f, 12.f);
@@ -810,8 +758,9 @@ void ChainRackComponent::paint(juce::Graphics& g)
         }
     }
 
-    // Right border
+    // Left + right borders (the left edge is the single divider with the rail)
     g.setColour(juce::Colour(Sp3ctraTheme::kColBorder));
+    g.fillRect(0, 0, 1, getHeight());
     g.fillRect(getWidth() - 1, 0, 1, getHeight());
 }
 
@@ -828,7 +777,7 @@ void ChainRackComponent::mouseUp(const juce::MouseEvent& e)
         return;
     }
 
-    if (model.numChains() > 1)
+    if (model.numChains() > 1 && ! locked)   // chain delete disabled while locked
     {
         for (const auto& band : bands)
         {
@@ -851,7 +800,7 @@ void ChainRackComponent::timerCallback()
     updateLeds();
 }
 
-ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type) const
+ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, int chainIdx) const
 {
     auto paramOn = [this](const char* id) -> bool
     {
@@ -868,15 +817,17 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type) const
             return sourceLed;
 
         case ModuleType::Pitch:
-        {
-            const bool en = (g_lux_pitch_proc.config.enabled != 0);
-            const int  v  = (int) g_lux_pitch_proc.midi.voice_count;
+        {   // per-chain instance (slot = chain index) — M6 Phase 2
+            const LuxPitchState* st = lux_pitch_instance(chainIdx);
+            const bool en = (st->config.enabled != 0);
+            const int  v  = (int) st->midi.voice_count;
             return ! en ? LedState::Off : (v > 0 ? LedState::Active : LedState::Idle);
         }
         case ModuleType::Mask:
-        {
-            const bool en = (g_lux_mask_proc.config.enabled != 0);
-            const int  v  = (int) g_lux_mask_proc.midi.voice_count;
+        {   // per-chain instance (slot = chain index) — M6 Phase 2
+            const LuxMaskState* st = lux_mask_instance(chainIdx);
+            const bool en = (st->config.enabled != 0);
+            const int  v  = (int) st->midi.voice_count;
             return ! en ? LedState::Off : (v > 0 ? LedState::Active : LedState::Idle);
         }
         case ModuleType::Sampler:
@@ -894,6 +845,12 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type) const
                      : fs->scoreHasContent() ? LedState::Idle
                      :                         LedState::Off;
             return LedState::Off;
+
+        case ModuleType::VideoScroll:
+            return LedState::Active;   // passive output tap — always capturing
+
+        default:
+            break;   // Sequencer (owned elsewhere) etc. → neutral
     }
     return LedState::Off;
 }
@@ -917,5 +874,9 @@ void ChainRackComponent::updateLeds()
     }
 
     for (auto& blk : blocks)
-        blk->setLed(ledFor(blk->getType()));
+    {
+        int c = -1, i = -1;
+        model.find(blk->getUuid(), c, i);   // chain index → per-chain instance slot
+        blk->setLed(ledFor(blk->getType(), c < 0 ? 0 : c));
+    }
 }

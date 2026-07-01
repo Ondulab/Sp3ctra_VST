@@ -38,7 +38,33 @@ public:
     FrameSequencer();
 
     // ── Wiring ───────────────────────────────────────────────────────────────
-    void setLuxSampler(LuxSampler* fs) noexcept { luxSampler = fs; }
+    /** Max addressable sampler engines (A, B, …). MUST be ≥ the number of
+     *  sampler instances the model can hold. Step 1: only slot 0 (A) is used. */
+    static constexpr int kMaxSamplers = 8;
+
+    /** Register the ordered sampler engines (by chain placement order:
+     *  index 0 = A, 1 = B, …). Message thread / init only. */
+    void setSamplers(LuxSampler* const* list, int count) noexcept
+    {
+        const int n = juce::jlimit(0, kMaxSamplers, count);
+        for (int i = 0; i < kMaxSamplers; ++i)
+            samplers_[i] = (i < n && list != nullptr) ? list[i] : nullptr;
+        numSamplers_.store(n, std::memory_order_release);
+    }
+    /** Back-compat single-engine wiring (sampler A). */
+    void setLuxSampler(LuxSampler* fs) noexcept
+    {
+        samplers_[0] = fs;
+        for (int i = 1; i < kMaxSamplers; ++i) samplers_[i] = nullptr;
+        numSamplers_.store(fs != nullptr ? 1 : 0, std::memory_order_release);
+    }
+    /** Engine for sampler index i (A=0, B=1, …), or nullptr if unset. */
+    LuxSampler* getSampler(int i) const noexcept
+    {
+        return (i >= 0 && i < kMaxSamplers) ? samplers_[i] : nullptr;
+    }
+    /** Number of registered sampler engines (≥1 once wired). */
+    int getNumSamplers() const noexcept { return numSamplers_.load(std::memory_order_relaxed); }
 
     // ── Configuration (message thread) ───────────────────────────────────────
     void setEnabled      (bool  e) noexcept { enabled.store(e);     }
@@ -56,10 +82,32 @@ public:
     int   getBeatsPerStep()const noexcept { return beatsPerStep.load(); }
 
     // ── Step data (message thread write / RT read) ────────────────────────────
-    /** Assign a bank (0–11) to step i, or -1 to leave it empty. */
+    /** Assign an encoded (sampler,slot) value to step i, or a sentinel
+     *  (STEP_EMPTY / STEP_LIVE). See encodeStep(). */
     void setStep (int stepIdx, int bankIdx) noexcept;
-    /** Returns the bank index (0–11) or -1 if empty/invalid. */
+    /** Returns the encoded step value (≥0 = real slot, <0 = sentinel/invalid). */
     int  getStep (int stepIdx) const noexcept;
+
+    // ── Step value encoding ───────────────────────────────────────────────────
+    // A real slot step encodes BOTH the sampler engine and the slot:
+    //   enc = samplerIdx * NUM_SLOTS + slot   (A1..A12 = 0..11, B1..B12 = 12..23)
+    // Sentinels stay negative, so old patterns (0..11) decode to sampler A.
+    static int encodeStep(int samplerIdx, int slot) noexcept
+    {
+        return samplerIdx * LuxSamplerConstants::NUM_SLOTS + slot;
+    }
+    static int decodeSampler(int enc) noexcept
+    {
+        return enc < 0 ? -1 : enc / LuxSamplerConstants::NUM_SLOTS;
+    }
+    static int decodeSlot(int enc) noexcept
+    {
+        return enc < 0 ? enc : enc % LuxSamplerConstants::NUM_SLOTS;
+    }
+    /** Decoded sampler index for step i (−1 for empty/live/invalid). */
+    int stepSampler(int stepIdx) const noexcept { return decodeSampler(getStep(stepIdx)); }
+    /** Decoded slot for step i (0..11, or the sentinel value). */
+    int stepSlot(int stepIdx) const noexcept { return decodeSlot(getStep(stepIdx)); }
 
     // ── Transport (message thread — converted to RT-safe atomic commands) ─────
     void uiPlay  () noexcept;
@@ -86,9 +134,14 @@ public:
     bool loadFromXml (const juce::XmlElement& xml);
 
 private:
-    LuxSampler* luxSampler = nullptr;
+    // ── Ordered sampler engines (index 0 = A, 1 = B, …) ───────────────────────
+    LuxSampler*      samplers_[kMaxSamplers] {};
+    std::atomic<int> numSamplers_ { 0 };
+    /** Primary engine (sampler A) — owns the single playback channel in step 1;
+     *  sentinel steps (LIVE/EMPTY) and transport act on it. */
+    LuxSampler* primarySampler() const noexcept { return samplers_[0]; }
 
-    // ── Per-step bank assignment (-1 = empty, 0–11 = bank index) ─────────────
+    // ── Per-step encoded (sampler,slot) assignment, or a negative sentinel ────
     std::atomic<int> steps[MAX_STEPS];
 
     // ── Config atomics ────────────────────────────────────────────────────────
@@ -125,6 +178,10 @@ private:
      *  activating the next one — regardless of whether it was playing or
      *  recording (activePlaySlot is -1 during recording). */
     int    rtPrevActiveBank      = -1;
+    /** Sampler engine index of the slot in rtPrevActiveBank, so triggerStep()
+     *  finalises the previous bank on the RIGHT engine when the next step lives
+     *  on a different sampler. */
+    int    rtPrevActiveSampler   = 0;
 
     // ── RT helper (atomics only) ──────────────────────────────────────────────
     void triggerStep (int stepIdx) noexcept;

@@ -218,7 +218,7 @@ SamplerSetupPanel::SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Col
         slotClearBtn[i].setButtonText("X");
         slotClearBtn[i].onClick = [this, i]()
         {
-            if (auto* fs = audioProcessor.getLuxSampler())
+            if (auto* fs = audioProcessor.getSampler(samplerIndex_))
                 fs->clearSlot(i);
         };
         addAndMakeVisible(slotClearBtn[i]);
@@ -359,7 +359,7 @@ void SamplerSetupPanel::timerCallback()
 
 void SamplerSetupPanel::updateSlotDisplays()
 {
-    auto* fs = audioProcessor.getLuxSampler();
+    auto* fs = audioProcessor.getSampler(samplerIndex_);
     if (fs == nullptr) return;
 
     for (int i = 0; i < NUM_SLOTS; ++i)

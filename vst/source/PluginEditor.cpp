@@ -25,11 +25,38 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     catalogViewport.setScrollBarThickness(8);
     addAndMakeVisible(catalogViewport);
 
+    // Collapse / expand controls for the catalogue rail (mirrors ZONE 4).
+    // Collapsing hides the rail and locks the chain rack (no deletion; reorder
+    // still works); expanding restores both.
+    catalogCollapseBtn.setTooltip("Hide modules - locks chain edits (reorder still works)");
+    catalogCollapseBtn.onClick = [this] { setCatalogCollapsed(true); };
+    addChildComponent(catalogCollapseBtn);
+    catalogExpandBtn.setTooltip("Show modules - unlocks chain edits");
+    catalogExpandBtn.onClick = [this] { setCatalogCollapsed(false); };
+    addChildComponent(catalogExpandBtn);
+
     // ── ZONE 2: chain rack inside a vertical viewport ─────────────────────────
     chainRack = std::make_unique<ChainRackComponent>(audioProcessor);
     chainRack->onBlockSelected = [this](ChainBlockId id) { selectBlock(id); };
+    // Selecting a VIDEO SCROLL output binds the contextual panel to that
+    // instance's bank (fires just before onBlockSelected → selectBlock).
+    chainRack->onVideoBlockSelected = [this](int slot)
+    {
+        if (videoScrollPage) videoScrollPage->setSlot(slot);
+    };
+    // Selecting a SAMPLER block binds the sampler page + setup to engine A/B
+    // (slot 0 = A, 1 = B), fired just before onBlockSelected → selectBlock.
+    chainRack->onSamplerBlockSelected = [this](int slot)
+    {
+        if (samplerPage)  samplerPage ->setSamplerIndex(slot);
+        if (samplerSetup) samplerSetup->setSamplerIndex(slot);
+    };
     // A chain edit changes the rack's preferred height → re-run the zone layout.
-    chainRack->onModelChanged  = [this] { layoutZones(); };
+    chainRack->onModelChanged  = [this]
+    {
+        layoutZones();
+        if (waterfallColumn) waterfallColumn->refreshActiveSlots();   // outputs added/removed
+    };
     rackViewport.setViewedComponent(chainRack.get(), false);
     rackViewport.setScrollBarsShown(true, false);
     rackViewport.setScrollBarThickness(8);
@@ -66,9 +93,17 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     samplerPage = std::make_unique<SamplerPageComponent>(audioProcessor);
     zone3Content.addChildComponent(samplerPage.get());
 
+    // SEQUENCER — step sequencer extracted from the sampler page into its own
+    // module page (grid + transport/config bar).
+    sequencerPage = std::make_unique<SequencerPageComponent>(audioProcessor);
+    zone3Content.addChildComponent(sequencerPage.get());
+
     // SCORE — offline printable-spectrogram export tool (no SETUP face)
     scorePage = std::make_unique<ScoreGenTabComponent>(audioProcessor);
     zone3Content.addChildComponent(scorePage.get());
+
+    videoScrollPage = std::make_unique<VideoScrollPage>(audioProcessor);
+    zone3Content.addChildComponent(videoScrollPage.get());
 
     // Engine audio panels — the former SYNTH AUDIOSYNTH/AUDIOWAVE sub-pages,
     // repackaged as components (same params & attachments).  AUDIOSTRAL is now
@@ -118,7 +153,7 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     addChildComponent(modulePowerButton);
 
     // ── ZONE 4: video scroll column (hosts the former VIDEO tab) ──────────────
-    waterfallColumn = std::make_unique<WaterfallColumnComponent>(audioProcessor);
+    waterfallColumn = std::make_unique<VideoMixerColumn>(audioProcessor);
     waterfallColumn->onCollapseToggled = [this](bool)
     {
         layoutZones();
@@ -163,6 +198,8 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     zone4Width = (int) state.getProperty("zone4W", kZone4DefaultW);
     if ((bool) state.getProperty("scrollCollapsed", false))
         waterfallColumn->setCollapsed(true, false);
+    if ((bool) state.getProperty("catalogCollapsed", false))
+        setCatalogCollapsed(true, false);   // also locks the chain rack
 
     // Initial selection: chain 1 source (zone 1 → Chain 1 view)
     selectBlock(ChainBlockId::Chain1Source);
@@ -188,11 +225,13 @@ Sp3ctraAudioProcessorEditor::~Sp3ctraAudioProcessorEditor()
 }
 
 //==============================================================================
-bool Sp3ctraAudioProcessorEditor::blockHasSetup(ChainBlockId) noexcept
+bool Sp3ctraAudioProcessorEditor::blockHasSetup(ChainBlockId id) noexcept
 {
     // Every block has a SETUP face — the SP3CTRA source hosts the network/CIS
-    // configuration there (formerly the gear-wheel Network tab).
-    return true;
+    // configuration there (formerly the gear-wheel Network tab) — EXCEPT the
+    // SEQUENCER module, whose controls all live on its single PLAY page, and the
+    // VIDEO SCROLL output, whose params are all on its PLAY page (no setup).
+    return id != ChainBlockId::Sequencer && id != ChainBlockId::VideoScroll;
 }
 
 //==============================================================================
@@ -208,11 +247,13 @@ void Sp3ctraAudioProcessorEditor::applyZone3Visibility()
     if (pitchPage)       pitchPage      ->setVisible(play && id == ChainBlockId::Pitch);
     if (maskPage)        maskPage       ->setVisible(play && id == ChainBlockId::Mask);
     if (samplerPage)     samplerPage    ->setVisible(play && id == ChainBlockId::Sampler);
+    if (sequencerPage)   sequencerPage  ->setVisible(play && id == ChainBlockId::Sequencer);
     if (imgLuxStralPage) imgLuxStralPage->setVisible(play && id == ChainBlockId::LuxStral);
     if (imgLuxSynthPage) imgLuxSynthPage->setVisible(play && id == ChainBlockId::LuxSynth);
     if (audioSynthPanel) audioSynthPanel->setVisible(play && id == ChainBlockId::LuxSynth);
     if (audioWavePanel)  audioWavePanel ->setVisible(play && id == ChainBlockId::LuxWave);
     if (scorePage)       scorePage      ->setVisible(play && id == ChainBlockId::Score);
+    if (videoScrollPage) videoScrollPage->setVisible(play && id == ChainBlockId::VideoScroll);
 
     // ── SETUP face: the per-block settings panel ──────────────────────────────
     if (sourceSetup)  sourceSetup ->setVisible(setupFace && (id == ChainBlockId::Chain1Source
@@ -281,6 +322,15 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
             break;
         // SCORE is an offline export tool — keep a neutral live view in zone 1.
         case ChainBlockId::Score:
+            sources = { VisualizerMode::MODULATED };
+            break;
+        // SEQUENCER drives the sampler engines — neutral Modulated view in zone 1.
+        case ChainBlockId::Sequencer:
+            sources = { VisualizerMode::MODULATED };
+            break;
+        // VIDEO SCROLL output — neutral Modulated view in zone 1 (its own waterfall
+        // is composited in the right-band mixer, not here).
+        case ChainBlockId::VideoScroll:
             sources = { VisualizerMode::MODULATED };
             break;
     }
@@ -416,6 +466,60 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
     g.setColour(juce::Colour(0xff333333));
     g.fillRect(0, zonesTopY() - 1, getWidth(), 1);
 
+    // ── Module catalogue rail — mirrors ZONE 4 (header band / collapsed grip).
+    //    The rack sits flush to the right; its own left border is the divider. ─
+    {
+        const int ry    = zonesTopY();
+        const int rh    = juce::jmax(0, getHeight() - ry);
+
+        if (catalogCollapsed)
+        {
+            // Collapsed grip: expand button (laid out in resized) + dotted spine
+            // + rotated "MODULES" caption, centred — same as the VIDEO SCROLL grip.
+            g.setColour(juce::Colour(0xff14141c));
+            g.fillRect(0, ry, kCatGripW, rh);
+
+            const float cx = kCatGripW * 0.5f;
+            const float cy = ry + rh * 0.5f;
+
+            const int spineTop = ry + 4 + 18 + 10;   // below the expand button
+            g.setColour(juce::Colour(0xff2c2c3a));
+            for (int y = spineTop; y < getHeight() - 12; y += 9)
+                g.fillEllipse(cx - 1.5f, (float) y, 3.f, 3.f);
+
+            g.setColour(juce::Colour(0xff7a86a0));
+            g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontTiny)).boldened());
+            g.saveState();
+            g.addTransform(juce::AffineTransform::rotation(
+                juce::MathConstants<float>::halfPi, cx, cy));
+            g.drawText("MODULES",
+                       juce::Rectangle<float>(cx - 130.f, cy - 9.f, 260.f, 18.f),
+                       juce::Justification::centred, false);
+            g.restoreState();
+        }
+        else
+        {
+            // Header band: same bg + title weight as ZONE 4 so the collapse ✕
+            // button blends in identically.
+            g.setColour(juce::Colour(0xff1f1f2c));
+            g.fillRect(0, ry, kPaletteW, kCatHeaderH);
+
+            const int btn = kCatHeaderH - 4;
+            g.setColour(juce::Colour(0xff66cc88));
+            g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
+            g.drawText("MODULES", 8, ry, juce::jmax(0, kPaletteW - btn - 12), kCatHeaderH,
+                       juce::Justification::centredLeft, false);
+
+            g.setColour(juce::Colour(Sp3ctraTheme::kColBorder));
+            g.fillRect(0, ry + kCatHeaderH - 1, kPaletteW, 1);
+
+            // Body bg behind the viewport: keeps the scrollbar-reserved strip the
+            // rail's colour (never the window bg) right up to the rack edge.
+            g.setColour(juce::Colour(0xff14141c));
+            g.fillRect(0, ry + kCatHeaderH, kPaletteW, juce::jmax(0, rh - kCatHeaderH));
+        }
+    }
+
     // ZONE 5 (reserved — output / master / monitoring) is a collapsed strip
     // of height 0 at the bottom; nothing is drawn for it yet.
 }
@@ -437,6 +541,22 @@ void Sp3ctraAudioProcessorEditor::resized()
 
     // Persist the window size (+ current zone widths) in the session state.
     persistLayoutProps();
+}
+
+//==============================================================================
+void Sp3ctraAudioProcessorEditor::setCatalogCollapsed(bool shouldCollapse, bool persist)
+{
+    catalogCollapsed = shouldCollapse;
+
+    // Performance lock follows the rail: collapsed → chains can be reordered but
+    // not deleted; expanded → full editing returns.
+    if (chainRack)
+        chainRack->setLocked(catalogCollapsed);
+
+    layoutZones();            // rail width + button visibility + zone reflow
+    if (persist)
+        persistLayoutProps();
+    repaint();                // header band / collapsed grip background
 }
 
 //==============================================================================
@@ -467,28 +587,48 @@ void Sp3ctraAudioProcessorEditor::layoutZones()
     const int zonesY = zonesTopY();
     const int zonesH = juce::jmax(0, H - zonesY - zone5H);
 
-    // ── Module catalogue rail (fixed width, far left; scrolls if tall) ────────
-    catalogViewport.setBounds(0, zonesY, kPaletteW, zonesH);
-    const int catW = juce::jmax(40, kPaletteW - catalogViewport.getScrollBarThickness());
-    moduleCatalog.setSize(catW, juce::jmax(moduleCatalog.preferredHeight(), zonesH));
+    // ── Module catalogue rail (collapsible, far left; scrolls if tall) ────────
+    // Collapsed → a thin grip with the expand button; expanded → a header band
+    // (title + collapse ✕) above the scrolling catalogue viewport.
+    const int catRailW = catalogCollapsed ? kCatGripW : kPaletteW;
+    catalogViewport.setVisible(! catalogCollapsed);
+    catalogCollapseBtn.setVisible(! catalogCollapsed);
+    catalogExpandBtn  .setVisible(catalogCollapsed);
+
+    if (catalogCollapsed)
+    {
+        // Full-width grip button, like ZONE 4's expand control.
+        catalogExpandBtn.setBounds(2, zonesY + 4, kCatGripW - 4, 18);
+    }
+    else
+    {
+        const int btn = kCatHeaderH - 4;   // 18 — identical to ZONE 4's collapse ✕
+        catalogCollapseBtn.setBounds(kPaletteW - btn - 2, zonesY + 2, btn, btn);
+
+        const int catTop = zonesY + kCatHeaderH;
+        const int catH   = juce::jmax(0, zonesH - kCatHeaderH);
+        catalogViewport.setBounds(0, catTop, kPaletteW, catH);
+        const int catW = juce::jmax(40, kPaletteW - catalogViewport.getScrollBarThickness());
+        moduleCatalog.setSize(catW, juce::jmax(moduleCatalog.preferredHeight(), catH));
+    }
 
     // ── Zone widths (clamped so zone 3 keeps at least kZone3MinW) ────────────
     const bool collapsed   = waterfallColumn->isCollapsed();
     const int  rightSplitW = collapsed ? 0 : kSplitterW;
 
-    int z4w = WaterfallColumnComponent::kGripW;
+    int z4w = VideoMixerColumn::kGripW;
     if (!collapsed)
     {
-        const int z4Max = W - kPaletteW - kZone2MinW - kSplitterW - kZone3MinW - rightSplitW;
+        const int z4Max = W - catRailW - kZone2MinW - kSplitterW - kZone3MinW - rightSplitW;
         zone4Width = juce::jlimit(kZone4MinW, juce::jmax(kZone4MinW, z4Max), zone4Width);
         z4w = zone4Width;
     }
 
-    const int z2Max = W - kPaletteW - kSplitterW - kZone3MinW - rightSplitW - z4w;
+    const int z2Max = W - catRailW - kSplitterW - kZone3MinW - rightSplitW - z4w;
     zone2Width = juce::jlimit(kZone2MinW, juce::jmax(kZone2MinW, z2Max), zone2Width);
 
-    // ── Place the columns left → right ────────────────────────────────────────
-    int x = kPaletteW;
+    // ── Place the columns left → right (chain rack flush against the rail) ────
+    int x = catRailW;
 
     rackViewport.setBounds(x, zonesY, zone2Width, zonesH);
     x += zone2Width;
@@ -569,6 +709,9 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
             case ChainBlockId::Chain1Source:
             case ChainBlockId::Chain2Source:
                 top = sourceSetup.get();  topMinH = SourceSetupPanel::kPreferredH;    break;
+            case ChainBlockId::Sequencer:
+            case ChainBlockId::VideoScroll:
+                break;   // no SETUP face (blockHasSetup == false)
         }
     }
     else
@@ -577,13 +720,15 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
         {
             case ChainBlockId::Chain1Source:
             case ChainBlockId::Chain2Source:
-                top = sourcesPage.get();     topMinH = 130; break;
+                top = sourcesPage.get();     topMinH = 260; break;  // +acquisition-speed group
             case ChainBlockId::Pitch:
                 top = pitchPage.get();       topMinH = 510; break;  // +100 env editor
             case ChainBlockId::Mask:
                 top = maskPage.get();        topMinH = 570; break;  // +100 env editor
             case ChainBlockId::Sampler:
                 top = samplerPage.get();     topMinH = 560; break;
+            case ChainBlockId::Sequencer:
+                top = sequencerPage.get();   topMinH = 360; break;  // grid + transport
             case ChainBlockId::LuxStral:
                 top = imgLuxStralPage.get(); topMinH = LuxStralTabComponent::kPreferredH;
                 break;
@@ -595,6 +740,8 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
                 top = audioWavePanel.get();  topMinH = AudioWavePanel::kPreferredH; break;
             case ChainBlockId::Score:
                 top = scorePage.get();       topMinH = 360; break;  // actions + transport only
+            case ChainBlockId::VideoScroll:
+                top = videoScrollPage.get(); topMinH = VideoScrollPage::kPreferredH; break;
         }
     }
 
@@ -635,6 +782,7 @@ void Sp3ctraAudioProcessorEditor::persistLayoutProps()
     state.setProperty("scrollCollapsed",
                       waterfallColumn != nullptr && waterfallColumn->isCollapsed(),
                       nullptr);
+    state.setProperty("catalogCollapsed", catalogCollapsed, nullptr);
 }
 
 //==============================================================================

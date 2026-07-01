@@ -767,6 +767,9 @@ static void synth_shutdown_thread_pool_impl(LuxStralEngine *eng) {
  */
 void synth_shutdown_thread_pool(void) {
   synth_shutdown_thread_pool_impl(&g_luxstral_engine_a);
+  // M8 — engine B (no-op if its pool never initialised)
+  if (g_luxstral_engine_b.pool_initialized)
+    synth_shutdown_thread_pool_impl(&g_luxstral_engine_b);
 }
 
 /**

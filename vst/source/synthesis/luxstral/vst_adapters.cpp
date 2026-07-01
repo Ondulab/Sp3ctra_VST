@@ -25,6 +25,14 @@ AudioImageBuffer luxstral_buffers_L[2] = {{nullptr, 0, 0}, {nullptr, 0, 0}};
 AudioImageBuffer luxstral_buffers_R[2] = {{nullptr, 0, 0}, {nullptr, 0, 0}};
 volatile int luxstral_buffer_index = 0;  // 🔧 Access ONLY via __atomic_*_n for ARM64
 
+// M8 — LuxStral engine B: second, independent publish target (dual-engine A/B).
+// Allocated/freed alongside engine A's buffers below. Engine B has no separate
+// producer/consumer handshake: it renders inside the same audio-thread iteration
+// as A (paced by A's g_vst_callback_consumed_buffer), so it is implicitly paced.
+AudioImageBuffer luxstral_b_buffers_L[2] = {{nullptr, 0, 0}, {nullptr, 0, 0}};
+AudioImageBuffer luxstral_b_buffers_R[2] = {{nullptr, 0, 0}, {nullptr, 0, 0}};
+volatile int luxstral_b_buffer_index = 0;  // 🔧 Access ONLY via __atomic_*_n
+
 // VST callback synchronization (producer/consumer handoff)
 // 🔧 LOCK-FREE: Replaced pthread_cond with atomic flag polling
 // pthread_cond_signal() without mutex caused lost signals → 200ms audio gaps
@@ -137,9 +145,23 @@ int luxstral_init_audio_buffers(int buffer_size) {
         }
         luxstral_buffers_R[i].ready = 0;
         luxstral_buffers_R[i].write_timestamp_us = 0;
+
+        // M8 — engine B second buffer set (same size/layout)
+        luxstral_b_buffers_L[i].data = (float*)calloc(buffer_size, sizeof(float));
+        luxstral_b_buffers_R[i].data = (float*)calloc(buffer_size, sizeof(float));
+        if (!luxstral_b_buffers_L[i].data || !luxstral_b_buffers_R[i].data) {
+            log_error("SYNTH", "Failed to allocate engine-B buffer");
+            luxstral_cleanup_audio_buffers();
+            return -1;
+        }
+        luxstral_b_buffers_L[i].ready = 0;
+        luxstral_b_buffers_L[i].write_timestamp_us = 0;
+        luxstral_b_buffers_R[i].ready = 0;
+        luxstral_b_buffers_R[i].write_timestamp_us = 0;
     }
-    
+
     luxstral_buffer_index = 0;
+    luxstral_b_buffer_index = 0;
     luxstral_audio_buffer_size = buffer_size;  // Store current size
     luxstral_audio_buffers_initialized = true;
     
@@ -165,6 +187,9 @@ int luxstral_init_audio_buffers(int buffer_size) {
         if (mlock(luxstral_buffers_R[i].data, buffer_bytes) == 0) {
             mlock_success++;
         }
+        // Engine B buffers (best-effort; not counted in mlock_total)
+        mlock(luxstral_b_buffers_L[i].data, buffer_bytes);
+        mlock(luxstral_b_buffers_R[i].data, buffer_bytes);
     }
     
     if (mlock_success == mlock_total) {
@@ -196,8 +221,20 @@ void luxstral_cleanup_audio_buffers(void) {
             luxstral_buffers_R[i].data = nullptr;
         }
         luxstral_buffers_R[i].ready = 0;
+
+        // M8 — engine B second buffer set
+        if (luxstral_b_buffers_L[i].data) {
+            free(luxstral_b_buffers_L[i].data);
+            luxstral_b_buffers_L[i].data = nullptr;
+        }
+        luxstral_b_buffers_L[i].ready = 0;
+        if (luxstral_b_buffers_R[i].data) {
+            free(luxstral_b_buffers_R[i].data);
+            luxstral_b_buffers_R[i].data = nullptr;
+        }
+        luxstral_b_buffers_R[i].ready = 0;
     }
-    
+
     luxstral_audio_buffers_initialized = false;
     log_info("SYNTH", "Audio buffers cleaned up");
 }

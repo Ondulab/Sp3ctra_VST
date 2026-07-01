@@ -28,8 +28,8 @@ public:
     ScoreSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour);
     ~ScoreSetupPanel() override;
 
-    /** Natural content height (freq-range section + dynamic-range row). */
-    static constexpr int kPreferredH = 300;
+    /** Natural content height (freq-range + dynamic-range + CIS-height rows). */
+    static constexpr int kPreferredH = 400;
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -42,6 +42,9 @@ private:
 
     /** Refresh the freq-range controls + enabled state from the current mode. */
     void refreshFreqControls();
+    /** Refresh the CIS-height control: greyed + locked to the sensor length
+     *  unless the Manual override is enabled. */
+    void refreshHeightControls();
     /** Compute & display the resulting Hz span for the current settings. */
     void updateRangeInfo();
 
@@ -67,6 +70,14 @@ private:
     // Page Format / Printer DPI moved to the PLAY page (format options).
     juce::Label  dynLabel;
     juce::Slider dynSlider;
+
+    // ── Print size — spectro band height = CIS sensor active length ────────
+    // Locked to SCORE_CIS_HEIGHT_MM (219.456 mm) by default so a 100%-scale
+    // print plays in tune; tick Manual to override (non-standard sensor/scaling).
+    juce::Label        printSectionLabel;
+    juce::ToggleButton heightManualToggle;
+    juce::Label        heightLabel;
+    juce::Slider       heightSlider;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ScoreSetupPanel)
 };

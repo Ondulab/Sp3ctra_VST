@@ -49,7 +49,15 @@ extern "C" {
 #define SCORE_DEFAULT_PRINTER_DPI       400.0
 #define SCORE_DEFAULT_HIGH_BOOST_ALPHA  0.99
 #define SCORE_DEFAULT_BOTTOM_MARGIN_MM  50.8
-#define SCORE_DEFAULT_SPECTRO_HEIGHT_MM 216.7
+/* Physical active length of the Sp3ctra CIS sensor. The spectro band MUST be
+ * printed at exactly this height for a 100%-scale print to play back in tune:
+ * the whole minFreq..maxFreq span is mapped across the sensor's pixels, so any
+ * height mismatch shifts every frequency. It is DPI-independent — the sensor is
+ * 8.64" long either way: 3456 px / 400 DPI = 1728 px / 200 DPI = 8.64" =
+ * 219.456 mm. (The legacy 216.7 mm was ~1.3% short ⇒ printed scores sounded
+ * slightly flat.) */
+#define SCORE_CIS_HEIGHT_MM             219.456
+#define SCORE_DEFAULT_SPECTRO_HEIGHT_MM SCORE_CIS_HEIGHT_MM
 
 #define SCORE_OVERLAP_LOW               0.50
 #define SCORE_OVERLAP_MEDIUM            0.85
@@ -81,7 +89,8 @@ typedef struct ScoreSettings
     double printerDpi;          /* output resolution        (400)           */
     int    pageFormat;          /* 0=A4 portrait, 1=A3 landscape            */
     double writingSpeed;        /* cm/s ; 0 ⇒ use binsPerSecond directly     */
-    double spectroHeightMM;     /* height of the spectro band (216.7)       */
+    double spectroHeightMM;     /* height of the spectro band = CIS length (219.456) */
+    int    spectroHeightManual; /* 0 ⇒ locked to SCORE_CIS_HEIGHT_MM; 1 ⇒ user override */
     double bottomMarginMM;      /* band offset above page bottom (50.8)     */
     int    enableHighBoost;     /* 0/1 — HF pre-emphasis (bass-cut/treble tilt)*/
     double highBoostAlpha;      /* 0..1 (0.99)                              */
@@ -93,6 +102,7 @@ typedef struct ScoreSettings
     int    enableNormalization; /* 0/1 — normalise to peak 1.0 before FFT    */
     int    fftSize;             /* useful window size; 0 ⇒ auto from bps     */
     double startTimeSec;        /* offset into the WAV where extraction begins */
+    int    enableStereoMode;    /* 0/1 — generate L/R spectrograms (red=L, blue=R) */
 } ScoreSettings;
 
 /* Fills *s with the legacy defaults. */

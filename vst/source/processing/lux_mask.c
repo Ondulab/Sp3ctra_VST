@@ -28,10 +28,26 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-/* ── Global instance ───────────────────────────────────────────────────────────
- * Single simulation (M2): the synthesis-thread instance is the only one.
- * Visualizers read the insert taps published by the chain executor. */
+/* ── Instance pool (M6 Phase 2) ────────────────────────────────────────────────
+ * Slot 0 is g_lux_mask_proc (legacy instance, also read by the UI). Slots 1..
+ * are independent per-chain instances. */
 LuxMaskState g_lux_mask_proc;
+static LuxMaskState s_lux_mask_extra[CHAIN_MAX_CHAINS - 1];
+
+LuxMaskState *lux_mask_instance(int idx)
+{
+    if (idx <= 0)
+        return &g_lux_mask_proc;
+    if (idx >= CHAIN_MAX_CHAINS)
+        idx = CHAIN_MAX_CHAINS - 1;
+    return &s_lux_mask_extra[idx - 1];
+}
+
+void lux_mask_init_all(void)
+{
+    for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
+        lux_mask_init(lux_mask_instance(i));
+}
 
 /* ── Timestamp helper ──────────────────────────────────────────────────────── */
 static uint64_t lux_mask_get_timestamp_us(void)
