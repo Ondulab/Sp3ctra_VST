@@ -42,34 +42,18 @@ TransportBarComponent::TransportBarComponent(Sp3ctraAudioProcessor& proc)
     // samplerFreezeMode — that parameter is owned exclusively by the
     // IMAGE page's S–Sampler transport (SourcesTabComponent).
     // The sequencer overrides freeze_mode internally via seqControlledPlay.
+    // They go through the seqTransport param (0=Stop 1=Play 2=Hold) so the DAW
+    // can automate / MIDI-map the transport; the processor relays to the engine.
     seqPlayBtn.setIconPath(Icons::play());
-    seqPlayBtn.onClick = [this]
-    {
-        if (auto* seq = processor.getFrameSequencer())
-        {
-            if (seq->isHeld())
-                seq->uiResume();
-            else
-                seq->uiPlay();
-        }
-        updateTransportButtons();
-    };
+    seqPlayBtn.onClick = [this] { requestTransport(1); };
     addAndMakeVisible(seqPlayBtn);
 
     seqHoldBtn.setIconPath(Icons::pause());
-    seqHoldBtn.onClick = [this]
-    {
-        if (auto* seq = processor.getFrameSequencer()) seq->uiHold();
-        updateTransportButtons();
-    };
+    seqHoldBtn.onClick = [this] { requestTransport(2); };
     addAndMakeVisible(seqHoldBtn);
 
     seqStopBtn.setIconPath(Icons::stop());
-    seqStopBtn.onClick = [this]
-    {
-        if (auto* seq = processor.getFrameSequencer()) seq->uiStop();
-        updateTransportButtons();
-    };
+    seqStopBtn.onClick = [this] { requestTransport(0); };
     addAndMakeVisible(seqStopBtn);
 
     updateTransportButtons();
@@ -128,6 +112,31 @@ TransportBarComponent::TransportBarComponent(Sp3ctraAudioProcessor& proc)
 }
 
 TransportBarComponent::~TransportBarComponent() { stopTimer(); }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// requestTransport — route a Play/Hold/Stop press through the seqTransport
+// param so the host records/sees it. Re-pressing the current mode cannot
+// change the param (no callback fires), so that case falls through to the
+// engine directly — notably Play-while-playing restarts from step 0.
+// ─────────────────────────────────────────────────────────────────────────────
+void TransportBarComponent::requestTransport(int mode)
+{
+    if (auto* p = processor.getAPVTS().getParameter("seqTransport"))
+    {
+        const float norm = p->convertTo0to1(static_cast<float>(mode));
+        if (! juce::approximatelyEqual(p->getValue(), norm))
+        {
+            p->setValueNotifyingHost(norm);  // parameterChanged drives the engine
+        }
+        else if (auto* seq = processor.getFrameSequencer())
+        {
+            if (mode == 1)      { if (seq->isHeld()) seq->uiResume(); else seq->uiPlay(); }
+            else if (mode == 2) seq->uiHold();
+            else                seq->uiStop();
+        }
+    }
+    updateTransportButtons();
+}
 
 void TransportBarComponent::paint(juce::Graphics& g)
 {

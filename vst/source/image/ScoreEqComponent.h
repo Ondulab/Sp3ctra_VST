@@ -33,10 +33,15 @@ public:
     /** Called whenever the curve changes (drag / reset). */
     std::function<void()> onChange;
 
-    /** Rebuild the octave node grid for a new frequency span (resets gains). */
+    /** Rebuild the octave node grid for a new frequency span (resets gains).
+     *  No-op when the span is unchanged, so regenerating with the same musical
+     *  range keeps the curve the user drew. */
     void setRange(double minHz, double maxHz)
     {
         if (minHz <= 0.0 || maxHz <= minHz) return;
+        if (! gains.empty()
+            && std::abs(minHz - minF) < 1e-9 && std::abs(maxHz - maxF) < 1e-9)
+            return;
         minF = minHz; maxF = maxHz;
         const int oct = juce::jmax(1, (int) std::lround(std::log2(maxF / minF)));
         freqs.clear();
@@ -44,6 +49,38 @@ public:
             freqs.push_back(minF * std::pow(2.0, (double) k));
         gains.assign(freqs.size(), 0.0f);
         repaint();
+    }
+
+    /** Serialise the curve as "minF|maxF|g0;g1;…" for the plugin state blob. */
+    juce::String encodeState() const
+    {
+        juce::String s;
+        s << juce::String(minF, 3) << '|' << juce::String(maxF, 3) << '|';
+        for (size_t i = 0; i < gains.size(); ++i)
+        {
+            if (i) s << ';';
+            s << juce::String(gains[i], 2);
+        }
+        return s;
+    }
+
+    /** Restore a curve written by encodeState(). Returns false (curve left
+     *  untouched / flat) on any mismatch. */
+    bool decodeState(const juce::String& s)
+    {
+        const auto parts = juce::StringArray::fromTokens(s, "|", "");
+        if (parts.size() != 3) return false;
+        const double lo = parts[0].getDoubleValue();
+        const double hi = parts[1].getDoubleValue();
+        if (lo <= 0.0 || hi <= lo) return false;
+        setRange(lo, hi);
+        const auto gs = juce::StringArray::fromTokens(parts[2], ";", "");
+        if ((size_t) gs.size() != gains.size()) return false;
+        for (int i = 0; i < gs.size(); ++i)
+            gains[(size_t) i] = juce::jlimit(-kGainRange, kGainRange,
+                                             gs[i].getFloatValue());
+        repaint();
+        return true;
     }
 
     /** Reset every band to 0 dB. */

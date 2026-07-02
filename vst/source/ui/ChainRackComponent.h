@@ -66,6 +66,11 @@ public:
      *  sampler page + setup panel to the right engine. */
     std::function<void(int)> onSamplerBlockSelected;
 
+    /** Fired (BEFORE onBlockSelected) when the selected block is a LUXSTRAL,
+     *  carrying its engine index (slot: 0 = A, 1 = B) so the editor can bind the
+     *  module page + setup panel to the right engine's parameter set (M8). */
+    std::function<void(int)> onLuxStralBlockSelected;
+
     /** Fired after a model mutation so the editor can re-run layoutZones()
      *  (the rack's preferred height changed). Persistence + the audio-param
      *  bridge are handled internally. */

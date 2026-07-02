@@ -73,6 +73,14 @@ typedef struct
      *   Large (50+)  → loose, nearly all blob oscillators active (spectral cloud)
      */
     float note_attenuation[STROKEFORGE_MAX_NOTES];
+
+    /*
+     * Waveform morph for THIS frame: 0.0 = pure sine … 1.0 = pure square.
+     * Per-frame, per-pipeline-call output (M8) — each LuxStral engine reads its
+     * own db's value (the global g_waveform_morph holds the LAST call's frame,
+     * which cross-talks between engines A and B).
+     */
+    float morph;
 } StrokeForgeFrameData;
 
 /*──────────────────────────────────────────────────────────────────────────────

@@ -53,7 +53,10 @@ private:
 
     // ── Session helpers (Non-RT, message thread only) ─────────────────────────
     void doSaveSession(const juce::File& sessionFile);
-    void doLoadSession(const juce::File& sessionFile);
+    /** @p isAutoRestore true when triggered by the startup auto-reload: the
+     *  slot params / sequencer pattern freshly restored from the DAW state
+     *  (newer than the session's copies) are then preserved. */
+    void doLoadSession(const juce::File& sessionFile, bool isAutoRestore = false);
 
     /** Path of the last loaded or saved session.
      *  When set, SAVE SESSION writes directly to this file (no file dialog). */

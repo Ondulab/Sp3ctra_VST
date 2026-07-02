@@ -903,23 +903,30 @@ void *udpThread(void *arg) {
             }
 
             const SynthChainPlan *spLB = &frame_plan.synth[CHAIN_SYNTH_LUXSTRAL_B];
-            if (spLB->present)
+            if (spLB->present && spLB->source_kind == CHAIN_SRC_NONE)
             {
-                /* Silent input frame — used when engine B's chain has NO source
-                 * (source_kind == NONE): feeding the live scanline in that case is
-                 * the "sound without a source" bug. Static zero buffer → the normal
-                 * pipeline path yields a zeroed grayscale (proper silence). */
-                static const uint8_t s_zero_frame[CIS_MAX_PIXELS_NB] = {0};
+                /* No source placed in this chain → TRUE silence. Do NOT run the
+                 * pipeline on a synthetic frame: with inversion ON a black frame
+                 * comes out as ALL notes at max volume (wall of sound), and no
+                 * uniform frame is silent for every inversion/AC-removal combo.
+                 * Zeroed notes/grayscale/contrast are silent unconditionally. */
+                static PreprocessedImageData s_preprocessed_silence; /* stays zeroed */
+                struct timeval tv_silence;
+                gettimeofday(&tv_silence, NULL);
+                s_preprocessed_silence.timestamp_us =
+                    (uint64_t)tv_silence.tv_sec * 1000000ULL + (uint64_t)tv_silence.tv_usec;
 
+                pthread_mutex_lock(&s_luxstral_b_db.mutex);
+                s_luxstral_b_db.preprocessed_data = s_preprocessed_silence;
+                s_luxstral_b_db.dataReady = 1;
+                pthread_mutex_unlock(&s_luxstral_b_db.mutex);
+            }
+            else if (spLB->present)
+            {
                 const uint8_t *bxR, *bxG, *bxB;
                 if (spLB->has_sampler && mod_R)
                 {
                     bxR = mod_R; bxG = mod_G; bxB = mod_B;   /* modulated/sampler channel */
-                }
-                else if (spLB->source_kind == CHAIN_SRC_NONE)
-                {
-                    /* No source placed in this chain → silence (NOT the live feed). */
-                    bxR = s_zero_frame; bxG = s_zero_frame; bxB = s_zero_frame;
                 }
                 else if (spLB->num_inserts > 0)
                 {
@@ -935,7 +942,11 @@ void *udpThread(void *arg) {
                     bxR = db->activeBuffer_R; bxG = db->activeBuffer_G; bxB = db->activeBuffer_B;
                 }
 
-                if (pipeline_process_frame(bxR, bxG, bxB, &live_cfg, &s_preprocessed_temp_b) == 0)
+                /* Engine B's OWN pipeline config (M8): its inversion/AC/gamma/
+                 * contrast/stereo knobs + its own freeze-envelope state — fully
+                 * decoupled from engine A's settings (live_cfg above). */
+                PipelineConfig cfg_b = pipeline_build_config_luxstral_b();
+                if (pipeline_process_frame(bxR, bxG, bxB, &cfg_b, &s_preprocessed_temp_b) == 0)
                 {
                     pthread_mutex_lock(&s_luxstral_b_db.mutex);
                     s_luxstral_b_db.preprocessed_data = s_preprocessed_temp_b;

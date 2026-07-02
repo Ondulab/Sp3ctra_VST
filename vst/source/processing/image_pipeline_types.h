@@ -107,11 +107,14 @@ typedef struct {
 
     /* Stereo and misc */
     int        stereo_enabled;          /* 1 = compute stereo panning, 0 = skip */
+    float      stereo_temp_amp;         /* Colour-temperature amplification (pan) */
     int        pixels_per_note;         /* Averaging factor for LuxStral */
 
     /* Envelope identity — MUST match the caller, NOT the source routing.
      * 0 = ENVELOPE_LIVE  (set by live/UDP callers)
      * 1 = ENVELOPE_SAMPLER (set by FramePlayerThread callers)
+     * 2 = ENVELOPE_CHAIN2 (LuxSynth/LuxWave)
+     * 3 = ENVELOPE_LUXSTRAL_B (2nd LuxStral engine — its own freeze state)
      * Prevents the live thread from corrupting the sampler envelope state. */
     int        envelope_id;
 } PipelineConfig;
@@ -150,6 +153,7 @@ static inline PipelineConfig pipeline_config_default(void)
 
     /* Misc */
     cfg.stereo_enabled  = 0;
+    cfg.stereo_temp_amp = 2.5f;
     cfg.pixels_per_note = 1;
 
     /* Envelope: default to LIVE (0) */

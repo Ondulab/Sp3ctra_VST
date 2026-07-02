@@ -168,6 +168,11 @@ public:
     };
     ScoreFreqOverride& getScoreFreqOverride() noexcept { return scoreFreq_; }
 
+    /** Path of the WAV last loaded in the SCORE PLAY page. Persisted in the
+     *  APVTS state blob so the page reloads it on the next launch. */
+    void         setScoreWavPath(const juce::String& p) { scoreWavPath = p; }
+    juce::String getScoreWavPath()                const { return scoreWavPath; }
+
     /** Musical frequency range (Hz) driven by LuxStral's Tuning + Root Note +
      *  Octaves (the values LuxStral itself uses). */
     void getMusicalFrequencyRange(double& lowHz, double& highHz) const noexcept;
@@ -244,6 +249,31 @@ public:
      *  routing — WITHOUT touching enable params (those are restored from state).
      *  Headless-safe; called from the constructor and setStateInformation. */
     void loadChainModelFromState();
+
+    // -------------------------------------------------------------------------
+    // Non-APVTS state riding in the session blob (SCORE / SEQ / SAMPLER_SLOTS
+    // child trees). Captured in getStateInformation, restored in
+    // setStateInformation; the flags below coordinate the sampler session
+    // auto-load so a stale .sp3s can never clobber the freshly restored state.
+    // -------------------------------------------------------------------------
+    /** True when setStateInformation restored a sequencer pattern — the session
+     *  auto-load must then skip the (older) pattern stored in the .sp3s. */
+    bool wasSeqRestoredFromState() const noexcept { return seqRestoredFromState_; }
+
+    /** True when the state blob carried per-slot sampler parameters. */
+    bool hasStateSamplerParams() const noexcept { return samplerParamsInState_; }
+
+    /** Re-applies the SAMPLER_SLOTS state overlay to both engines (message
+     *  thread). Called after a session auto-load so labels/params restored
+     *  from the bank file are overridden by the newer state values. */
+    void applySamplerParamsFromState();
+
+    /** One-shot: true exactly once after setStateInformation restored a
+     *  non-empty lastSessionPath. The first SamplerPageComponent consumes it
+     *  to trigger the session auto-load; later editor re-openings must NOT
+     *  reload the session over live (unsaved) in-RAM edits. */
+    bool consumeSamplerAutoLoadPending() noexcept
+    { return samplerAutoLoadPending_.exchange(false, std::memory_order_acq_rel); }
 
     void startSamplerMidiLearn(int target) noexcept
     {
@@ -352,7 +382,14 @@ private:
     static constexpr const char* PARAM_SEQ_LOOP     = "seqLoop";
     static constexpr const char* PARAM_SEQ_DAW_SYNC = "seqDawSync";
     static constexpr const char* PARAM_SEQ_BPS      = "seqBeatsPerStep";
-    
+    static constexpr const char* PARAM_SEQ_TRANSPORT = "seqTransport"; // 0=Stop 1=Play 2=Hold
+
+    // SCORE playback transport parameter IDs (relayed to LuxSampler)
+    static constexpr const char* PARAM_SCORE_PLAYING = "scorePlaying";
+    static constexpr const char* PARAM_SCORE_LOOP    = "scoreLoop";
+    static constexpr const char* PARAM_SCORE_REVERSE = "scoreReverse";
+    static constexpr const char* PARAM_SCORE_SPEED   = "scoreSpeed";
+
     // Quick access to parameters (cached, no atomic overhead)
     std::atomic<float>* udpPortParam = nullptr;
     std::atomic<float>* udpByte1Param = nullptr;
@@ -410,6 +447,15 @@ private:
     void deriveAndPublishChainPlan();       // model → RT-safe per-synth ChainPlan
     void persistChainModel();              // model → apvts.state <CHAINS>
     void applyChainEnableBridge();         // presence → enable params (diff vs chainActiveTypes_)
+
+    // Non-APVTS state ↔ session blob (see the public flags above).
+    juce::ValueTree scoreStateToTree() const;                 // SCORE settings + freq override
+    void restoreScoreStateFromTree(const juce::ValueTree& t);
+    juce::ValueTree samplerSlotsStateToTree() const;          // both engines × 12 slots (+ overdub)
+    juce::ValueTree seqStateToTree() const;                   // sequencer pattern + timing
+    bool seqRestoredFromState_    = false;
+    bool samplerParamsInState_    = false;
+    std::atomic<bool> samplerAutoLoadPending_ { false };
     void teardownAbsentModules(const std::set<ModuleType>& now); // free state of removed modules
 
     // Video-scroll "Stop" pulse: incremented by the UI; each VideoDisplayComponent
@@ -449,6 +495,9 @@ private:
      *  Empty → fallback to file chooser (legacy behaviour). Persisted in
      *  the APVTS state blob alongside lastSessionPath. */
     juce::String samplerOutputDir;
+
+    /** WAV last loaded in the SCORE PLAY page (see get/setScoreWavPath). */
+    juce::String scoreWavPath;
     
     // Note: RT Profiler is now global (g_vst_rt_profiler) to be accessible from C threads
     

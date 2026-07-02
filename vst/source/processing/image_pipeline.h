@@ -75,6 +75,13 @@ PipelineConfig pipeline_build_config_live(void);
  */
 PipelineConfig pipeline_build_config_sampler(void);
 
+/**
+ * @brief Build a PipelineConfig for the 2nd LuxStral engine (B, M8).
+ * Live config with engine B's OWN image/stereo knobs (luxstral_b_* mirror of
+ * the luxstralB* APVTS params) and its OWN freeze-envelope state.
+ */
+PipelineConfig pipeline_build_config_luxstral_b(void);
+
 /* ============================================================================
  * Per-path processing (used internally and available for testing)
  * ============================================================================ */

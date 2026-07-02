@@ -47,47 +47,39 @@ public:
         // ── Master Volume (top of left column) ────────────────────────────
         initLabel(volumeLabel, "Volume");
         initSlider(luxstralVolumeSlider);
-        volumeAttach.reset(new SldAttach(apvts, "luxstralVolume", luxstralVolumeSlider));
 
         // ── IMAGE — conditioning (label is the toggle text itself) ──────────
         negativeToggle.setButtonText("Negative");
         addAndMakeVisible(negativeToggle);
-        negativeAttach.reset(new BtnAttach(apvts, "luxstralInversion", negativeToggle));
 
         dcBlockToggle.setButtonText("DC Blocking");
         addAndMakeVisible(dcBlockToggle);
-        dcBlockAttach.reset(new BtnAttach(apvts, "luxstralAcRemoval", dcBlockToggle));
 
         initLabel(gammaLabel, "Gamma");
         initSlider(gammaSlider);
-        gammaAttach.reset(new SldAttach(apvts, "luxstralGammaValue", gammaSlider));
 
         initLabel(contrastMinLabel, "Contrast Min");
         initSlider(contrastMinSlider);
-        contrastMinAttach.reset(new SldAttach(apvts, "luxstralContrastMin", contrastMinSlider));
 
-        // ── OSCILLATORS — additive voice: A/R envelope + Sum Exp / Noise Gate ─
-        arEnv = std::make_unique<EnvelopeEditorComponent>(
-            apvts, juce::Colour(0xff7ab0f0),
-            "luxstralAttackMs", juce::String(), juce::String(), "luxstralReleaseMs");
-        addAndMakeVisible(*arEnv);
-
+        // ── OSCILLATORS — additive voice: Sum Exp / Noise Gate knobs ─────────
+        // (the A/R envelope editor is created per-engine in bindEngineParams)
         AudioPanelUI::initKnob(sumExpSlider);
         addAndMakeVisible(sumExpSlider);
-        sumExpAttach.reset(new SldAttach(apvts, "luxstralSummationResponseExp", sumExpSlider));
 
         AudioPanelUI::initKnob(noiseGateSlider);
         addAndMakeVisible(noiseGateSlider);
-        noiseGateAttach.reset(new SldAttach(apvts, "luxstralNoiseGateThreshold", noiseGateSlider));
 
         // ── STEREO — spatialisation (enable toggle lives in the badge) ───────
         stereoEnableToggle.setButtonText({});
         addAndMakeVisible(stereoEnableToggle);
-        stereoEnableAttach.reset(new BtnAttach(apvts, "luxstralStereoEnable", stereoEnableToggle));
 
         AudioPanelUI::initKnob(stereoTempSlider);
         addAndMakeVisible(stereoTempSlider);
-        stereoTempAttach.reset(new SldAttach(apvts, "luxstralStereoTempAmp", stereoTempSlider));
+
+        // Per-engine attachments (Volume / IMAGE / OSCILLATORS / STEREO) —
+        // bound to luxstral* (A) or luxstralB* (B) depending on the selected
+        // rack instance. StrokeForge below stays SHARED between engines.
+        bindEngineParams();
 
         // ── STROKEFORGE — blob detection (sliders) ──────────────────────────
         initLabel(blobThreshLabel, "Ampl. Thr.");
@@ -146,6 +138,23 @@ public:
             g.drawRoundedRectangle(r, 4.f, 1.f);
         }
 
+        // ── Engine identity chip (M8) — A vs B unmistakable at a glance ─────
+        // Top of the right column, mirroring the Volume strip's header row.
+        {
+            const bool isB = (engineIndex_ == 1);
+            const juce::Colour tagCol = isB ? juce::Colour(0xffe0a35a)   // amber = B
+                                            : juce::Colour(0xff7ab0f0);  // blue  = A
+            const auto chip = L.engineChip.toFloat();
+            g.setColour(tagCol.withAlpha(0.12f));
+            g.fillRoundedRectangle(chip, 4.f);
+            g.setColour(tagCol.withAlpha(0.55f));
+            g.drawRoundedRectangle(chip, 4.f, 1.f);
+            g.setColour(tagCol);
+            g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+            g.drawText(isB ? "LUXSTRAL  --  ENGINE B" : "LUXSTRAL  --  ENGINE A",
+                       L.engineChip, juce::Justification::centred);
+        }
+
         // ── LEFT: IMAGE ─────────────────────────────────────────────────────
         drawSectionBg(g, L.imgBg.getX(), L.imgBg.getY(), L.imgBg.getWidth(), L.imgBg.getHeight());
         drawBadge(g, L.imgBadge.getX(), L.imgBadge.getY(), L.imgBadge.getWidth(),
@@ -176,8 +185,11 @@ public:
         const juce::uint32 cap2 = sfOn ? 0xffb07af0 : kDimText;   // MORPHING
         const juce::uint32 klbl = sfOn ? 0xffb8c4d0 : kDimText;   // knob labels
         drawSectionBg(g, L.sfBg.getX(), L.sfBg.getY(), L.sfBg.getWidth(), L.sfBg.getHeight());
+        // StrokeForge settings are SHARED between engines A and B (single
+        // analysis config) — say so explicitly on the B page.
         drawBadge(g, L.sfBadge.getX(), L.sfBadge.getY(), L.sfBadge.getWidth(),
-                  0xff2a2a40, 0xff8888e0, "STROKEFORGE");
+                  0xff2a2a40, 0xff8888e0,
+                  engineIndex_ == 1 ? "STROKEFORGE (SHARED A+B)" : "STROKEFORGE");
 
         const int sdx = L.rightX + kSecInsetX;
         const int sdw = L.colW - 2 * kSecInsetX;
@@ -229,8 +241,58 @@ public:
      *  shown (COLOR ⟺ Stereo, BLOB ⟺ StrokeForge) when a toggle flips. */
     std::function<void()> onVisualizerSourcesChanged;
 
+    /** Bind the per-engine controls to LuxStral A (0) or B (1) — fired by the
+     *  rack on selection (M8). Volume / IMAGE / OSCILLATORS / STEREO rebind to
+     *  the luxstral* / luxstralB* parameter sets; STROKEFORGE stays shared. */
+    void setEngineIndex(int idx)
+    {
+        idx = (idx == 1) ? 1 : 0;
+        if (idx == engineIndex_)
+            return;
+        engineIndex_ = idx;
+        bindEngineParams();
+        resized();               // place the recreated envelope editor
+        updateStereoEnablement();
+        updateStrokeForgeEnablement();
+        repaint();
+    }
+
+    int engineIndex() const noexcept { return engineIndex_; }
+
 private:
-    [[maybe_unused]] Sp3ctraAudioProcessor& processor;
+    Sp3ctraAudioProcessor& processor;
+    int engineIndex_ = 0;    // 0 = LuxStral A (luxstral*), 1 = B (luxstralB*)
+
+    /** Per-engine parameter ID: "luxstral"+base (A) or "luxstralB"+base (B). */
+    juce::String pid(const char* base) const
+    {
+        return (engineIndex_ == 1 ? juce::String("luxstralB")
+                                  : juce::String("luxstral")) + base;
+    }
+
+    /** (Re)create every per-engine attachment + the A/R envelope editor. */
+    void bindEngineParams()
+    {
+        auto& apvts = processor.getAPVTS();
+
+        volumeAttach.reset(new SldAttach(apvts, pid("Volume"), luxstralVolumeSlider));
+        negativeAttach.reset(new BtnAttach(apvts, pid("Inversion"), negativeToggle));
+        dcBlockAttach.reset(new BtnAttach(apvts, pid("AcRemoval"), dcBlockToggle));
+        gammaAttach.reset(new SldAttach(apvts, pid("GammaValue"), gammaSlider));
+        contrastMinAttach.reset(new SldAttach(apvts, pid("ContrastMin"), contrastMinSlider));
+
+        // The envelope editor captures its parameter IDs at construction —
+        // recreate it against the selected engine's Attack/Release params.
+        arEnv = std::make_unique<EnvelopeEditorComponent>(
+            apvts, juce::Colour(0xff7ab0f0),
+            pid("AttackMs"), juce::String(), juce::String(), pid("ReleaseMs"));
+        addAndMakeVisible(*arEnv);
+
+        sumExpAttach.reset(new SldAttach(apvts, pid("SummationResponseExp"), sumExpSlider));
+        noiseGateAttach.reset(new SldAttach(apvts, pid("NoiseGateThreshold"), noiseGateSlider));
+        stereoEnableAttach.reset(new BtnAttach(apvts, pid("StereoEnable"), stereoEnableToggle));
+        stereoTempAttach.reset(new SldAttach(apvts, pid("StereoTempAmp"), stereoTempSlider));
+    }
 
     // ── Vertical layout tokens ──────────────────────────────────────────────
     static constexpr int kTopPad    = 6;
@@ -259,7 +321,9 @@ private:
                                      + kCapH + kRowH + kToggleGap + kKnobH + kSecPadB;                 // 271
 
     static constexpr int kLeftColH   = kHeaderH + kSecGapV + kImgSecH + kSecGapV + kOscSecH;           // 414
-    static constexpr int kRightColH  = kStereoSecH + kSecGapV + kSfSecH;                               // 416
+    // Right column starts with the engine-identity chip (same height as the
+    // Volume strip) so both columns share the top header row (M8).
+    static constexpr int kRightColH  = kHeaderH + kSecGapV + kStereoSecH + kSecGapV + kSfSecH;         // 456
 
 public:
     /** Natural content height — the taller of the two columns. */
@@ -278,6 +342,7 @@ private:
         juce::Rectangle<int> oscBg, oscBadge, env;
         int oscCaptionY = 0, oscGridX = 0, oscGridW = 0, oscGridY = 0;
         // right
+        juce::Rectangle<int> engineChip;
         juce::Rectangle<int> stBg, stBadge, stBadgeToggle;
         int stGridX = 0, stGridW = 0, stGridY = 0;
         juce::Rectangle<int> sfBg, sfBadge, sfBadgeToggle;
@@ -354,6 +419,10 @@ private:
             const int cx = rightX + kSecInsetX;
             const int cw = colW - 2 * kSecInsetX;
             int y = kTopPad;
+
+            // Engine identity chip row (M8) — mirrors the Volume strip height.
+            L.engineChip = { rightX - 2, y, colW + 4, kHeaderH };
+            y += kHeaderH + kSecGapV;
 
             // STEREO — enable toggle in the badge; content is just the knob.
             L.stBg          = { rightX - 2, y, colW + 4, kStereoSecH };

@@ -260,6 +260,7 @@ void img_stage_compute_pan_luxstral(
     int            pixel_count,
     int            pixels_per_note,
     int            max_notes,
+    float          temp_amp,
     float         *pan_out,
     float         *left_gains_out,
     float         *right_gains_out)
@@ -300,7 +301,8 @@ void img_stage_compute_pan_luxstral(
             uint8_t g_avg = (uint8_t)(g_sum / count);
             uint8_t b_avg = (uint8_t)(b_sum / count);
 
-            float temperature = calculate_color_temperature(r_avg, g_avg, b_avg);
+            float temperature = calculate_color_temperature_amp(r_avg, g_avg, b_avg,
+                                                                temp_amp);
             pan_out[note] = temperature;
             calculate_pan_gains(temperature,
                                 &left_gains_out[note],

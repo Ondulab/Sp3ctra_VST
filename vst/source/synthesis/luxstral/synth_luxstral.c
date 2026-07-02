@@ -304,10 +304,14 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
     // This is safe because workers are waiting on start_barrier.
     // ONLY engine A: check_and_process_frequency_reinit() mutates the GLOBAL waves[]
     // (engine A's array). Running it from engine B would regenerate/zero A's phases
-    // mid-flight (a robotic glitch on A during a hot-reload). Engine B keeps its
-    // static timbre snapshot (frequency hot-reload doesn't propagate to B — v1).
-    if (eng == &g_luxstral_engine_a)
-      check_and_process_frequency_reinit();
+    // mid-flight (a robotic glitch on A during a hot-reload). When a reinit DID
+    // happen, resync engine B's static timbre from the fresh table (tuning/root/
+    // physiological are SHARED between engines) while preserving B's own dynamic
+    // state and its own envelope coefficients.
+    if (eng == &g_luxstral_engine_a) {
+      if (check_and_process_frequency_reinit())
+        synth_luxstral_resync_engine_b_timbre();
+    }
 
     // Phase 1: Pre-compute data in single-thread (avoids contention)
     synth_precompute_wave_data(eng, imageData, db);
@@ -407,8 +411,24 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
     // DISABLED: Anti-tac fade-in temporarily for debugging
     float fade_in_factor = 1.0f;  // Force full volume immediately
 
+    // Per-engine DSP knobs (M8): engine B reads its own luxstral_b_* config
+    // mirror; engine A keeps the legacy global fields (behaviour unchanged).
+    const int is_engine_b = (eng == &g_luxstral_engine_b);
+    const float sum_response_exp = is_engine_b
+        ? g_sp3ctra_config.luxstral_b_summation_response_exponent
+        : g_sp3ctra_config.summation_response_exponent;
+    const float soft_limit_threshold = is_engine_b
+        ? g_sp3ctra_config.luxstral_b_soft_limit_threshold
+        : g_sp3ctra_config.soft_limit_threshold;
+    const float soft_limit_knee = is_engine_b
+        ? g_sp3ctra_config.luxstral_b_soft_limit_knee
+        : g_sp3ctra_config.soft_limit_knee;
+    const int stereo_enabled = is_engine_b
+        ? g_sp3ctra_config.luxstral_b_stereo_mode_enabled
+        : g_sp3ctra_config.stereo_mode_enabled;
+
     // Summation normalization exponent (hoisted for mono + stereo paths)
-    const float norm_expo = 1.0f / g_sp3ctra_config.summation_response_exponent;
+    const float norm_expo = 1.0f / sum_response_exp;
     const float norm_base = (float)SUMMATION_BASE_LEVEL / (float)VOLUME_AMP_RESOLUTION;
 
     // Peak compensation: calibrate so that at a MODERATE content level (~500
@@ -444,11 +464,11 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
     // SOFT LIMITER: Prevent hard clipping while preserving dynamics (applied AFTER normalization)
     for (buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
         float abs_signal = fabsf(eng->tmp_audioData[buff_idx]);
-        if (abs_signal > g_sp3ctra_config.soft_limit_threshold) {
+        if (abs_signal > soft_limit_threshold) {
           // Soft compression using tanh for smooth saturation
-          float excess = abs_signal - g_sp3ctra_config.soft_limit_threshold;
-          float compressed = tanhf(excess / g_sp3ctra_config.soft_limit_knee) * g_sp3ctra_config.soft_limit_knee;
-          eng->tmp_audioData[buff_idx] = copysignf(g_sp3ctra_config.soft_limit_threshold + compressed, eng->tmp_audioData[buff_idx]);
+          float excess = abs_signal - soft_limit_threshold;
+          float compressed = tanhf(excess / soft_limit_knee) * soft_limit_knee;
+          eng->tmp_audioData[buff_idx] = copysignf(soft_limit_threshold + compressed, eng->tmp_audioData[buff_idx]);
         }
     }
 
@@ -456,7 +476,7 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
 
   // Apply contrast modulation and unified stereo output
   if (eng->pool_initialized && !eng->pool_shutdown) {
-    if (g_sp3ctra_config.stereo_mode_enabled) {
+    if (stereo_enabled) {
     // STEREO MODE: Use actual stereo buffers from threads
     // Combine stereo buffers from all threads (held in the engine struct)
 
@@ -741,7 +761,9 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
 #endif
     {
       PreprocessedImageData preprocessed_temp;
-      PipelineConfig fallback_cfg = pipeline_build_config_live();
+      PipelineConfig fallback_cfg = (eng == &g_luxstral_engine_b)
+                                        ? pipeline_build_config_luxstral_b()
+                                        : pipeline_build_config_live();
       if (pipeline_process_frame(buffer_R, buffer_G, buffer_B, &fallback_cfg, &preprocessed_temp) == 0) {
         memcpy(eng->grayScale_live, preprocessed_temp.additive.grayscale,
                nb_pixels * sizeof(float));
@@ -948,6 +970,10 @@ int32_t synth_luxstral_init_engine_b(void) {
   }
   eng->waves = wb;
 
+  // The clone above copied engine A's alpha_up/alpha_down_weighted — replace
+  // them with coefficients derived from B's OWN Attack/Release parameters.
+  synth_luxstral_update_engine_b_envelope();
+
   eng->imageRef = (int32_t*)calloc(n > 0 ? n : 1, sizeof(int32_t));
   if (!eng->imageRef) {
     log_error("SYNTH", "Failed to allocate imageRef (engine B)");
@@ -966,6 +992,41 @@ int32_t synth_luxstral_init_engine_b(void) {
 
   log_info("SYNTH", "LuxStral engine B initialised (private oscillator array + state)");
   return 0;
+}
+
+// M8 — recompute engine B's envelope coefficients from ITS OWN Attack/Release
+// parameters (luxstral_b_tau_*). Safe no-op before engine B is initialised.
+// Called from: engine B init, the luxstralBAttackMs/ReleaseMs parameter
+// listener, and the post-frequency-reinit timbre resync below.
+void synth_luxstral_update_engine_b_envelope(void) {
+  if (!g_luxstral_engine_b.waves) return;
+  update_gap_limiter_coefficients_for(g_luxstral_engine_b.waves,
+                                      g_sp3ctra_config.luxstral_b_tau_up_base_ms,
+                                      g_sp3ctra_config.luxstral_b_tau_down_base_ms);
+}
+
+// M8 — after a frequency hot-reload regenerated the GLOBAL waves[] (engine A),
+// re-copy the shared static timbre (frequency, phase_inc, physiological gain…)
+// into engine B's private array so both engines stay in tune. B's dynamic state
+// (phase_acc, volumes) is preserved, and B's envelope coefficients are re-derived
+// from B's own taus (the fresh table carries A's). Runs on the producer thread
+// while both engines' workers are idle — no locking needed.
+void synth_luxstral_resync_engine_b_timbre(void) {
+  LuxStralEngine *eng = &g_luxstral_engine_b;
+  if (!eng->waves || !waves) return;
+
+  const int n = get_current_number_of_notes();
+  for (int i = 0; i < n; i++) {
+    float pa = eng->waves[i].phase_acc;
+    float cv = eng->waves[i].current_volume;
+    float tv = eng->waves[i].target_volume;
+    memcpy((void*)&eng->waves[i], (const void*)&waves[i], sizeof(struct wave));
+    eng->waves[i].phase_acc      = pa;
+    eng->waves[i].current_volume = cv;
+    eng->waves[i].target_volume  = tv;
+  }
+  synth_luxstral_update_engine_b_envelope();
+  log_info("SYNTH", "Engine B timbre resynced after frequency reinit (%d notes)", n);
 }
 
 /**

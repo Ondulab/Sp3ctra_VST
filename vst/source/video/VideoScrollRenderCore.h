@@ -55,8 +55,10 @@ public:
 
     // Drain the capture ring and advance the scroll by one step. No-op while
     // paused (matches the original: ring is consumed/re-anchored but no scroll)
-    // or when the display size is 0.
-    void tick();
+    // or when the display size is 0. Returns true when the history was mutated
+    // (scrolled/stamped/cleared) — false means the frozen image is untouched and
+    // the caller may skip repainting its views this tick.
+    bool tick();
 
     // Blit the current waterfall into `dest` (a caller-sized ARGB/RGB Image),
     // applying the display params (compression, fade, zoom, rotation/mode,
@@ -78,8 +80,10 @@ public:
     // collapsing the message-thread frame-rate. Now the mixer calls buildWarp()
     // once after tick(), then drawWarp() per destination.
     //   buildWarp() : warp + age the linear history into warpBuf_ (bufW_×compH_).
+    //                 Returns true when warpBuf_ was rebuilt (false = cache hit,
+    //                 the previous warp is still current → no repaint needed).
     //   drawWarp()  : zoom/rotate/scale warpBuf_ into the destination Graphics.
-    void buildWarp();
+    bool buildWarp();
     void drawWarp(juce::Graphics& g, int destW, int destH);
 
     // Blank both history buffers (transport Stop). May be called by the mixer.
@@ -93,7 +97,8 @@ private:
     int drainRing(int* outPixelCount);
 
     // ── Scroll + stamp (the original scrollStep + buildLineImage) ─────────────
-    void scrollStep();
+    // scrollStep returns true when it mutated the history (see tick()).
+    bool scrollStep();
     bool buildLineImage(juce::Image& out, int coreH, int bandH,
                         int captured, int captureCount);
 

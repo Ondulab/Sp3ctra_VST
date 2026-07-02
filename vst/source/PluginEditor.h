@@ -465,6 +465,7 @@ private:
     ChainBlockId selectedBlock { ChainBlockId::Chain1Source };
     int  visPanelCount_ { 1 };         // ZONE 1 stacked-panel count (drives its height)
     bool setupFace { false };          // false = PLAY, true = SETUP (per M5)
+    int  luxStralEngineIndex_ { 0 };   // selected LuxStral engine (0 = A, 1 = B) — M8
     int zone2Width { kZone2DefaultW };
     int zone4Width { kZone4DefaultW };
     int splitterDragStartW { 0 };

@@ -45,10 +45,11 @@ static uint64_t pipeline_get_timestamp_us(void)
  * LuxStral (Path A, Chain 1) keeps separate live/sampler held states so the
  * live thread never corrupts the sampler hold during playback.  LuxSynth +
  * LuxWave (Path B, Chain 2) read the raw live feed only, so a single state. */
-#define ENVELOPE_LIVE      0   /* Chain 1 — additive, live thread   */
-#define ENVELOPE_SAMPLER   1   /* Chain 1 — additive, sampler thread */
-#define ENVELOPE_CHAIN2    2   /* Chain 2 — polyphonic (LuxSynth/LuxWave) */
-#define ENVELOPE_COUNT     3
+#define ENVELOPE_LIVE       0   /* Chain 1 — additive, live thread   */
+#define ENVELOPE_SAMPLER    1   /* Chain 1 — additive, sampler thread */
+#define ENVELOPE_CHAIN2     2   /* Chain 2 — polyphonic (LuxSynth/LuxWave) */
+#define ENVELOPE_LUXSTRAL_B 3   /* 2nd LuxStral engine — own held-frame state */
+#define ENVELOPE_COUNT      4
 
 typedef struct {
     float    held_notes[PREPROCESS_MAX_NOTES];
@@ -61,9 +62,10 @@ typedef struct {
 } EnvelopeState;
 
 static EnvelopeState g_envelope[ENVELOPE_COUNT] = {
-    { .prev_freeze = -1 },   /* ENVELOPE_LIVE    */
-    { .prev_freeze = -1 },   /* ENVELOPE_SAMPLER */
-    { .prev_freeze = -1 }    /* ENVELOPE_CHAIN2  */
+    { .prev_freeze = -1 },   /* ENVELOPE_LIVE       */
+    { .prev_freeze = -1 },   /* ENVELOPE_SAMPLER    */
+    { .prev_freeze = -1 },   /* ENVELOPE_CHAIN2     */
+    { .prev_freeze = -1 }    /* ENVELOPE_LUXSTRAL_B */
 };
 
 /**
@@ -267,10 +269,31 @@ PipelineConfig pipeline_build_config_live(void)
 
     /* Misc */
     cfg.stereo_enabled  = g_sp3ctra_config.stereo_mode_enabled;
+    cfg.stereo_temp_amp = g_sp3ctra_config.stereo_temperature_amplification;
     cfg.pixels_per_note = g_sp3ctra_config.pixels_per_note;
 
     /* Envelope identity: always LIVE for this builder, regardless of source routing */
     cfg.envelope_id = ENVELOPE_LIVE;
+
+    return cfg;
+}
+
+/* M8 — LuxStral engine B: the live config with engine B's OWN image/stereo
+ * knobs (luxstral_b_* mirror of the luxstralB* APVTS params) and its OWN
+ * envelope state. envelope_id != ENVELOPE_LIVE also means pipeline_path_luxstral
+ * gates the freeze with cfg.freeze_mode (= image_freeze_mode, the Chain 2 /
+ * live transport) instead of Chain 1's sampler_freeze_mode.                   */
+PipelineConfig pipeline_build_config_luxstral_b(void)
+{
+    PipelineConfig cfg = pipeline_build_config_live();
+
+    cfg.luxstral_path.inversion  = g_sp3ctra_config.luxstral_b_inversion;
+    cfg.luxstral_path.ac_removal = g_sp3ctra_config.luxstral_b_ac_removal;
+    cfg.luxstral_path.gamma      = g_sp3ctra_config.luxstral_b_gamma_value;
+    cfg.contrast_min             = g_sp3ctra_config.luxstral_b_contrast_min;
+    cfg.stereo_enabled           = g_sp3ctra_config.luxstral_b_stereo_mode_enabled;
+    cfg.stereo_temp_amp          = g_sp3ctra_config.luxstral_b_stereo_temperature_amplification;
+    cfg.envelope_id              = ENVELOPE_LUXSTRAL_B;
 
     return cfg;
 }
@@ -313,6 +336,7 @@ PipelineConfig pipeline_build_config_sampler(void)
 
     /* Misc */
     cfg.stereo_enabled  = g_sp3ctra_config.stereo_mode_enabled;
+    cfg.stereo_temp_amp = g_sp3ctra_config.stereo_temperature_amplification;
     cfg.pixels_per_note = g_sp3ctra_config.pixels_per_note;
 
     /* Envelope identity: always SAMPLER for this builder, regardless of source routing */
@@ -441,6 +465,7 @@ void pipeline_path_luxstral(
             nb_pixels,
             pixels_per_note,
             PREPROCESS_MAX_NOTES,
+            config->stereo_temp_amp,
             out->stereo.pan_positions,
             out->stereo.left_gains,
             out->stereo.right_gains);

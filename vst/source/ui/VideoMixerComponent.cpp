@@ -1,5 +1,4 @@
 #include "VideoMixerComponent.h"
-#include <cstdio>   // [VS-DIAG] temporary flicker instrumentation
 
 //==============================================================================
 // Detached master window — shows the composited master at any size / fullscreen.
@@ -204,6 +203,10 @@ bool VideoMixerComponent::singleDirect() const
     if (voices_.size() != 1) return false;
     auto& apvts = processor_.getAPVTS();
     const int slot = voices_[0]->slot;
+    // Disabled output → route through the offscreen path so composite() drops it
+    // and the master stays black (no crisp direct paint of a muted output).
+    if (auto* ep = apvts.getRawParameterValue(vsParam(slot, "enabled")))
+        if (ep->load() < 0.5f) return false;
     float level = 1.0f;
     if (auto* lp = apvts.getRawParameterValue(vsMixParam(slot, "level"))) level = lp->load();
     // Blend mode is irrelevant with a SINGLE layer over a black base: Mix, Add and
@@ -213,7 +216,7 @@ bool VideoMixerComponent::singleDirect() const
     return level >= 0.999f;
 }
 
-void VideoMixerComponent::composite()
+bool VideoMixerComponent::composite()
 {
     // Engine (history) resolution = the view's LOGICAL size. The detached window
     // (when open) is the biggest consumer, so size the history to it; otherwise to
@@ -225,7 +228,7 @@ void VideoMixerComponent::composite()
     if (window_ != nullptr && window_->isVisible())
         if (auto* c = window_->getContentComponent())
             if (c->getWidth() > 0 && c->getHeight() > 0) { W = c->getWidth(); H = c->getHeight(); }
-    if (W <= 0 || H <= 0) return;
+    if (W <= 0 || H <= 0) return false;
 
     // Render-resolution ceiling. The whole warp is a per-pixel scalar pass on the
     // message thread, so its cost is O(W×H) every tick — a 2560×1440 fullscreen
@@ -238,60 +241,72 @@ void VideoMixerComponent::composite()
     if (big > kMaxRenderDim) { W = juce::jmax(1, W * kMaxRenderDim / big);
                                H = juce::jmax(1, H * kMaxRenderDim / big); }
 
-    // [VS-DIAG] Heartbeat: prove whether W/H (and voice count / singleDirect) are
-    // stable frame-to-frame. If W/H oscillates here, setDisplaySize reallocs the
-    // history to black every tick → flicker. Logged once/second.
-    {
-        static int vsDiagTick = 0;
-        if ((vsDiagTick++ % 60) == 0)
-        {
-            const bool winOpen = (window_ != nullptr && window_->isVisible());
-            float lvl = -1.f; int md = -1;
-            if (! voices_.empty())
-            {
-                const int s0 = voices_[0]->slot;
-                if (auto* lp = processor_.getAPVTS().getRawParameterValue(vsMixParam(s0, "level"))) lvl = lp->load();
-                if (auto* bp = processor_.getAPVTS().getRawParameterValue(vsMixParam(s0, "blend"))) md  = (int) bp->load();
-            }
-            std::fprintf(stderr,
-                "[VS-DIAG] composite W=%d H=%d voices=%d winOpen=%d singleDirect=%d level=%.3f blend=%d\n",
-                W, H, (int) voices_.size(), winOpen ? 1 : 0, singleDirect() ? 1 : 0, lvl, md);
-            std::fflush(stderr);
-        }
-    }
-
     // Advance every output's waterfall once per 60 fps tick, then build the heavy
     // warp ONCE here (shared by the column preview AND the detached window). The
     // per-view draw is a cheap blit (drawWarp) — this is what keeps the message
     // thread from melting when a large/fullscreen window is open.
+    bool changed = false;
     for (auto& v : voices_)
     {
         v->core->setDisplaySize(W, H);
-        v->core->tick();
-        v->core->buildWarp();
+        changed |= v->core->tick();
+        changed |= v->core->buildWarp();
     }
+
+    auto& apvts = processor_.getAPVTS();
+    auto levelOf   = [&](int slot) { auto* p = apvts.getRawParameterValue(vsMixParam(slot, "level")); return p ? p->load() : 1.0f; };
+    auto modeOf    = [&](int slot) { auto* p = apvts.getRawParameterValue(vsMixParam(slot, "blend")); return p ? (int) p->load() : 0; };
+    auto enabledOf = [&](int slot) { auto* p = apvts.getRawParameterValue(vsParam(slot, "enabled")); return p ? p->load() >= 0.5f : true; };
+
+    // Signature of everything the views depend on OUTSIDE the warp itself: the
+    // render size, the per-voice mix controls, and the drawWarp-time params
+    // (zoom/mode are applied at draw time, not baked into warpBuf_). A frozen
+    // (paused) output with untouched controls yields an identical signature →
+    // composite() reports "unchanged" and the mixer skips the repaint. Without
+    // this, the 60 fps repaint of a static image occasionally gets presented
+    // half-painted by the OS → the pause "blinking".
+    std::vector<float> sig;
+    sig.reserve(2 + voices_.size() * 6);
+    sig.push_back((float) W);
+    sig.push_back((float) H);
+    auto zoomOf = [&](int slot) { auto* p = apvts.getRawParameterValue(vsParam(slot, "zoom")); return p ? p->load() : 1.0f; };
+    auto rotOf  = [&](int slot) { auto* p = apvts.getRawParameterValue(vsParam(slot, "mode")); return p ? p->load() : 0.0f; };
+    for (auto& v : voices_)
+    {
+        sig.push_back((float) v->slot);
+        sig.push_back(levelOf(v->slot));
+        sig.push_back((float) modeOf(v->slot));
+        sig.push_back(enabledOf(v->slot) ? 1.f : 0.f);
+        sig.push_back(zoomOf(v->slot));
+        sig.push_back(rotOf(v->slot));
+    }
+    if (sig != mixSig_) { mixSig_ = std::move(sig); changed = true; }
 
     // Single full-level Mix output → painted DIRECTLY by renderMaster() into the
     // destination Graphics (no offscreen image, no blend, crisp). Skip the composite.
     if (singleDirect())
-        return;
+        return changed;
+
+    // Nothing changed → master_ already holds the current composite; skip the
+    // per-layer blend pass entirely (and tell the caller not to repaint).
+    if (! changed && master_.isValid() && master_.getWidth() == W && master_.getHeight() == H)
+        return false;
 
     // Multi-output → composite into the offscreen master_ at the engine resolution.
     if (! master_.isValid() || master_.getWidth() != W || master_.getHeight() != H)
         master_ = juce::Image(juce::Image::ARGB, W, H, true);
     master_.clear(master_.getBounds(), juce::Colours::black);
 
-    auto& apvts = processor_.getAPVTS();
-    auto levelOf = [&](int slot) { auto* p = apvts.getRawParameterValue(vsMixParam(slot, "level")); return p ? p->load() : 1.0f; };
-    auto modeOf  = [&](int slot) { auto* p = apvts.getRawParameterValue(vsMixParam(slot, "blend")); return p ? (int) p->load() : 0; };
-
     for (auto& v : voices_)
     {
+        if (! enabledOf(v->slot))
+            continue;   // output disabled → not composited into the master
         if (! v->scratch.isValid() || v->scratch.getWidth() != W || v->scratch.getHeight() != H)
             v->scratch = juce::Image(juce::Image::ARGB, W, H, true);
         { juce::Graphics gs(v->scratch); v->core->drawWarp(gs, W, H); }  // warp already built above
         blendLayer(master_, v->scratch, levelOf(v->slot), modeOf(v->slot));
     }
+    return true;
 }
 
 void VideoMixerComponent::renderMaster(juce::Graphics& g, juce::Rectangle<int> dest)
@@ -321,7 +336,12 @@ void VideoMixerComponent::renderMaster(juce::Graphics& g, juce::Rectangle<int> d
 
 void VideoMixerComponent::timerCallback()
 {
-    composite();
+    // Only invalidate the views when this tick actually produced a new frame.
+    // While paused (or otherwise frozen) the previous — complete — frame stays on
+    // screen untouched: invalidating a static area 60×/s occasionally got a
+    // half-painted buffer presented (black flash over the frozen image).
+    if (! composite())
+        return;
     repaint(masterArea_);
     if (window_ != nullptr)
         if (auto* c = window_->getContentComponent())
