@@ -34,6 +34,11 @@ void synth_data_freeze_init(void);
 void synth_data_freeze_cleanup(void);
 double synth_getCurrentTimeInSeconds(void);
 
+/* M8 — init the freeze/fade state (mutex + frozen buffer) for a GIVEN engine.
+ * synth_data_freeze_init() above is the engine-A wrapper; engine B calls this. */
+struct LuxStralEngine;
+void synth_data_freeze_init_engine(struct LuxStralEngine *eng);
+
 /* Display buffer management */
 void displayable_synth_buffers_init(void);
 void displayable_synth_buffers_cleanup(void);

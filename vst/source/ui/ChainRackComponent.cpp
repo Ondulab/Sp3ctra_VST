@@ -256,6 +256,9 @@ void ChainRackComponent::rebuild()
             auto* bp = blk.get();
             if (m.type == ModuleType::LuxStral && luxstralCount >= 2 && m.slot >= 0)
                 bp->setEngineSuffix(m.slot == 1 ? "B" : "A");
+            // Engine B's LED toggles its OWN enable param (independent of A).
+            if (m.type == ModuleType::LuxStral && m.slot == 1)
+                bp->setEnableParamOverride("luxstralBEnabled");
             bp->onClick        = [this](juce::Uuid id) { selectInstance(id, true); };
             bp->onToggleEnable = [this, bp]            { toggleEnable(bp->getEnableParam()); };
             bp->onRemove       = [this](juce::Uuid id) { removeInstance(id); };
@@ -440,9 +443,16 @@ ChainRackComponent::computeDrop(juce::Point<int> localPos, ModuleType type,
 {
     const int y = localPos.y;
 
-    // "+ CHAIN" row → drop creates a new chain (an empty chain accepts anything).
+    // "+ CHAIN" row → drop creates a new chain. Validate BEFORE creating it:
+    // the chain-count cap and the GLOBAL placement limits (singleton types,
+    // slot pools) still apply — otherwise the drop indicator shows green for a
+    // drop that will fail and leave a phantom empty chain behind.
     if (addRowRect.contains(localPos))
-        return { -1, 0, true, true };
+    {
+        const bool ok = model.canAddChain()
+                     && model.canInsertIntoNewChain(type, movingId);
+        return { -1, 0, ok, true };
+    }
 
     if (bands.empty())
         return { -1, 0, false, false };
@@ -554,7 +564,8 @@ void ChainRackComponent::itemDropped(const SourceDetails& d)
 
     if (! isMove)
     {
-        const int c   = dt.newChain ? model.addChain() : dt.chainIdx;
+        const int c = dt.newChain ? model.addChain() : dt.chainIdx;
+        if (c < 0) { repaint(); return; }   // chain cap reached
         const int idx = dt.newChain ? 0
                       : juce::jlimit(0, (int) model.chains[(size_t) c].modules.size(), dt.index);
         if (model.insert(c, type, idx))
@@ -563,6 +574,12 @@ void ChainRackComponent::itemDropped(const SourceDetails& d)
             const int pos = juce::jlimit(0, (int) mods.size() - 1, idx);
             selectedId = mods[(size_t) pos].id;   // newly added module becomes the selection
         }
+        else if (dt.newChain)
+        {
+            model.removeChain(c);   // rollback — never leave a phantom empty chain
+            repaint();
+            return;
+        }
         scheduleRefresh(true);    // deferred: rebuild() destroys the drag-source block
     }
     else
@@ -570,7 +587,13 @@ void ChainRackComponent::itemDropped(const SourceDetails& d)
         if (dt.newChain)
         {
             const int c = model.addChain();
-            model.moveAcross(sc, si, c, 0);
+            if (c < 0) { repaint(); return; }   // chain cap reached
+            if (! model.moveAcross(sc, si, c, 0))
+            {
+                model.removeChain(c);   // rollback — never leave a phantom empty chain
+                repaint();
+                return;
+            }
         }
         else if (dt.chainIdx == sc)
         {
@@ -711,17 +734,20 @@ void ChainRackComponent::paint(juce::Graphics& g)
         g.fillPath(arrow);
     }
 
-    // ── "+ CHAIN" row ─────────────────────────────────────────────────────────
+    // ── "+ CHAIN" row (greyed out at the kMaxChains cap) ─────────────────────
     {
         auto r = addRowRect.toFloat().reduced(2.f);
-        const bool hot = dragActive && dropTarget.newChain;
+        const bool canAdd = model.canAddChain();
+        const bool hot    = canAdd && dragActive && dropTarget.newChain
+                                   && dropTarget.valid;
         g.setColour(hot ? juce::Colour(0xff2a3346) : juce::Colour(0xff20242e));
         g.fillRoundedRectangle(r, 4.f);
         g.setColour(hot ? juce::Colour(0xff6be0a0) : juce::Colour(0xff3a4250));
         g.drawRoundedRectangle(r, 4.f, 1.f);
-        g.setColour(juce::Colour(0xff9aa4b4));
+        g.setColour(canAdd ? juce::Colour(0xff9aa4b4) : juce::Colour(0xff4a5058));
         g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontTiny)).boldened());
-        g.drawText("+ CHAIN", addRowRect, juce::Justification::centred, false);
+        g.drawText(canAdd ? "+ CHAIN" : "8 CHAINS MAX",
+                   addRowRect, juce::Justification::centred, false);
     }
 
     // ── Drop indicator (insertion line) ───────────────────────────────────────
@@ -772,8 +798,8 @@ void ChainRackComponent::mouseUp(const juce::MouseEvent& e)
 
     if (addRowRect.contains(e.getPosition()))
     {
-        model.addChain();
-        mutateAndRefresh(false);
+        if (model.addChain() >= 0)   // refused at the kMaxChains cap
+            mutateAndRefresh(false);
         return;
     }
 
@@ -800,7 +826,7 @@ void ChainRackComponent::timerCallback()
     updateLeds();
 }
 
-ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, int chainIdx) const
+ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, int chainIdx, int engineSlot) const
 {
     auto paramOn = [this](const char* id) -> bool
     {
@@ -817,15 +843,15 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, int cha
             return sourceLed;
 
         case ModuleType::Pitch:
-        {   // per-chain instance (slot = chain index) — M6 Phase 2
-            const LuxPitchState* st = lux_pitch_instance(chainIdx);
+        {   // per-chain instance — pool slot is UUID-bound (stable across edits)
+            const LuxPitchState* st = lux_pitch_instance(processor.poolSlotForChain(chainIdx));
             const bool en = (st->config.enabled != 0);
             const int  v  = (int) st->midi.voice_count;
             return ! en ? LedState::Off : (v > 0 ? LedState::Active : LedState::Idle);
         }
         case ModuleType::Mask:
-        {   // per-chain instance (slot = chain index) — M6 Phase 2
-            const LuxMaskState* st = lux_mask_instance(chainIdx);
+        {   // per-chain instance — pool slot is UUID-bound (stable across edits)
+            const LuxMaskState* st = lux_mask_instance(processor.poolSlotForChain(chainIdx));
             const bool en = (st->config.enabled != 0);
             const int  v  = (int) st->midi.voice_count;
             return ! en ? LedState::Off : (v > 0 ? LedState::Active : LedState::Idle);
@@ -833,7 +859,9 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, int cha
         case ModuleType::Sampler:
             return paramOn("luxSamplerEnabled") ? LedState::Active : LedState::Off;
         case ModuleType::LuxStral:
-            return paramOn("deviceEnabled") ? LedState::Active : LedState::Off;
+            // Engine A → deviceEnabled, engine B → luxstralBEnabled (independent).
+            return paramOn(engineSlot == 1 ? "luxstralBEnabled" : "deviceEnabled")
+                       ? LedState::Active : LedState::Off;
         case ModuleType::LuxSynth:
             return paramOn("luxsynthEnabled") ? LedState::Active : LedState::Off;
         case ModuleType::LuxWave:
@@ -876,7 +904,7 @@ void ChainRackComponent::updateLeds()
     for (auto& blk : blocks)
     {
         int c = -1, i = -1;
-        model.find(blk->getUuid(), c, i);   // chain index → per-chain instance slot
-        blk->setLed(ledFor(blk->getType(), c < 0 ? 0 : c));
+        const ModuleInstance* mi = model.find(blk->getUuid(), c, i);
+        blk->setLed(ledFor(blk->getType(), c < 0 ? 0 : c, mi ? mi->slot : -1));
     }
 }

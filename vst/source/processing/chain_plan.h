@@ -27,11 +27,14 @@ extern "C" {
 
 /* Max ordered inserts before a synth in ONE chain. Worst case allowed by the
  * model: Pitch + Mask + up to CHAIN_MAX_CHAINS (8) VideoScroll probes (the
- * per-chain duplicate rule is relaxed for VideoScroll only) = 10. The
- * `num_inserts < CHAIN_PLAN_MAX_INSERTS` gate in deriveAndPublishChainPlan is a
- * defensive cap; at 10 it is unreachable for any legal model. states[] locals in
- * multithreading.c grow to 10*sizeof(void*) = 80 B — negligible stack. */
-#define CHAIN_PLAN_MAX_INSERTS 10   /* max ordered processors/probes before a synth */
+ * per-chain duplicate rule is relaxed for VideoScroll only) + up to 2 Sampler
+ * position markers (IMAGE_CHAIN_INSERT_SAMPLER — engines A/B may share a chain)
+ * = 12. The `num_inserts < CHAIN_PLAN_MAX_INSERTS` gate in
+ * deriveAndPublishChainPlan is a defensive cap; at 12 it is unreachable for any
+ * legal model (an overflow would silently drop entries — a dropped SAMPLER
+ * marker misroutes every probe placed after the sampler). states[] locals in
+ * multithreading.c grow to 12*sizeof(void*) = 96 B — negligible stack. */
+#define CHAIN_PLAN_MAX_INSERTS 12   /* max ordered processors/probes/markers before a synth */
 #define CHAIN_MAX_CHAINS       8    /* per-instance state pool size (Pitch/Mask/VideoScroll) */
 
 /* Where a chain's input frame comes from. */

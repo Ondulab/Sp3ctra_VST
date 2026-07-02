@@ -8,10 +8,10 @@
  *   • at most one Source-role module per chain (a source is optional),
  *   • never two instances of the same ModuleType in the same chain.
  *
- * In Phase 1 the editor owns the model; its only audio effect is to project
- * module presence onto the existing APVTS enable params + chainInsertOrder
- * (see Sp3ctraAudioProcessorEditor::applyModelToParams). The richer per-chain
- * routing is Phase 2 — the data model is already shaped for it.
+ * Since Phase 2 the model is owned by the processor (Sp3ctraAudioProcessor::
+ * getChainModel). Edits are pushed through onChainModelEdited(), which derives
+ * the per-synth routing + RT ChainPlan, projects presence onto the APVTS
+ * enable params and persists the topology.
  *
  * Persistence: toValueTree()/fromValueTree() ride on apvts.state, so the model
  * round-trips through the processor's existing getState/setState path.
@@ -45,6 +45,12 @@ class ChainModel
 public:
     std::vector<Chain> chains;
 
+    /** Hard cap on the number of chains. Every RT consumer (Pitch/Mask state
+     *  pools, chain masks, the ChainPlan) sizes its per-chain storage with
+     *  CHAIN_MAX_CHAINS (chain_plan.h); a 9th chain would silently share pool
+     *  state with chain 8. Enforced by addChain() and validateAndRepair(). */
+    static constexpr int kMaxChains = 8;   // MUST equal CHAIN_MAX_CHAINS
+
     //── Queries ───────────────────────────────────────────────────────────────
     bool chainHasRole(int chainIdx, ModuleRole role) const;
     bool chainHasType(int chainIdx, ModuleType type) const;
@@ -53,6 +59,13 @@ public:
      *  non-null, that instance is excluded from the duplicate/role counts (used
      *  for in-rack reordering / cross-chain moves of an existing block). */
     bool canInsert(int chainIdx, ModuleType type, const juce::Uuid* movingId = nullptr) const;
+
+    /** True if `type` could be inserted into a freshly created empty chain —
+     *  i.e. it passes the GLOBAL limits only (singleton synth/util types,
+     *  VideoScroll/Sampler/LuxStral slot pools). Used by the rack to validate
+     *  a drop on the "+ CHAIN" row BEFORE the chain is actually created, so an
+     *  invalid drop never leaves a phantom empty chain behind. */
+    bool canInsertIntoNewChain(ModuleType type, const juce::Uuid* movingId = nullptr) const;
 
     //── VideoScroll per-instance slot pool ─────────────────────────────────────
     static constexpr int kMaxVideoSlots = 8;   // MUST equal CHAIN_MAX_CHAINS
@@ -93,7 +106,8 @@ public:
     bool moveAcross(int fromChain, int from, int toChain, int dropIdx);
     bool remove(int chainIdx, int idx);
 
-    int  addChain();                 ///< appends an empty chain, returns its index
+    bool canAddChain() const noexcept { return numChains() < kMaxChains; }
+    int  addChain();                 ///< appends an empty chain, returns its index (-1 when at kMaxChains)
     bool removeChain(int chainIdx);  ///< refuses to delete the last chain
 
     //── Lookups ───────────────────────────────────────────────────────────────
@@ -110,8 +124,11 @@ public:
     /** Phase-2 source routing: the channel a synth should read given its chain
      *  placement — 0 = MODULATED (an image Processor/Util sits upstream of it in
      *  its chain), 1 = LIVE (raw source upstream, or none). Returns `fallback`
-     *  when the synth isn't placed in any chain. */
-    int sourceChannelForSynth(ModuleType synthType, int fallback) const;
+     *  when the synth isn't placed in any chain. `engineSlot` >= 0 additionally
+     *  matches ModuleInstance.slot — used for dual-engine types (LuxStral A/B)
+     *  so the routing follows the RIGHT engine, not the first instance found. */
+    int sourceChannelForSynth(ModuleType synthType, int fallback,
+                              int engineSlot = -1) const;
 
     //── Persistence ───────────────────────────────────────────────────────────
     juce::ValueTree toValueTree() const;

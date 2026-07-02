@@ -32,6 +32,8 @@
 extern "C" {
 #endif
 
+struct wave;   /* per-oscillator state (defined in wave_generation.h) */
+
 /* Exported types ------------------------------------------------------------*/
 
 typedef struct LuxStralEngine {
@@ -50,6 +52,15 @@ typedef struct LuxStralEngine {
   /* Grayscale staging buffers, sized to nb_pixels (synth_AudioProcess)       */
   float *grayScale_live;      /* live grayscale input (normalized float [0,1]) */
   float *processed_grayScale; /* data passed to synth_IfftMode                 */
+
+  /* ===== Per-oscillator state (M8 — dual-engine) ============================ */
+  /* Per-engine oscillator array. Holds MUTABLE runtime state (phase_acc,
+   * current_volume, target_volume) advanced every frame — it MUST be private to
+   * each engine or two engines corrupt each other's phase/envelope (robotic
+   * artefacts). Engine A points at the historical global waves[]; engine B owns
+   * its own copy (same static timbre: frequency/phase_inc/coeffs). See
+   * synth_luxstral_init_engine_b(). Workers read it via worker->engine->waves.  */
+  volatile struct wave *waves;
 
   /* ===== Worker pool ======================================================== */
   synth_thread_worker_t *thread_pool;  /* Dynamically allocated (num_workers)  */
@@ -84,6 +95,12 @@ typedef struct LuxStralEngine {
   void         *out_L;       /* AudioImageBuffer[2] */
   void         *out_R;       /* AudioImageBuffer[2] */
   volatile int *out_index;   /* publish double-buffer index */
+  /* Buffer slot the last frame was written to. When synth_AudioProcess_impl is
+   * called with commit_now = 0 (dual-engine A+B), it records the slot here and
+   * defers the index flip so the caller can publish A and B with two ADJACENT
+   * atomic stores — eliminating the A-published/B-not window that otherwise
+   * duplicates/skips whole B frames (robotic artefact). */
+  int           last_write_index;
   /* Source-type gating override: -1 = use the global luxstral_source_type
    * (engine A, exact legacy behaviour); otherwise a fixed value (engine B reads
    * its OWN DoubleBuffer which it fully controls, so it accepts either → 2).   */
@@ -142,6 +159,12 @@ int32_t synth_luxstral_init_engine_b(void);
  * synth_AudioProcess() but for g_luxstral_engine_b + its own DoubleBuffer.     */
 void synth_AudioProcess_b(uint8_t *buffer_R, uint8_t *buffer_G,
                           uint8_t *buffer_B, struct DoubleBuffer *db);
+
+/* Render BOTH engines and publish them atomically (adjacent index flips) — use
+ * this instead of separate synth_AudioProcess()/_b() calls whenever engine B is
+ * active, so the consumer never sees A's new frame paired with B's stale one. */
+void synth_AudioProcess_ab(uint8_t *buffer_R, uint8_t *buffer_G, uint8_t *buffer_B,
+                           struct DoubleBuffer *db_a, struct DoubleBuffer *db_b);
 
 /* Public accessors for external consumers ------------------------------------
  * These wrap the display buffers of g_luxstral_engine_a so external files

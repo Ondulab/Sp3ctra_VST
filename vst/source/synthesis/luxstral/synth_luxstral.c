@@ -113,6 +113,7 @@ static int32_t synth_IfftInit_impl(LuxStralEngine *eng) {
 
   // Set global waves pointer (allocated in synth_runtime_allocate_buffers)
   waves = synth_runtime_get_waves();
+  eng->waves = waves;   /* engine A uses the historical global oscillator array */
 
   // Register cleanup functions
   atexit(synth_runtime_free_buffers);
@@ -300,8 +301,13 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
     // === OPTIMIZED VERSION WITH THREAD POOL ===
 
     // HOT-RELOAD CHECK: Process pending frequency reinit BEFORE workers start
-    // This is safe because workers are waiting on start_barrier
-    check_and_process_frequency_reinit();
+    // This is safe because workers are waiting on start_barrier.
+    // ONLY engine A: check_and_process_frequency_reinit() mutates the GLOBAL waves[]
+    // (engine A's array). Running it from engine B would regenerate/zero A's phases
+    // mid-flight (a robotic glitch on A during a hot-reload). Engine B keeps its
+    // static timbre snapshot (frequency hot-reload doesn't propagate to B — v1).
+    if (eng == &g_luxstral_engine_a)
+      check_and_process_frequency_reinit();
 
     // Phase 1: Pre-compute data in single-thread (avoids contention)
     synth_precompute_wave_data(eng, imageData, db);
@@ -616,7 +622,7 @@ void synth_IfftMode(float *imageData, float *audioDataLeft, float *audioDataRigh
 
 // Synth process function
 static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint8_t *buffer_G,
-                                    uint8_t *buffer_B, DoubleBuffer *db) {
+                                    uint8_t *buffer_B, DoubleBuffer *db, int commit_now) {
   // Audio processing (limited logs)
   if (eng->log_counter % LOG_FREQUENCY == 0) {
     // printf("===== Audio Process called =====\n"); // Removed or commented
@@ -876,21 +882,42 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
   __atomic_store_n(&obR[index].ready, 1, __ATOMIC_RELEASE);
   // pthread_cond_signal removed - RT callback polls atomically
 
-  // Change index so callback reads the filled buffer and next write goes to other buffer
-  __atomic_store_n(obIdx, 1 - index, __ATOMIC_RELEASE);
+  // Record the written slot. Publish now (single engine) or DEFER the flip so the
+  // dual-engine caller can publish A and B with two adjacent stores (see below).
+  eng->last_write_index = index;
+  if (commit_now)
+    __atomic_store_n(obIdx, 1 - index, __ATOMIC_RELEASE);
 }
 
 // Public wrapper (signature unchanged for external callers, e.g. multithreading.c)
 void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
                         uint8_t *buffer_B, DoubleBuffer *db) {
-  synth_AudioProcess_impl(&g_luxstral_engine_a, buffer_R, buffer_G, buffer_B, db);
+  synth_AudioProcess_impl(&g_luxstral_engine_a, buffer_R, buffer_G, buffer_B, db, /*commit_now*/1);
 }
 
 // M8 — render engine B (dual-engine). Same entry as A but on g_luxstral_engine_b
 // + its own DoubleBuffer. Worker pool + RT output buffers self-init lazily.
 void synth_AudioProcess_b(uint8_t *buffer_R, uint8_t *buffer_G,
                           uint8_t *buffer_B, DoubleBuffer *db) {
-  synth_AudioProcess_impl(&g_luxstral_engine_b, buffer_R, buffer_G, buffer_B, db);
+  synth_AudioProcess_impl(&g_luxstral_engine_b, buffer_R, buffer_G, buffer_B, db, /*commit_now*/1);
+}
+
+// M8 — render BOTH LuxStral engines and publish them ATOMICALLY. Engine A and B
+// are synthesised first (flip deferred), then their output double-buffer indices
+// are flipped with two ADJACENT atomic stores. This closes the window where the
+// consumer would otherwise see engine A's new frame while engine B's is still the
+// previous one — that window (≈ engine B's whole synthesis time) is what
+// duplicated/skipped B frames and produced the robotic artefact. `db_a`/`db_b`
+// are each engine's own input DoubleBuffer.
+void synth_AudioProcess_ab(uint8_t *buffer_R, uint8_t *buffer_G, uint8_t *buffer_B,
+                           DoubleBuffer *db_a, DoubleBuffer *db_b) {
+  synth_AudioProcess_impl(&g_luxstral_engine_a, buffer_R, buffer_G, buffer_B, db_a, /*commit_now*/0);
+  synth_AudioProcess_impl(&g_luxstral_engine_b, buffer_R, buffer_G, buffer_B, db_b, /*commit_now*/0);
+  // Adjacent publish (≈ 2 instructions apart): both engines become visible at once.
+  __atomic_store_n(g_luxstral_engine_a.out_index,
+                   1 - g_luxstral_engine_a.last_write_index, __ATOMIC_RELEASE);
+  __atomic_store_n(g_luxstral_engine_b.out_index,
+                   1 - g_luxstral_engine_b.last_write_index, __ATOMIC_RELEASE);
 }
 
 // M8 — per-instance init for engine B. Runs ONLY the per-engine setup; the
@@ -898,9 +925,29 @@ void synth_AudioProcess_b(uint8_t *buffer_R, uint8_t *buffer_G,
 // synth_IfftInit() for engine A. Safe to call once, after synth_IfftInit().
 int32_t synth_luxstral_init_engine_b(void) {
   LuxStralEngine *eng = &g_luxstral_engine_b;
-  if (eng->imageRef) return 0;   // already initialised
+  if (eng->waves) return 0;   // already initialised
 
   const int n = get_current_number_of_notes();
+
+  // Private oscillator array: clone engine A's (same static timbre — frequency,
+  // phase_inc, alpha coeffs, physiological_gain) then give it INDEPENDENT dynamic
+  // state (fresh random phase, zero volume) so the two engines never share the
+  // per-frame phase_acc/current_volume that would otherwise cause robotic artefacts.
+  struct wave *wb = (struct wave*)malloc((size_t)(n > 0 ? n : 1) * sizeof(struct wave));
+  if (!wb) { log_error("SYNTH", "Failed to allocate waves[] (engine B)"); return -1; }
+  memcpy(wb, (const void*)waves, (size_t)n * sizeof(struct wave));   // copy static timbre
+  for (int i = 0; i < n; i++) {
+#ifdef __APPLE__
+    uint32_t r = arc4random();
+#else
+    uint32_t r = (uint32_t)rand();
+#endif
+    wb[i].phase_acc      = (float)(r % (uint32_t)SINE_TABLE_SIZE);
+    wb[i].current_volume = 0.0f;
+    wb[i].target_volume  = 0.0f;
+  }
+  eng->waves = wb;
+
   eng->imageRef = (int32_t*)calloc(n > 0 ? n : 1, sizeof(int32_t));
   if (!eng->imageRef) {
     log_error("SYNTH", "Failed to allocate imageRef (engine B)");
@@ -912,7 +959,12 @@ int32_t synth_luxstral_init_engine_b(void) {
     log_error("SYNTH", "Failed to init synth_process_mutex (engine B)");
     return -1;
   }
-  log_info("SYNTH", "LuxStral engine B initialised (per-instance state ready)");
+
+  // Freeze/fade state (mutex + frozen buffer): synth_AudioProcess_impl locks
+  // eng->synth_data_freeze_mutex every frame — leaving it zero-initialised is UB.
+  synth_data_freeze_init_engine(eng);
+
+  log_info("SYNTH", "LuxStral engine B initialised (private oscillator array + state)");
   return 0;
 }
 

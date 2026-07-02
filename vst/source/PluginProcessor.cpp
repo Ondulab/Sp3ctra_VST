@@ -174,6 +174,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     // ── Gameplay — Device On ─────────────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"deviceEnabled", 1}, "Device On", true));
+    // M8 — independent enable for the 2nd LuxStral engine (B).
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"luxstralBEnabled", 1}, "LuxStral B On", true));
 
     // ── Gameplay — StrokeForge enable ────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterBool>(
@@ -2051,7 +2054,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // the buffer; A + B + LuxSynth + LuxWave sum). Gated by model presence + its
     // own volume. Independent chain input is prepared in multithreading.c.
     // ========================================================================
-    if (luxstralBPresent_.load(std::memory_order_relaxed)
+    const bool luxstralBEnabled = apvts.getRawParameterValue("luxstralBEnabled")->load() >= 0.5f;
+    if (luxstralBEnabled && luxstralBPresent_.load(std::memory_order_relaxed)
         && sharedCore && sharedCore->isReady() && luxstral_are_audio_buffers_ready()) {
         extern AudioImageBuffer luxstral_b_buffers_L[2];
         extern AudioImageBuffer luxstral_b_buffers_R[2];
@@ -2559,33 +2563,67 @@ void Sp3ctraAudioProcessor::loadChainModelFromState()
     chainActiveTypes_.clear();
     chainModel_.deriveActiveTypes(chainActiveTypes_);
     videoScrollSlots_.clear();
+    luxstralEngines_.clear();
     for (const auto& ch : chainModel_.chains)
         for (const auto& mod : ch.modules)
+        {
             if (mod.type == ModuleType::VideoScroll
                 && mod.slot >= 0 && mod.slot < CHAIN_MAX_CHAINS)
                 videoScrollSlots_.insert(mod.slot);
+            if (mod.type == ModuleType::LuxStral
+                && mod.slot >= 0 && mod.slot < ChainModel::kMaxLuxStralEngines)
+                luxstralEngines_.insert(mod.slot);
+        }
 
     deriveChainRouting();   // headless-correct per-synth source routing
 }
 
 void Sp3ctraAudioProcessor::deriveChainRouting()
 {
-    const int luxstralSrc = chainModel_.sourceChannelForSynth(ModuleType::LuxStral, 0);
+    // Engine A specifically (slot 0) — this global routing drives engine A; engine
+    // B reads its own DoubleBuffer (source_type_override), independent of this.
+    const int luxstralSrc = chainModel_.sourceChannelForSynth(ModuleType::LuxStral, 0, /*engineSlot*/ 0);
     int       luxsynthSrc = chainModel_.sourceChannelForSynth(ModuleType::LuxSynth, 1);
     if (luxsynthSrc == 1)   // LuxSynth absent/live → let a placed LuxWave decide
         luxsynthSrc = chainModel_.sourceChannelForSynth(ModuleType::LuxWave, luxsynthSrc);
     setChainSourceRouting(luxstralSrc, luxsynthSrc);
 
-    // Active per-chain Pitch/Mask instances → MIDI fan-out + config-sync mask.
+    // Stable chain → Pitch/Mask pool-slot binding (keyed by chain UUID). Binding
+    // by chain POSITION would rebind every chain below a removed one to a
+    // different state pool (inheriting its held voices / stale state). Slots
+    // whose binding just changed carry stale state — reset AFTER the new plan
+    // is published at the end of this function.
+    const uint32_t staleSlots = updateChainPoolBindings();
+
+    // Active per-chain Pitch/Mask instances → MIDI fan-out + config-sync mask,
+    // indexed by POOL SLOT (stable across edits), not by chain position.
     uint32_t pitchMask = 0, maskMask = 0;
-    for (int c = 0; c < chainModel_.numChains() && c < CHAIN_MAX_CHAINS; ++c)
+    for (int c = 0; c < chainModel_.numChains(); ++c)
+    {
+        const int slot = poolSlotForChain(c);
         for (const auto& m : chainModel_.chains[(size_t) c].modules)
         {
-            if (m.type == ModuleType::Pitch) pitchMask |= (1u << c);
-            if (m.type == ModuleType::Mask)  maskMask  |= (1u << c);
+            if (m.type == ModuleType::Pitch) pitchMask |= (1u << slot);
+            if (m.type == ModuleType::Mask)  maskMask  |= (1u << slot);
         }
+    }
     chainPitchMask_.store(pitchMask, std::memory_order_relaxed);
     chainMaskMask_.store(maskMask,  std::memory_order_relaxed);
+
+    // Per-instance `enabled` sync — must NOT wait for applyConfigurationToCore:
+    // a pure topology change (Pitch dragged to another chain, chain removal,
+    // session restore) flips no enable param, so no parameterChanged() would
+    // refresh the pool configs and the moved module would stay silently
+    // bypassed on its new slot until some unrelated param edit.
+    {
+        const bool lpOn = apvts.getRawParameterValue("luxpitchEnabled")->load() >= 0.5f;
+        const bool lmOn = apvts.getRawParameterValue("luxmaskEnabled")->load() >= 0.5f;
+        for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
+        {
+            lux_pitch_instance(i)->config.enabled = (lpOn && ((pitchMask >> i) & 1u)) ? 1 : 0;
+            lux_mask_instance(i)->config.enabled  = (lmOn && ((maskMask  >> i) & 1u)) ? 1 : 0;
+        }
+    }
 
     // Per-engine sampler enable: a Sampler instance carries its engine index in
     // `slot` (0 = A, 1 = B). An engine is enabled iff its instance is present in
@@ -2618,6 +2656,80 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
         ? IMAGE_CHAIN_ORDER_MASK_PITCH : IMAGE_CHAIN_ORDER_PITCH_MASK);
 
     deriveAndPublishChainPlan();   // RT-safe per-chain recipe for the synth thread
+
+    // Reset the transient state (held voices, LFO phase — config untouched) of
+    // every pool slot that just lost its Pitch/Mask instance or changed its
+    // chain binding. Runs AFTER the publish above: the synth thread no longer
+    // pulls these pools, and we are on the message thread like every other
+    // pool-state writer. Without this, a removed instance's held voices would
+    // silently resurface when the module (or a new chain) reuses the slot.
+    {
+        const uint32_t lostPitch = (prevPitchSlots_ & ~pitchMask) | staleSlots;
+        const uint32_t lostMask  = (prevMaskSlots_  & ~maskMask)  | staleSlots;
+        for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
+        {
+            if ((lostPitch >> i) & 1u) lux_pitch_reset(lux_pitch_instance(i));
+            if ((lostMask  >> i) & 1u) lux_mask_reset(lux_mask_instance(i));
+        }
+        prevPitchSlots_ = pitchMask;
+        prevMaskSlots_  = maskMask;
+    }
+}
+
+//==============================================================================
+// Stable chain → Pitch/Mask pool-slot binding (message thread).
+// Chains keep their existing slot (keyed by UUID); vanished chains release
+// theirs; new chains take the lowest free slot. Returns the mask of slots whose
+// binding changed (released or freshly assigned) — their pool state is stale.
+//==============================================================================
+uint32_t Sp3ctraAudioProcessor::updateChainPoolBindings()
+{
+    uint32_t stale = 0;
+
+    std::set<juce::Uuid> live;
+    for (const auto& ch : chainModel_.chains)
+        live.insert(ch.id);
+
+    for (auto it = chainPoolSlots_.begin(); it != chainPoolSlots_.end();)
+    {
+        if (live.count(it->first) == 0)
+        {
+            stale |= (1u << it->second);          // chain gone → slot state stale
+            it = chainPoolSlots_.erase(it);
+        }
+        else
+            ++it;
+    }
+
+    uint32_t used = 0;
+    for (const auto& binding : chainPoolSlots_)
+        used |= (1u << binding.second);
+
+    for (const auto& ch : chainModel_.chains)
+    {
+        if (chainPoolSlots_.count(ch.id) != 0)
+            continue;
+        for (int s = 0; s < CHAIN_MAX_CHAINS; ++s)
+            if (((used >> s) & 1u) == 0)
+            {
+                chainPoolSlots_[ch.id] = s;
+                used  |= (1u << s);
+                stale |= (1u << s);               // fresh binding → start clean
+                break;
+            }
+        // The model caps chains at kMaxChains == CHAIN_MAX_CHAINS, so a free
+        // slot always exists for a legal model.
+        jassert(chainPoolSlots_.count(ch.id) != 0);
+    }
+    return stale;
+}
+
+int Sp3ctraAudioProcessor::poolSlotForChain(int chainIdx) const noexcept
+{
+    if (chainIdx < 0 || chainIdx >= chainModel_.numChains())
+        return 0;
+    const auto it = chainPoolSlots_.find(chainModel_.chains[(size_t) chainIdx].id);
+    return it != chainPoolSlots_.end() ? it->second : 0;
 }
 
 //==============================================================================
@@ -2661,7 +2773,9 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
         const auto& ch = chainModel_.chains[(size_t) ci];
         sp.present     = 1;
         sp.source_kind = sourceKind(ch);
-        const int stateIdx = (ci < CHAIN_MAX_CHAINS) ? ci : (CHAIN_MAX_CHAINS - 1);
+        // Pitch/Mask pool slot bound to this chain's UUID — stable across edits
+        // (must match the masks derived in deriveChainRouting).
+        const int stateIdx = poolSlotForChain(ci);
 
         for (int i = 0; i < idx; ++i)
         {
@@ -2749,9 +2863,13 @@ void Sp3ctraAudioProcessor::applyChainEnableBridge()
     std::set<ModuleType> now;
     chainModel_.deriveActiveTypes(now);
 
+    // LuxStral is handled PER ENGINE below (A = deviceEnabled, B =
+    // luxstralBEnabled) — a type-level diff would flip A's param when only B
+    // was added/removed, and would leave A audible (raw live fallback) after
+    // its block is removed while B stays placed.
     static const ModuleType kEnableTypes[] = {
         ModuleType::Pitch, ModuleType::Mask, ModuleType::Sampler, ModuleType::Sequencer,
-        ModuleType::LuxStral, ModuleType::LuxSynth, ModuleType::LuxWave
+        ModuleType::LuxSynth, ModuleType::LuxWave
     };
     for (auto t : kEnableTypes)
     {
@@ -2762,6 +2880,30 @@ void Sp3ctraAudioProcessor::applyChainEnableBridge()
         else if (! isNow)
             setParam(moduleEnableParam(t), false);   // absent ⇒ force off
     }
+
+    // Per-engine LuxStral enable (same add ⇒ on / absent ⇒ off diff semantics).
+    {
+        std::set<int> enginesNow;
+        for (const auto& ch : chainModel_.chains)
+            for (const auto& m : ch.modules)
+                if (m.type == ModuleType::LuxStral && m.slot >= 0
+                    && m.slot < ChainModel::kMaxLuxStralEngines)
+                    enginesNow.insert(m.slot);
+
+        static const char* kEngineParam[ChainModel::kMaxLuxStralEngines] =
+            { "deviceEnabled", "luxstralBEnabled" };
+        for (int s = 0; s < ChainModel::kMaxLuxStralEngines; ++s)
+        {
+            const bool isNow = enginesNow.count(s) > 0;
+            const bool was   = luxstralEngines_.count(s) > 0;
+            if (isNow && ! was)
+                setParam(kEngineParam[s], true);
+            else if (! isNow)
+                setParam(kEngineParam[s], false);
+        }
+        luxstralEngines_ = enginesNow;
+    }
+
     setParam("chainInsertOrder", chainModel_.isMaskBeforePitch());
     chainActiveTypes_ = now;
 }
@@ -2790,15 +2932,10 @@ void Sp3ctraAudioProcessor::teardownAbsentModules(const std::set<ModuleType>& no
         scoreSettings_.writingSpeed = 2.5;   // match the constructor default
     }
 
-    // Pitch / Mask: output already silenced by the enable bridge; drop any held
-    // live voices so a re-added instance starts clean (config is re-applied from
-    // APVTS on add). Type-level removal ⇒ no chain references these pools anymore.
-    if (removed(ModuleType::Pitch))
-        for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
-            lux_pitch_reset(lux_pitch_instance(i));
-    if (removed(ModuleType::Mask))
-        for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
-            lux_mask_reset(lux_mask_instance(i));
+    // Pitch / Mask: handled at INSTANCE granularity by deriveChainRouting() —
+    // it diffs the per-slot presence masks (and chain→slot rebindings) and
+    // resets exactly the pool slots that lost their module, which subsumes the
+    // old type-level reset here.
 
     // VideoScroll: per-instance probe (slot 0..7), may repeat per chain, so diff
     // at slot granularity. Re-init the capture ring of any removed probe so its
@@ -3050,8 +3187,13 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         }
 
         // ── Insert chain order (M1 — modular pipeline core) ──
-        image_chain_set_order(static_cast<int>(
-            apvts.getRawParameterValue("chainInsertOrder")->load()));
+        // Derived from the CHAIN MODEL, not the "chainInsertOrder" param: the
+        // model is the single source of truth for topology; the param is only
+        // its host-visible projection (kept in sync by applyChainEnableBridge).
+        // Reading the param here would let a host automation of it desync the
+        // global order from the per-chain plans derived from the model.
+        image_chain_set_order(chainModel_.isMaskBeforePitch()
+            ? IMAGE_CHAIN_ORDER_MASK_PITCH : IMAGE_CHAIN_ORDER_PITCH_MASK);
 
         // ── Sync LuxPitch config to the processing instance ──
         {

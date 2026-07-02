@@ -14,8 +14,9 @@
  * Selection is tracked internally per instance (Uuid) so duplicate types across
  * chains highlight correctly; the editor-facing API stays ChainBlockId-keyed.
  *
- * The model's only Phase-1 audio effect is projecting module presence onto the
- * existing APVTS enable params + chainInsertOrder (see applyModelToParams).
+ * The model is owned by the processor (Phase 2): every mutation here goes
+ * through processor.onChainModelEdited(), which derives the per-chain routing,
+ * publishes the RT ChainPlan, bridges the enable params and persists.
  */
 #pragma once
 
@@ -135,6 +136,10 @@ private:
             repaint();
         }
 
+        /** Override the APVTS enable param this block's LED toggles — e.g. the 2nd
+         *  LuxStral engine (B) drives "luxstralBEnabled", independent of A. */
+        void setEnableParamOverride(const juce::String& id) { enableParam = id; }
+
         /** When false the × remove glyph is hidden + its click is ignored
          *  (the rack is locked). Reorder dragging is unaffected. */
         void setRemovable(bool r)
@@ -184,7 +189,8 @@ private:
     void removeInstance(const juce::Uuid& id);
 
     void updateLeds();
-    LedState ledFor(ModuleType type, int chainIdx) const;
+    // engineSlot: per-instance engine index (LuxStral/Sampler A=0/B=1); -1 = n/a.
+    LedState ledFor(ModuleType type, int chainIdx, int engineSlot = -1) const;
 
     void selectInstance(const juce::Uuid& id, bool notify);
     juce::Uuid   firstInstanceId() const;

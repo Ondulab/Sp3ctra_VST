@@ -3,10 +3,15 @@
 
 static_assert(ChainModel::kMaxVideoSlots == CHAIN_MAX_CHAINS,
               "ChainModel::kMaxVideoSlots must equal CHAIN_MAX_CHAINS (chain_plan.h)");
-static_assert(CHAIN_PLAN_MAX_INSERTS >= 10,
-              "VideoScroll probes share insert slots with Pitch/Mask; a single chain "
-              "may hold Pitch+Mask + up to 8 probes, so CHAIN_PLAN_MAX_INSERTS must be "
-              ">= 10 or deriveAndPublishChainPlan silently drops probes.");
+static_assert(ChainModel::kMaxChains == CHAIN_MAX_CHAINS,
+              "ChainModel::kMaxChains must equal CHAIN_MAX_CHAINS (chain_plan.h) — "
+              "every per-chain RT pool is sized with it.");
+static_assert(CHAIN_PLAN_MAX_INSERTS >= 12,
+              "The insert list holds Pitch + Mask + up to 8 VideoScroll probes AND up "
+              "to 2 Sampler position markers in a single chain = 12 entries, so "
+              "CHAIN_PLAN_MAX_INSERTS must be >= 12 or deriveAndPublishChainPlan "
+              "silently drops probes/markers (a dropped SAMPLER marker misroutes "
+              "every probe placed after the sampler).");
 
 //==============================================================================
 const juce::Identifier ChainModel::kChainsTag   { "CHAINS" };
@@ -98,16 +103,11 @@ int ChainModel::firstFreeLuxStralSlot(const juce::Uuid* movingId) const
     return -1;
 }
 
-bool ChainModel::canInsert(int chainIdx, ModuleType type, const juce::Uuid* movingId) const
+// Global (model-wide) placement limits — the per-chain rules live in canInsert.
+bool ChainModel::canInsertIntoNewChain(ModuleType type, const juce::Uuid* movingId) const
 {
-    if (chainIdx < 0 || chainIdx >= numChains())
-        return false;
-
-    const ModuleRole role = moduleRole(type);
-    const bool wantSource = (role == ModuleRole::Source);
-
     // VideoScroll is a multi-per-chain slotted type: it's bounded by the 8-slot
-    // pool, not the per-chain duplicate rule below.
+    // pool, not the per-chain duplicate rule.
     if (isSlottedType(type) && firstFreeVideoSlot(movingId) < 0)
         return false;   // pool full (8 used)
 
@@ -116,7 +116,7 @@ bool ChainModel::canInsert(int chainIdx, ModuleType type, const juce::Uuid* movi
         return false;   // both sampler engines (A + B) already placed
 
     // LuxStral is dual-engine (A/B), bounded by its own 2-slot pool. Unlike the
-    // Sampler it stays subject to the per-chain duplicate rule below (1 per chain),
+    // Sampler it stays subject to the per-chain duplicate rule (1 per chain),
     // so the two engines necessarily live in different chains.
     if (isLuxStralEngine(type) && firstFreeLuxStralSlot(movingId) < 0)
         return false;   // both LuxStral engines (A + B) already placed
@@ -124,6 +124,7 @@ bool ChainModel::canInsert(int chainIdx, ModuleType type, const juce::Uuid* movi
     // Engine-backed modules (synths + Score/Sequencer) are singletons: at most one
     // across the whole model. Pitch/Mask (processors), sources, the Sampler and
     // LuxStral (their own pools above) stay multi-instance.
+    const ModuleRole role = moduleRole(type);
     if ((role == ModuleRole::Synth || role == ModuleRole::Util)
         && ! isSamplerEngine(type) && ! isLuxStralEngine(type))
     {
@@ -136,6 +137,18 @@ bool ChainModel::canInsert(int chainIdx, ModuleType type, const juce::Uuid* movi
                     return false;                 // already placed in some chain
             }
     }
+    return true;
+}
+
+bool ChainModel::canInsert(int chainIdx, ModuleType type, const juce::Uuid* movingId) const
+{
+    if (chainIdx < 0 || chainIdx >= numChains())
+        return false;
+
+    if (! canInsertIntoNewChain(type, movingId))   // global limits first
+        return false;
+
+    const bool wantSource = (moduleRole(type) == ModuleRole::Source);
 
     const auto& mods = chains[(size_t) chainIdx].modules;
     for (const auto& m : mods)
@@ -223,6 +236,8 @@ bool ChainModel::remove(int chainIdx, int idx)
 
 int ChainModel::addChain()
 {
+    if (! canAddChain())
+        return -1;   // at kMaxChains — a 9th chain would have no RT pool slot
     chains.push_back(Chain{ juce::Uuid(), {} });
     return (int) chains.size() - 1;
 }
@@ -284,7 +299,8 @@ bool ChainModel::isMaskBeforePitch() const
     return false;   // default: Pitch first (legacy)
 }
 
-int ChainModel::sourceChannelForSynth(ModuleType synthType, int fallback) const
+int ChainModel::sourceChannelForSynth(ModuleType synthType, int fallback,
+                                      int engineSlot) const
 {
     for (const auto& ch : chains)
     {
@@ -292,6 +308,8 @@ int ChainModel::sourceChannelForSynth(ModuleType synthType, int fallback) const
         {
             if (ch.modules[(size_t) i].type != synthType)
                 continue;
+            if (engineSlot >= 0 && ch.modules[(size_t) i].slot != engineSlot)
+                continue;   // dual-engine type: only the requested engine counts
 
             // Found the synth — does any image processor / utility sit upstream?
             for (int j = 0; j < i; ++j)
@@ -370,6 +388,27 @@ void ChainModel::fromValueTree(const juce::ValueTree& root)
 
 void ChainModel::validateAndRepair()
 {
+    // Hard cap FIRST: every RT pool (Pitch/Mask instances, chain masks, plan
+    // slots) is sized for kMaxChains; extra chains from a corrupt/hand-edited
+    // session are dropped — same philosophy as dropping unknown module types.
+    if (numChains() > kMaxChains)
+        chains.resize((size_t) kMaxChains);
+
+    // UUIDs are identity: chain ids key the stable Pitch/Mask pool-slot binding,
+    // module ids key selection & drag moves. A duplicate (hand-edited session)
+    // would silently alias two entities — regenerate the later one.
+    {
+        std::set<juce::Uuid> seenIds;
+        for (auto& ch : chains)
+        {
+            if (! seenIds.insert(ch.id).second)
+                ch.id = juce::Uuid();
+            for (auto& m : ch.modules)
+                if (! seenIds.insert(m.id).second)
+                    m.id = juce::Uuid();
+        }
+    }
+
     std::set<ModuleType> seenSingletons;   // synth/util types already placed (global)
     int videoBudget    = kMaxVideoSlots;    // at most 8 slotted instances model-wide
     int samplerBudget  = kMaxSamplerEngines;// at most 2 sampler engines (A/B) model-wide
