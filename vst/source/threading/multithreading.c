@@ -272,6 +272,30 @@ int hasValidImageForAudio(DoubleBuffer *db) {
 // It is also assumed that the Context structure now contains a boolean field
 // 'enableImageTransform' to toggle image transformation at runtime.
 
+/* Resolve the per-insert state pointers of one synth's chain plan (Pitch/Mask
+ * pool instances, VideoScroll probe rings) for image_chain_run(). Marker and
+ * unknown ids get NULL — the executor treats them as pass-through. Shared by
+ * the three per-synth input selections in udpThread (single source of truth
+ * for the insert-id → state-pool mapping). */
+static void chain_resolve_insert_states(const SynthChainPlan *sp,
+                                        void *states[CHAIN_PLAN_MAX_INSERTS])
+{
+    for (int i = 0; i < sp->num_inserts; i++)
+    {
+        switch (sp->insert_id[i])
+        {
+            case IMAGE_CHAIN_INSERT_LUXPITCH:
+                states[i] = (void *)lux_pitch_instance(sp->insert_state_idx[i]); break;
+            case IMAGE_CHAIN_INSERT_LUXMASK:
+                states[i] = (void *)lux_mask_instance(sp->insert_state_idx[i]); break;
+            case IMAGE_CHAIN_INSERT_VIDEOSCROLL:
+                states[i] = (void *)video_scroll_instance(sp->insert_state_idx[i]); break;
+            default:
+                states[i] = NULL; break;
+        }
+    }
+}
+
 void *udpThread(void *arg) {
   Context *ctx;
   DoubleBuffer *db;
@@ -799,6 +823,14 @@ void *udpThread(void *arg) {
         }
 
 
+        /* ── ONE ChainPlan snapshot per frame ─────────────────────────────────
+         * The three per-synth input selections below (LuxStral A, LuxStral B,
+         * LuxSynth/LuxWave) must all see the SAME topology: taking a fresh
+         * snapshot per synth could mix two different plans within one frame
+         * when a rack edit is published mid-frame. */
+        ChainPlan frame_plan;
+        chain_plan_get(&frame_plan);
+
         /* ── Pick LuxStral's input (M6 Phase 2 — fed by ITS OWN chain) ────────
          * • A chain holding the Sampler IS the modulated channel (mod) — it
          *   carries the sampler playback frame + the recorded Pitch/Mask, so
@@ -808,9 +840,7 @@ void *udpThread(void *arg) {
          *   Mask instances) over the live frame, so LuxStral's processing is
          *   independent of every other chain. No inserts → raw live. */
         {
-            ChainPlan planA;
-            chain_plan_get(&planA);
-            const SynthChainPlan *spA = &planA.synth[CHAIN_SYNTH_LUXSTRAL];
+            const SynthChainPlan *spA = &frame_plan.synth[CHAIN_SYNTH_LUXSTRAL];
 
             if (spA->present && spA->has_sampler && mod_R)
             {
@@ -839,19 +869,7 @@ void *udpThread(void *arg) {
             else if (spA->present && spA->num_inserts > 0)
             {
                 void *states[CHAIN_PLAN_MAX_INSERTS];
-                for (int i = 0; i < spA->num_inserts; i++)
-                {
-                    switch (spA->insert_id[i])
-                    {
-                        case IMAGE_CHAIN_INSERT_LUXPITCH:
-                            states[i] = (void *)lux_pitch_instance(spA->insert_state_idx[i]); break;
-                        case IMAGE_CHAIN_INSERT_LUXMASK:
-                            states[i] = (void *)lux_mask_instance(spA->insert_state_idx[i]); break;
-                        case IMAGE_CHAIN_INSERT_VIDEOSCROLL:
-                            states[i] = (void *)video_scroll_instance(spA->insert_state_idx[i]); break;
-                        default: states[i] = NULL; break;
-                    }
-                }
+                chain_resolve_insert_states(spA, states);
                 image_chain_run(db->activeBuffer_R, db->activeBuffer_G, db->activeBuffer_B,
                                 nb_pixels, g_sp3ctra_config.num_octaves,
                                 spA->insert_id, states, spA->num_inserts,
@@ -884,32 +902,29 @@ void *udpThread(void *arg) {
                 __atomic_store_n(&s_luxstral_b_db_ready, 1, __ATOMIC_RELEASE);
             }
 
-            ChainPlan planLB;
-            chain_plan_get(&planLB);
-            const SynthChainPlan *spLB = &planLB.synth[CHAIN_SYNTH_LUXSTRAL_B];
+            const SynthChainPlan *spLB = &frame_plan.synth[CHAIN_SYNTH_LUXSTRAL_B];
             if (spLB->present)
             {
+                /* Silent input frame — used when engine B's chain has NO source
+                 * (source_kind == NONE): feeding the live scanline in that case is
+                 * the "sound without a source" bug. Static zero buffer → the normal
+                 * pipeline path yields a zeroed grayscale (proper silence). */
+                static const uint8_t s_zero_frame[CIS_MAX_PIXELS_NB] = {0};
+
                 const uint8_t *bxR, *bxG, *bxB;
                 if (spLB->has_sampler && mod_R)
                 {
                     bxR = mod_R; bxG = mod_G; bxB = mod_B;   /* modulated/sampler channel */
                 }
+                else if (spLB->source_kind == CHAIN_SRC_NONE)
+                {
+                    /* No source placed in this chain → silence (NOT the live feed). */
+                    bxR = s_zero_frame; bxG = s_zero_frame; bxB = s_zero_frame;
+                }
                 else if (spLB->num_inserts > 0)
                 {
                     void *states[CHAIN_PLAN_MAX_INSERTS];
-                    for (int i = 0; i < spLB->num_inserts; i++)
-                    {
-                        switch (spLB->insert_id[i])
-                        {
-                            case IMAGE_CHAIN_INSERT_LUXPITCH:
-                                states[i] = (void *)lux_pitch_instance(spLB->insert_state_idx[i]); break;
-                            case IMAGE_CHAIN_INSERT_LUXMASK:
-                                states[i] = (void *)lux_mask_instance(spLB->insert_state_idx[i]); break;
-                            case IMAGE_CHAIN_INSERT_VIDEOSCROLL:
-                                states[i] = (void *)video_scroll_instance(spLB->insert_state_idx[i]); break;
-                            default: states[i] = NULL; break;
-                        }
-                    }
+                    chain_resolve_insert_states(spLB, states);
                     image_chain_run(db->activeBuffer_R, db->activeBuffer_G, db->activeBuffer_B,
                                     nb_pixels, g_sp3ctra_config.num_octaves,
                                     spLB->insert_id, states, spLB->num_inserts,
@@ -943,9 +958,7 @@ void *udpThread(void *arg) {
          * freeze envelope here, skipped on the sampler worker). */
 #ifdef VST_MODE
         {
-            ChainPlan plan;
-            chain_plan_get(&plan);
-            const SynthChainPlan *spB = &plan.synth[CHAIN_SYNTH_LUXSYNTH];
+            const SynthChainPlan *spB = &frame_plan.synth[CHAIN_SYNTH_LUXSYNTH];
 
             const uint8_t *bR = db->activeBuffer_R;
             const uint8_t *bG = db->activeBuffer_G;
@@ -954,19 +967,7 @@ void *udpThread(void *arg) {
             if (spB->present && spB->num_inserts > 0)
             {
                 void *states[CHAIN_PLAN_MAX_INSERTS];
-                for (int i = 0; i < spB->num_inserts; i++)
-                {
-                    switch (spB->insert_id[i])
-                    {
-                        case IMAGE_CHAIN_INSERT_LUXPITCH:
-                            states[i] = (void *)lux_pitch_instance(spB->insert_state_idx[i]); break;
-                        case IMAGE_CHAIN_INSERT_LUXMASK:
-                            states[i] = (void *)lux_mask_instance(spB->insert_state_idx[i]); break;
-                        case IMAGE_CHAIN_INSERT_VIDEOSCROLL:
-                            states[i] = (void *)video_scroll_instance(spB->insert_state_idx[i]); break;
-                        default: states[i] = NULL; break;
-                    }
-                }
+                chain_resolve_insert_states(spB, states);
                 image_chain_run(db->activeBuffer_R, db->activeBuffer_G, db->activeBuffer_B,
                                 nb_pixels, g_sp3ctra_config.num_octaves,
                                 spB->insert_id, states, spB->num_inserts,
@@ -1294,24 +1295,32 @@ void *audioProcessingThread(void *arg) {
 
     // Call synthesis routine directly with stable image data
     // This will NEVER block, even if scanner disconnects!
-    synth_AudioProcess(audio_read_R, audio_read_G, audio_read_B, context->doubleBuffer);
-
 #ifdef VST_MODE
-    /* M8 — render LuxStral engine B from its own DoubleBuffer, in the SAME
-     * iteration as A (so it is paced by A's consumed-buffer handshake). Only
-     * spun up when engine B is actually placed in a chain (plan.present); its
-     * worker pool + per-instance state initialise lazily on first render. */
+    /* M8 — dual-engine publish. When engine B is active, render A AND B and
+     * publish them ATOMICALLY (adjacent index flips) via synth_AudioProcess_ab,
+     * so the consumer never pairs A's new frame with B's stale one (the window
+     * that duplicated/skipped B frames → robotic artefact). B renders in the SAME
+     * iteration as A (paced by A's consumed-buffer handshake) and spins up lazily
+     * on first render. Otherwise render engine A alone. */
     {
       static int s_engine_b_inited = 0;
       ChainPlan planB_render;
       chain_plan_get(&planB_render);
-      if (planB_render.synth[CHAIN_SYNTH_LUXSTRAL_B].present
-          && __atomic_load_n(&s_luxstral_b_db_ready, __ATOMIC_ACQUIRE))
+      const int bActive = planB_render.synth[CHAIN_SYNTH_LUXSTRAL_B].present
+                          && __atomic_load_n(&s_luxstral_b_db_ready, __ATOMIC_ACQUIRE);
+      if (bActive)
       {
         if (!s_engine_b_inited) { synth_luxstral_init_engine_b(); s_engine_b_inited = 1; }
-        synth_AudioProcess_b(audio_read_R, audio_read_G, audio_read_B, &s_luxstral_b_db);
+        synth_AudioProcess_ab(audio_read_R, audio_read_G, audio_read_B,
+                              context->doubleBuffer, &s_luxstral_b_db);
+      }
+      else
+      {
+        synth_AudioProcess(audio_read_R, audio_read_G, audio_read_B, context->doubleBuffer);
       }
     }
+#else
+    synth_AudioProcess(audio_read_R, audio_read_G, audio_read_B, context->doubleBuffer);
 #endif
 
     // Report iteration time to profiler (VST mode only - uses extern profiler)

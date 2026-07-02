@@ -347,8 +347,8 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
     {
       float*      pre_wave_w = worker->precomputed_wave_data +
                                (size_t)local_note_idx * audio_buffer_size;
-      float       phase = waves[note].phase_acc;
-      const float inc   = waves[note].phase_inc;
+      float       phase = worker->engine->waves[note].phase_acc;
+      const float inc   = worker->engine->waves[note].phase_inc;
       const float fsize = (float)SINE_TABLE_SIZE;
       for (int s = 0; s < audio_buffer_size; s++) {
         phase += inc;
@@ -365,7 +365,7 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
             pre_wave_w[s]  = sine_s + morph * (square_s - sine_s);
         }
       }
-      waves[note].phase_acc = phase;  /* safe: disjoint per-worker ranges */
+      worker->engine->waves[note].phase_acc = phase;  /* per-engine + disjoint per-worker ranges */
     }
 
     // ✅ OPTIMIZATION: Prefetch next iteration data (improves cache hit rate)
@@ -386,7 +386,7 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
     generate_waveform_samples(note, wave_buf, pre_wave);
 
     // Apply GAP_LIMITER envelope
-    apply_gap_limiter_ramp(note, target_volume, pre_wave, vol_buf);
+    apply_gap_limiter_ramp(worker->engine->waves, note, target_volume, pre_wave, vol_buf);
 
     // Debug capture (fast path when disabled)
     if (capture_enabled) {
@@ -394,7 +394,7 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
         memcpy(worker->captured_current_volume + (size_t)local_note_idx * audio_buffer_size,
                vol_buf,
                sizeof(float) * (size_t)audio_buffer_size);
-        fill_float(waves[note].target_volume,
+        fill_float(worker->engine->waves[note].target_volume,
                    worker->captured_target_volume + (size_t)local_note_idx * audio_buffer_size,
                    (size_t)audio_buffer_size);
       }

@@ -7,6 +7,7 @@
 #include "framesequencer/FrameSequencer.h"
 #include "processing/AcquisitionGate.h" // "Vitesse d'acquisition" — frame-advance brake clock
 #include "ui/ChainModel.h"      // M6 Phase 2 — editable chain topology (owned here)
+#include <map>                  // chainPoolSlots_ (stable chain → pool-slot binding)
 
 // C headers for RT profiling
 extern "C" {
@@ -228,6 +229,12 @@ public:
      *  onChainModelEdited() afterwards. */
     ChainModel& getChainModel() noexcept { return chainModel_; }
 
+    /** Pitch/Mask state-pool slot bound to chain `chainIdx` (0..7), or 0 when
+     *  unknown. The binding is keyed by the chain's UUID and STABLE across
+     *  edits: removing / reordering another chain never rebinds this chain's
+     *  live Pitch/Mask state (see updateChainPoolBindings). Message thread. */
+    int poolSlotForChain(int chainIdx) const noexcept;
+
     /** Called by the UI after a model mutation: pushes module presence onto the
      *  APVTS enable params, derives the per-synth source routing, and persists
      *  the topology. (Message thread.) */
@@ -378,14 +385,28 @@ private:
     // VideoScroll probe slots (0..7) present last edit — diffed to clear the
     // capture ring of any probe that was just removed.
     std::set<int>        videoScrollSlots_;
-    // Bit i set ⇒ chain i has a Pitch/Mask instance → fan MIDI to pool slot i.
-    // Default bit 0 reproduces the legacy single-instance behaviour.
+    // LuxStral engines (0 = A, 1 = B) present last edit — diffed so each engine's
+    // enable param (A = deviceEnabled, B = luxstralBEnabled) follows ITS OWN
+    // placement, not type-level presence.
+    std::set<int>        luxstralEngines_;
+    // Stable chain → Pitch/Mask pool-slot binding, keyed by chain UUID. A chain
+    // keeps its pool slot for its whole lifetime, so removing / reordering other
+    // chains never rebinds (and thus never corrupts) its live Pitch/Mask state.
+    // Rebuilt by updateChainPoolBindings() on every model load/edit.
+    std::map<juce::Uuid, int> chainPoolSlots_;
+    // Pool slots owning a Pitch/Mask instance after the LAST derive — diffed to
+    // reset instances whose module (or whole chain) was just removed.
+    uint32_t prevPitchSlots_ { 0 };
+    uint32_t prevMaskSlots_  { 0 };
+    // Bit i set ⇒ the chain bound to pool slot i has a Pitch/Mask instance →
+    // fan MIDI to pool slot i. Default bit 0 = legacy single-instance behaviour.
     std::atomic<uint32_t> chainPitchMask_ { 1 };
     std::atomic<uint32_t> chainMaskMask_  { 1 };
     // M8 — true when a 2nd LuxStral engine (slot B) is placed in the model; gates
     // the additive engine-B mix in processBlock(). Set in deriveChainRouting().
     std::atomic<bool>     luxstralBPresent_ { false };
     void deriveChainRouting();              // model → setChainSourceRouting + chain plan
+    uint32_t updateChainPoolBindings();     // model → chainPoolSlots_; returns slots to reset
     void deriveAndPublishChainPlan();       // model → RT-safe per-synth ChainPlan
     void persistChainModel();              // model → apvts.state <CHAINS>
     void applyChainEnableBridge();         // presence → enable params (diff vs chainActiveTypes_)

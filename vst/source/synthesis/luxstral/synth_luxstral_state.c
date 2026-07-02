@@ -120,6 +120,12 @@ void synth_data_freeze_init(void) {
   synth_data_freeze_init_impl(&g_luxstral_engine_a);
 }
 
+/* M8 — engine-B (and any non-A engine) freeze-state init. synth_AudioProcess_impl
+ * locks eng->synth_data_freeze_mutex every frame, so it MUST be initialised. */
+void synth_data_freeze_init_engine(LuxStralEngine *eng) {
+  synth_data_freeze_init_impl(eng);
+}
+
 void synth_data_freeze_cleanup(void) {
   synth_data_freeze_cleanup_impl(&g_luxstral_engine_a);
 }

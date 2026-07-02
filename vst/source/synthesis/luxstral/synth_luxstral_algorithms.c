@@ -97,7 +97,9 @@ void update_gap_limiter_coefficients(void) {
  * @param volumeBuffer Output volume buffer for audio samples
  * @retval None
  */
-void apply_gap_limiter_ramp(int note, float target_volume, const float *pre_wave, float *volumeBuffer) {
+void apply_gap_limiter_ramp(volatile struct wave *waves, int note, float target_volume, const float *pre_wave, float *volumeBuffer) {
+    // `waves` (param) shadows the global — engine A passes the global array,
+    // engine B its own copy, so per-note current_volume stays per-engine (M8).
     (void)pre_wave; // No longer used (phase weighting removed)
 
     // Apply per-note physiological (equal-loudness) gain.

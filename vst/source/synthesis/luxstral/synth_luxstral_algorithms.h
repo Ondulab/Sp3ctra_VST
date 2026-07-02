@@ -38,7 +38,9 @@ extern "C" {
  * @param volumeBuffer Output volume buffer for audio samples
  * @retval None
  */
-void apply_gap_limiter_ramp(int note, float target_volume, const float *pre_wave, float *volumeBuffer);
+/* `waves` is the OWNING engine's oscillator array (worker->engine->waves) — the
+ * per-note current_volume/target_volume it reads/writes must be per-engine (M8). */
+void apply_gap_limiter_ramp(volatile struct wave *waves, int note, float target_volume, const float *pre_wave, float *volumeBuffer);
 
 /**
  * @brief Precompute GAP_LIMITER envelope coefficients for all oscillators

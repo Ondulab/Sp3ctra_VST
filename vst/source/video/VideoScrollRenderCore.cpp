@@ -232,9 +232,14 @@ void VideoScrollRenderCore::scrollStep()
     // functions of the distance from the birth line.
 
     // ── Speed → signed pixels this tick (absolute, exponential) ──────────────
-    //   px = sign(s) * (2^(3*|s|) - 1)  → s=0 frozen, s=±1 → ±7 px/tick.
+    //   px = sign(s) * (2^(kSpeedExp*|s|) - 1).  s=0 → frozen.
+    //   kSpeedExp is set so |s|=1 → ~16.7 px/tick = ~1000 px/s at 60 fps, i.e.
+    //   one screen pixel per incoming CIS line → full-fidelity 1000 lps. Lower
+    //   it (e.g. 3.0 → ±7 px/tick) for a slower/artistic feel, at the cost of
+    //   collapsing several lines into each row again.
+    constexpr float kSpeedExp = 4.14f;
     const float speedParam = juce::jlimit(-1.f, 1.f, param("speed", 0.f));
-    const float mag    = std::pow(2.0f, 3.0f * std::abs(speedParam)) - 1.0f;
+    const float mag    = std::pow(2.0f, kSpeedExp * std::abs(speedParam)) - 1.0f;
     const float pxRate = (speedParam < 0.f) ? -mag : mag;
     const bool  reverse = (pxRate < 0.f);
 
@@ -262,8 +267,9 @@ void VideoScrollRenderCore::scrollStep()
     const int   coreH = juce::jmax(1, 2 * scroll);
     const int   bandH = juce::jmax(coreH, thicknessPx);
 
-    // Build the fresh content (newest `captured` frames, box-averaged on BOTH the
-    // CIS axis and the temporal axis).
+    // Build the fresh content: the newest `captured` frames stamped as DISTINCT
+    // rows across the band (time gradient, newest at the birth line) instead of
+    // averaged into one line — this is what preserves the 1000 lps detail.
     juce::Image lineImg;
     const bool haveLine = buildLineImage(lineImg, coreH, bandH, captured, newestPx);
 
@@ -317,10 +323,12 @@ void VideoScrollRenderCore::scrollStep()
 }
 
 //==============================================================================
-// buildLineImage — average the `captured` most-recent CIS frames into a single
-// birth-line scanline (width bufW_) duplicated across the band, applying
-// invert / colour-mode. Verbatim port; the source is now capR_/capG_/capB_
-// (drained this tick) instead of the frameRing_ window.
+// buildLineImage — turn the `captured` CIS frames drained this tick into the
+// birth-line strip. Each frame becomes ONE distinct display row (width bufW_,
+// horizontal box-average), and the rows are mapped onto the band as a time
+// gradient with the NEWEST frame at the birth line. This preserves the full
+// 1000 lps temporal detail instead of collapsing the whole tick into a single
+// averaged line duplicated across the band (the old ~16:1 detail loss).
 //   `captured`     = number of valid rows in capR_/capG_/capB_ this tick.
 //   `captureCount` = newest valid pixel count (the CIS width to box-average).
 //==============================================================================
@@ -350,20 +358,42 @@ bool VideoScrollRenderCore::buildLineImage(juce::Image& out, int coreH, int band
     for (int x = 0; x <= bufW_; ++x)
         col0[x] = juce::jlimit(0, count, (int) ((long long) x * count / bufW_));
 
-    std::vector<int>   pfR(count + 1), pfG(count + 1), pfB(count + 1);
-    std::vector<float> accR(bufW_, 0.f), accG(bufW_, 0.f), accB(bufW_, 0.f);
-
-    // The birth line is ONE scanline (the `captured` CIS frames this tick, box-
-    // averaged on both axes), duplicated across the whole band. No temporal
-    // gradient inside the stamp — every row identical → a clean fat band.
-    int used = 0;
+    // ── Collect the frames drained this tick (oldest → newest) ───────────────
+    // Each valid frame becomes ONE distinct display row. We no longer collapse
+    // the whole tick into a single averaged line (that discarded ~16:1 of the
+    // 1000 lps temporal detail); the rows are mapped onto the band below.
+    std::vector<int> valid;
+    valid.reserve((size_t) juce::jmax(0, captured));
     for (int f = 0; f < captured; ++f)
+        if (capPx_[f] == count) valid.push_back(f);
+    const int used = (int) valid.size();
+
+    const size_t rowBytes = (size_t) bufW_ * (size_t) dps;
+    if (used == 0)
     {
-        if (capPx_[f] != count) continue;   // skip size mismatch
+        for (int r = 0; r < bandH; ++r)
+            std::memset(bmp.getLinePointer(r), 0, rowBytes);   // no width match → black
+        return true;
+    }
+
+    // ── Per-frame horizontal box-average → one float row each (oldest→newest) ─
+    // Luma is folded into all three channels when !colorMode so the band-fill
+    // pass below is channel-agnostic.
+    std::vector<float> rowsR((size_t) used * (size_t) bufW_);
+    std::vector<float> rowsG((size_t) used * (size_t) bufW_);
+    std::vector<float> rowsB((size_t) used * (size_t) bufW_);
+    std::vector<int>   pfR(count + 1), pfG(count + 1), pfB(count + 1);
+
+    for (int u = 0; u < used; ++u)
+    {
+        const int f = valid[u];
         const uint8_t* fr = capR_[f].data();
         const uint8_t* fg = capG_[f].data();
         const uint8_t* fb = capB_[f].data();
-        ++used;
+        float* oR = &rowsR[(size_t) u * (size_t) bufW_];
+        float* oG = &rowsG[(size_t) u * (size_t) bufW_];
+        float* oB = &rowsB[(size_t) u * (size_t) bufW_];
+
         if (colorMode)
         {
             pfR[0] = pfG[0] = pfB[0] = 0;
@@ -378,16 +408,15 @@ bool VideoScrollRenderCore::buildLineImage(juce::Image& out, int coreH, int band
                 int a = col0[x], b = col0[x + 1];
                 if (b <= a) b = juce::jmin(count, a + 1);
                 const float inv = 1.f / (float) (b - a);
-                accR[x] += (float) (pfR[b] - pfR[a]) * inv;
-                accG[x] += (float) (pfG[b] - pfG[a]) * inv;
-                accB[x] += (float) (pfB[b] - pfB[a]) * inv;
+                oR[x] = (float) (pfR[b] - pfR[a]) * inv;
+                oG[x] = (float) (pfG[b] - pfG[a]) * inv;
+                oB[x] = (float) (pfB[b] - pfB[a]) * inv;
             }
         }
         else
         {
-            // Derive luma here (the ring stores r/g/b only; the original stored a
-            // precomputed gray channel — same 0.299/0.587/0.114 weights via the
-            // 77/150/29 fixed-point form used in captureCurrentFrame()).
+            // Derive luma (the ring stores r/g/b only): 0.299/0.587/0.114 via the
+            // 77/150/29 fixed-point form used in captureCurrentFrame().
             pfR[0] = 0;
             for (int i = 0; i < count; ++i)
             {
@@ -399,31 +428,62 @@ bool VideoScrollRenderCore::buildLineImage(juce::Image& out, int coreH, int band
                 int a = col0[x], b = col0[x + 1];
                 if (b <= a) b = juce::jmin(count, a + 1);
                 const float gy = (float) (pfR[b] - pfR[a]) / (float) (b - a);
-                accR[x] += gy; accG[x] += gy; accB[x] += gy;
+                oR[x] = oG[x] = oB[x] = gy;
             }
         }
     }
-    if (used == 0) used = 1;  // leave the line black rather than divide by 0
-    const float invUsed = 1.f / (float) used;
 
-    // Compose the birth line into the first row, then duplicate it everywhere.
-    auto* row0 = bmp.getLinePointer(0);
-    for (int x = 0; x < bufW_; ++x)
+    // ── Map the `used` rows onto the band as a time gradient ──────────────────
+    // The birth line (band centre) is the NEWEST row; rows age away from it on
+    // both sides — mirroring how scrollStep() pushes both zones away from the
+    // birth line. The gradient spans the `coreH` motion rows; a taller band
+    // (Thickness) keeps a clean bar by repeating the newest row past the core.
+    // `span` box-averages a group of frames per row when the tick delivered more
+    // lines than the core can show (honest decimation, never a total collapse).
+    const float center   = (float) (bandH - 1) * 0.5f;
+    const float coreHalf = juce::jmax(1.0f, (float) coreH * 0.5f);
+    const float span     = juce::jmax(1.0f, (float) used / coreHalf);
+
+    int prevLo = -1, prevHi = -1;
+    for (int r = 0; r < bandH; ++r)
     {
-        int r  = (int) (accR[x] * invUsed + 0.5f);
-        int gv = (int) (accG[x] * invUsed + 0.5f);
-        int b  = (int) (accB[x] * invUsed + 0.5f);
-        if (invert) { r = 255 - r; gv = 255 - gv; b = 255 - b; }
-        auto* dp = reinterpret_cast<juce::PixelRGB*>(row0 + x * dps);
-        dp->setARGB(255,
-                    (juce::uint8) juce::jlimit(0, 255, r),
-                    (juce::uint8) juce::jlimit(0, 255, gv),
-                    (juce::uint8) juce::jlimit(0, 255, b));
-    }
+        const float d    = std::abs((float) r - center);
+        const float ageN = juce::jmin(1.0f, d / coreHalf);         // 0 birth → 1 core edge
+        const float fpos = (float) (used - 1) * (1.0f - ageN);     // newest at the birth line
+        int lo = (int) std::floor(fpos - span * 0.5f);
+        int hi = (int) std::ceil (fpos + span * 0.5f);
+        lo = juce::jlimit(0, used - 1, lo);
+        hi = juce::jlimit(0, used,     hi);
+        if (hi <= lo) hi = juce::jmin(used, lo + 1);
 
-    const size_t rowBytes = (size_t) bufW_ * (size_t) dps;
-    for (int r = 1; r < bandH; ++r)
-        std::memcpy(bmp.getLinePointer(r), row0, rowBytes);
+        auto* dst = bmp.getLinePointer(r);
+        if (r > 0 && lo == prevLo && hi == prevHi)
+        {
+            std::memcpy(dst, bmp.getLinePointer(r - 1), rowBytes);   // same group → reuse
+            continue;
+        }
+        prevLo = lo; prevHi = hi;
+
+        const float invN = 1.f / (float) (hi - lo);
+        for (int x = 0; x < bufW_; ++x)
+        {
+            float sr = 0.f, sg = 0.f, sb = 0.f;
+            for (int u = lo; u < hi; ++u)
+            {
+                const size_t idx = (size_t) u * (size_t) bufW_ + (size_t) x;
+                sr += rowsR[idx]; sg += rowsG[idx]; sb += rowsB[idx];
+            }
+            int rr = (int) (sr * invN + 0.5f);
+            int gv = (int) (sg * invN + 0.5f);
+            int bb = (int) (sb * invN + 0.5f);
+            if (invert) { rr = 255 - rr; gv = 255 - gv; bb = 255 - bb; }
+            auto* dp = reinterpret_cast<juce::PixelRGB*>(dst + x * dps);
+            dp->setARGB(255,
+                        (juce::uint8) juce::jlimit(0, 255, rr),
+                        (juce::uint8) juce::jlimit(0, 255, gv),
+                        (juce::uint8) juce::jlimit(0, 255, bb));
+        }
+    }
 
     return true;
 }
