@@ -100,6 +100,7 @@ void img_stage_compute_pan_luxstral(
     int            pixel_count,
     int            pixels_per_note,
     int            max_notes,
+    float          temp_amp,      /* per-engine colour-temperature amplification */
     float         *pan_out,
     float         *left_gains_out,
     float         *right_gains_out

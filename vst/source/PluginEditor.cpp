@@ -51,6 +51,15 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         if (samplerPage)  samplerPage ->setSamplerIndex(slot);
         if (samplerSetup) samplerSetup->setSamplerIndex(slot);
     };
+    // Selecting a LUXSTRAL block binds the module page + setup to engine A/B
+    // (slot 0 = A, 1 = B), fired just before onBlockSelected → selectBlock —
+    // so the PLAY/SETUP faces edit the right engine's parameter set (M8).
+    chainRack->onLuxStralBlockSelected = [this](int slot)
+    {
+        luxStralEngineIndex_ = (slot == 1) ? 1 : 0;
+        if (imgLuxStralPage) imgLuxStralPage->setEngineIndex(luxStralEngineIndex_);
+        if (stralSetup)      stralSetup->setEngineIndex(luxStralEngineIndex_);
+    };
     // A chain edit changes the rack's preferred height → re-run the zone layout.
     chainRack->onModelChanged  = [this]
     {
@@ -362,7 +371,11 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
     // Module power toggle (right of the face row) — rebind to this block's enable
     // param, or hide for blocks without a power switch (SOURCE CIS, SCORE).
     {
-        const juce::String enableId = ChainRackComponent::enableParamId(id);
+        juce::String enableId = ChainRackComponent::enableParamId(id);
+        // LuxStral engine B powers through its own param (the type-level
+        // mapping returns deviceEnabled, which is engine A's toggle).
+        if (id == ChainBlockId::LuxStral && luxStralEngineIndex_ == 1)
+            enableId = "luxstralBEnabled";
         const bool showPower = blockHasSetup(id) && enableId.isNotEmpty();
         modulePowerAttachment.reset();   // detach before rebinding to a new param
         if (showPower)
@@ -406,7 +419,10 @@ Sp3ctraAudioProcessorEditor::luxStralVisualizerSources() const
     // Stage 8 (pan, gated on stereo) and Stage 9 (blob, gated on StrokeForge).
     auto& apvts = audioProcessor.getAPVTS();
     std::vector<VisualizerMode> s { VisualizerMode::SPCTR_GRAY };
-    if (apvts.getRawParameterValue("luxstralStereoEnable")->load() > 0.5f)
+    // COLOR follows the SELECTED engine's stereo toggle (A/B have their own).
+    const char* stereoId = (luxStralEngineIndex_ == 1) ? "luxstralBStereoEnable"
+                                                       : "luxstralStereoEnable";
+    if (apvts.getRawParameterValue(stereoId)->load() > 0.5f)
         s.push_back(VisualizerMode::SPCTR_COLOR);
     if (apvts.getRawParameterValue("sfEnabled")->load() > 0.5f)
         s.push_back(VisualizerMode::SPCTR_BLOB);

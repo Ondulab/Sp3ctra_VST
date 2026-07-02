@@ -82,6 +82,21 @@ static const sp3ctra_config_t DEFAULT_CONFIG = {
     // Noise gate parameters
     .noise_gate_threshold = 0.005f,
 
+    // LuxStral engine B (M8 dual-engine) — same defaults as engine A.
+    // Live values come from the luxstralB* APVTS params (VST mode).
+    .luxstral_b_inversion = 1,
+    .luxstral_b_ac_removal = 1,
+    .luxstral_b_gamma_value = 1.0f,
+    .luxstral_b_contrast_min = 0.21f,
+    .luxstral_b_tau_up_base_ms = 0.5f,
+    .luxstral_b_tau_down_base_ms = 0.5f,
+    .luxstral_b_summation_response_exponent = 2.0f,
+    .luxstral_b_noise_gate_threshold = 0.005f,
+    .luxstral_b_stereo_mode_enabled = 1,
+    .luxstral_b_stereo_temperature_amplification = 2.5f,
+    .luxstral_b_soft_limit_threshold = SOFT_LIMIT_THRESHOLD_DEFAULT,
+    .luxstral_b_soft_limit_knee = SOFT_LIMIT_KNEE_DEFAULT,
+
     // Image processing parameters - LUXSTRAL SYNTHESIS
     .additive_enable_non_linear_mapping = 1,      // Enable gamma correction by default
     .additive_gamma_value = 4.8f,                 // Default gamma value

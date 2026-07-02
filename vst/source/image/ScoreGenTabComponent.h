@@ -85,26 +85,28 @@ public:
         addAndMakeVisible(playStopButton);
 
         // Loop + Inverse as compact pictogram toggles (replace the old text Loop).
-        loopBtn.setToggleState(true, juce::dontSendNotification);   // loop on by default
+        // APVTS-bound (scoreLoop / scoreReverse) so the DAW can automate /
+        // MIDI-map them; the processor derives the engine LoopMode from the
+        // two params (reverse → INVERSE, else loop → LOOP, else NONE).
         loopBtn.setEnabled(false);
         loopBtn.setTooltip("Loop playback");
-        loopBtn.onClick = [this] { applyTransportMode(); };
         addAndMakeVisible(loopBtn);
+        loopAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            processor.getAPVTS(), "scoreLoop", loopBtn);
 
-        reverseBtn.setToggleState(false, juce::dontSendNotification);
         reverseBtn.setEnabled(false);
         reverseBtn.setTooltip("Reverse (play the score backward)");
-        reverseBtn.onClick = [this] { applyTransportMode(); };
         addAndMakeVisible(reverseBtn);
+        reverseAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            processor.getAPVTS(), "scoreReverse", reverseBtn);
 
         initLabel(speedLabel, "Speed");
         initKnob(speedSlider, 0.1, 6.0, 0.01, 1.0, "x");
         speedSlider.setSkewFactorFromMidPoint(1.0); // 1.0× sits at the knob's centre (log feel)
-        speedSlider.onValueChange = [this]
-        {
-            if (auto* fs = processor.getLuxSampler())
-                fs->setScoreSpeed((float) speedSlider.getValue());
-        };
+        // APVTS-bound (scoreSpeed) — the processor relays changes to the engine
+        // live, whether they come from this knob, DAW automation or MIDI.
+        speedAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+            processor.getAPVTS(), "scoreSpeed", speedSlider);
 
         // Disabled (greyed) until a score is generated.
         setTransportEnabled(false);
@@ -172,6 +174,21 @@ public:
         eqEditor.onChange = [this] { eqDirty = true; };
         addAndMakeVisible(eqEditor);
 
+        // ── Restore persisted SCORE page state ──────────────────────────────
+        // The EQ curve rides in apvts.state (written on every edit below);
+        // the WAV path + extraction start live in the processor and were
+        // restored by setStateInformation before this page is built.
+        {
+            const juce::String eq = processor.getAPVTS().state
+                .getProperty("scoreEqCurve", "").toString();
+            if (eq.isNotEmpty())
+                eqEditor.decodeState(eq);
+
+            const juce::File wav(processor.getScoreWavPath());
+            if (wav.existsAsFile())
+                setLoadedFile(wav, /*restoreRegion*/ true);
+        }
+
         startTimerHz(10);   // reflect auto-stop (LoopMode::NONE end) on the button
 
         // ── Log ────────────────────────────────────────────────────────────
@@ -208,6 +225,10 @@ public:
         stopTimer();
         if (auto* fs = processor.getLuxSampler())
             fs->uiStopScore();
+        // Reflect the stop on the transport param (the timer that mirrors it
+        // is gone once this page closes).
+        if (auto* p = processor.getAPVTS().getParameter("scorePlaying"))
+            p->setValueNotifyingHost(0.0f);
         processor.stopScorePreview();
         job.stopThread(3000);
     }
@@ -458,7 +479,8 @@ private:
     /** Compact pictogram toggle for the loop controls.
      *   • Loop    → a "racetrack" loop with a left-pointing arrow (repeat).
      *   • Inverse → the same loop, mirrored (right-pointing arrow) = play backward.
-     *  Lights up amber when active. JUCE toggle — read in applyTransportMode(). */
+     *  Lights up amber when active. JUCE toggle — APVTS-bound (scoreLoop /
+     *  scoreReverse); the processor maps the two params to the engine LoopMode. */
     class ScoreIconToggle : public juce::Button
     {
     public:
@@ -611,7 +633,10 @@ private:
             });
     }
 
-    void setLoadedFile(const juce::File& f)
+    /** @p restoreRegion true when reloading the persisted WAV on construction:
+     *  the extraction start stored in ScoreSettings is then kept instead of
+     *  being reset to 0 like a user-picked new file. */
+    void setLoadedFile(const juce::File& f, bool restoreRegion = false)
     {
         loadedWav = f;
         const auto info = scoregen::probeWav(f);
@@ -622,13 +647,17 @@ private:
                               + juce::String(info.sampleRate) + " Hz, "
                               + juce::String(info.numChannels) + " ch)",
                               juce::dontSendNotification);
-            processor.getScoreSettings().startTimeSec = 0.0;   // new file → from start
+            if (! restoreRegion)
+                processor.getScoreSettings().startTimeSec = 0.0; // new file → from start
             waveform.setFile(f);
+            if (restoreRegion)
+                waveform.setStartSeconds(processor.getScoreSettings().startTimeSec);
             updateExportWindow();
             processor.stopScorePreview();      // drop any preview of the old file
             previewFile = juce::File(); previewStart = -1.0; previewLen = -1.0;
             previewButton.setEnabled(true);
             refreshPreviewButton();
+            processor.setScoreWavPath(f.getFullPathName());   // persists in state
         }
         else
         {
@@ -638,6 +667,7 @@ private:
             processor.stopScorePreview();
             previewButton.setEnabled(false);
             refreshPreviewButton();
+            processor.setScoreWavPath({});
         }
     }
 
@@ -955,38 +985,28 @@ private:
     }
 
     //==========================================================================
-    /** Map the two loop pictograms to the engine's LoopMode. Reverse always loops
-     *  (the engine has no one-shot reverse), so: reverse → INVERSE, else loop →
-     *  LOOP, else NONE (play once forward). */
-    LoopMode currentLoopMode() const
-    {
-        if (reverseBtn.getToggleState()) return LoopMode::INVERSE;
-        if (loopBtn.getToggleState())    return LoopMode::LOOP;
-        return LoopMode::NONE;
-    }
-
-    void applyTransportMode()
-    {
-        if (auto* fs = processor.getLuxSampler())
-            fs->setScoreLoopMode(currentLoopMode());
-    }
+    // Loop-mode mapping now lives in the processor (scoreLoop/scoreReverse
+    // params → LoopMode), so DAW automation and this page share one path.
 
     void togglePlay()
     {
         auto* fs = processor.getLuxSampler();
         if (fs == nullptr) return;
 
-        if (fs->isScorePlaying())
-        {
-            fs->uiStopScore();
+        const bool play = ! fs->isScorePlaying();
+        if (! play)
             scrubHead = -1;     // Stop returns to the start; clear the armed scrub
-        }
-        else
+
+        // Route through the scorePlaying param so the DAW sees the transport;
+        // the processor pushes speed/loop and starts/stops the engine. If the
+        // param already matches (brief drift window), drive the engine directly.
+        if (auto* p = processor.getAPVTS().getParameter("scorePlaying"))
         {
-            // Push current transport settings before starting.
-            fs->setScoreSpeed((float) speedSlider.getValue());
-            fs->setScoreLoopMode(currentLoopMode());
-            fs->uiPlayScore();
+            const float norm = play ? 1.0f : 0.0f;
+            if (! juce::approximatelyEqual(p->getValue(), norm))
+                p->setValueNotifyingHost(norm);
+            else if (play) fs->uiPlayScore();
+            else           fs->uiStopScore();
         }
         refreshPlayButton();
         repaint(previewArea);
@@ -1024,6 +1044,9 @@ private:
         if (eqDirty && ! eqEditor.isDragging())
         {
             eqDirty = false;
+            // Persist the curve — rides in apvts.state so it survives close.
+            processor.getAPVTS().state
+                .setProperty("scoreEqCurve", eqEditor.encodeState(), nullptr);
             if (baseImage.isValid())
                 applyEqToImageAndReload();
         }
@@ -1032,6 +1055,16 @@ private:
         refreshPlayButton();
         // Animate the reading head while playing.
         auto* fs = processor.getLuxSampler();
+        // Mirror the scorePlaying param on the real engine state so the DAW
+        // lane stays truthful when playback ends on its own (one-shot end) or
+        // is stopped by internal reload flows. parameterChanged() ignores
+        // writes that already match the engine state, so this cannot retrigger.
+        if (auto* p = processor.getAPVTS().getParameter("scorePlaying"))
+        {
+            const float norm = (fs != nullptr && fs->isScorePlaying()) ? 1.0f : 0.0f;
+            if (! juce::approximatelyEqual(p->getValue(), norm))
+                p->setValueNotifyingHost(norm);
+        }
         if (fs != nullptr && fs->isScorePlaying())
             repaint(previewArea);
 
@@ -1069,6 +1102,9 @@ private:
     ScoreIconToggle     reverseBtn { ScoreIconToggle::Glyph::Inverse };
     juce::Slider        speedSlider;
     juce::Label         speedLabel, playHint;
+    // APVTS bindings (declared after the widgets → destroyed first).
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> loopAttach, reverseAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> speedAttach;
     int                 scrubHead { -1 }; // armed/displayed score head when stopped (-1 = none)
     bool                scrubbing { false };
     bool                scrubAuditioning { false }; // true while a stopped-score scrub plays audio

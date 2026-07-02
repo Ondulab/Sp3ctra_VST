@@ -1664,9 +1664,10 @@ bool LuxSampler::loadFromFile(const juce::File& file)
         return false;
     }
 
-    setMidiChannel(static_cast<int>(hdr.midi_channel));
-    setOctaveOffset(static_cast<int>(hdr.octave_offset));
-    setMaxDuration(hdr.max_duration_s);
+    // NOTE: the header's midi_channel / octave_offset / max_duration are
+    // deliberately NOT applied — those live in the APVTS (restored by the
+    // host before any session auto-load) and applying stale file values here
+    // silently overrode the user's saved settings on every session reload.
 
     const int numSlotsInFile = static_cast<int>(
         std::min(hdr.num_slots, static_cast<uint32_t>(NUM_SLOTS)));
@@ -1777,6 +1778,126 @@ namespace
     constexpr uint16_t FSLOT_VERSION = 0x0001u;
 }
 
+// ============================================================================
+// Per-slot play-parameter XML — the single serialisation shared by .fslot,
+// the .sp3s session and the DAW state blob.
+// ============================================================================
+
+void LuxSampler::slotParamsToXml(int slotIndex, juce::XmlElement& xml) const
+{
+    if (slotIndex < 0 || slotIndex >= LuxSamplerConstants::NUM_SLOTS)
+        return;
+
+    xml.setAttribute("idx",            slotIndex);
+    xml.setAttribute("startFrac",      static_cast<double>(getSlotStartFrac(slotIndex)));
+    xml.setAttribute("endFrac",        static_cast<double>(getSlotEndFrac(slotIndex)));
+    xml.setAttribute("speed",          static_cast<double>(getSlotSpeed(slotIndex)));
+    xml.setAttribute("loopMode",       static_cast<int>(getSlotLoopMode(slotIndex)));
+    xml.setAttribute("resumeMode",     static_cast<int>(getSlotResumeMode(slotIndex)));
+    xml.setAttribute("blendAmount",    static_cast<double>(getSlotBlendAmount(slotIndex)));
+    xml.setAttribute("attackLen",      static_cast<double>(getSlotAttackLen(slotIndex)));
+    xml.setAttribute("decayLen",       static_cast<double>(getSlotDecayLen(slotIndex)));
+    xml.setAttribute("brightnessLift", static_cast<double>(getSlotBrightnessLift(slotIndex)));
+    xml.setAttribute("trebleCut",      static_cast<double>(getSlotTrebleCut(slotIndex)));
+    xml.setAttribute("bassCut",        static_cast<double>(getSlotBassCut(slotIndex)));
+    xml.setAttribute("loopOverlap",    static_cast<double>(getSlotLoopOverlap(slotIndex)));
+    // Frequency-axis multi-point curves → "x,y;x,y;…" per band (LF + HF).
+    {
+        auto encodeBand = [this, slotIndex](int band)
+        {
+            SamplerSpectralPoint pts[LuxSamplerConstants::MAX_FREQ_PTS];
+            const int n = getSlotFreqCurve(slotIndex, band, pts, LuxSamplerConstants::MAX_FREQ_PTS);
+            juce::String fc;
+            for (int k = 0; k < n; ++k)
+            {
+                if (k) fc << ';';
+                fc << juce::String(pts[k].x, 4) << ',' << juce::String(pts[k].y, 4);
+            }
+            return fc;
+        };
+        xml.setAttribute("freqCurveLF", encodeBand(LuxSamplerConstants::FREQ_BAND_LF));
+        xml.setAttribute("freqCurveHF", encodeBand(LuxSamplerConstants::FREQ_BAND_HF));
+    }
+    xml.setAttribute("fadeCurveType",  static_cast<int>(getSlotFadeCurveType(slotIndex)));
+    xml.setAttribute("fadeCurvePower", static_cast<double>(getSlotFadeCurvePower(slotIndex)));
+    xml.setAttribute("label",          juce::String(getSlotLabel(slotIndex)));
+}
+
+void LuxSampler::slotParamsFromXml(int slotIndex, const juce::XmlElement& xml)
+{
+    if (slotIndex < 0 || slotIndex >= LuxSamplerConstants::NUM_SLOTS)
+        return;
+
+    setSlotStartFrac     (slotIndex, static_cast<float>(xml.getDoubleAttribute("startFrac",      0.0)));
+    setSlotEndFrac       (slotIndex, static_cast<float>(xml.getDoubleAttribute("endFrac",        1.0)));
+    setSlotSpeed         (slotIndex, static_cast<float>(xml.getDoubleAttribute("speed",          1.0)));
+    setSlotLoopMode      (slotIndex, static_cast<LoopMode>(xml.getIntAttribute("loopMode",       1)));
+    setSlotResumeMode    (slotIndex, xml.getIntAttribute("resumeMode", 0) != 0);
+    setSlotBlendAmount   (slotIndex, static_cast<float>(xml.getDoubleAttribute("blendAmount",    0.0)));
+    setSlotAttackLen     (slotIndex, static_cast<float>(xml.getDoubleAttribute("attackLen",      0.0)));
+    setSlotDecayLen      (slotIndex, static_cast<float>(xml.getDoubleAttribute("decayLen",       0.0)));
+    setSlotBrightnessLift(slotIndex, static_cast<float>(xml.getDoubleAttribute("brightnessLift", 0.0)));
+    setSlotTrebleCut     (slotIndex, static_cast<float>(xml.getDoubleAttribute("trebleCut",      0.0)));
+    setSlotBassCut       (slotIndex, static_cast<float>(xml.getDoubleAttribute("bassCut",        0.0)));
+    setSlotFadeCurveType (slotIndex, static_cast<FadeCurveType>(xml.getIntAttribute("fadeCurveType", 0)));
+    setSlotFadeCurvePower(slotIndex, static_cast<float>(xml.getDoubleAttribute("fadeCurvePower", 1.0)));
+    setSlotLoopOverlap   (slotIndex, static_cast<float>(xml.getDoubleAttribute("loopOverlap",   0.0)));
+    // Frequency curves: parse "x,y;…" per band if present, else migrate the
+    // legacy trebleCut / bassCut cuts into HF / LF curve points.
+    {
+        auto parseBand = [&](const juce::String& s, int band) -> bool
+        {
+            if (s.isEmpty()) return false;
+            SamplerSpectralPoint pts[LuxSamplerConstants::MAX_FREQ_PTS];
+            int n = 0;
+            juce::StringArray toks;
+            toks.addTokens(s, ";", "");
+            for (const auto& tok : toks)
+            {
+                if (n >= LuxSamplerConstants::MAX_FREQ_PTS) break;
+                const int comma = tok.indexOfChar(',');
+                if (comma < 0) continue;
+                pts[n].x = tok.substring(0, comma).getFloatValue();
+                pts[n].y = tok.substring(comma + 1).getFloatValue();
+                ++n;
+            }
+            if (n < 1) return false;
+            setSlotFreqCurve(slotIndex, band, pts, n);
+            return true;
+        };
+
+        const bool gotLF = parseBand(xml.getStringAttribute("freqCurveLF", ""),
+                                     LuxSamplerConstants::FREQ_BAND_LF);
+        const bool gotHF = parseBand(xml.getStringAttribute("freqCurveHF", ""),
+                                     LuxSamplerConstants::FREQ_BAND_HF);
+
+        if (!gotLF || !gotHF) // legacy migration for the missing band(s)
+        {
+            const float tc = static_cast<float>(xml.getDoubleAttribute("trebleCut", 0.0));
+            const float bc = static_cast<float>(xml.getDoubleAttribute("bassCut",   0.0));
+            // LF band from bassCut: keep at grave, dip toward the mid.
+            if (!gotLF && bc > 0.001f)
+            {
+                SamplerSpectralPoint p[3] = { {0.0f, 0.0f},
+                                              {juce::jlimit(0.0f,1.0f, bc), 1.0f},
+                                              {1.0f, 1.0f} };
+                setSlotFreqCurve(slotIndex, LuxSamplerConstants::FREQ_BAND_LF, p, 3);
+            }
+            // HF band from trebleCut: keep at mid, dip toward the aigu.
+            if (!gotHF && tc > 0.001f)
+            {
+                SamplerSpectralPoint p[3] = { {0.0f, 1.0f},
+                                              {juce::jlimit(0.0f,1.0f, 1.0f - tc), 1.0f},
+                                              {1.0f, 0.0f} };
+                setSlotFreqCurve(slotIndex, LuxSamplerConstants::FREQ_BAND_HF, p, 3);
+            }
+        }
+    }
+    const juce::String lbl = xml.getStringAttribute("label", "");
+    if (lbl.isNotEmpty())
+        setSlotLabel(slotIndex, lbl.toRawUTF8());
+}
+
 bool LuxSampler::saveSlotToFile(int slotIndex, const juce::File& file) const
 {
     using namespace LuxSamplerConstants;
@@ -1852,36 +1973,7 @@ bool LuxSampler::saveSlotToFile(int slotIndex, const juce::File& file) const
 
     // ── Per-slot play parameters as embedded XML ─────────────────────────────
     juce::XmlElement paramsXml("SlotParams");
-    paramsXml.setAttribute("startFrac",      static_cast<double>(getSlotStartFrac(slotIndex)));
-    paramsXml.setAttribute("endFrac",        static_cast<double>(getSlotEndFrac(slotIndex)));
-    paramsXml.setAttribute("speed",          static_cast<double>(getSlotSpeed(slotIndex)));
-    paramsXml.setAttribute("loopMode",       static_cast<int>(getSlotLoopMode(slotIndex)));
-    paramsXml.setAttribute("resumeMode",     static_cast<int>(getSlotResumeMode(slotIndex)));
-    paramsXml.setAttribute("blendAmount",    static_cast<double>(getSlotBlendAmount(slotIndex)));
-    paramsXml.setAttribute("attackLen",      static_cast<double>(getSlotAttackLen(slotIndex)));
-    paramsXml.setAttribute("decayLen",       static_cast<double>(getSlotDecayLen(slotIndex)));
-    paramsXml.setAttribute("brightnessLift", static_cast<double>(getSlotBrightnessLift(slotIndex)));
-    paramsXml.setAttribute("loopOverlap",    static_cast<double>(getSlotLoopOverlap(slotIndex)));
-    // Frequency-axis multi-point curves → "x,y;x,y;…" per band (LF + HF).
-    {
-        auto encodeBand = [this, slotIndex](int band)
-        {
-            SamplerSpectralPoint pts[LuxSamplerConstants::MAX_FREQ_PTS];
-            const int n = getSlotFreqCurve(slotIndex, band, pts, LuxSamplerConstants::MAX_FREQ_PTS);
-            juce::String fc;
-            for (int k = 0; k < n; ++k)
-            {
-                if (k) fc << ';';
-                fc << juce::String(pts[k].x, 4) << ',' << juce::String(pts[k].y, 4);
-            }
-            return fc;
-        };
-        paramsXml.setAttribute("freqCurveLF", encodeBand(LuxSamplerConstants::FREQ_BAND_LF));
-        paramsXml.setAttribute("freqCurveHF", encodeBand(LuxSamplerConstants::FREQ_BAND_HF));
-    }
-    paramsXml.setAttribute("fadeCurveType",  static_cast<int>(getSlotFadeCurveType(slotIndex)));
-    paramsXml.setAttribute("fadeCurvePower", static_cast<double>(getSlotFadeCurvePower(slotIndex)));
-    paramsXml.setAttribute("label",          juce::String(getSlotLabel(slotIndex)));
+    slotParamsToXml(slotIndex, paramsXml);
 
     const juce::String xmlStr = paramsXml.toString();
     const uint32_t xmlLen     = static_cast<uint32_t>(xmlStr.getNumBytesAsUTF8());
@@ -2053,76 +2145,7 @@ bool LuxSampler::loadSlotFromFile(int slotIndex, const juce::File& file)
         if (auto xml = juce::parseXML(paramsXmlStr))
         {
             if (xml->getTagName() == "SlotParams")
-            {
-                setSlotStartFrac     (slotIndex, static_cast<float>(xml->getDoubleAttribute("startFrac",      0.0)));
-                setSlotEndFrac       (slotIndex, static_cast<float>(xml->getDoubleAttribute("endFrac",        1.0)));
-                setSlotSpeed         (slotIndex, static_cast<float>(xml->getDoubleAttribute("speed",          1.0)));
-                setSlotLoopMode      (slotIndex, static_cast<LoopMode>(xml->getIntAttribute("loopMode",       1)));
-                setSlotResumeMode    (slotIndex, xml->getIntAttribute("resumeMode", 0) != 0);
-                setSlotBlendAmount   (slotIndex, static_cast<float>(xml->getDoubleAttribute("blendAmount",    0.0)));
-                setSlotAttackLen     (slotIndex, static_cast<float>(xml->getDoubleAttribute("attackLen",      0.0)));
-                setSlotDecayLen      (slotIndex, static_cast<float>(xml->getDoubleAttribute("decayLen",       0.0)));
-                setSlotBrightnessLift(slotIndex, static_cast<float>(xml->getDoubleAttribute("brightnessLift", 0.0)));
-                setSlotTrebleCut     (slotIndex, static_cast<float>(xml->getDoubleAttribute("trebleCut",      0.0)));
-                setSlotBassCut       (slotIndex, static_cast<float>(xml->getDoubleAttribute("bassCut",        0.0)));
-                setSlotFadeCurveType (slotIndex, static_cast<FadeCurveType>(xml->getIntAttribute("fadeCurveType", 0)));
-                setSlotFadeCurvePower(slotIndex, static_cast<float>(xml->getDoubleAttribute("fadeCurvePower", 1.0)));
-                setSlotLoopOverlap   (slotIndex, static_cast<float>(xml->getDoubleAttribute("loopOverlap",   0.0)));
-                // Frequency curves: parse "x,y;…" per band if present, else migrate
-                // the legacy trebleCut / bassCut cuts into HF / LF curve points.
-                {
-                    auto parseBand = [&](const juce::String& s, int band) -> bool
-                    {
-                        if (s.isEmpty()) return false;
-                        SamplerSpectralPoint pts[LuxSamplerConstants::MAX_FREQ_PTS];
-                        int n = 0;
-                        juce::StringArray toks;
-                        toks.addTokens(s, ";", "");
-                        for (const auto& tok : toks)
-                        {
-                            if (n >= LuxSamplerConstants::MAX_FREQ_PTS) break;
-                            const int comma = tok.indexOfChar(',');
-                            if (comma < 0) continue;
-                            pts[n].x = tok.substring(0, comma).getFloatValue();
-                            pts[n].y = tok.substring(comma + 1).getFloatValue();
-                            ++n;
-                        }
-                        if (n < 1) return false;
-                        setSlotFreqCurve(slotIndex, band, pts, n);
-                        return true;
-                    };
-
-                    const bool gotLF = parseBand(xml->getStringAttribute("freqCurveLF", ""),
-                                                 LuxSamplerConstants::FREQ_BAND_LF);
-                    const bool gotHF = parseBand(xml->getStringAttribute("freqCurveHF", ""),
-                                                 LuxSamplerConstants::FREQ_BAND_HF);
-
-                    if (!gotLF || !gotHF) // legacy migration for the missing band(s)
-                    {
-                        const float tc = static_cast<float>(xml->getDoubleAttribute("trebleCut", 0.0));
-                        const float bc = static_cast<float>(xml->getDoubleAttribute("bassCut",   0.0));
-                        // LF band from bassCut: keep at grave, dip toward the mid.
-                        if (!gotLF && bc > 0.001f)
-                        {
-                            SamplerSpectralPoint p[3] = { {0.0f, 0.0f},
-                                                          {juce::jlimit(0.0f,1.0f, bc), 1.0f},
-                                                          {1.0f, 1.0f} };
-                            setSlotFreqCurve(slotIndex, LuxSamplerConstants::FREQ_BAND_LF, p, 3);
-                        }
-                        // HF band from trebleCut: keep at mid, dip toward the aigu.
-                        if (!gotHF && tc > 0.001f)
-                        {
-                            SamplerSpectralPoint p[3] = { {0.0f, 1.0f},
-                                                          {juce::jlimit(0.0f,1.0f, 1.0f - tc), 1.0f},
-                                                          {1.0f, 0.0f} };
-                            setSlotFreqCurve(slotIndex, LuxSamplerConstants::FREQ_BAND_HF, p, 3);
-                        }
-                    }
-                }
-                const juce::String lbl = xml->getStringAttribute("label", "");
-                if (lbl.isNotEmpty())
-                    setSlotLabel(slotIndex, lbl.toRawUTF8());
-            }
+                slotParamsFromXml(slotIndex, *xml);
         }
     }
 

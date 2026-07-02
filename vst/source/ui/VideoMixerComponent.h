@@ -53,7 +53,12 @@ private:
     void timerCallback() override;
     void rebuildStrip();
     void layoutStrip();
-    void composite();
+    // Tick + warp every voice and (re)build the master composite. Returns true
+    // when anything visible changed this tick; false = the frozen frame already
+    // on screen is still current, so timerCallback() skips the repaint (a 60 fps
+    // repaint of a static image occasionally gets presented half-painted → the
+    // pause-time flicker).
+    bool composite();
     // True when exactly one output is patched at full level in Mix mode — the
     // common case, painted DIRECTLY (no offscreen / no blend / no cap).
     bool singleDirect() const;
@@ -83,6 +88,9 @@ private:
     juce::Image master_;                  // composited output
     juce::Rectangle<int> masterArea_;
     juce::Rectangle<int> stripArea_;
+    // Last-seen composite signature (render size + per-voice mix/draw params);
+    // composite() reports "changed" whenever it differs. See composite().
+    std::vector<float> mixSig_;
 
     std::unique_ptr<MasterWindow> window_;
 

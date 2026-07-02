@@ -30,7 +30,8 @@ private:
 //
 // Full-width bar at the bottom of the sampler page.
 // APVTS-bound: seqBpm, seqLoop, seqDawSync.
-// Manual: play/stop (FrameSequencer::uiPlay/uiStop), steps combo.
+// Play/hold/stop drive the seqTransport param (DAW-automatable/MIDI-mappable);
+// the processor relays it to FrameSequencer. Steps combo writes seqNumSteps.
 // 200 ms Timer disables BPM slider when DAW sync is active.
 // ─────────────────────────────────────────────────────────────────────────────
 class TransportBarComponent : public juce::Component,
@@ -46,6 +47,7 @@ public:
 private:
     void timerCallback() override;
     void updateTransportButtons();   ///< Refreshes play/hold/stop highlight state.
+    void requestTransport(int mode); ///< Writes seqTransport (0=Stop 1=Play 2=Hold).
 
     Sp3ctraAudioProcessor& processor;
 

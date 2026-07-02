@@ -918,6 +918,20 @@ public:
     bool loadFromFile(const juce::File& file);
 
     // =========================================================================
+    // Per-slot play-parameter XML — Non-RT only
+    //
+    // Single source of truth for serialising one slot's play parameters
+    // (trim, speed, loop, resume, fades, loop crossfade, frequency curves,
+    // label). Shared by the .fslot format, the .sp3s session file and the
+    // DAW state blob so no consumer can drift out of sync with the others.
+    // =========================================================================
+    /** Write slot @p slotIndex's play parameters as attributes on @p xml. */
+    void slotParamsToXml(int slotIndex, juce::XmlElement& xml) const;
+    /** Apply parameters written by slotParamsToXml. Attributes absent from
+     *  @p xml fall back to their defaults. */
+    void slotParamsFromXml(int slotIndex, const juce::XmlElement& xml);
+
+    // =========================================================================
     // Per-slot file I/O — Non-RT only (.fslot single-slot format)
     // =========================================================================
     /**

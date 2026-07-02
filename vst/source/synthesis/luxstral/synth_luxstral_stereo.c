@@ -28,41 +28,49 @@
  * @param b Blue component (0-255)
  * @retval Pan position from -1.0 (warm/left) to +1.0 (cold/right)
  */
-float calculate_color_temperature(uint8_t r, uint8_t g, uint8_t b) {
+float calculate_color_temperature_amp(uint8_t r, uint8_t g, uint8_t b,
+                                      float temp_amplification) {
   // Convert RGB to normalized values
   float r_norm = r / 255.0f;
   float g_norm = g / 255.0f;
   float b_norm = b / 255.0f;
-  
+
   // AGGRESSIVE ALGORITHM: Direct blue-red comparison for maximum stereo effect
   // Blue/Cyan = cold (right), Red/Yellow = warm (left)
-  
+
   // Primary cold/warm axis: Blue vs Red (most important) - INVERTED
   float blue_red_diff = b_norm - r_norm;
-  
+
   // Secondary axis: Cyan (G+B) vs Yellow (R+G) - INVERTED
   float cyan_strength = (g_norm + b_norm) * 0.5f;
   float yellow_strength = (r_norm + g_norm) * 0.5f;
   float cyan_yellow_diff = cyan_strength - yellow_strength;
-  
+
   // Combine with configurable weight on blue-red axis
   float temperature = blue_red_diff * g_sp3ctra_config.stereo_blue_red_weight + cyan_yellow_diff * g_sp3ctra_config.stereo_cyan_yellow_weight;
-  
-  // Configurable amplification: Make the effect adjustable
-  temperature *= g_sp3ctra_config.stereo_temperature_amplification;  // Amplify the base signal
-  
+
+  // Amplification — per-engine: LuxStral A and B each pass their own
+  // Stereo Temp knob through the pipeline config (M8).
+  temperature *= temp_amplification;  // Amplify the base signal
+
   // Apply configurable non-linear curve to push values toward extremes
   if (temperature > 0) {
     temperature = powf(temperature, g_sp3ctra_config.stereo_temperature_curve_exponent);  // Configurable curve exponent
   } else {
     temperature = -powf(-temperature, g_sp3ctra_config.stereo_temperature_curve_exponent);
   }
-  
+
   // Hard clamp to [-1, 1] range
   if (temperature > 1.0f) temperature = 1.0f;
   if (temperature < -1.0f) temperature = -1.0f;
-  
+
   return temperature;
+}
+
+float calculate_color_temperature(uint8_t r, uint8_t g, uint8_t b) {
+  // Legacy wrapper — historical callers use the global (engine A) knob.
+  return calculate_color_temperature_amp(
+      r, g, b, g_sp3ctra_config.stereo_temperature_amplification);
 }
 
 /**

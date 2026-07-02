@@ -259,6 +259,10 @@ void ChainRackComponent::rebuild()
             // Engine B's LED toggles its OWN enable param (independent of A).
             if (m.type == ModuleType::LuxStral && m.slot == 1)
                 bp->setEnableParamOverride("luxstralBEnabled");
+            // Each VideoScroll output is per-instance: its LED toggles the slot's
+            // own enable param, so the mixer can drop just this output.
+            if (m.type == ModuleType::VideoScroll && m.slot >= 0)
+                bp->setEnableParamOverride(vsParam(m.slot, "enabled"));
             bp->onClick        = [this](juce::Uuid id) { selectInstance(id, true); };
             bp->onToggleEnable = [this, bp]            { toggleEnable(bp->getEnableParam()); };
             bp->onRemove       = [this](juce::Uuid id) { removeInstance(id); };
@@ -305,6 +309,8 @@ void ChainRackComponent::mutateAndRefresh(bool notifySelection)
                 onVideoBlockSelected(m->slot);
             if (m->type == ModuleType::Sampler && onSamplerBlockSelected)
                 onSamplerBlockSelected(m->slot);   // engine A (0) / B (1)
+            if (m->type == ModuleType::LuxStral && onLuxStralBlockSelected)
+                onLuxStralBlockSelected(m->slot == 1 ? 1 : 0);   // engine A (0) / B (1)
             onBlockSelected(instanceToBlockId(m->type, sc));
         }
     }
@@ -397,6 +403,8 @@ void ChainRackComponent::selectInstance(const juce::Uuid& id, bool notify)
                 onVideoBlockSelected(m->slot);   // bind the per-instance bank first
             if (m->type == ModuleType::Sampler && onSamplerBlockSelected)
                 onSamplerBlockSelected(m->slot);   // engine A (0) / B (1)
+            if (m->type == ModuleType::LuxStral && onLuxStralBlockSelected)
+                onLuxStralBlockSelected(m->slot == 1 ? 1 : 0);   // engine A (0) / B (1)
             onBlockSelected(instanceToBlockId(m->type, c));
         }
     }
@@ -875,7 +883,14 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, int cha
             return LedState::Off;
 
         case ModuleType::VideoScroll:
-            return LedState::Active;   // passive output tap — always capturing
+        {
+            // Per-instance output toggle: LED reflects (and clicking flips) this
+            // slot's enable param. Off = the mixer drops this output.
+            if (engineSlot < 0)
+                return LedState::Off;
+            auto* raw = processor.getAPVTS().getRawParameterValue(vsParam(engineSlot, "enabled"));
+            return (raw && raw->load() >= 0.5f) ? LedState::Active : LedState::Off;
+        }
 
         default:
             break;   // Sequencer (owned elsewhere) etc. → neutral

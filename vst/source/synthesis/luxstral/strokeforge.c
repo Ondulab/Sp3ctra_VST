@@ -155,6 +155,7 @@ void strokeforge_analyze_frame(
      * blob scan) resets morph + attenuation so no stale state leaks to the synth. */
     if (!g_sp3ctra_config.strokeforge_enabled)
     {
+        out->morph = 0.0f;
         g_waveform_morph = 0.0f;
         return;
     }
@@ -171,6 +172,7 @@ void strokeforge_analyze_frame(
     if (out->blob_count == 0)
     {
         /* No strokes → pure sine, no attenuation */
+        out->morph = 0.0f;
         g_waveform_morph = 0.0f;
         return;
     }
@@ -190,11 +192,13 @@ void strokeforge_analyze_frame(
         if (scale <= 0.0f) scale = 400.0f;
         float morph = widest / scale;
         if (morph > 1.0f) morph = 1.0f;
-        g_waveform_morph = morph;
+        out->morph = morph;              /* per-frame, per-engine (M8) */
+        g_waveform_morph = morph;        /* legacy global (diagnostics) */
     }
     else
     {
         /* Focus Only: Gaussian focus active but waveform stays pure sine */
+        out->morph = 0.0f;
         g_waveform_morph = 0.0f;
     }
 

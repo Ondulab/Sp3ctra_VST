@@ -17,7 +17,9 @@
 namespace
 {
     constexpr uint32_t kSessionMagic   = 0x53503353u; // "SP3S"
-    constexpr uint16_t kSessionVersion = 0x0001u;
+    // v2: per-engine SlotParams blocks (engine attr) + TWO .fsmp banks (A, B).
+    // v1 (single engine) is still readable; new saves are always v2.
+    constexpr uint16_t kSessionVersion = 0x0002u;
     constexpr uint32_t kSessionEof     = 0xDEADBEEFu;
 
 } // namespace
@@ -214,20 +216,28 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
 
     // ── Auto-restore last session on startup ──────────────────────────────────
     // lastSessionPath is restored from DAW state (setStateInformation) before
-    // the editor is created, so it is already available here.
+    // the editor is created, so it is already available here. The pending flag
+    // is one-shot: re-opening the editor later must NOT reload the session
+    // over live (unsaved) in-RAM edits of the banks / slots / pattern.
     // Deferred via callAsync so the component is fully laid out and the
     // LuxSampler player thread is started (prepareToPlay) before file I/O.
-    const auto lastPath = processor.getLastSessionPath();
-    if (lastPath.isNotEmpty())
+    if (processor.consumeSamplerAutoLoadPending())
     {
-        const juce::File f(lastPath);
+        const juce::File f(processor.getLastSessionPath());
         if (f.existsAsFile())
         {
             juce::MessageManager::callAsync([this, f]
             {
-                doLoadSession(f);
+                doLoadSession(f, /*isAutoRestore*/ true);
             });
         }
+    }
+    else
+    {
+        // No auto-load, but keep SAVE SESSION pointing at the known session.
+        const juce::File f(processor.getLastSessionPath());
+        if (f.existsAsFile())
+            currentSessionFile = f;
     }
 }
 
@@ -286,57 +296,57 @@ void SamplerPageComponent::resized()
 
 void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
 {
-    auto* fs  = processor.getSampler(samplerIndex_);
+    // v2: the session carries BOTH sampler engines (A + B) — params and banks.
+    // v1 only stored the engine this page happened to be bound to, silently
+    // dropping the other engine's data on every save.
+    LuxSampler* engines[2] = { processor.getSampler(0), processor.getSampler(1) };
     auto* seq = processor.getFrameSequencer();
-    if (!fs || !seq) return;
+    if (!engines[0] || !engines[1] || !seq) return;
 
     // ── Build XML ─────────────────────────────────────────────────────────────
     juce::XmlElement root("Sp3ctraSession");
-    root.setAttribute("version", 1);
+    root.setAttribute("version", 2);
 
-    // Per-slot play parameters
-    auto* slotsXml = root.createNewChildElement("SlotParams");
-    for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
+    // Per-slot play parameters, one block per engine (shared serialisation —
+    // same fields as .fslot / DAW state, incl. loop crossfade, fade curves
+    // and frequency curves that v1 silently dropped).
+    for (int e = 0; e < 2; ++e)
     {
-        auto* s = slotsXml->createNewChildElement("Slot");
-        s->setAttribute("idx",        i);
-        s->setAttribute("startFrac",  static_cast<double>(fs->getSlotStartFrac(i)));
-        s->setAttribute("endFrac",    static_cast<double>(fs->getSlotEndFrac(i)));
-        s->setAttribute("speed",      static_cast<double>(fs->getSlotSpeed(i)));
-        s->setAttribute("loopMode",      static_cast<int>(fs->getSlotLoopMode(i)));
-        s->setAttribute("resumeMode",    static_cast<int>(fs->getSlotResumeMode(i)));
-        s->setAttribute("label",         juce::String(fs->getSlotLabel(i)));
-        s->setAttribute("blendAmount",   static_cast<double>(fs->getSlotBlendAmount(i)));
-        s->setAttribute("attackLen",     static_cast<double>(fs->getSlotAttackLen(i)));
-        s->setAttribute("decayLen",      static_cast<double>(fs->getSlotDecayLen(i)));
-        s->setAttribute("brightnessLift",static_cast<double>(fs->getSlotBrightnessLift(i)));
-        s->setAttribute("trebleCut",     static_cast<double>(fs->getSlotTrebleCut(i)));
-        s->setAttribute("bassCut",       static_cast<double>(fs->getSlotBassCut(i)));
+        auto* slotsXml = root.createNewChildElement("SlotParams");
+        slotsXml->setAttribute("engine",  e);
+        slotsXml->setAttribute("overdub", engines[e]->getOverdubMode() ? 1 : 0);
+        for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
+        {
+            auto* s = slotsXml->createNewChildElement("Slot");
+            engines[e]->slotParamsToXml(i, *s);
+        }
     }
 
     // Sequencer state (uses FrameSequencer's own serialisation)
     auto* seqXml = root.createNewChildElement("Sequencer");
     seq->saveToXml(*seqXml);
 
-    // ── Save audio frames to a temporary .fsmp file ────────────────────────────
-    juce::TemporaryFile tmpFsmp(".fsmp");
-    if (!fs->saveToFile(tmpFsmp.getFile()))
+    // ── Save audio frames to temporary .fsmp files (one per engine) ──────────
+    juce::MemoryBlock fsmpBlobs[2];
+    for (int e = 0; e < 2; ++e)
     {
-        Sp3ctraDialog::showWarning(
-            this,
-            "Save Session",
-            "Failed to write sample bank to temporary file.");
-        return;
-    }
-
-    juce::MemoryBlock fsmpBlob;
-    if (!tmpFsmp.getFile().loadFileAsData(fsmpBlob) || fsmpBlob.isEmpty())
-    {
-        Sp3ctraDialog::showWarning(
-            this,
-            "Save Session",
-            "Could not read temporary sample bank.");
-        return;
+        juce::TemporaryFile tmpFsmp(".fsmp");
+        if (!engines[e]->saveToFile(tmpFsmp.getFile()))
+        {
+            Sp3ctraDialog::showWarning(
+                this,
+                "Save Session",
+                "Failed to write sample bank to temporary file.");
+            return;
+        }
+        if (!tmpFsmp.getFile().loadFileAsData(fsmpBlobs[e]) || fsmpBlobs[e].isEmpty())
+        {
+            Sp3ctraDialog::showWarning(
+                this,
+                "Save Session",
+                "Could not read temporary sample bank.");
+            return;
+        }
     }
 
     // ── Serialise XML to UTF-8 ────────────────────────────────────────────────
@@ -359,8 +369,11 @@ void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
     out.writeShort(static_cast<short>(kSessionVersion));
     out.writeInt  (static_cast<int>(xmlBlock.getSize()));
     out.write     (xmlBlock.getData(), xmlBlock.getSize());
-    out.writeInt  (static_cast<int>(fsmpBlob.getSize()));
-    out.write     (fsmpBlob.getData(), fsmpBlob.getSize());
+    for (const auto& blob : fsmpBlobs)
+    {
+        out.writeInt(static_cast<int>(blob.getSize()));
+        out.write   (blob.getData(), blob.getSize());
+    }
     out.writeInt  (static_cast<int>(kSessionEof));
 
     if (!out.getStatus().wasOk())
@@ -398,7 +411,8 @@ void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
         const juce::File destDir =
             sessionFile.getParentDirectory().getChildFile(baseName + "_images");
 
-        const int n = fs->exportAllSlotsImages(destDir, baseName, asPng);
+        int n = engines[0]->exportAllSlotsImages(destDir, baseName, asPng);
+        n    += engines[1]->exportAllSlotsImages(destDir, baseName + "_B", asPng);
 
         if (n <= 0)
         {
@@ -413,11 +427,11 @@ void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
 
 // -----------------------------------------------------------------------------
 
-void SamplerPageComponent::doLoadSession(const juce::File& sessionFile)
+void SamplerPageComponent::doLoadSession(const juce::File& sessionFile, bool isAutoRestore)
 {
-    auto* fs  = processor.getSampler(samplerIndex_);
+    LuxSampler* engines[2] = { processor.getSampler(0), processor.getSampler(1) };
     auto* seq = processor.getFrameSequencer();
-    if (!fs || !seq) return;
+    if (!engines[0] || !engines[1] || !seq) return;
 
     juce::FileInputStream in(sessionFile);
     if (!in.openedOk())
@@ -438,7 +452,13 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile)
             "Not a valid Sp3ctra session file (.sp3s).");
         return;
     }
-    in.readShort(); // version — reserved for future compatibility checks
+    const int version = static_cast<int>(in.readShort()); // 1 = single engine (A), 2 = A+B
+
+    // On startup auto-restore, the DAW state carries slot params / sequencer
+    // pattern captured at the last close — NEWER than the session's copies
+    // (written at the last explicit SAVE SESSION). Keep the state versions.
+    const bool skipSlotParams = isAutoRestore && processor.hasStateSamplerParams();
+    const bool skipSequencer  = isAutoRestore && processor.wasSeqRestoredFromState();
 
     // ── XML section ───────────────────────────────────────────────────────────
     const int xmlLen = in.readInt();
@@ -475,76 +495,103 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile)
     }
 
     // ── Apply per-slot parameters ─────────────────────────────────────────────
-    if (auto* slotsXml = xmlDoc->getChildByName("SlotParams"))
+    // v2: one <SlotParams engine="e"> block per engine. v1: a single block,
+    // no engine attribute → engine A. Shared slotParamsFromXml handles every
+    // field (incl. loop crossfade, fade curves and frequency curves).
+    if (! skipSlotParams)
     {
-        for (auto* s : slotsXml->getChildIterator())
+        for (auto* slotsXml : xmlDoc->getChildWithTagNameIterator("SlotParams"))
         {
-            const int i = s->getIntAttribute("idx", -1);
-            if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) continue;
-            fs->setSlotStartFrac (i, static_cast<float>(s->getDoubleAttribute("startFrac",  0.0)));
-            fs->setSlotEndFrac   (i, static_cast<float>(s->getDoubleAttribute("endFrac",    1.0)));
-            fs->setSlotSpeed     (i, static_cast<float>(s->getDoubleAttribute("speed",      1.0)));
-            fs->setSlotLoopMode  (i, static_cast<LoopMode>(s->getIntAttribute("loopMode",   1)));
-            fs->setSlotResumeMode(i, s->getIntAttribute("resumeMode", 0) != 0);
-            fs->setSlotLabel     (i, s->getStringAttribute("label", "").toRawUTF8());
-            fs->setSlotBlendAmount    (i, static_cast<float>(s->getDoubleAttribute("blendAmount",    0.0)));
-            fs->setSlotAttackLen      (i, static_cast<float>(s->getDoubleAttribute("attackLen",      0.0)));
-            fs->setSlotDecayLen       (i, static_cast<float>(s->getDoubleAttribute("decayLen",       0.0)));
-            fs->setSlotBrightnessLift (i, static_cast<float>(s->getDoubleAttribute("brightnessLift", 0.0)));
-            fs->setSlotTrebleCut      (i, static_cast<float>(s->getDoubleAttribute("trebleCut",      0.0)));
-            fs->setSlotBassCut        (i, static_cast<float>(s->getDoubleAttribute("bassCut",        0.0)));
+            const int e = slotsXml->getIntAttribute("engine", 0);
+            if (e < 0 || e > 1) continue;
+            engines[e]->setOverdubMode(slotsXml->getIntAttribute("overdub", 0) != 0);
+            for (auto* s : slotsXml->getChildIterator())
+            {
+                const int i = s->getIntAttribute("idx", -1);
+                if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) continue;
+                engines[e]->slotParamsFromXml(i, *s);
+            }
         }
     }
 
     // ── Apply sequencer state ─────────────────────────────────────────────────
-    if (auto* seqXml = xmlDoc->getChildByName("Sequencer"))
-        seq->loadFromXml(*seqXml);
-
-    // ── Binary .fsmp section ──────────────────────────────────────────────────
-    const int fsmpLen = in.readInt();
-    if (fsmpLen <= 0 || fsmpLen > 2'000'000'000)
+    if (! skipSequencer)
     {
-        Sp3ctraDialog::showWarning(
-            this,
-            "Load Session",
-            "Session file is corrupt (invalid sample bank size).");
-        return;
+        if (auto* seqXml = xmlDoc->getChildByName("Sequencer"))
+        {
+            seq->loadFromXml(*seqXml);
+            // Keep the APVTS transport params (UI + host source of truth) in
+            // sync with the values the sequencer just adopted — otherwise the
+            // attached controls display stale values that silently reassert
+            // themselves on the next parameter edit.
+            auto& apvts = processor.getAPVTS();
+            auto syncParam = [&apvts](const char* id, float denorm)
+            {
+                if (auto* p = apvts.getParameter(id))
+                    p->setValueNotifyingHost(p->convertTo0to1(denorm));
+            };
+            syncParam("seqBpm",          seq->getBpm());
+            syncParam("seqNumSteps",     (float) seq->getNumSteps());
+            syncParam("seqLoop",         seq->isLooping() ? 1.0f : 0.0f);
+            syncParam("seqDawSync",      seq->isDawSync() ? 1.0f : 0.0f);
+            syncParam("seqBeatsPerStep", (float) seq->getBeatsPerStep());
+        }
     }
 
-    juce::MemoryBlock fsmpBlob;
-    fsmpBlob.setSize(static_cast<size_t>(fsmpLen));
-    if (in.read(fsmpBlob.getData(), fsmpLen) != fsmpLen)
+    // ── Binary .fsmp sections (v2: engine A then B; v1: A only) ──────────────
+    const int numBanks = (version >= 2) ? 2 : 1;
+    for (int e = 0; e < numBanks; ++e)
     {
-        Sp3ctraDialog::showWarning(
-            this,
-            "Load Session",
-            "Session file is truncated (sample bank section).");
-        return;
-    }
-
-    // Write to temporary file and load via LuxSampler
-    juce::TemporaryFile tmpFsmp(".fsmp");
-    {
-        juce::FileOutputStream fsmpOut(tmpFsmp.getFile());
-        if (fsmpOut.failedToOpen())
+        const int fsmpLen = in.readInt();
+        if (fsmpLen <= 0 || fsmpLen > 2'000'000'000)
         {
             Sp3ctraDialog::showWarning(
                 this,
                 "Load Session",
-                "Cannot create temporary file for sample bank.");
+                "Session file is corrupt (invalid sample bank size).");
             return;
         }
-        fsmpOut.write(fsmpBlob.getData(), fsmpBlob.getSize());
+
+        juce::MemoryBlock fsmpBlob;
+        fsmpBlob.setSize(static_cast<size_t>(fsmpLen));
+        if (in.read(fsmpBlob.getData(), fsmpLen) != fsmpLen)
+        {
+            Sp3ctraDialog::showWarning(
+                this,
+                "Load Session",
+                "Session file is truncated (sample bank section).");
+            return;
+        }
+
+        // Write to temporary file and load via LuxSampler
+        juce::TemporaryFile tmpFsmp(".fsmp");
+        {
+            juce::FileOutputStream fsmpOut(tmpFsmp.getFile());
+            if (fsmpOut.failedToOpen())
+            {
+                Sp3ctraDialog::showWarning(
+                    this,
+                    "Load Session",
+                    "Cannot create temporary file for sample bank.");
+                return;
+            }
+            fsmpOut.write(fsmpBlob.getData(), fsmpBlob.getSize());
+        }
+
+        if (!engines[e]->loadFromFile(tmpFsmp.getFile()))
+        {
+            Sp3ctraDialog::showWarning(
+                this,
+                "Load Session",
+                "Failed to load sample bank from session.");
+            return;
+        }
     }
 
-    if (!fs->loadFromFile(tmpFsmp.getFile()))
-    {
-        Sp3ctraDialog::showWarning(
-            this,
-            "Load Session",
-            "Failed to load sample bank from session.");
-        return;
-    }
+    // Bank load restored labels from the .fsmp headers — on auto-restore the
+    // DAW state carries the newer per-slot values, so re-apply them on top.
+    if (skipSlotParams)
+        processor.applySamplerParamsFromState();
 
     // ── Memorise path — auto-save + DAW/Standalone auto-reload ───────────────
     currentSessionFile = sessionFile;

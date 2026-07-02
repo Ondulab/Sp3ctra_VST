@@ -24,68 +24,70 @@
  * Called at startup and when tau parameters change at runtime
  * @retval None
  */
-void update_gap_limiter_coefficients(void) {
-    // Safety check: waves array must be initialized before we can update coefficients
-    if (waves == NULL) {
-        log_warning("LUXSTRAL", "update_gap_limiter_coefficients: waves is NULL, skipping");
+void update_gap_limiter_coefficients_for(volatile struct wave *w,
+                                         float tau_up_ms, float tau_down_ms) {
+    // Safety check: the target array must be initialized
+    if (w == NULL) {
+        log_warning("LUXSTRAL", "update_gap_limiter_coefficients_for: waves is NULL, skipping");
         return;  // Silently return if called before initialization
     }
-    
+
     const float Fs = (float)g_sp3ctra_config.sampling_frequency;
-    
-    // Get runtime tau parameter for attack (progressive attack mode)
-    float tau_up_ms = g_sp3ctra_config.tau_up_base_ms;
-    
+
     // Clamp tau to avoid division by zero or denormals
     if (tau_up_ms < 0.01f) tau_up_ms = 0.01f;
     if (tau_up_ms > TAU_UP_MAX_MS) tau_up_ms = TAU_UP_MAX_MS;
-    
+
     const float tau_up_s = tau_up_ms * 0.001f;
-    
+
     // Compute attack alpha (exponential envelope coefficient)
     float alpha_up = 1.0f - expf(-1.0f / (tau_up_s * Fs));
-    
+
     // Clamp alpha to reasonable bounds
     if (alpha_up < ALPHA_MIN) alpha_up = ALPHA_MIN;
     if (alpha_up > 1.0f) alpha_up = 1.0f;
-    
-    // Get runtime tau parameter for release
-    float tau_down_ms = g_sp3ctra_config.tau_down_base_ms;
-    
+
     // Clamp tau to avoid division by zero or denormals
     if (tau_down_ms < 0.01f) tau_down_ms = 0.01f;
     if (tau_down_ms > TAU_DOWN_MAX_MS) tau_down_ms = TAU_DOWN_MAX_MS;
-    
+
     const float tau_down_s = tau_down_ms * 0.001f;
-    
+
     // Compute release alpha (exponential envelope coefficient)
     float alpha_down = 1.0f - expf(-1.0f / (tau_down_s * Fs));
-    
+
     // Clamp alpha to reasonable bounds
     if (alpha_down < ALPHA_MIN) alpha_down = ALPHA_MIN;
     if (alpha_down > 1.0f) alpha_down = 1.0f;
-    
+
     // Precompute for each oscillator
     const int num_notes = get_current_number_of_notes();
-    
+
     for (int note = 0; note < num_notes; note++) {
         // Store attack coefficient (frequency-independent)
-        waves[note].alpha_up = alpha_up;
-        
+        w[note].alpha_up = alpha_up;
+
         // Compute frequency-dependent release weighting
-        float f = waves[note].frequency;
+        float f = w[note].frequency;
         if (f < 1.0f) f = 1.0f;
-        
+
         float ratio = f / g_sp3ctra_config.decay_freq_ref_hz;
         float g_down = powf(ratio, -g_sp3ctra_config.decay_freq_beta);
-        
+
         // Clamp frequency weight
         if (g_down < DECAY_FREQ_MIN) g_down = DECAY_FREQ_MIN;
         if (g_down > DECAY_FREQ_MAX) g_down = DECAY_FREQ_MAX;
-        
+
         // Store weighted release coefficient
-        waves[note].alpha_down_weighted = alpha_down * g_down;
+        w[note].alpha_down_weighted = alpha_down * g_down;
     }
+}
+
+void update_gap_limiter_coefficients(void) {
+    // Legacy entry — engine A: global waves[] + the global (A) tau params.
+    update_gap_limiter_coefficients_for(waves,
+                                        g_sp3ctra_config.tau_up_base_ms,
+                                        g_sp3ctra_config.tau_down_base_ms);
 }
 
 

@@ -322,7 +322,10 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
 
   // ✅ OPTIMIZATION: Hoist invariant calculations and improve cache locality
   const int audio_buffer_size = g_sp3ctra_config.audio_buffer_size;
-  const int stereo_enabled = g_sp3ctra_config.stereo_mode_enabled;
+  // Per-engine stereo flag (M8): engine B has its own Stereo toggle.
+  const int stereo_enabled = (worker->engine == &g_luxstral_engine_b)
+      ? g_sp3ctra_config.luxstral_b_stereo_mode_enabled
+      : g_sp3ctra_config.stereo_mode_enabled;
   const float volume_weighting_exp = g_sp3ctra_config.volume_weighting_exponent;
   const int capture_enabled = image_debug_is_oscillator_capture_enabled();
   
@@ -342,8 +345,10 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
     // before the note loop avoids repeated volatile dereferences in the hot path.
     // -----------------------------------------------------------------------
 
-    /* One volatile read per synthesis cycle — safe, relaxed ordering sufficient */
-    const float morph = g_waveform_morph;
+    /* Per-engine morph snapshot (M8) — copied from THIS engine's db in
+     * synth_precompute_wave_data(); the global g_waveform_morph holds the last
+     * pipeline call's frame and would cross-talk between engines A and B. */
+    const float morph = worker->engine->sf_morph;
     {
       float*      pre_wave_w = worker->precomputed_wave_data +
                                (size_t)local_note_idx * audio_buffer_size;
@@ -490,18 +495,29 @@ void synth_precompute_wave_data(LuxStralEngine *eng, float *imageData, DoubleBuf
   uint64_t wait_us = (uint64_t)(sec_diff * 1000000LL + usec_diff);
   rt_profiler_mutex_lock_end(&g_rt_profiler, wait_us);
   
+  // Per-engine stereo flag (M8): engine B has its own Stereo toggle, and its
+  // pan data comes from ITS pipeline config (cfg_b.stereo_enabled matches).
+  const int eng_stereo_enabled = (eng == &g_luxstral_engine_b)
+      ? g_sp3ctra_config.luxstral_b_stereo_mode_enabled
+      : g_sp3ctra_config.stereo_mode_enabled;
+
+  // StrokeForge morph is per-frame, per-engine data (M8): snapshot this db's
+  // analysed morph under the mutex; workers read eng->sf_morph (the global
+  // g_waveform_morph would leak the LAST pipeline call's frame across engines).
+  eng->sf_morph = db->preprocessed_data.strokeforge.morph;
+
   // Copy all preprocessed data for all workers in one shot
   for (int i = 0; i < eng->num_workers; i++) {
     synth_thread_worker_t *worker = &eng->thread_pool[i];
     int notes_this_worker = worker->end_note - worker->start_note;
-    
+
     // Batch copy volume data
     memcpy(worker->precomputed_volume,
            &db->preprocessed_data.additive.notes[worker->start_note],
            notes_this_worker * sizeof(float));
-    
+
     // Batch copy stereo data if enabled
-    if (g_sp3ctra_config.stereo_mode_enabled) {
+    if (eng_stereo_enabled) {
       memcpy(worker->precomputed_pan_position,
              &db->preprocessed_data.stereo.pan_positions[worker->start_note],
              notes_this_worker * sizeof(float));

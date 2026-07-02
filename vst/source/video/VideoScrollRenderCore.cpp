@@ -7,7 +7,6 @@
 
 #include <cstring>
 #include <cmath>
-#include <cstdio>   // [VS-DIAG] temporary flicker instrumentation
 
 //==============================================================================
 // Construction
@@ -75,13 +74,6 @@ void VideoScrollRenderCore::allocateScrollBuffer(int w, int h)
     if (w <= 0 || h <= 0) return;
     if (w != compW_ || h != compH_)
     {
-        // [VS-DIAG] Log every history reallocation. If this spams while paused,
-        // the display size is oscillating → the waterfall is reset to black every
-        // frame (the flicker + poor-quality root cause).
-        std::fprintf(stderr, "[VS-DIAG] REALLOC slot=%d  %dx%d -> %dx%d\n",
-                     slot_, compW_, compH_, w, h);
-        std::fflush(stderr);
-
         compW_ = w;
         compH_ = h;
         bufW_  = w;
@@ -190,14 +182,18 @@ int VideoScrollRenderCore::drainRing(int* outPixelCount)
 
 //==============================================================================
 // tick — drains the ring and advances the scroll by one step (the original
-// timerCallback() body, minus the repaint() which the mixer owns).
+// timerCallback() body, minus the repaint() which the mixer owns). Returns true
+// when the history buffers were mutated (scrolled/stamped/cleared) — false lets
+// the mixer skip the repaint entirely (a paused output must NOT keep invalidating
+// its views: 60 fps repaints of a static image occasionally get presented
+// half-painted by the OS, which reads as flicker).
 //==============================================================================
-void VideoScrollRenderCore::tick()
+bool VideoScrollRenderCore::tick()
 {
     if (!buffersInit_ || bufW_ <= 0 || bufH_ <= 0)
-        return;
+        return false;
 
-    scrollStep();
+    return scrollStep();
 }
 
 //==============================================================================
@@ -207,7 +203,7 @@ void VideoScrollRenderCore::tick()
 // than frameRing_; everything else (speed curve, birth line, geometry, the
 // ping-pong blit) is unchanged.
 //==============================================================================
-void VideoScrollRenderCore::scrollStep()
+bool VideoScrollRenderCore::scrollStep()
 {
     // ── Transport: paused → freeze in place ──────────────────────────────────
     // Keep the current image untouched and perform no scroll/stamp. The capture
@@ -219,11 +215,7 @@ void VideoScrollRenderCore::scrollStep()
         if (auto* st = video_scroll_instance(slot_))
             cursor_ = video_scroll_ring_writepos(st);
         scrollAccumulator_ = 0.f;
-        // [VS-DIAG] Confirm the pause branch is actually taken (frozen frame).
-        static int vsp = 0;
-        if ((vsp++ % 60) == 0)
-        { std::fprintf(stderr, "[VS-DIAG] scrollStep PAUSED slot=%d curBuf=%d\n", slot_, curBuf_); std::fflush(stderr); }
-        return;
+        return false;
     }
 
     // The history buffer is kept as a CLEAN linear waterfall (one buffer row per
@@ -273,20 +265,10 @@ void VideoScrollRenderCore::scrollStep()
     juce::Image lineImg;
     const bool haveLine = buildLineImage(lineImg, coreH, bandH, captured, newestPx);
 
-    // [VS-DIAG] Active-path summary: is it scrolling or re-stamping every frame?
-    {
-        static int vsa = 0;
-        if ((vsa++ % 60) == 0)
-        { std::fprintf(stderr,
-            "[VS-DIAG] scrollStep ACTIVE slot=%d speed=%.2f scroll=%d captured=%d haveLine=%d curBuf=%d\n",
-            slot_, (double) param("speed", 0.f), scroll, captured, haveLine ? 1 : 0, curBuf_);
-          std::fflush(stderr); }
-    }
-
     // Nothing changed and not scrolling — keep last frame (renderInto() still
     // re-applies the display effects each refresh).
     if (scroll == 0 && !haveLine)
-        return;
+        return false;
 
     juce::Image& src = (curBuf_ != 0) ? historyB_ : historyA_;
     juce::Image& dst = (curBuf_ != 0) ? historyA_ : historyB_;
@@ -320,6 +302,7 @@ void VideoScrollRenderCore::scrollStep()
 
     curBuf_ = 1 - curBuf_;
     warpDirty_ = true;   // history advanced → buildWarp() must rebuild this tick.
+    return true;
 }
 
 //==============================================================================
@@ -514,16 +497,18 @@ void VideoScrollRenderCore::renderInto(juce::Graphics& g, int destW, int destH)
 // buildWarp — the expensive per-pixel pass: warp (compression time-squish) + age
 // (fade) the clean linear history into warpBuf_. Independent of the destination
 // size, so it is computed ONCE per tick and shared by every view (column + window).
+// Returns true when warpBuf_ was actually rebuilt (false on a cache hit), so the
+// mixer knows whether its views need a repaint at all.
 //==============================================================================
-void VideoScrollRenderCore::buildWarp()
+bool VideoScrollRenderCore::buildWarp()
 {
     // No history yet (size 0 / slot has no frames) → nothing to warp.
-    if (!buffersInit_ || bufW_ <= 0 || bufH_ <= 0 || compH_ <= 0) { warpReady_ = false; return; }
+    if (!buffersInit_ || bufW_ <= 0 || bufH_ <= 0 || compH_ <= 0) { warpReady_ = false; return false; }
 
     // The freshly-drawn buffer is the one scrollStep() rendered into before the
     // swap (see curBuf_ bookkeeping in scrollStep()).
     const juce::Image& shown = (curBuf_ != 0) ? historyB_ : historyA_;
-    if (!shown.isValid()) { warpReady_ = false; return; }
+    if (!shown.isValid()) { warpReady_ = false; return false; }
 
     // ── Cache: reuse the previous warpBuf_ when nothing that shapes it changed ──
     // (frozen history + identical linePos/compress/fade + same render size). This
@@ -535,7 +520,7 @@ void VideoScrollRenderCore::buildWarp()
     if (warpReady_ && !warpDirty_
         && pLinePos == wsLinePos_ && pCompress == wsCompress_ && pFade == wsFade_
         && bufW_ == wsBufW_ && compH_ == wsCompH_)
-        return;
+        return false;
     wsLinePos_ = pLinePos; wsCompress_ = pCompress; wsFade_ = pFade;
     wsBufW_ = bufW_; wsCompH_ = compH_; warpDirty_ = false;
 
@@ -703,6 +688,7 @@ void VideoScrollRenderCore::buildWarp()
     }
 
     warpReady_ = true;   // warpBuf_ now holds the current warped/aged frame.
+    return true;
 }
 
 //==============================================================================

@@ -105,6 +105,11 @@ typedef struct LuxStralEngine {
    * (engine A, exact legacy behaviour); otherwise a fixed value (engine B reads
    * its OWN DoubleBuffer which it fully controls, so it accepts either → 2).   */
   int           source_type_override;
+  /* StrokeForge waveform-morph snapshot for THIS engine's current frame (M8).
+   * Copied from the engine's DoubleBuffer in synth_precompute_wave_data();
+   * workers read it instead of the global g_waveform_morph (which holds the
+   * LAST pipeline call's frame -> cross-talk between engines A and B).         */
+  float         sf_morph;
 
   /* ===== Freeze / display state ============================================ */
   volatile int is_synth_data_frozen;
@@ -154,6 +159,15 @@ extern LuxStralEngine g_luxstral_engine_b;
  * output buffers and grayscale staging self-initialise lazily on first render.
  * Safe to call once, after synth_IfftInit(). Returns 0 on success.            */
 int32_t synth_luxstral_init_engine_b(void);
+
+/* M8 — recompute engine B's envelope coefficients from its OWN Attack/Release
+ * params (luxstral_b_tau_*). Safe no-op before engine B is initialised.      */
+void synth_luxstral_update_engine_b_envelope(void);
+
+/* M8 — after a frequency hot-reload regenerated the global waves[] (engine A),
+ * re-copy the shared static timbre into engine B's private array (preserving
+ * B's dynamic state) and re-derive B's envelope coefficients.                 */
+void synth_luxstral_resync_engine_b_timbre(void);
 
 /* Render one frame on engine B, publishing to its own output buffers. Mirrors
  * synth_AudioProcess() but for g_luxstral_engine_b + its own DoubleBuffer.     */

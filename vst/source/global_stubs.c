@@ -73,7 +73,21 @@ sp3ctra_config_t g_sp3ctra_config = {
     // 🔧 CRITICAL: Soft limiter (prevents hard clipping)
     .soft_limit_threshold = 0.8f,                // Start soft limit at 80%
     .soft_limit_knee = 0.2f,                     // Smooth transition
-    
+
+    // LuxStral engine B (M8 dual-engine) — same defaults as engine A
+    .luxstral_b_inversion = 1,
+    .luxstral_b_ac_removal = 1,
+    .luxstral_b_gamma_value = 1.0f,
+    .luxstral_b_contrast_min = 0.21f,
+    .luxstral_b_tau_up_base_ms = 0.5f,
+    .luxstral_b_tau_down_base_ms = 0.5f,
+    .luxstral_b_summation_response_exponent = 2.0f,
+    .luxstral_b_noise_gate_threshold = 0.005f,
+    .luxstral_b_stereo_mode_enabled = 1,
+    .luxstral_b_stereo_temperature_amplification = 2.5f,
+    .luxstral_b_soft_limit_threshold = 0.8f,
+    .luxstral_b_soft_limit_knee = 0.2f,
+
     // 🔧 CRITICAL: Stereo processing
     .stereo_mode_enabled = 1,
     .stereo_blue_red_weight = 0.7f,           // Primary color axis weight
