@@ -482,6 +482,11 @@ bool LuxSampler::onLiveFrameAssembled(const uint8_t* R, const uint8_t* G,
     // "stop (old take)" then "start (new take)"; draining start first armed
     // the slot and the queued stop finalised the NEW take immediately — the
     // UI showed RECORDING while nothing was captured.
+    // The whole drain is FROZEN while a chunked save copies frames (see
+    // saveInProgress_): a non-overdub START resets frame_count and rewrites
+    // frames[0..] on this very thread, corrupting the interleaved chunk
+    // copies. Flags stay queued and drain right after the save.
+    if (!saveInProgress_.load(std::memory_order_acquire))
     for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
     {
         if (atomicState.stopRecCmd[i].exchange(false, std::memory_order_acq_rel))
@@ -747,7 +752,11 @@ void LuxSampler::uiToggleRecord(int slotIndex) noexcept
 
     if (cur == SlotState::RECORDING)
     {
-        // Toggle off → stop recording
+        // Toggle off → stop recording. Also clear a queued START that was
+        // never drained (CIS stream gap): leaving both flags armed made the
+        // eventual drain re-arm the slot and record forever with the UI on
+        // IDLE — with start cleared, the drain order no longer matters.
+        atomicState.startRecCmd[slotIndex].store(false, std::memory_order_release);
         atomicState.stopRecCmd[slotIndex].store(true, std::memory_order_release);
         atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::IDLE),
                                                 std::memory_order_release);
@@ -1687,6 +1696,13 @@ bool LuxSampler::saveToFile(const juce::File& file) const
     // recording only appends, and every path that frees or reorders frames
     // runs on THIS (message) thread.
     constexpr int kChunkFrames = 256;   // ≈ 2.6 MB staging
+    // Freeze rec-command drains for the whole chunked copy (see saveInProgress_).
+    saveInProgress_.store(true, std::memory_order_release);
+    struct SaveFlagReset
+    {
+        std::atomic<bool>& f;
+        ~SaveFlagReset() { f.store(false, std::memory_order_release); }
+    } saveFlagReset { saveInProgress_ };   // mutable member — writable from const
     std::vector<CapturedFrame> staging;
     for (int s = 0; s < NUM_SLOTS; ++s)
     {
@@ -2234,6 +2250,13 @@ bool LuxSampler::saveSlotToFile(int slotIndex, const juce::File& file) const
     // per-frame recording path — never hold it across disk I/O.
     {
         constexpr int kChunkFrames = 256;   // ≈ 2.6 MB staging
+        // Freeze rec-command drains for the whole chunked copy (see saveInProgress_).
+        saveInProgress_.store(true, std::memory_order_release);
+        struct SaveFlagReset
+        {
+            std::atomic<bool>& f;
+            ~SaveFlagReset() { f.store(false, std::memory_order_release); }
+        } saveFlagReset { saveInProgress_ };   // mutable member — writable from const
         FsmpSlotHeader shdr {};
         int fc = 0;
         {
@@ -2602,7 +2625,15 @@ void FramePlayerThread::run()
         if (enc < 0) return false;
         const int engIdx = enc / LuxSamplerConstants::NUM_SLOTS;
         const int relay  = enc % LuxSamplerConstants::NUM_SLOTS;
-        LuxSampler* target = LuxSampler::engineAt(engIdx);
+        // Pin the target engine: this runs on A's player thread while the
+        // processor may be destroying engine B — an unpinned dereference
+        // could race the dtor's CAS-unregister (same protocol as the C hooks).
+        LuxSampler* target = LuxSampler::pinEngine(engIdx);
+        struct RelayPinReset
+        {
+            int idx;
+            ~RelayPinReset() { LuxSampler::unpinEngine(idx); }
+        } pinReset { engIdx };
         if (target == nullptr) return false;
         if (!target->getSlot(relay).has_content) return false;
 

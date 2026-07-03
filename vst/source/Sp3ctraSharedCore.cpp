@@ -233,19 +233,37 @@ bool Sp3ctraSharedCore::ensureAudioBufferSize(int samplesPerBlock)
         restartAudioThread = true;
     }
 
+    // Reallocate FIRST, then commit the new size to the global config — the
+    // engine sizes its writes on g_sp3ctra_config.audio_buffer_size, so
+    // committing before a failed (OOM) realloc would make the producer write
+    // the new size into freed/NULL buffers.
     extern sp3ctra_config_t g_sp3ctra_config;
-    g_sp3ctra_config.audio_buffer_size = samplesPerBlock;
-
-    const bool ok = (luxstral_init_audio_buffers(samplesPerBlock) == 0);
-    if (!ok)
-        log_error("SHARED", "ensureAudioBufferSize() — luxstral_init_audio_buffers(%d) failed",
-                  samplesPerBlock);
+    const int  oldSize = luxstral_get_audio_buffer_size();
+    bool ok = (luxstral_init_audio_buffers(samplesPerBlock) == 0);
+    if (ok)
+        g_sp3ctra_config.audio_buffer_size = samplesPerBlock;
+    else
+    {
+        log_error("SHARED", "ensureAudioBufferSize() — luxstral_init_audio_buffers(%d) "
+                            "failed, trying to restore the previous size (%d)",
+                  samplesPerBlock, oldSize);
+        if (oldSize > 0 && luxstral_init_audio_buffers(oldSize) == 0)
+            g_sp3ctra_config.audio_buffer_size = oldSize;
+    }
 
     if (restartAudioThread)
     {
-        audioThread = std::make_unique<AudioProcessingThread>(core.get());
-        audioThread->startThread(juce::Thread::Priority::highest);
-        log_info("SHARED", "ensureAudioBufferSize() — synthesis thread restarted");
+        if (luxstral_are_audio_buffers_ready())
+        {
+            audioThread = std::make_unique<AudioProcessingThread>(core.get());
+            audioThread->startThread(juce::Thread::Priority::highest);
+            log_info("SHARED", "ensureAudioBufferSize() — synthesis thread restarted");
+        }
+        else
+            // Both reallocations failed (OOM): leave the producer stopped —
+            // silence, but no writes into NULL output buffers.
+            log_error("SHARED", "ensureAudioBufferSize() — output buffers unavailable, "
+                                "synthesis thread NOT restarted");
     }
     return ok;
 }

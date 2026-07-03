@@ -1214,19 +1214,21 @@ void *udpThread(void *arg) {
         }
       }
 #endif
-      pthread_cond_signal(&db->cond);
-      pthread_mutex_unlock(&db->mutex);
-
       /* 🎨 DISPLAY: update global display buffers from the just-assembled
        * line. After swapBuffers() above it lives in db->processingBuffer_*
        * (assembly fills activeBuffer, the swap moves it there — the exact
-       * bytes the former mixed_* identity copies carried). Same thread owns
-       * both pointer sets, no lock needed beyond the displayable one. */
+       * bytes the former mixed_* identity copies carried). Done UNDER
+       * db->mutex: during the device↔feeder handover the MediaSourceService
+       * thread can swap/write these very buffers (the displayable mutex nests
+       * inside db->mutex here; no path takes them in the reverse order). */
       luxstral_engine_displayable_lock();
       memcpy(luxstral_engine_displayable_R(), db->processingBuffer_R, nb_pixels);
       memcpy(luxstral_engine_displayable_G(), db->processingBuffer_G, nb_pixels);
       memcpy(luxstral_engine_displayable_B(), db->processingBuffer_B, nb_pixels);
       luxstral_engine_displayable_unlock();
+
+      pthread_cond_signal(&db->cond);
+      pthread_mutex_unlock(&db->mutex);
 
       /* Capture raw scanner data only when new UDP data arrives
        * Function handles runtime enable/disable internally
