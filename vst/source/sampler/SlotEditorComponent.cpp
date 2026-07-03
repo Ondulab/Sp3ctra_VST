@@ -322,6 +322,15 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     };
     addAndMakeVisible(fadePowerSlider);
 
+    // Purge stale MIDI pulses latched while NO editor was open: processBlock
+    // keeps setting them, nobody consumes them, and acting on a press latched
+    // minutes ago would start a phantom recording the moment the editor opens.
+    (void) processor.consumeSamplerRecPressed();
+    (void) processor.consumeSamplerRecReleased();
+    (void) processor.consumeSamplerPlayPressed();
+    (void) processor.consumeSamplerPlayReleased();
+    (void) processor.consumeSamplerSaveTrigger();
+
     // 30 ms (~33 Hz) — frequent enough so MIDI press/release pulses get
     // consumed with low latency (worst-case ~30 ms after the MIDI event).
     // UI repaint cost is negligible at this rate.
@@ -633,7 +642,11 @@ void SlotEditorComponent::timerCallback()
         if (recPressed && midiSt != SlotState::RECORDING && recBtn.onClick)
             recBtn.onClick();
         // REC release → stop recording if currently in RECORDING state.
-        else if (recReleased && midiSt == SlotState::RECORDING && recBtn.onClick)
+        // Sequential `if` (NOT else-if): press and release often land in the
+        // SAME timer tick — the release must still close the take, otherwise a
+        // quick tap leaves the recording running (momentary semantic violated).
+        if (recReleased && recBtn.onClick
+            && fs->getSlotState(selectedSlot) == SlotState::RECORDING)
             recBtn.onClick();
 
         // Re-read state because REC may have just changed it.
@@ -642,8 +655,10 @@ void SlotEditorComponent::timerCallback()
         // PLAY press → start playback if not already in PLAYING state.
         if (playPressed && midiSt2 != SlotState::PLAYING && playBtn.onClick)
             playBtn.onClick();
-        // PLAY release → stop playback if currently in PLAYING state.
-        else if (playReleased && midiSt2 == SlotState::PLAYING && playBtn.onClick)
+        // PLAY release → stop playback if currently in PLAYING state (same
+        // sequential handling as REC above).
+        if (playReleased && playBtn.onClick
+            && fs->getSlotState(selectedSlot) == SlotState::PLAYING)
             playBtn.onClick();
     }
 

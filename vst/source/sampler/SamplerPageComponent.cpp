@@ -81,9 +81,14 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
                         seq->setStep(i, FrameSequencer::STEP_EMPTY);
                 }
 
-                // Clear all recorded slots and reset play params to defaults
-                if (auto* fs = processor.getSampler(samplerIndex_))
+                // Clear all recorded slots and reset play params to defaults —
+                // on BOTH engines: SAVE SESSION always writes banks A AND B, so
+                // leaving the other engine's takes in RAM would silently embed
+                // them into the brand-new session file.
+                for (int e = 0; e < 2; ++e)
                 {
+                    auto* fs = processor.getSampler(e);
+                    if (fs == nullptr) continue;
                     fs->clearAllSlots();
                     for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
                     {
@@ -231,6 +236,22 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
                 doLoadSession(f, /*isAutoRestore*/ true);
             });
         }
+        else if (processor.getLastSessionPath().isNotEmpty())
+        {
+            // The banks live ONLY in the .sp3s (absolute path in the DAW
+            // state) — a moved/renamed project used to fail 100% silently,
+            // leaving 24 empty slots with no clue which file is missing.
+            const juce::String missing = processor.getLastSessionPath();
+            juce::MessageManager::callAsync([this, missing]
+            {
+                Sp3ctraDialog::showWarning(
+                    this,
+                    "Load Session",
+                    ("Saved session not found:\n" + missing
+                     + "\n\nSample banks were NOT restored. Use LOAD SESSION "
+                       "to locate the .sp3s file.").toRawUTF8());
+            });
+        }
     }
     else
     {
@@ -354,39 +375,59 @@ void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
     const juce::MemoryBlock xmlBlock(xmlStr.toRawUTF8(),
                                      static_cast<size_t>(xmlStr.getNumBytesAsUTF8()));
 
-    // ── Write combined .sp3s ──────────────────────────────────────────────────
-    sessionFile.deleteFile();
-    juce::FileOutputStream out(sessionFile);
-    if (out.failedToOpen())
+    // ── Write combined .sp3s (ATOMIC replace) ─────────────────────────────────
+    // Never delete the previous session before the new one is fully written: a
+    // failure mid-write (disk full, USB drive unplugged) would destroy the only
+    // copy of the sample banks — the frames live in the .sp3s, not in the DAW
+    // state blob. Write a sibling temp file, then swap it in.
+    juce::TemporaryFile tmpSession(sessionFile);
     {
-        const juce::String msg =
-            "Cannot open output file:\n" + sessionFile.getFullPathName();
-        Sp3ctraDialog::showWarning(this, "Save Session", msg.toRawUTF8());
-        return;
-    }
+        juce::FileOutputStream out(tmpSession.getFile());
+        if (out.failedToOpen())
+        {
+            const juce::String msg =
+                "Cannot open output file:\n" + sessionFile.getFullPathName();
+            Sp3ctraDialog::showWarning(this, "Save Session", msg.toRawUTF8());
+            return;
+        }
 
-    out.writeInt  (static_cast<int>(kSessionMagic));
-    out.writeShort(static_cast<short>(kSessionVersion));
-    out.writeInt  (static_cast<int>(xmlBlock.getSize()));
-    out.write     (xmlBlock.getData(), xmlBlock.getSize());
-    for (const auto& blob : fsmpBlobs)
-    {
-        out.writeInt(static_cast<int>(blob.getSize()));
-        out.write   (blob.getData(), blob.getSize());
-    }
-    out.writeInt  (static_cast<int>(kSessionEof));
+        out.writeInt  (static_cast<int>(kSessionMagic));
+        out.writeShort(static_cast<short>(kSessionVersion));
+        out.writeInt  (static_cast<int>(xmlBlock.getSize()));
+        out.write     (xmlBlock.getData(), xmlBlock.getSize());
+        for (const auto& blob : fsmpBlobs)
+        {
+            out.writeInt(static_cast<int>(blob.getSize()));
+            out.write   (blob.getData(), blob.getSize());
+        }
+        out.writeInt  (static_cast<int>(kSessionEof));
+        out.flush();
 
-    if (!out.getStatus().wasOk())
+        if (!out.getStatus().wasOk())
+        {
+            Sp3ctraDialog::showWarning(
+                this,
+                "Save Session",
+                "Write error - previous session file left untouched.");
+            return;   // tmpSession dtor removes the partial temp file
+        }
+    }
+    if (!tmpSession.overwriteTargetFileWithTemporary())
     {
         Sp3ctraDialog::showWarning(
             this,
             "Save Session",
-            "Write error - session may be incomplete.");
+            "Could not replace the session file - previous session left untouched.");
         return;
     }
     // Persist path so the DAW project and Standalone reload this session on
     // the next launch (stored in getStateInformation via processor.lastSessionPath).
     processor.setLastSessionPath(sessionFile.getFullPathName());
+
+    // The banks in RAM are now exactly what the file holds — drop any stale
+    // one-shot auto-load flag so a later editor open cannot reload an older
+    // .sp3s on top of this freshly saved session.
+    (void) processor.consumeSamplerAutoLoadPending();
 
     // ── Optional image export ────────────────────────────────────────────────
     // When the user enabled "Export Images on Save Session" in
@@ -453,6 +494,15 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile, bool isA
         return;
     }
     const int version = static_cast<int>(in.readShort()); // 1 = single engine (A), 2 = A+B
+    if (version > kSessionVersion)
+    {
+        Sp3ctraDialog::showWarning(
+            this,
+            "Load Session",
+            "This session was saved by a newer Sp3ctra version and cannot be "
+            "loaded - please update the plugin.");
+        return;
+    }
 
     // On startup auto-restore, the DAW state carries slot params / sequencer
     // pattern captured at the last close — NEWER than the session's copies
@@ -492,6 +542,34 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile, bool isA
             "Load Session",
             "Session file has invalid or unrecognised XML.");
         return;
+    }
+
+    // ── Read + validate the binary .fsmp bank sections BEFORE applying ───────
+    // anything (v2: engine A then B; v1: A only). Applying params/pattern first
+    // and rejecting the banks afterwards left a hybrid, non-undoable state:
+    // the rejected file's params on top of the old banks.
+    const int numBanks = (version >= 2) ? 2 : 1;
+    juce::MemoryBlock fsmpBlobs[2];
+    for (int e = 0; e < numBanks; ++e)
+    {
+        const int fsmpLen = in.readInt();
+        if (fsmpLen <= 0 || fsmpLen > 2'000'000'000)
+        {
+            Sp3ctraDialog::showWarning(
+                this,
+                "Load Session",
+                "Session file is corrupt (invalid sample bank size). Nothing was loaded.");
+            return;
+        }
+        fsmpBlobs[e].setSize(static_cast<size_t>(fsmpLen));
+        if (in.read(fsmpBlobs[e].getData(), fsmpLen) != fsmpLen)
+        {
+            Sp3ctraDialog::showWarning(
+                this,
+                "Load Session",
+                "Session file is truncated (sample bank section). Nothing was loaded.");
+            return;
+        }
     }
 
     // ── Apply per-slot parameters ─────────────────────────────────────────────
@@ -538,31 +616,9 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile, bool isA
         }
     }
 
-    // ── Binary .fsmp sections (v2: engine A then B; v1: A only) ──────────────
-    const int numBanks = (version >= 2) ? 2 : 1;
+    // ── Load the pre-read .fsmp banks into the engines ────────────────────────
     for (int e = 0; e < numBanks; ++e)
     {
-        const int fsmpLen = in.readInt();
-        if (fsmpLen <= 0 || fsmpLen > 2'000'000'000)
-        {
-            Sp3ctraDialog::showWarning(
-                this,
-                "Load Session",
-                "Session file is corrupt (invalid sample bank size).");
-            return;
-        }
-
-        juce::MemoryBlock fsmpBlob;
-        fsmpBlob.setSize(static_cast<size_t>(fsmpLen));
-        if (in.read(fsmpBlob.getData(), fsmpLen) != fsmpLen)
-        {
-            Sp3ctraDialog::showWarning(
-                this,
-                "Load Session",
-                "Session file is truncated (sample bank section).");
-            return;
-        }
-
         // Write to temporary file and load via LuxSampler
         juce::TemporaryFile tmpFsmp(".fsmp");
         {
@@ -575,7 +631,7 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile, bool isA
                     "Cannot create temporary file for sample bank.");
                 return;
             }
-            fsmpOut.write(fsmpBlob.getData(), fsmpBlob.getSize());
+            fsmpOut.write(fsmpBlobs[e].getData(), fsmpBlobs[e].getSize());
         }
 
         if (!engines[e]->loadFromFile(tmpFsmp.getFile()))
@@ -588,6 +644,31 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile, bool isA
         }
     }
 
+    // v1 sessions carry no engine-B bank: clear B so the loaded session is
+    // exactly what the file describes — otherwise the previous session's B
+    // takes kept playing under the new session (and the next v2 SAVE embedded
+    // them into the new file).
+    if (version < 2 && engines[1] != nullptr)
+    {
+        engines[1]->clearAllSlots();
+        for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
+        {
+            engines[1]->setSlotStartFrac   (i, 0.0f);
+            engines[1]->setSlotEndFrac     (i, 1.0f);
+            engines[1]->setSlotSpeed       (i, 1.0f);
+            engines[1]->setSlotLoopMode    (i, LoopMode::LOOP);
+            engines[1]->setSlotResumeMode  (i, false);
+            engines[1]->setSlotBlendAmount (i, 0.0f);
+            engines[1]->setSlotAttackLen   (i, 0.0f);
+            engines[1]->setSlotDecayLen    (i, 0.0f);
+            engines[1]->setSlotBrightnessLift(i, 0.0f);
+            engines[1]->setSlotTrebleCut   (i, 0.0f);
+            engines[1]->setSlotBassCut     (i, 0.0f);
+            engines[1]->setSlotLabel       (i, "");
+        }
+        engines[1]->setOverdubMode(false);
+    }
+
     // Bank load restored labels from the .fsmp headers — on auto-restore the
     // DAW state carries the newer per-slot values, so re-apply them on top.
     if (skipSlotParams)
@@ -596,6 +677,11 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile, bool isA
     // ── Memorise path — auto-save + DAW/Standalone auto-reload ───────────────
     currentSessionFile = sessionFile;
     processor.setLastSessionPath(sessionFile.getFullPathName());
+
+    // A session is now explicitly loaded — drop any stale one-shot auto-load
+    // still armed by an earlier setStateInformation: consumed later (next
+    // editor open) it would reload an OLD .sp3s over these banks.
+    (void) processor.consumeSamplerAutoLoadPending();
 
     // ── Refresh UI ────────────────────────────────────────────────────────────
     slotGrid  .repaint();

@@ -74,6 +74,15 @@ typedef struct {
 
 typedef struct {
     SynthChainPlan synth[CHAIN_SYNTH_COUNT];
+
+    /* Probe-only chains (no synth module placed): VideoScroll slots fed from
+     * the LIVE frame so a "monitor" chain ([SP3CTRA, VIDEOSCROLL]) shows the
+     * feed instead of staying black — such chains have no synth executor.
+     * v1 limitation: probes of a synth-less chain whose source is an INTERNAL
+     * module (IMAGE/VIDEO/CAMERA) are not fed (internal sources are pumped per
+     * synth slot). */
+    int num_live_probes;
+    int live_probe_slot[CHAIN_MAX_CHAINS];
 } ChainPlan;
 
 /* Message thread: publish a new plan (lock-free double buffer + atomic flip). */

@@ -67,7 +67,15 @@ public:
     int getNumSamplers() const noexcept { return numSamplers_.load(std::memory_order_relaxed); }
 
     // ── Configuration (message thread) ───────────────────────────────────────
-    void setEnabled      (bool  e) noexcept { enabled.store(e);     }
+    // Disabling while playing posts a STOP: processBlock drains transport
+    // commands even when disabled, so removing the SEQUENCER module no longer
+    // leaves the current step looping forever with no way to stop it.
+    void setEnabled      (bool  e) noexcept
+    {
+        const bool was = enabled.exchange(e, std::memory_order_acq_rel);
+        if (was && !e && playing.load(std::memory_order_relaxed))
+            stopCmd.store(true, std::memory_order_release);
+    }
     void setBpm          (float b) noexcept { bpm.store(b);         }
     void setNumSteps     (int   n) noexcept { numSteps.store(juce::jlimit(1, MAX_STEPS, n)); }
     void setLooping      (bool  l) noexcept { looping.store(l);     }
@@ -140,6 +148,16 @@ private:
     /** Primary engine (sampler A) — owns the single playback channel in step 1;
      *  sentinel steps (LIVE/EMPTY) and transport act on it. */
     LuxSampler* primarySampler() const noexcept { return samplers_[0]; }
+    /** Apply fn to every registered engine — transport actions must reach a
+     *  step playing/held on ANY engine, not just A. */
+    template <typename Fn>
+    void forEachSampler(Fn&& fn) const noexcept
+    {
+        const int n = numSamplers_.load(std::memory_order_relaxed);
+        for (int i = 0; i < n && i < kMaxSamplers; ++i)
+            if (samplers_[i] != nullptr)
+                fn(*samplers_[i]);
+    }
 
     // ── Per-step encoded (sampler,slot) assignment, or a negative sentinel ────
     std::atomic<int> steps[MAX_STEPS];

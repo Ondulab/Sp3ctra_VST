@@ -380,7 +380,10 @@ public:
     // =========================================================================
     // Configuration (message thread / APVTS listener)
     // =========================================================================
-    void setEnabled(bool e)          noexcept { enabled.store(e); }
+    // true→false with activity in flight finalises the recording and stops
+    // playback (the command drains in onLiveFrameAssembled stop running once
+    // disabled — a REC stayed armed forever after the module was removed).
+    void setEnabled(bool e)          noexcept;
     void setMidiChannel(int ch)      noexcept { midiChannel.store(ch); }   // 1–16
     void setOctaveOffset(int off)    noexcept { octaveOffset.store(off); } // -2..+2
     void setMaxDuration(float secs)  noexcept { maxDurationS.store(secs); }// 1..10

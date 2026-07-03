@@ -68,6 +68,15 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         layoutZones();
         if (waterfallColumn) waterfallColumn->refreshActiveSlots();   // outputs added/removed
     };
+    // State restore with the editor open (host preset change / project
+    // reload): rebuild the rack from the NEW model — the audio follows the
+    // restored topology immediately while the rack otherwise kept showing the
+    // old blocks (ghost drops, stale LEDs) until the window was reopened.
+    audioProcessor.onStateRestoredUi = [this]
+    {
+        if (chainRack)       chainRack->refreshFromModel();
+        if (waterfallColumn) waterfallColumn->refreshActiveSlots();
+    };
     rackViewport.setViewedComponent(chainRack.get(), false);
     rackViewport.setScrollBarsShown(true, false);
     rackViewport.setScrollBarThickness(8);
@@ -279,6 +288,7 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
 
 Sp3ctraAudioProcessorEditor::~Sp3ctraAudioProcessorEditor()
 {
+    audioProcessor.onStateRestoredUi = nullptr;   // this editor is going away
     juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
     settingsWindow.reset();
 }

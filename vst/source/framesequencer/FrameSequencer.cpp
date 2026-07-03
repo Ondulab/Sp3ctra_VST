@@ -59,8 +59,8 @@ void FrameSequencer::uiPlay() noexcept
     // whether the sequencer was held mid-sequence or fully stopped.
     held.store(false, std::memory_order_release);
     startCmd.store(true, std::memory_order_release);
-    // Release FramePlayerThread: play_head may advance again.
-    if (auto* s = primarySampler()) s->setSeqPlayerHeld(false);
+    // Release the player of EVERY engine (a held step may live on B).
+    forEachSampler([](LuxSampler& s) { s.setSeqPlayerHeld(false); });
 }
 
 void FrameSequencer::uiHold() noexcept
@@ -72,16 +72,17 @@ void FrameSequencer::uiHold() noexcept
     held.store(true, std::memory_order_release);
     // holdCmd signals the audio thread (belt-and-suspenders + future RT side-effects).
     holdCmd.store(true, std::memory_order_release);
-    // Freeze FramePlayerThread on the current frame until uiResume().
-    if (auto* s = primarySampler()) s->setSeqPlayerHeld(true);
+    // Freeze the player of EVERY engine — a step playing on engine B did not
+    // freeze (only A was held).
+    forEachSampler([](LuxSampler& s) { s.setSeqPlayerHeld(true); });
 }
 
 void FrameSequencer::uiStop() noexcept
 {
     held.store(false, std::memory_order_release);
     stopCmd.store(true, std::memory_order_release);
-    // Ensure FramePlayerThread is not left in a frozen state after stop.
-    if (auto* s = primarySampler()) s->setSeqPlayerHeld(false);
+    // Ensure no engine's player is left in a frozen state after stop.
+    forEachSampler([](LuxSampler& s) { s.setSeqPlayerHeld(false); });
 }
 
 void FrameSequencer::uiResume() noexcept
@@ -93,8 +94,8 @@ void FrameSequencer::uiResume() noexcept
     // the DAW timeline advanced during the pause (DAW sync mode).
     held.store(false, std::memory_order_release);
     resumeCmd.store(true, std::memory_order_release);
-    // Unfreeze FramePlayerThread: play_head resumes from where it stopped.
-    if (auto* s = primarySampler()) s->setSeqPlayerHeld(false);
+    // Unfreeze every engine's player: play_head resumes where it stopped.
+    forEachSampler([](LuxSampler& s) { s.setSeqPlayerHeld(false); });
 }
 
 // ============================================================================
@@ -231,39 +232,68 @@ void FrameSequencer::rtStop() noexcept
 {
     playing.store(false, std::memory_order_release);
     currentStep.store(-1, std::memory_order_release);
+    const int prevBank    = rtPrevActiveBank;      // capture before the reset below
+    const int prevSampler = rtPrevActiveSampler;
     rtLastTriggeredStep  = -1;
     rtInternalPhaseBeats = 0.0;
     rtLastPpqPosition    = -1.0;
     rtPrevActiveBank     = -1;
     rtPrevActiveSampler  = 0;
 
-    if (auto* s = primarySampler())
+    const int n = juce::jmax(1, numSamplers_.load(std::memory_order_relaxed));
+
+    // Finalise a bank the sequencer left RECORDING (activePlaySlot is -1 while
+    // recording, so the per-engine loop below cannot see it) — mirrors
+    // triggerStep()'s previous-bank finalisation.
+    if (prevBank >= 0 && prevBank < LuxSamplerConstants::NUM_SLOTS
+        && prevSampler >= 0 && prevSampler < n)
+        if (LuxSampler* prev = samplers_[prevSampler])
+        {
+            auto& pas = prev->getAtomicState();
+            if (static_cast<SlotState>(pas.slotState[prevBank].load(
+                    std::memory_order_relaxed)) == SlotState::RECORDING)
+            {
+                pas.stopRecCmd[prevBank].store(true, std::memory_order_release);
+                pas.slotState[prevBank].store(static_cast<int>(SlotState::IDLE),
+                                              std::memory_order_release);
+            }
+        }
+
+    // Stop playback + release sequencer ownership on EVERY engine — a step
+    // playing on engine B kept looping after STOP (only A was reset) with
+    // B's passthrough left false → live feed dead. The white silence frame
+    // is injected once, by the engine that owned the channel (else A).
+    bool silencePosted = false;
+    for (int i = 0; i < n && i < kMaxSamplers; ++i)
     {
+        LuxSampler* s = samplers_[i];
+        if (s == nullptr) continue;
         auto& as = s->getAtomicState();
         // cp may be the SCORE_SLOT sentinel (== NUM_SLOTS) — never index the
         // NUM_SLOTS-sized slotState[] with it (out-of-bounds write).
         const int cp = as.activePlaySlot.load(std::memory_order_relaxed);
         if (cp >= 0 && cp < LuxSamplerConstants::NUM_SLOTS)
-        {
             as.slotState[cp].store(static_cast<int>(SlotState::IDLE),
                                     std::memory_order_release);
-        }
         as.stopPlayCmd.store(true,  std::memory_order_release);
         as.activePlaySlot.store(-1, std::memory_order_release);
         // Release sequencer ownership so FramePlayerThread's tail cleanup
         // can safely restore passthrough if it is still running.
         as.seqControlledPlay.store(false, std::memory_order_release);
-        // FIX(silence): Signal FramePlayerThread to inject a white (silence) frame
-        // so the last sampler frame does not freeze in AudioImageBuffers and
-        // preprocessed_data after the sequencer stops.
-        // FramePlayerThread will write 255 to all channels on its next idle tick
-        // (or immediately after its inner playback loop exits if a slot was playing).
-        // passthroughEnabled is set to true below so the live UDP stream will
-        // naturally overwrite AudioImageBuffers once the next UDP frame arrives.
-        as.injectSilenceCmd.store(true, std::memory_order_release);
         as.seqLiveStepActive.store(false, std::memory_order_release);  // clear on stop
+        // FIX(silence): inject ONE white frame so the last sampler frame does
+        // not freeze in AudioImageBuffers / preprocessed_data after stop;
+        // passthrough=true lets the live UDP stream take over naturally.
+        if (cp >= 0 && !silencePosted)
+        {
+            as.injectSilenceCmd.store(true, std::memory_order_release);
+            silencePosted = true;
+        }
         as.passthroughEnabled.store(true, std::memory_order_release);
     }
+    if (!silencePosted)
+        if (auto* s = primarySampler())
+            s->getAtomicState().injectSilenceCmd.store(true, std::memory_order_release);
 }
 
 // ============================================================================
@@ -274,7 +304,20 @@ void FrameSequencer::processBlock(juce::AudioPlayHead* playHead,
                                    int                 numSamples,
                                    double              sampleRate) noexcept
 {
-    if (!enabled.load(std::memory_order_relaxed)) return;
+    if (!enabled.load(std::memory_order_relaxed))
+    {
+        // Even while disabled (module removed from the rack), transport
+        // commands must be drained: a queued STOP has to stop the looping
+        // slot (it kept playing forever with the live feed suppressed and no
+        // way to stop it), and a stale START must not fire minutes later when
+        // the module is re-added.
+        if (stopCmd.exchange(false, std::memory_order_acq_rel))
+            rtStop();
+        startCmd.store(false, std::memory_order_release);
+        holdCmd.store(false, std::memory_order_release);
+        resumeCmd.store(false, std::memory_order_release);
+        return;
+    }
 
     // ── 1. Handle stop command ────────────────────────────────────────────────
     if (stopCmd.exchange(false, std::memory_order_acq_rel))
@@ -319,7 +362,12 @@ void FrameSequencer::processBlock(juce::AudioPlayHead* playHead,
     {
         held.store(false, std::memory_order_release); // play always clears hold
         rtLastTriggeredStep  = -1;
-        rtInternalPhaseBeats = 0.0;
+        // Internal-BPM mode: pre-load a full phase so the accumulator below
+        // fires on THIS very block — step 0 otherwise only sounded after one
+        // whole step duration (a full second at 60 BPM), unlike DAW-sync mode
+        // which triggers immediately. Unused in DAW-sync mode; uiResume()
+        // keeps the frozen phase (separate resumeCmd path).
+        rtInternalPhaseBeats = 1.0;
         rtLastPpqPosition    = -1.0;
         playing.store(true, std::memory_order_release);
         // The step-advance logic below will trigger step 0 on this very block.
