@@ -291,7 +291,11 @@ void ChainRackComponent::mutateAndRefresh(bool notifySelection)
 {
     // The processor owns the model: apply the enable/routing bridge + persist.
     processor.onChainModelEdited();
+    refreshAfterModelEdit(notifySelection);
+}
 
+void ChainRackComponent::refreshAfterModelEdit(bool notifySelection)
+{
     rebuild();
 
     // Keep the selection valid; fall back to the first module if it vanished.
@@ -351,11 +355,20 @@ void ChainRackComponent::removeInstance(const juce::Uuid& id)
 
 void ChainRackComponent::scheduleRefresh(bool notifySelection)
 {
+    // Derive/persist SYNCHRONOUSLY: the model has already been mutated, and
+    // the deferred lambda dies silently if the editor is destroyed before the
+    // message loop runs it — the RT plan and the <CHAINS> persistence must
+    // never depend on the UI surviving one more tick. onChainModelEdited()
+    // touches no Component, so it is safe from a block's mouseUp.
+    processor.onChainModelEdited();
+
+    // Only the UI part (rebuild destroys the very block whose mouseUp may
+    // have called us) is deferred.
     juce::Component::SafePointer<ChainRackComponent> safe(this);
     juce::MessageManager::callAsync([safe, notifySelection]
     {
         if (safe != nullptr)
-            safe->mutateAndRefresh(notifySelection);
+            safe->refreshAfterModelEdit(notifySelection);
     });
 }
 

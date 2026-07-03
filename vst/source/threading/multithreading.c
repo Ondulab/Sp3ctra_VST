@@ -778,6 +778,16 @@ void *udpThread(void *arg) {
         const uint8_t *src_G;
         const uint8_t *src_B;
 
+        /* ── ONE ChainPlan snapshot per frame ─────────────────────────────────
+         * Taken BEFORE the modulated build: need_modulated below must also see
+         * the plan (a sampler on LuxStral B's chain needs the modulated frame
+         * even when engine A's routing does not), and every per-synth input
+         * selection further down must share the SAME topology — a fresh
+         * snapshot per consumer could mix two plans within one frame when a
+         * rack edit is published mid-frame. */
+        ChainPlan frame_plan;
+        chain_plan_get(&frame_plan);
+
         /* ── Build the MODULATED frame once — used by any path that selects it.
          * The inserts run inside their own preallocated buffers (see lux_pitch.c
          * / lux_mask.c, no allocation in this hot path).  When disabled or no
@@ -789,7 +799,16 @@ void *udpThread(void *arg) {
         int            need_modulated =
             (live_cfg.luxstral_path.source         == IMAGE_SOURCE_MODULATED) ||
             (live_cfg.luxsynth_luxwave_path.source == IMAGE_SOURCE_MODULATED) ||
-            image_chain_any_tap_demand(); /* a visualizer watches an insert tap */
+            image_chain_any_tap_demand() || /* a visualizer watches an insert tap */
+            /* deriveChainRouting only routes engine A's global source — a
+             * sampler sitting on LuxStral B's chain was invisible here, so B
+             * played the LIVE feed instead of the sampler (and resampling
+             * captured nothing). Engine A's clause is included for symmetry
+             * (normally already covered by luxstral_path.source above). */
+            (frame_plan.synth[CHAIN_SYNTH_LUXSTRAL].present
+             && frame_plan.synth[CHAIN_SYNTH_LUXSTRAL].has_sampler) ||
+            (frame_plan.synth[CHAIN_SYNTH_LUXSTRAL_B].present
+             && frame_plan.synth[CHAIN_SYNTH_LUXSTRAL_B].has_sampler);
 
         if (need_modulated)
         {
@@ -853,7 +872,61 @@ void *udpThread(void *arg) {
                 /* IDLE / REC / STEP_LIVE: run the insert chain on the raw
                  * live frame (configurable order, per-insert visual taps),
                  * publish as modulated, then let the sampler hook mirror &
-                 * record it. */
+                 * record it.
+                 *
+                 * The chain that HOLDS the sampler owns the modulated channel.
+                 * image_chain_process_inserts() runs the GLOBAL Pitch/Mask
+                 * instances (= pool slot 0); when the sampler chain is bound
+                 * to ANOTHER pool slot, use its own instances instead — a
+                 * Pitch played into that chain was silently ignored and the
+                 * recording captured un-pitched frames. Pool slot 0 keeps the
+                 * legacy path (identical behaviour + live per-insert visual
+                 * taps; the chain-specific path publishes no taps — the tap
+                 * mirrors follow pool slot 0 only, v1 limitation). */
+                const SynthChainPlan *spSmp = NULL;
+                for (int s = 0; s < CHAIN_SYNTH_COUNT && !spSmp; s++)
+                    if (frame_plan.synth[s].present && frame_plan.synth[s].has_sampler)
+                        spSmp = &frame_plan.synth[s];
+                int chain_specific = 0;
+                if (spSmp)
+                    for (int i = 0; i < spSmp->num_inserts; i++)
+                        if ((spSmp->insert_id[i] == IMAGE_CHAIN_INSERT_LUXPITCH ||
+                             spSmp->insert_id[i] == IMAGE_CHAIN_INSERT_LUXMASK)
+                            && spSmp->insert_state_idx[i] != 0)
+                            chain_specific = 1;
+
+                if (chain_specific)
+                {
+                    /* Only the Pitch/Mask inserts BEFORE the sampler marker
+                     * shape the recorded signal; probes are fed elsewhere
+                     * (per-position loops) — including them here would double-
+                     * capture each line. */
+                    int   ids[CHAIN_PLAN_MAX_INSERTS];
+                    void *sel_states[CHAIN_PLAN_MAX_INSERTS];
+                    void *all_states[CHAIN_PLAN_MAX_INSERTS];
+                    int   n = 0;
+                    chain_resolve_insert_states(spSmp, all_states);
+                    for (int i = 0; i < spSmp->num_inserts; i++)
+                    {
+                        if (spSmp->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER)
+                            break;
+                        if (spSmp->insert_id[i] == IMAGE_CHAIN_INSERT_LUXPITCH ||
+                            spSmp->insert_id[i] == IMAGE_CHAIN_INSERT_LUXMASK)
+                        {
+                            ids[n]        = spSmp->insert_id[i];
+                            sel_states[n] = all_states[i];
+                            n++;
+                        }
+                    }
+                    image_chain_run(db->activeBuffer_R,
+                                    db->activeBuffer_G,
+                                    db->activeBuffer_B,
+                                    nb_pixels,
+                                    g_sp3ctra_config.num_octaves,
+                                    ids, sel_states, n,
+                                    &mod_R, &mod_G, &mod_B);
+                }
+                else
                 image_chain_process_inserts(db->activeBuffer_R,
                                             db->activeBuffer_G,
                                             db->activeBuffer_B,
@@ -882,14 +955,6 @@ void *udpThread(void *arg) {
             }
         }
 
-
-        /* ── ONE ChainPlan snapshot per frame ─────────────────────────────────
-         * The three per-synth input selections below (LuxStral A, LuxStral B,
-         * LuxSynth/LuxWave) must all see the SAME topology: taking a fresh
-         * snapshot per synth could mix two different plans within one frame
-         * when a rack edit is published mid-frame. */
-        ChainPlan frame_plan;
-        chain_plan_get(&frame_plan);
 
         /* ── Pick LuxStral's input (M6 Phase 2 — fed by ITS OWN chain) ────────
          * • A chain holding the Sampler IS the modulated channel (mod) — it
@@ -950,6 +1015,15 @@ void *udpThread(void *arg) {
             }
         }
 
+        /* ── Probe-only chains (no synth): feed their VideoScroll probes from
+         * the live frame — no synth executor ever reaches them, a monitor
+         * chain ([SP3CTRA, VIDEOSCROLL]) stayed black. */
+        for (int i = 0; i < frame_plan.num_live_probes; i++)
+            video_scroll_capture_line(
+                video_scroll_instance(frame_plan.live_probe_slot[i]),
+                db->activeBuffer_R, db->activeBuffer_G, db->activeBuffer_B,
+                nb_pixels);
+
         if (pipeline_process_frame(src_R, src_G, src_B, &live_cfg, &preprocessed_temp) != 0) {
           log_error("THREAD", "Pipeline processing failed");
         }
@@ -978,13 +1052,17 @@ void *udpThread(void *arg) {
                 /* DoubleBuffer init failed above — its mutex/buffers are not
                  * usable, skip engine-B feeding entirely. */
             }
-            else if (spLB->present && spLB->source_kind == CHAIN_SRC_NONE)
+            else if (spLB->present && spLB->source_kind == CHAIN_SRC_NONE
+                     && !spLB->has_sampler)
             {
-                /* No source placed in this chain → TRUE silence. Do NOT run the
-                 * pipeline on a synthetic frame: with inversion ON a black frame
-                 * comes out as ALL notes at max volume (wall of sound), and no
-                 * uniform frame is silent for every inversion/AC-removal combo.
-                 * Zeroed notes/grayscale/contrast are silent unconditionally. */
+                /* No source placed in this chain → TRUE silence — UNLESS a
+                 * sampler sits upstream: [SAMPLER, LUXSTRAL B] needs no source
+                 * module (the sampler IS the signal), and the same topology
+                 * plays on engine A. Do NOT run the pipeline on a synthetic
+                 * frame: with inversion ON a black frame comes out as ALL
+                 * notes at max volume (wall of sound), and no uniform frame is
+                 * silent for every inversion/AC-removal combo. Zeroed notes/
+                 * grayscale/contrast are silent unconditionally. */
                 static PreprocessedImageData s_preprocessed_silence; /* stays zeroed */
                 struct timeval tv_silence;
                 gettimeofday(&tv_silence, NULL);
@@ -1007,6 +1085,23 @@ void *udpThread(void *arg) {
                 if (spLB->has_sampler && mod_R)
                 {
                     bxR = mod_R; bxG = mod_G; bxB = mod_B;   /* modulated/sampler channel */
+                    /* Feed VideoScroll probes by their position relative to the
+                     * sampler — mirror of engine A's short-circuit branch (the
+                     * probes of a sampler chain on B stayed black without it). */
+                    int after_sampler_b = 0;
+                    for (int i = 0; i < spLB->num_inserts; i++)
+                    {
+                        if (spLB->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER) { after_sampler_b = 1; continue; }
+                        if (spLB->insert_id[i] == IMAGE_CHAIN_INSERT_VIDEOSCROLL)
+                        {
+                            const uint8_t *fr = after_sampler_b ? mod_R : baseB_R;
+                            const uint8_t *fg = after_sampler_b ? mod_G : baseB_G;
+                            const uint8_t *fb = after_sampler_b ? mod_B : baseB_B;
+                            video_scroll_capture_line(
+                                video_scroll_instance(spLB->insert_state_idx[i]),
+                                fr, fg, fb, nb_pixels);
+                        }
+                    }
                 }
                 else if (spLB->num_inserts > 0)
                 {

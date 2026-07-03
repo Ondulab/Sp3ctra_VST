@@ -102,6 +102,12 @@ public:
      *  Message-thread only (reads the editable chain model). */
     std::vector<int> activeVideoSlots() const;
 
+    /** UI hook (message thread only): set by the editor, cleared in its
+     *  destructor, invoked after a full state restore so an OPEN editor
+     *  rebuilds its rack from the new model instead of keeping the old
+     *  topology on screen (ghost blocks, stale drops/LEDs). */
+    std::function<void()> onStateRestoredUi;
+
     /** Video-scroll transport — momentary "Stop": freezes (videoScrollPaused)
      *  and clears the waterfall.  The clear is a generation counter polled by
      *  every live VideoDisplayComponent, so it reaches all open views without a
@@ -518,6 +524,10 @@ private:
     // VideoScroll probe slots (0..7) present last edit — diffed to clear the
     // capture ring of any probe that was just removed.
     std::set<int>        videoScrollSlots_;
+    // Instance identity per VideoScroll slot: a NEW instance claiming a
+    // previously-used slot must not inherit the removed instance's parameter
+    // bank / automation values (see teardownAbsentModules).
+    std::map<int, juce::Uuid> videoScrollSlotIds_;
     // LuxStral engines (0 = A, 1 = B) present last edit — diffed so each engine's
     // enable param (A = deviceEnabled, B = luxstralBEnabled) follows ITS OWN
     // placement, not type-level presence.
@@ -538,6 +548,11 @@ private:
     // M8 — true when a 2nd LuxStral engine (slot B) is placed in the model; gates
     // the additive engine-B mix in processBlock(). Set in deriveChainRouting().
     std::atomic<bool>     luxstralBPresent_ { false };
+    // Sampler A/B presence in the model (message thread, set in
+    // deriveChainRouting) — combined with the shared luxSamplerEnabled param
+    // to drive each engine's setEnabled().
+    bool samplerAPresent_ { false };
+    bool samplerBPresent_ { false };
     void deriveChainRouting();              // model → setChainSourceRouting + chain plan
     uint32_t updateChainPoolBindings();     // model → chainPoolSlots_; returns slots to reset
     void deriveAndPublishChainPlan();       // model → RT-safe per-synth ChainPlan

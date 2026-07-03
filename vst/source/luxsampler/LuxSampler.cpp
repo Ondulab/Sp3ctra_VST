@@ -205,6 +205,16 @@ void LuxSampler::stopOtherEnginesPlayback(int exceptIndex) noexcept
                                        std::memory_order_release);
             as.stopPlayCmd.store(true, std::memory_order_release);
             as.activePlaySlot.store(-1, std::memory_order_release);
+            // Restore the evicted engine's live-passthrough flag: its player
+            // tail only restores when slotState is still PLAYING (already
+            // IDLE here), so the flag stayed false FOREVER and
+            // lux_sampler_is_passthrough() kept the live feed dead after the
+            // new owner stopped. The new owner clears its own flag right
+            // after this call, so the shared channel stays suppressed while
+            // it plays. Sequencer-owned engines keep their flag — the
+            // sequencer is the only authority there (rtStop / STEP_LIVE).
+            if (! as.seqControlledPlay.load(std::memory_order_relaxed))
+                as.passthroughEnabled.store(true, std::memory_order_release);
         }
     }
     s_playbackOwner.store(exceptIndex, std::memory_order_release);
@@ -385,6 +395,9 @@ void LuxSampler::handleNoteOn(int note, int velocity) noexcept
             atomicState.slotState[i].store(static_cast<int>(SlotState::PLAYING),
                                             std::memory_order_release);
             atomicState.activePlaySlot.store(i, std::memory_order_release);
+            // Clear a stale stop left by stopPlayerThread() (see uiPlaySlot) —
+            // atomic store, RT-safe.
+            atomicState.stopPlayCmd.store(false, std::memory_order_release);
             atomicState.startPlayCmd.store(i, std::memory_order_release);
             atomicState.passthroughEnabled.store(false, std::memory_order_release);
         }
@@ -465,8 +478,26 @@ bool LuxSampler::onLiveFrameAssembled(const uint8_t* R, const uint8_t* G,
     if (!enabled.load(std::memory_order_relaxed)) return false;
 
     // ── Process pending start/stop commands from RT ───────────────────────
+    // Stop is drained BEFORE start: during a CIS stream gap the UI can queue
+    // "stop (old take)" then "start (new take)"; draining start first armed
+    // the slot and the queued stop finalised the NEW take immediately — the
+    // UI showed RECORDING while nothing was captured.
     for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
     {
+        if (atomicState.stopRecCmd[i].exchange(false, std::memory_order_acq_rel))
+        {
+            if (activeRecSlot.load(std::memory_order_relaxed) == i)
+            {
+                std::lock_guard<std::mutex> lk(slotsMutex_);
+                slots[i].has_content = (slots[i].frame_count > 0);
+                slots[i].duration_us = recBaseUs_ + (currentTimeUs() - recStartTimeUs);
+                activeRecSlot.store(-1, std::memory_order_release);
+                log_info("FS", "Slot %d: recording stopped — %d frames, %.2f s",
+                         i, slots[i].frame_count,
+                         static_cast<double>(slots[i].duration_us) / 1e6);
+            }
+        }
+
         if (atomicState.startRecCmd[i].exchange(false, std::memory_order_acq_rel))
         {
             {
@@ -505,20 +536,6 @@ bool LuxSampler::onLiveFrameAssembled(const uint8_t* R, const uint8_t* G,
             activeRecSlot.store(i, std::memory_order_release);
             recStartTimeUs = currentTimeUs();
             log_info("FS", "Slot %d: recording started", i);
-        }
-
-        if (atomicState.stopRecCmd[i].exchange(false, std::memory_order_acq_rel))
-        {
-            if (activeRecSlot.load(std::memory_order_relaxed) == i)
-            {
-                std::lock_guard<std::mutex> lk(slotsMutex_);
-                slots[i].has_content = (slots[i].frame_count > 0);
-                slots[i].duration_us = recBaseUs_ + (currentTimeUs() - recStartTimeUs);
-                activeRecSlot.store(-1, std::memory_order_release);
-                log_info("FS", "Slot %d: recording stopped — %d frames, %.2f s",
-                         i, slots[i].frame_count,
-                         static_cast<double>(slots[i].duration_us) / 1e6);
-            }
         }
     }
 
@@ -670,6 +687,53 @@ void LuxSampler::getLiveFrame(uint8_t* outR, uint8_t* outG, uint8_t* outB,
 }
 
 // ============================================================================
+// Non-RT: enable/disable (message thread — deriveChainRouting / enable param)
+// ============================================================================
+
+void LuxSampler::setEnabled(bool e) noexcept
+{
+    const bool was = enabled.exchange(e, std::memory_order_acq_rel);
+    if (!was || e)
+        return;   // no transition, or turning ON — nothing to tear down
+
+    // Disabled while active (module removed from its chain / LED off): the
+    // command drains in onLiveFrameAssembled() no longer run, so an in-flight
+    // recording stayed armed forever (STOP REC dead; re-adding the module
+    // later resumed capture with a huge elapsed time → take auto-truncated as
+    // overflow). Finalise the take and stop playback now.
+    const int rec = activeRecSlot.load(std::memory_order_acquire);
+    if (rec >= 0 && rec < LuxSamplerConstants::NUM_SLOTS)
+    {
+        atomicState.startRecCmd[rec].store(false, std::memory_order_release);
+        atomicState.stopRecCmd[rec].store(false, std::memory_order_release);
+        atomicState.slotState[rec].store(static_cast<int>(SlotState::IDLE),
+                                         std::memory_order_release);
+        std::lock_guard<std::mutex> lk(slotsMutex_);
+        if (activeRecSlot.load(std::memory_order_relaxed) == rec)
+        {
+            slots[rec].has_content = (slots[rec].frame_count > 0);
+            slots[rec].duration_us = recBaseUs_ + (currentTimeUs() - recStartTimeUs);
+            activeRecSlot.store(-1, std::memory_order_release);
+            log_info("FS", "Slot %d: recording finalised on disable (%d frames)",
+                     rec, slots[rec].frame_count);
+        }
+    }
+
+    // Stop a REAL playing slot (a running SCORE keeps its own lifecycle) and
+    // hand the live feed back.
+    const int cp = atomicState.activePlaySlot.load(std::memory_order_acquire);
+    if (cp >= 0 && cp < LuxSamplerConstants::NUM_SLOTS)
+    {
+        atomicState.stopPlayCmd.store(true, std::memory_order_release);
+        atomicState.slotState[cp].store(static_cast<int>(SlotState::IDLE),
+                                        std::memory_order_release);
+        atomicState.activePlaySlot.store(-1, std::memory_order_release);
+        atomicState.seqControlledPlay.store(false, std::memory_order_release);
+        atomicState.passthroughEnabled.store(true, std::memory_order_release);
+    }
+}
+
+// ============================================================================
 // Non-RT: UI-triggered record toggle
 // ============================================================================
 
@@ -687,6 +751,24 @@ void LuxSampler::uiToggleRecord(int slotIndex) noexcept
         atomicState.stopRecCmd[slotIndex].store(true, std::memory_order_release);
         atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::IDLE),
                                                 std::memory_order_release);
+        // Finalise the take NOW too: the UDP drain that normally finalises
+        // (has_content / duration_us) only runs when a frame arrives — with
+        // the CIS stream stopped, a SAVE SESSION right after this stop
+        // silently skipped the take (has_content still false). Idempotent
+        // with the drain thanks to the activeRecSlot guard.
+        if (activeRecSlot.load(std::memory_order_acquire) == slotIndex)
+        {
+            std::lock_guard<std::mutex> lk(slotsMutex_);
+            if (activeRecSlot.load(std::memory_order_relaxed) == slotIndex)
+            {
+                slots[slotIndex].has_content = (slots[slotIndex].frame_count > 0);
+                slots[slotIndex].duration_us =
+                    recBaseUs_ + (currentTimeUs() - recStartTimeUs);
+                activeRecSlot.store(-1, std::memory_order_release);
+                log_info("FS", "Slot %d: UI stop record — finalised %d frames",
+                         slotIndex, slots[slotIndex].frame_count);
+            }
+        }
         log_info("FS", "Slot %d: UI stop record", slotIndex);
         return;
     }
@@ -766,6 +848,11 @@ void LuxSampler::uiPlaySlot(int slotIndex) noexcept
     atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::PLAYING),
                                             std::memory_order_release);
     atomicState.activePlaySlot.store(slotIndex,  std::memory_order_release);
+    // Clear any stale stop request BEFORE arming playback — stopPlayerThread()
+    // (every prepareToPlay) leaves stopPlayCmd=true that the idle player never
+    // consumes; the first PLAY after it was silently swallowed ("press PLAY
+    // twice" bug — same fix as uiPlayScore). Sequenced-before startPlayCmd.
+    atomicState.stopPlayCmd.store(false,         std::memory_order_release);
     atomicState.startPlayCmd.store(slotIndex,    std::memory_order_release);
     atomicState.passthroughEnabled.store(false,  std::memory_order_release);
 }
@@ -938,15 +1025,36 @@ void LuxSampler::uiPlayScore() noexcept
     // sampler perdure. Halt the sampler's injection (slotState→IDLE) and free the
     // channel for SCORE. A non-slot owner leaves any armed relay untouched, so it
     // survives a live-EQ reload (stop → reallocate → re-play).
+    // Encoding: engine * NUM_SLOTS + slot — the channel may be owned by
+    // ANOTHER engine (e.g. sampler B playing while SCORE lives on A); the
+    // arbiter below would otherwise stop it with no memory and the contract
+    // "the sampler resumes when SCORE stops" broke for engine B.
     const int curPlay = atomicState.activePlaySlot.load(std::memory_order_relaxed);
     if (curPlay >= 0)
     {
         atomicState.stopPlayCmd.store(true, std::memory_order_release);
         if (curPlay < LuxSamplerConstants::NUM_SLOTS)
         {
-            scoreRelaySlot_.store(curPlay, std::memory_order_relaxed);
+            scoreRelaySlot_.store(engineIndex_ * LuxSamplerConstants::NUM_SLOTS + curPlay,
+                                  std::memory_order_relaxed);
             atomicState.slotState[curPlay].store(static_cast<int>(SlotState::IDLE),
                                                  std::memory_order_release);
+        }
+    }
+    else
+    {
+        for (int i = 0; i < kMaxEngines; ++i)
+        {
+            if (i == engineIndex_) continue;
+            LuxSampler* e = s_engines[i].load(std::memory_order_acquire);
+            if (e == nullptr) continue;
+            const int cp = e->atomicState.activePlaySlot.load(std::memory_order_relaxed);
+            if (cp >= 0 && cp < LuxSamplerConstants::NUM_SLOTS)
+            {
+                scoreRelaySlot_.store(i * LuxSamplerConstants::NUM_SLOTS + cp,
+                                      std::memory_order_relaxed);
+                break;   // single playback channel → at most one owner
+            }
         }
     }
 
@@ -1017,16 +1125,34 @@ bool LuxSampler::uiBeginScoreScrub() noexcept
 
     // Take over the synthesis channel from any other player (sampler slot or
     // sequencer), mirroring uiPlayScore(). Relay: remember an overridden sampler
-    // slot so it resumes when the scrub ends (uiEndScoreScrub).
+    // slot so it resumes when the scrub ends (uiEndScoreScrub). Same encoding
+    // as uiPlayScore: engine * NUM_SLOTS + slot (cross-engine relay).
     const int curPlay = atomicState.activePlaySlot.load(std::memory_order_relaxed);
     if (curPlay >= 0)
     {
         atomicState.stopPlayCmd.store(true, std::memory_order_release);
         if (curPlay < LuxSamplerConstants::NUM_SLOTS)
         {
-            scoreRelaySlot_.store(curPlay, std::memory_order_relaxed);
+            scoreRelaySlot_.store(engineIndex_ * LuxSamplerConstants::NUM_SLOTS + curPlay,
+                                  std::memory_order_relaxed);
             atomicState.slotState[curPlay].store(static_cast<int>(SlotState::IDLE),
                                                  std::memory_order_release);
+        }
+    }
+    else
+    {
+        for (int i = 0; i < kMaxEngines; ++i)
+        {
+            if (i == engineIndex_) continue;
+            LuxSampler* e = s_engines[i].load(std::memory_order_acquire);
+            if (e == nullptr) continue;
+            const int cp = e->atomicState.activePlaySlot.load(std::memory_order_relaxed);
+            if (cp >= 0 && cp < LuxSamplerConstants::NUM_SLOTS)
+            {
+                scoreRelaySlot_.store(i * LuxSamplerConstants::NUM_SLOTS + cp,
+                                      std::memory_order_relaxed);
+                break;   // single playback channel → at most one owner
+            }
         }
     }
 
@@ -2470,15 +2596,37 @@ void FramePlayerThread::run()
     // slot was re-armed (caller must then NOT restore live passthrough).
     auto resumeScoreRelaySlot = [&]() -> bool
     {
-        const int relay = sampler.consumeScoreRelaySlot();
-        if (relay < 0 || relay >= LuxSamplerConstants::NUM_SLOTS) return false;
-        if (!sampler.getSlot(relay).has_content) return false;
-        state.slotState[relay].store(static_cast<int>(SlotState::PLAYING),
-                                     std::memory_order_release);
-        state.activePlaySlot.store(relay, std::memory_order_release);
-        state.startPlayCmd.store(relay, std::memory_order_release);
-        state.passthroughEnabled.store(false, std::memory_order_release);
-        log_info("FS", "SCORE stopped — relaying back to sampler slot %d", relay);
+        // Encoded engine * NUM_SLOTS + slot (see uiPlayScore) — the channel
+        // may have been owned by ANOTHER engine (sampler B under SCORE on A).
+        const int enc = sampler.consumeScoreRelaySlot();
+        if (enc < 0) return false;
+        const int engIdx = enc / LuxSamplerConstants::NUM_SLOTS;
+        const int relay  = enc % LuxSamplerConstants::NUM_SLOTS;
+        LuxSampler* target = LuxSampler::engineAt(engIdx);
+        if (target == nullptr) return false;
+        if (!target->getSlot(relay).has_content) return false;
+
+        auto& ts = target->getAtomicState();
+        ts.slotState[relay].store(static_cast<int>(SlotState::PLAYING),
+                                  std::memory_order_release);
+        ts.activePlaySlot.store(relay, std::memory_order_release);
+        ts.stopPlayCmd.store(false, std::memory_order_release);   // clear stale stop
+        ts.startPlayCmd.store(relay, std::memory_order_release);
+        ts.passthroughEnabled.store(false, std::memory_order_release);
+
+        if (&ts != &state)
+        {
+            // Cross-engine resume: release OUR channel bookkeeping — the score
+            // sentinel must not linger in activePlaySlot (it would poison the
+            // next arbiter pass), and our passthrough flag must not keep the
+            // live feed suppressed (the target engine owns that now).
+            if (state.activePlaySlot.load(std::memory_order_relaxed)
+                == LuxSamplerConstants::SCORE_SLOT)
+                state.activePlaySlot.store(-1, std::memory_order_release);
+            state.passthroughEnabled.store(true, std::memory_order_release);
+        }
+        log_info("FS", "SCORE stopped — relaying back to sampler %d slot %d",
+                 engIdx, relay);
         return true;
     };
 

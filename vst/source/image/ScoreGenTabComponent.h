@@ -108,8 +108,15 @@ public:
         speedAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
             processor.getAPVTS(), "scoreSpeed", speedSlider);
 
-        // Disabled (greyed) until a score is generated.
+        // Disabled (greyed) until a score is generated — but frames generated
+        // in a PREVIOUS life of this page survive in the engine (the page is
+        // just a view), so re-enable the transport when a score is already
+        // loaded. The preview image itself is rebuilt on the next GENERATE
+        // only (v1 limitation).
         setTransportEnabled(false);
+        if (auto* fs0 = processor.getLuxSampler())
+            if (fs0->scoreHasContent())
+                setTransportEnabled(true);
 
         playHint.setText("Set LuxStral source = Sampler to hear the score.",
                          juce::dontSendNotification);
@@ -223,12 +230,11 @@ public:
     ~ScoreGenTabComponent() override
     {
         stopTimer();
-        if (auto* fs = processor.getLuxSampler())
-            fs->uiStopScore();
-        // Reflect the stop on the transport param (the timer that mirrors it
-        // is gone once this page closes).
-        if (auto* p = processor.getAPVTS().getParameter("scorePlaying"))
-            p->setValueNotifyingHost(0.0f);
+        // Do NOT stop the score here: this page is a VIEW, not the transport —
+        // closing the plugin window must not cut the music (the SEQUENCER
+        // already survives it). The scorePlaying param mirror moved to the
+        // processor's timer, which also covers the one-shot natural end while
+        // no page is open.
         processor.stopScorePreview();
         job.stopThread(3000);
     }

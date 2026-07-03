@@ -1986,6 +1986,10 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // ── LuxSampler MIDI (RT-safe: atomics only, no alloc, no lock, no I/O) ──
     if (luxSampler != nullptr)
         luxSampler->processMidi(midiMessages);
+    // Engine B listens on ITS OWN MIDI channel (set distinct in the ctor —
+    // processMidi filters by channel); it never received MIDI at all before.
+    if (luxSamplerB != nullptr)
+        luxSamplerB->processMidi(midiMessages);
 
     // ── LuxSampler action button MIDI bindings (REC / PLAY / SAVE) ─────────
     // RT-safe: only atomic reads/writes, no allocation, no logging.
@@ -2656,6 +2660,26 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
 
     if (xmlState.get() != nullptr) {
         if (xmlState->hasTagName(apvts.state.getType())) {
+            // Never-auto-run: every transport must open STOPPED. Patch the
+            // tree BEFORE replaceState so "stopped" IS the restored value —
+            // the previous setValueNotifyingHost(0) push after the restore
+            // marked host automation lanes as overridden on every project
+            // open (and could write a point in Latch/Write modes). A missing
+            // PARAM entry needs no patch: the parameter defaults are stopped.
+            auto forceRestoredParam = [&xmlState](const juce::String& id, double v)
+            {
+                for (auto* e : xmlState->getChildWithTagNameIterator("PARAM"))
+                    if (e->getStringAttribute("id") == id)
+                    { e->setAttribute("value", v); return; }
+            };
+            forceRestoredParam("videoScrollPaused", 1.0);
+            for (int s = 0; s < CHAIN_MAX_CHAINS; ++s)
+                forceRestoredParam(vsParam(s, "paused"), 1.0);  // per-instance
+            forceRestoredParam(PARAM_SEQ_TRANSPORT, 0.0);       // Stop
+            forceRestoredParam(PARAM_SCORE_PLAYING, 0.0);
+            forceRestoredParam(PARAM_IMGSRC_PLAY,   0.0);       // M9 sources
+            forceRestoredParam(PARAM_VIDSRC_PLAY,   0.0);
+
             apvts.replaceState(juce::ValueTree::fromXml(*xmlState));
 
             // Everything below mutates non-APVTS state that UI timers iterate
@@ -2684,26 +2708,11 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
 {
     {
         {
-            // Transport must never auto-run on open: force the video scroll to
-            // STOP regardless of what the saved session had. A session stored
-            // while playing would otherwise resume scrolling the moment the
-            // plugin/window opens. setValueNotifyingHost keeps the Play/Pause
-            // button's toggle state in sync. Clearing makes it a true Stop
-            // (frozen + blank), not just a pause.
-            if (auto* p = apvts.getParameter("videoScrollPaused"))
-                p->setValueNotifyingHost(1.0f);
+            // Never-auto-run is enforced by patching the restored tree BEFORE
+            // replaceState (see setStateInformation) — no host-visible pushes
+            // here. Clearing makes the video scroll a true Stop (frozen +
+            // blank), not just a pause.
             requestVideoScrollClear();
-            // Same never-auto-run rule for the sequencer and SCORE transports:
-            // a session saved while playing must open stopped.
-            if (auto* p = apvts.getParameter(PARAM_SEQ_TRANSPORT))
-                p->setValueNotifyingHost(0.0f);   // Stop
-            if (auto* p = apvts.getParameter(PARAM_SCORE_PLAYING))
-                p->setValueNotifyingHost(0.0f);
-            // M9 — IMAGE/VIDEO source transports open stopped too.
-            if (auto* p = apvts.getParameter(PARAM_IMGSRC_PLAY))
-                p->setValueNotifyingHost(0.0f);
-            if (auto* p = apvts.getParameter(PARAM_VIDSRC_PLAY))
-                p->setValueNotifyingHost(0.0f);
             // Push the restored SCORE speed/loop into the engine (the listener
             // does not fire for values equal to the pre-restore state).
             if (luxSampler != nullptr)
@@ -2796,6 +2805,10 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
                          static_cast<int>(udpPortParam->load()));
             }
             // else: coreNeedsInit == true → prepareToPlay() will call startWithConfig()
+
+            // Let an OPEN editor rebuild its rack/panels from the new model.
+            if (onStateRestoredUi)
+                onStateRestoredUi();
         }
     }
 }
@@ -2848,6 +2861,16 @@ void Sp3ctraAudioProcessor::timerCallback()
                 if (auto* raw = apvts.getRawParameterValue(deferredParamIds_[i]))
                     applyParameterChange(deferredParamIds_[i], raw->load());
     }
+
+    // ── SCORE transport mirror ────────────────────────────────────────────────
+    // The SCORE page is a view: it no longer force-stops the score in its
+    // destructor, so with no page open somebody must still fold the engine's
+    // one-shot natural end back onto the automatable scorePlaying param (the
+    // param listener then runs uiStopScore — idempotent).
+    if (luxSampler != nullptr)
+        if (auto* p = apvts.getParameter(PARAM_SCORE_PLAYING))
+            if (p->getValue() >= 0.5f && ! luxSampler->isScorePlaying())
+                p->setValueNotifyingHost(0.0f);
 
     // ── Deferred Pitch/Mask/VideoScroll pool resets (see header) ─────────────
     if ((pendingPitchResets_ | pendingMaskResets_ | pendingVideoScrollInits_) != 0
@@ -2978,9 +3001,18 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
     // LuxSampler parameters — update atomic config on LuxSampler
     if (parameterID.startsWith("luxSampler"))
     {
-        // NOTE: setEnabled is NOT applied here — per-engine sampler enable is
-        // owned by deriveChainRouting() (module presence drives A/B). The shared
-        // settings below apply to both engines (per-B params land in Part B).
+        // Per-engine sampler enable = model presence AND the shared enable
+        // param (the rack LED / host automation). Presence alone used to be
+        // authoritative, which made the LED a dead toggle: switching it off
+        // changed nothing audible while showing "off".
+        if (parameterID == PARAM_FS_ENABLED)
+        {
+            const bool on = newValue > 0.5f;
+            if (luxSampler  != nullptr) luxSampler ->setEnabled(samplerAPresent_ && on);
+            if (luxSamplerB != nullptr) luxSamplerB->setEnabled(samplerBPresent_ && on);
+            return;
+        }
+        // The shared settings below apply to both engines (per-B params land in Part B).
         const int midiCh = static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_MIDI_CH)) + 1;
         const int oct    = static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_OCT_OFFSET)) - 2;
         const float dur  = *apvts.getRawParameterValue(PARAM_FS_MAX_DUR);
@@ -3226,13 +3258,17 @@ void Sp3ctraAudioProcessor::loadChainModelFromState()
     chainActiveTypes_.clear();
     chainModel_.deriveActiveTypes(chainActiveTypes_);
     videoScrollSlots_.clear();
+    videoScrollSlotIds_.clear();
     luxstralEngines_.clear();
     for (const auto& ch : chainModel_.chains)
         for (const auto& mod : ch.modules)
         {
             if (mod.type == ModuleType::VideoScroll
                 && mod.slot >= 0 && mod.slot < CHAIN_MAX_CHAINS)
+            {
                 videoScrollSlots_.insert(mod.slot);
+                videoScrollSlotIds_[mod.slot] = mod.id;   // identity baseline (no reset on load)
+            }
             if (mod.type == ModuleType::LuxStral
                 && mod.slot >= 0 && mod.slot < ChainModel::kMaxLuxStralEngines)
                 luxstralEngines_.insert(mod.slot);
@@ -3289,8 +3325,9 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
     }
 
     // Per-engine sampler enable: a Sampler instance carries its engine index in
-    // `slot` (0 = A, 1 = B). An engine is enabled iff its instance is present in
-    // the model. Authoritative — overrides the shared luxSamplerEnabled param.
+    // `slot` (0 = A, 1 = B). An engine is enabled iff its instance is present
+    // in the model AND the shared luxSamplerEnabled param (rack LED / host
+    // automation) is on — presence alone made the LED a dead toggle.
     bool samplerAPresent = false, samplerBPresent = false;
     bool luxstralBPresent = false;                        // M8 — 2nd LuxStral engine
     for (const auto& ch : chainModel_.chains)
@@ -3304,8 +3341,12 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
             else if (m.type == ModuleType::LuxStral && m.slot == 1)
                 luxstralBPresent = true;
         }
-    if (luxSampler)  luxSampler ->setEnabled(samplerAPresent);
-    if (luxSamplerB) luxSamplerB->setEnabled(samplerBPresent);
+    samplerAPresent_ = samplerAPresent;
+    samplerBPresent_ = samplerBPresent;
+    const bool fsParamOn =
+        apvts.getRawParameterValue(PARAM_FS_ENABLED)->load() > 0.5f;
+    if (luxSampler)  luxSampler ->setEnabled(samplerAPresent && fsParamOn);
+    if (luxSamplerB) luxSamplerB->setEnabled(samplerBPresent && fsParamOn);
     luxstralBPresent_.store(luxstralBPresent, std::memory_order_relaxed);
 
     // Insert order for the GLOBAL Modulated channel (image_chain_process_inserts),
@@ -3411,10 +3452,14 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
     ChainPlan plan;
     memset(&plan, 0, sizeof(plan));
 
-    auto sourceKind = [](const Chain& ch) -> int
+    // Only modules UPSTREAM of the synth count as its source: "order is
+    // significant" (ChainModel.h) — a source dragged BELOW the synth used to
+    // feed it anyway, contradicting how Pitch/Mask below the synth are ignored.
+    auto sourceKind = [](const Chain& ch, int limit) -> int
     {
-        for (const auto& m : ch.modules)
+        for (int i = 0; i < limit && i < (int) ch.modules.size(); ++i)
         {
+            const auto& m = ch.modules[(size_t) i];
             if (m.type == ModuleType::Sp3ctra) return CHAIN_SRC_LIVE;
             if (m.type == ModuleType::Image)   return CHAIN_SRC_IMAGE;
             if (m.type == ModuleType::Video)   return CHAIN_SRC_VIDEO;
@@ -3441,7 +3486,7 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
 
         const auto& ch = chainModel_.chains[(size_t) ci];
         sp.present     = 1;
-        sp.source_kind = sourceKind(ch);
+        sp.source_kind = sourceKind(ch, idx);
         // Pitch/Mask pool slot bound to this chain's UUID — stable across edits
         // (must match the masks derived in deriveChainRouting).
         const int stateIdx = poolSlotForChain(ci);
@@ -3487,6 +3532,30 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
     fill(ModuleType::LuxSynth, CHAIN_SYNTH_LUXSYNTH);
     fill(ModuleType::LuxWave,  CHAIN_SYNTH_LUXWAVE);
     fill(ModuleType::LuxStral, CHAIN_SYNTH_LUXSTRAL_B, 1);  // engine B (slot 1)
+
+    // Probe-only chains (no synth placed, e.g. a [SP3CTRA, VIDEOSCROLL]
+    // monitor): no synth executor ever feeds their probes, so list them for
+    // the udpThread to capture from the LIVE frame. Internal-source probe-only
+    // chains stay inert (v1 limitation, see chain_plan.h).
+    for (const auto& ch : chainModel_.chains)
+    {
+        bool hasSynth = false;
+        for (const auto& m : ch.modules)
+            if (m.type == ModuleType::LuxStral || m.type == ModuleType::LuxSynth
+                || m.type == ModuleType::LuxWave)
+            { hasSynth = true; break; }
+        if (hasSynth) continue;
+
+        const int src = sourceKind(ch, (int) ch.modules.size());
+        if (src != CHAIN_SRC_LIVE && src != CHAIN_SRC_NONE)
+            continue;   // internal source — not pumped for synth-less chains
+
+        for (const auto& m : ch.modules)
+            if (m.type == ModuleType::VideoScroll
+                && m.slot >= 0 && m.slot < CHAIN_MAX_CHAINS
+                && plan.num_live_probes < CHAIN_MAX_CHAINS)
+                plan.live_probe_slot[plan.num_live_probes++] = m.slot;
+    }
 
     chain_plan_publish(&plan);
 }
@@ -3837,6 +3906,39 @@ void Sp3ctraAudioProcessor::teardownAbsentModules(const std::set<ModuleType>& no
         if (videoScrollSlots_.count(slot) == 0)
             if (auto* p = apvts.getParameter(vsParam(slot, "enabled")))
                 p->setValueNotifyingHost(1.0f);
+
+    // A NEW instance (different UUID) claiming a slot must not inherit the
+    // removed instance's parameter bank: existing "VS{N} …" automation lanes
+    // and settings would silently drive the new module. Reset the whole
+    // videoScroll{N}_* / videoMix{N}_* bank to defaults (enable is owned by
+    // the forcing above). Same-UUID instances (a plain re-derive) are
+    // untouched, and session loads baseline the map without resetting.
+    {
+        std::map<int, juce::Uuid> vsIdsNow;
+        for (const auto& ch : chainModel_.chains)
+            for (const auto& m : ch.modules)
+                if (m.type == ModuleType::VideoScroll
+                    && m.slot >= 0 && m.slot < CHAIN_MAX_CHAINS)
+                    vsIdsNow[m.slot] = m.id;
+        for (const auto& entry : vsIdsNow)
+        {
+            const auto prev = videoScrollSlotIds_.find(entry.first);
+            if (prev != videoScrollSlotIds_.end() && prev->second == entry.second)
+                continue;   // same instance as before
+            const juce::String pfx1 = "videoScroll" + juce::String(entry.first) + "_";
+            const juce::String pfx2 = "videoMix"    + juce::String(entry.first) + "_";
+            for (auto* param : getParameters())
+                if (auto* pw = dynamic_cast<juce::RangedAudioParameter*>(param))
+                {
+                    if (!pw->paramID.startsWith(pfx1) && !pw->paramID.startsWith(pfx2))
+                        continue;
+                    if (pw->paramID.endsWith("_enabled"))
+                        continue;
+                    pw->setValueNotifyingHost(pw->getDefaultValue());
+                }
+        }
+        videoScrollSlotIds_ = std::move(vsIdsNow);
+    }
     videoScrollSlots_ = vsNow;
 }
 
