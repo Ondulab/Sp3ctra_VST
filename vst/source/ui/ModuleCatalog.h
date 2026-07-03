@@ -32,7 +32,8 @@ enum class ModuleType
     Pitch, Mask,                   // MIDI
     Sampler, Score, Sequencer,     // UTILS
     LuxStral, LuxSynth, LuxWave,   // SYNTH
-    VideoScroll                    // VIDEO (waterfall probe — pass-through, slotted)
+    VideoScroll,                   // VIDEO (waterfall probe — pass-through, slotted)
+    Camera                         // SRC (appended to keep table indices stable)
 };
 
 /** Behavioural role — drives the placement constraints. */
@@ -54,10 +55,11 @@ struct ModuleDesc
 };
 
 //==============================================================================
-/** The whole catalogue, in canonical display order. */
-inline const std::array<ModuleDesc, 12>& moduleTable()
+/** The whole catalogue. Table order MUST match the enum order (descFor indexes
+ *  by ordinal); the catalogue panel buckets rows by category for display. */
+inline const std::array<ModuleDesc, 13>& moduleTable()
 {
-    static const std::array<ModuleDesc, 12> table = {{
+    static const std::array<ModuleDesc, 13> table = {{
         // type                  category          role                  name                       colour       enableParam          id
         { ModuleType::Sp3ctra,     ModuleCat::SRC,   ModuleRole::Source,   "SP3CTRA",                 0xff68788f,  "",                  "Sp3ctra"  },
         { ModuleType::Image,       ModuleCat::SRC,   ModuleRole::Source,   "IMAGE",                   0xff68788f,  "",                  "Image"    },
@@ -71,6 +73,7 @@ inline const std::array<ModuleDesc, 12>& moduleTable()
         { ModuleType::LuxSynth,    ModuleCat::SYNTH, ModuleRole::Synth,    "\xE2\x99\xAA LUXSYNTH",   0xffb07af0,  "luxsynthEnabled",   "LuxSynth" },
         { ModuleType::LuxWave,     ModuleCat::SYNTH, ModuleRole::Synth,    "\xE2\x99\xAA LUXWAVE",    0xff8fd05a,  "luxwaveEnabled",    "LuxWave"  },
         { ModuleType::VideoScroll, ModuleCat::OUT,   ModuleRole::Processor,"VIDEO SCROLL",            0xff5ad0c8,  "",                  "VideoScroll" },
+        { ModuleType::Camera,      ModuleCat::SRC,   ModuleRole::Source,   "CAMERA",                  0xff68788f,  "",                  "Camera"   },
     }};
     return table;
 }

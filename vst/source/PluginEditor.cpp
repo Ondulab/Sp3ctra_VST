@@ -42,12 +42,14 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     // instance's bank (fires just before onBlockSelected → selectBlock).
     chainRack->onVideoBlockSelected = [this](int slot)
     {
+        videoSlotIndex_ = slot;
         if (videoScrollPage) videoScrollPage->setSlot(slot);
     };
     // Selecting a SAMPLER block binds the sampler page + setup to engine A/B
     // (slot 0 = A, 1 = B), fired just before onBlockSelected → selectBlock.
     chainRack->onSamplerBlockSelected = [this](int slot)
     {
+        samplerEngineIndex_ = (slot == 1) ? 1 : 0;
         if (samplerPage)  samplerPage ->setSamplerIndex(slot);
         if (samplerSetup) samplerSetup->setSamplerIndex(slot);
     };
@@ -114,12 +116,18 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     videoScrollPage = std::make_unique<VideoScrollPage>(audioProcessor);
     zone3Content.addChildComponent(videoScrollPage.get());
 
-    // Engine audio panels — the former SYNTH AUDIOSYNTH/AUDIOWAVE sub-pages,
-    // repackaged as components (same params & attachments).  AUDIOSTRAL is now
-    // part of the LUXSTRAL module page (imgLuxStralPage) itself.
-    audioSynthPanel = std::make_unique<AudioSynthPanel>(audioProcessor);
+    // M9 — IMAGE / VIDEO / CAMERA source pages (preview + movable line + transport)
+    imageSrcPage  = std::make_unique<MediaSourcePage>(audioProcessor, MediaSourcePage::Kind::Image);
+    videoSrcPage  = std::make_unique<MediaSourcePage>(audioProcessor, MediaSourcePage::Kind::Video);
+    cameraSrcPage = std::make_unique<MediaSourcePage>(audioProcessor, MediaSourcePage::Kind::Camera);
+    zone3Content.addChildComponent(imageSrcPage.get());
+    zone3Content.addChildComponent(videoSrcPage.get());
+    zone3Content.addChildComponent(cameraSrcPage.get());
+
+    // Engine audio panel — the former SYNTH AUDIOWAVE sub-page, repackaged as
+    // a component (same params & attachments).  AUDIOSTRAL and AUDIOSYNTH are
+    // now part of their module pages (imgLuxStralPage / imgLuxSynthPage).
     audioWavePanel  = std::make_unique<AudioWavePanel>(audioProcessor);
-    zone3Content.addChildComponent(audioSynthPanel.get());
     zone3Content.addChildComponent(audioWavePanel.get());
 
     // SETUP faces (M5) — per-block settings migrated from the gear-wheel
@@ -140,6 +148,18 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         audioProcessor, ChainRackComponent::blockColour(ChainBlockId::Sampler));
     scoreSetup   = std::make_unique<ScoreSetupPanel>(
         audioProcessor, ChainRackComponent::blockColour(ChainBlockId::Score));
+    imageSrcSetup  = std::make_unique<MediaSourceSetupPanel>(
+        audioProcessor, MediaSourceSetupPanel::Kind::Image,
+        ChainRackComponent::blockColour(ChainBlockId::ImageSrc));
+    videoSrcSetup  = std::make_unique<MediaSourceSetupPanel>(
+        audioProcessor, MediaSourceSetupPanel::Kind::Video,
+        ChainRackComponent::blockColour(ChainBlockId::VideoSrc));
+    cameraSrcSetup = std::make_unique<MediaSourceSetupPanel>(
+        audioProcessor, MediaSourceSetupPanel::Kind::Camera,
+        ChainRackComponent::blockColour(ChainBlockId::CameraSrc));
+    zone3Content.addChildComponent(imageSrcSetup.get());
+    zone3Content.addChildComponent(videoSrcSetup.get());
+    zone3Content.addChildComponent(cameraSrcSetup.get());
     zone3Content.addChildComponent(sourceSetup.get());
     zone3Content.addChildComponent(pitchSetup.get());
     zone3Content.addChildComponent(maskSetup.get());
@@ -157,6 +177,7 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         applyZone3Visibility();
         layoutZone3();
         zone3Viewport.setViewPosition(0, 0);
+        persistLayoutProps();   // face survives session reload
     };
     addChildComponent(faceSwitch);
     addChildComponent(modulePowerButton);
@@ -210,8 +231,37 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     if ((bool) state.getProperty("catalogCollapsed", false))
         setCatalogCollapsed(true, false);   // also locks the chain rack
 
-    // Initial selection: chain 1 source (zone 1 → Chain 1 view)
-    selectBlock(ChainBlockId::Chain1Source);
+    // ── Restore the zone-3 selection (block + face + A/B bindings) ────────────
+    // Bindings first, so the restored selection lands on the same engine /
+    // video instance the user was editing (rack clicks set these callbacks-
+    // first for the same reason).
+    luxStralEngineIndex_ = juce::jlimit(0, 1,
+        (int) state.getProperty("selLuxStralEngine", 0));
+    samplerEngineIndex_  = juce::jlimit(0, 1,
+        (int) state.getProperty("selSamplerEngine", 0));
+    videoSlotIndex_      = juce::jlimit(0, ChainModel::kMaxVideoSlots - 1,
+        (int) state.getProperty("selVideoSlot", 0));
+    if (imgLuxStralPage) imgLuxStralPage->setEngineIndex(luxStralEngineIndex_);
+    if (stralSetup)      stralSetup     ->setEngineIndex(luxStralEngineIndex_);
+    if (samplerPage)     samplerPage    ->setSamplerIndex(samplerEngineIndex_);
+    if (samplerSetup)    samplerSetup   ->setSamplerIndex(samplerEngineIndex_);
+    if (videoScrollPage) videoScrollPage->setSlot(videoSlotIndex_);
+
+    // Selected block: fall back to the default when out of range or when its
+    // module was deleted since the save (the rack can't highlight a ghost).
+    auto sel = ChainBlockId::Chain1Source;
+    {
+        const int raw = (int) state.getProperty("selBlock", (int) sel);
+        if (raw >= (int) ChainBlockId::Chain1Source
+            && raw <= (int) ChainBlockId::CameraSrc
+            && chainRack->hasBlock((ChainBlockId) raw))
+            sel = (ChainBlockId) raw;
+    }
+    // Pre-seed selectedBlock so selectBlock() keeps the restored face (it
+    // resets to PLAY on a block CHANGE); blockHasSetup is re-checked inside.
+    setupFace     = (bool) state.getProperty("selSetupFace", false);
+    selectedBlock = sel;
+    selectBlock(sel);
 
     juce::LookAndFeel::setDefaultLookAndFeel(&sp3ctraLaf);
 
@@ -259,10 +309,12 @@ void Sp3ctraAudioProcessorEditor::applyZone3Visibility()
     if (sequencerPage)   sequencerPage  ->setVisible(play && id == ChainBlockId::Sequencer);
     if (imgLuxStralPage) imgLuxStralPage->setVisible(play && id == ChainBlockId::LuxStral);
     if (imgLuxSynthPage) imgLuxSynthPage->setVisible(play && id == ChainBlockId::LuxSynth);
-    if (audioSynthPanel) audioSynthPanel->setVisible(play && id == ChainBlockId::LuxSynth);
     if (audioWavePanel)  audioWavePanel ->setVisible(play && id == ChainBlockId::LuxWave);
     if (scorePage)       scorePage      ->setVisible(play && id == ChainBlockId::Score);
     if (videoScrollPage) videoScrollPage->setVisible(play && id == ChainBlockId::VideoScroll);
+    if (imageSrcPage)    imageSrcPage   ->setVisible(play && id == ChainBlockId::ImageSrc);
+    if (videoSrcPage)    videoSrcPage   ->setVisible(play && id == ChainBlockId::VideoSrc);
+    if (cameraSrcPage)   cameraSrcPage  ->setVisible(play && id == ChainBlockId::CameraSrc);
 
     // ── SETUP face: the per-block settings panel ──────────────────────────────
     if (sourceSetup)  sourceSetup ->setVisible(setupFace && (id == ChainBlockId::Chain1Source
@@ -274,6 +326,9 @@ void Sp3ctraAudioProcessorEditor::applyZone3Visibility()
     if (stralSetup)   stralSetup  ->setVisible(setupFace && id == ChainBlockId::LuxStral);
     if (synthSetup)   synthSetup  ->setVisible(setupFace && id == ChainBlockId::LuxSynth);
     if (waveSetup)    waveSetup   ->setVisible(setupFace && id == ChainBlockId::LuxWave);
+    if (imageSrcSetup)  imageSrcSetup ->setVisible(setupFace && id == ChainBlockId::ImageSrc);
+    if (videoSrcSetup)  videoSrcSetup ->setVisible(setupFace && id == ChainBlockId::VideoSrc);
+    if (cameraSrcSetup) cameraSrcSetup->setVisible(setupFace && id == ChainBlockId::CameraSrc);
 }
 
 //==============================================================================
@@ -342,6 +397,13 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
         case ChainBlockId::VideoScroll:
             sources = { VisualizerMode::MODULATED };
             break;
+        // M9 — media sources: their line feeds the raw/live bus when they drive
+        // the pipeline; the page's own preview is the primary view anyway.
+        case ChainBlockId::ImageSrc:
+        case ChainBlockId::VideoSrc:
+        case ChainBlockId::CameraSrc:
+            sources = { VisualizerMode::LIVE };
+            break;
     }
     // The SOURCES page transport follows the selected chain (1 or 2).
     if (sourcesPage)
@@ -406,6 +468,10 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
     zone3Viewport.setViewPosition(0, 0);
 
     repaint();
+
+    // Selection (+ bindings captured by the rack callbacks just before this)
+    // survives session reload. No-op during construction (width still 0).
+    persistLayoutProps();
 }
 
 //==============================================================================
@@ -725,6 +791,12 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
             case ChainBlockId::Chain1Source:
             case ChainBlockId::Chain2Source:
                 top = sourceSetup.get();  topMinH = SourceSetupPanel::kPreferredH;    break;
+            case ChainBlockId::ImageSrc:
+                top = imageSrcSetup.get();  topMinH = MediaSourceSetupPanel::kPreferredH; break;
+            case ChainBlockId::VideoSrc:
+                top = videoSrcSetup.get();  topMinH = MediaSourceSetupPanel::kPreferredH; break;
+            case ChainBlockId::CameraSrc:
+                top = cameraSrcSetup.get(); topMinH = MediaSourceSetupPanel::kPreferredH; break;
             case ChainBlockId::Sequencer:
             case ChainBlockId::VideoScroll:
                 break;   // no SETUP face (blockHasSetup == false)
@@ -749,8 +821,7 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
                 top = imgLuxStralPage.get(); topMinH = LuxStralTabComponent::kPreferredH;
                 break;
             case ChainBlockId::LuxSynth:
-                top = imgLuxSynthPage.get(); topMinH = 400;
-                bottom = audioSynthPanel.get(); bottomH = AudioSynthPanel::kPreferredH;
+                top = imgLuxSynthPage.get(); topMinH = LuxSynthTabComponent::kPreferredH;
                 break;
             case ChainBlockId::LuxWave:
                 top = audioWavePanel.get();  topMinH = AudioWavePanel::kPreferredH; break;
@@ -758,6 +829,12 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
                 top = scorePage.get();       topMinH = 360; break;  // actions + transport only
             case ChainBlockId::VideoScroll:
                 top = videoScrollPage.get(); topMinH = VideoScrollPage::kPreferredH; break;
+            case ChainBlockId::ImageSrc:
+                top = imageSrcPage.get();    topMinH = MediaSourcePage::kPreferredH; break;
+            case ChainBlockId::VideoSrc:
+                top = videoSrcPage.get();    topMinH = MediaSourcePage::kPreferredH; break;
+            case ChainBlockId::CameraSrc:
+                top = cameraSrcPage.get();   topMinH = MediaSourcePage::kPreferredH; break;
         }
     }
 
@@ -799,6 +876,14 @@ void Sp3ctraAudioProcessorEditor::persistLayoutProps()
                       waterfallColumn != nullptr && waterfallColumn->isCollapsed(),
                       nullptr);
     state.setProperty("catalogCollapsed", catalogCollapsed, nullptr);
+
+    // Zone-3 selection — which block/page the user was editing, its PLAY/SETUP
+    // face and the engine/instance bindings behind it. Restored in the ctor.
+    state.setProperty("selBlock",          (int) selectedBlock,  nullptr);
+    state.setProperty("selSetupFace",      setupFace,            nullptr);
+    state.setProperty("selLuxStralEngine", luxStralEngineIndex_, nullptr);
+    state.setProperty("selSamplerEngine",  samplerEngineIndex_,  nullptr);
+    state.setProperty("selVideoSlot",      videoSlotIndex_,      nullptr);
 }
 
 //==============================================================================

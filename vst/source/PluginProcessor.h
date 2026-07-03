@@ -9,6 +9,12 @@
 #include "ui/ChainModel.h"      // M6 Phase 2 — editable chain topology (owned here)
 #include <map>                  // chainPoolSlots_ (stable chain → pool-slot binding)
 
+// M9 — IMAGE / VIDEO / CAMERA source engines (owned here, UI binds to them)
+class ImageSourceEngine;
+class VideoSourceEngine;
+class CameraSourceEngine;
+class MediaSourceService;
+
 // C headers for RT profiling
 extern "C" {
     #include "utils/rt_profiler.h"
@@ -134,6 +140,15 @@ public:
     /** Sampler engine by index: 0 = A, 1 = B. Out-of-range falls back to A. */
     LuxSampler*    getSampler(int i)  { return (i == 1) ? luxSamplerB.get() : luxSampler.get(); }
     FrameSequencer*  getFrameSequencer()  { return frameSequencer.get();  }
+
+    // M9 — IMAGE / VIDEO / CAMERA source engines (message-thread accessors)
+    ImageSourceEngine*  getImageSource()  { return imageSource_.get();  }
+    VideoSourceEngine*  getVideoSource()  { return videoSource_.get();  }
+    CameraSourceEngine* getCameraSource() { return cameraSource_.get(); }
+
+    /** Persisted camera device name (restored/reopened on session load). */
+    void         setCameraDeviceName(const juce::String& n) { cameraDeviceName_ = n; }
+    juce::String getCameraDeviceName() const                { return cameraDeviceName_; }
 
     // -------------------------------------------------------------------------
     // SCORE module — shared generation settings (offline, message-thread only).
@@ -330,6 +345,22 @@ private:
     std::unique_ptr<LuxSampler>   luxSamplerB;   // engine B (sampler slot 1) — 2nd sampler
     std::unique_ptr<FrameSequencer> frameSequencer;
 
+    // M9 — IMAGE / VIDEO / CAMERA source engines + the single service thread
+    // that ticks them and pumps the chains when the device is not streaming.
+    std::unique_ptr<ImageSourceEngine>  imageSource_;
+    std::unique_ptr<VideoSourceEngine>  videoSource_;
+    std::unique_ptr<CameraSourceEngine> cameraSource_;
+    std::unique_ptr<MediaSourceService> mediaService_;
+    juce::String cameraDeviceName_;   // persisted device choice (by name)
+
+    /** Push module presence (Image/Video/Camera placed in some chain) onto the
+     *  engines so they publish lines only while their module exists. Called
+     *  from deriveChainRouting() on every model change. */
+    void updateMediaSourcePresence();
+    /** MEDIA_SOURCES state blob child tree (paths + camera device). */
+    juce::ValueTree mediaSourcesStateToTree() const;
+    void restoreMediaSourcesFromTree(const juce::ValueTree& t);
+
     // "Vitesse d'acquisition" — brakes the live frame-advance rate (sample-and-
     // hold) of the SP3CTRA source.  Clock only (audio thread); the buffer module
     // enforces the hold.  Driven each block from processBlock by the acqGate*
@@ -389,6 +420,17 @@ private:
     static constexpr const char* PARAM_SCORE_LOOP    = "scoreLoop";
     static constexpr const char* PARAM_SCORE_REVERSE = "scoreReverse";
     static constexpr const char* PARAM_SCORE_SPEED   = "scoreSpeed";
+
+    // M9 — IMAGE / VIDEO / CAMERA source parameter IDs (relayed to the engines)
+    static constexpr const char* PARAM_IMGSRC_POS   = "imgSrcPos";
+    static constexpr const char* PARAM_IMGSRC_DUR   = "imgSrcDuration";
+    static constexpr const char* PARAM_IMGSRC_LOOP  = "imgSrcLoop";
+    static constexpr const char* PARAM_IMGSRC_PLAY  = "imgSrcPlay";
+    static constexpr const char* PARAM_VIDSRC_LINE  = "vidSrcLine";
+    static constexpr const char* PARAM_VIDSRC_SPEED = "vidSrcSpeed";
+    static constexpr const char* PARAM_VIDSRC_LOOP  = "vidSrcLoop";
+    static constexpr const char* PARAM_VIDSRC_PLAY  = "vidSrcPlay";
+    static constexpr const char* PARAM_CAMSRC_LINE  = "camSrcLine";
 
     // Quick access to parameters (cached, no atomic overhead)
     std::atomic<float>* udpPortParam = nullptr;

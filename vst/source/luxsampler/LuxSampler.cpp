@@ -1893,9 +1893,12 @@ void LuxSampler::slotParamsFromXml(int slotIndex, const juce::XmlElement& xml)
             }
         }
     }
-    const juce::String lbl = xml.getStringAttribute("label", "");
-    if (lbl.isNotEmpty())
-        setSlotLabel(slotIndex, lbl.toRawUTF8());
+    // Apply the label whenever the attribute is PRESENT — an empty value is a
+    // deliberate clear and must round-trip (slotParamsToXml always writes it).
+    // Only a truly absent attribute (legacy file) keeps the header's label.
+    if (xml.hasAttribute("label"))
+        setSlotLabel(slotIndex,
+                     xml.getStringAttribute("label", "").toRawUTF8());
 }
 
 bool LuxSampler::saveSlotToFile(int slotIndex, const juce::File& file) const

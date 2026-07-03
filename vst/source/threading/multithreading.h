@@ -168,4 +168,11 @@ void *imageProcessingThread(void *arg);
 void *dmxSendingThread(void *arg);
 void *audioProcessingThread(void *arg);
 
+/* M9 — one feeder tick: drives the per-synth chains from the IMAGE/VIDEO/
+ * CAMERA internal sources while the SP3CTRA device is NOT streaming (when it
+ * streams, udpThread substitutes the source frames itself, at line rate).
+ * Called by MediaSourceService (Non-RT JUCE thread) at a few hundred Hz.
+ * `arg` is the Context*. No-op when no internal source is active. */
+void internal_sources_process_tick(void *arg);
+
 #endif

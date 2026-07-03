@@ -151,4 +151,11 @@ public:
     static const juce::Identifier kUuidProp;    // "uuid"
     static const juce::Identifier kVersionProp; // "version"
     static const juce::Identifier kSlotProp;    // "slot" (VideoScroll bank index)
+
+    /** CHAINS schema version written by toValueTree(). Migrations gate on the
+     *  version read back from a loaded tree:
+     *   1 — pre-SEQUENCER-module era (a missing Sequencer means "old save")
+     *   2 — Sequencer is a chain block; a missing Sequencer means the user
+     *       deleted it and it must NOT be re-injected on load. */
+    static constexpr int kSchemaVersion = 2;
 };
