@@ -23,7 +23,7 @@
 #define __LUXSTRAL_ENGINE_H__
 
 /* Includes ------------------------------------------------------------------*/
-#include "synth_luxstral_threading.h"  /* synth_thread_worker_t, rt_safe_buffer_t, barrier_t */
+#include "synth_luxstral_threading.h"  /* synth_thread_worker_t, barrier_t */
 #include <stdint.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -80,11 +80,6 @@ typedef struct LuxStralEngine {
   barrier_t worker_end_barrier;
 #endif
   _Atomic int use_barriers;            /* Enabled by default (set to 1 at def) */
-
-  /* ===== RT-safe output double buffers ===================================== */
-  rt_safe_buffer_t rt_luxstral_buffer;
-  rt_safe_buffer_t rt_stereo_L_buffer;
-  rt_safe_buffer_t rt_stereo_R_buffer;
 
   /* ===== Output publish target (de-globalised, M8 — dual engine A/B) ======= */
   /* Where synth_AudioProcess publishes its final stereo result. Engine A points

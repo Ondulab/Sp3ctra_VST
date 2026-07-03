@@ -71,8 +71,24 @@ LuxStralEngine g_luxstral_engine_b = {
     .source_type_override = 2,
 };
 
-/* Global context variables (moved from shared.c) */
-struct shared_var shared_var;
+
+/* Shared summation-normalization gain (mono + stereo output paths): inverse
+ * of the exponential response curve, with peak compensation. Returns 0 below
+ * the silence epsilon. ONE implementation for both paths — the former two
+ * copies could drift, silently changing the compression character with the
+ * Stereo toggle. */
+static inline float summation_norm_gain(float sum_volume, float norm_base,
+                                        float norm_expo,
+                                        float peak_compensation) {
+  const float SUM_EPS_FLOAT = 1.0e-6f;
+  if (sum_volume <= SUM_EPS_FLOAT)
+    return 0.0f;
+  const float x = sum_volume / (float)VOLUME_AMP_RESOLUTION + norm_base;
+  const float response_curve = (fabsf(norm_expo - 0.5f) <= 1e-3f)
+                                   ? sqrtf(x < 0.0f ? 0.0f : x)
+                                   : pow_shifted_fast(x, norm_base, norm_expo);
+  return peak_compensation / (response_curve * (float)VOLUME_AMP_RESOLUTION);
+}
 
 // Cleanup function to release persistent buffers
 static void synth_luxstral_cleanup_impl(LuxStralEngine *eng) {
@@ -89,6 +105,22 @@ static void synth_luxstral_cleanup_impl(LuxStralEngine *eng) {
 void synth_luxstral_cleanup(void) {
   synth_luxstral_cleanup_impl(&g_luxstral_engine_a);
   synth_luxstral_cleanup_impl(&g_luxstral_engine_b);   // M8 — free engine B too
+  // Engine B OWNS its oscillator array (private clone malloc'd in
+  // synth_luxstral_init_engine_b); engine A only BORROWS the runtime's global
+  // waves[] (freed by synth_runtime_free_buffers) — never free that one here.
+  // NULLing it also re-arms the lazy engine-B init after a full core teardown
+  // + restart in the same DAW process (see synth_luxstral_engine_b_ready).
+  if (g_luxstral_engine_b.waves) {
+    free((void *)g_luxstral_engine_b.waves);   /* cast: waves is volatile-qualified */
+    g_luxstral_engine_b.waves = NULL;
+  }
+}
+
+// M8 — true once engine B's private state (oscillator clone…) is initialised.
+// Used by audioProcessingThread's lazy init: a function-local static flag
+// survived a core teardown and skipped re-initialisation on the next start.
+int synth_luxstral_engine_b_ready(void) {
+  return g_luxstral_engine_b.waves != NULL;
 }
 
 /* Public functions ----------------------------------------------------------*/
@@ -197,11 +229,8 @@ static int32_t synth_IfftInit_impl(LuxStralEngine *eng) {
       return -1;
   }
 
-  if (g_sp3ctra_config.stereo_mode_enabled) {
-    // Initialize lock-free pan gains system
-    lock_free_pan_init();
-    log_info("AUDIO", "Lock-free pan system initialized for stereo mode");
-  }
+  // (Dead lock_free_pan subsystem removed: its data API had no callers — the
+  // pan values flow through db->preprocessed_data.stereo instead.)
 
   return 0;
 }
@@ -237,16 +266,14 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
     log_info("SYNTH", "Initializing synthesis system (pool_init=%d, shutdown=%d)",
              eng->pool_initialized, eng->pool_shutdown);
 
+    // (init_rt_safe_buffers removed: the "RT-safe double buffering" subsystem
+    // had no consumer — it only calloc'd + mlock'd 96 KB per engine on every
+    // pool init and never freed them.)
     if (synth_init_thread_pool(eng) == 0) {
-      if (init_rt_safe_buffers(eng) == 0) {
-        if (synth_start_worker_threads(eng) == 0) {
-          log_info("SYNTH", "RT-safe synthesis system initialized successfully");
-        } else {
-          log_error("SYNTH", "Failed to start worker threads, synthesis will fail");
-          eng->pool_initialized = 0;
-        }
+      if (synth_start_worker_threads(eng) == 0) {
+        log_info("SYNTH", "RT-safe synthesis system initialized successfully");
       } else {
-        log_error("SYNTH", "Failed to initialize RT-safe buffers, synthesis will fail");
+        log_error("SYNTH", "Failed to start worker threads, synthesis will fail");
         eng->pool_initialized = 0;
       }
     } else {
@@ -406,8 +433,7 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
 
     // Intelligent normalization with exponential response curve (REACTIVATED)
     // ANTI-TAC PROTECTION: Fade-in over first few callbacks to eliminate startup "tac"
-    const float SUM_EPS_FLOAT = 1.0e-6f;   // after scaling (Float path)
-    
+
     // DISABLED: Anti-tac fade-in temporarily for debugging
     float fade_in_factor = 1.0f;  // Force full volume immediately
 
@@ -444,21 +470,15 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
     const float peak_compensation = powf(n_cal, norm_expo - ref_expo);
     
     for (buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
-        // Compression applied to all signals
-        if (eng->sumVolumeBuffer[buff_idx] > SUM_EPS_FLOAT) {
-          // Apply exponential response curve to reduce compression effects
-          float sum_normalized = eng->sumVolumeBuffer[buff_idx] / (float)VOLUME_AMP_RESOLUTION;
-          float base_level = norm_base;
-          // CORRECTED: Proper exponent logic for compression reduction with normalized waveforms
-          float expo = norm_expo;
-          float x = sum_normalized + base_level;
-          float response_curve = (fabsf(expo - 0.5f) <= 1e-3f) ? sqrtf(x < 0.0f ? 0.0f : x)
-                                  : pow_shifted_fast(x, base_level, expo);
-          float ratio = eng->additiveBuffer[buff_idx] * peak_compensation / (response_curve * (float)VOLUME_AMP_RESOLUTION);
-          eng->tmp_audioData[buff_idx] = ratio * fade_in_factor; // Apply anti-tac fade-in
-        } else {
-          eng->tmp_audioData[buff_idx] = 0.0f;
-        }
+        // Compression applied to all signals — SHARED normalization gain (see
+        // summation_norm_gain: one implementation for mono AND stereo, so a
+        // tweak to the compression law can no longer change the sound
+        // character depending on the Stereo toggle).
+        const float gain = summation_norm_gain(eng->sumVolumeBuffer[buff_idx],
+                                               norm_base, norm_expo,
+                                               peak_compensation);
+        eng->tmp_audioData[buff_idx] =
+            eng->additiveBuffer[buff_idx] * gain * fade_in_factor; // anti-tac fade-in
     }
 
     // SOFT LIMITER: Prevent hard clipping while preserving dynamics (applied AFTER normalization)
@@ -525,26 +545,12 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
       float left_signal, right_signal;
 
       {
-        const float SUM_EPS_FLOAT = 1.0e-6f;
-        if (eng->sumVolumeBuffer[buff_idx] > SUM_EPS_FLOAT) {
-          // Apply exponential response curve to reduce compression effects (stereo mode)
-          float sum_normalized = eng->sumVolumeBuffer[buff_idx] / (float)VOLUME_AMP_RESOLUTION;
-          float base_level = norm_base;
-          // CORRECTED: Proper exponent logic for compression reduction with normalized waveforms
-          float expo = norm_expo;
-          float x = sum_normalized + base_level;
-          float response_curve = (fabsf(expo - 0.5f) <= 1e-3f) ? sqrtf(x < 0.0f ? 0.0f : x)
-                                  : pow_shifted_fast(x, base_level, expo);
-          left_signal  = eng->stereoBuffer_L[buff_idx] * peak_compensation / (response_curve * (float)VOLUME_AMP_RESOLUTION);
-          right_signal = eng->stereoBuffer_R[buff_idx] * peak_compensation / (response_curve * (float)VOLUME_AMP_RESOLUTION);
-          
-          // Apply same anti-tac fade-in as mono mode
-          left_signal *= fade_in_factor;
-          right_signal *= fade_in_factor;
-        } else {
-          left_signal = 0.0f;
-          right_signal = 0.0f;
-        }
+        // SHARED normalization gain — same implementation as the mono loop.
+        const float gain = summation_norm_gain(eng->sumVolumeBuffer[buff_idx],
+                                               norm_base, norm_expo,
+                                               peak_compensation);
+        left_signal  = eng->stereoBuffer_L[buff_idx] * gain * fade_in_factor;
+        right_signal = eng->stereoBuffer_R[buff_idx] * gain * fade_in_factor;
       }
 
       // Track pre-limit peaks
@@ -631,8 +637,7 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
 
   // Increment global counter for log frequency limitation
   eng->log_counter++;
-
-  shared_var.synth_process_cnt += g_sp3ctra_config.audio_buffer_size;
+  // (write-only shared_var.synth_process_cnt counter removed — never read)
 }
 
 // Public wrapper (signature unchanged for external callers)

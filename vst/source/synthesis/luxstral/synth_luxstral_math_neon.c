@@ -8,7 +8,14 @@
  * Created: 2025-09-30
  */
 
-#ifdef __ARM_NEON
+/* Opt-in only (SP3CTRA_USE_NEON_MATH): synth_luxstral_math.c guarded its
+ * scalar versions with the TYPO `__LINUX__` (never defined — the real macro
+ * is `__linux__`), so the scalar functions were ALWAYS compiled and, on ARM,
+ * this file defined the SAME strong symbols a second time. The archive link
+ * happened to pick the scalar objects, so the NEON code never actually ran
+ * anywhere — enabling it now would change the DSP path (pow LUT vs powf) and
+ * must be a deliberate, benchmarked decision. */
+#if defined(SP3CTRA_USE_NEON_MATH) && defined(__ARM_NEON)
 
 /* Includes ------------------------------------------------------------------*/
 #include "synth_luxstral_math.h"
@@ -368,9 +375,9 @@ float apply_envelope_ramp(float *volumeBuffer, float start_volume, float target_
   return v;
 }
 
-#else /* !__ARM_NEON */
+#else /* !(SP3CTRA_USE_NEON_MATH && __ARM_NEON) */
 
 /* Fallback: If NEON is not available, the standard C version from 
    synth_luxstral_math.c will be used instead */
 
-#endif /* __ARM_NEON */
+#endif /* SP3CTRA_USE_NEON_MATH && __ARM_NEON */

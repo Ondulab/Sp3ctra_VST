@@ -38,8 +38,13 @@ static inline int get_udp_line_fragment_size(void) {
 #define CIS_MAX_PIXELS_NB            (CIS_400DPI_PIXELS_NB)
 #define UDP_LINE_FRAGMENT_SIZE       (CIS_MAX_PIXELS_NB / UDP_MAX_NB_PACKET_PER_LINE)
 
-#define PORT                         (55151)                // Port for incoming data
-#define DEFAULT_MULTI                "192.168.0.1"
-#define DEFAULT_PORT                 PORT
+// SINGLE source of truth for the default UDP endpoint — shared by the C
+// network fallback (udp.c) and the C++ APVTS defaults (Sp3ctraConstants.h).
+// Changing only one of the old duplicated literals made the bound port differ
+// from the one displayed in the UI whenever the config was still unset.
+#define SP3CTRA_DEFAULT_UDP_PORT     (55151)
+#define SP3CTRA_DEFAULT_UDP_ADDRESS  "239.100.100.100"
+// (Legacy PORT/DEFAULT_MULTI/DEFAULT_PORT aliases removed — 0 remaining users
+//  after udp.c switched to the SP3CTRA_* names.)
 
 #endif // __CONFIG_INSTRUMENT_H__

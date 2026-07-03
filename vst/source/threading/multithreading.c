@@ -21,9 +21,7 @@
 #include "../processing/lux_pitch.h"
 #include "../processing/lux_mask.h"
 #include "../processing/video_scroll.h"
-#include "../processing/image_sequencer.h"
 #include "../processing/internal_source.h"
-#include "../synthesis/luxwave/synth_luxwave.h"
 #include <time.h>
 #include <sys/time.h>
 
@@ -34,7 +32,6 @@ extern void luxstral_wait_for_buffer_consumed(void);
 #endif
 
 /* External sequencer instance */
-extern ImageSequencer *g_image_sequencer;
 
 /* ── M8: LuxStral engine B — independent input DoubleBuffer ──────────────────
  * Both the UDP thread (producer: fills preprocessed_data from engine B's OWN
@@ -358,9 +355,6 @@ void *udpThread(void *arg) {
   ssize_t recv_len;
   struct packet_Image packet;
   int nb_pixels;
-  uint8_t *mixed_R;
-  uint8_t *mixed_G;
-  uint8_t *mixed_B;
   uint32_t currentLineId;
   int *receivedFragments;
   uint32_t fragmentCount;
@@ -383,9 +377,6 @@ void *udpThread(void *arg) {
   si_other = ctx->si_other;
   slen = sizeof(*si_other);
   nb_pixels = get_cis_pixels_nb();
-  mixed_R = NULL;
-  mixed_G = NULL;
-  mixed_B = NULL;
   currentLineId = 0;
   fragmentCount = 0;
   audio_write_R = NULL;
@@ -407,20 +398,6 @@ void *udpThread(void *arg) {
     return NULL;
   }
 
-  /* Allocate mixed buffers dynamically */
-  mixed_R = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
-  mixed_G = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
-  mixed_B = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
-
-  if (!mixed_R || !mixed_G || !mixed_B) {
-    log_error("THREAD", "Failed to allocate mixed buffers");
-    if (mixed_R) free(mixed_R);
-    if (mixed_G) free(mixed_G);
-    if (mixed_B) free(mixed_B);
-    free(receivedFragments);
-    return NULL;
-  }
-
   /* Allocate acquisition-gate hold buffers */
   held_R = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
   held_G = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
@@ -430,9 +407,6 @@ void *udpThread(void *arg) {
     if (held_R) free(held_R);
     if (held_G) free(held_G);
     if (held_B) free(held_B);
-    free(mixed_R);
-    free(mixed_G);
-    free(mixed_B);
     free(receivedFragments);
     return NULL;
   }
@@ -735,30 +709,12 @@ void *udpThread(void *arg) {
           (uint16_t)nb_pixels);
 #endif
 
-      /* 🎬 NEW ARCHITECTURE: Sequencer BEFORE preprocessing
-       * 1. Sequencer mixes RGB (live + sequences)
-       * 2. Preprocessing calculates grayscale/pan/DMX from MIXED RGB
-       * 3. Display shows the MIXED RGB colors
-       */
-      
-      /* Step 1: Mix RGB through sequencer (or passthrough if no sequencer) */
-      if (g_image_sequencer) {
-        if (image_sequencer_process_frame(g_image_sequencer,
-                                          db->activeBuffer_R, db->activeBuffer_G, db->activeBuffer_B,
-                                          mixed_R, mixed_G, mixed_B) != 0) {
-          log_error("THREAD", "Sequencer processing failed, using live RGB");
-          memcpy(mixed_R, db->activeBuffer_R, nb_pixels);
-          memcpy(mixed_G, db->activeBuffer_G, nb_pixels);
-          memcpy(mixed_B, db->activeBuffer_B, nb_pixels);
-        }
-      } else {
-        /* No sequencer: passthrough live RGB */
-        memcpy(mixed_R, db->activeBuffer_R, nb_pixels);
-        memcpy(mixed_G, db->activeBuffer_G, nb_pixels);
-        memcpy(mixed_B, db->activeBuffer_B, nb_pixels);
-      }
-      
-      /* Step 2: Preprocess via pipeline — channel routing selects either
+      /* (Legacy ImageSequencer removed: g_image_sequencer was always NULL —
+       * the passthrough round-trip copied activeBuffer→mixed→activeBuffer,
+       * 6 full-line memcpy per UDP line for an identity. The display buses
+       * below read db->activeBuffer directly now.) */
+
+      /* Preprocess via pipeline — channel routing selects either
        * the MODULATED chain or the raw LIVE feed for each synthesis path.
        *
        *   Channel A — MODULATED : Live ► LuxSampler ► LuxPitch ► LuxMask
@@ -1166,22 +1122,11 @@ void *udpThread(void *arg) {
 #endif
       }
 
-      /* 🎵 LUXWAVE FIX: Pass grayscale image data to LuxWave synthesis thread
-       * This connects the scanner data pipeline to LuxWave for audio generation
-       * Note: LuxWave will convert RGB to grayscale internally, so we pass mixed_R
-       */
-      synth_luxwave_set_image_line(&g_luxwave_state, 
-                                     mixed_R, 
-                                     nb_pixels);
+      /* (Legacy no-op removed: synth_luxwave_set_image_line() resolved to an
+       * empty stub — the REAL LuxWave feed is pipeline_path_luxsynth_luxwave
+       * above, via luxwave_engine_set_image_line().) */
 
-      /* Step 3: Update display buffers with MIXED RGB (fixes N&B display issue) */
       pthread_mutex_lock(&db->mutex);
-      
-      /* CRITICAL FIX: Copy mixed RGB to activeBuffer so display shows colors */
-      memcpy(db->activeBuffer_R, mixed_R, nb_pixels);
-      memcpy(db->activeBuffer_G, mixed_G, nb_pixels);
-      memcpy(db->activeBuffer_B, mixed_B, nb_pixels);
-      
       swapBuffers(db);
       updateLastValidImage(db);
 
@@ -1272,26 +1217,15 @@ void *udpThread(void *arg) {
       pthread_cond_signal(&db->cond);
       pthread_mutex_unlock(&db->mutex);
 
-      /* 🎨 DISPLAY FIX: Update global display buffers with MIXED RGB colors
-       * This replaces the grayscale→RGB conversion in synth_luxstral.c
-       */
-      
-      /* DEBUG: Pixel difference check - DISABLED (too verbose in production) */
-      /*
-      if (++diff_log_counter % 1000 == 0) {
-        diff_count = 0;
-        for (i = 0; i < nb_pixels; i++) {
-          if (mixed_R[i] != db->activeBuffer_R[i]) diff_count++;
-        }
-        log_debug("UDP", "Pixels different: %d/%d (%.1f%%)",
-                  diff_count, nb_pixels, (diff_count * 100.0f) / nb_pixels);
-      }
-      */
-      
+      /* 🎨 DISPLAY: update global display buffers from the just-assembled
+       * line. After swapBuffers() above it lives in db->processingBuffer_*
+       * (assembly fills activeBuffer, the swap moves it there — the exact
+       * bytes the former mixed_* identity copies carried). Same thread owns
+       * both pointer sets, no lock needed beyond the displayable one. */
       luxstral_engine_displayable_lock();
-      memcpy(luxstral_engine_displayable_R(), mixed_R, nb_pixels);
-      memcpy(luxstral_engine_displayable_G(), mixed_G, nb_pixels);
-      memcpy(luxstral_engine_displayable_B(), mixed_B, nb_pixels);
+      memcpy(luxstral_engine_displayable_R(), db->processingBuffer_R, nb_pixels);
+      memcpy(luxstral_engine_displayable_G(), db->processingBuffer_G, nb_pixels);
+      memcpy(luxstral_engine_displayable_B(), db->processingBuffer_B, nb_pixels);
       luxstral_engine_displayable_unlock();
 
       /* Capture raw scanner data only when new UDP data arrives
@@ -1330,9 +1264,6 @@ void *udpThread(void *arg) {
   log_info("THREAD", "UDP thread terminating");
 
   // Free allocated buffers
-  if (mixed_R) free(mixed_R);
-  if (mixed_G) free(mixed_G);
-  if (mixed_B) free(mixed_B);
   if (held_R) free(held_R);
   if (held_G) free(held_G);
   if (held_B) free(held_B);
@@ -1435,7 +1366,6 @@ void internal_sources_process_tick(void *arg)
     }
     PipelineConfig cfg = pipeline_build_config_live();
     pipeline_path_luxsynth_luxwave(sR, sG, sB, &cfg, &s_feeder_pp);
-    synth_luxwave_set_image_line(&g_luxwave_state, sR, nb_pixels);
     pb_done = 1;
   }
 
@@ -1700,14 +1630,17 @@ void *audioProcessingThread(void *arg) {
      * iteration as A (paced by A's consumed-buffer handshake) and spins up lazily
      * on first render. Otherwise render engine A alone. */
     {
-      static int s_engine_b_inited = 0;
       ChainPlan planB_render;
       chain_plan_get(&planB_render);
       const int bActive = planB_render.synth[CHAIN_SYNTH_LUXSTRAL_B].present
                           && __atomic_load_n(&s_luxstral_b_db_ready, __ATOMIC_ACQUIRE);
       if (bActive)
       {
-        if (!s_engine_b_inited) { synth_luxstral_init_engine_b(); s_engine_b_inited = 1; }
+        /* Lazy init keyed on the ENGINE's own state, not a function-local
+         * static: the old flag survived a core teardown (which now frees B's
+         * oscillator clone) and skipped re-initialisation on the next start. */
+        if (!synth_luxstral_engine_b_ready())
+          synth_luxstral_init_engine_b();
         synth_AudioProcess_ab(audio_read_R, audio_read_G, audio_read_B,
                               context->doubleBuffer, &s_luxstral_b_db);
       }

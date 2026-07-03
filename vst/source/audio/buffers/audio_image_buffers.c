@@ -331,29 +331,6 @@ void audio_image_buffers_complete_write(AudioImageBuffers *buffers) {
 }
 
 /**
- * @brief Release the write mutex WITHOUT swapping buffers (acquisition gate hold)
- *
- * Used by the live UDP publish path when the acquisition gate decides to hold
- * the current frame.  The freshly assembled line stays in the (un-rotated) write
- * buffer and will be overwritten by the next line; the read buffer — and every
- * downstream consumer — keeps the last published frame.  Sample-and-hold.
- *
- * @param buffers Pointer to AudioImageBuffers structure
- */
-void audio_image_buffers_abort_write(AudioImageBuffers *buffers) {
-  if (!buffers || !buffers->initialized) {
-    fprintf(stderr, "ERROR: AudioImageBuffers not initialized\n");
-    return;
-  }
-
-  // No buffer rotation — hold the current read frame.
-  buffers->gate_holds++;
-
-  // Still must release the mutex acquired by start_write() (avoid deadlock).
-  pthread_mutex_unlock(&buffers->write_mutex);
-}
-
-/**
  * @brief Enable/disable the acquisition gate (audio thread).
  */
 void audio_image_buffers_gate_set_enabled(AudioImageBuffers *buffers, int enabled) {
@@ -420,35 +397,6 @@ void audio_image_buffers_get_read_pointers(AudioImageBuffers *buffers,
 
   // Update statistics (note: this is not thread-safe but only for monitoring)
   buffers->lines_processed++;
-}
-
-/**
- * @brief Get buffer statistics
- * @param buffers Pointer to AudioImageBuffers structure
- * @param lines_received Pointer to receive lines received count
- * @param lines_processed Pointer to receive lines processed count
- * @param buffer_swaps Pointer to receive buffer swaps count
- */
-void audio_image_buffers_get_stats(AudioImageBuffers *buffers,
-                                   uint64_t *lines_received,
-                                   uint64_t *lines_processed,
-                                   uint64_t *buffer_swaps) {
-  if (!buffers || !buffers->initialized) {
-    if (lines_received)
-      *lines_received = 0;
-    if (lines_processed)
-      *lines_processed = 0;
-    if (buffer_swaps)
-      *buffer_swaps = 0;
-    return;
-  }
-
-  if (lines_received)
-    *lines_received = buffers->lines_received;
-  if (lines_processed)
-    *lines_processed = buffers->lines_processed;
-  if (buffer_swaps)
-    *buffer_swaps = buffers->buffer_swaps;
 }
 
 /**

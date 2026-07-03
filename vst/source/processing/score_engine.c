@@ -339,17 +339,3 @@ void score_free_spectrogram(ScoreSpectrogramData *data)
     data->num_windows = 0;
     data->num_bins = 0;
 }
-
-/*---------------------------------------------------------------------------*/
-void score_generate_sine(double *signal, int total_samples, double sample_rate,
-                         double frequency, double amplitude)
-{
-    double phase_increment = 2.0 * M_PI * frequency / sample_rate;
-    double phase = 0.0;
-    for (int i = 0; i < total_samples; i++)
-    {
-        signal[i] = amplitude * sin(phase);
-        phase += phase_increment;
-        if (phase > 2.0 * M_PI) phase -= 2.0 * M_PI;
-    }
-}

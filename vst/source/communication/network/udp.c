@@ -22,7 +22,6 @@
 #include "error.h"
 #include "logger.h"
 #include "udp.h"
-#include "../synthesis/luxwave/synth_luxwave.h"
 #include "../../config/config_loader.h"
 
 // #define CALIBRATION
@@ -59,12 +58,13 @@ int udp_Init(struct sockaddr_in *si_other, struct sockaddr_in *si_me) {
   int udp_port = g_sp3ctra_config.udp_port;
   const char* multicast_interface = g_sp3ctra_config.multicast_interface;
   
-  // Use defaults if not configured
+  // Use defaults if not configured (single source of truth shared with the
+  // C++ APVTS defaults — see config_instrument.h)
   if (udp_address[0] == '\0') {
-    udp_address = "239.100.100.100";  // Default multicast address
+    udp_address = SP3CTRA_DEFAULT_UDP_ADDRESS;
   }
   if (udp_port == 0) {
-    udp_port = PORT;  // Use PORT constant as fallback
+    udp_port = SP3CTRA_DEFAULT_UDP_PORT;
   }
 
   // Creating UDP socket

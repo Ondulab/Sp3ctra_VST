@@ -24,7 +24,6 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/time.h>
-#include <sys/mman.h>  // For mlock() - prevent page faults in RT threads
 
 #ifdef __linux__
 #include <sched.h>
@@ -91,15 +90,10 @@ static inline void synth_release_capture_buffers_if_disabled(synth_thread_worker
   }
 }
 
-/* External declarations -----------------------------------------------------*/
-#ifdef DEBUG_OSC
-extern debug_luxstral_osc_config_t g_debug_osc_config;
-#endif
-
 /* Global variables ----------------------------------------------------------*/
 
-/* NOTE: the worker pool, barriers and RT-safe double buffers now live in
- * LuxStralEngine (luxstral_engine.h). The engine instance is defined in
+/* NOTE: the worker pool and barriers now live in LuxStralEngine
+ * (luxstral_engine.h). The engine instance is defined in
  * synth_luxstral.c and passed down to every function in this file.          */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -765,12 +759,6 @@ static void synth_shutdown_thread_pool_impl(LuxStralEngine *eng) {
   }
   eng->num_workers = 0;
 
-  if (g_sp3ctra_config.stereo_mode_enabled) {
-    // Cleanup lock-free pan gains system
-    lock_free_pan_cleanup();
-    log_info("SYNTH", "Lock-free pan system cleaned up");
-  }
-
   // Cleanup barrier synchronization
   if (eng->use_barriers) {
     synth_cleanup_barriers(eng);
@@ -791,122 +779,4 @@ void synth_shutdown_thread_pool(void) {
   // M8 — engine B (no-op if its pool never initialised)
   if (g_luxstral_engine_b.pool_initialized)
     synth_shutdown_thread_pool_impl(&g_luxstral_engine_b);
-}
-
-/**
- * @brief  Initialize RT-safe double buffering system
- * @param  eng Engine instance
- * @retval 0 on success, -1 on error
- */
-int init_rt_safe_buffers(LuxStralEngine *eng) {
-  // ✅ STATIC ALLOCATION: Use MAX_BUFFER_SIZE for RT-safe buffers
-  // No reallocation needed when DAW changes buffer size
-
-  // Initialize additive buffer with MAX_BUFFER_SIZE
-  eng->rt_luxstral_buffer.buffers[0] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
-  eng->rt_luxstral_buffer.buffers[1] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
-  if (!eng->rt_luxstral_buffer.buffers[0] || !eng->rt_luxstral_buffer.buffers[1]) {
-    log_error("SYNTH", "Failed to allocate RT additive buffers");
-    return -1;
-  }
-  eng->rt_luxstral_buffer.ready_buffer = 0;  // RT reads from buffer 0 initially
-  eng->rt_luxstral_buffer.worker_buffer = 1; // Workers write to buffer 1 initially
-  pthread_mutex_init(&eng->rt_luxstral_buffer.swap_mutex, NULL);
-
-  // Initialize stereo L buffer with MAX_BUFFER_SIZE
-  eng->rt_stereo_L_buffer.buffers[0] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
-  eng->rt_stereo_L_buffer.buffers[1] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
-  if (!eng->rt_stereo_L_buffer.buffers[0] || !eng->rt_stereo_L_buffer.buffers[1]) {
-    log_error("SYNTH", "Failed to allocate RT stereo L buffers");
-    return -1;
-  }
-  eng->rt_stereo_L_buffer.ready_buffer = 0;
-  eng->rt_stereo_L_buffer.worker_buffer = 1;
-  pthread_mutex_init(&eng->rt_stereo_L_buffer.swap_mutex, NULL);
-
-  // Initialize stereo R buffer with MAX_BUFFER_SIZE
-  eng->rt_stereo_R_buffer.buffers[0] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
-  eng->rt_stereo_R_buffer.buffers[1] = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
-  if (!eng->rt_stereo_R_buffer.buffers[0] || !eng->rt_stereo_R_buffer.buffers[1]) {
-    log_error("SYNTH", "Failed to allocate RT stereo R buffers");
-    return -1;
-  }
-  eng->rt_stereo_R_buffer.ready_buffer = 0;
-  eng->rt_stereo_R_buffer.worker_buffer = 1;
-  pthread_mutex_init(&eng->rt_stereo_R_buffer.swap_mutex, NULL);
-
-  // ========================================================================
-  // 🔧 RT OPTIMIZATION: Lock RT-safe buffers in memory to prevent page faults
-  // ========================================================================
-  size_t buffer_bytes = (size_t)MAX_BUFFER_SIZE * sizeof(float);
-  int mlock_success = 0;
-  int mlock_total = 6;  // 3 buffer types × 2 double-buffer slots
-
-  if (mlock(eng->rt_luxstral_buffer.buffers[0], buffer_bytes) == 0) mlock_success++;
-  if (mlock(eng->rt_luxstral_buffer.buffers[1], buffer_bytes) == 0) mlock_success++;
-  if (mlock(eng->rt_stereo_L_buffer.buffers[0], buffer_bytes) == 0) mlock_success++;
-  if (mlock(eng->rt_stereo_L_buffer.buffers[1], buffer_bytes) == 0) mlock_success++;
-  if (mlock(eng->rt_stereo_R_buffer.buffers[0], buffer_bytes) == 0) mlock_success++;
-  if (mlock(eng->rt_stereo_R_buffer.buffers[1], buffer_bytes) == 0) mlock_success++;
-
-  if (mlock_success == mlock_total) {
-    log_info("SYNTH", "RT-safe buffers locked in memory (mlock) - page faults prevented");
-  } else if (mlock_success > 0) {
-    log_warning("SYNTH", "Partial mlock: %d/%d RT-safe buffers locked", mlock_success, mlock_total);
-  }
-
-  log_info("SYNTH", "RT-safe double buffering system initialized (MAX_BUFFER_SIZE=%d)", MAX_BUFFER_SIZE);
-  return 0;
-}
-
-/**
- * @brief  Cleanup RT-safe double buffering system
- * @param  eng Engine instance
- * @retval None
- */
-void cleanup_rt_safe_buffers(LuxStralEngine *eng) {
-  // Cleanup additive buffer
-  if (eng->rt_luxstral_buffer.buffers[0]) { free(eng->rt_luxstral_buffer.buffers[0]); eng->rt_luxstral_buffer.buffers[0] = NULL; }
-  if (eng->rt_luxstral_buffer.buffers[1]) { free(eng->rt_luxstral_buffer.buffers[1]); eng->rt_luxstral_buffer.buffers[1] = NULL; }
-  pthread_mutex_destroy(&eng->rt_luxstral_buffer.swap_mutex);
-
-  // Cleanup stereo L buffer
-  if (eng->rt_stereo_L_buffer.buffers[0]) { free(eng->rt_stereo_L_buffer.buffers[0]); eng->rt_stereo_L_buffer.buffers[0] = NULL; }
-  if (eng->rt_stereo_L_buffer.buffers[1]) { free(eng->rt_stereo_L_buffer.buffers[1]); eng->rt_stereo_L_buffer.buffers[1] = NULL; }
-  pthread_mutex_destroy(&eng->rt_stereo_L_buffer.swap_mutex);
-
-  // Cleanup stereo R buffer
-  if (eng->rt_stereo_R_buffer.buffers[0]) { free(eng->rt_stereo_R_buffer.buffers[0]); eng->rt_stereo_R_buffer.buffers[0] = NULL; }
-  if (eng->rt_stereo_R_buffer.buffers[1]) { free(eng->rt_stereo_R_buffer.buffers[1]); eng->rt_stereo_R_buffer.buffers[1] = NULL; }
-  pthread_mutex_destroy(&eng->rt_stereo_R_buffer.swap_mutex);
-
-  log_info("SYNTH", "RT-safe double buffering system cleaned up");
-}
-
-/**
- * @brief  Swap RT-safe buffers when workers are done (called from non-RT thread)
- * @param  eng Engine instance
- * @retval None
- */
-void rt_safe_swap_buffers(LuxStralEngine *eng) {
-  // Swap additive buffer (non-blocking for non-RT thread)
-  pthread_mutex_lock(&eng->rt_luxstral_buffer.swap_mutex);
-  int old_ready = eng->rt_luxstral_buffer.ready_buffer;
-  eng->rt_luxstral_buffer.ready_buffer = eng->rt_luxstral_buffer.worker_buffer;
-  eng->rt_luxstral_buffer.worker_buffer = old_ready;
-  pthread_mutex_unlock(&eng->rt_luxstral_buffer.swap_mutex);
-
-  // Swap stereo L buffer
-  pthread_mutex_lock(&eng->rt_stereo_L_buffer.swap_mutex);
-  old_ready = eng->rt_stereo_L_buffer.ready_buffer;
-  eng->rt_stereo_L_buffer.ready_buffer = eng->rt_stereo_L_buffer.worker_buffer;
-  eng->rt_stereo_L_buffer.worker_buffer = old_ready;
-  pthread_mutex_unlock(&eng->rt_stereo_L_buffer.swap_mutex);
-
-  // Swap stereo R buffer
-  pthread_mutex_lock(&eng->rt_stereo_R_buffer.swap_mutex);
-  old_ready = eng->rt_stereo_R_buffer.ready_buffer;
-  eng->rt_stereo_R_buffer.ready_buffer = eng->rt_stereo_R_buffer.worker_buffer;
-  eng->rt_stereo_R_buffer.worker_buffer = old_ready;
-  pthread_mutex_unlock(&eng->rt_stereo_R_buffer.swap_mutex);
 }

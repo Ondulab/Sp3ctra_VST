@@ -14,11 +14,10 @@
 #include <sys/mman.h>   // For mlock() - prevent page faults in RT threads
 #include <sched.h>      // For sched_yield() - lock-free spin-wait
 #include <sys/time.h>   // For gettimeofday() - spin-wait timeout
+#include <unistd.h>     // For usleep() - idle backoff when the host stops consuming
 
 // Note: vst_adapters.h already includes everything we need
 // No need to include vst_adapters_c.h here (would cause redefinitions)
-
-// Note: shared_var is already defined in context.h and instantiated in multithreading.c
 
 // VST-specific audio buffers for LuxStral (RENAMED to avoid conflicts)
 AudioImageBuffer luxstral_buffers_L[2] = {{nullptr, 0, 0}, {nullptr, 0, 0}};
@@ -307,10 +306,32 @@ void luxstral_signal_buffer_consumed(void) {
  * without mutex caused lost signals → 200ms audio gaps → crackling.
  */
 void luxstral_wait_for_buffer_consumed(void) {
+    /* Consecutive-timeout counter (producer thread only): when the host stops
+     * calling processBlock (bypass, device closed), the 50 ms timeout below
+     * made the producer render the FULL synthesis (3456 oscillators) ~20×/s
+     * forever. After a few consecutive timeouts, fall back to a cheap 5 ms
+     * sleep-poll bounded to 250 ms per call (bounded so thread shutdown joins
+     * stay responsive); the first consumed buffer restores full speed. */
+    static int s_consecutive_timeouts = 0;
+
     // Fast path: check if already consumed (common case after first buffer)
     if (__atomic_load_n(&g_vst_callback_consumed_buffer, __ATOMIC_ACQUIRE)) {
         __atomic_store_n(&g_vst_callback_consumed_buffer, 0, __ATOMIC_RELEASE);
+        s_consecutive_timeouts = 0;
         return;
+    }
+
+    if (s_consecutive_timeouts >= 10) {
+        // Backoff mode: audio is (probably) stopped — poll gently.
+        for (int i = 0; i < 50; i++) {           // 50 × 5 ms = 250 ms max
+            usleep(5000);
+            if (__atomic_load_n(&g_vst_callback_consumed_buffer, __ATOMIC_ACQUIRE)) {
+                __atomic_store_n(&g_vst_callback_consumed_buffer, 0, __ATOMIC_RELEASE);
+                s_consecutive_timeouts = 0;
+                return;
+            }
+        }
+        return;   // still nothing — caller re-checks its running flag
     }
 
     // Adaptive spin-wait with timeout
@@ -353,7 +374,9 @@ void luxstral_wait_for_buffer_consumed(void) {
                 int64_t elapsed_us = (int64_t)(now.tv_sec - start_time.tv_sec) * 1000000LL +
                                      (int64_t)(now.tv_usec - start_time.tv_usec);
                 if (elapsed_us > timeout_us) {
-                    // Timeout: audio probably stopped, don't block forever
+                    // Timeout: audio probably stopped, don't block forever.
+                    // Count it — repeated timeouts switch to backoff mode above.
+                    s_consecutive_timeouts++;
                     return;
                 }
             }
@@ -362,6 +385,7 @@ void luxstral_wait_for_buffer_consumed(void) {
 
     // Buffer was consumed, reset flag so we wait next time
     __atomic_store_n(&g_vst_callback_consumed_buffer, 0, __ATOMIC_RELEASE);
+    s_consecutive_timeouts = 0;
 }
 
 } // extern "C"

@@ -129,18 +129,4 @@ void synth_precompute_wave_data(struct LuxStralEngine *eng, float *imageData, st
 /* Thread pool limits */
 #define MAX_WORKERS 16  // Maximum number of worker threads (M-series: 10–12 perf cores)
 
-/* RT-safe double buffering system */
-typedef struct {
-  // Double buffers for RT-safe access
-  float *buffers[2]; // [0] = current RT reads, [1] = workers write
-  _Atomic int ready_buffer;  // RT-SAFE: Which buffer is ready for RT (atomic read)
-  _Atomic int worker_buffer; // RT-SAFE: Which buffer workers are writing to
-  pthread_mutex_t swap_mutex; // Protects buffer swapping (non-RT thread only)
-} rt_safe_buffer_t;
-
-/* RT-safe buffer management (buffers live in LuxStralEngine) */
-int init_rt_safe_buffers(struct LuxStralEngine *eng);
-void cleanup_rt_safe_buffers(struct LuxStralEngine *eng);
-void rt_safe_swap_buffers(struct LuxStralEngine *eng); // Called by workers when done (non-RT)
-
 #endif /* __SYNTH_LUXSTRAL_THREADING_H__ */

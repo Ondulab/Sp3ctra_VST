@@ -70,6 +70,13 @@ void synth_IfftMode(float *imageData, float *audioLeft, float *audioRight, float
 void synth_luxstral_cleanup(void);
 
 /**
+ * @brief True once engine B's private state (oscillator clone…) is initialised.
+ * @note  Drives audioProcessingThread's lazy engine-B init — survives (and is
+ *        re-armed by) a full core teardown, unlike a function-local static.
+ */
+int synth_luxstral_engine_b_ready(void);
+
+/**
  * @brief Get the last calculated contrast factor (thread-safe)
  * @return Last contrast factor value (0.0-1.0 range typically)
  * @note Used by auto-volume system to detect audio intensity for adaptive thresholding

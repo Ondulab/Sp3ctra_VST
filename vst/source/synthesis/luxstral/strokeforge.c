@@ -4,7 +4,7 @@
  * StrokeForge — Blob-to-note mapping with waveform morphing
  *
  * Each detected blob (stroke on paper) produces:
- *   1. A morph factor: blob_width / morph_width_scale → g_waveform_morph
+ *   1. A morph factor: blob_width / morph_width_scale → out->morph
  *      (0.0 = pure sine,  1.0 = pure square wave)
  *   2. A Gaussian attenuation centered on the blob centroid:
  *      note_attenuation[n] = exp(-dist² / (2 × focus_sigma²))
@@ -24,7 +24,6 @@
  * extern avoids pulling the full wave_generation.h include chain.
  * 0.0 = pure sine | 1.0 = pure square.
  */
-extern volatile float g_waveform_morph;
 
 #include <string.h>
 #include <math.h>
@@ -121,14 +120,12 @@ static int detect_blobs(
 
 void strokeforge_init(void)
 {
-    g_waveform_morph = 0.0f;
     log_info("STROKEFORGE", "StrokeForge initialized (enabled=%d)",
              g_sp3ctra_config.strokeforge_enabled);
 }
 
 void strokeforge_cleanup(void)
 {
-    g_waveform_morph = 0.0f;
     log_info("STROKEFORGE", "StrokeForge cleaned up");
 }
 
@@ -156,8 +153,7 @@ void strokeforge_analyze_frame(
     if (!g_sp3ctra_config.strokeforge_enabled)
     {
         out->morph = 0.0f;
-        g_waveform_morph = 0.0f;
-        return;
+            return;
     }
 
     float threshold = g_sp3ctra_config.strokeforge_blob_base_threshold;
@@ -173,8 +169,7 @@ void strokeforge_analyze_frame(
     {
         /* No strokes → pure sine, no attenuation */
         out->morph = 0.0f;
-        g_waveform_morph = 0.0f;
-        return;
+            return;
     }
 
     /* Step 2: Waveform morph from the widest blob — FULL mode only.
@@ -193,14 +188,12 @@ void strokeforge_analyze_frame(
         float morph = widest / scale;
         if (morph > 1.0f) morph = 1.0f;
         out->morph = morph;              /* per-frame, per-engine (M8) */
-        g_waveform_morph = morph;        /* legacy global (diagnostics) */
     }
     else
     {
         /* Focus Only: Gaussian focus active but waveform stays pure sine */
         out->morph = 0.0f;
-        g_waveform_morph = 0.0f;
-    }
+        }
 
     /* Step 3: Per-blob: Gaussian focus OR spectral passthrough.
      *
@@ -263,7 +256,7 @@ void strokeforge_analyze_frame(
             log_info("STROKEFORGE",
                      "%d blob(s) | morph=%.3f | sigma=%.1f",
                      out->blob_count,
-                     (double)g_waveform_morph,
+                     (double)out->morph,
                      (double)g_sp3ctra_config.strokeforge_blob_focus_sigma);
             for (int b = 0; b < out->blob_count; b++)
             {

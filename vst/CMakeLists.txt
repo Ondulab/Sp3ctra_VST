@@ -226,9 +226,6 @@ target_sources(Sp3ctraVST
         # Device HTTP control-plane client (config.html API)
         source/communication/device/Sp3ctraDeviceClient.cpp
 
-        # Configuration system
-        source/config/config_loader.c
-        
         # Logging system
         source/utils/logger.c
         source/utils/error.c
@@ -241,8 +238,6 @@ target_sources(Sp3ctraVST
         source/processing/image_preprocessor.c
 
         # Image pipeline refactoring (Phase 1+2)
-        source/processing/image_source_router.c
-        source/processing/image_blend.c
         source/processing/image_pipeline_stages.c
         source/processing/image_pipeline.c
         source/processing/image_chain.c
@@ -258,18 +253,12 @@ target_sources(Sp3ctraVST
         # SCORE — offline spectrogram engine (KissFFT port of Sp3ctraGen)
         source/processing/score_engine.c
 
-        # Pan system (required for stereo mode)
-        source/audio/pan/lock_free_pan.c
-
         # KissFFT (required by image_preprocessor luxsynth path)
         source/synthesis/luxsynth/kissfft/kiss_fft.c
         source/synthesis/luxsynth/kissfft/kiss_fftr.c
         
         # Audio buffers (DoubleBuffer, AudioImageBuffers)
         source/audio/buffers/audio_image_buffers.c
-        
-        # Stubs for missing functions
-        source/utils/stubs.c
 )
 
 # Add include directories for C headers (all migrated into vst/source/)
@@ -281,7 +270,6 @@ target_include_directories(Sp3ctraVST
         ${CMAKE_CURRENT_SOURCE_DIR}/source/utils
         ${CMAKE_CURRENT_SOURCE_DIR}/source/communication/network
         ${CMAKE_CURRENT_SOURCE_DIR}/source/audio/buffers
-        ${CMAKE_CURRENT_SOURCE_DIR}/source/audio/pan
         ${CMAKE_CURRENT_SOURCE_DIR}/source/audio/rtaudio
         ${CMAKE_CURRENT_SOURCE_DIR}/source/threading
         ${CMAKE_CURRENT_SOURCE_DIR}/source/processing
