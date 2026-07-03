@@ -1101,6 +1101,11 @@ private:
     // Slot the player is currently dereferencing (SCORE_SLOT for the score),
     // -1 when idle — see waitForPlayerRelease().
     std::atomic<int>  playerBusySlot_    { -1 };
+    // True while saveToFile/saveSlotToFile copy frames chunk by chunk: the
+    // UDP-thread rec-command drain is frozen meanwhile (a non-overdub START
+    // rewrites frames[0..] and would corrupt the interleaved chunk copies).
+    // mutable: the save methods are const. Commands stay queued.
+    mutable std::atomic<bool> saveInProgress_ { false };
     // While true the player must not pick up new startPlayCmd commands (bulk
     // slot replacement in progress, e.g. loadFromFile). Commands stay queued.
     std::atomic<bool> playbackSuspended_ { false };

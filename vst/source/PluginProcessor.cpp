@@ -1531,6 +1531,10 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
         (size_t) juce::jmax(1, deferredParamIds_.size()));
     for (int i = 0; i < deferredParamIds_.size(); ++i)
         paramDirty_[(size_t) i].store(false, std::memory_order_relaxed);
+    {
+        const auto it = paramIndexById_.find(PARAM_SCORE_PLAYING);
+        scorePlayingParamIdx_ = (it != paramIndexById_.end()) ? it->second : -1;
+    }
     startTimer(30);
 
     log_info("VST", "Sp3ctraAudioProcessor: Constructor complete (deferred init)");
@@ -1986,9 +1990,13 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // ── LuxSampler MIDI (RT-safe: atomics only, no alloc, no lock, no I/O) ──
     if (luxSampler != nullptr)
         luxSampler->processMidi(midiMessages);
-    // Engine B listens on ITS OWN MIDI channel (set distinct in the ctor —
+    // Engine B listens on ITS OWN fixed MIDI channel (2, set in the ctor —
     // processMidi filters by channel); it never received MIDI at all before.
-    if (luxSamplerB != nullptr)
+    // Skip it when the user sets engine A's channel to 2 as well: both would
+    // otherwise act on the same notes and the one-plays arbiter would stop
+    // A's slot right after it started (silence / wrong bank).
+    if (luxSamplerB != nullptr && luxSamplerMidiChannelParam != nullptr
+        && static_cast<int>(luxSamplerMidiChannelParam->load()) + 1 != 2)
         luxSamplerB->processMidi(midiMessages);
 
     // ── LuxSampler action button MIDI bindings (REC / PLAY / SAVE) ─────────
@@ -2710,9 +2718,31 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
         {
             // Never-auto-run is enforced by patching the restored tree BEFORE
             // replaceState (see setStateInformation) — no host-visible pushes
-            // here. Clearing makes the video scroll a true Stop (frozen +
-            // blank), not just a pause.
+            // on the nominal path. Clearing makes the video scroll a true
+            // Stop (frozen + blank), not just a pause.
             requestVideoScrollClear();
+
+            // Belt-and-suspenders for blobs saved by OLDER plugin versions:
+            // replaceState KEEPS the current value of any parameter absent
+            // from the restored tree, so the pre-replace patch cannot reach
+            // those. Fold any still-running transport back to stopped —
+            // host-visible only in this corner case (old preset loaded while
+            // something is playing).
+            {
+                auto forceStopped = [this](const juce::String& id, float stoppedNorm)
+                {
+                    if (auto* p = apvts.getParameter(id))
+                        if (std::abs(p->getValue() - stoppedNorm) > 1.0e-4f)
+                            p->setValueNotifyingHost(stoppedNorm);
+                };
+                forceStopped("videoScrollPaused", 1.0f);
+                for (int s = 0; s < CHAIN_MAX_CHAINS; ++s)
+                    forceStopped(vsParam(s, "paused"), 1.0f);
+                forceStopped(PARAM_SEQ_TRANSPORT, 0.0f);
+                forceStopped(PARAM_SCORE_PLAYING, 0.0f);
+                forceStopped(PARAM_IMGSRC_PLAY,   0.0f);
+                forceStopped(PARAM_VIDSRC_PLAY,   0.0f);
+            }
             // Push the restored SCORE speed/loop into the engine (the listener
             // does not fire for values equal to the pre-restore state).
             if (luxSampler != nullptr)
@@ -2866,8 +2896,13 @@ void Sp3ctraAudioProcessor::timerCallback()
     // The SCORE page is a view: it no longer force-stops the score in its
     // destructor, so with no page open somebody must still fold the engine's
     // one-shot natural end back onto the automatable scorePlaying param (the
-    // param listener then runs uiStopScore — idempotent).
-    if (luxSampler != nullptr)
+    // param listener then runs uiStopScore — idempotent). Guard: never fold
+    // while a scorePlaying change is still pending in the deferred queue —
+    // an automation Play marked dirty between the drain above and this
+    // mirror would otherwise be swallowed (param 1, engine not started yet).
+    if (luxSampler != nullptr
+        && ! (scorePlayingParamIdx_ >= 0
+              && paramDirty_[(size_t) scorePlayingParamIdx_].load(std::memory_order_acquire)))
         if (auto* p = apvts.getParameter(PARAM_SCORE_PLAYING))
             if (p->getValue() >= 0.5f && ! luxSampler->isScorePlaying())
                 p->setValueNotifyingHost(0.0f);
@@ -3378,6 +3413,13 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
         const uint32_t lostMask  = (prevMaskSlots_  & ~maskMask)  | staleSlots;
         pendingPitchResets_ |= lostPitch;
         pendingMaskResets_  |= lostMask;
+        // A slot ACTIVE in the new plan must not be reset by a pending bit
+        // armed for a previous removal (remove + re-add within the 40 ms
+        // window): the deferred reset would wipe — and race — the freshly
+        // active instance. Trade-off: such a fast re-add skips the clean-
+        // start reset (held voices may resurface — the old, benign quirk).
+        pendingPitchResets_ &= ~pitchMask;
+        pendingMaskResets_  &= ~maskMask;
         if (lostPitch != 0 || lostMask != 0)
             poolResetArmedMs_ = juce::Time::getMillisecondCounter();
         prevPitchSlots_ = pitchMask;
@@ -3899,6 +3941,11 @@ void Sp3ctraAudioProcessor::teardownAbsentModules(const std::set<ModuleType>& no
             pendingVideoScrollInits_ |= (1u << slot);
             poolResetArmedMs_ = juce::Time::getMillisecondCounter();
         }
+    // A slot re-armed before the deferred init fired (remove + re-add within
+    // 40 ms) must keep its ring — the pending memset would wipe and race the
+    // freshly active probe.
+    for (int slot : vsNow)
+        pendingVideoScrollInits_ &= ~(1u << slot);
     // A slot that just (re)appeared is a freshly placed output: force its enable
     // ON so a new VideoScroll block starts visible even if that slot was left
     // disabled by a previously removed instance.

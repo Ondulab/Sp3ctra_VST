@@ -637,6 +637,7 @@ private:
     std::map<juce::String, int>           paramIndexById_;
     std::unique_ptr<std::atomic<bool>[]>  paramDirty_;
     std::atomic<bool>                     anyParamDirty_ { false };
+    int                                   scorePlayingParamIdx_ { -1 }; // SCORE mirror guard
 
     // R6 — pool resets deferred past the in-flight frame: chain_plan_publish()
     // makes the NEXT frame stop pulling a removed Pitch/Mask/VideoScroll pool

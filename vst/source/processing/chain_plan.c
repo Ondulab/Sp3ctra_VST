@@ -23,7 +23,13 @@ static _Atomic int      s_plan_valid = 0;
 void chain_plan_publish(const ChainPlan* plan)
 {
     const uint32_t seq = atomic_load_explicit(&s_plan_seq, memory_order_relaxed);
-    atomic_store_explicit(&s_plan_seq, seq + 1, memory_order_release); /* odd: write in progress */
+    atomic_store_explicit(&s_plan_seq, seq + 1, memory_order_relaxed); /* odd: write in progress */
+    /* Full release FENCE (not just a release store): the odd marker must be
+     * visible BEFORE the plan writes below — a release store only orders the
+     * accesses PRECEDING it, so plan writes could otherwise be hoisted above
+     * the odd store on weakly-ordered CPUs and a reader could validate a
+     * half-written plan against two equal even sequences. */
+    atomic_thread_fence(memory_order_release);
     s_plan = *plan;
     atomic_store_explicit(&s_plan_seq, seq + 2, memory_order_release); /* even: stable */
     atomic_store_explicit(&s_plan_valid, 1, memory_order_release);
@@ -36,7 +42,12 @@ void chain_plan_get(ChainPlan* out)
         memset(out, 0, sizeof(*out));
         return;
     }
-    for (;;)
+    /* Bounded retry: the writer (message thread) can be preempted mid-publish
+     * while a HIGH priority reader spins — never let an RT thread spin
+     * unbounded on it. After the cap, return the last copy as-is: worst case
+     * one possibly-mixed plan for one frame (indices stay bounded — same
+     * degradation as the pre-seqlock double buffer), never a stall. */
+    for (int tries = 0; tries < 1000; ++tries)
     {
         const uint32_t before = atomic_load_explicit(&s_plan_seq, memory_order_acquire);
         if (before & 1u)
@@ -47,4 +58,5 @@ void chain_plan_get(ChainPlan* out)
         if (before == after)
             return;                             /* consistent snapshot */
     }
+    *out = s_plan;                              /* degraded fallback (see above) */
 }
