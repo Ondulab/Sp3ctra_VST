@@ -27,9 +27,8 @@
 
 /* Configuration Macros ------------------------------------------*/
 
-// Audio configuration from VST context  
+// Audio configuration from VST context
 #define AUDIO_BUFFER_SIZE (g_sp3ctra_config.audio_buffer_size)
-#define AUDIO_SAMPLE_RATE (g_sp3ctra_config.sampling_frequency)
 
 // Note: CIS_MAX_PIXELS_NB is already defined in config_instrument.h
 // Note: SUMMATION_BASE_LEVEL is already defined in config_synth_luxstral.h
@@ -39,29 +38,12 @@
 // VOLUME_AMP_RESOLUTION is 1.0f (normalized waveforms)
 #define VOLUME_AMP_RESOLUTION (1.0f)
 
-// Envelope times (use actual config fields)
-#define ATTACK_TIME_MS (g_sp3ctra_config.tau_up_base_ms)
-#define RELEASE_TIME_MS (g_sp3ctra_config.tau_down_base_ms)
-
-// Gap limiter defaults (not in config struct - use compile-time defaults)
-#define GAP_LIMITER_ENABLED (1)
-#define GAP_LIMITER_THRESHOLD (0.01f)
-#define GAP_LIMITER_ATTACK_MS (10.0f)
-#define GAP_LIMITER_RELEASE_MS (50.0f)
-
 // Log frequency for periodic messages
 #define LOG_FREQUENCY 100
 
-// Platform detection
-#ifdef __APPLE__
-  #define PLATFORM_MACOS 1
-#elif defined(__linux__)
-  #define PLATFORM_LINUX 1
-#endif
-
 /* Include existing type definitions from source ----------------*/
 #include "doublebuffer.h"          // DoubleBuffer
-#include "context.h"                // shared_var
+#include "context.h"                // Context
 #include "config_instrument.h"      // get_cis_pixels_nb()
 #include "config_loader.h"          // sp3ctra_config_t
 
@@ -77,30 +59,6 @@ void vst_log_error(const char* message);
 #ifdef __cplusplus
 }
 #endif
-
-/* Logging Macros ------------------------------------------------*/
-// RENAMED to luxstral_log_* to avoid conflict with unified C logger (src/utils/logger.h)
-// These macros are used by LuxStral C code for legacy compatibility
-#define luxstral_log_info(tag, fmt, ...) \
-    do { \
-        char buffer[512]; \
-        snprintf(buffer, sizeof(buffer), "[%s] " fmt, tag, ##__VA_ARGS__); \
-        vst_log_info(buffer); \
-    } while(0)
-
-#define luxstral_log_warning(tag, fmt, ...) \
-    do { \
-        char buffer[512]; \
-        snprintf(buffer, sizeof(buffer), "[%s] WARNING: " fmt, tag, ##__VA_ARGS__); \
-        vst_log_warning(buffer); \
-    } while(0)
-
-#define luxstral_log_error(tag, fmt, ...) \
-    do { \
-        char buffer[512]; \
-        snprintf(buffer, sizeof(buffer), "[%s] ERROR: " fmt, tag, ##__VA_ARGS__); \
-        vst_log_error(buffer); \
-    } while(0)
 
 /* Error Handling ------------------------------------------------*/
 /* die() is declared in utils/error.h and implemented in utils/error.c  */
@@ -168,10 +126,6 @@ int luxstral_are_audio_buffers_ready(void);  // bool not available in C89
 
 /* RT Profiler - use real definition from rt_profiler.h --------*/
 // No stubs needed - rt_profiler.h is already included via includes chain
-
-/* Lock-Free Pan System -------------------------------------------*/
-/* Real implementation in audio/pan/lock_free_pan.c — use real header */
-#include "audio/pan/lock_free_pan.h"
 
 /* Wave Generation Types -----------------------------------------*/
 // Note: wave_generation.h defines these types properly

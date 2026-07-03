@@ -129,36 +129,6 @@ void apply_gap_limiter_ramp(volatile struct wave *waves, int note, float target_
     waves[note].current_volume = final_volume;
 }
 
-
-/**
- * @brief Apply RELATIVE_MODE processing to image buffer
- * @param imageBuffer_q31 Input/output buffer
- * @param start_note Starting note index
- * @param end_note Ending note index (exclusive)
- * @retval None
- */
-void apply_relative_mode(int32_t *imageBuffer_q31, int start_note, int end_note) {
-  (void)imageBuffer_q31; // Mark as unused to suppress warning
-  (void)start_note;      // Mark as unused to suppress warning
-  (void)end_note;        // Mark as unused to suppress warning
-#ifdef RELATIVE_MODE
-    // Special processing for RELATIVE_MODE
-    if (start_note < end_note - 1) {
-        sub_int32((int32_t *)&imageBuffer_q31[0],
-                  (int32_t *)&imageBuffer_q31[1],
-                  (int32_t *)&imageBuffer_q31[0],
-                  end_note - start_note - 1);
-
-        clip_int32((int32_t *)imageBuffer_q31, 0, VOLUME_AMP_RESOLUTION,
-                   end_note - start_note);
-    }
-
-    if (end_note == NUMBER_OF_NOTES) {
-        imageBuffer_q31[end_note - start_note - 1] = 0;
-    }
-#endif
-}
-
 /**
  * @brief Generate waveform samples using precomputed data
  * @param note Note index

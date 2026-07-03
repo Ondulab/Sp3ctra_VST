@@ -7,18 +7,6 @@
 #include "../utils/logger.h"
 
 /**************************************************************************************
- * Error Codes
- **************************************************************************************/
-typedef enum {
-    CONFIG_SUCCESS = 0,
-    CONFIG_ERROR_FILE_NOT_FOUND = -1,
-    CONFIG_ERROR_INVALID_SYNTAX = -2,
-    CONFIG_ERROR_INVALID_VALUE = -3,
-    CONFIG_ERROR_VALIDATION_FAILED = -4,
-    CONFIG_ERROR_OUT_OF_MEMORY = -5
-} config_error_t;
-
-/**************************************************************************************
  * Sp3ctra Runtime Configuration Structure
  **************************************************************************************/
 typedef struct {
@@ -29,14 +17,7 @@ typedef struct {
     int sampling_frequency;              // Sampling frequency in Hz (22050, 44100, 48000, 96000)
     int audio_buffer_size;               // Audio buffer size in frames
     
-    // Auto-volume parameters (runtime configurable)
-    int auto_volume_enabled;             // Enable/disable IMU-based auto-volume (0/1)
-    int imu_inactivity_timeout_s;        // Timeout before switching to inactive mode (seconds)
-    float auto_volume_inactive_level;    // Volume level when inactive (0.0-1.0)
-    int auto_volume_fade_ms;             // Fade duration for volume transitions (ms)
-    
     // Anti-vibrations acoustiques (runtime configurable)
-    float imu_sensitivity;               // IMU sensitivity (0.1-10.0, default 1.0)
     float vibration_protection_factor;   // Threshold hardening factor when audio loud (1.0-5.0, default 3.0)
     float contrast_change_threshold;     // Minimum contrast change to validate activity (0.01-0.5, default 0.05)
     
@@ -89,32 +70,6 @@ typedef struct {
     // Noise gate parameters
     float noise_gate_threshold;                // Noise gate threshold (0.0-0.1, fraction of max volume)
     
-    // LuxWave synthesis parameters
-    int photowave_continuous_mode;             // Continuous mode (0=MIDI notes only, 1=always generating)
-    int photowave_scan_mode;                   // Scanning mode (0=L→R, 1=R→L, 2=Dual)
-    int photowave_interp_mode;                 // Interpolation mode (0=Linear, 1=Cubic)
-    float photowave_amplitude;                 // Amplitude (0.0-1.0)
-    
-    // LuxWave ADSR Volume parameters
-    float photowave_volume_adsr_attack_s;      // Volume ADSR attack time (seconds)
-    float photowave_volume_adsr_decay_s;       // Volume ADSR decay time (seconds)
-    float photowave_volume_adsr_sustain_level; // Volume ADSR sustain level (0.0-1.0)
-    float photowave_volume_adsr_release_s;     // Volume ADSR release time (seconds)
-    
-    // LuxWave ADSR Filter parameters
-    float photowave_filter_adsr_attack_s;      // Filter ADSR attack time (seconds)
-    float photowave_filter_adsr_decay_s;       // Filter ADSR decay time (seconds)
-    float photowave_filter_adsr_sustain_level; // Filter ADSR sustain level (0.0-1.0)
-    float photowave_filter_adsr_release_s;     // Filter ADSR release time (seconds)
-    
-    // LuxWave LFO parameters
-    float photowave_lfo_rate_hz;               // LFO rate in Hz
-    float photowave_lfo_depth_semitones;       // LFO depth in semitones
-    
-    // LuxWave spectral filter parameters
-    float photowave_filter_cutoff_hz;          // Base filter cutoff frequency (Hz)
-    float photowave_filter_env_depth_hz;       // Filter envelope depth (Hz)
-    
     // LuxSynth synthesis parameters
     int poly_num_voices;                       // Number of polyphonic voices (1-32)
     int poly_max_oscillators;                  // Max oscillators per voice (1-256)
@@ -154,42 +109,11 @@ typedef struct {
     float poly_detune_max_cents;               // Maximum detune for semi-harmonic sounds (cents)
     float poly_harmonicity_curve_exponent;     // Exponent for harmonicity response curve (0.5-2.0)
     
-    // DMX lighting parameters
-    float dmx_brightness;                      // Global brightness multiplier (0.0-2.0)
-    float dmx_gamma;                           // Gamma correction (0.5-2.5)
-    float dmx_black_threshold;                 // Black threshold - LEDs off below this (0.0-0.5)
-    float dmx_response_curve;                  // Response curve exponent (1.0-5.0)
-    float dmx_red_factor;                      // Red channel correction factor (0.5-2.0)
-    float dmx_green_factor;                    // Green channel correction factor (0.5-2.0)
-    float dmx_blue_factor;                     // Blue channel correction factor (0.5-2.0)
-    float dmx_saturation_factor;               // Color saturation amplification (1.0-5.0)
-    
     // Network configuration
     char udp_address[64];                      // UDP address for data reception (unicast or multicast)
     int udp_port;                              // UDP port for data reception
     char multicast_interface[64];              // Specific interface IP for multicast (empty = INADDR_ANY)
-    
-    // Display system parameters
-    float display_orientation;                 // Display orientation (0=vertical, 1=horizontal)
-    float display_udp_scroll_speed;            // UDP scroll speed (-1.0 to +1.0)
-    float display_accel_x_scroll_speed;        // Accelerometer X-axis scroll speed modulation (-1.0 to +1.0)
-    float display_accel_y_offset;              // Accelerometer Y-axis position offset (-1.0 to +1.0)
-    float display_initial_line_position;       // Initial line position (-1.0 to +1.0)
-    float display_line_thickness;              // Line thickness (0.0 to 1.0)
-    float display_transition_time_ms;          // Smooth transition time in milliseconds (0-1000)
-    float display_accel_sensitivity;           // Accelerometer sensitivity (0.1-5.0)
-    float display_fade_strength;               // Fade effect strength (0.0-1.0)
-    float display_line_persistence;            // Line persistence in seconds (0-10)
-    float display_zoom;                        // Display zoom factor (-1.0 to +1.0)
-    int display_history_buffer_size;           // History buffer size in lines (100-10000)
-    int display_window_width;                  // Window width in pixels
-    int display_window_height;                 // Window height in pixels
-    
-    // IMU rotation parameters
-    float display_gyro_rotation_enabled;       // Enable gyroscope rotation (0=off, 1=on)
-    float display_gyro_rotation_sensitivity;   // Rotation sensitivity multiplier (0.1-5.0)
-    float display_rotation_smoothing;          // Rotation smoothing factor (0.0-0.95)
-    
+
     // StrokeForge — Blob-centric harmonic morphing
     /* ── StrokeForge — Blob-to-note with waveform morphing ──────────────────
      * Blob width controls sine→square morphing; Gaussian focus concentrates
@@ -303,34 +227,5 @@ typedef struct {
  * Global Configuration Instance
  **************************************************************************************/
 extern sp3ctra_config_t g_sp3ctra_config;
-
-/**************************************************************************************
- * Configuration Loading Functions
- **************************************************************************************/
-
-/**
- * Load additive synthesis configuration from INI file
- * Creates the file with default values if it doesn't exist
- * 
- * @param config_file_path Path to the configuration file
- * @return CONFIG_SUCCESS on success, error code on failure
- */
-int load_luxstral_config(const char* config_file_path);
-
-/**
- * Create default configuration file with current default values
- * 
- * @param config_file_path Path where to create the configuration file
- * @return CONFIG_SUCCESS on success, error code on failure
- */
-int create_default_config_file(const char* config_file_path);
-
-/**
- * Validate configuration parameters
- * 
- * @param config Configuration structure to validate
- * @return CONFIG_SUCCESS if valid, CONFIG_ERROR_VALIDATION_FAILED otherwise
- */
-int validate_config(const sp3ctra_config_t* config);
 
 #endif // CONFIG_LOADER_H

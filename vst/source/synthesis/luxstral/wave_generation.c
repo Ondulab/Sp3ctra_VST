@@ -42,7 +42,6 @@ float g_square_table[SINE_TABLE_SIZE];
  * Written by StrokeForge preprocessor (non-RT), read by synthesis workers (RT).
  * volatile + relaxed atomic semantics: single float, naturally atomic on ARM64/x86-64.
  */
-volatile float g_waveform_morph = 0.0f;
 
 /** Legacy waveParams instance (kept for hot-reload compatibility) */
 volatile struct waveParams wavesGeneratorParams;

@@ -2,12 +2,16 @@
 
 /**
  * Sp3ctra VST - Fixed Configuration Constants
- * 
+ *
  * These parameters are COMPILE-TIME constants and cannot be changed at runtime.
  * They define core architectural constraints for buffer sizes, performance budgets, etc.
- * 
+ *
  * If you need to change these values, you must recompile the plugin.
  */
+
+extern "C" {
+#include "config/config_instrument.h"   // SP3CTRA_DEFAULT_UDP_* (shared with udp.c)
+}
 
 namespace Sp3ctraConstants {
     // ============================================================
@@ -57,10 +61,12 @@ namespace Sp3ctraConstants {
     constexpr int IMU_DATA_HEADER = 0x13;         // Packet type for IMU data
     
     /**
-     * Default network configuration (can be overridden by user via APVTS)
+     * Default network configuration (can be overridden by user via APVTS).
+     * Values come from the shared C defines (config_instrument.h) so the C
+     * network fallback (udp.c) and the APVTS defaults can never diverge.
      */
-    constexpr int DEFAULT_UDP_PORT = 55151;
-    constexpr const char* DEFAULT_UDP_ADDRESS = "239.100.100.100";  // Multicast
+    constexpr int DEFAULT_UDP_PORT = SP3CTRA_DEFAULT_UDP_PORT;
+    constexpr const char* DEFAULT_UDP_ADDRESS = SP3CTRA_DEFAULT_UDP_ADDRESS;  // Multicast
     constexpr const char* DEFAULT_MULTICAST_INTERFACE = "";         // Auto-detect
     
     // ============================================================

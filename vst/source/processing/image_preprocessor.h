@@ -83,76 +83,13 @@ typedef struct {
     
 } PreprocessedImageData;
 
-/* Module initialization and cleanup */
-void image_preprocess_init(void);
+/* Module cleanup */
 void image_preprocess_cleanup(void);
-
-/* Main preprocessing function
- * Transforms raw RGB image data into synthesis-ready preprocessed data
- * Calls all specialized preprocessing functions for each synthesis engine
- * 
- * Parameters:
- *   raw_r, raw_g, raw_b: Raw RGB buffers (0-255)
- *   out: Output structure to fill with preprocessed data
- * 
- * Returns:
- *   0 on success, -1 on error
- */
-int image_preprocess_frame(
-    const uint8_t *raw_r,
-    const uint8_t *raw_g,
-    const uint8_t *raw_b,
-    PreprocessedImageData *out
-);
-
-/* Specialized preprocessing functions (called internally by image_preprocess_frame) */
-
-/* LuxStral synthesis preprocessing
- * Pipeline: RGB → Grayscale → Inversion (optional) → Gamma → Averaging → Contrast
- */
-void preprocess_luxstral(
-    const uint8_t *raw_r,
-    const uint8_t *raw_g,
-    const uint8_t *raw_b,
-    PreprocessedImageData *out
-);
 
 /* LuxSynth synthesis preprocessing
  * Pipeline: RGB → Grayscale → Inversion (optional) → FFT (no gamma for linear response)
  */
 void preprocess_luxsynth(
-    const uint8_t *raw_r,
-    const uint8_t *raw_g,
-    const uint8_t *raw_b,
-    PreprocessedImageData *out
-);
-
-/* LuxWave synthesis preprocessing
- * Pipeline: Direct RGB copy (native sampling, no conversion)
- */
-void preprocess_luxwave(
-    const uint8_t *raw_r,
-    const uint8_t *raw_g,
-    const uint8_t *raw_b,
-    PreprocessedImageData *out
-);
-
-/* Sampler-specific variant of image_preprocess_frame.
- * Identical pipeline to image_preprocess_frame() but uses sampler parameters
- * (sampler_gamma, sampler_contrast_min, sampler_freeze_mode, sampler_fade_in_ms,
- * image_sampler_opacity) instead of the live-stream parameters.
- * Called exclusively from FramePlayerThread to process captured slot frames.
- */
-int image_preprocess_lux_sampler(
-    const uint8_t *raw_r,
-    const uint8_t *raw_g,
-    const uint8_t *raw_b,
-    PreprocessedImageData *out
-);
-
-/* LuxStral sampler preprocessing — mirrors preprocess_luxstral() but with
- * sampler-specific gamma, contrast_min, opacity, freeze mode, and fade-in. */
-void preprocess_luxstral_sampler(
     const uint8_t *raw_r,
     const uint8_t *raw_g,
     const uint8_t *raw_b,

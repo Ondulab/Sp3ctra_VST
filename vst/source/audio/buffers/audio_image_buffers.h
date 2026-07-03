@@ -114,13 +114,6 @@ int audio_image_buffers_start_write(AudioImageBuffers *buffers, uint8_t **out_R,
                                     uint8_t **out_G, uint8_t **out_B);
 void audio_image_buffers_complete_write(AudioImageBuffers *buffers);
 
-// Release the write_mutex WITHOUT swapping buffers — used by the live publish
-// path when the acquisition gate holds the current frame (sample-and-hold).
-// Pairs with start_write() exactly like complete_write(), but performs no buffer
-// rotation, so the read buffer (and every consumer) keeps the last published
-// line.  UDP thread only.
-void audio_image_buffers_abort_write(AudioImageBuffers *buffers);
-
 // ── Acquisition gate (frame-advance brake) ─────────────────────────────────
 // Enable/disable the gate (audio thread).  Disabled ⇒ should_publish() always
 // returns 1 (legacy full-rate behaviour).
@@ -213,12 +206,5 @@ int audio_image_buffers_get_insert_tap_pointers(const AudioImageBuffers *buffers
                                                 uint8_t **out_R,
                                                 uint8_t **out_G,
                                                 uint8_t **out_B);
-
-
-// Utility functions
-void audio_image_buffers_get_stats(AudioImageBuffers *buffers,
-                                   uint64_t *lines_received,
-                                   uint64_t *lines_processed,
-                                   uint64_t *buffer_swaps);
 
 #endif /* AUDIO_IMAGE_BUFFERS_H */

@@ -148,10 +148,6 @@ void score_apply_image_processing(ScoreSpectrogramData *data,
 
 void score_free_spectrogram(ScoreSpectrogramData *data);
 
-/* Test helper: fill signal with a sine wave (used to validate the FFT port). */
-void score_generate_sine(double *signal, int total_samples, double sample_rate,
-                         double frequency, double amplitude);
-
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

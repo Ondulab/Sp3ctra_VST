@@ -30,7 +30,7 @@ void clip_int32(int32_t *array, int32_t min, int32_t max, size_t length) {
   }
 }
 
-#if !defined(__LINUX__) || !defined(__ARM_NEON)
+#if !(defined(SP3CTRA_USE_NEON_MATH) && defined(__ARM_NEON))
 // Standard C implementations (used on non-Linux platforms or when NEON is not available)
 // On Linux with NEON, optimized versions from synth_luxstral_math_neon.c are used instead
 
@@ -58,7 +58,7 @@ void fill_float(float value, float *array, size_t length) {
   }
 }
 
-#endif /* !__LINUX__ || !__ARM_NEON */
+#endif /* !(SP3CTRA_USE_NEON_MATH && __ARM_NEON) */
 
 void fill_int32(int32_t value, int32_t *array, size_t length) {
   if (array == NULL) {
@@ -70,7 +70,7 @@ void fill_int32(int32_t value, int32_t *array, size_t length) {
   }
 }
 
-#if !defined(__LINUX__) || !defined(__ARM_NEON)
+#if !(defined(SP3CTRA_USE_NEON_MATH) && defined(__ARM_NEON))
 // Standard C implementation (used on non-Linux platforms or when NEON is not available)
 // On Linux with NEON, the optimized version from synth_luxstral_math_neon.c is used instead
 void apply_volume_weighting(float *sum_buffer, const float *volume_buffer, 
@@ -86,9 +86,9 @@ void apply_volume_weighting(float *sum_buffer, const float *volume_buffer,
     sum_buffer[i] += weighted_volume;
   }
 }
-#endif /* !__LINUX__ || !__ARM_NEON */
+#endif /* !(SP3CTRA_USE_NEON_MATH && __ARM_NEON) */
 
-#if !defined(__LINUX__) || !defined(__ARM_NEON)
+#if !(defined(SP3CTRA_USE_NEON_MATH) && defined(__ARM_NEON))
 // Standard C implementations for stereo panning and envelope (non-NEON platforms)
 
 /**
@@ -129,7 +129,7 @@ float apply_envelope_ramp(float *volumeBuffer, float start_volume, float target_
   return v;
 }
 
-#endif /* !__LINUX__ || !__ARM_NEON */
+#endif /* !(SP3CTRA_USE_NEON_MATH && __ARM_NEON) */
 
 uint32_t greyScale(uint8_t *buffer_R, uint8_t *buffer_G, uint8_t *buffer_B,
                    float *gray, uint32_t size) {

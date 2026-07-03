@@ -3,8 +3,6 @@
 
 #include "core/context.h"
 #include "config/config_loader.h"
-#include "processing/image_sequencer.h"
-#include "synthesis/luxwave/synth_luxwave.h"
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -57,6 +55,14 @@ sp3ctra_config_t g_sp3ctra_config = {
     // Envelope parameters (very fast response)
     .tau_up_base_ms = 0.5f,
     .tau_down_base_ms = 0.5f,
+
+    // Release frequency weighting — the ONLY writer of these fields (the INI
+    // loader was dead code): unset they were 0.0, and synth_luxstral_algorithms
+    // computed powf(f/0, -0.0) = powf(inf, -0) = 1.0 — accidentally neutral.
+    // beta = 0 keeps that neutrality EXPLICIT (identical sound); raise beta
+    // (e.g. -1.2 with ref 440 Hz) to actually enable the weighting.
+    .decay_freq_ref_hz = 440.0f,
+    .decay_freq_beta   = 0.0f,
     
     // 🔧 CRITICAL: Image processing parameters (from sp3ctra.ini [image_processing_luxstral])
     .invert_intensity = 1,                       // Dark pixels louder
@@ -96,44 +102,13 @@ sp3ctra_config_t g_sp3ctra_config = {
     .stereo_temperature_curve_exponent = 0.7f // Non-linear curve exponent (must be > 0!)
 };
 
-// ✨ BRICK 1 STUBS: Variables globales utilisées par udpThread
-// Ces stubs seront remplacés dans les prochaines briques de migration
-
-// Image sequencer global (pour l'instant NULL, brique 3)
-ImageSequencer *g_image_sequencer = NULL;
-
-// LuxWave state global (pour l'instant stub, brique 4)
-LuxWaveState g_luxwave_state;
-
 // NOTE: g_displayable_synth_R/G/B are now defined in synth_luxstral_state.c
 // Removed stubs - using real LuxStral implementation
 
-// ✨ BRICK 1 STUBS: Fonctions utilisées par udpThread
-// Ces stubs permettent la compilation, mais ne font rien (UDP reçoit mais ne traite pas)
-
-// Image preprocessing (LuxStral pipeline)
-// NOTE: Real implementation is in src/processing/image_preprocessor.c
-// Stub removed to avoid duplicate symbol during VST link.
-
-// Image sequencer processing (brique 3)
-int image_sequencer_process_frame(ImageSequencer* seq, 
-                                   const uint8_t* in_r, const uint8_t* in_g, const uint8_t* in_b,
-                                   uint8_t* out_r, uint8_t* out_g, uint8_t* out_b) {
-    (void)seq;
-    // Stub: passthrough - copie l'entrée vers la sortie
-    // Use get_cis_pixels_nb() for correct size (1728 for 200 DPI)
-    int pixels = get_cis_pixels_nb();
-    memcpy(out_r, in_r, pixels);
-    memcpy(out_g, in_g, pixels);
-    memcpy(out_b, in_b, pixels);
-    return 0;
-}
-
-// LuxWave set image line (brique 4)
-void synth_luxwave_set_image_line(LuxWaveState* state, const uint8_t* line, int length) {
-    (void)state; (void)line; (void)length;
-    // Stub: LuxWave sera ajouté dans brique 4
-}
+// NOTE: the legacy ImageSequencer ghost (g_image_sequencer, always NULL, plus
+// its passthrough stub) and the empty synth_luxwave_set_image_line() stub were
+// removed together with their call sites in multithreading.c — the REAL
+// LuxWave feed is luxwave_engine_set_image_line() via the image pipeline.
 
 // NOTE: synth_AudioProcess is now defined in synth_luxstral.c
 // Removed stub - using real LuxStral implementation

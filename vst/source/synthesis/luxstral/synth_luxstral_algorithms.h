@@ -55,16 +55,6 @@ struct wave;
 void update_gap_limiter_coefficients_for(volatile struct wave *w,
                                          float tau_up_ms, float tau_down_ms);
 
-
-/**
- * @brief Apply RELATIVE_MODE processing to image buffer
- * @param imageBuffer_q31 Input/output buffer
- * @param start_note Starting note index
- * @param end_note Ending note index (exclusive)
- * @retval None
- */
-void apply_relative_mode(int32_t *imageBuffer_q31, int start_note, int end_note);
-
 /**
  * @brief Generate waveform samples using precomputed data
  * @param note Note index
