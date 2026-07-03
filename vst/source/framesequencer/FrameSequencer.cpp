@@ -149,8 +149,11 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
     }
 
     // Also stop any other slot that happens to be playing on the TARGET engine.
+    // curPlay may be the SCORE_SLOT sentinel (== NUM_SLOTS) — never index the
+    // NUM_SLOTS-sized slotState[] with it (out-of-bounds write).
     const int curPlay = as.activePlaySlot.load(std::memory_order_relaxed);
-    if (curPlay >= 0 && curPlay != bankIdx)
+    if (curPlay >= 0 && curPlay != bankIdx
+        && curPlay < LuxSamplerConstants::NUM_SLOTS)
     {
         as.slotState[curPlay].store(static_cast<int>(SlotState::IDLE),
                                     std::memory_order_release);
@@ -237,8 +240,10 @@ void FrameSequencer::rtStop() noexcept
     if (auto* s = primarySampler())
     {
         auto& as = s->getAtomicState();
+        // cp may be the SCORE_SLOT sentinel (== NUM_SLOTS) — never index the
+        // NUM_SLOTS-sized slotState[] with it (out-of-bounds write).
         const int cp = as.activePlaySlot.load(std::memory_order_relaxed);
-        if (cp >= 0)
+        if (cp >= 0 && cp < LuxSamplerConstants::NUM_SLOTS)
         {
             as.slotState[cp].store(static_cast<int>(SlotState::IDLE),
                                     std::memory_order_release);

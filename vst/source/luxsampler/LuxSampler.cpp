@@ -25,7 +25,8 @@ extern "C" {
 // ============================================================================
 // Static instance (singleton for C hook access)
 // ============================================================================
-LuxSampler* LuxSampler::s_engines[LuxSampler::kMaxEngines] = { nullptr, nullptr };
+std::atomic<LuxSampler*> LuxSampler::s_engines[LuxSampler::kMaxEngines] = { nullptr, nullptr };
+std::atomic<int>         LuxSampler::s_engineBusy[LuxSampler::kMaxEngines] = { 0, 0 };
 std::atomic<int> LuxSampler::s_playbackOwner{ -1 };
 
 // ============================================================================
@@ -34,6 +35,10 @@ std::atomic<int> LuxSampler::s_playbackOwner{ -1 };
 // ============================================================================
 extern "C"
 {
+    /* All fan-outs below pin the engine slot (busy counter) around the call so
+     * that ~LuxSampler can unregister and then wait for in-flight hook calls to
+     * drain — the hooks run on the UDP thread, which outlives any single plugin
+     * instance (shared core). See LuxSampler::pinEngine(). */
     void lux_sampler_on_frame_assembled(const uint8_t* R,
                                            const uint8_t* G,
                                            const uint8_t* B,
@@ -41,8 +46,11 @@ extern "C"
                                            uint32_t       line_id)
     {
         for (int i = 0; i < LuxSampler::kMaxEngines; ++i)
-            if (auto* e = LuxSampler::engineAt(i))
+        {
+            if (auto* e = LuxSampler::pinEngine(i))
                 e->onFrameAssembled(R, G, B, pixel_count, line_id);
+            LuxSampler::unpinEngine(i);
+        }
     }
 
     /* Two-phase hooks (image-chain refactor) — fanned out to every engine.
@@ -66,8 +74,11 @@ extern "C"
                                               uint16_t       pixel_count)
     {
         for (int i = 0; i < LuxSampler::kMaxEngines; ++i)
-            if (auto* e = LuxSampler::engineAt(i))
+        {
+            if (auto* e = LuxSampler::pinEngine(i))
                 e->onLiveFrameAssembled(R, G, B, pixel_count);
+            LuxSampler::unpinEngine(i);
+        }
     }
 
     void lux_sampler_on_modulated_frame_ready(const uint8_t* R,
@@ -77,11 +88,17 @@ extern "C"
                                                uint32_t       line_id)
     {
         if (!lux_sampler_is_playing())
-            if (auto* e0 = LuxSampler::engineAt(0))
+        {
+            if (auto* e0 = LuxSampler::pinEngine(0))
                 e0->mirrorSamplerSnapshot(R, G, B, pixel_count);
+            LuxSampler::unpinEngine(0);
+        }
         for (int i = 0; i < LuxSampler::kMaxEngines; ++i)
-            if (auto* e = LuxSampler::engineAt(i))
+        {
+            if (auto* e = LuxSampler::pinEngine(i))
                 e->recordModulatedFrame(R, G, B, pixel_count, line_id);
+            LuxSampler::unpinEngine(i);
+        }
     }
 
     void lux_samplers_record_modulated(const uint8_t* R,
@@ -91,45 +108,62 @@ extern "C"
                                        uint32_t       line_id)
     {
         for (int i = 0; i < LuxSampler::kMaxEngines; ++i)
-            if (auto* e = LuxSampler::engineAt(i))
+        {
+            if (auto* e = LuxSampler::pinEngine(i))
                 e->recordModulatedFrame(R, G, B, pixel_count, line_id);
+            LuxSampler::unpinEngine(i);
+        }
     }
 
     int lux_sampler_is_playing(void)
     {
-        for (int i = 0; i < LuxSampler::kMaxEngines; ++i)
-            if (auto* e = LuxSampler::engineAt(i))
-                if (e->isDrivingChannel())
-                    return 1;
-        return 0;
+        int playing = 0;
+        for (int i = 0; i < LuxSampler::kMaxEngines && !playing; ++i)
+        {
+            if (auto* e = LuxSampler::pinEngine(i))
+                playing = e->isDrivingChannel() ? 1 : 0;
+            LuxSampler::unpinEngine(i);
+        }
+        return playing;
     }
 
     int lux_sampler_is_recording(void)
     {
-        for (int i = 0; i < LuxSampler::kMaxEngines; ++i)
-            if (auto* e = LuxSampler::engineAt(i))
-                if (e->isAnySlotRecording())
-                    return 1;
-        return 0;
+        int recording = 0;
+        for (int i = 0; i < LuxSampler::kMaxEngines && !recording; ++i)
+        {
+            if (auto* e = LuxSampler::pinEngine(i))
+                recording = e->isAnySlotRecording() ? 1 : 0;
+            LuxSampler::unpinEngine(i);
+        }
+        return recording;
     }
 
     int lux_sampler_is_passthrough(void)
     {
         // Live should flow only if NO engine is suppressing it (PLAYING/STEP_EMPTY).
-        for (int i = 0; i < LuxSampler::kMaxEngines; ++i)
-            if (auto* e = LuxSampler::engineAt(i))
+        int passthrough = 1;
+        for (int i = 0; i < LuxSampler::kMaxEngines && passthrough; ++i)
+        {
+            if (auto* e = LuxSampler::pinEngine(i))
                 if (! e->getAtomicState().passthroughEnabled.load(std::memory_order_relaxed))
-                    return 0;
-        return 1; // no engine, or all in passthrough → default passthrough
+                    passthrough = 0;
+            LuxSampler::unpinEngine(i);
+        }
+        return passthrough; // no engine, or all in passthrough → default passthrough
     }
 
     int lux_sampler_is_seq_live_step(void)
     {
-        for (int i = 0; i < LuxSampler::kMaxEngines; ++i)
-            if (auto* e = LuxSampler::engineAt(i))
+        int liveStep = 0;
+        for (int i = 0; i < LuxSampler::kMaxEngines && !liveStep; ++i)
+        {
+            if (auto* e = LuxSampler::pinEngine(i))
                 if (e->getAtomicState().seqLiveStepActive.load(std::memory_order_relaxed))
-                    return 1;
-        return 0;
+                    liveStep = 1;
+            LuxSampler::unpinEngine(i);
+        }
+        return liveStep;
     }
 }
 
@@ -160,7 +194,7 @@ void LuxSampler::stopOtherEnginesPlayback(int exceptIndex) noexcept
     for (int i = 0; i < kMaxEngines; ++i)
     {
         if (i == exceptIndex) continue;
-        LuxSampler* e = s_engines[i];
+        LuxSampler* e = s_engines[i].load(std::memory_order_acquire);
         if (e == nullptr) continue;
         auto& as = e->atomicState;
         const int cp = as.activePlaySlot.load(std::memory_order_relaxed);
@@ -209,7 +243,17 @@ uint64_t LuxSampler::currentTimeUs() noexcept
 LuxSampler::LuxSampler(int engineIndex)
     : engineIndex_(juce::jlimit(0, kMaxEngines - 1, engineIndex))
 {
-    s_engines[engineIndex_] = this;   // register in the multi-engine registry
+    // Register in the multi-engine registry — first plugin instance wins. A
+    // second instance in the same DAW process must NOT clobber the first one's
+    // entry (the UDP hooks would silently stop reaching it, and its dtor would
+    // null out OUR slot).
+    LuxSampler* expected = nullptr;
+    registered_ = s_engines[engineIndex_].compare_exchange_strong(
+        expected, this, std::memory_order_acq_rel);
+    if (!registered_)
+        log_warning("FS", "LuxSampler[%c]: registry slot already owned by another "
+                          "plugin instance — UDP hooks stay bound to that instance",
+                    (char) ('A' + engineIndex_));
     for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
     {
         currentPlayHead[i].store(0,  std::memory_order_relaxed);
@@ -227,8 +271,20 @@ LuxSampler::LuxSampler(int engineIndex)
 LuxSampler::~LuxSampler()
 {
     stopPlayerThread();
-    if (s_engines[engineIndex_] == this)
-        s_engines[engineIndex_] = nullptr;
+    if (registered_)
+    {
+        LuxSampler* expected = this;
+        s_engines[engineIndex_].compare_exchange_strong(
+            expected, nullptr, std::memory_order_acq_rel);
+        // Quiescence: a UDP-thread hook may have pinned this slot and loaded the
+        // pointer just before the store above — wait for in-flight calls to
+        // drain before the object is freed (hook bodies run in µs; bounded).
+        for (int tries = 0;
+             s_engineBusy[engineIndex_].load(std::memory_order_acquire) != 0
+                 && tries < 100;
+             ++tries)
+            juce::Thread::sleep(1);
+    }
     int expectedOwner = engineIndex_;
     s_playbackOwner.compare_exchange_strong(expectedOwner, -1);  // release if we owned it
     log_info("FS", "LuxSampler[%c] destroyed", (char) ('A' + engineIndex_));
@@ -651,7 +707,9 @@ void LuxSampler::uiToggleRecord(int slotIndex) noexcept
         atomicState.stopPlayCmd.store(true, std::memory_order_release);
         atomicState.activePlaySlot.store(-1, std::memory_order_release);
         atomicState.passthroughEnabled.store(true, std::memory_order_release);
-        if (curPlay != slotIndex)
+        // curPlay may be the SCORE_SLOT sentinel (== NUM_SLOTS) — never index
+        // the NUM_SLOTS-sized slotState[] with it (out-of-bounds write).
+        if (curPlay != slotIndex && curPlay < LuxSamplerConstants::NUM_SLOTS)
             atomicState.slotState[curPlay].store(static_cast<int>(SlotState::IDLE),
                                                   std::memory_order_release);
     }
@@ -694,8 +752,11 @@ void LuxSampler::uiPlaySlot(int slotIndex) noexcept
     if (curPlay >= 0 && curPlay != slotIndex)
     {
         atomicState.stopPlayCmd.store(true, std::memory_order_release);
-        atomicState.slotState[curPlay].store(static_cast<int>(SlotState::IDLE),
-                                              std::memory_order_release);
+        // curPlay may be the SCORE_SLOT sentinel (== NUM_SLOTS) — never index
+        // the NUM_SLOTS-sized slotState[] with it (out-of-bounds write).
+        if (curPlay < LuxSamplerConstants::NUM_SLOTS)
+            atomicState.slotState[curPlay].store(static_cast<int>(SlotState::IDLE),
+                                                  std::memory_order_release);
     }
 
     // Trigger playback (UI-driven: FramePlayerThread is allowed to restore
@@ -720,8 +781,10 @@ void LuxSampler::loadScoreFramesFromImage(const juce::Image& image,
                                          bool stereo)
 {
     // Always stop any score playback first — FramePlayerThread must not be
-    // reading scoreSlot while we reallocate it.
+    // reading scoreSlot while we reallocate it. The stop is asynchronous, so
+    // also wait until the player has actually released the score slot.
     uiStopScore();
+    waitForPlayerRelease(LuxSamplerConstants::SCORE_SLOT);
     scorePlayHead.store(0, std::memory_order_relaxed);
 
     if (!image.isValid() || image.getWidth() <= 0 || image.getHeight() <= 0)
@@ -934,8 +997,10 @@ void LuxSampler::uiStopScore() noexcept
 void LuxSampler::uiDiscardScore()
 {
     // Stop first: FramePlayerThread must not be reading scoreSlot while we free it
-    // (same ordering as loadScoreFramesFromImage's reallocation path).
+    // (same ordering as loadScoreFramesFromImage's reallocation path). The stop is
+    // asynchronous, so wait until the player has actually released the score slot.
     uiStopScore();
+    waitForPlayerRelease(LuxSamplerConstants::SCORE_SLOT);
     scorePlayHead.store(0, std::memory_order_relaxed);
     scoreResumeHead.store(-1, std::memory_order_relaxed);
 
@@ -1023,6 +1088,16 @@ void LuxSampler::uiClearSlot(int slotIndex) noexcept
     atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::IDLE),
                                             std::memory_order_release);
 
+    // Disarm recording immediately (the stopRecCmd drain runs on the UDP thread
+    // and may not have executed yet) so recordModulatedFrame() bails out before
+    // writing into the buffer we are about to free.
+    if (activeRecSlot.load(std::memory_order_relaxed) == slotIndex)
+        activeRecSlot.store(-1, std::memory_order_release);
+
+    // The stop above is asynchronous — wait until the player has released this
+    // slot (it dereferences slot.frames WITHOUT slotsMutex_) before freeing.
+    waitForPlayerRelease(slotIndex);
+
     // Clear the slot data under slotsMutex_ so that sampleSpectralForTimeline
     // (message thread) cannot access slot.frames while clear() frees it.
     std::lock_guard<std::mutex> lk(slotsMutex_);
@@ -1066,6 +1141,35 @@ void LuxSampler::stopPlayerThread()
     }
 }
 
+void LuxSampler::waitForPlayerRelease(int slotIndex, int timeoutMs) const noexcept
+{
+    // Message thread only. Stop commands are asynchronous: the player may still
+    // be inside its current tick dereferencing slot.frames. Wait until it has
+    // released the slot before the caller frees/replaces the frame buffer.
+    // slotIndex < 0 waits for "no REAL slot busy" (a running SCORE keeps its own
+    // scoreSlot and does not conflict with slots[] replacement).
+    // Two consecutive idle observations are required: the player publishes
+    // playerBusySlot_ a few instructions AFTER consuming startPlayCmd, so a
+    // single read could race a playback that is just starting.
+    int idleStreak = 0;
+    for (int elapsed = 0; elapsed <= timeoutMs; ++elapsed)
+    {
+        const int busy = playerBusySlot_.load(std::memory_order_acquire);
+        const bool clear = (slotIndex >= 0)
+            ? (busy != slotIndex)
+            : (busy < 0 || busy >= LuxSamplerConstants::NUM_SLOTS);
+        if (clear)
+        {
+            if (++idleStreak >= 2) return;
+        }
+        else
+            idleStreak = 0;
+        juce::Thread::sleep(1);
+    }
+    log_warning("FS", "waitForPlayerRelease(%d): timeout after %d ms — proceeding",
+                slotIndex, timeoutMs);
+}
+
 // ============================================================================
 // Slot management
 // ============================================================================
@@ -1085,6 +1189,10 @@ void LuxSampler::clearSlot(int i)
     }
 
     atomicState.slotState[i].store(static_cast<int>(SlotState::IDLE));
+
+    // The stop above is asynchronous — wait until the player has released this
+    // slot (it dereferences slot.frames WITHOUT slotsMutex_) before freeing.
+    waitForPlayerRelease(i);
     {
         std::lock_guard<std::mutex> lk(slotsMutex_);
         slots[i].clear();
@@ -1115,6 +1223,10 @@ void LuxSampler::copySlotTo(int srcIdx, int dstIdx)
                                         std::memory_order_release);
     if (atomicState.activePlaySlot.load(std::memory_order_acquire) == dstIdx)
         atomicState.activePlaySlot.store(-1, std::memory_order_release);
+
+    // The player checks slotState each tick but may still be inside the current
+    // one — wait for it to release the destination before rewriting its frames.
+    waitForPlayerRelease(dstIdx);
 
     std::lock_guard<std::mutex> lk(slotsMutex_);
 
@@ -1191,6 +1303,10 @@ void LuxSampler::cropSlotToBounds(int slotIndex)
     }
     atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::IDLE),
                                             std::memory_order_release);
+
+    // The stops above are asynchronous — wait until the player has released
+    // this slot before the memmove below reorders its frames.
+    waitForPlayerRelease(slotIndex);
 
     std::lock_guard<std::mutex> lk(slotsMutex_);
 
@@ -1438,30 +1554,46 @@ bool LuxSampler::saveToFile(const juce::File& file) const
     out.write(&hdr, sizeof(hdr));
 
     // ── Slot blocks ──────────────────────────────────────────────────────
+    // slotsMutex_ is taken per CHUNK, not across the whole file write: the UDP
+    // thread takes it for every recorded frame, and holding it for the full
+    // save froze live capture/recording for seconds. Frames below the
+    // snapshotted frame_count are stable for the duration of the save —
+    // recording only appends, and every path that frees or reorders frames
+    // runs on THIS (message) thread.
+    constexpr int kChunkFrames = 256;   // ≈ 2.6 MB staging
+    std::vector<CapturedFrame> staging;
+    for (int s = 0; s < NUM_SLOTS; ++s)
     {
-        std::lock_guard<std::mutex> lk(slotsMutex_);
-        for (int s = 0; s < NUM_SLOTS; ++s)
+        FsmpSlotHeader shdr {};
+        int fc = 0;
         {
+            std::lock_guard<std::mutex> lk(slotsMutex_);
             const FrameSlot& slot = slots[s];
-
-            FsmpSlotHeader shdr {};
             shdr.slot_index  = static_cast<uint8_t>(s);
             shdr.has_content = slot.has_content ? 0x01u : 0x00u;
             shdr.frame_count = static_cast<uint32_t>(slot.frame_count);
             shdr.duration_us = slot.duration_us;
             std::strncpy(shdr.label, slot.label, 63);
             shdr.label[63]   = '\0';
-            shdr.slot_crc32  = crc32_compute(reinterpret_cast<const uint8_t*>(&shdr),
-                                              offsetof(FsmpSlotHeader, slot_crc32));
-            out.write(&shdr, sizeof(shdr));
+            if (slot.has_content && slot.frame_count > 0 && slot.isAllocated())
+                fc = slot.frame_count;
+        }
+        shdr.slot_crc32 = crc32_compute(reinterpret_cast<const uint8_t*>(&shdr),
+                                         offsetof(FsmpSlotHeader, slot_crc32));
+        out.write(&shdr, sizeof(shdr));
 
-            if (!slot.has_content || slot.frame_count == 0 || !slot.isAllocated())
-                continue;
-
-            const int fc = slot.frame_count; // snapshot under lock
-            for (int f = 0; f < fc; ++f)
+        for (int base = 0; base < fc; base += kChunkFrames)
+        {
+            const int n = std::min(kChunkFrames, fc - base);
+            staging.resize(static_cast<size_t>(n));
             {
-                const CapturedFrame& fr = slot.frames[f];
+                std::lock_guard<std::mutex> lk(slotsMutex_);
+                std::memcpy(staging.data(), slots[s].frames.get() + base,
+                            static_cast<size_t>(n) * sizeof(CapturedFrame));
+            }
+            for (int f = 0; f < n; ++f)
+            {
+                const CapturedFrame& fr = staging[static_cast<size_t>(f)];
                 const uint32_t psize    = sizeof(fr.line_id) + sizeof(fr.pixel_count)
                                           + 3u * static_cast<uint32_t>(fr.pixel_count);
                 FsmpFrameHeader fhdr { fr.timestamp_us, psize };
@@ -1671,6 +1803,38 @@ bool LuxSampler::loadFromFile(const juce::File& file)
 
     const int numSlotsInFile = static_cast<int>(
         std::min(hdr.num_slots, static_cast<uint32_t>(NUM_SLOTS)));
+
+    // ── Stop any ongoing activity before replacing slot contents ─────────
+    // (mirrors loadSlotFromFile). The player dereferences slot.frames WITHOUT
+    // slotsMutex_, so freeing a playing slot's buffer below would be a
+    // use-after-free. Stop playback of real slots (a running SCORE keeps its
+    // own scoreSlot — untouched here), disarm recording, suspend command
+    // pickup for the whole load, and wait for the player to release.
+    playbackSuspended_.store(true, std::memory_order_release);
+    struct SuspendReset
+    {
+        std::atomic<bool>& f;
+        ~SuspendReset() { f.store(false, std::memory_order_release); }
+    } suspendReset { playbackSuspended_ };
+
+    activeRecSlot.store(-1, std::memory_order_release);
+    {
+        const int cp = atomicState.activePlaySlot.load(std::memory_order_acquire);
+        if (cp >= 0 && cp < NUM_SLOTS)
+        {
+            atomicState.stopPlayCmd.store(true, std::memory_order_release);
+            atomicState.activePlaySlot.store(-1, std::memory_order_release);
+            atomicState.passthroughEnabled.store(true, std::memory_order_release);
+        }
+    }
+    for (int i = 0; i < NUM_SLOTS; ++i)
+    {
+        atomicState.startRecCmd[i].store(false, std::memory_order_release);
+        atomicState.stopRecCmd[i].store(false, std::memory_order_release);
+        atomicState.slotState[i].store(static_cast<int>(SlotState::IDLE),
+                                       std::memory_order_release);
+    }
+    waitForPlayerRelease(-1);
 
     // ── Slot blocks ──────────────────────────────────────────────────────
     for (int s = 0; s < numSlotsInFile; ++s)
@@ -1939,28 +2103,42 @@ bool LuxSampler::saveSlotToFile(int slotIndex, const juce::File& file) const
     out.write(&flags,   sizeof(flags));
     out.write(&slotIdx, sizeof(slotIdx));
 
-    // ── Slot header + frames (under lock) ────────────────────────────────────
+    // ── Slot header + frames ─────────────────────────────────────────────────
+    // Chunked like saveToFile(): slotsMutex_ is shared with the UDP thread's
+    // per-frame recording path — never hold it across disk I/O.
     {
-        std::lock_guard<std::mutex> lk(slotsMutex_);
-        const FrameSlot& slot = slots[slotIndex];
-
+        constexpr int kChunkFrames = 256;   // ≈ 2.6 MB staging
         FsmpSlotHeader shdr {};
-        shdr.slot_index  = static_cast<uint8_t>(slotIndex);
-        shdr.has_content = slot.has_content ? 0x01u : 0x00u;
-        shdr.frame_count = static_cast<uint32_t>(slot.frame_count);
-        shdr.duration_us = slot.duration_us;
-        std::strncpy(shdr.label, slot.label, 63);
-        shdr.label[63]   = '\0';
-        shdr.slot_crc32  = crc32_compute(reinterpret_cast<const uint8_t*>(&shdr),
-                                          offsetof(FsmpSlotHeader, slot_crc32));
+        int fc = 0;
+        {
+            std::lock_guard<std::mutex> lk(slotsMutex_);
+            const FrameSlot& slot = slots[slotIndex];
+            shdr.slot_index  = static_cast<uint8_t>(slotIndex);
+            shdr.has_content = slot.has_content ? 0x01u : 0x00u;
+            shdr.frame_count = static_cast<uint32_t>(slot.frame_count);
+            shdr.duration_us = slot.duration_us;
+            std::strncpy(shdr.label, slot.label, 63);
+            shdr.label[63]   = '\0';
+            if (slot.has_content && slot.frame_count > 0 && slot.isAllocated())
+                fc = slot.frame_count;
+        }
+        shdr.slot_crc32 = crc32_compute(reinterpret_cast<const uint8_t*>(&shdr),
+                                         offsetof(FsmpSlotHeader, slot_crc32));
         out.write(&shdr, sizeof(shdr));
 
-        if (slot.has_content && slot.frame_count > 0 && slot.isAllocated())
+        std::vector<CapturedFrame> staging;
+        for (int base = 0; base < fc; base += kChunkFrames)
         {
-            const int fc = slot.frame_count;
-            for (int f = 0; f < fc; ++f)
+            const int n = std::min(kChunkFrames, fc - base);
+            staging.resize(static_cast<size_t>(n));
             {
-                const CapturedFrame& fr = slot.frames[f];
+                std::lock_guard<std::mutex> lk(slotsMutex_);
+                std::memcpy(staging.data(), slots[slotIndex].frames.get() + base,
+                            static_cast<size_t>(n) * sizeof(CapturedFrame));
+            }
+            for (int f = 0; f < n; ++f)
+            {
+                const CapturedFrame& fr = staging[static_cast<size_t>(f)];
                 const uint32_t psize    = sizeof(fr.line_id) + sizeof(fr.pixel_count)
                                           + 3u * static_cast<uint32_t>(fr.pixel_count);
                 FsmpFrameHeader fhdr { fr.timestamp_us, psize };
@@ -2120,6 +2298,10 @@ bool LuxSampler::loadSlotFromFile(int slotIndex, const juce::File& file)
         atomicState.passthroughEnabled.store(true);
     }
     atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::IDLE));
+
+    // The stop above is asynchronous — wait until the player has released this
+    // slot before clear()/allocate() below free or replace its frame buffer.
+    waitForPlayerRelease(slotIndex);
 
     // ── Commit frames under slotsMutex_ ──────────────────────────────────────
     {
@@ -2302,6 +2484,14 @@ void FramePlayerThread::run()
 
     while (!threadShouldExit())
     {
+        // Bulk slot replacement in progress (loadFromFile): leave any queued
+        // command untouched and stay idle until the message thread finishes.
+        if (sampler.isPlaybackSuspended())
+        {
+            Thread::sleep(1);
+            continue;
+        }
+
         // Wait for a startPlay command
         const int slotToPlay = state.startPlayCmd.exchange(-1,
                                                             std::memory_order_acq_rel);
@@ -2330,6 +2520,17 @@ void FramePlayerThread::run()
             Thread::sleep(1);
             continue;
         }
+
+        // Publish the slot this iteration works on BEFORE touching any of its
+        // fields — message-thread code that frees/replaces the slot's frames
+        // stops playback then waitForPlayerRelease()s on this marker. Cleared
+        // on every exit path of the iteration (RAII).
+        sampler.setPlayerBusySlot(slotToPlay);
+        struct BusyReset
+        {
+            LuxSampler& s;
+            ~BusyReset() { s.setPlayerBusySlot(-1); }
+        } busyReset { sampler };
 
         // SCORE module uses the dedicated scoreSlot (sentinel SCORE_SLOT) and
         // must NEVER index the NUM_SLOTS-sized state arrays.

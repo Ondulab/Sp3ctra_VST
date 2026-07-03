@@ -161,7 +161,7 @@ struct PACKED_STRUCT cisRgbBuffers
 // PROTOTYPES
 //---------------------------------------------------------------------------------------------------------------------------------------------------------
 
-void initDoubleBuffer(DoubleBuffer *db);
+int initDoubleBuffer(DoubleBuffer *db);   // 0 = ok, -1 = init/alloc failure
 void swapBuffers(DoubleBuffer *db);
 void *udpThread(void *arg);
 void *imageProcessingThread(void *arg);

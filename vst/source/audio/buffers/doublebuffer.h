@@ -38,7 +38,7 @@ typedef struct DoubleBuffer {
 } DoubleBuffer;
 
 // Function prototypes
-void initDoubleBuffer(DoubleBuffer *db);
+int initDoubleBuffer(DoubleBuffer *db);   // 0 = ok, -1 = init/alloc failure
 void cleanupDoubleBuffer(DoubleBuffer *db);
 void swapBuffers(DoubleBuffer *db); // swapBuffers is also in multithreading.c
 

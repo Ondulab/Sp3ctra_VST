@@ -75,16 +75,19 @@ static void WaitForDMXColorUpdate(DMXContext *ctx) {
 }
 */
 
-void initDoubleBuffer(DoubleBuffer *db) {
+int initDoubleBuffer(DoubleBuffer *db) {
   int nb_pixels;
-  
+
+  /* Failures return -1 (caller decides) — never exit(EXIT_FAILURE): inside a
+   * plugin that would kill the whole DAW process. */
   if (pthread_mutex_init(&db->mutex, NULL) != 0) {
     log_error("THREAD", "Mutex initialization failed");
-    exit(EXIT_FAILURE);
+    return -1;
   }
   if (pthread_cond_init(&db->cond, NULL) != 0) {
     log_error("THREAD", "Condition variable initialization failed");
-    exit(EXIT_FAILURE);
+    pthread_mutex_destroy(&db->mutex);
+    return -1;
   }
 
   nb_pixels = get_cis_pixels_nb();
@@ -110,7 +113,18 @@ void initDoubleBuffer(DoubleBuffer *db) {
       !db->processingBuffer_B || !db->lastValidImage_R ||
       !db->lastValidImage_G || !db->lastValidImage_B) {
     log_error("THREAD", "Allocation of image buffers failed");
-    exit(EXIT_FAILURE);
+    free(db->activeBuffer_R);     db->activeBuffer_R = NULL;
+    free(db->activeBuffer_G);     db->activeBuffer_G = NULL;
+    free(db->activeBuffer_B);     db->activeBuffer_B = NULL;
+    free(db->processingBuffer_R); db->processingBuffer_R = NULL;
+    free(db->processingBuffer_G); db->processingBuffer_G = NULL;
+    free(db->processingBuffer_B); db->processingBuffer_B = NULL;
+    free(db->lastValidImage_R);   db->lastValidImage_R = NULL;
+    free(db->lastValidImage_G);   db->lastValidImage_G = NULL;
+    free(db->lastValidImage_B);   db->lastValidImage_B = NULL;
+    pthread_cond_destroy(&db->cond);
+    pthread_mutex_destroy(&db->mutex);
+    return -1;
   }
 
   // Initialize persistent image with black (zero)
@@ -157,8 +171,9 @@ void initDoubleBuffer(DoubleBuffer *db) {
 #endif
   
   db->preprocessed_data.timestamp_us = 0;
-  
+
   log_info("THREAD", "DoubleBuffer preprocessed_data initialized with safe defaults");
+  return 0;
 }
 
 void cleanupDoubleBuffer(DoubleBuffer *db) {
@@ -382,25 +397,28 @@ void *udpThread(void *arg) {
   held_B = NULL;
   held_line_valid = 0;
 
-  /* Allocate receivedFragments */
+  /* Allocate receivedFragments.
+   * Allocation failures abort THIS thread only (return NULL) — never
+   * exit(EXIT_FAILURE): inside a plugin that would kill the whole DAW
+   * process and the user's unsaved project. */
   receivedFragments = (int *)calloc(UDP_MAX_NB_PACKET_PER_LINE, sizeof(int));
   if (receivedFragments == NULL) {
     log_error("THREAD", "Error allocating receivedFragments: %s", strerror(errno));
-    exit(EXIT_FAILURE);
+    return NULL;
   }
-  
+
   /* Allocate mixed buffers dynamically */
   mixed_R = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
   mixed_G = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
   mixed_B = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
-  
+
   if (!mixed_R || !mixed_G || !mixed_B) {
     log_error("THREAD", "Failed to allocate mixed buffers");
     if (mixed_R) free(mixed_R);
     if (mixed_G) free(mixed_G);
     if (mixed_B) free(mixed_B);
     free(receivedFragments);
-    exit(EXIT_FAILURE);
+    return NULL;
   }
 
   /* Allocate acquisition-gate hold buffers */
@@ -416,7 +434,7 @@ void *udpThread(void *arg) {
     free(mixed_G);
     free(mixed_B);
     free(receivedFragments);
-    exit(EXIT_FAILURE);
+    return NULL;
   }
 
   log_info("THREAD", "UDP thread started with dual buffer system");
@@ -945,14 +963,22 @@ void *udpThread(void *arg) {
          * committed preprocessed_temp is untouched. */
         {
             if (!s_luxstral_b_db_ready) {
-                initDoubleBuffer(&s_luxstral_b_db);
-                // RELEASE so the audio thread, on seeing ready=1 (ACQUIRE), also
-                // sees the fully-initialised DoubleBuffer (mutex, buffers).
-                __atomic_store_n(&s_luxstral_b_db_ready, 1, __ATOMIC_RELEASE);
+                if (initDoubleBuffer(&s_luxstral_b_db) != 0) {
+                    log_error("THREAD", "Engine-B DoubleBuffer init failed — engine B stays inactive");
+                } else {
+                    // RELEASE so the audio thread, on seeing ready=1 (ACQUIRE), also
+                    // sees the fully-initialised DoubleBuffer (mutex, buffers).
+                    __atomic_store_n(&s_luxstral_b_db_ready, 1, __ATOMIC_RELEASE);
+                }
             }
 
             const SynthChainPlan *spLB = &frame_plan.synth[CHAIN_SYNTH_LUXSTRAL_B];
-            if (spLB->present && spLB->source_kind == CHAIN_SRC_NONE)
+            if (spLB->present && !s_luxstral_b_db_ready)
+            {
+                /* DoubleBuffer init failed above — its mutex/buffers are not
+                 * usable, skip engine-B feeding entirely. */
+            }
+            else if (spLB->present && spLB->source_kind == CHAIN_SRC_NONE)
             {
                 /* No source placed in this chain → TRUE silence. Do NOT run the
                  * pipeline on a synthetic frame: with inversion ON a black frame
@@ -1328,26 +1354,31 @@ void internal_sources_process_tick(void *arg)
     {
       if (!s_luxstral_b_db_ready)
       {
-        initDoubleBuffer(&s_luxstral_b_db);
-        __atomic_store_n(&s_luxstral_b_db_ready, 1, __ATOMIC_RELEASE);
+        if (initDoubleBuffer(&s_luxstral_b_db) != 0)
+          log_error("THREAD", "Engine-B DoubleBuffer init failed — engine B stays inactive");
+        else
+          __atomic_store_n(&s_luxstral_b_db_ready, 1, __ATOMIC_RELEASE);
       }
-      const uint8_t *bxR = baseB_R, *bxG = baseB_G, *bxB = baseB_B;
-      if (spLB->num_inserts > 0)
+      if (s_luxstral_b_db_ready)   /* skip if the DoubleBuffer init failed */
       {
-        void *states[CHAIN_PLAN_MAX_INSERTS];
-        chain_resolve_insert_states(spLB, states);
-        image_chain_run(baseB_R, baseB_G, baseB_B,
-                        nb_pixels, g_sp3ctra_config.num_octaves,
-                        spLB->insert_id, states, spLB->num_inserts,
-                        &bxR, &bxG, &bxB);
-      }
-      PipelineConfig cfg_b = pipeline_build_config_luxstral_b();
-      if (pipeline_process_frame(bxR, bxG, bxB, &cfg_b, &s_feeder_pp_b) == 0)
-      {
-        pthread_mutex_lock(&s_luxstral_b_db.mutex);
-        s_luxstral_b_db.preprocessed_data = s_feeder_pp_b;
-        s_luxstral_b_db.dataReady = 1;
-        pthread_mutex_unlock(&s_luxstral_b_db.mutex);
+        const uint8_t *bxR = baseB_R, *bxG = baseB_G, *bxB = baseB_B;
+        if (spLB->num_inserts > 0)
+        {
+          void *states[CHAIN_PLAN_MAX_INSERTS];
+          chain_resolve_insert_states(spLB, states);
+          image_chain_run(baseB_R, baseB_G, baseB_B,
+                          nb_pixels, g_sp3ctra_config.num_octaves,
+                          spLB->insert_id, states, spLB->num_inserts,
+                          &bxR, &bxG, &bxB);
+        }
+        PipelineConfig cfg_b = pipeline_build_config_luxstral_b();
+        if (pipeline_process_frame(bxR, bxG, bxB, &cfg_b, &s_feeder_pp_b) == 0)
+        {
+          pthread_mutex_lock(&s_luxstral_b_db.mutex);
+          s_luxstral_b_db.preprocessed_data = s_feeder_pp_b;
+          s_luxstral_b_db.dataReady = 1;
+          pthread_mutex_unlock(&s_luxstral_b_db.mutex);
+        }
       }
     }
   }

@@ -990,9 +990,46 @@ public:
     static constexpr int kMaxEngines = 2;           // sampler A + sampler B
     static LuxSampler* engineAt(int i) noexcept
     {
-        return (i >= 0 && i < kMaxEngines) ? s_engines[i] : nullptr;
+        return (i >= 0 && i < kMaxEngines)
+                   ? s_engines[i].load(std::memory_order_acquire) : nullptr;
+    }
+    // Pin API for the C fan-out hooks (UDP thread): busy++ BEFORE loading the
+    // pointer so ~LuxSampler can wait for in-flight hook calls to drain after
+    // unregistering (quiescence). Always pair pinEngine() with unpinEngine(),
+    // even when the returned pointer is null.
+    static LuxSampler* pinEngine(int i) noexcept
+    {
+        if (i < 0 || i >= kMaxEngines) return nullptr;
+        s_engineBusy[i].fetch_add(1, std::memory_order_acq_rel);
+        return s_engines[i].load(std::memory_order_acquire);
+    }
+    static void unpinEngine(int i) noexcept
+    {
+        if (i < 0 || i >= kMaxEngines) return;
+        s_engineBusy[i].fetch_sub(1, std::memory_order_acq_rel);
     }
     int getEngineIndex() const noexcept { return engineIndex_; }
+
+    // =========================================================================
+    // Player-release handshake (message thread ⇄ FramePlayerThread).
+    // playerBusySlot_ mirrors the slot the player is CURRENTLY dereferencing
+    // (frames of slots[i] or scoreSlot via SCORE_SLOT); -1 when idle. Every
+    // message-thread path that frees/replaces a slot's frame buffer must stop
+    // playback and then waitForPlayerRelease() before touching the buffer —
+    // stop commands are asynchronous and the player reads frames WITHOUT
+    // slotsMutex_.
+    // =========================================================================
+    void setPlayerBusySlot(int slot) noexcept
+    {
+        playerBusySlot_.store(slot, std::memory_order_release);
+    }
+    bool isPlaybackSuspended() const noexcept
+    {
+        return playbackSuspended_.load(std::memory_order_acquire);
+    }
+    // Message thread only. slotIndex >= 0: wait until the player no longer works
+    // on that slot; slotIndex < 0: wait until the player is fully idle. Bounded.
+    void waitForPlayerRelease(int slotIndex, int timeoutMs = 100) const noexcept;
 
     // Resampling capture: write the (already chain-modulated) frame into THIS
     // engine's active recording slot. Non-RT (UDP thread). No snapshot side
@@ -1014,7 +1051,9 @@ private:
     // Multi-engine identity / registry (see kMaxEngines)
     // -------------------------------------------------------------------------
     int                     engineIndex_ = 0;
-    static LuxSampler*      s_engines[kMaxEngines];
+    bool                    registered_  = false; // this instance owns s_engines[engineIndex_]
+    static std::atomic<LuxSampler*> s_engines[kMaxEngines];
+    static std::atomic<int>         s_engineBusy[kMaxEngines]; // in-flight hook calls per slot
     static std::atomic<int> s_playbackOwner;   // engine index driving the channel, -1 = none
 
     // -------------------------------------------------------------------------
@@ -1055,6 +1094,13 @@ private:
     std::unique_ptr<FramePlayerThread> playerThread;
     AudioImageBuffers* audioBuffers_ = nullptr; // stored by startPlayerThread()
     DoubleBuffer*      doubleBuffer_ = nullptr; // stored by startPlayerThread()
+
+    // Slot the player is currently dereferencing (SCORE_SLOT for the score),
+    // -1 when idle — see waitForPlayerRelease().
+    std::atomic<int>  playerBusySlot_    { -1 };
+    // While true the player must not pick up new startPlayCmd commands (bulk
+    // slot replacement in progress, e.g. loadFromFile). Commands stay queued.
+    std::atomic<bool> playbackSuspended_ { false };
 
     // -------------------------------------------------------------------------
     // Per-slot play parameters — parallel to slots[], owned by LuxSampler.

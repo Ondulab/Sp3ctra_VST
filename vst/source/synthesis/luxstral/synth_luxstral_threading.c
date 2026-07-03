@@ -273,8 +273,15 @@ void *synth_persistent_worker_thread(void *arg) {
     synth_barrier_wait(eng, &eng->worker_start_barrier);
 
     // 🔧 CRITICAL: Check exit flags immediately after barrier wakeup
-    if (eng->pool_shutdown || eng->workers_must_exit)
+    if (eng->pool_shutdown || eng->workers_must_exit) {
+      // Rejoin the end barrier before exiting: the shutdown thread joins BOTH
+      // barriers (synth_shutdown_thread_pool_impl). On Linux
+      // pthread_barrier_wait has no exit-flag escape, so exiting without this
+      // join left the shutdown thread blocked forever on the end barrier.
+      // On macOS the custom barrier returns immediately (flags checked).
+      synth_barrier_wait(eng, &eng->worker_end_barrier);
       break;
+    }
 
     // Perform the work (Float32 path)
     synth_process_worker_range(worker);
@@ -668,21 +675,19 @@ static void synth_shutdown_thread_pool_impl(LuxStralEngine *eng) {
   if (eng->use_barriers) {
     log_info("SYNTH", "Performing final barrier sync to unblock workers...");
 
-    // Try to join start barrier (if workers are waiting there)
-    // This will either:
-    // - Succeed if workers are waiting (unblocks them)
-    // - Return immediately if no one is waiting
-    // - Return error if workers already passed (safe to ignore)
+    // Join the start barrier: workers parked there wake up, see the exit flags
+    // and rejoin the END barrier before exiting (see synth_worker_thread) —
+    // so ALWAYS join the end barrier too, regardless of the start result.
+    // On Linux pthread_barrier_wait returns PTHREAD_BARRIER_SERIAL_THREAD for
+    // one arbitrary thread; the old `== 0 || == -1` guard skipped the end join
+    // in that case, leaving every worker (and this thread on the next call)
+    // blocked forever — frozen DAW on unload.
     int start_result = synth_barrier_wait(eng, &eng->worker_start_barrier);
-    if (start_result == 0 || start_result == -1) {
-      log_info("SYNTH", "Joined start barrier, workers can proceed to exit check");
-
-      // Now join end barrier if they proceeded to work phase
-      int end_result = synth_barrier_wait(eng, &eng->worker_end_barrier);
-      if (end_result == 0 || end_result == -1) {
-        log_info("SYNTH", "Joined end barrier, workers should exit now");
-      }
-    }
+    (void)start_result;
+    log_info("SYNTH", "Joined start barrier, workers can proceed to exit check");
+    int end_result = synth_barrier_wait(eng, &eng->worker_end_barrier);
+    (void)end_result;
+    log_info("SYNTH", "Joined end barrier, workers should exit now");
 
     // Additional broadcast to catch any edge cases
 #ifndef __linux__

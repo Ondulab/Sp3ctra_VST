@@ -62,26 +62,33 @@ void rt_profiler_callback_end(RTProfiler *profiler) {
         profiler->max_callback_time_us = elapsed_us;
     }
     
-    /* Report stats periodically */
+    /* Report stats periodically — DEFERRED: logging from the audio thread
+     * (logger mutex + localtime + fprintf) blocked the callback, so we only
+     * raise a flag here and rt_profiler_flush_logs() prints on the message
+     * thread. */
     if (profiler->callback_count % RT_PROFILER_REPORT_INTERVAL_FRAMES == 0) {
-        rt_profiler_print_stats(profiler);
+        atomic_store(&profiler->report_due, 1);
     }
-    
-    /* Warn on critical latency */
+
+    /* Track critical latency — coalesced into ONE line at the next flush
+     * (logging every offending callback amplified the very latency reported) */
     float percent = (elapsed_us * 100.0f) / profiler->callback_budget_us;
     if (percent > RT_PROFILER_CRITICAL_LATENCY_PERCENT) {
-        log_warning("RT_PROFILER", "CRITICAL latency: %llu µs (%.1f%% of budget)",
-                    elapsed_us, percent);
+        atomic_fetch_add(&profiler->critical_latency_events, 1);
+        if (elapsed_us > profiler->critical_latency_worst_us) {
+            profiler->critical_latency_worst_us = elapsed_us;
+        }
     }
 }
 
 void rt_profiler_report_underrun(RTProfiler *profiler) {
     if (!profiler->enabled) return;
     
-    uint64_t count = atomic_fetch_add(&profiler->underrun_count, 1) + 1;
-    
-    /* Log every underrun (they should be rare) */
-    log_error("RT_PROFILER", "UNDERRUN #%llu detected!", count);
+    atomic_fetch_add(&profiler->underrun_count, 1);
+
+    /* Called from the RT callback path — no logging here, events are
+     * coalesced by rt_profiler_flush_logs() on the message thread */
+    atomic_fetch_add(&profiler->underrun_events, 1);
 }
 
 void rt_profiler_report_buffer_miss_luxstral(RTProfiler *profiler) {
@@ -117,11 +124,12 @@ void rt_profiler_mutex_lock_end(RTProfiler *profiler, uint64_t wait_time_us) {
         profiler->mutex_max_wait_us = wait_time_us;
     }
     
-    /* Warn on long waits */
+    /* Count long waits — called from the synthesis thread, so no logging
+     * here; events are coalesced by rt_profiler_flush_logs() */
     if (wait_time_us > RT_PROFILER_CRITICAL_MUTEX_WAIT_US) {
-        log_warning("RT_PROFILER", "CRITICAL mutex wait: %llu µs", wait_time_us);
+        atomic_fetch_add(&profiler->mutex_critical_wait_events, 1);
     } else if (wait_time_us > RT_PROFILER_WARN_MUTEX_WAIT_US) {
-        log_warning("RT_PROFILER", "Long mutex wait: %llu µs", wait_time_us);
+        atomic_fetch_add(&profiler->mutex_warn_wait_events, 1);
     }
 }
 
@@ -129,11 +137,10 @@ void rt_profiler_mutex_contention(RTProfiler *profiler) {
     if (!profiler->enabled) return;
     
     profiler->mutex_contentions++;
-    
-    /* Log contentions (should be rare in well-designed RT code) */
-    if (profiler->mutex_contentions % 100 == 1) {  /* Log first and every 100th */
-        log_warning("RT_PROFILER", "Mutex contention #%llu", profiler->mutex_contentions);
-    }
+
+    /* Called from RT paths — contentions are logged coalesced by
+     * rt_profiler_flush_logs() on the message thread */
+    atomic_fetch_add(&profiler->mutex_contention_events, 1);
 }
 
 void rt_profiler_print_stats(RTProfiler *profiler) {
@@ -229,6 +236,52 @@ void rt_profiler_print_stats(RTProfiler *profiler) {
         atomic_store(&profiler->udp_thread_total_time_us,  0);
         atomic_store(&profiler->udp_thread_packet_count,   0);
         atomic_store(&profiler->udp_thread_max_time_us,    0);
+    }
+}
+
+void rt_profiler_flush_logs(RTProfiler *profiler) {
+    /* Message-thread only. RT threads never log — they raise the flags and
+     * counters drained here. Slightly stale readings are fine (diagnostic). */
+
+    /* Periodic stats report requested by the audio callback */
+    if (atomic_exchange(&profiler->report_due, 0)) {
+        rt_profiler_print_stats(profiler);
+    }
+
+    /* Coalesced critical-latency events (one line per flush, not per callback) */
+    uint64_t crit_latency = atomic_exchange(&profiler->critical_latency_events, 0);
+    if (crit_latency > 0) {
+        uint64_t worst_us = profiler->critical_latency_worst_us;
+        profiler->critical_latency_worst_us = 0;
+        log_warning("RT_PROFILER",
+                    "CRITICAL latency: %llu callback(s) > %.0f%% of budget since last flush (worst %llu µs)",
+                    crit_latency, RT_PROFILER_CRITICAL_LATENCY_PERCENT, worst_us);
+    }
+
+    /* Coalesced underruns (they should be rare) */
+    uint64_t underruns = atomic_exchange(&profiler->underrun_events, 0);
+    if (underruns > 0) {
+        log_error("RT_PROFILER", "UNDERRUN x%llu since last flush (total %llu)",
+                  underruns, (uint64_t)atomic_load(&profiler->underrun_count));
+    }
+
+    /* Coalesced mutex-wait warnings */
+    uint64_t mutex_crit = atomic_exchange(&profiler->mutex_critical_wait_events, 0);
+    if (mutex_crit > 0) {
+        log_warning("RT_PROFILER", "CRITICAL mutex wait x%llu since last flush (max %llu µs)",
+                    mutex_crit, profiler->mutex_max_wait_us);
+    }
+    uint64_t mutex_warn = atomic_exchange(&profiler->mutex_warn_wait_events, 0);
+    if (mutex_warn > 0) {
+        log_warning("RT_PROFILER", "Long mutex wait x%llu since last flush",
+                    mutex_warn);
+    }
+
+    /* Coalesced mutex contentions (should be rare in well-designed RT code) */
+    uint64_t contentions = atomic_exchange(&profiler->mutex_contention_events, 0);
+    if (contentions > 0) {
+        log_warning("RT_PROFILER", "Mutex contention x%llu since last flush (total %llu)",
+                    contentions, profiler->mutex_contentions);
     }
 }
 

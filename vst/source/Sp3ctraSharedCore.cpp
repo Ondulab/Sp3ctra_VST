@@ -188,6 +188,68 @@ bool Sp3ctraSharedCore::startWithConfig(const Sp3ctraCore::ActiveConfig& config,
     return true;
 }
 
+bool Sp3ctraSharedCore::ensureAudioBufferSize(int samplesPerBlock)
+{
+    if (!ready.load())
+        return true;    // startWithConfig() will size the buffers itself
+
+    if (luxstral_get_audio_buffer_size() == samplesPerBlock)
+        return true;    // already the right size
+
+    // Another live plugin instance may be reading the shared output buffers
+    // from ITS processBlock right now — reallocating would free memory under
+    // it. Only the sole owner may resize; other callers keep the old size and
+    // clamp their reads.
+    {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        if (s_instance.use_count() > 1)
+        {
+            log_warning("SHARED",
+                        "ensureAudioBufferSize(%d) — %ld instances share the core, "
+                        "keeping current size %d (reads are clamped)",
+                        samplesPerBlock,
+                        static_cast<long>(s_instance.use_count()),
+                        luxstral_get_audio_buffer_size());
+            return false;
+        }
+    }
+
+    log_info("SHARED", "ensureAudioBufferSize() — host buffer size changed %d → %d, "
+                       "reallocating output buffers",
+             luxstral_get_audio_buffer_size(), samplesPerBlock);
+
+    // Stop the producer while the buffers it writes to are reallocated.
+    bool restartAudioThread = false;
+    if (audioThread)
+    {
+        audioThread->requestStop();
+        if (!audioThread->stopThread(2000))
+        {
+            log_error("SHARED", "ensureAudioBufferSize() — synthesis thread did not "
+                                "stop, ABORTING reallocation (old size kept)");
+            return false;   // never free buffers under a live producer
+        }
+        audioThread.reset();
+        restartAudioThread = true;
+    }
+
+    extern sp3ctra_config_t g_sp3ctra_config;
+    g_sp3ctra_config.audio_buffer_size = samplesPerBlock;
+
+    const bool ok = (luxstral_init_audio_buffers(samplesPerBlock) == 0);
+    if (!ok)
+        log_error("SHARED", "ensureAudioBufferSize() — luxstral_init_audio_buffers(%d) failed",
+                  samplesPerBlock);
+
+    if (restartAudioThread)
+    {
+        audioThread = std::make_unique<AudioProcessingThread>(core.get());
+        audioThread->startThread(juce::Thread::Priority::highest);
+        log_info("SHARED", "ensureAudioBufferSize() — synthesis thread restarted");
+    }
+    return ok;
+}
+
 void Sp3ctraSharedCore::stopThreads()
 {
     if (!ready.load() && !audioThread && !luxSynthThread && !udpThread)
@@ -225,6 +287,7 @@ void Sp3ctraSharedCore::stopThreads()
 
     // ── AudioProcessingThread (LuxStral) ─────────────────────────────────────
     // Must stop before calling synth_luxstral_cleanup() to avoid use-after-free.
+    bool audioThreadLeaked = false;
     if (audioThread)
     {
         log_info("SHARED", "Stopping AudioProcessingThread...");
@@ -238,6 +301,7 @@ void Sp3ctraSharedCore::stopThreads()
             log_error("SHARED",
                       "AudioProcessingThread did NOT exit within timeout — leaking to avoid crash");
             (void)audioThread.release(); // NOLINT: intentional leak
+            audioThreadLeaked = true;
         }
         else
         {
@@ -247,12 +311,21 @@ void Sp3ctraSharedCore::stopThreads()
     }
 
     // ── LuxStral cleanup ─────────────────────────────────────────────────────
-    // Only safe once the audio thread is confirmed stopped.
-    log_info("SHARED", "Cleaning up LuxStral engine...");
-    synth_shutdown_thread_pool();
-    synth_runtime_free_buffers();
-    synth_luxstral_cleanup();
-    log_info("SHARED", "LuxStral cleanup complete");
+    // Only safe once the audio thread is confirmed stopped. If the thread was
+    // leaked above it may still be running inside the synthesis code — freeing
+    // the pool/buffers it uses would turn the intentional leak back into a
+    // use-after-free crash, so leak those too.
+    if (!audioThreadLeaked)
+    {
+        log_info("SHARED", "Cleaning up LuxStral engine...");
+        synth_shutdown_thread_pool();
+        synth_runtime_free_buffers();
+        synth_luxstral_cleanup();
+        log_info("SHARED", "LuxStral cleanup complete");
+    }
+    else
+        log_error("SHARED", "Skipping LuxStral cleanup — leaked synthesis thread may "
+                            "still dereference its pool/buffers");
 
     // ── UDP receiver thread ───────────────────────────────────────────────────
     if (udpThread)
@@ -267,11 +340,23 @@ void Sp3ctraSharedCore::stopThreads()
     // ── Core shutdown (closes socket, frees AudioImageBuffers + DoubleBuffer) ─
     if (core)
     {
-        log_info("SHARED", "Shutting down core...");
-        core->shutdown();
-        // Do NOT reset core — it is referenced by the threads via raw pointer.
-        // The unique_ptr destructs naturally with this object.
-        log_info("SHARED", "Core shutdown complete");
+        if (!audioThreadLeaked)
+        {
+            log_info("SHARED", "Shutting down core...");
+            core->shutdown();
+            // Do NOT reset core — it is referenced by the threads via raw pointer.
+            // The unique_ptr destructs naturally with this object.
+            log_info("SHARED", "Core shutdown complete");
+        }
+        else
+        {
+            // The leaked synthesis thread still reads AudioImageBuffers and the
+            // DoubleBuffer owned by the core — close the socket but leak the
+            // buffers (bounded, process is unloading the plugin anyway).
+            log_error("SHARED", "Skipping core buffer teardown (leaked synthesis "
+                                "thread) — closing UDP socket only");
+            core->closeUdpSocket();
+        }
     }
 
     ready.store(false);

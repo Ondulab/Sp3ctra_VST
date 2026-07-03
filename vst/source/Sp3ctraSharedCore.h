@@ -105,6 +105,21 @@ public:
      */
     void stopThreads();
 
+    /**
+     * @brief Resize the shared LuxStral output buffers after a host buffer-size
+     *        change. Main thread only.
+     *
+     * luxstral_init_audio_buffers() is otherwise only called by
+     * startWithConfig(), which is skipped once the pipeline runs — without this
+     * the synthesis engine writes the NEW block size into buffers still
+     * allocated for the OLD one (heap overflow). Stops the synthesis thread,
+     * reallocates, restarts. Refuses (returns false) when another live plugin
+     * instance shares the buffers or when the synthesis thread cannot be
+     * stopped; callers must then clamp their reads to
+     * luxstral_get_audio_buffer_size().
+     */
+    bool ensureAudioBufferSize(int samplesPerBlock);
+
     // -------------------------------------------------------------------------
     // State queries
     // -------------------------------------------------------------------------

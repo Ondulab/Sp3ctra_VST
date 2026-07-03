@@ -248,6 +248,15 @@ bool luxstral_are_audio_buffers_ready(void) {
 }
 
 /**
+ * @brief Currently allocated per-channel output buffer size, in samples.
+ * 0 until luxstral_init_audio_buffers() has run. Consumers must clamp their
+ * reads to this value — the host block size can change after allocation.
+ */
+int luxstral_get_audio_buffer_size(void) {
+    return luxstral_audio_buffer_size;
+}
+
+/**
  * @brief Initialize callback synchronization system
  * 
  * Called once during plugin initialization. The mutex and condition variable
