@@ -192,7 +192,11 @@ bool Sp3ctraCore::initializeBuffers() {
         memset(doubleBuffer.get(), 0, sizeof(DoubleBuffer));
         
         // Initialize double buffer using existing C function
-        initDoubleBuffer(doubleBuffer.get());
+        if (initDoubleBuffer(doubleBuffer.get()) != 0) {
+            log_error("CORE", "Failed to init double buffer");
+            pthread_mutex_destroy(&context->imu_mutex);
+            return false;
+        }
         
         // Allocate AudioImageBuffers
         audioImageBuffers = std::make_unique<AudioImageBuffers>();

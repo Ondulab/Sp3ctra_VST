@@ -151,6 +151,7 @@ extern "C" {
 #endif
 
 int luxstral_init_audio_buffers(int buffer_size);
+int luxstral_get_audio_buffer_size(void); // allocated size in samples (0 = not yet)
 void luxstral_cleanup_audio_buffers(void);
 void luxstral_init_callback_sync(void);
 void luxstral_cleanup_callback_sync(void);

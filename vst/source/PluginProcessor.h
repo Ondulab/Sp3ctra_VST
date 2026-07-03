@@ -43,7 +43,8 @@ inline juce::String vsMixParam(int slot, const char* suffix)
  * - VST parameters (APVTS with UDP config, sensor DPI, log level)
  */
 class Sp3ctraAudioProcessor  : public juce::AudioProcessor,
-                                public juce::AudioProcessorValueTreeState::Listener
+                                public juce::AudioProcessorValueTreeState::Listener,
+                                private juce::Timer
 {
 public:
     //==============================================================================
@@ -84,9 +85,14 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
     
     //==============================================================================
-    // AudioProcessorValueTreeState::Listener interface
+    // AudioProcessorValueTreeState::Listener interface.
+    // Dispatcher only: on the message thread it applies immediately; from the
+    // audio (host automation) or a project-loading thread it marks the param
+    // dirty and the 30 ms timer applies it on the message thread — the heavy
+    // handlers (applyConfigurationToCore, source routing under db->mutex, UDP
+    // restart) must never run on the audio thread.
     void parameterChanged(const juce::String& parameterID, float newValue) override;
-    
+
     //==============================================================================
     // Public accessors for UI
     juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
@@ -443,7 +449,55 @@ private:
     std::atomic<float>* deviceEnabledParam  = nullptr;
     std::atomic<float>* visualizerModeParam = nullptr;
     std::atomic<float>* masterVolumeParam   = nullptr;  // RT output gain
-    
+
+    // Cached raw-parameter pointers read by processBlock (audio thread):
+    // apvts.getRawParameterValue("literal") builds a juce::String (malloc)
+    // on every call, so the RT path reads through these pointers instead.
+    std::atomic<float>* luxSamplerMidiChannelParam  = nullptr;
+    std::atomic<float>* luxSamplerRecBindTypeParam  = nullptr;
+    std::atomic<float>* luxSamplerRecBindNumParam   = nullptr;
+    std::atomic<float>* luxSamplerPlayBindTypeParam = nullptr;
+    std::atomic<float>* luxSamplerPlayBindNumParam  = nullptr;
+    std::atomic<float>* luxSamplerSaveBindTypeParam = nullptr;
+    std::atomic<float>* luxSamplerSaveBindNumParam  = nullptr;
+    std::atomic<float>* luxpitchMidiChannelParam    = nullptr;
+    std::atomic<float>* luxpitchOctaveOffsetParam   = nullptr;
+    std::atomic<float>* luxmaskMidiChannelParam     = nullptr;
+    std::atomic<float>* luxmaskOctaveOffsetParam    = nullptr;
+    std::atomic<float>* luxsynthEnabledParam        = nullptr;
+    std::atomic<float>* luxsynthMidiChannelParam    = nullptr;
+    std::atomic<float>* luxsynthOctaveOffsetParam   = nullptr;
+    std::atomic<float>* luxsynthVolumeParam         = nullptr;
+    std::atomic<float>* luxwaveEnabledParam         = nullptr;
+    std::atomic<float>* luxwaveMidiChannelParam     = nullptr;
+    std::atomic<float>* luxwaveOctaveOffsetParam    = nullptr;
+    std::atomic<float>* luxwaveVolumeParam          = nullptr;
+    std::atomic<float>* luxwaveAttackMsParam        = nullptr;
+    std::atomic<float>* luxwaveDecayMsParam         = nullptr;
+    std::atomic<float>* luxwaveSustainLevelParam    = nullptr;
+    std::atomic<float>* luxwaveReleaseMsParam       = nullptr;
+    std::atomic<float>* luxwaveAttackCurveParam     = nullptr;
+    std::atomic<float>* luxwaveDecayCurveParam      = nullptr;
+    std::atomic<float>* luxwaveReleaseCurveParam    = nullptr;
+    std::atomic<float>* luxwaveFilterCutoffParam    = nullptr;
+    std::atomic<float>* luxwaveFilterEnvDepthParam  = nullptr;
+    std::atomic<float>* luxwaveLfoRateParam         = nullptr;
+    std::atomic<float>* luxwaveLfoDepthParam        = nullptr;
+    std::atomic<float>* luxwaveScanModeParam        = nullptr;
+    std::atomic<float>* luxwaveAmplitudeParam       = nullptr;
+    std::atomic<float>* acqGateModeParam            = nullptr;
+    std::atomic<float>* acqGateRateMsParam          = nullptr;
+    std::atomic<float>* acqGateSyncDivParam         = nullptr;
+    std::atomic<float>* acqGateMultDivParam         = nullptr;
+    std::atomic<float>* luxstralVolumeParam         = nullptr;
+    std::atomic<float>* luxstralBEnabledParam       = nullptr;
+    std::atomic<float>* luxstralBVolumeParam        = nullptr;
+
+    // CC1 mod-wheel targets driven from processBlock (setValueNotifyingHost):
+    // cached to avoid the juce::String built by apvts.getParameter("literal").
+    juce::RangedAudioParameter* luxpitchLfoDepthParam   = nullptr;
+    juce::RangedAudioParameter* luxmaskLfoPosDepthParam = nullptr;
+
     // UDP Batch Update state (prevents multiple UDP restarts)
     std::atomic<bool> udpBatchUpdateActive{false};
     std::atomic<bool> udpNeedsRestart{false};
@@ -542,6 +596,43 @@ private:
     juce::String scoreWavPath;
     
     // Note: RT Profiler is now global (g_vst_rt_profiler) to be accessible from C threads
-    
+
+    // Suspend/resume the editor's visualizer from prepareToPlay. Hosts may call
+    // prepareToPlay off the message thread; touching the editor Component from
+    // there races its destruction — marshal via callAsync + WeakReference then.
+    void setVisualizerSuspendedSafely(bool suspend);
+
+    // -------------------------------------------------------------------------
+    // Message-thread dispatch machinery (RT safety)
+    // -------------------------------------------------------------------------
+    // Real parameter handler — message thread only (see parameterChanged()).
+    void applyParameterChange(const juce::String& parameterID, float newValue);
+    // Non-APVTS part of setStateInformation (chain model, SCORE/SEQ trees,
+    // sampler params…) — mutates state read by UI timers, message thread only.
+    void applyRestoredStateOnMessageThread();
+    // 30 ms message-thread tick: drains dirty deferred params and executes
+    // pending pool resets (see pendingPitchResets_ below).
+    void timerCallback() override;
+
+    // Deferred parameterChanged dispatch. Multi-producer safe: one dirty flag
+    // per parameter + a global "any" flag; the timer drains in index order
+    // (ordering across params is not semantically relevant here, values are
+    // re-read from the APVTS at apply time so they coalesce).
+    juce::StringArray                     deferredParamIds_;   // index → paramID
+    std::map<juce::String, int>           paramIndexById_;
+    std::unique_ptr<std::atomic<bool>[]>  paramDirty_;
+    std::atomic<bool>                     anyParamDirty_ { false };
+
+    // R6 — pool resets deferred past the in-flight frame: chain_plan_publish()
+    // makes the NEXT frame stop pulling a removed Pitch/Mask/VideoScroll pool
+    // slot, but the UDP/feeder thread may still be processing the CURRENT
+    // frame with the OLD plan. Resetting immediately raced those writes; the
+    // timer executes the reset ≥40 ms later (frames last ~1 ms).
+    uint32_t pendingPitchResets_      { 0 };
+    uint32_t pendingMaskResets_       { 0 };
+    uint32_t pendingVideoScrollInits_ { 0 };
+    uint32_t poolResetArmedMs_        { 0 };
+
+    JUCE_DECLARE_WEAK_REFERENCEABLE (Sp3ctraAudioProcessor)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Sp3ctraAudioProcessor)
 };

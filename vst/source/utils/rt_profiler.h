@@ -76,6 +76,19 @@ typedef struct {
     atomic_uint_fast64_t udp_thread_total_time_us;
     atomic_uint_fast64_t udp_thread_packet_count;
     atomic_uint_fast64_t udp_thread_max_time_us;
+
+    /* Deferred logging (RT-safe): RT threads only set flags/counters here,
+     * the message thread drains them via rt_profiler_flush_logs().
+     * Logging directly from the audio/synthesis threads (logger mutex +
+     * localtime + fprintf) blocked the callback and amplified the very
+     * latency being reported. */
+    atomic_int           report_due;                  /* periodic stats report pending */
+    atomic_uint_fast64_t critical_latency_events;     /* callbacks > critical budget since last flush */
+    uint64_t             critical_latency_worst_us;   /* worst offender since last flush (approx) */
+    atomic_uint_fast64_t underrun_events;             /* underruns since last flush */
+    atomic_uint_fast64_t mutex_critical_wait_events;  /* critical mutex waits since last flush */
+    atomic_uint_fast64_t mutex_warn_wait_events;      /* long mutex waits since last flush */
+    atomic_uint_fast64_t mutex_contention_events;     /* contentions since last flush */
 } RTProfiler;
 
 /**
@@ -182,10 +195,21 @@ void rt_profiler_mutex_contention(RTProfiler *profiler);
 /**
  * @brief Print performance statistics
  * Call this periodically from a non-RT thread
- * 
+ *
  * @param profiler Profiler instance
  */
 void rt_profiler_print_stats(RTProfiler *profiler);
+
+/**
+ * @brief Flush deferred RT-thread log events
+ * Call this periodically from the message thread. Prints the periodic stats
+ * report if one is due, plus one coalesced line per event class accumulated
+ * since the last flush (critical latency, underruns, mutex waits...), then
+ * resets the event counters. Readings may be slightly out of date (diagnostic).
+ *
+ * @param profiler Profiler instance
+ */
+void rt_profiler_flush_logs(RTProfiler *profiler);
 
 /**
  * @brief Reset all statistics

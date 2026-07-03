@@ -1199,7 +1199,53 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     deviceEnabledParam  = apvts.getRawParameterValue(PARAM_DEVICE_ENABLED);
     visualizerModeParam = apvts.getRawParameterValue(PARAM_VISUALIZER_MODE);
     masterVolumeParam   = apvts.getRawParameterValue("masterVolume");
-    
+
+    // Cache raw-parameter pointers read by processBlock (audio thread) —
+    // getRawParameterValue("literal") allocates a juce::String per call.
+    luxSamplerMidiChannelParam  = apvts.getRawParameterValue("luxSamplerMidiChannel");
+    luxSamplerRecBindTypeParam  = apvts.getRawParameterValue("luxSamplerRecBindType");
+    luxSamplerRecBindNumParam   = apvts.getRawParameterValue("luxSamplerRecBindNum");
+    luxSamplerPlayBindTypeParam = apvts.getRawParameterValue("luxSamplerPlayBindType");
+    luxSamplerPlayBindNumParam  = apvts.getRawParameterValue("luxSamplerPlayBindNum");
+    luxSamplerSaveBindTypeParam = apvts.getRawParameterValue("luxSamplerSaveBindType");
+    luxSamplerSaveBindNumParam  = apvts.getRawParameterValue("luxSamplerSaveBindNum");
+    luxpitchMidiChannelParam    = apvts.getRawParameterValue("luxpitchMidiChannel");
+    luxpitchOctaveOffsetParam   = apvts.getRawParameterValue("luxpitchOctaveOffset");
+    luxmaskMidiChannelParam     = apvts.getRawParameterValue("luxmaskMidiChannel");
+    luxmaskOctaveOffsetParam    = apvts.getRawParameterValue("luxmaskOctaveOffset");
+    luxsynthEnabledParam        = apvts.getRawParameterValue("luxsynthEnabled");
+    luxsynthMidiChannelParam    = apvts.getRawParameterValue("luxsynthMidiChannel");
+    luxsynthOctaveOffsetParam   = apvts.getRawParameterValue("luxsynthOctaveOffset");
+    luxsynthVolumeParam         = apvts.getRawParameterValue("luxsynthVolume");
+    luxwaveEnabledParam         = apvts.getRawParameterValue("luxwaveEnabled");
+    luxwaveMidiChannelParam     = apvts.getRawParameterValue("luxwaveMidiChannel");
+    luxwaveOctaveOffsetParam    = apvts.getRawParameterValue("luxwaveOctaveOffset");
+    luxwaveVolumeParam          = apvts.getRawParameterValue("luxwaveVolume");
+    luxwaveAttackMsParam        = apvts.getRawParameterValue("luxwaveAttackMs");
+    luxwaveDecayMsParam         = apvts.getRawParameterValue("luxwaveDecayMs");
+    luxwaveSustainLevelParam    = apvts.getRawParameterValue("luxwaveSustainLevel");
+    luxwaveReleaseMsParam       = apvts.getRawParameterValue("luxwaveReleaseMs");
+    luxwaveAttackCurveParam     = apvts.getRawParameterValue("luxwaveAttackCurve");
+    luxwaveDecayCurveParam      = apvts.getRawParameterValue("luxwaveDecayCurve");
+    luxwaveReleaseCurveParam    = apvts.getRawParameterValue("luxwaveReleaseCurve");
+    luxwaveFilterCutoffParam    = apvts.getRawParameterValue("luxwaveFilterCutoff");
+    luxwaveFilterEnvDepthParam  = apvts.getRawParameterValue("luxwaveFilterEnvDepth");
+    luxwaveLfoRateParam         = apvts.getRawParameterValue("luxwaveLfoRate");
+    luxwaveLfoDepthParam        = apvts.getRawParameterValue("luxwaveLfoDepth");
+    luxwaveScanModeParam        = apvts.getRawParameterValue("luxwaveScanMode");
+    luxwaveAmplitudeParam       = apvts.getRawParameterValue("luxwaveAmplitude");
+    acqGateModeParam            = apvts.getRawParameterValue("acqGateMode");
+    acqGateRateMsParam          = apvts.getRawParameterValue("acqGateRateMs");
+    acqGateSyncDivParam         = apvts.getRawParameterValue("acqGateSyncDiv");
+    acqGateMultDivParam         = apvts.getRawParameterValue("acqGateMultDiv");
+    luxstralVolumeParam         = apvts.getRawParameterValue("luxstralVolume");
+    luxstralBEnabledParam       = apvts.getRawParameterValue("luxstralBEnabled");
+    luxstralBVolumeParam        = apvts.getRawParameterValue("luxstralBVolume");
+
+    // CC1 mod-wheel targets driven from processBlock (setValueNotifyingHost)
+    luxpitchLfoDepthParam   = apvts.getParameter("luxpitchLfoDepth");
+    luxmaskLfoPosDepthParam = apvts.getParameter("luxmaskLfoPosDepth");
+
     // Register as listener for parameter changes
     apvts.addParameterListener(PARAM_UDP_PORT, this);
     apvts.addParameterListener(PARAM_UDP_BYTE1, this);
@@ -1472,6 +1518,21 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     // session reloads it later in setStateInformation().
     loadChainModelFromState();
 
+    // Deferred-dispatch table for parameterChanged() (see dispatcher): one
+    // dirty flag per parameter, drained by the 30 ms message-thread timer.
+    for (auto* p : getParameters())
+        if (auto* pw = dynamic_cast<juce::AudioProcessorParameterWithID*>(p))
+            if (paramIndexById_.find(pw->paramID) == paramIndexById_.end())
+            {
+                paramIndexById_[pw->paramID] = deferredParamIds_.size();
+                deferredParamIds_.add(pw->paramID);
+            }
+    paramDirty_ = std::make_unique<std::atomic<bool>[]>(
+        (size_t) juce::jmax(1, deferredParamIds_.size()));
+    for (int i = 0; i < deferredParamIds_.size(); ++i)
+        paramDirty_[(size_t) i].store(false, std::memory_order_relaxed);
+    startTimer(30);
+
     log_info("VST", "Sp3ctraAudioProcessor: Constructor complete (deferred init)");
     log_info("VST", "  - Shared core acquired (ref-count now %ld)",
              sharedCore.use_count());
@@ -1633,11 +1694,38 @@ void Sp3ctraAudioProcessor::changeProgramName (int index, const juce::String& ne
 }
 
 //==============================================================================
+void Sp3ctraAudioProcessor::setVisualizerSuspendedSafely (bool suspend)
+{
+    auto apply = [] (Sp3ctraAudioProcessor& p, bool s)
+    {
+        if (auto* editor = dynamic_cast<Sp3ctraAudioProcessorEditor*>(p.getActiveEditor()))
+        {
+            if (s) editor->suspendVisualizer();
+            else   editor->resumeVisualizer();
+        }
+    };
+
+    auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+    if (mm == nullptr || mm->isThisTheMessageThread())
+    {
+        apply(*this, suspend);
+        return;
+    }
+
+    // Off the message thread (host-dependent prepareToPlay): the editor may be
+    // mid-destruction on the message thread — marshal instead of touching it.
+    juce::WeakReference<Sp3ctraAudioProcessor> weakThis(this);
+    juce::MessageManager::callAsync([weakThis, suspend, apply]
+    {
+        if (auto* p = weakThis.get())
+            apply(*p, suspend);
+    });
+}
+
 void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     // 🛡️ PROTECTION: Suspend visualizer to prevent Metal/CoreGraphics race
-    if (auto* editor = dynamic_cast<Sp3ctraAudioProcessorEditor*>(getActiveEditor()))
-        editor->suspendVisualizer();
+    setVisualizerSuspendedSafely(true);
 
     log_info("VST", "=============================================================");
     log_info("VST", "prepareToPlay - SR=%.1f Hz, BS=%d samples", sampleRate, samplesPerBlock);
@@ -1646,7 +1734,13 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     extern sp3ctra_config_t g_sp3ctra_config;
     int oldSampleRate = g_sp3ctra_config.sampling_frequency;
     g_sp3ctra_config.sampling_frequency = static_cast<int>(sampleRate);
-    g_sp3ctra_config.audio_buffer_size   = samplesPerBlock;
+    // audio_buffer_size drives how many samples the synthesis engine WRITES into
+    // the shared output buffers. Once the pipeline runs, it must only change
+    // together with a successful buffer reallocation (ensureAudioBufferSize()
+    // below) — updating it unconditionally made the engine overflow buffers
+    // still allocated for the previous host block size.
+    if (!sharedCore || !sharedCore->isReady())
+        g_sp3ctra_config.audio_buffer_size = samplesPerBlock;
     g_sp3ctra_config.semitone_per_octave = 12;
     g_sp3ctra_config.comma_per_semitone  = 36;
 
@@ -1703,8 +1797,7 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
                                           sampleRate, samplesPerBlock))
         {
             log_error("VST", "prepareToPlay — sharedCore->startWithConfig() FAILED");
-            if (auto* ed = dynamic_cast<Sp3ctraAudioProcessorEditor*>(getActiveEditor()))
-                ed->resumeVisualizer();
+            setVisualizerSuspendedSafely(false);
             return;
         }
 
@@ -1721,6 +1814,15 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
         // The shared pipeline (UDP + synthesis thread) is already running.
         // This instance simply reads from the same luxstral_buffers_L/R globals.
         log_info("VST", "Shared pipeline already running — connecting as additional consumer");
+
+        // Host buffer size may have changed since the buffers were allocated —
+        // resize them (stops/restarts the synthesis thread). When refused
+        // (multi-instance), the old size stays authoritative and processBlock
+        // clamps its reads to luxstral_get_audio_buffer_size().
+        if (!sharedCore->ensureAudioBufferSize(samplesPerBlock))
+            log_warning("VST", "prepareToPlay — shared output buffers stay at %d "
+                               "samples (host asked %d); reads are clamped",
+                        luxstral_get_audio_buffer_size(), samplesPerBlock);
     }
 
     // ── LuxSampler player threads (per-instance, non-RT) ───────────────────
@@ -1743,8 +1845,7 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
 
     log_info("VST", "=============================================================");
 
-    if (auto* editor = dynamic_cast<Sp3ctraAudioProcessorEditor*>(getActiveEditor()))
-        editor->resumeVisualizer();
+    setVisualizerSuspendedSafely(false);
 }
 
 void Sp3ctraAudioProcessor::releaseResources()
@@ -1891,14 +1992,14 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // Triggers are consumed by SlotEditorComponent::timerCallback() (UI thread).
     {
         const int samplerCh =
-            static_cast<int>(apvts.getRawParameterValue("luxSamplerMidiChannel")->load()) + 1;
+            static_cast<int>(luxSamplerMidiChannelParam->load()) + 1;
 
-        const int recType  = static_cast<int>(apvts.getRawParameterValue("luxSamplerRecBindType")->load());
-        const int recNum   = static_cast<int>(apvts.getRawParameterValue("luxSamplerRecBindNum") ->load());
-        const int playType = static_cast<int>(apvts.getRawParameterValue("luxSamplerPlayBindType")->load());
-        const int playNum  = static_cast<int>(apvts.getRawParameterValue("luxSamplerPlayBindNum") ->load());
-        const int saveType = static_cast<int>(apvts.getRawParameterValue("luxSamplerSaveBindType")->load());
-        const int saveNum  = static_cast<int>(apvts.getRawParameterValue("luxSamplerSaveBindNum") ->load());
+        const int recType  = static_cast<int>(luxSamplerRecBindTypeParam->load());
+        const int recNum   = static_cast<int>(luxSamplerRecBindNumParam ->load());
+        const int playType = static_cast<int>(luxSamplerPlayBindTypeParam->load());
+        const int playNum  = static_cast<int>(luxSamplerPlayBindNumParam ->load());
+        const int saveType = static_cast<int>(luxSamplerSaveBindTypeParam->load());
+        const int saveNum  = static_cast<int>(luxSamplerSaveBindNumParam ->load());
 
         const int learnTarget = samplerMidiLearnTarget.load(std::memory_order_acquire);
 
@@ -2037,8 +2138,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 
     // ── LuxPitch MIDI (RT-safe) — fanned out to every active per-chain instance ──
     {
-        const int lpCh  = static_cast<int>(apvts.getRawParameterValue("luxpitchMidiChannel")->load()) + 1;
-        const int lpOct = static_cast<int>(apvts.getRawParameterValue("luxpitchOctaveOffset")->load()) - 2;
+        const int lpCh  = static_cast<int>(luxpitchMidiChannelParam->load()) + 1;
+        const int lpOct = static_cast<int>(luxpitchOctaveOffsetParam->load()) - 2;
         const uint32_t pitchBits = chainPitchMask_.load(std::memory_order_relaxed);
         for (const auto metadata : midiMessages)
         {
@@ -2049,7 +2150,7 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             {
                 // The wheel and the on-screen "LFO Depth" slider are a single
                 // control (shared param) — handle once, not per instance.
-                if (auto* p = apvts.getParameter("luxpitchLfoDepth"))
+                if (auto* p = luxpitchLfoDepthParam)
                     p->setValueNotifyingHost((float)msg.getControllerValue() / 127.0f);
                 continue;
             }
@@ -2073,8 +2174,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 
     // ── LuxMask MIDI (RT-safe) — fanned out to every active per-chain instance ──
     {
-        const int lmCh  = static_cast<int>(apvts.getRawParameterValue("luxmaskMidiChannel")->load()) + 1;
-        const int lmOct = static_cast<int>(apvts.getRawParameterValue("luxmaskOctaveOffset")->load()) - 2;
+        const int lmCh  = static_cast<int>(luxmaskMidiChannelParam->load()) + 1;
+        const int lmOct = static_cast<int>(luxmaskOctaveOffsetParam->load()) - 2;
         const uint32_t maskBits = chainMaskMask_.load(std::memory_order_relaxed);
         for (const auto metadata : midiMessages)
         {
@@ -2083,7 +2184,7 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 
             if (msg.isControllerOfType(1)) // CC1 mod wheel → drives the LFO Pos Depth slider (shared param)
             {
-                if (auto* p = apvts.getParameter("luxmaskLfoPosDepth"))
+                if (auto* p = luxmaskLfoPosDepthParam)
                     p->setValueNotifyingHost((float)msg.getControllerValue() / 127.0f);
                 continue;
             }
@@ -2107,11 +2208,11 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 
     // ── LuxSynth MIDI (RT-safe: push into lock-free ring buffer) ─────────────
     {
-        const bool lxEnabled = apvts.getRawParameterValue("luxsynthEnabled")->load() > 0.5f;
+        const bool lxEnabled = luxsynthEnabledParam->load() > 0.5f;
         if (lxEnabled && g_luxsynth_engine.initialized)
         {
-            const int lxCh  = static_cast<int>(apvts.getRawParameterValue("luxsynthMidiChannel")->load()) + 1;
-            const int lxOct = static_cast<int>(apvts.getRawParameterValue("luxsynthOctaveOffset")->load()) - 2;
+            const int lxCh  = static_cast<int>(luxsynthMidiChannelParam->load()) + 1;
+            const int lxOct = static_cast<int>(luxsynthOctaveOffsetParam->load()) - 2;
             for (const auto metadata : midiMessages)
             {
                 const auto msg = metadata.getMessage();
@@ -2128,11 +2229,11 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 
     // ── LuxWave MIDI (RT-safe: push into lock-free ring buffer) ──────────────
     {
-        const bool lwEnabled = apvts.getRawParameterValue("luxwaveEnabled")->load() > 0.5f;
+        const bool lwEnabled = luxwaveEnabledParam->load() > 0.5f;
         if (lwEnabled && g_luxwave_engine.initialized)
         {
-            const int lwCh  = static_cast<int>(apvts.getRawParameterValue("luxwaveMidiChannel")->load()) + 1;
-            const int lwOct = static_cast<int>(apvts.getRawParameterValue("luxwaveOctaveOffset")->load()) - 2;
+            const int lwCh  = static_cast<int>(luxwaveMidiChannelParam->load()) + 1;
+            const int lwOct = static_cast<int>(luxwaveOctaveOffsetParam->load()) - 2;
             for (const auto metadata : midiMessages)
             {
                 const auto msg = metadata.getMessage();
@@ -2158,10 +2259,10 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // it disables the gate (full-rate); otherwise it grants advances at the
     // chosen rate and the UDP thread holds the frame between grants.
     {
-        const int   mode    = static_cast<int> (apvts.getRawParameterValue("acqGateMode")->load());
-        const float rateMs  = apvts.getRawParameterValue("acqGateRateMs")->load();
-        const int   divIdx  = static_cast<int> (apvts.getRawParameterValue("acqGateSyncDiv")->load());
-        const int   mdIdx   = static_cast<int> (apvts.getRawParameterValue("acqGateMultDiv")->load());
+        const int   mode    = static_cast<int> (acqGateModeParam->load());
+        const float rateMs  = acqGateRateMsParam->load();
+        const int   divIdx  = static_cast<int> (acqGateSyncDivParam->load());
+        const int   mdIdx   = static_cast<int> (acqGateMultDivParam->load());
 
         // Index → period-in-beats (1/1 .. 1/32, assuming a quarter-note beat).
         static constexpr double kSyncDivBeats[6]  = { 4.0, 2.0, 1.0, 0.5, 0.25, 0.125 };
@@ -2238,8 +2339,11 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         // Check if the buffer at readIdx has new data
         int leftReady = __atomic_load_n(&luxstral_buffers_L[readIdx].ready, __ATOMIC_ACQUIRE);
         int rightReady = __atomic_load_n(&luxstral_buffers_R[readIdx].ready, __ATOMIC_ACQUIRE);
-        
-        const int synthBufferSize = g_sp3ctra_config.audio_buffer_size;
+
+        // Clamp to the ALLOCATED size, not g_sp3ctra_config.audio_buffer_size —
+        // after a host buffer-size change the reallocation can be refused
+        // (multi-instance) and reading numSamples would run past the allocation.
+        const int synthBufferSize = luxstral_get_audio_buffer_size();
         const int samplesToRead = (numSamples <= synthBufferSize) ? numSamples : synthBufferSize;
         
         if (leftReady && rightReady && readIdx != lastConsumedReadIdx) {
@@ -2249,7 +2353,7 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 
                 if (leftData && rightData) {
                 if (luxstralEnabled) {
-                    const float lsVol = apvts.getRawParameterValue("luxstralVolume")->load();
+                    const float lsVol = luxstralVolumeParam->load();
                     if (totalNumOutputChannels >= 1) {
                         float* destLeft = buffer.getWritePointer(0);
                         for (int i = 0; i < samplesToRead; ++i)
@@ -2278,7 +2382,7 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             float* rightData = luxstral_buffers_R[readIdx].data;
             
             if (leftData && rightData) {
-                const float lsVol = apvts.getRawParameterValue("luxstralVolume")->load();
+                const float lsVol = luxstralVolumeParam->load();
                 if (totalNumOutputChannels >= 1) {
                     float* destLeft = buffer.getWritePointer(0);
                     for (int i = 0; i < samplesToRead; ++i)
@@ -2307,7 +2411,7 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // the buffer; A + B + LuxSynth + LuxWave sum). Gated by model presence + its
     // own volume. Independent chain input is prepared in multithreading.c.
     // ========================================================================
-    const bool luxstralBEnabled = apvts.getRawParameterValue("luxstralBEnabled")->load() >= 0.5f;
+    const bool luxstralBEnabled = luxstralBEnabledParam->load() >= 0.5f;
     if (luxstralBEnabled && luxstralBPresent_.load(std::memory_order_relaxed)
         && sharedCore && sharedCore->isReady() && luxstral_are_audio_buffers_ready()) {
         extern AudioImageBuffer luxstral_b_buffers_L[2];
@@ -2319,7 +2423,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         int leftReady  = __atomic_load_n(&luxstral_b_buffers_L[readIdx].ready, __ATOMIC_ACQUIRE);
         int rightReady = __atomic_load_n(&luxstral_b_buffers_R[readIdx].ready, __ATOMIC_ACQUIRE);
 
-        const int synthBufferSize = g_sp3ctra_config.audio_buffer_size;
+        // Clamp to the ALLOCATED size (see engine A block above).
+        const int synthBufferSize = luxstral_get_audio_buffer_size();
         const int samplesToRead = (numSamples <= synthBufferSize) ? numSamples : synthBufferSize;
 
         if (leftReady && rightReady) {
@@ -2329,7 +2434,7 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             float* leftData  = luxstral_b_buffers_L[readIdx].data;
             float* rightData = luxstral_b_buffers_R[readIdx].data;
             if (leftData && rightData) {
-                const float lsVolB = apvts.getRawParameterValue("luxstralBVolume")->load();
+                const float lsVolB = luxstralBVolumeParam->load();
                 if (totalNumOutputChannels >= 1) {
                     float* destLeft = buffer.getWritePointer(0);
                     for (int i = 0; i < samplesToRead; ++i)
@@ -2359,7 +2464,7 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // ========================================================================
     if (sharedCore && sharedCore->isReady() && g_luxsynth_engine.initialized)
     {
-        const bool lxEnabled = apvts.getRawParameterValue("luxsynthEnabled")->load() > 0.5f;
+        const bool lxEnabled = luxsynthEnabledParam->load() > 0.5f;
         if (lxEnabled)
         {
             // 1. Drain pending MIDI events into engine voices
@@ -2371,7 +2476,7 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                                     g_luxsynth_engine.output_right);
 
             // 3. Mix into JUCE output buffer (additive)
-            const float lxVol = apvts.getRawParameterValue("luxsynthVolume")->load();
+            const float lxVol = luxsynthVolumeParam->load();
 
             if (totalNumOutputChannels >= 1)
             {
@@ -2397,28 +2502,28 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // ========================================================================
     if (sharedCore && sharedCore->isReady() && g_luxwave_engine.initialized)
     {
-        const bool lwEnabled = apvts.getRawParameterValue("luxwaveEnabled")->load() > 0.5f;
+        const bool lwEnabled = luxwaveEnabledParam->load() > 0.5f;
         if (lwEnabled)
         {
             // 1. Update engine config from APVTS (RT-safe: simple struct copy)
             LuxWaveConfig lwCfg;
-            lwCfg.attack_ms           = apvts.getRawParameterValue("luxwaveAttackMs")->load();
-            lwCfg.decay_ms            = apvts.getRawParameterValue("luxwaveDecayMs")->load();
-            lwCfg.sustain_level       = apvts.getRawParameterValue("luxwaveSustainLevel")->load();
-            lwCfg.release_ms          = apvts.getRawParameterValue("luxwaveReleaseMs")->load();
-            lwCfg.attack_curve        = apvts.getRawParameterValue("luxwaveAttackCurve")->load();
-            lwCfg.decay_curve         = apvts.getRawParameterValue("luxwaveDecayCurve")->load();
-            lwCfg.release_curve       = apvts.getRawParameterValue("luxwaveReleaseCurve")->load();
+            lwCfg.attack_ms           = luxwaveAttackMsParam->load();
+            lwCfg.decay_ms            = luxwaveDecayMsParam->load();
+            lwCfg.sustain_level       = luxwaveSustainLevelParam->load();
+            lwCfg.release_ms          = luxwaveReleaseMsParam->load();
+            lwCfg.attack_curve        = luxwaveAttackCurveParam->load();
+            lwCfg.decay_curve         = luxwaveDecayCurveParam->load();
+            lwCfg.release_curve       = luxwaveReleaseCurveParam->load();
             lwCfg.filter_attack_ms    = 20.0f;
             lwCfg.filter_decay_ms     = 150.0f;
             lwCfg.filter_sustain      = 0.5f;
             lwCfg.filter_release_ms   = 300.0f;
-            lwCfg.filter_cutoff_hz    = apvts.getRawParameterValue("luxwaveFilterCutoff")->load();
-            lwCfg.filter_env_depth_hz = apvts.getRawParameterValue("luxwaveFilterEnvDepth")->load();
-            lwCfg.lfo_rate_hz         = apvts.getRawParameterValue("luxwaveLfoRate")->load();
-            lwCfg.lfo_depth_semitones = apvts.getRawParameterValue("luxwaveLfoDepth")->load();
-            lwCfg.scan_mode           = (LuxWaveScanMode)static_cast<int>(apvts.getRawParameterValue("luxwaveScanMode")->load());
-            lwCfg.amplitude           = apvts.getRawParameterValue("luxwaveAmplitude")->load();
+            lwCfg.filter_cutoff_hz    = luxwaveFilterCutoffParam->load();
+            lwCfg.filter_env_depth_hz = luxwaveFilterEnvDepthParam->load();
+            lwCfg.lfo_rate_hz         = luxwaveLfoRateParam->load();
+            lwCfg.lfo_depth_semitones = luxwaveLfoDepthParam->load();
+            lwCfg.scan_mode           = (LuxWaveScanMode)static_cast<int>(luxwaveScanModeParam->load());
+            lwCfg.amplitude           = luxwaveAmplitudeParam->load();
             lwCfg.sample_rate         = (float)getSampleRate();
             lwCfg.buffer_size         = numSamples;
             lwCfg.enabled             = true;
@@ -2433,7 +2538,7 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                                    g_luxwave_engine.output_right);
 
             // 4. Mix into JUCE output buffer (additive)
-            const float lwVol = apvts.getRawParameterValue("luxwaveVolume")->load();
+            const float lwVol = luxwaveVolumeParam->load();
             if (totalNumOutputChannels >= 1)
             {
                 float* dest = buffer.getWritePointer(0);
@@ -2552,6 +2657,33 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
     if (xmlState.get() != nullptr) {
         if (xmlState->hasTagName(apvts.state.getType())) {
             apvts.replaceState(juce::ValueTree::fromXml(*xmlState));
+
+            // Everything below mutates non-APVTS state that UI timers iterate
+            // concurrently (chainModel_, SCORE/SEQ trees, engines). Some hosts
+            // call setStateInformation from a project-loading thread — apply
+            // on the message thread only (replaceState above is thread-safe).
+            auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+            if (mm == nullptr || mm->isThisTheMessageThread())
+            {
+                applyRestoredStateOnMessageThread();
+            }
+            else
+            {
+                juce::WeakReference<Sp3ctraAudioProcessor> weakThis(this);
+                juce::MessageManager::callAsync([weakThis]
+                {
+                    if (auto* p = weakThis.get())
+                        p->applyRestoredStateOnMessageThread();
+                });
+            }
+        }
+    }
+}
+
+void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
+{
+    {
+        {
             // Transport must never auto-run on open: force the video scroll to
             // STOP regardless of what the saved session had. A session stored
             // while playing would otherwise resume scrolling the moment the
@@ -2681,8 +2813,62 @@ juce::String Sp3ctraAudioProcessor::getUdpAddressString() const
 }
 
 //==============================================================================
-// Parameter Change Listener (called when user modifies parameters in UI)
+// Parameter Change Listener — DISPATCHER.
+// APVTS listeners fire synchronously on whatever thread set the value: the
+// audio thread for host automation / MIDI-mapped params (CC1 → LFO depth), a
+// loading thread for some hosts. The real handler below does message-thread
+// work (applyConfigurationToCore ≈ 60 String lookups + logs, source routing
+// under db->mutex, UDP restart with joins/sleeps) — running it on the audio
+// thread caused xruns up to guaranteed dropouts. Defer via per-param dirty
+// flags drained by the 30 ms timer; values are re-read at apply time.
 void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, float newValue)
+{
+    auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+    if (mm == nullptr || mm->isThisTheMessageThread())
+    {
+        applyParameterChange(parameterID, newValue);
+        return;
+    }
+
+    // RT path: atomics only (map lookup = String compares, no alloc/lock).
+    const auto it = paramIndexById_.find(parameterID);
+    if (it == paramIndexById_.end())
+        return;
+    paramDirty_[(size_t) it->second].store(true, std::memory_order_relaxed);
+    anyParamDirty_.store(true, std::memory_order_release);
+}
+
+void Sp3ctraAudioProcessor::timerCallback()
+{
+    // ── Deferred parameter changes (audio/loader thread → here) ──────────────
+    if (anyParamDirty_.exchange(false, std::memory_order_acq_rel))
+    {
+        for (int i = 0; i < deferredParamIds_.size(); ++i)
+            if (paramDirty_[(size_t) i].exchange(false, std::memory_order_acq_rel))
+                if (auto* raw = apvts.getRawParameterValue(deferredParamIds_[i]))
+                    applyParameterChange(deferredParamIds_[i], raw->load());
+    }
+
+    // ── Deferred Pitch/Mask/VideoScroll pool resets (see header) ─────────────
+    if ((pendingPitchResets_ | pendingMaskResets_ | pendingVideoScrollInits_) != 0
+        && juce::Time::getMillisecondCounter() - poolResetArmedMs_ >= 40)
+    {
+        for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
+        {
+            if ((pendingPitchResets_ >> i) & 1u) lux_pitch_reset(lux_pitch_instance(i));
+            if ((pendingMaskResets_  >> i) & 1u) lux_mask_reset(lux_mask_instance(i));
+            if ((pendingVideoScrollInits_ >> i) & 1u)
+                video_scroll_init(video_scroll_instance(i));
+        }
+        pendingPitchResets_ = pendingMaskResets_ = pendingVideoScrollInits_ = 0;
+    }
+
+    // ── RT profiler: drain deferred logs (RT threads never log directly) ─────
+    rt_profiler_flush_logs(&g_vst_rt_profiler);
+}
+
+// Real parameter handler — message thread only (see dispatcher above).
+void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID, float newValue)
 {
     log_debug("VST", "Parameter '%s' changed to %.2f", parameterID.toRawUTF8(), newValue);
 
@@ -3140,18 +3326,19 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
 
     // Reset the transient state (held voices, LFO phase — config untouched) of
     // every pool slot that just lost its Pitch/Mask instance or changed its
-    // chain binding. Runs AFTER the publish above: the synth thread no longer
-    // pulls these pools, and we are on the message thread like every other
-    // pool-state writer. Without this, a removed instance's held voices would
+    // chain binding. Without this, a removed instance's held voices would
     // silently resurface when the module (or a new chain) reuses the slot.
+    // DEFERRED (not immediate): the publish above only takes effect from the
+    // NEXT frame — the UDP/feeder thread may still be running the CURRENT
+    // frame with the OLD plan, actively writing these very pool instances.
+    // The processor timer executes the reset ≥40 ms later (frames last ~1 ms).
     {
         const uint32_t lostPitch = (prevPitchSlots_ & ~pitchMask) | staleSlots;
         const uint32_t lostMask  = (prevMaskSlots_  & ~maskMask)  | staleSlots;
-        for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
-        {
-            if ((lostPitch >> i) & 1u) lux_pitch_reset(lux_pitch_instance(i));
-            if ((lostMask  >> i) & 1u) lux_mask_reset(lux_mask_instance(i));
-        }
+        pendingPitchResets_ |= lostPitch;
+        pendingMaskResets_  |= lostMask;
+        if (lostPitch != 0 || lostMask != 0)
+            poolResetArmedMs_ = juce::Time::getMillisecondCounter();
         prevPitchSlots_ = pitchMask;
         prevMaskSlots_  = maskMask;
     }
@@ -3635,7 +3822,14 @@ void Sp3ctraAudioProcessor::teardownAbsentModules(const std::set<ModuleType>& no
                 vsNow.insert(m.slot);
     for (int slot : videoScrollSlots_)
         if (vsNow.count(slot) == 0)
-            video_scroll_init(video_scroll_instance(slot));   // re-init = clear ring
+        {
+            // Deferred re-init (= clear ring): the UDP/feeder thread may still
+            // be capturing into this slot for the in-flight frame taken with
+            // the OLD plan — memset'ing 6.3 MB under it would race the writes.
+            // The processor timer runs it ≥40 ms after the publish.
+            pendingVideoScrollInits_ |= (1u << slot);
+            poolResetArmedMs_ = juce::Time::getMillisecondCounter();
+        }
     // A slot that just (re)appeared is a freshly placed output: force its enable
     // ON so a new VideoScroll block starts visible even if that slot was left
     // disabled by a previously removed instance.

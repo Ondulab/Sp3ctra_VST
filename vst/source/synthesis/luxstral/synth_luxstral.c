@@ -697,6 +697,12 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
   float contrast_factor = 0.0f;
   int has_preprocessed = 0;
 
+  /* SRC-GATE diagnostic snapshot — captured under db->mutex, logged after
+   * unlock (never log while holding a mutex shared with the UDP thread). */
+  int      _diag_print = 0, _diag_src = -1, _diag_tag = -1;
+  float    _diag_gray_sum = 0.0f, _diag_notes_sum = 0.0f, _diag_cf = 0.0f;
+  uint64_t _diag_ts = 0;
+
   pthread_mutex_lock(&db->mutex);
   has_preprocessed = (db->dataReady != 0) && (db->preprocessed_data.timestamp_us != 0);
 #ifdef VST_MODE
@@ -711,8 +717,12 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
                 : g_sp3ctra_config.luxstral_source_type;
     int tag = db->dataReady;
 
-    /* Diagnostic: print source routing state every ~500 synth calls (~0.5s) */
-    int _diag_print = ((eng->diag_ctr++ % 500) == 0);
+    /* Diagnostic: print source routing state every ~500 synth calls (~0.5s).
+     * Values are captured under db->mutex; the log_info itself runs AFTER the
+     * unlock below — logging (logger mutex + fprintf + fflush) while holding
+     * db->mutex stalled the UDP thread and the FramePlayerThread on every
+     * slow stderr flush (periodic crackle synced to the log cadence). */
+    _diag_print = ((eng->diag_ctr++ % 500) == 0);
 
     if (has_preprocessed) {
       if ((src == 0 && tag != 2) || (src == 1 && tag != 1)) {
@@ -721,19 +731,16 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
     }
 
     if (_diag_print) {
-      /* Compute energy of the preprocessed grayscale + notes for debugging */
-      float gray_sum = 0.0f, notes_sum = 0.0f;
       if (has_preprocessed) {
         for (int _d = 0; _d < nb_pixels && _d < 3456; _d++)
-          gray_sum += db->preprocessed_data.additive.grayscale[_d];
+          _diag_gray_sum += db->preprocessed_data.additive.grayscale[_d];
         for (int _d = 0; _d < 3456; _d++)
-          notes_sum += db->preprocessed_data.additive.notes[_d];
+          _diag_notes_sum += db->preprocessed_data.additive.notes[_d];
+        _diag_cf = db->preprocessed_data.additive.contrast_factor;
       }
-      log_info("SRC-GATE", "src=%d tag=%d has_pre=%d cf=%.4f gray_sum=%.2f notes_sum=%.2f ts=%llu",
-               src, tag, has_preprocessed,
-               has_preprocessed ? db->preprocessed_data.additive.contrast_factor : 0.0f,
-               gray_sum, notes_sum,
-               (unsigned long long)db->preprocessed_data.timestamp_us);
+      _diag_src = src;
+      _diag_tag = tag;
+      _diag_ts  = db->preprocessed_data.timestamp_us;
     }
   }
 #endif
@@ -743,6 +750,13 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
     contrast_factor = db->preprocessed_data.additive.contrast_factor;
   }
   pthread_mutex_unlock(&db->mutex);
+
+#ifdef VST_MODE
+  if (_diag_print)
+    log_info("SRC-GATE", "src=%d tag=%d has_pre=%d cf=%.4f gray_sum=%.2f notes_sum=%.2f ts=%llu",
+             _diag_src, _diag_tag, has_preprocessed, _diag_cf,
+             _diag_gray_sum, _diag_notes_sum, (unsigned long long)_diag_ts);
+#endif
 
   if (!has_preprocessed) {
 #ifdef VST_MODE

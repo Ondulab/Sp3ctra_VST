@@ -27,9 +27,13 @@ void video_scroll_init(VideoScrollState *state)
 {
     if (!state) return;
     memset(state->slots, 0, sizeof(state->slots));   /* ~6.3 MB, INIT ONLY (never RT) */
-    atomic_init(&state->write_index, 0u);
-    atomic_init(&state->generation,  0u);
-    atomic_init(&state->paused,      0);
+    /* atomic_store, NOT atomic_init: this also runs as a RE-init (module removed
+     * from a chain) on atomics that other threads may still be loading —
+     * atomic_init on a live atomic is undefined behaviour. First init is fine
+     * too (static storage is already valid zero state). */
+    atomic_store_explicit(&state->write_index, 0u, memory_order_release);
+    atomic_store_explicit(&state->generation,  0u, memory_order_release);
+    atomic_store_explicit(&state->paused,      0,  memory_order_release);
 }
 
 /* ── Producer (synthesis thread) ───────────────────────────────────────────── */
