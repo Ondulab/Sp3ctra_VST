@@ -39,6 +39,9 @@ juce_add_plugin(Sp3ctraVST
     PLUGIN_CODE "Sp3c"
     FORMATS VST3 AU Standalone
     PRODUCT_NAME "Sp3ctra"
+    # M9 — CAMERA source module (juce::CameraDevice / AVFoundation capture)
+    CAMERA_PERMISSION_ENABLED TRUE
+    CAMERA_PERMISSION_TEXT "Sp3ctra uses the camera as a scan-line source (CAMERA module)."
 )
 
 # Source files for the plugin wrapper (C++)
@@ -108,6 +111,17 @@ target_sources(Sp3ctraVST
         source/ui/setup/SamplerSetupPanel.h
         source/ui/setup/ScoreSetupPanel.cpp
         source/ui/setup/ScoreSetupPanel.h
+
+        # M9 — IMAGE / VIDEO / CAMERA source modules (engines + service + UI)
+        source/sources/MediaSourceEngines.cpp
+        source/sources/MediaSourceEngines.h
+        source/sources/MediaSourceService.h
+        source/sources/VideoFileReader.h
+        source/sources/VideoFileReader.mm
+        source/sources/ui/MediaSourcePage.cpp
+        source/sources/ui/MediaSourcePage.h
+        source/sources/ui/MediaSourceSetupPanel.cpp
+        source/sources/ui/MediaSourceSetupPanel.h
 
         # LuxSampler subsystem
         source/luxsampler/LuxSampler.cpp
@@ -238,6 +252,8 @@ target_sources(Sp3ctraVST
         source/processing/lux_mask.c
         source/processing/video_scroll.c
         source/processing/video_scroll.h
+        source/processing/internal_source.c
+        source/processing/internal_source.h
 
         # SCORE — offline spectrogram engine (KissFFT port of Sp3ctraGen)
         source/processing/score_engine.c
@@ -284,6 +300,7 @@ target_compile_definitions(Sp3ctraVST PRIVATE
     JUCE_VST3_CAN_REPLACE_VST2=0
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
+    JUCE_USE_CAMERA=1      # M9 — CAMERA source module (juce::CameraDevice)
     NO_SFML=1              # VST does not use SFML (C code uses this for conditional compilation)
     VST_MODE=1
 )
@@ -298,7 +315,18 @@ target_link_libraries(Sp3ctraVST PRIVATE
     juce::juce_core
     juce::juce_data_structures
     juce::juce_events
+    juce::juce_video       # M9 — CAMERA source (juce::CameraDevice)
 )
+
+# M9 — VideoFileReader.mm (headless AVPlayer frame reader for the VIDEO source)
+if(APPLE)
+    target_link_libraries(Sp3ctraVST PRIVATE
+        "-framework AVFoundation"
+        "-framework CoreMedia"
+        "-framework CoreVideo"
+        "-framework QuartzCore"
+    )
+endif()
 
 # Standard settings
 target_compile_features(Sp3ctraVST PRIVATE cxx_std_17 c_std_11)

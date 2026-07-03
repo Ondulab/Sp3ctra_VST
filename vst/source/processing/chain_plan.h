@@ -42,9 +42,12 @@ typedef enum {
     CHAIN_SRC_LIVE = 0,   /* SP3CTRA raw UDP feed */
     CHAIN_SRC_SAMPLER,    /* sampler playback frames */
     CHAIN_SRC_SCORE,      /* score playback frames */
-    CHAIN_SRC_IMAGE,      /* loaded still image (future) */
-    CHAIN_SRC_VIDEO,      /* video frames (future) */
-    CHAIN_SRC_NONE        /* no source placed (treated as live fallback) */
+    CHAIN_SRC_IMAGE,      /* loaded still image (internal source, M9) */
+    CHAIN_SRC_VIDEO,      /* video file frames (internal source, M9) */
+    CHAIN_SRC_NONE,       /* no source placed (treated as live fallback) */
+    CHAIN_SRC_CAMERA      /* camera device frames (internal source, M9).
+                           * Appended AFTER NONE to keep persisted ordinals
+                           * of older sessions valid. */
 } ChainSourceKind;
 
 /* Synth slot indices in ChainPlan.synth[]. LuxStral has two engines (A/B). */

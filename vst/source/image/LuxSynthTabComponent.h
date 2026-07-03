@@ -1,21 +1,35 @@
 /**
  * @file LuxSynthTabComponent.h
- * @brief Tab 3 — LUXSYNTH: pipeline visual, source selector, toggles, output nodes.
+ * @brief LUXSYNTH module — the WHOLE module UI on one page, laid out in 2 columns
+ *        (same charter as LuxStralTabComponent).
  *
- * Pipeline:  Source → [Negative] → [DC Blocking] → Gamma →
- *            SYNTH_GRAY / SYNTH_COLOR / SYNTH_BLOB → FFT → FFT_COLOR
+ *   ┌ Volume ════════════════════ ┐   ┌ LUXSYNTH -- FFT ADDITIVE ┐
+ *   │ LEFT                │ RIGHT  │
+ *   │ ┌ IMAGE ─────────┐  │ ┌ ANALYSIS ─────┐
+ *   │ │ Negative/DC    │  │ │ BLOB DETECTION │
+ *   │ │ Gamma/Contrast │  │ │  Ampl/Pix/...  │
+ *   │ └────────────────┘  │ │ FFT            │
+ *   │ ┌ OSCILLATORS ───┐  │ │  Bins/Smooth   │
+ *   │ │ VOLUME ADSR    │  │ └───────────────┘
+ *   │ │  [ env curve ] │  │ ┌ FILTER & LFO ─┐
+ *   │ │ Oscillators    │  │ │ FILTER ADSR    │
+ *   │ └────────────────┘  │ │  [ env curve ] │
+ *   │                     │ │ Cutoff/Depth/..│
+ *   │                     │ └───────────────┘
  *
- * Gamma is always active (no enable toggle) — set to 1.0 for identity (no-op).
+ * The page was previously split across two stacked components (image page +
+ * AudioSynthPanel); the module is now a single self-contained component.
  *
- * UI style: follows the Synth-page charter (Label + Slider rows,
- * kFontSettings, centredRight justification). Boolean parameters are
- * rendered as ToggleButtons for visual consistency with LUXSTRAL tab.
+ * Signal flow: IMAGE conditioning → OSCILLATORS (FFT-additive voice + volume
+ * ADSR) on the left; BLOB/FFT ANALYSIS + FILTER (ADSR + LFO) on the right.
  */
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "../ui/AudioPanelWidgets.h"      // AudioPanelLayout + AudioPanelUI (shared look)
+#include "../ui/EnvelopeEditorComponent.h"
 #include "VisualizerMode.h"
 
 class LuxSynthTabComponent : public juce::Component
@@ -26,234 +40,359 @@ public:
     {
         auto& apvts = p.getAPVTS();
 
-        // ── Source selector ───────────────────────────────────────────────
         // ── Source selector — RETIRED (source follows chain placement) ──────
-        // LuxSynth (and LuxWave, same chain) live on Chain 2, so they always
-        // read the Chain 2 signal; the per-engine selector is no longer shown.
         // The combo + attachment are kept (not made visible) so the param
         // plumbing survives for the future modular-chain routing.
         sourceCombo.addItem("Chain 1", 1);
         sourceCombo.addItem("Chain 2", 2);
-        sourceAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            apvts, "luxsynthSource", sourceCombo));
+        sourceAttach.reset(new CmbAttach(apvts, "luxsynthSource", sourceCombo));
 
-        // ── Negative (ToggleButton) ───────────────────────────────────────
-        initLabel(negativeLabel, "Negative");
-        negativeToggle.setButtonText("Active");
+        // ── Master Volume (top of left column) ────────────────────────────
+        initLabel(volumeLabel, "Volume");
+        initSlider(volumeSlider);
+        volumeAttach.reset(new SldAttach(apvts, "luxsynthVolume", volumeSlider));
+
+        // ── IMAGE — conditioning (label is the toggle text itself) ──────────
+        negativeToggle.setButtonText("Negative");
         addAndMakeVisible(negativeToggle);
-        negativeAttach.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(
-            apvts, "luxsynthInversion", negativeToggle));
+        negativeAttach.reset(new BtnAttach(apvts, "luxsynthInversion", negativeToggle));
 
-        // ── DC Blocking (ToggleButton) ────────────────────────────────────
-        initLabel(dcBlockLabel, "DC Blocking");
-        dcBlockToggle.setButtonText("Active");
+        dcBlockToggle.setButtonText("DC Blocking");
         addAndMakeVisible(dcBlockToggle);
-        dcBlockAttach.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(
-            apvts, "luxsynthAcRemoval", dcBlockToggle));
+        dcBlockAttach.reset(new BtnAttach(apvts, "luxsynthAcRemoval", dcBlockToggle));
 
-        // ── Gamma Value (Slider) — always active, 1.0 = no-op ────────────
-        initLabel(gammaValueLabel, "Gamma");
-        gammaSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        gammaSlider.setTextBoxStyle(juce::Slider::TextBoxRight,
-                                    false,
-                                    50,
-                                    Sp3ctraTheme::kControlH);
-        addAndMakeVisible(gammaSlider);
-        gammaValueAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxsynthGammaValue", gammaSlider));
+        initLabel(gammaLabel, "Gamma");
+        initSlider(gammaSlider);
+        gammaAttach.reset(new SldAttach(apvts, "luxsynthGammaValue", gammaSlider));
 
-        // ── Contrast Min (Slider) ───────────────────────────────────────────
         initLabel(contrastMinLabel, "Contrast Min");
-        contrastMinSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        contrastMinSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                          50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(contrastMinSlider);
-        contrastMinAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "samplerContrastMin", contrastMinSlider));
+        initSlider(contrastMinSlider);
+        contrastMinAttach.reset(new SldAttach(apvts, "samplerContrastMin", contrastMinSlider));
 
-        // ── BLOB DETECTION — LuxSynth-only params (isolated from LuxStral) ──
-        // Row 4: Amplitude threshold — expressed as normalised brightness [0..1].
-        // 0.05 means pixels brighter than 5% of max amplitude are considered active.
+        // ── OSCILLATORS — additive voice: volume ADSR + oscillator count ─────
+        volEnv = std::make_unique<EnvelopeEditorComponent>(
+            apvts, juce::Colour(0xff66ccaa),
+            "luxsynthAttackMs", "luxsynthDecayMs", "luxsynthSustainLevel", "luxsynthReleaseMs",
+            "luxsynthAttackCurve", "luxsynthDecayCurve", "luxsynthReleaseCurve");
+        addAndMakeVisible(*volEnv);
+
+        AudioPanelUI::initKnob(numOscSlider);
+        addAndMakeVisible(numOscSlider);
+        numOscAttach.reset(new SldAttach(apvts, "luxsynthNumOscillators", numOscSlider));
+
+        // ── ANALYSIS — blob detection (LuxSynth-only params) ────────────────
+        // Amplitude threshold — normalised brightness [0..1]: pixels brighter
+        // than this fraction of max amplitude are considered active.
         initLabel(blobThreshLabel, "Ampl. Thr.");
-        blobThreshSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        blobThreshSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                         50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(blobThreshSlider);
-        blobThreshAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "lxBlobThreshold", blobThreshSlider));
-
-        // Row 5: Pixel threshold — minimum blob span in CIS pixels.
-        // Acts as a width filter: blobs narrower than this value are discarded.
+        initSlider(blobThreshSlider);
+        blobThreshAttach.reset(new SldAttach(apvts, "lxBlobThreshold", blobThreshSlider));
+        // Pixel threshold — minimum blob span in CIS pixels (width filter).
         initLabel(blobMinWidthLabel, "Pix. Thr.");
-        blobMinWidthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        blobMinWidthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                           50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(blobMinWidthSlider);
-        blobMinWidthAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "lxBlobMinWidth", blobMinWidthSlider));
-
-        // Row 7: Merge Gap
+        initSlider(blobMinWidthSlider);
+        blobMinWidthAttach.reset(new SldAttach(apvts, "lxBlobMinWidth", blobMinWidthSlider));
         initLabel(blobMergeGapLabel, "Merge Gap");
-        blobMergeGapSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        blobMergeGapSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                            50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(blobMergeGapSlider);
-        blobMergeGapAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "lxBlobMergeGap", blobMergeGapSlider));
-
-        // Row 7: Color Split — how aggressively color differences cause splits.
-        // 0% = no color-based split (pure gap-based merge, color ignored).
-        // 100% = maximum split: any color divergence breaks a blob, even within
-        //        a continuous active region (independent of Merge Gap).
+        initSlider(blobMergeGapSlider);
+        blobMergeGapAttach.reset(new SldAttach(apvts, "lxBlobMergeGap", blobMergeGapSlider));
+        // Color Split — 0% = gap-based merge only, 100% = any colour divergence
+        // breaks a blob (independent of Merge Gap).
         initLabel(blobColorSplitLabel, "Color Split");
-        blobColorSplitSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        blobColorSplitSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                              50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(blobColorSplitSlider);
-        blobColorSplitAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "lxBlobColorSplit", blobColorSplitSlider));
+        initSlider(blobColorSplitSlider);
+        blobColorSplitAttach.reset(new SldAttach(apvts, "lxBlobColorSplit", blobColorSplitSlider));
 
-        // ── FFT PARAMETERS ────────────────────────────────────────────────
-        // Row 8: FFT Bins — number of harmonics extracted from spatial FFT.
-        // Each bin maps to one LuxSynth oscillator in the additive synthesis engine.
-        // 32 = fast / low-res, 256 = slow / high-res (default 128).
+        // ── ANALYSIS — FFT (bins map 1:1 to additive oscillators) ───────────
         initLabel(fftBinsLabel, "FFT Bins");
         addAndMakeVisible(fftBinsCombo);
         fftBinsCombo.addItem("32  - fast",    1);
         fftBinsCombo.addItem("64",            2);
         fftBinsCombo.addItem("128 - default", 3);
         fftBinsCombo.addItem("256 - quality", 4);
-        fftBinsAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            apvts, "lxFftBins", fftBinsCombo));
+        fftBinsAttach.reset(new CmbAttach(apvts, "lxFftBins", fftBinsCombo));
 
-        // Row 9: FFT Smoothing — temporal averaging of FFT magnitudes.
-        // 0 = very reactive (fast attack + fast release).
-        // 1 = very smooth   (slow attack + slow release).
+        // Temporal averaging of FFT magnitudes: 0 = reactive, 1 = smooth.
         initLabel(fftSmoothingLabel, "Smoothing");
-        fftSmoothingSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        fftSmoothingSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                           50, Sp3ctraTheme::kControlH);
-        addAndMakeVisible(fftSmoothingSlider);
-        fftSmoothingAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "lxFftSmoothing", fftSmoothingSlider));
+        initSlider(fftSmoothingSlider);
+        fftSmoothingAttach.reset(new SldAttach(apvts, "lxFftSmoothing", fftSmoothingSlider));
+
+        // ── FILTER & LFO — filter ADSR + modulation knobs ───────────────────
+        fltEnv = std::make_unique<EnvelopeEditorComponent>(
+            apvts, juce::Colour(0xffcc88cc),
+            "luxsynthFilterAttackMs", "luxsynthFilterDecayMs", "luxsynthFilterSustain", "luxsynthFilterReleaseMs",
+            "luxsynthFilterAttackCurve", "luxsynthFilterDecayCurve", "luxsynthFilterReleaseCurve");
+        addAndMakeVisible(*fltEnv);
+
+        AudioPanelUI::initKnob(fltCutoffSlider, " Hz");
+        addAndMakeVisible(fltCutoffSlider);
+        fltCutoffAttach.reset(new SldAttach(apvts, "luxsynthFilterCutoff", fltCutoffSlider));
+
+        AudioPanelUI::initKnob(fltDepthSlider);
+        addAndMakeVisible(fltDepthSlider);
+        fltDepthAttach.reset(new SldAttach(apvts, "luxsynthFilterEnvDepth", fltDepthSlider));
+
+        AudioPanelUI::initKnob(lfoRateSlider, " Hz");
+        addAndMakeVisible(lfoRateSlider);
+        lfoRateAttach.reset(new SldAttach(apvts, "luxsynthLfoRate", lfoRateSlider));
+
+        AudioPanelUI::initKnob(lfoDepthSlider);
+        addAndMakeVisible(lfoDepthSlider);
+        lfoDepthAttach.reset(new SldAttach(apvts, "luxsynthLfoDepth", lfoDepthSlider));
     }
 
+    //==========================================================================
     void paint(juce::Graphics& g) override
     {
-        const int W = getWidth();
-        computeColumns(W, leftX_, leftW_, rightX_, rightW_);
+        const auto L = computeGeom(getWidth());
+        using namespace AudioPanelUI;
 
-        // ── Section headers ───────────────────────────────────────────────
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
+        // ── Master Volume strip ─────────────────────────────────────────────
+        {
+            const auto r = L.volStrip.toFloat();
+            g.setColour(juce::Colour(0xff182636));
+            g.fillRoundedRectangle(r, 4.f);
+            g.setColour(juce::Colour(0xff2c4055));
+            g.drawRoundedRectangle(r, 4.f, 1.f);
+        }
 
-        const int blobSectionY = rowY(3) + Sp3ctraTheme::kControlH + 2;
-        g.setColour(juce::Colour(0xffd07040).withAlpha(0.55f));
-        g.drawText("--- BLOB DETECTION ---", leftX_, blobSectionY, leftW_, 12,
-                   juce::Justification::centred);
+        // ── Module identity chip — mirrors the LuxStral engine chip ─────────
+        {
+            const juce::Colour tagCol(0xffb07af0);   // LUXSYNTH rack accent
+            const auto chip = L.moduleChip.toFloat();
+            g.setColour(tagCol.withAlpha(0.12f));
+            g.fillRoundedRectangle(chip, 4.f);
+            g.setColour(tagCol.withAlpha(0.55f));
+            g.drawRoundedRectangle(chip, 4.f, 1.f);
+            g.setColour(tagCol);
+            g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+            g.drawText("LUXSYNTH  --  FFT ADDITIVE", L.moduleChip,
+                       juce::Justification::centred);
+        }
 
-        const int fftSectionY = rowY(7) + Sp3ctraTheme::kControlH + 2;
-        g.setColour(juce::Colour(0xffe06868).withAlpha(0.55f));
-        g.drawText("--- FFT PARAMETERS ---", leftX_, fftSectionY, leftW_, 12,
-                   juce::Justification::centred);
+        // ── LEFT: IMAGE ─────────────────────────────────────────────────────
+        drawSectionBg(g, L.imgBg.getX(), L.imgBg.getY(), L.imgBg.getWidth(), L.imgBg.getHeight());
+        drawBadge(g, L.imgBadge.getX(), L.imgBadge.getY(), L.imgBadge.getWidth(),
+                  0xff20303c, 0xff7aade0, "IMAGE");
+
+        // ── LEFT: OSCILLATORS ───────────────────────────────────────────────
+        drawSectionBg(g, L.oscBg.getX(), L.oscBg.getY(), L.oscBg.getWidth(), L.oscBg.getHeight());
+        drawBadge(g, L.oscBadge.getX(), L.oscBadge.getY(), L.oscBadge.getWidth(),
+                  0xff1a3a3a, 0xff66ccaa, "OSCILLATORS");
+        drawEnvCaption(g, L.oscBadge.getX() + kSecInsetX, L.oscCaptionY,
+                       L.oscBadge.getWidth() - 2 * kSecInsetX, 0xff66ccaa, "VOLUME  ADSR");
+        drawKnobLabel(g, L.oscGridX, L.oscGridW, L.oscGridY, 0, "Oscill.");
+
+        // ── RIGHT: ANALYSIS (blob detection + FFT, dual-caption card) ───────
+        drawSectionBg(g, L.anaBg.getX(), L.anaBg.getY(), L.anaBg.getWidth(), L.anaBg.getHeight());
+        drawBadge(g, L.anaBadge.getX(), L.anaBadge.getY(), L.anaBadge.getWidth(),
+                  0xff3a2620, 0xffd07040, "ANALYSIS");
+        {
+            const int adx = L.rightX + kSecInsetX;
+            const int adw = L.colW - 2 * kSecInsetX;
+            drawEnvCaption(g, adx, L.anaBlobCaptionY, adw, 0xffd07040, "BLOB DETECTION");
+            g.setColour(juce::Colour(0xff2a2a40));
+            g.fillRect(adx, L.anaDividerY, adw, 1);
+            drawEnvCaption(g, adx, L.anaFftCaptionY, adw, 0xffe06868,
+                           "FFT  --  1 bin -> 1 oscillator");
+        }
+
+        // ── RIGHT: FILTER & LFO ─────────────────────────────────────────────
+        drawSectionBg(g, L.fltBg.getX(), L.fltBg.getY(), L.fltBg.getWidth(), L.fltBg.getHeight());
+        drawBadge(g, L.fltBadge.getX(), L.fltBadge.getY(), L.fltBadge.getWidth(),
+                  0xff32203a, 0xffcc88cc, "FILTER & LFO");
+        drawEnvCaption(g, L.fltBadge.getX() + kSecInsetX, L.fltCaptionY,
+                       L.fltBadge.getWidth() - 2 * kSecInsetX, 0xffcc88cc, "FILTER  ADSR");
+        {
+            // Short labels — half-column knob cells are ~48 px wide.
+            static const char* const lbls[] = { "Cutoff", "Env Amt", "LFO Rate", "LFO Amt" };
+            for (int i = 0; i < 4; ++i) drawKnobLabel(g, L.fltGridX, L.fltGridW, L.fltGridY, i, lbls[i]);
+        }
     }
 
+    //==========================================================================
     void resized() override
     {
-        const int W = getWidth();
-        computeColumns(W, leftX_, leftW_, rightX_, rightW_);
+        const auto L = computeGeom(getWidth());
 
-        // ── Left column: all controls ─────────────────────────────────────
-        const int labelW = 80;
-        const int gap    = Sp3ctraTheme::kGap;
-        const int ch     = Sp3ctraTheme::kControlH;
+        // LEFT
+        volumeLabel.setBounds(L.volLabel);
+        volumeSlider.setBounds(L.volSlider);
 
-        auto lb = [&](int row) -> juce::Rectangle<int>
-        {
-            return { leftX_, rowY(row), labelW, ch };
-        };
-        auto cb = [&](int row) -> juce::Rectangle<int>
-        {
-            return { leftX_ + labelW + gap, rowY(row),
-                     leftW_ - labelW - gap,  ch };
-        };
+        negativeToggle.setBounds(L.negToggle);
+        dcBlockToggle.setBounds(L.dcToggle);
+        gammaLabel.setBounds(L.gammaLabel);          gammaSlider.setBounds(L.gammaSlider);
+        contrastMinLabel.setBounds(L.contrastLabel); contrastMinSlider.setBounds(L.contrastSlider);
 
-        // Source row retired — controls start at row 0 (placement defines source).
-        // Row 0: Negative toggle
-        negativeLabel.setBounds(lb(0));
-        negativeToggle.setBounds(cb(0).withWidth(80));
-        // Row 1: DC Blocking toggle
-        dcBlockLabel.setBounds(lb(1));
-        dcBlockToggle.setBounds(cb(1).withWidth(80));
-        // Row 2: Gamma slider
-        gammaValueLabel.setBounds(lb(2));
-        gammaSlider.setBounds(cb(2));
-        // Row 3: Contrast Min slider
-        contrastMinLabel.setBounds(lb(3));
-        contrastMinSlider.setBounds(cb(3));
-        // Rows 4-7: Blob Detection
-        blobThreshLabel.setBounds(lb(4));      blobThreshSlider.setBounds(cb(4));
-        blobMinWidthLabel.setBounds(lb(5));    blobMinWidthSlider.setBounds(cb(5));
-        blobMergeGapLabel.setBounds(lb(6));    blobMergeGapSlider.setBounds(cb(6));
-        blobColorSplitLabel.setBounds(lb(7));  blobColorSplitSlider.setBounds(cb(7));
-        // Rows 8-9: FFT Parameters
-        fftBinsLabel.setBounds(lb(8));         fftBinsCombo.setBounds(cb(8));
-        fftSmoothingLabel.setBounds(lb(9));    fftSmoothingSlider.setBounds(cb(9));
+        volEnv->setBounds(L.oscEnv);
+        AudioPanelUI::placeKnob(numOscSlider, L.oscGridX, L.oscGridW, L.oscGridY, 0);
+
+        // RIGHT
+        blobThreshLabel.setBounds(L.anaLabel[0]);     blobThreshSlider.setBounds(L.anaCtrl[0]);
+        blobMinWidthLabel.setBounds(L.anaLabel[1]);   blobMinWidthSlider.setBounds(L.anaCtrl[1]);
+        blobMergeGapLabel.setBounds(L.anaLabel[2]);   blobMergeGapSlider.setBounds(L.anaCtrl[2]);
+        blobColorSplitLabel.setBounds(L.anaLabel[3]); blobColorSplitSlider.setBounds(L.anaCtrl[3]);
+        fftBinsLabel.setBounds(L.anaLabel[4]);        fftBinsCombo.setBounds(L.anaCtrl[4]);
+        fftSmoothingLabel.setBounds(L.anaLabel[5]);   fftSmoothingSlider.setBounds(L.anaCtrl[5]);
+
+        fltEnv->setBounds(L.fltEnv);
+        AudioPanelUI::placeKnob(fltCutoffSlider, L.fltGridX, L.fltGridW, L.fltGridY, 0);
+        AudioPanelUI::placeKnob(fltDepthSlider,  L.fltGridX, L.fltGridW, L.fltGridY, 1);
+        AudioPanelUI::placeKnob(lfoRateSlider,   L.fltGridX, L.fltGridW, L.fltGridY, 2);
+        AudioPanelUI::placeKnob(lfoDepthSlider,  L.fltGridX, L.fltGridW, L.fltGridY, 3);
     }
 
 private:
     [[maybe_unused]] Sp3ctraAudioProcessor& processor;
 
-    // Labels — image pipeline
-    juce::Label sourceLabel, negativeLabel, dcBlockLabel, gammaValueLabel, contrastMinLabel;
-    // Labels — blob detection (LuxSynth-only, isolated from LuxStral)
-    juce::Label blobThreshLabel, blobMinWidthLabel, blobMergeGapLabel, blobColorSplitLabel;
-    // Labels — FFT parameters
-    juce::Label fftBinsLabel, fftSmoothingLabel;
+    // ── Vertical layout tokens (same charter as LuxStralTabComponent) ───────
+    static constexpr int kTopPad    = 6;
+    static constexpr int kColGap    = 16;                          // between columns
+    static constexpr int kHeaderH   = 30;                          // Volume strip / chip
+    static constexpr int kBadgeH    = Sp3ctraTheme::kSectionH;     // 24
+    static constexpr int kBadgeGap  = Sp3ctraTheme::kSectionGap;   // 4
+    static constexpr int kRowH      = Sp3ctraTheme::kControlH;     // 22
+    static constexpr int kRowGap    = Sp3ctraTheme::kRowGap;       // 4
+    static constexpr int kSecGapV   = 10;                          // between sections
+    static constexpr int kSecPadB   = 8;                           // section bottom pad
+    static constexpr int kSecInsetX = 8;                           // content inset
+    static constexpr int kLabelW    = 96;                          // slider label column
+    static constexpr int kDivGap    = 10;                          // blob/FFT divider gap
+    static constexpr int kCapH      = AudioPanelLayout::kEnvCaptionH; // 13
+    static constexpr int kKnobH     = AudioPanelLayout::kKnobCellH;   // 71
+    static constexpr int kEnvH      = AudioPanelLayout::kEnvH;        // 124
+    static constexpr int kEnvGap    = AudioPanelLayout::kEnvGap;      // 10
 
-    // Controls — image pipeline
-    juce::ComboBox     sourceCombo;
-    juce::ToggleButton negativeToggle, dcBlockToggle;
-    juce::Slider       gammaSlider, contrastMinSlider;
-    // Controls — blob detection
-    juce::Slider blobThreshSlider, blobMinWidthSlider, blobMergeGapSlider, blobColorSplitSlider;
-    // Controls — FFT parameters
-    juce::ComboBox fftBinsCombo;
-    juce::Slider   fftSmoothingSlider;
+    static constexpr int kImgSecH = kBadgeH + kBadgeGap + (3 * kRowH + 2 * kRowGap) + kSecPadB;      // 110
+    static constexpr int kOscSecH = kBadgeH + kBadgeGap + kCapH + kEnvH + kEnvGap + kKnobH + kSecPadB; // 254
+    static constexpr int kAnaSecH = kBadgeH + kBadgeGap + kCapH + (4 * kRowH + 3 * kRowGap) + kDivGap
+                                  + kCapH + (2 * kRowH + kRowGap) + kSecPadB;                        // 220
+    static constexpr int kFltSecH = kBadgeH + kBadgeGap + kCapH + kEnvH + kEnvGap + kKnobH + kSecPadB; // 254
 
-    // Attachments — image pipeline
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> sourceAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   negativeAttach,
-                                                                             dcBlockAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   gammaValueAttach,
-                                                                             contrastMinAttach;
-    // Attachments — blob detection
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   blobThreshAttach,
-                                                                             blobMinWidthAttach,
-                                                                             blobMergeGapAttach,
-                                                                             blobColorSplitAttach;
-    // Attachments — FFT parameters
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> fftBinsAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   fftSmoothingAttach;
+    static constexpr int kLeftColH  = kHeaderH + kSecGapV + kImgSecH + kSecGapV + kOscSecH;          // 414
+    static constexpr int kRightColH = kHeaderH + kSecGapV + kAnaSecH + kSecGapV + kFltSecH;          // 524
 
-    // Cached column geometry — updated by computeColumns() in paint() / resized()
-    mutable int leftX_  = 0;
-    mutable int leftW_  = 0;
-    mutable int rightX_ = 0;
-    mutable int rightW_ = 0;
+public:
+    /** Natural content height — the taller of the two columns. */
+    static constexpr int kPreferredH =
+        kTopPad + (kLeftColH > kRightColH ? kLeftColH : kRightColH) + kSecPadB;
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    /** Controls now span the full width (pipeline-output nodes removed — the
-     *  visualizer shows all outputs simultaneously). */
-    static void computeColumns(int totalW,
-                                int& lx, int& lw,
-                                int& rx, int& rw) noexcept
+private:
+    // ── Resolved layout (single source for paint + resized) ─────────────────
+    struct Geom
     {
-        constexpr int kPad = 8;
-        lx = kPad;
-        lw = totalW - 2 * kPad;
-        rx = totalW - kPad;   // unused (no right column)
-        rw = 0;
+        int gx = 0, gw = 0, colW = 0, leftX = 0, rightX = 0;
+        // left
+        juce::Rectangle<int> volStrip, volLabel, volSlider;
+        juce::Rectangle<int> imgBg, imgBadge, negToggle, dcToggle,
+                             gammaLabel, gammaSlider, contrastLabel, contrastSlider;
+        juce::Rectangle<int> oscBg, oscBadge, oscEnv;
+        int oscCaptionY = 0, oscGridX = 0, oscGridW = 0, oscGridY = 0;
+        // right
+        juce::Rectangle<int> moduleChip;
+        juce::Rectangle<int> anaBg, anaBadge;
+        int anaBlobCaptionY = 0, anaDividerY = 0, anaFftCaptionY = 0;
+        juce::Rectangle<int> anaLabel[6], anaCtrl[6];   // 4 blob rows + 2 FFT rows
+        juce::Rectangle<int> fltBg, fltBadge, fltEnv;
+        int fltCaptionY = 0, fltGridX = 0, fltGridW = 0, fltGridY = 0;
+    };
+
+    Geom computeGeom(int w) const
+    {
+        Geom L{};
+        const int gx     = Sp3ctraTheme::kHPad;
+        const int gw     = w - 2 * Sp3ctraTheme::kHPad;
+        const int colW   = (gw - kColGap) / 2;
+        const int leftX  = gx;
+        const int rightX = gx + colW + kColGap;
+        const int gap    = Sp3ctraTheme::kGap;
+        L.gx = gx; L.gw = gw; L.colW = colW; L.leftX = leftX; L.rightX = rightX;
+
+        // ── LEFT COLUMN ─────────────────────────────────────────────────────
+        {
+            const int cx = leftX + kSecInsetX;
+            const int cw = colW - 2 * kSecInsetX;
+            int y = kTopPad;
+
+            // Volume strip
+            L.volStrip = { leftX - 2, y, colW + 4, kHeaderH };
+            {
+                const int vy = y + (kHeaderH - kRowH) / 2;
+                L.volLabel  = { cx, vy, kLabelW, kRowH };
+                L.volSlider = { cx + kLabelW + gap, vy, cw - kLabelW - gap, kRowH };
+            }
+            y += kHeaderH + kSecGapV;
+
+            // IMAGE
+            L.imgBg    = { leftX - 2, y, colW + 4, kImgSecH };
+            L.imgBadge = { leftX, y, colW, kBadgeH };
+            int cy = y + kBadgeH + kBadgeGap;
+            {
+                const int half = (cw - gap) / 2;
+                L.negToggle = { cx, cy, half, kRowH };
+                L.dcToggle  = { cx + half + gap, cy, half, kRowH };
+                cy += kRowH + kRowGap;
+            }
+            L.gammaLabel  = { cx, cy, kLabelW, kRowH };
+            L.gammaSlider = { cx + kLabelW + gap, cy, cw - kLabelW - gap, kRowH };
+            cy += kRowH + kRowGap;
+            L.contrastLabel  = { cx, cy, kLabelW, kRowH };
+            L.contrastSlider = { cx + kLabelW + gap, cy, cw - kLabelW - gap, kRowH };
+            y += kImgSecH + kSecGapV;
+
+            // OSCILLATORS
+            L.oscBg    = { leftX - 2, y, colW + 4, kOscSecH };
+            L.oscBadge = { leftX, y, colW, kBadgeH };
+            cy = y + kBadgeH + kBadgeGap;
+            L.oscCaptionY = cy;
+            cy += kCapH;
+            L.oscEnv = { cx, cy, cw, kEnvH };
+            cy += kEnvH + kEnvGap;
+            L.oscGridX = cx; L.oscGridW = cw; L.oscGridY = cy;
+        }
+
+        // ── RIGHT COLUMN ────────────────────────────────────────────────────
+        {
+            const int cx = rightX + kSecInsetX;
+            const int cw = colW - 2 * kSecInsetX;
+            int y = kTopPad;
+
+            // Module identity chip row — mirrors the Volume strip height.
+            L.moduleChip = { rightX - 2, y, colW + 4, kHeaderH };
+            y += kHeaderH + kSecGapV;
+
+            // ANALYSIS — blob rows, divider, FFT rows.
+            L.anaBg    = { rightX - 2, y, colW + 4, kAnaSecH };
+            L.anaBadge = { rightX, y, colW, kBadgeH };
+            int cy = y + kBadgeH + kBadgeGap;
+            L.anaBlobCaptionY = cy;
+            cy += kCapH;
+            for (int i = 0; i < 4; ++i)
+            {
+                L.anaLabel[i] = { cx, cy, kLabelW, kRowH };
+                L.anaCtrl[i]  = { cx + kLabelW + gap, cy, cw - kLabelW - gap, kRowH };
+                cy += kRowH + kRowGap;
+            }
+            cy += kDivGap - kRowGap;
+            L.anaDividerY   = cy - kDivGap / 2;
+            L.anaFftCaptionY = cy;
+            cy += kCapH;
+            for (int i = 4; i < 6; ++i)
+            {
+                L.anaLabel[i] = { cx, cy, kLabelW, kRowH };
+                L.anaCtrl[i]  = { cx + kLabelW + gap, cy, cw - kLabelW - gap, kRowH };
+                cy += kRowH + kRowGap;
+            }
+            y += kAnaSecH + kSecGapV;
+
+            // FILTER & LFO
+            L.fltBg    = { rightX - 2, y, colW + 4, kFltSecH };
+            L.fltBadge = { rightX, y, colW, kBadgeH };
+            cy = y + kBadgeH + kBadgeGap;
+            L.fltCaptionY = cy;
+            cy += kCapH;
+            L.fltEnv = { cx, cy, cw, kEnvH };
+            cy += kEnvH + kEnvGap;
+            L.fltGridX = cx; L.fltGridW = cw; L.fltGridY = cy;
+        }
+
+        return L;
     }
 
     void initLabel(juce::Label& lbl, const juce::String& text)
@@ -264,11 +403,49 @@ private:
         addAndMakeVisible(lbl);
     }
 
-    /** Y coordinate of control row n (left column). */
-    int rowY(int row) const noexcept
+    void initSlider(juce::Slider& s)
     {
-        return 6 + row * (Sp3ctraTheme::kControlH + 14);
+        s.setSliderStyle(juce::Slider::LinearHorizontal);
+        s.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, Sp3ctraTheme::kControlH);
+        addAndMakeVisible(s);
     }
+
+    // ── Controls ────────────────────────────────────────────────────────────
+    juce::Slider       volumeSlider;                               // master (left top)
+    juce::ComboBox     sourceCombo;                                // retired (plumbing only)
+    juce::ToggleButton negativeToggle, dcBlockToggle;
+    juce::Label        volumeLabel, gammaLabel, contrastMinLabel;
+    juce::Slider       gammaSlider, contrastMinSlider;
+
+    // OSCILLATORS (left)
+    std::unique_ptr<EnvelopeEditorComponent> volEnv;
+    juce::Slider       numOscSlider;
+
+    // ANALYSIS — blob detection + FFT (right)
+    juce::Label    blobThreshLabel, blobMinWidthLabel, blobMergeGapLabel, blobColorSplitLabel;
+    juce::Slider   blobThreshSlider, blobMinWidthSlider, blobMergeGapSlider, blobColorSplitSlider;
+    juce::Label    fftBinsLabel, fftSmoothingLabel;
+    juce::ComboBox fftBinsCombo;
+    juce::Slider   fftSmoothingSlider;
+
+    // FILTER & LFO (right)
+    std::unique_ptr<EnvelopeEditorComponent> fltEnv;
+    juce::Slider       fltCutoffSlider, fltDepthSlider, lfoRateSlider, lfoDepthSlider;
+
+    // ── Attachments ───────────────────────────────────────────────────────
+    using SldAttach = juce::AudioProcessorValueTreeState::SliderAttachment;
+    using BtnAttach = juce::AudioProcessorValueTreeState::ButtonAttachment;
+    using CmbAttach = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
+
+    std::unique_ptr<CmbAttach> sourceAttach, fftBinsAttach;
+    std::unique_ptr<SldAttach> volumeAttach, gammaAttach, contrastMinAttach,
+                               numOscAttach,
+                               blobThreshAttach, blobMinWidthAttach,
+                               blobMergeGapAttach, blobColorSplitAttach,
+                               fftSmoothingAttach,
+                               fltCutoffAttach, fltDepthAttach,
+                               lfoRateAttach, lfoDepthAttach;
+    std::unique_ptr<BtnAttach> negativeAttach, dcBlockAttach;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxSynthTabComponent)
 };

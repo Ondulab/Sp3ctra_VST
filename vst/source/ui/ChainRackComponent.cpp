@@ -1,5 +1,6 @@
 #include "ChainRackComponent.h"
 #include "../Sp3ctraCore.h"
+#include "../sources/MediaSourceEngines.h"   // M9 — media source LEDs
 
 // C engine state — read-only here (LED monitoring)
 extern "C" {
@@ -43,6 +44,9 @@ ModuleType chainBlockToModuleType(ChainBlockId id) noexcept
         case ChainBlockId::LuxSynth: return ModuleType::LuxSynth;
         case ChainBlockId::LuxWave:  return ModuleType::LuxWave;
         case ChainBlockId::VideoScroll: return ModuleType::VideoScroll;
+        case ChainBlockId::ImageSrc:  return ModuleType::Image;
+        case ChainBlockId::VideoSrc:  return ModuleType::Video;
+        case ChainBlockId::CameraSrc: return ModuleType::Camera;
         case ChainBlockId::Chain1Source:
         case ChainBlockId::Chain2Source:
         default:                     return ModuleType::Sp3ctra;
@@ -371,9 +375,10 @@ ChainBlockId ChainRackComponent::instanceToBlockId(ModuleType type, int chainIdx
         case ModuleType::LuxSynth: return ChainBlockId::LuxSynth;
         case ModuleType::LuxWave:  return ChainBlockId::LuxWave;
         case ModuleType::VideoScroll: return ChainBlockId::VideoScroll;
+        case ModuleType::Image:    return ChainBlockId::ImageSrc;    // M9 — own pages
+        case ModuleType::Video:    return ChainBlockId::VideoSrc;
+        case ModuleType::Camera:   return ChainBlockId::CameraSrc;
         case ModuleType::Sp3ctra:
-        case ModuleType::Image:
-        case ModuleType::Video:
         default:
             return (chainIdx == 0) ? ChainBlockId::Chain1Source
                                    : ChainBlockId::Chain2Source;
@@ -430,6 +435,15 @@ void ChainRackComponent::setSelectedBlock(ChainBlockId id)
                 selectInstance(m.id, false);
                 return;
             }
+}
+
+bool ChainRackComponent::hasBlock(ChainBlockId id) const noexcept
+{
+    for (int ci = 0; ci < model.numChains(); ++ci)
+        for (const auto& m : model.chains[(size_t) ci].modules)
+            if (instanceToBlockId(m.type, ci) == id)
+                return true;
+    return false;
 }
 
 void ChainRackComponent::setLocked(bool shouldLock)
@@ -846,9 +860,23 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, int cha
     switch (type)
     {
         case ModuleType::Sp3ctra:
-        case ModuleType::Image:
-        case ModuleType::Video:
             return sourceLed;
+
+        // M9 — media sources: ● transport running / ◐ media ready / ○ nothing
+        case ModuleType::Image:
+            if (auto* e = processor.getImageSource())
+                return ! e->isLoaded() ? LedState::Off
+                     : (e->isPlaying() ? LedState::Active : LedState::Idle);
+            return LedState::Off;
+        case ModuleType::Video:
+            if (auto* e = processor.getVideoSource())
+                return ! e->isLoaded() ? LedState::Off
+                     : (e->isPlaying() ? LedState::Active : LedState::Idle);
+            return LedState::Off;
+        case ModuleType::Camera:
+            if (auto* e = processor.getCameraSource())
+                return e->isOpen() ? LedState::Active : LedState::Off;
+            return LedState::Off;
 
         case ModuleType::Pitch:
         {   // per-chain instance — pool slot is UUID-bound (stable across edits)

@@ -1,6 +1,8 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include <juce_audio_formats/juce_audio_formats.h>   // SCORE source-audio preview
+#include "sources/MediaSourceEngines.h"              // M9 — IMAGE/VIDEO/CAMERA engines
+#include "sources/MediaSourceService.h"              // M9 — source service thread
 
 // C headers still used directly by this file
 extern "C" {
@@ -930,6 +932,47 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             juce::AudioParameterFloatAttributes{}.withLabel("x")));
     }
 
+    // ── M9: IMAGE / VIDEO / CAMERA source modules ────────────────────────────
+    // The line position IS the musical control of these sources — automatable,
+    // like the SCORE transport above. Loop modes mirror the sampler's:
+    // Once / Loop / Reverse / Ping-Pong.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"imgSrcPos", 1}, "Image Src Line",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.0001f), 0.5f));
+    {
+        // Full-image scan time (one traversal top→bottom), log feel around 5 s.
+        juce::NormalisableRange<float> dur(0.1f, 120.0f, 0.01f);
+        dur.setSkewForCentre(5.0f);
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{"imgSrcDuration", 1}, "Image Src Scan Time", dur, 5.0f,
+            juce::AudioParameterFloatAttributes{}.withLabel("s")));
+    }
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"imgSrcLoop", 1}, "Image Src Loop",
+        juce::StringArray{"Once", "Loop", "Reverse", "Ping-Pong"}, 1));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"imgSrcPlay", 1}, "Image Src Play", false));
+
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"vidSrcLine", 1}, "Video Src Line",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.0001f), 0.5f));
+    {
+        juce::NormalisableRange<float> spd(0.1f, 4.0f, 0.01f);
+        spd.setSkewForCentre(1.0f);
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{"vidSrcSpeed", 1}, "Video Src Speed", spd, 1.0f,
+            juce::AudioParameterFloatAttributes{}.withLabel("x")));
+    }
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"vidSrcLoop", 1}, "Video Src Loop",
+        juce::StringArray{"Once", "Loop", "Reverse", "Ping-Pong"}, 1));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"vidSrcPlay", 1}, "Video Src Play", false));
+
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"camSrcLine", 1}, "Camera Src Line",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.0001f), 0.5f));
+
     // ── Video Scroll — master toggle + live controls ───────────────────────────
     // Hidden from DAW automation (configuration/display parameters).
     params.push_back(std::make_unique<juce::AudioParameterBool>(
@@ -1316,6 +1359,33 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
         frameSequencer->setSamplers(engines, 2);
     }
 
+    // ── M9: IMAGE / VIDEO / CAMERA source engines + service thread ──────────
+    imageSource_  = std::make_unique<ImageSourceEngine>();
+    videoSource_  = std::make_unique<VideoSourceEngine>();
+    cameraSource_ = std::make_unique<CameraSourceEngine>();
+    mediaService_ = std::make_unique<MediaSourceService>(*imageSource_,
+                                                         *videoSource_,
+                                                         *cameraSource_);
+    // ONCE traversals snap the automatable play param back off when they end.
+    imageSource_->onPlaybackFinished = [this]
+    {
+        if (auto* p = apvts.getParameter(PARAM_IMGSRC_PLAY))
+            p->setValueNotifyingHost(0.0f);
+    };
+    videoSource_->onPlaybackFinished = [this]
+    {
+        if (auto* p = apvts.getParameter(PARAM_VIDSRC_PLAY))
+            p->setValueNotifyingHost(0.0f);
+    };
+    // Initial param sync (media/presence arrive later: state restore + model).
+    imageSource_->setPosition (apvts.getRawParameterValue(PARAM_IMGSRC_POS)->load());
+    imageSource_->setDurationS(apvts.getRawParameterValue(PARAM_IMGSRC_DUR)->load());
+    imageSource_->setLoopMode ((int) apvts.getRawParameterValue(PARAM_IMGSRC_LOOP)->load());
+    videoSource_->setLineFrac (apvts.getRawParameterValue(PARAM_VIDSRC_LINE)->load());
+    videoSource_->setSpeed    (apvts.getRawParameterValue(PARAM_VIDSRC_SPEED)->load());
+    videoSource_->setLoopMode ((int) apvts.getRawParameterValue(PARAM_VIDSRC_LOOP)->load());
+    cameraSource_->setLineFrac(apvts.getRawParameterValue(PARAM_CAMSRC_LINE)->load());
+
     // Register LuxSampler parameter listeners
     apvts.addParameterListener(PARAM_FS_ENABLED,    this);
     apvts.addParameterListener(PARAM_FS_MIDI_CH,    this);
@@ -1335,6 +1405,17 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener(PARAM_SCORE_LOOP,    this);
     apvts.addParameterListener(PARAM_SCORE_REVERSE, this);
     apvts.addParameterListener(PARAM_SCORE_SPEED,   this);
+
+    // M9 — IMAGE / VIDEO / CAMERA source params → engines
+    apvts.addParameterListener(PARAM_IMGSRC_POS,   this);
+    apvts.addParameterListener(PARAM_IMGSRC_DUR,   this);
+    apvts.addParameterListener(PARAM_IMGSRC_LOOP,  this);
+    apvts.addParameterListener(PARAM_IMGSRC_PLAY,  this);
+    apvts.addParameterListener(PARAM_VIDSRC_LINE,  this);
+    apvts.addParameterListener(PARAM_VIDSRC_SPEED, this);
+    apvts.addParameterListener(PARAM_VIDSRC_LOOP,  this);
+    apvts.addParameterListener(PARAM_VIDSRC_PLAY,  this);
+    apvts.addParameterListener(PARAM_CAMSRC_LINE,  this);
 
     // Sync LuxSampler config with initial APVTS values
     luxSampler->setEnabled(*apvts.getRawParameterValue(PARAM_FS_ENABLED) > 0.5f);
@@ -1367,9 +1448,12 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     sharedCore = Sp3ctraSharedCore::acquire();
     
     // 🔧 LAZY INITIALIZATION: Do NOT start the shared pipeline here.
-    // The DAW calls setStateInformation() with saved parameters BEFORE prepareToPlay().
+    // Host ordering DIFFERS per wrapper — both must work:
+    //   DAW:        ctor → setStateInformation() → prepareToPlay()
+    //   Standalone: ctor → prepareToPlay() → setStateInformation() → editor
     // We defer startWithConfig() to prepareToPlay() so we have the correct
-    // sample rate and buffer size when initializing LuxStral.
+    // sample rate and buffer size when initializing LuxStral; coreNeedsInit
+    // makes setStateInformation hot-reload instead when it runs second.
     
     // Initialize the LuxPitch / LuxMask processing instances.
     // Since the single-snapshot refactor (M2) there is ONE simulation per
@@ -1435,7 +1519,18 @@ Sp3ctraAudioProcessor::~Sp3ctraAudioProcessor()
     log_info("VST", "Sp3ctraAudioProcessor: Destructor - Shutting down");
     log_info("VST", "=============================================================");
 
-    // ── LuxSampler FIRST (uses AudioImageBuffers / DoubleBuffer owned by sharedCore) ──
+    // ── M9: media source service FIRST (uses Context/buffers owned by sharedCore) ──
+    if (mediaService_)
+    {
+        mediaService_->stopThread(2000);
+        mediaService_.reset();
+    }
+    if (cameraSource_) cameraSource_->closeDevice();   // release the capture device
+    imageSource_.reset();
+    videoSource_.reset();
+    cameraSource_.reset();
+
+    // ── LuxSampler (uses AudioImageBuffers / DoubleBuffer owned by sharedCore) ──
     // Must stop before releasing sharedCore to avoid use-after-free.
     if (luxSamplerB)
     {
@@ -1635,6 +1730,15 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
         auto* dbf = sharedCore->getCore()->getDoubleBuffer();
         if (luxSampler)  luxSampler->startPlayerThread(aib, dbf);
         if (luxSamplerB) luxSamplerB->startPlayerThread(aib, dbf);
+
+        // M9 — media source service (ticks the IMAGE/VIDEO/CAMERA engines and
+        // pumps the chains when the device is not streaming).
+        if (mediaService_)
+        {
+            mediaService_->setContext(sharedCore->getCore()->getContext());
+            if (! mediaService_->isThreadRunning())
+                mediaService_->startThread();
+        }
     }
 
     log_info("VST", "=============================================================");
@@ -2416,6 +2520,12 @@ void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     replaceChild(scoreStateToTree());        // SCORE settings + freq override
     replaceChild(seqStateToTree());          // sequencer pattern (steps A/B)
     replaceChild(samplerSlotsStateToTree()); // per-slot params, engines A + B
+    replaceChild(mediaSourcesStateToTree()); // M9 — IMAGE/VIDEO paths + camera
+    // CHAINS — snapshot the LIVE model, never trust the copy restored/edited
+    // earlier: rack edits persist via a deferred callAsync (persistChainModel),
+    // so a save taken before that dispatch would write a stale topology; and a
+    // fresh session has no CHAINS child at all until the first rack edit.
+    replaceChild(chainModel_.toValueTree());
 
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
 
@@ -2427,7 +2537,18 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
 {
     // APVTS handles deserialization automatically via ValueTree
     std::unique_ptr<juce::XmlElement> xmlState(getXmlFromBinary(data, sizeInBytes));
-    
+
+    // A failed restore silently keeps every default (topology, SCORE, SEQ,
+    // sampler params, session paths) — make that loudly visible in the log.
+    if (xmlState == nullptr)
+        log_error("VST", "State restore FAILED: corrupt/unreadable state blob "
+                         "(%d bytes) — session resets to defaults", sizeInBytes);
+    else if (! xmlState->hasTagName(apvts.state.getType()))
+        log_error("VST", "State restore FAILED: unexpected root tag '%s' "
+                         "(expected '%s') — session resets to defaults",
+                  xmlState->getTagName().toRawUTF8(),
+                  apvts.state.getType().toString().toRawUTF8());
+
     if (xmlState.get() != nullptr) {
         if (xmlState->hasTagName(apvts.state.getType())) {
             apvts.replaceState(juce::ValueTree::fromXml(*xmlState));
@@ -2445,6 +2566,11 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
             if (auto* p = apvts.getParameter(PARAM_SEQ_TRANSPORT))
                 p->setValueNotifyingHost(0.0f);   // Stop
             if (auto* p = apvts.getParameter(PARAM_SCORE_PLAYING))
+                p->setValueNotifyingHost(0.0f);
+            // M9 — IMAGE/VIDEO source transports open stopped too.
+            if (auto* p = apvts.getParameter(PARAM_IMGSRC_PLAY))
+                p->setValueNotifyingHost(0.0f);
+            if (auto* p = apvts.getParameter(PARAM_VIDSRC_PLAY))
                 p->setValueNotifyingHost(0.0f);
             // Push the restored SCORE speed/loop into the engine (the listener
             // does not fire for values equal to the pre-restore state).
@@ -2469,6 +2595,28 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
             // On state restore, just update g_sp3ctra_config.
             // The actual pipeline start (if needed) happens in prepareToPlay().
             applyConfigurationToCore(false);
+
+            // M9 — restore media paths + camera device BEFORE the chain model:
+            // updateMediaSourcePresence() (inside deriveChainRouting) reopens
+            // the camera only when a CAMERA module is placed, and needs the
+            // persisted device name to be known by then.
+            restoreMediaSourcesFromTree(apvts.state.getChildWithName("MEDIA_SOURCES"));
+            // Push the restored source params into the engines (the listener
+            // does not fire for values equal to the pre-restore state).
+            if (imageSource_)
+            {
+                imageSource_->setPosition (apvts.getRawParameterValue(PARAM_IMGSRC_POS)->load());
+                imageSource_->setDurationS(apvts.getRawParameterValue(PARAM_IMGSRC_DUR)->load());
+                imageSource_->setLoopMode ((int) apvts.getRawParameterValue(PARAM_IMGSRC_LOOP)->load());
+            }
+            if (videoSource_)
+            {
+                videoSource_->setLineFrac (apvts.getRawParameterValue(PARAM_VIDSRC_LINE)->load());
+                videoSource_->setSpeed    (apvts.getRawParameterValue(PARAM_VIDSRC_SPEED)->load());
+                videoSource_->setLoopMode ((int) apvts.getRawParameterValue(PARAM_VIDSRC_LOOP)->load());
+            }
+            if (cameraSource_)
+                cameraSource_->setLineFrac(apvts.getRawParameterValue(PARAM_CAMSRC_LINE)->load());
 
             // M6 Phase 2 — restore the chain topology and derive per-chain
             // routing (headless-correct; enable params are already restored).
@@ -2588,6 +2736,53 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
     {
         if (luxSampler != nullptr)
             luxSampler->setScoreLoopMode(scoreLoopModeFromParams(apvts));
+        return;
+    }
+
+    // ── M9: IMAGE / VIDEO / CAMERA sources — every engine call is atomic ─────
+    if (parameterID == PARAM_IMGSRC_POS)
+    {
+        if (imageSource_) imageSource_->setPosition(newValue);
+        return;
+    }
+    if (parameterID == PARAM_IMGSRC_DUR)
+    {
+        if (imageSource_) imageSource_->setDurationS(newValue);
+        return;
+    }
+    if (parameterID == PARAM_IMGSRC_LOOP)
+    {
+        if (imageSource_) imageSource_->setLoopMode((int) (newValue + 0.5f));
+        return;
+    }
+    if (parameterID == PARAM_IMGSRC_PLAY)
+    {
+        if (imageSource_) imageSource_->setPlaying(newValue > 0.5f);
+        return;
+    }
+    if (parameterID == PARAM_VIDSRC_LINE)
+    {
+        if (videoSource_) videoSource_->setLineFrac(newValue);
+        return;
+    }
+    if (parameterID == PARAM_VIDSRC_SPEED)
+    {
+        if (videoSource_) videoSource_->setSpeed(newValue);
+        return;
+    }
+    if (parameterID == PARAM_VIDSRC_LOOP)
+    {
+        if (videoSource_) videoSource_->setLoopMode((int) (newValue + 0.5f));
+        return;
+    }
+    if (parameterID == PARAM_VIDSRC_PLAY)
+    {
+        if (videoSource_) videoSource_->setPlaying(newValue > 0.5f);
+        return;
+    }
+    if (parameterID == PARAM_CAMSRC_LINE)
+    {
+        if (cameraSource_) cameraSource_->setLineFrac(newValue);
         return;
     }
 
@@ -2816,16 +3011,29 @@ void Sp3ctraAudioProcessor::loadChainModelFromState()
     chainModel_.validateAndRepair();
 
     // Migration: the step sequencer became a dedicated SEQUENCER module. A model
-    // saved before that has no Sequencer block — inject one so the sequencer stays
-    // reachable in the UI (same spirit as "always keep ≥1 chain").
+    // saved before that has no Sequencer block — inject one so the sequencer
+    // stays reachable in the UI (same spirit as "always keep ≥1 chain").
+    // GATED so a deliberate deletion survives reload: from schema v2 on, a
+    // missing Sequencer means the user removed it. A v1 tree is only "old"
+    // when the session has no SEQ pattern tree either — SEQ serialization
+    // shipped together with the sequencer-module era, so its presence proves
+    // the save could already contain (or deliberately omit) a Sequencer block.
     {
-        bool hasSeq = false;
-        for (const auto& ch : chainModel_.chains)
-            for (const auto& mod : ch.modules)
-                if (mod.type == ModuleType::Sequencer) { hasSeq = true; break; }
-        if (! hasSeq && ! chainModel_.chains.empty())
-            chainModel_.insert(0, ModuleType::Sequencer,
-                               (int) chainModel_.chains[0].modules.size());
+        const int savedVersion = t.isValid()
+            ? (int) t.getProperty(ChainModel::kVersionProp, 1)
+            : ChainModel::kSchemaVersion;   // fresh default — already has one
+        const bool preSequencerEra =
+            savedVersion < 2 && ! state.getChildWithName("SEQ").isValid();
+        if (preSequencerEra)
+        {
+            bool hasSeq = false;
+            for (const auto& ch : chainModel_.chains)
+                for (const auto& mod : ch.modules)
+                    if (mod.type == ModuleType::Sequencer) { hasSeq = true; break; }
+            if (! hasSeq && ! chainModel_.chains.empty())
+                chainModel_.insert(0, ModuleType::Sequencer,
+                                   (int) chainModel_.chains[0].modules.size());
+        }
     }
 
     // Presence baseline so the enable bridge only fires on real transitions.
@@ -2924,6 +3132,10 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
     image_chain_set_order(chainModel_.isMaskBeforePitch()
         ? IMAGE_CHAIN_ORDER_MASK_PITCH : IMAGE_CHAIN_ORDER_PITCH_MASK);
 
+    // M9 — push IMAGE/VIDEO/CAMERA module presence onto their engines so they
+    // publish lines only while placed in a chain.
+    updateMediaSourcePresence();
+
     deriveAndPublishChainPlan();   // RT-safe per-chain recipe for the synth thread
 
     // Reset the transient state (held voices, LFO phase — config untouched) of
@@ -3019,6 +3231,7 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
             if (m.type == ModuleType::Sp3ctra) return CHAIN_SRC_LIVE;
             if (m.type == ModuleType::Image)   return CHAIN_SRC_IMAGE;
             if (m.type == ModuleType::Video)   return CHAIN_SRC_VIDEO;
+            if (m.type == ModuleType::Camera)  return CHAIN_SRC_CAMERA;
         }
         return CHAIN_SRC_NONE;
     };
@@ -3239,6 +3452,79 @@ void Sp3ctraAudioProcessor::applySamplerParamsFromState()
             }
         }
     }
+}
+
+//==============================================================================
+// M9 — IMAGE / VIDEO / CAMERA source engines: presence + state blob
+//==============================================================================
+void Sp3ctraAudioProcessor::updateMediaSourcePresence()
+{
+    bool img = false, vid = false, cam = false;
+    for (const auto& ch : chainModel_.chains)
+        for (const auto& m : ch.modules)
+        {
+            if (m.type == ModuleType::Image)  img = true;
+            if (m.type == ModuleType::Video)  vid = true;
+            if (m.type == ModuleType::Camera) cam = true;
+        }
+    if (imageSource_)  imageSource_ ->setModulePresent(img);
+    if (videoSource_)  videoSource_ ->setModulePresent(vid);
+    if (cameraSource_) cameraSource_->setModulePresent(cam);
+
+    // A CAMERA module placed with a persisted device choice and no open device
+    // (fresh session restore, or module re-added) → reopen it. Message thread.
+    if (cam && cameraSource_ && ! cameraSource_->isOpen()
+        && cameraDeviceName_.isNotEmpty())
+    {
+        const auto names = CameraSourceEngine::getDeviceNames();
+        const int  idx   = names.indexOf(cameraDeviceName_);
+        if (idx >= 0)
+        {
+            juce::String err;
+            if (! cameraSource_->openDevice(idx, err))
+                log_warning("VST", "Camera reopen failed: %s", err.toRawUTF8());
+        }
+    }
+    // Module removed → release the device (turns the camera light off).
+    if (! cam && cameraSource_ && cameraSource_->isOpen())
+        cameraSource_->closeDevice();
+}
+
+juce::ValueTree Sp3ctraAudioProcessor::mediaSourcesStateToTree() const
+{
+    juce::ValueTree t("MEDIA_SOURCES");
+    if (imageSource_)
+        t.setProperty("imagePath", imageSource_->getFile().getFullPathName(), nullptr);
+    if (videoSource_)
+        t.setProperty("videoPath", videoSource_->getFile().getFullPathName(), nullptr);
+    t.setProperty("cameraDevice", cameraDeviceName_, nullptr);
+    return t;
+}
+
+void Sp3ctraAudioProcessor::restoreMediaSourcesFromTree(const juce::ValueTree& t)
+{
+    if (! t.isValid())
+        return;
+
+    const juce::String imgPath = t.getProperty("imagePath", "").toString();
+    if (imageSource_ && imgPath.isNotEmpty())
+    {
+        juce::String err;
+        if (! imageSource_->loadFile(juce::File(imgPath), err))
+            log_warning("VST", "Image source restore failed: %s", err.toRawUTF8());
+    }
+
+    const juce::String vidPath = t.getProperty("videoPath", "").toString();
+    if (videoSource_ && vidPath.isNotEmpty())
+    {
+        juce::String err;
+        if (! videoSource_->loadFile(juce::File(vidPath), err))
+            log_warning("VST", "Video source restore failed: %s", err.toRawUTF8());
+    }
+
+    cameraDeviceName_ = t.getProperty("cameraDevice", "").toString();
+    // The device itself is (re)opened by updateMediaSourcePresence() once the
+    // chain model restore confirms a CAMERA module is actually placed.
 }
 
 void Sp3ctraAudioProcessor::applyChainEnableBridge()

@@ -2385,7 +2385,7 @@ void CisVisualizerComponent::paintFftColorMode(juce::Graphics& g, int W, int H)
 
     g.setColour(juce::Colour(0x50ffffff));
     g.setFont(juce::FontOptions(9.0f));
-    g.drawText("LuxSynth harmonics  \xe2\x80\x94 color = harmonicity",
+    g.drawText(juce::String::fromUTF8("LuxSynth harmonics  \xe2\x80\x94 color = harmonicity"),
                juce::Rectangle<int>(4, H - 16, W - 8, 13),
                juce::Justification::centredLeft, false);
 }

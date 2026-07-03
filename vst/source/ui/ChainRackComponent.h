@@ -38,7 +38,8 @@
 enum class ChainBlockId
 {
     Chain1Source = 0, Pitch, Mask, Sampler, Score, LuxStral,
-    Chain2Source, LuxSynth, LuxWave, Sequencer, VideoScroll
+    Chain2Source, LuxSynth, LuxWave, Sequencer, VideoScroll,
+    ImageSrc, VideoSrc, CameraSrc      // M9 — media SRC modules (own pages)
 };
 
 /** Maps a selection key to its module type (sources → Sp3ctra). */
@@ -84,6 +85,11 @@ public:
 
     /** Updates the highlighted block (called back by the editor). */
     void setSelectedBlock(ChainBlockId id);
+
+    /** True if some instance in the model maps to this block id — used by the
+     *  editor to validate a session-restored selection whose module may have
+     *  been deleted since the save. */
+    bool hasBlock(ChainBlockId id) const noexcept;
 
     /** Locks the rack (performance mode): hides every delete affordance — the
      *  per-module × and the per-chain × — while keeping drag-to-reorder (within

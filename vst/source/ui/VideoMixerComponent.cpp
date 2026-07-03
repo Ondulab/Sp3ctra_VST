@@ -131,7 +131,12 @@ void VideoMixerComponent::layoutStrip()
     const int stripH = (n > 0) ? (kStripPad + n * (kRowH + kRowGap)) : 0;
 
     stripArea_  = r.removeFromBottom(stripH);
-    masterArea_ = r.reduced(2);
+
+    // The preview is kept square so it reads correctly whatever the scroll
+    // direction is. Fit the largest centred square inside the remaining area.
+    auto avail = r.reduced(2);
+    const int side = juce::jmin(avail.getWidth(), avail.getHeight());
+    masterArea_ = juce::Rectangle<int>(0, 0, side, side).withCentre(avail.getCentre());
 
     // Lay out each fader row: [label 38][level slider …][blend 72]
     auto strip = stripArea_.reduced(kStripPad, kStripPad / 2);

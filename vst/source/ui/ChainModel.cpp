@@ -122,11 +122,17 @@ bool ChainModel::canInsertIntoNewChain(ModuleType type, const juce::Uuid* moving
         return false;   // both LuxStral engines (A + B) already placed
 
     // Engine-backed modules (synths + Score/Sequencer) are singletons: at most one
-    // across the whole model. Pitch/Mask (processors), sources, the Sampler and
-    // LuxStral (their own pools above) stay multi-instance.
+    // across the whole model. Pitch/Mask (processors), the SP3CTRA source, the
+    // Sampler and LuxStral (their own pools above) stay multi-instance.
+    // M9: the internal media sources (IMAGE/VIDEO/CAMERA) are engine singletons
+    // too — each engine holds ONE media/transport, so at most one instance each.
     const ModuleRole role = moduleRole(type);
-    if ((role == ModuleRole::Synth || role == ModuleRole::Util)
-        && ! isSamplerEngine(type) && ! isLuxStralEngine(type))
+    const bool mediaSource = (type == ModuleType::Image
+                           || type == ModuleType::Video
+                           || type == ModuleType::Camera);
+    if (mediaSource
+        || ((role == ModuleRole::Synth || role == ModuleRole::Util)
+            && ! isSamplerEngine(type) && ! isLuxStralEngine(type)))
     {
         for (const auto& ch : chains)
             for (const auto& m : ch.modules)
@@ -334,7 +340,7 @@ int ChainModel::sourceChannelForSynth(ModuleType synthType, int fallback,
 juce::ValueTree ChainModel::toValueTree() const
 {
     juce::ValueTree root(kChainsTag);
-    root.setProperty(kVersionProp, 1, nullptr);
+    root.setProperty(kVersionProp, kSchemaVersion, nullptr);
 
     for (const auto& ch : chains)
     {

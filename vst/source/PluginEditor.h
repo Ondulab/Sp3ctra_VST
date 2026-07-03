@@ -22,6 +22,8 @@
 #include "ui/ModuleCatalogComponent.h"
 #include "ui/SplitterBar.h"
 #include "ui/setup/SourceSetupPanel.h"
+#include "sources/ui/MediaSourcePage.h"        // M9 — IMAGE/VIDEO/CAMERA PLAY faces
+#include "sources/ui/MediaSourceSetupPanel.h"  // M9 — media/device choosers
 #include "ui/setup/PitchSetupPanel.h"
 #include "ui/setup/MaskSetupPanel.h"
 #include "ui/setup/LuxStralSetupPanel.h"
@@ -448,7 +450,9 @@ private:
     /** Sizes zone3Content + positions the visible page(s) inside it. */
     void layoutZone3();
 
-    /** Writes editorW/H, zone2W/zone4W, scrollCollapsed into apvts.state. */
+    /** Writes editorW/H, zone2W/zone4W, scrollCollapsed, catalogCollapsed and
+     *  the zone-3 selection (block, PLAY/SETUP face, engine A/B + video-slot
+     *  bindings) into apvts.state so they ride in the session blob. */
     void persistLayoutProps();
 
     /** Top of the zones row — shifted down by the keyboard ruler when the
@@ -466,6 +470,8 @@ private:
     int  visPanelCount_ { 1 };         // ZONE 1 stacked-panel count (drives its height)
     bool setupFace { false };          // false = PLAY, true = SETUP (per M5)
     int  luxStralEngineIndex_ { 0 };   // selected LuxStral engine (0 = A, 1 = B) — M8
+    int  samplerEngineIndex_  { 0 };   // selected Sampler engine (0 = A, 1 = B)
+    int  videoSlotIndex_      { 0 };   // selected VideoScroll instance slot (0..7)
     int zone2Width { kZone2DefaultW };
     int zone4Width { kZone4DefaultW };
     int splitterDragStartW { 0 };
@@ -510,8 +516,10 @@ private:
     std::unique_ptr<SequencerPageComponent> sequencerPage;
     std::unique_ptr<ScoreGenTabComponent> scorePage;
     std::unique_ptr<VideoScrollPage>      videoScrollPage;   // OUT > VIDEO SCROLL (per-instance)
-    std::unique_ptr<AudioSynthPanel>      audioSynthPanel;
     std::unique_ptr<AudioWavePanel>       audioWavePanel;
+    std::unique_ptr<MediaSourcePage>      imageSrcPage;      // M9 — SRC > IMAGE
+    std::unique_ptr<MediaSourcePage>      videoSrcPage;      // M9 — SRC > VIDEO
+    std::unique_ptr<MediaSourcePage>      cameraSrcPage;     // M9 — SRC > CAMERA
 
     // Hosted SETUP faces (M5 — migrated gear-wheel settings, same APVTS IDs)
     std::unique_ptr<SourceSetupPanel>     sourceSetup;   // SP3CTRA — network/CIS config
@@ -522,6 +530,9 @@ private:
     std::unique_ptr<LuxWaveSetupPanel>    waveSetup;
     std::unique_ptr<SamplerSetupPanel>    samplerSetup;
     std::unique_ptr<ScoreSetupPanel>      scoreSetup;
+    std::unique_ptr<MediaSourceSetupPanel> imageSrcSetup;    // M9 — media chooser
+    std::unique_ptr<MediaSourceSetupPanel> videoSrcSetup;
+    std::unique_ptr<MediaSourceSetupPanel> cameraSrcSetup;   // device chooser
 
     // ── ZONE 4: video scroll column (collapsible, detachable window) ──────────
     std::unique_ptr<VideoMixerColumn> waterfallColumn;   // ZONE 4 — right-band VIDEO MIX
