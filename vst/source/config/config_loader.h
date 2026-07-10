@@ -39,6 +39,7 @@ typedef struct {
     float contrast_min;  /* LuxStral: contrast floor for blurred images     */
     float range_db;      /* LuxStral: inverse-dB decode window (Range dB)   */
     float intensity;     /* pre-engine mix weight of this send (1.0=unity)  */
+    int   enabled;       /* per-send power (rack LED); off = silent send    */
 } lux_out_params_t;
 
 typedef struct {

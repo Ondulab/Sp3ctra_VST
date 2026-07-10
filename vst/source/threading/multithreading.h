@@ -191,6 +191,16 @@ void luxstral_b_feed_player_frame(const uint8_t *r, const uint8_t *g,
  * player-fed (plan-gated no-op otherwise). VST only. */
 void luxstral_b_player_stopped(void);
 
+/* Synth-split P3 — FramePlayerThread: stage every PLAYER-OWNED LuxStral send
+ * (sampler chain, or score chain during score playback) from the blended
+ * playback frame; each send applies its own post-marker inserts + bank on a
+ * private copy. Returns the plan's num_ls_sends (0 → caller keeps the legacy
+ * engine-A/B player paths alive). VST only. */
+int ls_sends_stage_player_frame(const uint8_t *r, const uint8_t *g,
+                                const uint8_t *b, int nb_pixels,
+                                int is_score, int force_play,
+                                struct AudioImageBuffers *viz_bus);
+
 /* Engine A ← player-side chain inserts. Called by FramePlayerThread (Non-RT)
  * with the final blended playback frame: applies IN PLACE the inserts of
  * LuxStral A's chain placed BELOW the SCORE (is_score=1) / SAMPLER (is_score=0)

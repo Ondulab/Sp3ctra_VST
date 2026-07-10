@@ -273,12 +273,12 @@ void ChainRackComponent::rebuild()
         {
             auto blk = std::make_unique<BlockComponent>(m.type, m.id);
             auto* bp = blk.get();
-            // Synth-split: every LuxStral send is just "→ LUXSTRAL" — the A/B
-            // engine pair behind the two slots is an internal detail (no
-            // user-facing suffix). Each send keeps its OWN power LED though:
-            // the second slot's LED toggles its own enable param.
-            if (m.type == ModuleType::LuxStral && m.slot == 1)
-                bp->setEnableParamOverride("luxstralBEnabled");
+            // Synth-split: every LuxStral send is just "→ LUXSTRAL" (no A/B
+            // suffix) and its LED is the PER-SEND power, from the send's own
+            // conditioning bank — the ENGINE enable lives on the AUDIO MIX
+            // strip (deviceEnabled).
+            if (m.type == ModuleType::LuxStral && m.slot >= 0)
+                bp->setEnableParamOverride(lsOutParam(m.slot, "enabled"));
             // Each VideoScroll output is per-instance: its LED toggles the slot's
             // own enable param, so the mixer can drop just this output.
             if (m.type == ModuleType::VideoScroll && m.slot >= 0)

@@ -419,7 +419,7 @@ void ChainModel::validateAndRepair()
     std::set<ModuleType> seenSingletons;   // synth/util types already placed (global)
     int videoBudget    = kMaxVideoSlots;    // at most 8 slotted instances model-wide
     int samplerBudget  = kMaxSamplerEngines;// at most 2 sampler engines (A/B) model-wide
-    int luxstralBudget = kMaxLuxStralEngines;// at most 2 LuxStral engines (A/B) model-wide
+    int luxstralBudget = kMaxLuxStralEngines;// up to 8 LuxStral sends model-wide (P3)
 
     for (auto& ch : chains)
     {

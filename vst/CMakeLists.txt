@@ -268,6 +268,8 @@ target_sources(Sp3ctraVST
         source/processing/image_chain.c
         source/processing/chain_plan.c
         source/processing/chain_plan.h
+        source/processing/synth_staging.c
+        source/processing/synth_staging.h
         source/processing/lux_pitch.c
         source/processing/lux_mask.c
         source/processing/lux_reverb.c

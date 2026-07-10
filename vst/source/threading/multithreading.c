@@ -42,6 +42,17 @@ extern void luxstral_wait_for_buffer_consumed(void);
  * translation unit, so a file-static DoubleBuffer keeps the whole 2nd-voice
  * input path self-contained (no Context / Sp3ctraCore plumbing). Lazily
  * initialised on first use in the UDP thread. */
+#include "../processing/synth_staging.h"
+#include "../processing/image_pipeline_stages.h"   /* img_stage_blob_detect (P3 mixer) */
+
+/* Synth-split P3 — per-thread scratch for ONE LuxStral send's conditioned
+ * frame before staging (each producer thread has its own; the staging module
+ * seqlocks the shared slots). */
+static PreprocessedImageData s_ls_send_pp;         /* udpThread */
+static PreprocessedImageData s_ls_send_pp_feeder;  /* feeder tick */
+static int s_udp_frame_ls_sends = 0;   /* udpThread-only: plan.num_ls_sends of
+                                        * the current line (commit-scope read) */
+
 #ifdef VST_MODE
 static DoubleBuffer          s_luxstral_b_db;
 static PreprocessedImageData s_preprocessed_temp_b;   /* UDP-thread scratch (single writer) */
@@ -159,6 +170,74 @@ void luxstral_b_feed_player_frame(const uint8_t *r, const uint8_t *g,
         s_luxstral_b_db.dataReady = 1;
         pthread_mutex_unlock(&s_luxstral_b_db.mutex);
     }
+}
+
+/* ── Synth-split P3 — FramePlayerThread: stage every PLAYER-OWNED LuxStral
+ * send from the blended playback frame. A send is player-owned when its chain
+ * hosts the SAMPLER (the caller only runs while a slot plays), or the SCORE
+ * during score playback. Each send applies ITS OWN chain's post-marker
+ * inserts on a private copy (FX must not leak between chains) and its own
+ * conditioning bank; intensity is applied at MIX time by the audio thread.
+ * Returns plan.num_ls_sends so the caller keeps the legacy engine-A/B paths
+ * alive when no send exists. */
+int ls_sends_stage_player_frame(const uint8_t *r, const uint8_t *g,
+                                const uint8_t *b, int nb_pixels,
+                                int is_score, int force_play,
+                                struct AudioImageBuffers *viz_bus)
+{
+    static PreprocessedImageData s_pp_send_player; /* FramePlayerThread scratch */
+    static uint8_t s_snd_fx_r[8192], s_snd_fx_g[8192], s_snd_fx_b[8192];
+
+    ChainPlan plan;
+    chain_plan_get(&plan);
+    if (plan.num_ls_sends <= 0)
+        return 0;
+
+    int first_owned = 1;
+    for (int k = 0; k < plan.num_ls_sends; k++)
+    {
+        const LsSendPlan     *snd = &plan.ls_send[k];
+        const SynthChainPlan *sp  = &snd->recipe;
+
+        if (! (is_score ? sp->has_score : sp->has_sampler))
+            continue;   /* live/internal send — udpThread/feeder stage it */
+
+        int nb = nb_pixels;
+        if (nb > (int) sizeof(s_snd_fx_r)) nb = (int) sizeof(s_snd_fx_r);
+        memcpy(s_snd_fx_r, r, (size_t) nb);
+        memcpy(s_snd_fx_g, g, (size_t) nb);
+        memcpy(s_snd_fx_b, b, (size_t) nb);
+
+        const int tap_done = chain_apply_post_marker_inserts(
+            sp,
+            is_score ? IMAGE_CHAIN_INSERT_SCORE : IMAGE_CHAIN_INSERT_SAMPLER,
+            viz_bus, s_snd_fx_r, s_snd_fx_g, s_snd_fx_b, nb);
+        if (!tap_done && sp->viz_tap_insert >= 0 && viz_bus != NULL)
+            audio_image_buffers_publish_selection_tap(viz_bus, r, g, b,
+                                                      nb_pixels);
+
+        PipelineConfig scfg = pipeline_build_config_ls_send(
+            snd->bank_slot, snd->chain_idx, /*player_fed*/ 1);
+        if (force_play)
+            scfg.freeze_mode = 0; /* PLAY — sequencer/score drives transport */
+        pipeline_path_luxstral(s_snd_fx_r, s_snd_fx_g, s_snd_fx_b,
+                               &scfg, &s_pp_send_player);
+        int nnotes = nb / (scfg.pixels_per_note > 0 ? scfg.pixels_per_note : 1);
+        if (nnotes > PREPROCESS_MAX_NOTES) nnotes = PREPROCESS_MAX_NOTES;
+        synth_staging_stage_luxstral(snd->chain_idx, snd->bank_slot,
+                                     &s_pp_send_player, nnotes,
+                                     scfg.stereo_enabled);
+
+        if (first_owned)
+        {
+            first_owned = 0;
+            if (viz_bus != NULL)
+                audio_image_buffers_publish_engine_input(
+                    viz_bus, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                    s_snd_fx_r, s_snd_fx_g, s_snd_fx_b, nb);
+        }
+    }
+    return plan.num_ls_sends;
 }
 
 /* Player (sampler/score) stopped: silence engine B's input when its chain was
@@ -1166,6 +1245,8 @@ void *udpThread(void *arg) {
          * rack edit is published mid-frame. */
         ChainPlan frame_plan;
         chain_plan_get(&frame_plan);
+        s_udp_frame_ls_sends = frame_plan.num_ls_sends;   /* P3 — read by the
+                                     * commit block after this scope closes */
 
         /* ── Build the MODULATED frame once — used by any path that selects it.
          * The inserts run inside their own preallocated buffers (see lux_pitch.c
@@ -1192,6 +1273,12 @@ void *udpThread(void *arg) {
              && frame_plan.synth[CHAIN_SYNTH_LUXSTRAL].has_sampler) ||
             (frame_plan.synth[CHAIN_SYNTH_LUXSTRAL_B].present
              && frame_plan.synth[CHAIN_SYNTH_LUXSTRAL_B].has_sampler);
+        /* P3 — a sampler on ANY LuxStral send's chain needs the modulated
+         * channel (the legacy synth[A/B] clauses above only see the first
+         * two sends). */
+        for (int k = 0; k < frame_plan.num_ls_sends && !need_modulated; k++)
+            if (frame_plan.ls_send[k].recipe.has_sampler)
+                need_modulated = 1;
 
         if (need_modulated)
         {
@@ -1352,7 +1439,19 @@ void *udpThread(void *arg) {
             const int score_playing_now  = 0;
 #endif
 
-            if (a_no_signal)
+            if (frame_plan.num_ls_sends > 0)
+            {
+                /* Synth-split P3 — the SEND LOOP below owns every LuxStral
+                 * chain (inserts, probes, taps, staging); the legacy A path
+                 * only keeps the pipeline ticking on the base frame for the
+                 * Path-B/polyphonic legacy commit. Its additive result is
+                 * never committed (the audio-thread mixer owns db additive). */
+                src_R = baseA_R;
+                src_G = baseA_G;
+                src_B = baseA_B;
+                a_no_signal = 0;
+            }
+            else if (a_no_signal)
             {
                 /* No source module in engine A's chain (or an empty internal
                  * source) → the chain has NO stream. Mirror of engine B's
@@ -1481,6 +1580,94 @@ void *udpThread(void *arg) {
             }
         }
 
+        /* ── Synth-split P3: LuxStral SENDS ─────────────────────────────────
+         * Each "→ LUXSTRAL" chain is executed here (source → inserts → per-
+         * send conditioning) and STAGED; the audio thread mixes every active
+         * send into the single engine feed. Player-owned sends (sampler on
+         * the chain — idle included —, or score while the relay plays) are
+         * produced by FramePlayerThread instead. */
+        for (int k = 0; k < frame_plan.num_ls_sends; k++)
+        {
+            const LsSendPlan     *snd = &frame_plan.ls_send[k];
+            const SynthChainPlan *sp  = &snd->recipe;
+
+#ifdef VST_MODE
+            const int player_running_s = lux_sampler_is_playing();
+            const int score_playing_s  = lux_sampler_is_score_playing();
+#else
+            const int player_running_s = 0;
+            const int score_playing_s  = 0;
+#endif
+            if ((sp->has_sampler && player_running_s)
+                || (sp->has_score && score_playing_s))
+                continue;   /* staged by FramePlayerThread */
+
+            const uint8_t *sbR, *sbG, *sbB;
+            const int sig = synth_source_base(
+                sp, CHAIN_SYNTH_COUNT + CHAIN_MAX_CHAINS + snd->chain_idx,
+                db, nb_pixels, &sbR, &sbG, &sbB);
+            if (synth_chain_has_no_signal(sp, sig))
+            {
+                synth_staging_set_inactive(snd->chain_idx);
+                continue;   /* no stream → the send contributes silence */
+            }
+
+            const uint8_t *ssR = sbR, *ssG = sbG, *ssB = sbB;
+            if (mod_R && (sp->has_sampler
+                          || (sp->has_score && score_playing_s)))
+            {
+                /* Sampler chain, player idle: the modulated channel IS this
+                 * chain's stream (mirror of the legacy A short-circuit —
+                 * probes above the marker see the source, below see mod). */
+                int after_marker = 0;
+                for (int i = 0; i < sp->num_inserts; i++)
+                {
+                    if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER
+                        || sp->insert_id[i] == IMAGE_CHAIN_INSERT_SCORE)
+                    { after_marker = 1; continue; }
+                    if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_VIDEOSCROLL)
+                        video_scroll_capture_line(
+                            video_scroll_instance(sp->insert_state_idx[i]),
+                            after_marker ? mod_R : sbR,
+                            after_marker ? mod_G : sbG,
+                            after_marker ? mod_B : sbB,
+                            nb_pixels);
+                }
+                publish_viz_tap_sampler_shortcut(sp, audioBuffers,
+                                                 player_running_s,
+                                                 premarker_tap_done,
+                                                 sbR, sbG, sbB,
+                                                 mod_R, mod_G, mod_B, nb_pixels);
+                ssR = mod_R; ssG = mod_G; ssB = mod_B;
+            }
+            else if (sp->num_inserts > 0 || sp->viz_tap_insert >= 0)
+            {
+                chain_run_inserts_with_viz_tap(sp, audioBuffers,
+                                               sbR, sbG, sbB,
+                                               nb_pixels, &ssR, &ssG, &ssB);
+            }
+
+            /* Per-send conditioning + staging (intensity applied at MIX). */
+            {
+                PipelineConfig scfg = pipeline_build_config_ls_send(
+                    snd->bank_slot, snd->chain_idx, /*player_fed*/ 0);
+                pipeline_path_luxstral(ssR, ssG, ssB, &scfg, &s_ls_send_pp);
+                int nnotes = nb_pixels / (scfg.pixels_per_note > 0
+                                          ? scfg.pixels_per_note : 1);
+                if (nnotes > PREPROCESS_MAX_NOTES) nnotes = PREPROCESS_MAX_NOTES;
+                synth_staging_stage_luxstral(snd->chain_idx, snd->bank_slot,
+                                             &s_ls_send_pp, nnotes,
+                                             scfg.stereo_enabled);
+            }
+
+            /* Head-panel engine tap A — published from the FIRST send (M1
+             * approximation: the head panel shows one engine input line). */
+            if (k == 0)
+                audio_image_buffers_publish_engine_input(
+                    audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                    ssR, ssG, ssB, nb_pixels);
+        }
+
         if (pipeline_process_frame(src_R, src_G, src_B, &live_cfg, &preprocessed_temp) != 0) {
           log_error("THREAD", "Pipeline processing failed");
         }
@@ -1505,6 +1692,7 @@ void *udpThread(void *arg) {
          * passthrough, a RUNNING player owns the commit AND the tap via
          * FramePlayerThread). White when A's chain carries no signal
          * (mirror of the zeroed sections above). */
+        if (frame_plan.num_ls_sends == 0)   /* P3: the send loop owns tap A */
         {
 #ifdef VST_MODE
           const int a_commit_here =
@@ -1523,12 +1711,14 @@ void *udpThread(void *arg) {
         }
 
 #ifdef VST_MODE
-        /* ── LuxStral engine B (M8) — fed by ITS OWN chain, into s_luxstral_b_db ─
+        /* ── LuxStral engine B (M8) — LEGACY (num_ls_sends == 0 only; the P3
+         * send loop + mixer replace the whole B input path) ─────────────────
          * Computed HERE (before db->activeBuffer is overwritten with the display
          * mix below) using the live frame, mirroring engine A's src selection.
          * Committed to the file-static DoubleBuffer that audioProcessingThread
          * hands to synth_AudioProcess_b(). Independent scratch so A's not-yet-
          * committed preprocessed_temp is untouched. */
+        if (frame_plan.num_ls_sends == 0)
         {
             const SynthChainPlan *spLB = &frame_plan.synth[CHAIN_SYNTH_LUXSTRAL_B];
             if (spLB->present && !luxstral_b_db_ensure_ready())
@@ -1712,7 +1902,15 @@ void *udpThread(void *arg) {
        * Source=M(2): UDP thread always writes (live component of mix). */
       {
         int src = g_sp3ctra_config.luxstral_source_type;
-        if (src == 1 /* IMAGE_SOURCE_LIVE */ ||
+        if (s_udp_frame_ls_sends > 0)
+        {
+          /* Synth-split P3 — the audio-thread MIXER owns the additive/stereo/
+           * strokeforge sections of db->preprocessed_data (N-send blend).
+           * Only Path-B products are committed from here (polyphonic has its
+           * own dedicated block below; photowave rides along). */
+          db->preprocessed_data.photowave = preprocessed_temp.photowave;
+        }
+        else if (src == 1 /* IMAGE_SOURCE_LIVE */ ||
             src == 2 /* IMAGE_SOURCE_MIX  */ ||
             src == 3 /* IMAGE_SOURCE_LUXPITCH */ ||
             src == 4 /* IMAGE_SOURCE_LUXMASK */)
@@ -1965,10 +2163,85 @@ void internal_sources_process_tick(void *arg)
   if (!internal_source_any_active())
     return;
 
-  /* ── LuxStral A — its own chain, only when fed by an internal source ────── */
+  /* ── Synth-split P3: LuxStral SENDS (internal-source ticks) ──────────────
+   * Mirror of udpThread's send loop — every live/internal-fed send is staged
+   * here when the device does not stream. Player-owned sends belong to
+   * FramePlayerThread. */
+  for (int k = 0; k < frame_plan.num_ls_sends; k++)
+  {
+      const LsSendPlan     *snd = &frame_plan.ls_send[k];
+      const SynthChainPlan *sp  = &snd->recipe;
+
+      if ((sp->has_sampler && sampler_playing)
+          || (sp->has_score && score_playing))
+          continue;   /* staged by FramePlayerThread */
+
+      const uint8_t *sbR, *sbG, *sbB;
+      const int sig = synth_source_base(
+          sp, CHAIN_SYNTH_COUNT + CHAIN_MAX_CHAINS + snd->chain_idx,
+          db, nb_pixels, &sbR, &sbG, &sbB);
+      if (synth_chain_has_no_signal(sp, sig) || sig <= 0)
+      {
+          /* No internal stream this tick: sig==0 means the live path owns the
+           * frame (device streaming edge) — leave the staging as-is; a true
+           * no-signal chain goes silent. */
+          if (synth_chain_has_no_signal(sp, sig))
+          {
+              synth_staging_set_inactive(snd->chain_idx);
+              if (k == 0)
+                  audio_image_buffers_publish_engine_input(
+                      audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                      NULL, NULL, NULL, nb_pixels);
+          }
+          continue;
+      }
+
+      const uint8_t *ssR = sbR, *ssG = sbG, *ssB = sbB;
+#ifdef VST_MODE
+      if (sp->has_sampler && smpMod_R)
+      {
+          ssR = smpMod_R; ssG = smpMod_G; ssB = smpMod_B;
+          feeder_sampler_chain_shortcut(sp, audioBuffers,
+                                        smp_premarker_tap_done,
+                                        sbR, sbG, sbB,
+                                        smpMod_R, smpMod_G, smpMod_B,
+                                        nb_pixels);
+      }
+      else
+#endif
+      if (sp->num_inserts > 0 || sp->viz_tap_insert >= 0)
+          chain_run_inserts_with_viz_tap(sp, audioBuffers, sbR, sbG, sbB,
+                                         nb_pixels, &ssR, &ssG, &ssB);
+
+      if (k == 0 && !(sp->has_score && score_playing))
+      {
+#ifdef VST_MODE
+          if (!smpMod_R)   /* sampler chain owns the bus — published above */
+#endif
+          audio_image_buffers_snapshot_modulated(audioBuffers, ssR, ssG, ssB,
+                                                 nb_pixels);
+          audio_image_buffers_publish_engine_input(
+              audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+              ssR, ssG, ssB, nb_pixels);
+      }
+
+      {
+          PipelineConfig scfg = pipeline_build_config_ls_send(
+              snd->bank_slot, snd->chain_idx, /*player_fed*/ 0);
+          pipeline_path_luxstral(ssR, ssG, ssB, &scfg, &s_ls_send_pp_feeder);
+          int nnotes = nb_pixels / (scfg.pixels_per_note > 0
+                                    ? scfg.pixels_per_note : 1);
+          if (nnotes > PREPROCESS_MAX_NOTES) nnotes = PREPROCESS_MAX_NOTES;
+          synth_staging_stage_luxstral(snd->chain_idx, snd->bank_slot,
+                                       &s_ls_send_pp_feeder, nnotes,
+                                       scfg.stereo_enabled);
+      }
+  }
+
+  /* ── LuxStral A — LEGACY (num_ls_sends == 0 only; P3 sends staged above) ── */
   const uint8_t *baseA_R = NULL, *baseA_G = NULL, *baseA_B = NULL;
   int a_done = 0;
-  if (spA->present && !sampler_playing)
+  if (frame_plan.num_ls_sends == 0 && spA->present && !sampler_playing)
   {
     const int baseSigA = synth_source_base(spA, CHAIN_SYNTH_LUXSTRAL, db,
                                            nb_pixels,
@@ -2105,11 +2378,10 @@ void internal_sources_process_tick(void *arg)
   }
 
 #ifdef VST_MODE
-  /* ── LuxStral engine B — its own chain, into the file-static DoubleBuffer ──
-   * Skipped while a player owns B's input: sampler playback (shared modulated
-   * channel) or score playback on B's chain (FramePlayerThread feeds it via
-   * luxstral_b_feed_player_frame). */
-  if (spLB->present && !(spLB->has_sampler && sampler_playing)
+  /* ── LuxStral engine B — LEGACY (num_ls_sends == 0 only; the P3 send loop
+   * above owns every LuxStral chain). Skipped while a player owns B's input. */
+  if (frame_plan.num_ls_sends == 0
+      && spLB->present && !(spLB->has_sampler && sampler_playing)
       && !(spLB->has_score && lux_sampler_is_score_playing()))
   {
     const uint8_t *baseB_R, *baseB_G, *baseB_B;
@@ -2386,21 +2658,96 @@ void *audioProcessingThread(void *arg) {
     {
       ChainPlan planB_render;
       chain_plan_get(&planB_render);
-      const int bActive = planB_render.synth[CHAIN_SYNTH_LUXSTRAL_B].present
-                          && __atomic_load_n(&s_luxstral_b_db_ready, __ATOMIC_ACQUIRE);
-      if (bActive)
+
+      if (planB_render.num_ls_sends > 0)
       {
-        /* Lazy init keyed on the ENGINE's own state, not a function-local
-         * static: the old flag survived a core teardown (which now frees B's
-         * oscillator clone) and skipped re-initialisation on the next start. */
-        if (!synth_luxstral_engine_b_ready())
-          synth_luxstral_init_engine_b();
-        synth_AudioProcess_ab(audio_read_R, audio_read_G, audio_read_B,
-                              context->doubleBuffer, &s_luxstral_b_db);
+        /* ── Synth-split P3: PULL MIX ─────────────────────────────────────
+         * Blend every active LuxStral send (intensity-weighted) into the
+         * single engine feed. The mixer is db->preprocessed_data's SOLE
+         * writer for the additive/stereo/strokeforge sections while sends
+         * exist (producers stage; udp/feeder commit Path-B products only).
+         * StrokeForge analyses the MIXED notes — single-send parity intact. */
+        DoubleBuffer *mdb = context->doubleBuffer;
+        static PreprocessedImageData s_mixed_pp;   /* audio-thread scratch */
+        float  mixed_contrast = 0.0f;
+        int    stereo_valid   = 0;
+        const int max_notes   = PREPROCESS_MAX_NOTES;
+
+        const int mixed = synth_staging_mix_luxstral(
+            &planB_render,
+            s_mixed_pp.additive.notes, max_notes,
+            s_mixed_pp.stereo.left_gains, s_mixed_pp.stereo.right_gains,
+            &mixed_contrast, &stereo_valid);
+        (void) stereo_valid;   /* gains are centre-filled when mono */
+
+        if (mixed > 0)
+        {
+          s_mixed_pp.additive.contrast_factor = mixed_contrast;
+          /* Display axis: with pixels_per_note == 1 the note and pixel axes
+           * coincide — reuse the mixed amplitudes as the grayscale mirror. */
+          memcpy(s_mixed_pp.additive.grayscale, s_mixed_pp.additive.notes,
+                 sizeof(s_mixed_pp.additive.grayscale));
+          /* StrokeForge on the blended flux (cheap early-out when disabled). */
+          {
+            int sf_notes = get_cis_pixels_nb();
+            if (sf_notes > max_notes) sf_notes = max_notes;
+            img_stage_blob_detect(s_mixed_pp.additive.notes, sf_notes,
+                                  mixed_contrast, &s_mixed_pp.strokeforge);
+          }
+        }
+        else
+        {
+          /* No active send → TRUE silence (chain no-signal contract). */
+          memset(&s_mixed_pp.additive,    0, sizeof(s_mixed_pp.additive));
+          memset(&s_mixed_pp.stereo.left_gains, 0,
+                 sizeof(s_mixed_pp.stereo.left_gains));
+          memset(&s_mixed_pp.stereo.right_gains, 0,
+                 sizeof(s_mixed_pp.stereo.right_gains));
+          memset(&s_mixed_pp.strokeforge, 0, sizeof(s_mixed_pp.strokeforge));
+        }
+
+        pthread_mutex_lock(&mdb->mutex);
+        memcpy(&mdb->preprocessed_data.additive, &s_mixed_pp.additive,
+               sizeof(s_mixed_pp.additive));
+        memcpy(mdb->preprocessed_data.stereo.left_gains,
+               s_mixed_pp.stereo.left_gains,
+               sizeof(s_mixed_pp.stereo.left_gains));
+        memcpy(mdb->preprocessed_data.stereo.right_gains,
+               s_mixed_pp.stereo.right_gains,
+               sizeof(s_mixed_pp.stereo.right_gains));
+        mdb->preprocessed_data.strokeforge = s_mixed_pp.strokeforge;
+        mdb->preprocessed_data.timestamp_us = 1;   /* has_preprocessed gate */
+        {
+          struct timeval tv;
+          gettimeofday(&tv, NULL);
+          mdb->preprocessed_data.timestamp_us =
+              (uint64_t) tv.tv_sec * 1000000ULL + (uint64_t) tv.tv_usec;
+        }
+        /* Tag must match the engine's source gating (src==0 wants tag 2). */
+        mdb->dataReady = (g_sp3ctra_config.luxstral_source_type == 0) ? 2 : 1;
+        pthread_mutex_unlock(&mdb->mutex);
+
+        synth_AudioProcess(audio_read_R, audio_read_G, audio_read_B,
+                           context->doubleBuffer);
       }
       else
       {
-        synth_AudioProcess(audio_read_R, audio_read_G, audio_read_B, context->doubleBuffer);
+        const int bActive = planB_render.synth[CHAIN_SYNTH_LUXSTRAL_B].present
+                            && __atomic_load_n(&s_luxstral_b_db_ready, __ATOMIC_ACQUIRE);
+        if (bActive)
+        {
+          /* Lazy init keyed on the ENGINE's own state, not a function-local
+           * static: the old flag survived a core teardown (which now frees B's
+           * oscillator clone) and skipped re-initialisation on the next start. */
+          if (!synth_luxstral_engine_b_ready())
+            synth_luxstral_init_engine_b();
+          synth_AudioProcess_ab(audio_read_R, audio_read_G, audio_read_B,
+                                context->doubleBuffer, &s_luxstral_b_db);
+        }
+        else
+        {
+          synth_AudioProcess(audio_read_R, audio_read_G, audio_read_B, context->doubleBuffer);
+        }
       }
     }
 #else

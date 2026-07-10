@@ -22,6 +22,11 @@ extern "C" {
 #include <cmath>
 #include <vector>
 
+// Synth-split P3 — number of LuxStral sends staged for the current playback
+// frame (FramePlayerThread-only; read by the db-commit block below to leave
+// the additive sections to the audio-thread mixer when sends exist).
+static int s_playerSendCount = 0;
+
 // ============================================================================
 // Static instance (singleton for C hook access)
 // ============================================================================
@@ -3387,15 +3392,24 @@ void FramePlayerThread::run()
                         }
                     }
 
-                    // 2b. Feed engine B FIRST, with the RAW blended player frame —
-                    //     the feed applies the post-marker inserts of B's OWN chain
-                    //     internally (a chain's FX must not leak into the other's).
-                    luxstral_b_feed_player_frame(
+                    // 2b. Synth-split P3: stage every PLAYER-OWNED LuxStral
+                    //     send from the RAW blended frame (each send applies
+                    //     its own post-marker inserts + conditioning bank; the
+                    //     audio-thread mixer blends them). Legacy engine-B
+                    //     feed only when no send exists (pre-split sessions).
+                    s_playerSendCount = ls_sends_stage_player_frame(
                         workR, workG, workB, nb,
                         isScore ? 1 : 0,
                         (state.seqControlledPlay.load(std::memory_order_relaxed)
                          || isScore) ? 1 : 0,
                         audioBuffers);
+                    if (s_playerSendCount == 0)
+                        luxstral_b_feed_player_frame(
+                            workR, workG, workB, nb,
+                            isScore ? 1 : 0,
+                            (state.seqControlledPlay.load(std::memory_order_relaxed)
+                             || isScore) ? 1 : 0,
+                            audioBuffers);
 
                     // 2c. Engine A: apply the chain inserts placed BELOW the
                     //     SCORE/SAMPLER module (REVERB/ECHO/probes) to the playback
@@ -3464,15 +3478,21 @@ void FramePlayerThread::run()
                         // polyphonic.* (LuxSynth) may be fed by a different source (e.g. Live)
                         // and must not be clobbered with sampler-derived data.
                         // Only copy sections owned by the sampler/LuxStral path.
-                        doubleBuffer->preprocessed_data.additive    = ppData.additive;
+                        // Synth-split P3: with sends staged (s_playerSendCount
+                        // > 0) the audio-thread MIXER owns the additive/stereo/
+                        // strokeforge sections — commit only Path-B products.
+                        if (s_playerSendCount == 0)
+                        {
+                            doubleBuffer->preprocessed_data.additive    = ppData.additive;
+                            doubleBuffer->preprocessed_data.stereo      = ppData.stereo;
+                            doubleBuffer->preprocessed_data.strokeforge = ppData.strokeforge;
+                            doubleBuffer->preprocessed_data.timestamp_us = ppData.timestamp_us;
+                            doubleBuffer->dataReady = 2; /* 2 = sampler source tag */
+                        }
                         doubleBuffer->preprocessed_data.photowave   = ppData.photowave;
-                        doubleBuffer->preprocessed_data.stereo      = ppData.stereo;
-                        doubleBuffer->preprocessed_data.strokeforge = ppData.strokeforge;
-                        doubleBuffer->preprocessed_data.timestamp_us = ppData.timestamp_us;
                         // Only update polyphonic if LuxSynth source is also SAMPLER.
                         if (g_sp3ctra_config.luxsynth_source_type == 0 /* IMAGE_SOURCE_SAMPLER */)
                             doubleBuffer->preprocessed_data.polyphonic = ppData.polyphonic;
-                        doubleBuffer->dataReady = 2; /* 2 = sampler source tag */
                         pthread_mutex_unlock(&doubleBuffer->mutex);
 
                         // Per-engine input taps (per-chain display): the player
@@ -3482,9 +3502,11 @@ void FramePlayerThread::run()
                         // the pipeline above, post-marker inserts included, so
                         // the head panels track the playback chain. Path-B tap
                         // only when the player also owns the polyphonic commit.
-                        audio_image_buffers_publish_engine_input(
-                            audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
-                            workR, workG, workB, nb);
+                        // (P3: tap A already published by the send loop.)
+                        if (s_playerSendCount == 0)
+                            audio_image_buffers_publish_engine_input(
+                                audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                                workR, workG, workB, nb);
                         if (g_sp3ctra_config.luxsynth_source_type == 0)
                             audio_image_buffers_publish_engine_input(
                                 audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,

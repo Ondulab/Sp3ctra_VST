@@ -80,6 +80,20 @@ typedef struct {
     int viz_tap_insert;
 } SynthChainPlan;
 
+/* Synth-split P3 — one LuxStral SEND: a chain feeding the (single) LuxStral
+ * engine through its → LUXSTRAL OUT module. `recipe` is the chain compiled up
+ * to the OUT's position (same shape as a synth chain); `bank_slot` picks the
+ * send's conditioning bank (g_sp3ctra_config.luxstral_out[bank_slot]:
+ * negative/DC/gamma/contrastMin/rangeDb/intensity/enabled) and its envelope
+ * state. Every send is staged by its producer thread (synth_staging.h) and
+ * the engine feed is the intensity-weighted MIX of all active sends, pulled
+ * by the audio thread. */
+typedef struct {
+    int chain_idx;              /* model chain hosting this send (0..7) */
+    int bank_slot;              /* luxstral_out[] / luxstralOut{N}_* bank (0..7) */
+    SynthChainPlan recipe;      /* chain compiled up to the OUT position */
+} LsSendPlan;
+
 typedef struct {
     SynthChainPlan synth[CHAIN_SYNTH_COUNT];
 
@@ -91,6 +105,13 @@ typedef struct {
      * chains, so a source-less monitor chain stays static (no live leak). */
     int num_probe_chains;
     SynthChainPlan probe_chain[CHAIN_MAX_CHAINS];
+
+    /* Synth-split P3 — LuxStral sends (N-chain mix). When num_ls_sends > 0
+     * the audio thread's mixer owns db->preprocessed_data (additive/stereo/
+     * strokeforge sections) and synth[CHAIN_SYNTH_LUXSTRAL(_B)] are IGNORED by
+     * the audio path (kept filled for visualizer compatibility). */
+    int num_ls_sends;
+    LsSendPlan ls_send[CHAIN_MAX_CHAINS];
 } ChainPlan;
 
 /* Message thread: publish a new plan (lock-free double buffer + atomic flip). */
