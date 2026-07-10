@@ -206,7 +206,7 @@ public:
         if (isFlat())
         {
             g.setColour(juce::Colour(0xff55606f));
-            g.drawText("drag to shape  ·  double-click to reset",
+            g.drawText(juce::String::fromUTF8("drag to shape  \xc2\xb7  double-click to reset"),
                        plot.getRight() - 220, (int) bf.getY() + 2, 220, 10,
                        juce::Justification::right, false);
         }

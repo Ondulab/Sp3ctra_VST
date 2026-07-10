@@ -8,9 +8,13 @@
 #include "image/SourcesTabComponent.h"
 #include "image/LuxPitchTabComponent.h"
 #include "image/LuxMaskTabComponent.h"
+#include "image/LuxReverbTabComponent.h"
+#include "image/LuxEchoTabComponent.h"
+#include "image/LuxEqTabComponent.h"
 #include "image/LuxStralTabComponent.h"
 #include "image/LuxSynthTabComponent.h"
 #include "image/ScoreGenTabComponent.h"
+#include "image/TimbreGenTabComponent.h"
 #include "image/VisualizerMode.h"
 #include "video/VideoScrollPage.h"
 #include "sampler/SamplerPageComponent.h"
@@ -18,12 +22,13 @@
 #include "ui/ChainRackComponent.h"
 #include "ui/KeyboardRulerComponent.h"
 #include "ui/EngineAudioPanels.h"
+#include "ui/SynthOutPageComponent.h"
+#include "ui/AudioMixPanel.h"
 #include "ui/VideoMixerColumn.h"
 #include "ui/ModuleCatalogComponent.h"
 #include "ui/SplitterBar.h"
 #include "ui/setup/SourceSetupPanel.h"
 #include "sources/ui/MediaSourcePage.h"        // M9 — IMAGE/VIDEO/CAMERA PLAY faces
-#include "sources/ui/MediaSourceSetupPanel.h"  // M9 — media/device choosers
 #include "ui/setup/PitchSetupPanel.h"
 #include "ui/setup/MaskSetupPanel.h"
 #include "ui/setup/LuxStralSetupPanel.h"
@@ -127,8 +132,8 @@ public:
         g.drawRoundedRectangle(b, 4.f, 1.2f);
 
         g.setColour(red);
-        g.setFont(juce::Font(juce::jmin(b.getHeight() * 0.46f, 15.f),
-                             juce::Font::bold));
+        g.setFont(juce::Font(juce::FontOptions(juce::jmin(b.getHeight() * 0.46f, 15.f)))
+                      .boldened());
         g.drawText("PANIC", getLocalBounds(), juce::Justification::centred, false);
     }
 
@@ -261,6 +266,13 @@ public:
 
     bool isSetupFace() const noexcept { return setupFace; }
 
+    /** Play-only mode: the block has no SETUP face — draw the single PLAY
+     *  segment (always active) and ignore clicks on the SETUP area. */
+    void setPlayOnly(bool po)
+    {
+        if (playOnly != po) { playOnly = po; repaint(); }
+    }
+
     void setAccent(juce::Colour c)
     {
         if (accent != c) { accent = c; repaint(); }
@@ -275,7 +287,8 @@ public:
 
         const auto mouse = getMouseXYRelative();
         drawSegment(g, segmentBounds(false), "PLAY",  !setupFace, mouse);
-        drawSegment(g, segmentBounds(true),  "SETUP",  setupFace, mouse);
+        if (!playOnly)
+            drawSegment(g, segmentBounds(true), "SETUP", setupFace, mouse);
     }
 
     void mouseUp(const juce::MouseEvent& e) override
@@ -284,7 +297,7 @@ public:
             return;
         if (segmentBounds(false).contains(e.getPosition()))
             setFace(false, true);
-        else if (segmentBounds(true).contains(e.getPosition()))
+        else if (!playOnly && segmentBounds(true).contains(e.getPosition()))
             setFace(true, true);
     }
 
@@ -328,6 +341,7 @@ private:
     }
 
     bool setupFace { false };
+    bool playOnly  { false };
     juce::Colour accent { juce::Colour(0xff4fa3e0) };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FaceSwitchBar)
@@ -366,7 +380,8 @@ private:
  *   "scrollCollapsed"    — zone 4 collapse state
  */
 class Sp3ctraAudioProcessorEditor : public juce::AudioProcessorEditor,
-                                    public juce::DragAndDropContainer
+                                    public juce::DragAndDropContainer,
+                                    private juce::Timer
 {
 public:
     Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor&);
@@ -422,6 +437,12 @@ private:
     // ── Behaviour ─────────────────────────────────────────────────────────────
     void openSettings();
 
+    /** MIDI-follow — polls the mapping engine (~20 Hz) and, when enabled, jumps
+     *  to the module a MIDI controller just moved. */
+    void timerCallback() override;
+    bool midiFollowEnabled() const;
+    void followMidiParam(const juce::String& paramId);
+
     /** Single selection model — drives zones 1 + 2 + 3. */
     void selectBlock(ChainBlockId id);
     /** Contextual top-bandeau panels for LUXSTRAL: GRAY always, COLOR only when
@@ -469,6 +490,10 @@ private:
     ChainBlockId selectedBlock { ChainBlockId::Chain1Source };
     int  visPanelCount_ { 1 };         // ZONE 1 stacked-panel count (drives its height)
     bool setupFace { false };          // false = PLAY, true = SETUP (per M5)
+    // Synth-split P2 — for the synth blocks, WHICH view zone 3 hosts:
+    // false = OUT page (per-chain send conditioning, reached from the rack),
+    // true  = ENGINE page (reached from the ZONE-5 synth dock card).
+    bool engineView_ { false };
     int  luxStralEngineIndex_ { 0 };   // selected LuxStral engine (0 = A, 1 = B) — M8
     int  samplerEngineIndex_  { 0 };   // selected Sampler engine (0 = A, 1 = B)
     int  videoSlotIndex_      { 0 };   // selected VideoScroll instance slot (0..7)
@@ -515,8 +540,13 @@ private:
     std::unique_ptr<SamplerPageComponent> samplerPage;
     std::unique_ptr<SequencerPageComponent> sequencerPage;
     std::unique_ptr<ScoreGenTabComponent> scorePage;
+    std::unique_ptr<TimbreGenTabComponent> timbrePage;      // UTILS > TIMBRE
+    std::unique_ptr<LuxReverbTabComponent> reverbPage;       // FX > REVERB
+    std::unique_ptr<LuxEchoTabComponent>   echoPage;         // FX > ECHO
+    std::unique_ptr<LuxEqTabComponent>     eqPage;           // FX > EQ
     std::unique_ptr<VideoScrollPage>      videoScrollPage;   // OUT > VIDEO SCROLL (per-instance)
     std::unique_ptr<AudioWavePanel>       audioWavePanel;
+    std::unique_ptr<SynthOutPageComponent> synthOutPage;   // OUT/send page (synth-split P2)
     std::unique_ptr<MediaSourcePage>      imageSrcPage;      // M9 — SRC > IMAGE
     std::unique_ptr<MediaSourcePage>      videoSrcPage;      // M9 — SRC > VIDEO
     std::unique_ptr<MediaSourcePage>      cameraSrcPage;     // M9 — SRC > CAMERA
@@ -530,14 +560,15 @@ private:
     std::unique_ptr<LuxWaveSetupPanel>    waveSetup;
     std::unique_ptr<SamplerSetupPanel>    samplerSetup;
     std::unique_ptr<ScoreSetupPanel>      scoreSetup;
-    std::unique_ptr<MediaSourceSetupPanel> imageSrcSetup;    // M9 — media chooser
-    std::unique_ptr<MediaSourceSetupPanel> videoSrcSetup;
-    std::unique_ptr<MediaSourceSetupPanel> cameraSrcSetup;   // device chooser
+    // (M9 media modules have no SETUP face — picking lives on MediaSourcePage)
 
     // ── ZONE 4: video scroll column (collapsible, detachable window) ──────────
     std::unique_ptr<VideoMixerColumn> waterfallColumn;   // ZONE 4 — right-band VIDEO MIX
 
-    // ZONE 5 — reserved (output / master / monitoring): collapsed strip h=0.
+    // ── AUDIO MIX — bottom half of ZONE 4 (P2b): the three global engines +
+    // MASTER as vertical faders with VU meters. In the collapsed ZONE-4 band
+    // it shrinks to a bare vertical MASTER fader (mini mode).
+    std::unique_ptr<AudioMixPanel> audioMixPanel;
 
     // ── LookAndFeel (declared before all JUCE components that use it) ─────────
     Sp3ctraLookAndFeel sp3ctraLaf;

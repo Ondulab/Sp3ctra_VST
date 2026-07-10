@@ -20,6 +20,9 @@
 #include "../processing/chain_plan.h"
 #include "../processing/lux_pitch.h"
 #include "../processing/lux_mask.h"
+#include "../processing/lux_reverb.h"
+#include "../processing/lux_echo.h"
+#include "../processing/lux_eq.h"
 #include "../processing/video_scroll.h"
 #include "../processing/internal_source.h"
 #include <time.h>
@@ -43,6 +46,161 @@ extern void luxstral_wait_for_buffer_consumed(void);
 static DoubleBuffer          s_luxstral_b_db;
 static PreprocessedImageData s_preprocessed_temp_b;   /* UDP-thread scratch (single writer) */
 static int                   s_luxstral_b_db_ready = 0;
+
+/* Lazy init shared by every engine-B producer (udpThread, feeder tick,
+ * FramePlayerThread via luxstral_b_feed_player_frame). Returns 1 when the
+ * DoubleBuffer is usable. */
+static int luxstral_b_db_ensure_ready(void)
+{
+    if (__atomic_load_n(&s_luxstral_b_db_ready, __ATOMIC_ACQUIRE))
+        return 1;
+    if (initDoubleBuffer(&s_luxstral_b_db) != 0)
+    {
+        log_error("THREAD", "Engine-B DoubleBuffer init failed — engine B stays inactive");
+        return 0;
+    }
+    /* RELEASE so the audio thread, on seeing ready=1 (ACQUIRE), also sees the
+     * fully-initialised DoubleBuffer (mutex, buffers). */
+    __atomic_store_n(&s_luxstral_b_db_ready, 1, __ATOMIC_RELEASE);
+    return 1;
+}
+
+/* Commit TRUE silence into engine B's input. Zeroed notes/grayscale/contrast
+ * are silent for every inversion/AC-removal combo — never run the pipeline on
+ * a synthetic black/white frame instead (inversion ON turns a black frame
+ * into ALL notes at max volume). */
+static void luxstral_b_commit_silence(void)
+{
+    static PreprocessedImageData s_preprocessed_silence; /* stays zeroed */
+    struct timeval tv_silence;
+    if (!luxstral_b_db_ensure_ready())
+        return;
+    gettimeofday(&tv_silence, NULL);
+    s_preprocessed_silence.timestamp_us =
+        (uint64_t)tv_silence.tv_sec * 1000000ULL + (uint64_t)tv_silence.tv_usec;
+
+    pthread_mutex_lock(&s_luxstral_b_db.mutex);
+    s_luxstral_b_db.preprocessed_data = s_preprocessed_silence;
+    s_luxstral_b_db.dataReady = 1;
+    pthread_mutex_unlock(&s_luxstral_b_db.mutex);
+}
+
+/* Player-side execution of the inserts placed AFTER a SCORE/SAMPLER marker —
+ * defined below chain_run_inserts_with_viz_tap (which it reuses). */
+static int chain_apply_post_marker_inserts(const SynthChainPlan *sp,
+                                           int marker_id,
+                                           struct AudioImageBuffers *viz_bus,
+                                           uint8_t *r, uint8_t *g, uint8_t *b,
+                                           int nb_pixels);
+
+/* ── Engine B ← sampler/score player feed (bug: B silent without A) ──────────
+ * Called by FramePlayerThread (Non-RT) with the final blended playback frame.
+ * The SCORE/SAMPLER players historically wrote ONLY engine A's DoubleBuffer,
+ * so a [SCORE, LUXSTRAL B] chain never received a single frame and engine B
+ * stayed silent unless some other producer (device stream + engine A's chain)
+ * happened to run. This is the plan-driven feed that makes engine B's chain
+ * self-sufficient:
+ *   • is_score=1 → feed when a SCORE module sits upstream of LUXSTRAL B.
+ *   • is_score=0 → feed when a SAMPLER sits upstream of LUXSTRAL B AND the
+ *     device is NOT streaming (while it streams, udpThread already routes the
+ *     modulated channel to B — two writers would fight).
+ * force_play=1 forces the pipeline envelope to PLAY (sequencer/score driven),
+ * mirroring the engine-A commit in FramePlayerThread. */
+void luxstral_b_feed_player_frame(const uint8_t *r, const uint8_t *g,
+                                  const uint8_t *b, int nb_pixels,
+                                  int is_score, int force_play,
+                                  struct AudioImageBuffers *viz_bus)
+{
+    static PreprocessedImageData s_pp_player; /* FramePlayerThread-only scratch */
+    ChainPlan plan;
+    chain_plan_get(&plan);
+    const SynthChainPlan *spLB = &plan.synth[CHAIN_SYNTH_LUXSTRAL_B];
+
+    if (!spLB->present)
+        return;
+    if (is_score ? !spLB->has_score
+                 : (!spLB->has_sampler || internal_source_live_streaming()))
+        return;
+    if (!luxstral_b_db_ensure_ready())
+        return;
+
+    /* Apply the inserts of B's chain placed BELOW the score/sampler module
+     * (REVERB/ECHO/probes) to the playback frame — the per-line producers skip
+     * this chain while the player owns it, so this is their only execution. */
+    static uint8_t s_b_fx_r[8192], s_b_fx_g[8192], s_b_fx_b[8192];
+    int nb = nb_pixels;
+    if (nb > (int)sizeof(s_b_fx_r)) nb = (int)sizeof(s_b_fx_r);
+    memcpy(s_b_fx_r, r, (size_t)nb);
+    memcpy(s_b_fx_g, g, (size_t)nb);
+    memcpy(s_b_fx_b, b, (size_t)nb);
+    const int tap_done = chain_apply_post_marker_inserts(
+        spLB,
+        is_score ? IMAGE_CHAIN_INSERT_SCORE : IMAGE_CHAIN_INSERT_SAMPLER,
+        viz_bus, s_b_fx_r, s_b_fx_g, s_b_fx_b, nb);
+
+    /* Contextual zone 1: while the player owns B's input, udpThread skips this
+     * chain — publish the selection tap here. A tap at/above the marker shows
+     * the RAW player frame; below it, chain_apply_post_marker_inserts already
+     * published the stream at the selected module's position. */
+    if (!tap_done && spLB->viz_tap_insert >= 0 && viz_bus != NULL)
+        audio_image_buffers_publish_selection_tap(viz_bus, r, g, b, nb_pixels);
+
+    PipelineConfig cfg_b = pipeline_build_config_luxstral_b();
+    if (force_play)
+        cfg_b.freeze_mode = 0; /* PLAY — sequencer/score drives the transport */
+    if (pipeline_process_frame(s_b_fx_r, s_b_fx_g, s_b_fx_b, &cfg_b, &s_pp_player) == 0)
+    {
+        struct timeval tv_now;
+        gettimeofday(&tv_now, NULL);
+        s_pp_player.timestamp_us =
+            (uint64_t)tv_now.tv_sec * 1000000ULL + (uint64_t)tv_now.tv_usec;
+        pthread_mutex_lock(&s_luxstral_b_db.mutex);
+        s_luxstral_b_db.preprocessed_data = s_pp_player;
+        s_luxstral_b_db.dataReady = 1;
+        pthread_mutex_unlock(&s_luxstral_b_db.mutex);
+    }
+}
+
+/* Player (sampler/score) stopped: silence engine B's input when its chain was
+ * player-fed. Plan-gated so unrelated topologies are a no-op. Covers the
+ * offline case where no per-line producer would overwrite the last frame. */
+void luxstral_b_player_stopped(void)
+{
+    ChainPlan plan;
+    chain_plan_get(&plan);
+    const SynthChainPlan *spLB = &plan.synth[CHAIN_SYNTH_LUXSTRAL_B];
+    if (spLB->present && (spLB->has_score || spLB->has_sampler))
+        luxstral_b_commit_silence();
+}
+
+/* UI (message thread): copy engine B's CURRENT preprocessed additive grayscale
+ * — the REAL data engine B synthesises from, its own pipeline (inversion /
+ * gamma / decode) already applied. Feeds the LUXSTRAL B zone-1 view without
+ * any UI-side re-simulation. Returns the pixel count copied, 0 when engine
+ * B's input buffer has not been initialised yet. */
+int luxstral_b_copy_preprocessed_gray(uint8_t *gray_out, int max_pixels)
+{
+    if (gray_out == NULL || max_pixels <= 0)
+        return 0;
+    if (!__atomic_load_n(&s_luxstral_b_db_ready, __ATOMIC_ACQUIRE))
+        return 0;
+
+    int n = get_cis_pixels_nb();
+    if (n > max_pixels)
+        n = max_pixels;
+
+    pthread_mutex_lock(&s_luxstral_b_db.mutex);
+    const float *gsrc = s_luxstral_b_db.preprocessed_data.additive.grayscale;
+    for (int i = 0; i < n; i++)
+    {
+        float v = gsrc[i];
+        if (v < 0.0f) v = 0.0f;
+        else if (v > 1.0f) v = 1.0f;
+        gray_out[i] = (uint8_t)(v * 255.0f + 0.5f);
+    }
+    pthread_mutex_unlock(&s_luxstral_b_db.mutex);
+    return n;
+}
 #endif
 
 #ifndef NO_SFML
@@ -301,6 +459,12 @@ static void chain_resolve_insert_states(const SynthChainPlan *sp,
                 states[i] = (void *)lux_pitch_instance(sp->insert_state_idx[i]); break;
             case IMAGE_CHAIN_INSERT_LUXMASK:
                 states[i] = (void *)lux_mask_instance(sp->insert_state_idx[i]); break;
+            case IMAGE_CHAIN_INSERT_LUXREVERB:
+                states[i] = (void *)lux_reverb_instance(sp->insert_state_idx[i]); break;
+            case IMAGE_CHAIN_INSERT_LUXECHO:
+                states[i] = (void *)lux_echo_instance(sp->insert_state_idx[i]); break;
+            case IMAGE_CHAIN_INSERT_LUXEQ:
+                states[i] = (void *)lux_eq_instance(sp->insert_state_idx[i]); break;
             case IMAGE_CHAIN_INSERT_VIDEOSCROLL:
                 states[i] = (void *)video_scroll_instance(sp->insert_state_idx[i]); break;
             default:
@@ -310,17 +474,30 @@ static void chain_resolve_insert_states(const SynthChainPlan *sp,
 }
 
 /* ── M9: per-synth base frame — the chain's SOURCE module output ─────────────
- * LIVE / NONE / unavailable-internal → the shared live frame (db->activeBuffer,
- * legacy behaviour). IMAGE / VIDEO / CAMERA → the latest line published by that
- * source's engine, copied into a per-synth scratch so the pointers stay stable
- * for the rest of the frame.
+ * LIVE (or sampler/score-fed) → the shared live frame (db->activeBuffer).
+ * IMAGE / VIDEO / CAMERA → the latest line published by that source's engine,
+ * copied into a per-synth scratch so the pointers stay stable for the rest of
+ * the frame.
+ *
+ * Return codes:
+ *    1 = internal source line copied (out_* point into the scratch)
+ *    0 = live frame (out_* point into db->activeBuffer)
+ *   -1 = NO SIGNAL — no source module in the chain (CHAIN_SRC_NONE) or an
+ *        internal source module that is inactive / has published nothing.
+ *        out_* still fall back to the live frame so legacy pointer users stay
+ *        valid, but ROUTING callers must treat -1 as silence: a chain must
+ *        never leak the live device feed by default (only an explicit SP3CTRA
+ *        source, or a sampler/score upstream, may carry signal).
  *
  * The scratch is written by whichever thread currently drives the per-synth
  * processing (udpThread while the device streams, the feeder tick otherwise —
  * see internal_source_live_streaming()). The 250 ms hand-over hysteresis makes
  * concurrent writes to the same synth slot practically impossible; a glitched
- * frame at the boundary is acceptable. */
-static uint8_t s_synth_src_scratch[CHAIN_SYNTH_COUNT][3][INTERNAL_SRC_MAX_PIXELS];
+ * frame at the boundary is acceptable.
+ *
+ * Slots CHAIN_SYNTH_COUNT..CHAIN_SYNTH_COUNT+CHAIN_MAX_CHAINS-1 belong to the
+ * probe-only chains (plan.probe_chain[i] → slot CHAIN_SYNTH_COUNT + i). */
+static uint8_t s_synth_src_scratch[CHAIN_SYNTH_COUNT + CHAIN_MAX_CHAINS][3][INTERNAL_SRC_MAX_PIXELS];
 
 static int synth_source_base(const SynthChainPlan *sp, int synth_slot,
                              DoubleBuffer *db, int nb_pixels,
@@ -342,8 +519,254 @@ static int synth_source_base(const SynthChainPlan *sp, int synth_slot,
     *out_r = db->activeBuffer_R;
     *out_g = db->activeBuffer_G;
     *out_b = db->activeBuffer_B;
+    /* Internal module placed but empty/inactive, or no source module at all →
+     * the chain has no signal of its own. */
+    if (kind >= 0 || sp->source_kind == CHAIN_SRC_NONE)
+        return -1;
     return 0;
 }
+
+/* True when a synth chain carries NO signal: its base source resolved to
+ * "no signal" AND nothing upstream (sampler/score player) substitutes one. */
+static int synth_chain_has_no_signal(const SynthChainPlan *sp, int base_sig)
+{
+    return sp->present && base_sig < 0 && !sp->has_sampler && !sp->has_score;
+}
+
+/* ── Contextual visualizer (zone 1) — selection tap ──────────────────────────
+ * Run a chain's ordered inserts and, when the plan carries the selection tap
+ * (viz_tap_insert >= 0 — the SELECTED module lives in this chain), publish the
+ * stream frame AT that position to the selection-tap bus. The run is split at
+ * the tap point; the final output is identical to a plain image_chain_run. */
+static void chain_run_inserts_with_viz_tap(const SynthChainPlan *sp,
+                                           AudioImageBuffers *audioBuffers,
+                                           const uint8_t *inR, const uint8_t *inG,
+                                           const uint8_t *inB, int nb_pixels,
+                                           const uint8_t **outR, const uint8_t **outG,
+                                           const uint8_t **outB)
+{
+    void *states[CHAIN_PLAN_MAX_INSERTS];
+    chain_resolve_insert_states(sp, states);
+
+    int tap = sp->viz_tap_insert;
+    if (tap > sp->num_inserts)
+        tap = sp->num_inserts;
+
+    if (tap < 0 || audioBuffers == NULL)
+    {
+        image_chain_run(inR, inG, inB, nb_pixels, g_sp3ctra_config.num_octaves,
+                        sp->insert_id, states, sp->num_inserts, outR, outG, outB);
+        return;
+    }
+
+    const uint8_t *mr = inR, *mg = inG, *mb = inB;
+    if (tap > 0)
+        image_chain_run(inR, inG, inB, nb_pixels, g_sp3ctra_config.num_octaves,
+                        sp->insert_id, states, tap, &mr, &mg, &mb);
+    audio_image_buffers_publish_selection_tap(audioBuffers, mr, mg, mb, nb_pixels);
+    if (tap < sp->num_inserts)
+        image_chain_run(mr, mg, mb, nb_pixels, g_sp3ctra_config.num_octaves,
+                        sp->insert_id + tap, (void *const *)(states + tap),
+                        sp->num_inserts - tap, outR, outG, outB);
+    else
+    {
+        *outR = mr; *outG = mg; *outB = mb;
+    }
+}
+
+/* ── Player-side inserts (FramePlayerThread, Non-RT) ─────────────────────────
+ * Apply the inserts of `sp` placed AFTER the LAST `marker_id` (SCORE/SAMPLER
+ * position marker) to one playback frame, IN PLACE. While a player owns a
+ * chain's stream, the per-line producers (udpThread/feeder) skip these
+ * inserts, so this is their only execution — no double-run, and the pool
+ * instances are only ever touched by one thread at a time.
+ *
+ * Publishes the zone-1 selection tap when it points INTO the post-marker span
+ * (the producers' shortcut publishes the pre-marker taps). Returns 1 in that
+ * case, 0 otherwise (including marker absent → frame untouched). */
+static int chain_apply_post_marker_inserts(const SynthChainPlan *sp,
+                                           int marker_id,
+                                           struct AudioImageBuffers *viz_bus,
+                                           uint8_t *r, uint8_t *g, uint8_t *b,
+                                           int nb_pixels)
+{
+    int mk = -1;
+    for (int i = 0; i < sp->num_inserts; i++)
+        if (sp->insert_id[i] == marker_id)
+            mk = i;                       /* LAST occurrence */
+    if (mk < 0)
+        return 0;
+
+    /* Sub-plan = the inserts below the marker, tap index rebased onto it. */
+    SynthChainPlan sub = *sp;
+    sub.num_inserts = 0;
+    for (int i = mk + 1; i < sp->num_inserts; i++)
+    {
+        sub.insert_id[sub.num_inserts]        = sp->insert_id[i];
+        sub.insert_state_idx[sub.num_inserts] = sp->insert_state_idx[i];
+        sub.num_inserts++;
+    }
+    const int tap_here = (sp->viz_tap_insert > mk);
+    sub.viz_tap_insert = tap_here ? sp->viz_tap_insert - (mk + 1) : -1;
+
+    const uint8_t *oR, *oG, *oB;
+    chain_run_inserts_with_viz_tap(&sub, tap_here ? viz_bus : NULL,
+                                   r, g, b, nb_pixels, &oR, &oG, &oB);
+    if (oR != r) memcpy(r, oR, (size_t)nb_pixels);
+    if (oG != g) memcpy(g, oG, (size_t)nb_pixels);
+    if (oB != b) memcpy(b, oB, (size_t)nb_pixels);
+    return tap_here;
+}
+
+/* Engine A's entry point for the FramePlayerThread (LuxSampler.cpp): apply the
+ * inserts of LuxStral A's chain placed below the SCORE (is_score=1) or SAMPLER
+ * (is_score=0) module to the final blended playback frame, in place. */
+void chain_player_apply_synth_a_inserts(int is_score,
+                                        struct AudioImageBuffers *viz_bus,
+                                        uint8_t *r, uint8_t *g, uint8_t *b,
+                                        int nb_pixels)
+{
+    ChainPlan plan;
+    chain_plan_get(&plan);
+    const SynthChainPlan *spA = &plan.synth[CHAIN_SYNTH_LUXSTRAL];
+    if (!spA->present)
+        return;
+    if (is_score ? !spA->has_score : !spA->has_sampler)
+        return;
+    chain_apply_post_marker_inserts(spA,
+                                    is_score ? IMAGE_CHAIN_INSERT_SCORE
+                                             : IMAGE_CHAIN_INSERT_SAMPLER,
+                                    viz_bus, r, g, b, nb_pixels);
+}
+
+/* Selection tap for the SAMPLER/SCORE SHORT-CIRCUIT branches (no
+ * image_chain_run): approximate the selected module's position as "before or
+ * after the player marker" — the chain source frame before, the modulated
+ * channel after. While the player is RUNNING, the post-marker tap is published
+ * by the player thread at the exact position (chain_apply_post_marker_inserts)
+ * — skip it here to avoid a second, pre-FX publication. Same for the
+ * PRE-marker span when the modulated build already ran the chain's upstream
+ * processors and published the exact tap (premarker_tap_done). */
+static void publish_viz_tap_sampler_shortcut(const SynthChainPlan *sp,
+                                             AudioImageBuffers *audioBuffers,
+                                             int player_running,
+                                             int premarker_tap_done,
+                                             const uint8_t *baseR, const uint8_t *baseG,
+                                             const uint8_t *baseB,
+                                             const uint8_t *modR, const uint8_t *modG,
+                                             const uint8_t *modB, int nb_pixels)
+{
+    if (sp->viz_tap_insert < 0 || audioBuffers == NULL)
+        return;
+    int after_marker = 0;
+    for (int i = 0; i < sp->viz_tap_insert && i < sp->num_inserts; i++)
+        if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER
+            || sp->insert_id[i] == IMAGE_CHAIN_INSERT_SCORE)
+            after_marker = 1;
+    if (after_marker && player_running)
+        return;
+    if (!after_marker && premarker_tap_done)
+        return;   /* exact tap already published by the modulated build */
+    audio_image_buffers_publish_selection_tap(audioBuffers,
+                                              after_marker ? modR : baseR,
+                                              after_marker ? modG : baseG,
+                                              after_marker ? modB : baseB,
+                                              nb_pixels);
+}
+
+/* ── Sampler chain: PRE-MARKER processor sub-plan ────────────────────────────
+ * Every processor insert (Pitch/Mask + FX) placed ABOVE the first SAMPLER
+ * marker — probes and markers excluded (fed by the per-position loops). The
+ * zone-1 selection tap is rebased onto the kept processors when it points
+ * into the pre-marker span. Only num_inserts / insert_id / insert_state_idx /
+ * viz_tap_insert of `pre` are filled (all chain_run_inserts_with_viz_tap
+ * reads). Returns 1 when the sub-plan needs the chain-specific run (any FX,
+ * or a Pitch/Mask bound to a pool slot other than 0) — udpThread keeps the
+ * legacy image_chain_process_inserts path otherwise. */
+static int chain_build_sampler_premarker_plan(const SynthChainPlan *spSmp,
+                                              SynthChainPlan *pre)
+{
+    int chain_specific = 0;
+    pre->num_inserts    = 0;
+    pre->viz_tap_insert = -1;
+
+    int mk = spSmp->num_inserts;   /* first SAMPLER marker */
+    for (int i = 0; i < spSmp->num_inserts; i++)
+        if (spSmp->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER)
+        { mk = i; break; }
+    for (int i = 0; i < mk; i++)
+    {
+        const int id    = spSmp->insert_id[i];
+        const int is_pm = (id == IMAGE_CHAIN_INSERT_LUXPITCH ||
+                           id == IMAGE_CHAIN_INSERT_LUXMASK);
+        const int is_fx = (id == IMAGE_CHAIN_INSERT_LUXREVERB ||
+                           id == IMAGE_CHAIN_INSERT_LUXECHO ||
+                           id == IMAGE_CHAIN_INSERT_LUXEQ);
+        if (!is_pm && !is_fx)
+            continue;   /* probes/markers: fed elsewhere */
+        pre->insert_id[pre->num_inserts]        = id;
+        pre->insert_state_idx[pre->num_inserts] = spSmp->insert_state_idx[i];
+        pre->num_inserts++;
+        if (is_fx || spSmp->insert_state_idx[i] != 0)
+            chain_specific = 1;
+    }
+    /* Selection tap inside the pre-marker span → rebase it onto the kept
+     * processors (exact contextual tap, replaces the shortcut's raw-frame
+     * approximation). */
+    if (spSmp->viz_tap_insert >= 0 && spSmp->viz_tap_insert <= mk)
+    {
+        int t = 0;
+        for (int i = 0; i < spSmp->viz_tap_insert; i++)
+        {
+            const int id = spSmp->insert_id[i];
+            if (id == IMAGE_CHAIN_INSERT_LUXPITCH  ||
+                id == IMAGE_CHAIN_INSERT_LUXMASK   ||
+                id == IMAGE_CHAIN_INSERT_LUXREVERB ||
+                id == IMAGE_CHAIN_INSERT_LUXECHO   ||
+                id == IMAGE_CHAIN_INSERT_LUXEQ)
+                t++;
+        }
+        pre->viz_tap_insert = t;
+    }
+    return chain_specific;
+}
+
+#ifdef VST_MODE
+/* Feeder-side mirror of udpThread's player-chain short-circuit: the chain
+ * holding the sampler consumes the pre-marker stream built by the feeder's
+ * sampler block (mod) instead of re-running its inserts — stateful FX
+ * (reverb/echo) must tick exactly once per line. Feeds the chain's
+ * VideoScroll probes by their position relative to the marker and publishes
+ * the zone-1 selection tap. Post-marker processors only run in the player
+ * thread (playback), as on the device path. */
+static void feeder_sampler_chain_shortcut(const SynthChainPlan *sp,
+                                          AudioImageBuffers *audioBuffers,
+                                          int premarker_tap_done,
+                                          const uint8_t *baseR, const uint8_t *baseG,
+                                          const uint8_t *baseB,
+                                          const uint8_t *modR, const uint8_t *modG,
+                                          const uint8_t *modB, int nb_pixels)
+{
+    int after_marker = 0;
+    for (int i = 0; i < sp->num_inserts; i++)
+    {
+        if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER
+            || sp->insert_id[i] == IMAGE_CHAIN_INSERT_SCORE)
+        { after_marker = 1; continue; }
+        if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_VIDEOSCROLL)
+            video_scroll_capture_line(
+                video_scroll_instance(sp->insert_state_idx[i]),
+                after_marker ? modR : baseR,
+                after_marker ? modG : baseG,
+                after_marker ? modB : baseB,
+                nb_pixels);
+    }
+    publish_viz_tap_sampler_shortcut(sp, audioBuffers, /*player_running*/ 0,
+                                     premarker_tap_done,
+                                     baseR, baseG, baseB,
+                                     modR, modG, modB, nb_pixels);
+}
+#endif
 
 void *udpThread(void *arg) {
   Context *ctx;
@@ -752,6 +1175,10 @@ void *udpThread(void *arg) {
         const uint8_t *mod_R = NULL;
         const uint8_t *mod_G = NULL;
         const uint8_t *mod_B = NULL;
+        /* Set when the idle modulated build ran the sampler chain's pre-marker
+         * processors AND published the exact selection tap — the shortcut
+         * publishers below must then skip their raw-frame approximation. */
+        int premarker_tap_done = 0;
         int            need_modulated =
             (live_cfg.luxstral_path.source         == IMAGE_SOURCE_MODULATED) ||
             (live_cfg.luxsynth_luxwave_path.source == IMAGE_SOURCE_MODULATED) ||
@@ -831,56 +1258,38 @@ void *udpThread(void *arg) {
                  * record it.
                  *
                  * The chain that HOLDS the sampler owns the modulated channel.
-                 * image_chain_process_inserts() runs the GLOBAL Pitch/Mask
-                 * instances (= pool slot 0); when the sampler chain is bound
-                 * to ANOTHER pool slot, use its own instances instead — a
-                 * Pitch played into that chain was silently ignored and the
-                 * recording captured un-pitched frames. Pool slot 0 keeps the
-                 * legacy path (identical behaviour + live per-insert visual
-                 * taps; the chain-specific path publishes no taps — the tap
-                 * mirrors follow pool slot 0 only, v1 limitation). */
+                 * The sampler is a plain in→out module: its INPUT stream is
+                 * the chain processed up to its marker — so EVERY processor
+                 * insert placed ABOVE it (Pitch/Mask AND the FX: Reverb/Echo/
+                 * EQ) runs here, shaping both the idle pass-through and what
+                 * an armed slot records. Probes/markers are excluded (fed by
+                 * the per-position loops — double-capture otherwise).
+                 * image_chain_process_inserts() only knows the GLOBAL slot-0
+                 * Pitch/Mask pair, so any FX — or a Pitch/Mask bound to
+                 * another pool slot — forces the chain-specific run. Pool
+                 * slot 0 Pitch/Mask-only chains keep the legacy path
+                 * (identical behaviour + live per-insert visual taps). */
                 const SynthChainPlan *spSmp = NULL;
                 for (int s = 0; s < CHAIN_SYNTH_COUNT && !spSmp; s++)
                     if (frame_plan.synth[s].present && frame_plan.synth[s].has_sampler)
                         spSmp = &frame_plan.synth[s];
+
+                SynthChainPlan pre;          /* pre-marker processor sub-plan */
+                pre.num_inserts    = 0;
+                pre.viz_tap_insert = -1;
                 int chain_specific = 0;
                 if (spSmp)
-                    for (int i = 0; i < spSmp->num_inserts; i++)
-                        if ((spSmp->insert_id[i] == IMAGE_CHAIN_INSERT_LUXPITCH ||
-                             spSmp->insert_id[i] == IMAGE_CHAIN_INSERT_LUXMASK)
-                            && spSmp->insert_state_idx[i] != 0)
-                            chain_specific = 1;
+                    chain_specific = chain_build_sampler_premarker_plan(spSmp, &pre);
 
                 if (chain_specific)
                 {
-                    /* Only the Pitch/Mask inserts BEFORE the sampler marker
-                     * shape the recorded signal; probes are fed elsewhere
-                     * (per-position loops) — including them here would double-
-                     * capture each line. */
-                    int   ids[CHAIN_PLAN_MAX_INSERTS];
-                    void *sel_states[CHAIN_PLAN_MAX_INSERTS];
-                    void *all_states[CHAIN_PLAN_MAX_INSERTS];
-                    int   n = 0;
-                    chain_resolve_insert_states(spSmp, all_states);
-                    for (int i = 0; i < spSmp->num_inserts; i++)
-                    {
-                        if (spSmp->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER)
-                            break;
-                        if (spSmp->insert_id[i] == IMAGE_CHAIN_INSERT_LUXPITCH ||
-                            spSmp->insert_id[i] == IMAGE_CHAIN_INSERT_LUXMASK)
-                        {
-                            ids[n]        = spSmp->insert_id[i];
-                            sel_states[n] = all_states[i];
-                            n++;
-                        }
-                    }
-                    image_chain_run(db->activeBuffer_R,
-                                    db->activeBuffer_G,
-                                    db->activeBuffer_B,
-                                    nb_pixels,
-                                    g_sp3ctra_config.num_octaves,
-                                    ids, sel_states, n,
-                                    &mod_R, &mod_G, &mod_B);
+                    chain_run_inserts_with_viz_tap(&pre, audioBuffers,
+                                                   db->activeBuffer_R,
+                                                   db->activeBuffer_G,
+                                                   db->activeBuffer_B,
+                                                   nb_pixels,
+                                                   &mod_R, &mod_G, &mod_B);
+                    premarker_tap_done = (pre.viz_tap_insert >= 0);
                 }
                 else
                 image_chain_process_inserts(db->activeBuffer_R,
@@ -920,6 +1329,7 @@ void *udpThread(void *arg) {
          * • Otherwise run LuxStral's own ordered inserts (its per-chain Pitch/
          *   Mask instances) over the live frame, so LuxStral's processing is
          *   independent of every other chain. No inserts → raw live. */
+        int a_no_signal = 0;   /* engine A's chain carries no signal this frame */
         {
             const SynthChainPlan *spA = &frame_plan.synth[CHAIN_SYNTH_LUXSTRAL];
 
@@ -927,61 +1337,189 @@ void *udpThread(void *arg) {
              * the IMAGE/VIDEO/CAMERA internal source line when one is placed
              * and active in LuxStral's chain). */
             const uint8_t *baseA_R, *baseA_G, *baseA_B;
-            synth_source_base(spA, CHAIN_SYNTH_LUXSTRAL, db, nb_pixels,
-                              &baseA_R, &baseA_G, &baseA_B);
+            const int baseSigA = synth_source_base(spA, CHAIN_SYNTH_LUXSTRAL,
+                                                   db, nb_pixels,
+                                                   &baseA_R, &baseA_G, &baseA_B);
+            a_no_signal = synth_chain_has_no_signal(spA, baseSigA);
 
-            if (spA->present && spA->has_sampler && mod_R)
+            /* Player transport (sampler OR score relay): while it runs, the
+             * post-marker inserts/probes/tap are the PLAYER THREAD's job. */
+#ifdef VST_MODE
+            const int player_running_now = lux_sampler_is_playing();
+            const int score_playing_now  = lux_sampler_is_score_playing();
+#else
+            const int player_running_now = 0;
+            const int score_playing_now  = 0;
+#endif
+
+            if (a_no_signal)
             {
-                src_R = mod_R; src_G = mod_G; src_B = mod_B;   /* modulated/sampler channel */
-                /* This short-circuit skips image_chain_run (the sampler chain IS the
-                 * modulated channel). Feed VideoScroll probes by their POSITION
-                 * relative to the sampler: a probe ABOVE the sampler shows the live
-                 * source frame (what the sampler records); a probe BELOW shows the
-                 * modulated/sampler output. (Per-chain Pitch/Mask upstream of the
-                 * sampler aren't reflected in the pre-sampler tap — v1 limitation.) */
-                int after_sampler = 0;
+                /* No source module in engine A's chain (or an empty internal
+                 * source) → the chain has NO stream. Mirror of engine B's
+                 * guard below: never fall back to the live device feed. The
+                 * pipeline still runs (on the live frame) so Path B/state
+                 * keep ticking, but A's sections of the result are zeroed
+                 * after the run — see below. Inserts and probes are skipped:
+                 * there is no stream at any position of this chain. */
+                src_R = baseA_R;
+                src_G = baseA_G;
+                src_B = baseA_B;
+            }
+            else if (spA->present && mod_R
+                     && (spA->has_sampler
+                         || (spA->has_score && score_playing_now)))
+            {
+                src_R = mod_R; src_G = mod_G; src_B = mod_B;   /* modulated/player channel */
+                /* This short-circuit skips image_chain_run (the player chain IS the
+                 * modulated channel: SAMPLER always — idle included —, SCORE only
+                 * while the relay actually plays). Feed VideoScroll probes by their
+                 * POSITION relative to the marker: a probe ABOVE it shows the live
+                 * source frame; a probe BELOW shows the modulated/player output.
+                 * While the player RUNS, the post-marker inserts (FX + probes) are
+                 * executed by the player thread on the playback frames
+                 * (chain_apply_post_marker_inserts) — skip those probes here so
+                 * each line is captured exactly once. The pre-marker processors
+                 * (Pitch/Mask/FX above the sampler) run in the IDLE modulated
+                 * build, which also publishes the exact pre-marker selection
+                 * tap; while the player RUNS they are paused (the live input
+                 * is not consumed) and the pre-marker tap falls back to the
+                 * raw source frame. */
+                int after_marker = 0;
                 for (int i = 0; i < spA->num_inserts; i++)
                 {
-                    if (spA->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER) { after_sampler = 1; continue; }
+                    if (spA->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER
+                        || spA->insert_id[i] == IMAGE_CHAIN_INSERT_SCORE)
+                    { after_marker = 1; continue; }
                     if (spA->insert_id[i] == IMAGE_CHAIN_INSERT_VIDEOSCROLL)
                     {
-                        const uint8_t *fr = after_sampler ? mod_R : baseA_R;
-                        const uint8_t *fg = after_sampler ? mod_G : baseA_G;
-                        const uint8_t *fb = after_sampler ? mod_B : baseA_B;
+                        if (after_marker && player_running_now)
+                            continue;   /* captured by the player thread */
+                        const uint8_t *fr = after_marker ? mod_R : baseA_R;
+                        const uint8_t *fg = after_marker ? mod_G : baseA_G;
+                        const uint8_t *fb = after_marker ? mod_B : baseA_B;
                         video_scroll_capture_line(
                             video_scroll_instance(spA->insert_state_idx[i]),
                             fr, fg, fb, nb_pixels);
                     }
                 }
+                publish_viz_tap_sampler_shortcut(spA, audioBuffers,
+                                                 player_running_now,
+                                                 premarker_tap_done,
+                                                 baseA_R, baseA_G, baseA_B,
+                                                 mod_R, mod_G, mod_B, nb_pixels);
             }
-            else if (spA->present && spA->num_inserts > 0)
+            else if (spA->present)
             {
-                void *states[CHAIN_PLAN_MAX_INSERTS];
-                chain_resolve_insert_states(spA, states);
-                image_chain_run(baseA_R, baseA_G, baseA_B,
-                                nb_pixels, g_sp3ctra_config.num_octaves,
-                                spA->insert_id, states, spA->num_inserts,
-                                &src_R, &src_G, &src_B);
+                /* Ordered inserts (none → pass-through) + selection tap. */
+                chain_run_inserts_with_viz_tap(spA, audioBuffers,
+                                               baseA_R, baseA_G, baseA_B,
+                                               nb_pixels, &src_R, &src_G, &src_B);
             }
             else
             {
-                src_R = baseA_R;   /* chain source (no inserts, no sampler) */
+                src_R = baseA_R;   /* engine A absent — legacy live frame */
                 src_G = baseA_G;
                 src_B = baseA_B;
             }
         }
 
-        /* ── Probe-only chains (no synth): feed their VideoScroll probes from
-         * the live frame — no synth executor ever reaches them, a monitor
-         * chain ([SP3CTRA, VIDEOSCROLL]) stayed black. */
-        for (int i = 0; i < frame_plan.num_live_probes; i++)
-            video_scroll_capture_line(
-                video_scroll_instance(frame_plan.live_probe_slot[i]),
-                db->activeBuffer_R, db->activeBuffer_G, db->activeBuffer_B,
-                nb_pixels);
+        /* ── Probe-only chains (no synth): run each chain's ordered inserts so
+         * every VideoScroll probe captures the stream AT ITS POSITION. The old
+         * path fed probes the raw live frame unconditionally — a MASK placed
+         * before the probe was never executed, so the probe kept scrolling the
+         * live feed no matter what the chain contained. Output is discarded —
+         * only the side effects (probe captures) matter. */
+        for (int pc = 0; pc < frame_plan.num_probe_chains; pc++)
+        {
+            const SynthChainPlan *spP = &frame_plan.probe_chain[pc];
+            const uint8_t *pcR, *pcG, *pcB;
+            const int sigP = synth_source_base(spP, CHAIN_SYNTH_COUNT + pc, db,
+                                               nb_pixels, &pcR, &pcG, &pcB);
+            if (synth_chain_has_no_signal(spP, sigP))
+                continue;   /* chain carries no stream → probes stay static */
+
+#ifdef VST_MODE
+            const int player_running_p = lux_sampler_is_playing();
+            const int score_playing_p  = lux_sampler_is_score_playing();
+#else
+            const int player_running_p = 0;
+            const int score_playing_p  = 0;
+#endif
+            if (mod_R && (spP->has_sampler
+                          || (spP->has_score && score_playing_p)))
+            {
+                /* Mirror of the synth-chain player short-circuit: probes see
+                 * the chain source pre-marker, the modulated channel after.
+                 * (Probe-only chains have no synth, so no player thread runs
+                 * their post-marker inserts — capture them here from mod.) */
+                int after_marker_p = 0;
+                for (int i = 0; i < spP->num_inserts; i++)
+                {
+                    if (spP->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER
+                        || spP->insert_id[i] == IMAGE_CHAIN_INSERT_SCORE)
+                    { after_marker_p = 1; continue; }
+                    if (spP->insert_id[i] == IMAGE_CHAIN_INSERT_VIDEOSCROLL)
+                        video_scroll_capture_line(
+                            video_scroll_instance(spP->insert_state_idx[i]),
+                            after_marker_p ? mod_R : pcR,
+                            after_marker_p ? mod_G : pcG,
+                            after_marker_p ? mod_B : pcB,
+                            nb_pixels);
+                }
+                publish_viz_tap_sampler_shortcut(spP, audioBuffers,
+                                                 /*player_running*/ 0,
+                                                 /*premarker_tap_done*/ 0,
+                                                 pcR, pcG, pcB,
+                                                 mod_R, mod_G, mod_B, nb_pixels);
+                (void)player_running_p;
+            }
+            else
+            {
+                const uint8_t *poR, *poG, *poB;
+                chain_run_inserts_with_viz_tap(spP, audioBuffers, pcR, pcG, pcB,
+                                               nb_pixels, &poR, &poG, &poB);
+            }
+        }
 
         if (pipeline_process_frame(src_R, src_G, src_B, &live_cfg, &preprocessed_temp) != 0) {
           log_error("THREAD", "Pipeline processing failed");
+        }
+
+        if (a_no_signal)
+        {
+          /* Engine A's chain has no source → TRUE silence (mirror of engine
+           * B's zeroed-frame guard): zeroed notes/grayscale/contrast are
+           * silent for every inversion/AC-removal combo, whereas running the
+           * pipeline on a synthetic black frame is NOT (inversion ON turns it
+           * into all-notes-at-max). Only A's sections are cleared — Path B
+           * (polyphonic/photowave) is recomputed from its own chain below. */
+          memset(&preprocessed_temp.additive,    0, sizeof(preprocessed_temp.additive));
+          memset(&preprocessed_temp.stereo,      0, sizeof(preprocessed_temp.stereo));
+          memset(&preprocessed_temp.strokeforge, 0, sizeof(preprocessed_temp.strokeforge));
+        }
+
+        /* Per-engine input tap A (per-chain display): published by the thread
+         * that owns A's preprocessed commit this line — mirror of the
+         * source-routing gating at the commit site below (src != 0 →
+         * udpThread always commits; src == 0 → only the idle/REC
+         * passthrough, a RUNNING player owns the commit AND the tap via
+         * FramePlayerThread). White when A's chain carries no signal
+         * (mirror of the zeroed sections above). */
+        {
+#ifdef VST_MODE
+          const int a_commit_here =
+              (g_sp3ctra_config.luxstral_source_type != 0) ||
+              (!lux_sampler_is_playing() && lux_sampler_is_passthrough());
+#else
+          const int a_commit_here = 1;
+#endif
+          if (a_commit_here)
+            audio_image_buffers_publish_engine_input(
+                audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                a_no_signal ? NULL : src_R,
+                a_no_signal ? NULL : src_G,
+                a_no_signal ? NULL : src_B,
+                nb_pixels);
         }
 
 #ifdef VST_MODE
@@ -992,97 +1530,96 @@ void *udpThread(void *arg) {
          * hands to synth_AudioProcess_b(). Independent scratch so A's not-yet-
          * committed preprocessed_temp is untouched. */
         {
-            if (!s_luxstral_b_db_ready) {
-                if (initDoubleBuffer(&s_luxstral_b_db) != 0) {
-                    log_error("THREAD", "Engine-B DoubleBuffer init failed — engine B stays inactive");
-                } else {
-                    // RELEASE so the audio thread, on seeing ready=1 (ACQUIRE), also
-                    // sees the fully-initialised DoubleBuffer (mutex, buffers).
-                    __atomic_store_n(&s_luxstral_b_db_ready, 1, __ATOMIC_RELEASE);
-                }
-            }
-
             const SynthChainPlan *spLB = &frame_plan.synth[CHAIN_SYNTH_LUXSTRAL_B];
-            if (spLB->present && !s_luxstral_b_db_ready)
+            if (spLB->present && !luxstral_b_db_ensure_ready())
             {
-                /* DoubleBuffer init failed above — its mutex/buffers are not
+                /* DoubleBuffer init failed — its mutex/buffers are not
                  * usable, skip engine-B feeding entirely. */
+            }
+            else if (spLB->present && spLB->has_score
+                     && lux_sampler_is_score_playing())
+            {
+                /* SCORE playback overrides the chain source (relay semantics):
+                 * FramePlayerThread feeds engine B's input directly via
+                 * luxstral_b_feed_player_frame() — do not fight it here. */
             }
             else if (spLB->present && spLB->source_kind == CHAIN_SRC_NONE
                      && !spLB->has_sampler)
             {
-                /* No source placed in this chain → TRUE silence — UNLESS a
-                 * sampler sits upstream: [SAMPLER, LUXSTRAL B] needs no source
-                 * module (the sampler IS the signal), and the same topology
-                 * plays on engine A. Do NOT run the pipeline on a synthetic
-                 * frame: with inversion ON a black frame comes out as ALL
-                 * notes at max volume (wall of sound), and no uniform frame is
-                 * silent for every inversion/AC-removal combo. Zeroed notes/
-                 * grayscale/contrast are silent unconditionally. */
-                static PreprocessedImageData s_preprocessed_silence; /* stays zeroed */
-                struct timeval tv_silence;
-                gettimeofday(&tv_silence, NULL);
-                s_preprocessed_silence.timestamp_us =
-                    (uint64_t)tv_silence.tv_sec * 1000000ULL + (uint64_t)tv_silence.tv_usec;
-
-                pthread_mutex_lock(&s_luxstral_b_db.mutex);
-                s_luxstral_b_db.preprocessed_data = s_preprocessed_silence;
-                s_luxstral_b_db.dataReady = 1;
-                pthread_mutex_unlock(&s_luxstral_b_db.mutex);
+                /* No source placed in this chain (and the SCORE, if any, is
+                 * idle) → TRUE silence — UNLESS a sampler sits upstream:
+                 * [SAMPLER, LUXSTRAL B] needs no source module (the sampler
+                 * IS the signal), and the same topology plays on engine A. */
+                luxstral_b_commit_silence();
             }
             else if (spLB->present)
             {
                 /* M9: base frame = engine B's own chain source (live or internal). */
                 const uint8_t *baseB_R, *baseB_G, *baseB_B;
-                synth_source_base(spLB, CHAIN_SYNTH_LUXSTRAL_B, db, nb_pixels,
-                                  &baseB_R, &baseB_G, &baseB_B);
+                const int baseSigB =
+                    synth_source_base(spLB, CHAIN_SYNTH_LUXSTRAL_B, db, nb_pixels,
+                                      &baseB_R, &baseB_G, &baseB_B);
 
-                const uint8_t *bxR, *bxG, *bxB;
-                if (spLB->has_sampler && mod_R)
+                const uint8_t *bxR = NULL, *bxG = NULL, *bxB = NULL;
+                if (baseSigB < 0 && !spLB->has_sampler)
+                {
+                    /* Internal source module placed but empty/inactive → the
+                     * chain has no signal; never leak the live device feed.
+                     * bx stays NULL → the pipeline/commit below is skipped. */
+                    luxstral_b_commit_silence();
+                }
+                else if (spLB->has_sampler && mod_R)
                 {
                     bxR = mod_R; bxG = mod_G; bxB = mod_B;   /* modulated/sampler channel */
                     /* Feed VideoScroll probes by their position relative to the
-                     * sampler — mirror of engine A's short-circuit branch (the
-                     * probes of a sampler chain on B stayed black without it). */
-                    int after_sampler_b = 0;
+                     * marker — mirror of engine A's short-circuit branch (the
+                     * probes of a sampler chain on B stayed black without it).
+                     * NOTE: this per-line branch only runs while the DEVICE
+                     * streams, and B's player feed skips itself in that case
+                     * (two writers would fight) — so no double capture here. */
+                    int after_marker_b = 0;
                     for (int i = 0; i < spLB->num_inserts; i++)
                     {
-                        if (spLB->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER) { after_sampler_b = 1; continue; }
+                        if (spLB->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER
+                            || spLB->insert_id[i] == IMAGE_CHAIN_INSERT_SCORE)
+                        { after_marker_b = 1; continue; }
                         if (spLB->insert_id[i] == IMAGE_CHAIN_INSERT_VIDEOSCROLL)
                         {
-                            const uint8_t *fr = after_sampler_b ? mod_R : baseB_R;
-                            const uint8_t *fg = after_sampler_b ? mod_G : baseB_G;
-                            const uint8_t *fb = after_sampler_b ? mod_B : baseB_B;
+                            const uint8_t *fr = after_marker_b ? mod_R : baseB_R;
+                            const uint8_t *fg = after_marker_b ? mod_G : baseB_G;
+                            const uint8_t *fb = after_marker_b ? mod_B : baseB_B;
                             video_scroll_capture_line(
                                 video_scroll_instance(spLB->insert_state_idx[i]),
                                 fr, fg, fb, nb_pixels);
                         }
                     }
-                }
-                else if (spLB->num_inserts > 0)
-                {
-                    void *states[CHAIN_PLAN_MAX_INSERTS];
-                    chain_resolve_insert_states(spLB, states);
-                    image_chain_run(baseB_R, baseB_G, baseB_B,
-                                    nb_pixels, g_sp3ctra_config.num_octaves,
-                                    spLB->insert_id, states, spLB->num_inserts,
-                                    &bxR, &bxG, &bxB);
+                    publish_viz_tap_sampler_shortcut(spLB, audioBuffers,
+                                                     /*player_running*/ 0,
+                                                     premarker_tap_done,
+                                                     baseB_R, baseB_G, baseB_B,
+                                                     mod_R, mod_G, mod_B, nb_pixels);
                 }
                 else
                 {
-                    bxR = baseB_R; bxG = baseB_G; bxB = baseB_B;
+                    /* Ordered inserts (none → pass-through) + selection tap. */
+                    chain_run_inserts_with_viz_tap(spLB, audioBuffers,
+                                                   baseB_R, baseB_G, baseB_B,
+                                                   nb_pixels, &bxR, &bxG, &bxB);
                 }
 
                 /* Engine B's OWN pipeline config (M8): its inversion/AC/gamma/
                  * contrast/stereo knobs + its own freeze-envelope state — fully
                  * decoupled from engine A's settings (live_cfg above). */
-                PipelineConfig cfg_b = pipeline_build_config_luxstral_b();
-                if (pipeline_process_frame(bxR, bxG, bxB, &cfg_b, &s_preprocessed_temp_b) == 0)
+                if (bxR != NULL)
                 {
-                    pthread_mutex_lock(&s_luxstral_b_db.mutex);
-                    s_luxstral_b_db.preprocessed_data = s_preprocessed_temp_b;
-                    s_luxstral_b_db.dataReady = 1;
-                    pthread_mutex_unlock(&s_luxstral_b_db.mutex);
+                    PipelineConfig cfg_b = pipeline_build_config_luxstral_b();
+                    if (pipeline_process_frame(bxR, bxG, bxB, &cfg_b, &s_preprocessed_temp_b) == 0)
+                    {
+                        pthread_mutex_lock(&s_luxstral_b_db.mutex);
+                        s_luxstral_b_db.preprocessed_data = s_preprocessed_temp_b;
+                        s_luxstral_b_db.dataReady = 1;
+                        pthread_mutex_unlock(&s_luxstral_b_db.mutex);
+                    }
                 }
             }
         }
@@ -1100,24 +1637,55 @@ void *udpThread(void *arg) {
          * freeze envelope here, skipped on the sampler worker). */
 #ifdef VST_MODE
         {
-            const SynthChainPlan *spB = &frame_plan.synth[CHAIN_SYNTH_LUXSYNTH];
+            /* LuxWave shares the Path-B input; when LuxSynth is absent honour
+             * a placed LuxWave's OWN chain instead (mirrors the feeder tick). */
+            const SynthChainPlan *spS2 = &frame_plan.synth[CHAIN_SYNTH_LUXSYNTH];
+            const SynthChainPlan *spW2 = &frame_plan.synth[CHAIN_SYNTH_LUXWAVE];
+            const SynthChainPlan *spB  = spS2->present ? spS2
+                                       : (spW2->present ? spW2 : NULL);
+            const int pbSlot = (spB == spW2) ? CHAIN_SYNTH_LUXWAVE
+                                             : CHAIN_SYNTH_LUXSYNTH;
 
-            /* M9: base frame = LuxSynth's own chain source (live or internal). */
-            const uint8_t *bR, *bG, *bB;
-            synth_source_base(spB, CHAIN_SYNTH_LUXSYNTH, db, nb_pixels,
-                              &bR, &bG, &bB);
+            /* M9: base frame = the Path-B chain's source (live or internal). */
+            const uint8_t *bR = db->activeBuffer_R;
+            const uint8_t *bG = db->activeBuffer_G;
+            const uint8_t *bB = db->activeBuffer_B;
+            const int baseSigPB = (spB != NULL)
+                ? synth_source_base(spB, pbSlot, db, nb_pixels, &bR, &bG, &bB)
+                : 0;
 
-            if (spB->present && spB->num_inserts > 0)
+            if (spB != NULL && synth_chain_has_no_signal(spB, baseSigPB))
             {
-                void *states[CHAIN_PLAN_MAX_INSERTS];
-                chain_resolve_insert_states(spB, states);
-                image_chain_run(bR, bG, bB,
-                                nb_pixels, g_sp3ctra_config.num_octaves,
-                                spB->insert_id, states, spB->num_inserts,
-                                &bR, &bG, &bB);
+                /* No source in the Path-B chain → silence for LuxSynth (and
+                 * LuxWave's preprocessed mirror): zero their sections instead
+                 * of running the path on the live fallback — mirror of engine
+                 * A's guard above. (The LuxWave wavetable itself keeps its
+                 * last content — it only sounds under held MIDI notes.) */
+                memset(&preprocessed_temp.polyphonic, 0,
+                       sizeof(preprocessed_temp.polyphonic));
+                memset(&preprocessed_temp.photowave,  0,
+                       sizeof(preprocessed_temp.photowave));
+                audio_image_buffers_publish_engine_input(
+                    audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
+                    NULL, NULL, NULL, nb_pixels);
             }
+            else
+            {
+                if (spB != NULL)
+                    chain_run_inserts_with_viz_tap(spB, audioBuffers, bR, bG, bB,
+                                                   nb_pixels, &bR, &bG, &bB);
 
-            pipeline_path_luxsynth_luxwave(bR, bG, bB, &live_cfg, &preprocessed_temp);
+                /* Per-engine input tap Path-B (per-chain display) — skip
+                 * while a player owns the polyphonic commit (luxsynth source
+                 * MODULATED + playback: FramePlayerThread publishes then). */
+                if (!(g_sp3ctra_config.luxsynth_source_type == 0
+                      && lux_sampler_is_playing()))
+                    audio_image_buffers_publish_engine_input(
+                        audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
+                        bR, bG, bB, nb_pixels);
+
+                pipeline_path_luxsynth_luxwave(bR, bG, bB, &live_cfg, &preprocessed_temp);
+            }
         }
 #endif
       }
@@ -1284,11 +1852,12 @@ void *udpThread(void *arg) {
  * hysteresis in internal_source_live_streaming() makes the hand-over race-free
  * in practice.
  *
- * Mirrors the per-synth routing of udpThread's completed-line block, minus the
- * device-only machinery (fragment reassembly, acquisition gate, sequencer mix,
- * sampler record hooks). Known v1 limitations, matching FramePlayerThread's
- * behaviour: no sampler recording of internal sources without a device stream,
- * and the shared modulated channel stays owned by the sampler/score.
+ * Mirrors the per-synth routing of udpThread's completed-line block — sampler
+ * record hooks included (REC from an internal source, resampling while a
+ * player runs) — minus the device-only machinery (fragment reassembly,
+ * acquisition gate, sequencer mix). Known v1 limitation, matching
+ * FramePlayerThread's behaviour: the shared modulated channel stays owned by
+ * the sampler/score.
  *
  * Runs on MediaSourceService (Non-RT JUCE thread), a few hundred Hz.
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -1301,8 +1870,6 @@ void internal_sources_process_tick(void *arg)
 #endif
 
   if (!ctx || !ctx->running || !ctx->doubleBuffer || !ctx->audioImageBuffers)
-    return;
-  if (!internal_source_any_active())
     return;
   if (internal_source_live_streaming())
     return;   /* device streams → udpThread owns the per-synth processing */
@@ -1321,30 +1888,153 @@ void internal_sources_process_tick(void *arg)
 
 #ifdef VST_MODE
   const int sampler_playing = lux_sampler_is_playing();
+  const int score_playing   = lux_sampler_is_score_playing();
 #else
   const int sampler_playing = 0;
+  const int score_playing   = 0;
 #endif
+
+#ifdef VST_MODE
+  /* ── Sampler machinery — mirror of udpThread's modulated build ─────────────
+   * Without it, REC was dead whenever the device was silent (VIDEO / IMAGE /
+   * CAMERA sessions): phase 1 below is the ONLY drain site of the start/stop
+   * record commands, and phase 2 the only capture site. Runs BEFORE the
+   * any-active early-out — the drain and the resampling capture need no
+   * internal source (MediaSourceService keeps ticking at its idle rate). */
+  const SynthChainPlan *spSmp = NULL;
+  int smp_slot = -1;
+  for (int s = 0; s < CHAIN_SYNTH_COUNT && !spSmp; s++)
+      if (frame_plan.synth[s].present && frame_plan.synth[s].has_sampler)
+      { spSmp = &frame_plan.synth[s]; smp_slot = s; }
+
+  /* Set when the idle build below ran: the sampler chain's pre-marker stream
+   * (its modulated channel). The per-synth blocks further down consume it
+   * instead of re-running the chain (stateful FX tick once per line). */
+  const uint8_t *smpMod_R = NULL, *smpMod_G = NULL, *smpMod_B = NULL;
+  int smp_premarker_tap_done = 0;
+  if (spSmp)
+  {
+      static uint32_t s_feeder_line_id = 0;   /* debug/sync id (no UDP line) */
+      const uint8_t *sbR, *sbG, *sbB;
+      const int sbSig = synth_source_base(spSmp, smp_slot, db, nb_pixels,
+                                          &sbR, &sbG, &sbB);
+
+      /* Phase 1 — drain start/stop REC commands + cache the chain's source
+       * frame for the player's darken-blend. */
+      lux_sampler_on_live_frame_assembled(sbR, sbG, sbB, (uint16_t)nb_pixels);
+
+      if (sampler_playing)
+      {
+          /* PLAYING (sampler or score relay): resampling capture — the frame
+           * player owns the modulated channel; feed its output to every other
+           * engine with an armed rec slot (records the combination). */
+          uint8_t *plR, *plG, *plB;
+          audio_image_buffers_get_sampler_pointers(audioBuffers,
+                                                   &plR, &plG, &plB);
+          if (plR && plG && plB)
+              lux_samplers_record_modulated(plR, plG, plB,
+                                            (uint16_t)nb_pixels,
+                                            ++s_feeder_line_id);
+      }
+      else if (sbSig > 0)
+      {
+          /* IDLE / REC: run the chain's pre-marker processors once → the
+           * modulated stream; publish it (the sampler chain OWNS the
+           * modulated bus, as on the device path), mirror the sampler
+           * snapshot and capture into the armed slot (phase 2). */
+          SynthChainPlan pre;
+          chain_build_sampler_premarker_plan(spSmp, &pre);
+          chain_run_inserts_with_viz_tap(&pre, audioBuffers, sbR, sbG, sbB,
+                                         nb_pixels,
+                                         &smpMod_R, &smpMod_G, &smpMod_B);
+          smp_premarker_tap_done = (pre.viz_tap_insert >= 0);
+          if (smpMod_R && smpMod_G && smpMod_B)
+          {
+              audio_image_buffers_snapshot_modulated(audioBuffers,
+                                                     smpMod_R, smpMod_G,
+                                                     smpMod_B, nb_pixels);
+              lux_sampler_on_modulated_frame_ready(smpMod_R, smpMod_G,
+                                                   smpMod_B,
+                                                   (uint16_t)nb_pixels,
+                                                   ++s_feeder_line_id);
+          }
+      }
+  }
+#endif
+
+  if (!internal_source_any_active())
+    return;
 
   /* ── LuxStral A — its own chain, only when fed by an internal source ────── */
   const uint8_t *baseA_R = NULL, *baseA_G = NULL, *baseA_B = NULL;
   int a_done = 0;
-  if (spA->present && !sampler_playing
-      && synth_source_base(spA, CHAIN_SYNTH_LUXSTRAL, db, nb_pixels,
-                           &baseA_R, &baseA_G, &baseA_B))
+  if (spA->present && !sampler_playing)
   {
-    const uint8_t *srcR = baseA_R, *srcG = baseA_G, *srcB = baseA_B;
-    if (spA->num_inserts > 0)
+    const int baseSigA = synth_source_base(spA, CHAIN_SYNTH_LUXSTRAL, db,
+                                           nb_pixels,
+                                           &baseA_R, &baseA_G, &baseA_B);
+    if (baseSigA > 0)
     {
-      void *states[CHAIN_PLAN_MAX_INSERTS];
-      chain_resolve_insert_states(spA, states);
-      image_chain_run(baseA_R, baseA_G, baseA_B,
-                      nb_pixels, g_sp3ctra_config.num_octaves,
-                      spA->insert_id, states, spA->num_inserts,
-                      &srcR, &srcG, &srcB);
+    const uint8_t *srcR, *srcG, *srcB;
+#ifdef VST_MODE
+    if (spA == spSmp && smpMod_R)
+    {
+        /* The chain holding the sampler IS the modulated channel — reuse the
+         * pre-marker stream built by the sampler block above (udpThread's
+         * short-circuit: stateful FX tick once per line); probes and the
+         * selection tap are fed by their position around the marker. */
+        srcR = smpMod_R; srcG = smpMod_G; srcB = smpMod_B;
+        feeder_sampler_chain_shortcut(spA, audioBuffers,
+                                      smp_premarker_tap_done,
+                                      baseA_R, baseA_G, baseA_B,
+                                      smpMod_R, smpMod_G, smpMod_B, nb_pixels);
     }
+    else
+#endif
+    chain_run_inserts_with_viz_tap(spA, audioBuffers,
+                                   baseA_R, baseA_G, baseA_B,
+                                   nb_pixels, &srcR, &srcG, &srcB);
+
+    /* MODULATED display bus — mirror of udpThread's per-line publish (legacy
+     * CHAIN-1 panel + resampling views keep working off internal sources).
+     * Skipped while a score relay owns A's stream — the player thread feeds
+     * the engine, not this tick. */
+    if (!(spA->has_score && score_playing))
+    {
+#ifdef VST_MODE
+      if (!smpMod_R)   /* sampler chain owns the bus — published above */
+#endif
+      audio_image_buffers_snapshot_modulated(audioBuffers, srcR, srcG, srcB,
+                                             nb_pixels);
+
+      /* Per-engine input tap A (per-chain display) — the feeder owns A's
+       * commit here (same source-routing gating as the commit at the bottom
+       * of this tick: srcA != 0, or the Source=S idle passthrough). */
+#ifdef VST_MODE
+      const int a_commit_here =
+          (g_sp3ctra_config.luxstral_source_type != 0)
+          || lux_sampler_is_passthrough();
+#else
+      const int a_commit_here = 1;
+#endif
+      if (a_commit_here)
+        audio_image_buffers_publish_engine_input(
+            audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+            srcR, srcG, srcB, nb_pixels);
+    }
+
     PipelineConfig cfg = pipeline_build_config_live();
     if (pipeline_process_frame(srcR, srcG, srcB, &cfg, &s_feeder_pp) == 0)
       a_done = 1;
+    }
+    else if (synth_chain_has_no_signal(spA, baseSigA))
+    {
+      /* A's chain carries no stream of its own (internal source empty / no
+       * source module) → white tap = unfed engine, never a stale frame. */
+      audio_image_buffers_publish_engine_input(
+          audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+          NULL, NULL, NULL, nb_pixels);
+    }
   }
 
   /* ── Path B (LuxSynth + LuxWave) — LuxSynth's chain (LuxWave shares it, as
@@ -1354,50 +2044,95 @@ void internal_sources_process_tick(void *arg)
   const int pb_slot = (spPB == spW) ? CHAIN_SYNTH_LUXWAVE : CHAIN_SYNTH_LUXSYNTH;
   const uint8_t *pbR = NULL, *pbG = NULL, *pbB = NULL;
   int pb_done = 0;
-  if (spPB && synth_source_base(spPB, pb_slot, db, nb_pixels, &pbR, &pbG, &pbB))
+  if (spPB)
   {
-    const uint8_t *sR = pbR, *sG = pbG, *sB = pbB;
-    if (spPB->num_inserts > 0)
+    const int baseSigPB = synth_source_base(spPB, pb_slot, db, nb_pixels,
+                                            &pbR, &pbG, &pbB);
+    if (baseSigPB > 0)
     {
-      void *states[CHAIN_PLAN_MAX_INSERTS];
-      chain_resolve_insert_states(spPB, states);
-      image_chain_run(pbR, pbG, pbB,
-                      nb_pixels, g_sp3ctra_config.num_octaves,
-                      spPB->insert_id, states, spPB->num_inserts,
-                      &sR, &sG, &sB);
+    const uint8_t *sR, *sG, *sB;
+#ifdef VST_MODE
+    if (spPB == spSmp && smpMod_R)
+    {
+        /* Sampler on Path-B's chain: same short-circuit as engine A's. */
+        sR = smpMod_R; sG = smpMod_G; sB = smpMod_B;
+        feeder_sampler_chain_shortcut(spPB, audioBuffers,
+                                      smp_premarker_tap_done,
+                                      pbR, pbG, pbB,
+                                      smpMod_R, smpMod_G, smpMod_B, nb_pixels);
     }
+    else
+#endif
+    chain_run_inserts_with_viz_tap(spPB, audioBuffers, pbR, pbG, pbB,
+                                   nb_pixels, &sR, &sG, &sB);
+
+    /* Same MODULATED publish for a Path-B-only session (legacy CHAIN-1
+     * panel): only when LuxStral A is absent — with A placed, A's block
+     * above owns the (single, global) bus. Sampler/score guards mirror A's
+     * (a published sampler-chain stream owns the bus, as on the device path). */
+    if (!spA->present && !sampler_playing
+        && !(spPB->has_score && score_playing)
+#ifdef VST_MODE
+        && !smpMod_R
+#endif
+       )
+      audio_image_buffers_snapshot_modulated(audioBuffers, sR, sG, sB,
+                                             nb_pixels);
+
+    /* Per-engine input tap Path-B (per-chain display) — skip while a player
+     * owns the polyphonic commit (luxsynth source MODULATED + playback). */
+#ifdef VST_MODE
+    const int pb_player_owned =
+        (g_sp3ctra_config.luxsynth_source_type == 0) && sampler_playing;
+#else
+    const int pb_player_owned = 0;
+#endif
+    if (!pb_player_owned)
+      audio_image_buffers_publish_engine_input(
+          audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
+          sR, sG, sB, nb_pixels);
+
     PipelineConfig cfg = pipeline_build_config_live();
     pipeline_path_luxsynth_luxwave(sR, sG, sB, &cfg, &s_feeder_pp);
     pb_done = 1;
+    }
+    else if (synth_chain_has_no_signal(spPB, baseSigPB))
+    {
+      audio_image_buffers_publish_engine_input(
+          audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
+          NULL, NULL, NULL, nb_pixels);
+    }
   }
 
 #ifdef VST_MODE
-  /* ── LuxStral engine B — its own chain, into the file-static DoubleBuffer ── */
-  if (spLB->present && !(spLB->has_sampler && sampler_playing))
+  /* ── LuxStral engine B — its own chain, into the file-static DoubleBuffer ──
+   * Skipped while a player owns B's input: sampler playback (shared modulated
+   * channel) or score playback on B's chain (FramePlayerThread feeds it via
+   * luxstral_b_feed_player_frame). */
+  if (spLB->present && !(spLB->has_sampler && sampler_playing)
+      && !(spLB->has_score && lux_sampler_is_score_playing()))
   {
     const uint8_t *baseB_R, *baseB_G, *baseB_B;
     if (synth_source_base(spLB, CHAIN_SYNTH_LUXSTRAL_B, db, nb_pixels,
-                          &baseB_R, &baseB_G, &baseB_B))
+                          &baseB_R, &baseB_G, &baseB_B) > 0)
     {
-      if (!s_luxstral_b_db_ready)
+      if (luxstral_b_db_ensure_ready())
       {
-        if (initDoubleBuffer(&s_luxstral_b_db) != 0)
-          log_error("THREAD", "Engine-B DoubleBuffer init failed — engine B stays inactive");
-        else
-          __atomic_store_n(&s_luxstral_b_db_ready, 1, __ATOMIC_RELEASE);
-      }
-      if (s_luxstral_b_db_ready)   /* skip if the DoubleBuffer init failed */
-      {
-        const uint8_t *bxR = baseB_R, *bxG = baseB_G, *bxB = baseB_B;
-        if (spLB->num_inserts > 0)
+        const uint8_t *bxR, *bxG, *bxB;
+        if (spLB == spSmp && smpMod_R)
         {
-          void *states[CHAIN_PLAN_MAX_INSERTS];
-          chain_resolve_insert_states(spLB, states);
-          image_chain_run(baseB_R, baseB_G, baseB_B,
-                          nb_pixels, g_sp3ctra_config.num_octaves,
-                          spLB->insert_id, states, spLB->num_inserts,
-                          &bxR, &bxG, &bxB);
+            /* Sampler on B's chain: same short-circuit as engine A's. */
+            bxR = smpMod_R; bxG = smpMod_G; bxB = smpMod_B;
+            feeder_sampler_chain_shortcut(spLB, audioBuffers,
+                                          smp_premarker_tap_done,
+                                          baseB_R, baseB_G, baseB_B,
+                                          smpMod_R, smpMod_G, smpMod_B,
+                                          nb_pixels);
         }
+        else
+        chain_run_inserts_with_viz_tap(spLB, audioBuffers,
+                                       baseB_R, baseB_G, baseB_B,
+                                       nb_pixels, &bxR, &bxG, &bxB);
         PipelineConfig cfg_b = pipeline_build_config_luxstral_b();
         if (pipeline_process_frame(bxR, bxG, bxB, &cfg_b, &s_feeder_pp_b) == 0)
         {
@@ -1410,6 +2145,23 @@ void internal_sources_process_tick(void *arg)
     }
   }
 #endif
+
+  /* ── Probe-only chains fed by an INTERNAL source (device silent): run their
+   * ordered inserts so probes capture at their position — the udpThread path
+   * does the same at line rate while the device streams. Live-sourced probe
+   * chains are skipped here (no fresh live frames to observe). */
+  for (int pc = 0; pc < frame_plan.num_probe_chains; pc++)
+  {
+    const SynthChainPlan *spP = &frame_plan.probe_chain[pc];
+    const uint8_t *pcR, *pcG, *pcB;
+    if (synth_source_base(spP, CHAIN_SYNTH_COUNT + pc, db, nb_pixels,
+                          &pcR, &pcG, &pcB) > 0)
+    {
+      const uint8_t *poR, *poG, *poB;
+      chain_run_inserts_with_viz_tap(spP, audioBuffers, pcR, pcG, pcB,
+                                     nb_pixels, &poR, &poG, &poB);
+    }
+  }
 
   if (!a_done && !pb_done)
     return;
@@ -1559,7 +2311,7 @@ void internal_sources_process_tick(void *arg)
 // REMOVED (DMX): 
 // REMOVED (DMX):   log_info("THREAD", "DMX thread terminating");
 // REMOVED (DMX): 
-// REMOVED (DMX):   // Fermer le descripteur de fichier seulement s'il est valide
+// REMOVED (DMX):   // Close the file descriptor only if it is valid
 // REMOVED (DMX):   if (dmxCtx->fd >= 0) {
 // REMOVED (DMX):     close(dmxCtx->fd);
 // REMOVED (DMX):     dmxCtx->fd = -1;

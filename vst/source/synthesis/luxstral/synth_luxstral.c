@@ -71,23 +71,43 @@ LuxStralEngine g_luxstral_engine_b = {
     .source_type_override = 2,
 };
 
+/* Phase-management activity counters (UI LED) — cumulative onsets per engine
+ * (0 = A, 1 = B). Each engine's producer thread adds in the drain block; the
+ * LUXSTRAL page timer polls via synth_luxstral_get_phase_onset_total() and
+ * lights the LED on deltas. Monotonic, wraps harmlessly. */
+static _Atomic uint32_t g_phase_onset_total[2];
 
-/* Shared summation-normalization gain (mono + stereo output paths): inverse
- * of the exponential response curve, with peak compensation. Returns 0 below
- * the silence epsilon. ONE implementation for both paths — the former two
- * copies could drift, silently changing the compression character with the
- * Stereo toggle. */
-static inline float summation_norm_gain(float sum_volume, float norm_base,
-                                        float norm_expo,
-                                        float peak_compensation) {
-  const float SUM_EPS_FLOAT = 1.0e-6f;
-  if (sum_volume <= SUM_EPS_FLOAT)
-    return 0.0f;
-  const float x = sum_volume / (float)VOLUME_AMP_RESOLUTION + norm_base;
-  const float response_curve = (fabsf(norm_expo - 0.5f) <= 1e-3f)
-                                   ? sqrtf(x < 0.0f ? 0.0f : x)
-                                   : pow_shifted_fast(x, norm_base, norm_expo);
-  return peak_compensation / (response_curve * (float)VOLUME_AMP_RESOLUTION);
+uint32_t synth_luxstral_get_phase_onset_total(int engine_idx) {
+  if (engine_idx < 0 || engine_idx > 1)
+    return 0;
+  return atomic_load_explicit(&g_phase_onset_total[engine_idx],
+                              memory_order_relaxed);
+}
+
+
+/* RMS anti-saturation ceiling — the ONE dynamics stage, whatever the decode
+ * law (gamma or SCORE dB). Replaces the legacy summation normalization
+ * (peak-compensated 1/x^(1/sumExp) curve), which over-attenuated sparse
+ * content and left the output too quiet.
+ *
+ * sumVolumeBuffer accumulates Σ a_i² — the volume weighting exponent is fixed
+ * at 2 in synth_luxstral_threading.c — and the output RMS of a bank of
+ * orthogonal partials is EXACTLY chain_gain·sqrt(Σ a_i²/2), whatever the
+ * phases. chain_gain must be the FULL scale between oscillator amplitudes and
+ * output samples (combine-stage safety scale × loop base gain). While the
+ * predicted RMS stays under LUXSTRAL_RMS_MAX this returns unity: the chain is
+ * strictly linear and dynamics are fully preserved. Above it (dense image,
+ * hand-drawn strokes, black frame ⇒ Σa² up to 3456) the output is normalized
+ * to a constant loud-but-clean RMS instead of slamming the soft limiter into
+ * saturation. The transfer is continuous at the knee; the gain follows the
+ * envelope-smoothed volumes, so it moves at millisecond rate (no zipper). */
+static inline float rms_ceiling_gain(float energy_sum, float chain_gain) {
+  if (energy_sum <= 0.0f)
+    return 1.0f;
+  const float predicted_rms = chain_gain * sqrtf(0.5f * energy_sum);
+  return (predicted_rms > LUXSTRAL_RMS_MAX)
+             ? (LUXSTRAL_RMS_MAX / predicted_rms)
+             : 1.0f;
 }
 
 // Cleanup function to release persistent buffers
@@ -351,6 +371,81 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
     // Wait for all workers to complete via barrier
     synth_barrier_wait(eng, &eng->worker_end_barrier);
 
+    /* ── Phase management: auto-gate + diagnostics ────────────────────────
+     * Drain the per-worker counters every buffer (producer thread, after
+     * the end barrier — never in the RT workers).
+     *  1. phase_onset_ref  = slow-decaying max of note volumes (~10 s), the
+     *     self-calibrating reference: the user never tunes an absolute
+     *     threshold against invisible internal volume scales.
+     *  2. phase_gate_abs   = sensitivity_fraction × ref (floored) — read by
+     *     the workers NEXT frame (barrier-ordered, no race).
+     *  3. onset totals feed the UI activity LED (atomic, polled by the
+     *     LUXSTRAL page timer) and a ~5 s log line.                        */
+    if (g_sp3ctra_config.luxstral_phase_mode != LUXSTRAL_PHASE_MODE_FREE) {
+      const int ei = (eng == &g_luxstral_engine_b) ? 1 : 0;
+      static uint32_t rst_acc[2];   /* per-engine — each engine's producer
+                                       thread only touches its own index */
+      static uint32_t burst_max[2]; /* peak resets in a SINGLE buffer: the
+                                       flanger comb needs COLLECTIVE alignment
+                                       (a whole band resetting together);
+                                       scattered onsets never build the comb */
+      static float    vol_max[2];
+      static uint32_t frames[2];
+      uint32_t buf_resets  = 0;     /* this buffer's resets                  */
+      float    buf_volmax  = 0.0f;  /* this buffer's loudest note target     */
+      float    buf_volmin  = 1.0f;  /* this buffer's quietest note target    */
+      for (int wi = 0; wi < eng->num_workers; wi++) {
+        synth_thread_worker_t *w = &eng->thread_pool[wi];
+        buf_resets += w->phase_reset_count;
+        w->phase_reset_count = 0;
+        if (w->max_target_volume > buf_volmax) buf_volmax = w->max_target_volume;
+        w->max_target_volume = 0.0f;
+        if (w->min_target_volume < buf_volmin) buf_volmin = w->min_target_volume;
+        w->min_target_volume = 1.0f;
+      }
+
+      /* Rolling reference (peak) + resting bed (floor) + absolute gate for
+       * next frame. Peak decays 0.999/buf ≈ 10 s at 86 buf/s; the bed
+       * follows drops instantly and drifts up with ~1 s time constant.
+       * The bed is the decode law's floor for EMPTY pixels (10^(-range/20),
+       * e.g. 0.0032 @ 50 dB — never 0): the gate must stand clear of it
+       * (4×) so the workers' re-arm hysteresis (gate/2 = 2× bed) can see
+       * through it. sensitivity 1 → gate at 3 % of recent peak (catches
+       * soft onsets), 0 → ~50 % (only the hardest attacks). */
+      float ref = eng->phase_onset_ref * 0.999f;
+      if (buf_volmax > ref) ref = buf_volmax;
+      eng->phase_onset_ref = ref;
+      float bed = eng->phase_onset_floor;
+      bed += (buf_volmin - bed) * ((buf_volmin < bed) ? 1.0f : 0.01f);
+      eng->phase_onset_floor = bed;
+      const float sens = g_sp3ctra_config.luxstral_phase_sensitivity;
+      const float frac = 0.03f + (1.0f - sens) * (1.0f - sens) * 0.47f;
+      float gate = frac * ref;
+      if (gate < 4.0f * bed) gate = 4.0f * bed;
+      if (gate < 0.001f) gate = 0.001f;
+      eng->phase_gate_abs = gate;
+
+      /* UI activity feed: cumulative onset count, polled by the page timer */
+      if (buf_resets > 0)
+        atomic_fetch_add_explicit(&g_phase_onset_total[ei], buf_resets,
+                                  memory_order_relaxed);
+
+      rst_acc[ei] += buf_resets;
+      if (buf_resets > burst_max[ei]) burst_max[ei] = buf_resets;
+      if (buf_volmax > vol_max[ei]) vol_max[ei] = buf_volmax;
+      const int bs = g_sp3ctra_config.audio_buffer_size > 0
+                         ? g_sp3ctra_config.audio_buffer_size : 512;
+      if (++frames[ei] >= (uint32_t)(5 * g_sp3ctra_config.sampling_frequency / bs)) {
+        log_info("SYNTH",
+                 "PHASE[%c] mode=%d: %u onsets/5s (peak %u/buf) | ref %.4f bed %.4f gate %.4f | drift +/-%.2f ct",
+                 ei ? 'B' : 'A', g_sp3ctra_config.luxstral_phase_mode,
+                 rst_acc[ei], burst_max[ei], (double)eng->phase_onset_ref,
+                 (double)eng->phase_onset_floor, (double)eng->phase_gate_abs,
+                 (double)g_sp3ctra_config.luxstral_phase_drift_cents);
+        rst_acc[ei] = 0; burst_max[ei] = 0; vol_max[ei] = 0.0f; frames[ei] = 0;
+      }
+    }
+
     // Capture per-sample (per buffer) volumes across all notes to ensure 1 image line = 1 audio sample
   if (image_debug_is_oscillator_capture_enabled()) {
     // Iterate over each sample inside this audio buffer
@@ -405,7 +500,8 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
     }
 
     // SATURATION PREVENTION: Apply pre-scaling to keep headroom before normalization
-    const float safety_scale = 0.35f;
+    // (shared define — the RMS ceiling predictor accounts for this scale)
+    const float safety_scale = LUXSTRAL_SUM_SAFETY_SCALE;
     scale_float(eng->additiveBuffer, safety_scale, g_sp3ctra_config.audio_buffer_size);
 
     // CORRECTION: Conditional normalization by platform
@@ -437,12 +533,17 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
     // DISABLED: Anti-tac fade-in temporarily for debugging
     float fade_in_factor = 1.0f;  // Force full volume immediately
 
+    // RMS dynamics (see rms_ceiling_gain). base_gain is applied
+    // in the gain loops; the worker-combine stage already pre-scaled the mono
+    // AND stereo buffers by LUXSTRAL_SUM_SAFETY_SCALE, so the predictor uses
+    // the full chain gain (safety × base) between oscillator amplitudes and
+    // output samples.
+    const float base_gain  = LUXSTRAL_RMS_BASE_GAIN;
+    const float chain_gain = LUXSTRAL_RMS_BASE_GAIN * LUXSTRAL_SUM_SAFETY_SCALE;
+
     // Per-engine DSP knobs (M8): engine B reads its own luxstral_b_* config
     // mirror; engine A keeps the legacy global fields (behaviour unchanged).
     const int is_engine_b = (eng == &g_luxstral_engine_b);
-    const float sum_response_exp = is_engine_b
-        ? g_sp3ctra_config.luxstral_b_summation_response_exponent
-        : g_sp3ctra_config.summation_response_exponent;
     const float soft_limit_threshold = is_engine_b
         ? g_sp3ctra_config.luxstral_b_soft_limit_threshold
         : g_sp3ctra_config.soft_limit_threshold;
@@ -453,30 +554,11 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
         ? g_sp3ctra_config.luxstral_b_stereo_mode_enabled
         : g_sp3ctra_config.stereo_mode_enabled;
 
-    // Summation normalization exponent (hoisted for mono + stereo paths)
-    const float norm_expo = 1.0f / sum_response_exp;
-    const float norm_base = (float)SUMMATION_BASE_LEVEL / (float)VOLUME_AMP_RESOLUTION;
-
-    // Peak compensation: calibrate so that at a MODERATE content level (~500
-    // active oscillators), the output matches the reference at sum_exp=2.
-    // N_cal=500 maximizes dynamic range while keeping worst-case (black image
-    // at sum_exp=10) right at the soft_limit_threshold (0.8):
-    //   - Few strokes (N≈50) at sum_exp=10 → 0.15 (clearly quieter)
-    //   - Moderate content (N≈500) → 0.39 (same as sum_exp=2)
-    //   - Full black (N≈3456) at sum_exp=10 → ~0.80 (soft limiter threshold)
-    // Dynamic range at sum_exp=10: ~15 dB (5.5:1) vs ~0 dB at sum_exp=2.
-    const float ref_expo = 0.5f;
-    const float n_cal    = 500.0f + norm_base;
-    const float peak_compensation = powf(n_cal, norm_expo - ref_expo);
-    
     for (buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
-        // Compression applied to all signals — SHARED normalization gain (see
-        // summation_norm_gain: one implementation for mono AND stereo, so a
-        // tweak to the compression law can no longer change the sound
-        // character depending on the Stereo toggle).
-        const float gain = summation_norm_gain(eng->sumVolumeBuffer[buff_idx],
-                                               norm_base, norm_expo,
-                                               peak_compensation);
+        // ONE gain implementation for mono AND stereo: linear below the RMS
+        // ceiling, constant-RMS above (sumVolumeBuffer holds Σa²).
+        const float gain = base_gain
+            * rms_ceiling_gain(eng->sumVolumeBuffer[buff_idx], chain_gain);
         eng->tmp_audioData[buff_idx] =
             eng->additiveBuffer[buff_idx] * gain * fade_in_factor; // anti-tac fade-in
     }
@@ -520,7 +602,8 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
     }
 
     // SATURATION PREVENTION: Apply same safety scaling to stereo buffers
-    const float safety_scale_stereo = 0.35f;  // Same as mono for consistency
+    // (shared define — same as mono; the RMS predictor accounts for it)
+    const float safety_scale_stereo = LUXSTRAL_SUM_SAFETY_SCALE;
     scale_float(eng->stereoBuffer_L, safety_scale_stereo, g_sp3ctra_config.audio_buffer_size);
     scale_float(eng->stereoBuffer_R, safety_scale_stereo, g_sp3ctra_config.audio_buffer_size);
 
@@ -545,10 +628,12 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
       float left_signal, right_signal;
 
       {
-        // SHARED normalization gain — same implementation as the mono loop.
-        const float gain = summation_norm_gain(eng->sumVolumeBuffer[buff_idx],
-                                               norm_base, norm_expo,
-                                               peak_compensation);
+        // SHARED RMS gain — identical to the mono loop (mono and stereo are
+        // pre-scaled by the same safety scale). One gain for L and R:
+        // constant-power panning splits the same total energy, and a shared
+        // gain preserves the stereo image.
+        const float gain = base_gain
+            * rms_ceiling_gain(eng->sumVolumeBuffer[buff_idx], chain_gain);
         left_signal  = eng->stereoBuffer_L[buff_idx] * gain * fade_in_factor;
         right_signal = eng->stereoBuffer_R[buff_idx] * gain * fade_in_factor;
       }
@@ -984,6 +1069,7 @@ int32_t synth_luxstral_init_engine_b(void) {
     uint32_t r = (uint32_t)rand();
 #endif
     wb[i].phase_acc      = (float)(r % (uint32_t)SINE_TABLE_SIZE);
+    wb[i].detune_offset  = 0.0f;   /* dynamic per-onset state, not timbre */
     wb[i].current_volume = 0.0f;
     wb[i].target_volume  = 0.0f;
   }
@@ -1037,10 +1123,12 @@ void synth_luxstral_resync_engine_b_timbre(void) {
   const int n = get_current_number_of_notes();
   for (int i = 0; i < n; i++) {
     float pa = eng->waves[i].phase_acc;
+    float dt = eng->waves[i].detune_offset;   /* per-onset state, like phase_acc */
     float cv = eng->waves[i].current_volume;
     float tv = eng->waves[i].target_volume;
     memcpy((void*)&eng->waves[i], (const void*)&waves[i], sizeof(struct wave));
     eng->waves[i].phase_acc      = pa;
+    eng->waves[i].detune_offset  = dt;
     eng->waves[i].current_volume = cv;
     eng->waves[i].target_volume  = tv;
   }

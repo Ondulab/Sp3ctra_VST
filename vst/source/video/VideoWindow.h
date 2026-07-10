@@ -10,7 +10,7 @@ class Sp3ctraAudioProcessor;
  * @brief Detachable floating window for CIS video scroll visualization.
  *
  * Contains a VideoDisplayComponent (waterfall renderer) and a thin toolbar:
- *   [⛶ Plein écran]   [✕ Fermer]
+ *   [⛶ Fullscreen]   [✕ Close]
  *
  * Double-clicking the display area also toggles fullscreen.
  *

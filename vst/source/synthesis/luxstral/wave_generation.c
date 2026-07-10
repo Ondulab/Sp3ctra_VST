@@ -247,6 +247,7 @@ void init_waves(volatile struct wave *waves,
         waves[note].frequency          = freq;
         waves[note].phase_inc          = freq * phase_inc_factor;
         waves[note].phase_acc          = 0.0f; /* Randomized by caller after this function */
+        waves[note].detune_offset      = 0.0f; /* Redrawn at each phase-reset onset */
         waves[note].current_volume     = 0.0f;
         waves[note].target_volume      = 0.0f;
         waves[note].physiological_gain = 1.0f; /* Set below if filter enabled */

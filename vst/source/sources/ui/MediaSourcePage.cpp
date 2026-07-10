@@ -90,13 +90,36 @@ MediaSourcePage::MediaSourcePage(Sp3ctraAudioProcessor& p, Kind k)
     auto& apvts = processor.getAPVTS();
 
     addAndMakeVisible(preview);
-    preview.emptyHint = (kind == Kind::Image)  ? "No image loaded - use the SETUP face"
-                      : (kind == Kind::Video)  ? "No video loaded - use the SETUP face"
-                                               : "No camera open - use the SETUP face";
+    preview.emptyHint = (kind == Kind::Image)  ? "No image loaded - click LOAD..."
+                      : (kind == Kind::Video)  ? "No video loaded - click LOAD..."
+                                               : "No camera open - pick a device above";
+
+    // ── Source picker row (formerly the SETUP face) ──────────────────────────
+    if (kind == Kind::Camera)
+    {
+        deviceCombo.setTextWhenNoChoicesAvailable("No camera found");
+        deviceCombo.setTextWhenNothingSelected("Select a camera...");
+        deviceCombo.onChange = [this] { openSelectedDevice(); };
+        addAndMakeVisible(deviceCombo);
+
+        refreshButton.onClick = [this] { refreshDevices(); };
+        addAndMakeVisible(refreshButton);
+
+        clearButton.setButtonText("CLOSE");
+        clearButton.onClick = [this] { clearMedia(); };
+        addAndMakeVisible(clearButton);
+    }
+    else
+    {
+        loadButton.onClick  = [this] { chooseMedia(); };
+        addAndMakeVisible(loadButton);
+        clearButton.onClick = [this] { clearMedia(); };
+        addAndMakeVisible(clearButton);
+    }
 
     statusLabel.setJustificationType(juce::Justification::centredLeft);
     statusLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.55f));
-    statusLabel.setFont(juce::Font(12.0f));
+    statusLabel.setFont(juce::Font(juce::FontOptions(12.0f)));
     addAndMakeVisible(statusLabel);
 
     if (kind != Kind::Camera)
@@ -108,7 +131,7 @@ MediaSourcePage::MediaSourcePage(Sp3ctraAudioProcessor& p, Kind k)
             apvts, kind == Kind::Image ? "imgSrcPlay" : "vidSrcPlay", playButton);
 
         loopLabel.setText("MODE", juce::dontSendNotification);
-        loopLabel.setFont(juce::Font(11.0f));
+        loopLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
         loopLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.5f));
         addAndMakeVisible(loopLabel);
 
@@ -122,7 +145,7 @@ MediaSourcePage::MediaSourcePage(Sp3ctraAudioProcessor& p, Kind k)
 
         speedLabel.setText(kind == Kind::Image ? "SCAN TIME" : "SPEED",
                            juce::dontSendNotification);
-        speedLabel.setFont(juce::Font(11.0f));
+        speedLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
         speedLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.5f));
         addAndMakeVisible(speedLabel);
 
@@ -131,12 +154,21 @@ MediaSourcePage::MediaSourcePage(Sp3ctraAudioProcessor& p, Kind k)
         addAndMakeVisible(speedSlider);
         speedAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
             apvts, kind == Kind::Image ? "imgSrcDuration" : "vidSrcSpeed", speedSlider);
+
+        // Right-click MIDI Learn (media sources are engine singletons).
+        auto& mm = processor.getMidiMap();
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
+            mm, playButton,  kind == Kind::Image ? "imgSrcPlay" : "vidSrcPlay"));
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
+            mm, speedSlider, kind == Kind::Image ? "imgSrcDuration" : "vidSrcSpeed"));
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
+            mm, loopCombo,   kind == Kind::Image ? "imgSrcLoop" : "vidSrcLoop"));
     }
 
     if (kind == Kind::Video)
     {
         positionLabel.setText("POSITION", juce::dontSendNotification);
-        positionLabel.setFont(juce::Font(11.0f));
+        positionLabel.setFont(juce::Font(juce::FontOptions(11.0f)));
         positionLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.5f));
         addAndMakeVisible(positionLabel);
 
@@ -156,6 +188,100 @@ MediaSourcePage::MediaSourcePage(Sp3ctraAudioProcessor& p, Kind k)
 }
 
 MediaSourcePage::~MediaSourcePage() = default;
+
+//==============================================================================
+// Source picking (moved here from the former SETUP face)
+//==============================================================================
+void MediaSourcePage::chooseMedia()
+{
+    const bool isImage = (kind == Kind::Image);
+    chooser_ = std::make_unique<juce::FileChooser>(
+        isImage ? "Choose an image" : "Choose a video",
+        juce::File::getSpecialLocation(juce::File::userPicturesDirectory),
+        isImage ? "*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.tiff;*.tif"
+                : "*.mov;*.mp4;*.m4v;*.avi;*.mpg;*.mpeg");
+
+    juce::Component::SafePointer<MediaSourcePage> safe(this);
+    chooser_->launchAsync(juce::FileBrowserComponent::openMode
+                        | juce::FileBrowserComponent::canSelectFiles,
+        [safe](const juce::FileChooser& fc)
+        {
+            if (safe == nullptr)
+                return;
+            const auto file = fc.getResult();
+            if (file == juce::File{})
+                return;
+
+            juce::String err;
+            bool ok = false;
+            if (safe->kind == Kind::Image)
+            {
+                if (auto* e = safe->processor.getImageSource())
+                    ok = e->loadFile(file, err);
+            }
+            else
+            {
+                if (auto* e = safe->processor.getVideoSource())
+                    ok = e->loadFile(file, err);
+            }
+            if (! ok && err.isNotEmpty())
+                juce::AlertWindow::showMessageBoxAsync(
+                    juce::MessageBoxIconType::WarningIcon, "Load failed", err);
+        });
+}
+
+void MediaSourcePage::clearMedia()
+{
+    switch (kind)
+    {
+        case Kind::Image:
+            if (auto* e = processor.getImageSource()) e->unload();
+            break;
+        case Kind::Video:
+            if (auto* e = processor.getVideoSource()) e->unload();
+            break;
+        case Kind::Camera:
+            if (auto* e = processor.getCameraSource()) e->closeDevice();
+            processor.setCameraDeviceName({});
+            deviceCombo.setSelectedId(0, juce::dontSendNotification);
+            break;
+    }
+}
+
+void MediaSourcePage::refreshDevices()
+{
+    const auto names   = CameraSourceEngine::getDeviceNames();
+    const auto current = processor.getCameraSource() != nullptr
+                       ? processor.getCameraSource()->getOpenDeviceName()
+                       : juce::String();
+
+    deviceCombo.clear(juce::dontSendNotification);
+    for (int i = 0; i < names.size(); ++i)
+        deviceCombo.addItem(names[i], i + 1);
+
+    const int cur = names.indexOf(current);
+    if (cur >= 0)
+        deviceCombo.setSelectedId(cur + 1, juce::dontSendNotification);
+}
+
+void MediaSourcePage::openSelectedDevice()
+{
+    const int idx = deviceCombo.getSelectedId() - 1;
+    if (idx < 0)
+        return;
+    if (auto* e = processor.getCameraSource())
+    {
+        // Already open on this device → nothing to do.
+        if (e->isOpen() && e->getOpenDeviceIndex() == idx)
+            return;
+        juce::String err;
+        if (e->openDevice(idx, err))
+            processor.setCameraDeviceName(deviceCombo.getText());
+        else
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::MessageBoxIconType::WarningIcon, "Camera", err);
+    }
+}
 
 juce::String MediaSourcePage::lineParamId() const
 {
@@ -187,8 +313,14 @@ void MediaSourcePage::setLineParam(float v, bool gestureBegin, bool gestureEnd)
 
 void MediaSourcePage::visibilityChanged()
 {
-    if (isVisible()) startTimerHz(15);
-    else             stopTimer();
+    if (isVisible())
+    {
+        if (kind == Kind::Camera)
+            refreshDevices();
+        startTimerHz(15);
+    }
+    else
+        stopTimer();
 }
 
 void MediaSourcePage::timerCallback()
@@ -251,6 +383,26 @@ void MediaSourcePage::paint(juce::Graphics& g)
 void MediaSourcePage::resized()
 {
     auto b = getLocalBounds().reduced(kPad);
+
+    // Source picker row at the top (LOAD/CLEAR — or device combo for CAMERA)
+    {
+        auto row = b.removeFromTop(kCtrlH);
+        if (kind == Kind::Camera)
+        {
+            deviceCombo.setBounds(row.removeFromLeft(juce::jmax(180, row.getWidth() - 190)));
+            row.removeFromLeft(kRowGap);
+            refreshButton.setBounds(row.removeFromLeft(84));
+            row.removeFromLeft(kRowGap);
+            clearButton.setBounds(row.removeFromLeft(84));
+        }
+        else
+        {
+            loadButton.setBounds(row.removeFromLeft(110));
+            row.removeFromLeft(kRowGap);
+            clearButton.setBounds(row.removeFromLeft(84));
+        }
+        b.removeFromTop(kRowGap);
+    }
 
     // Transport row(s) at the bottom
     if (kind != Kind::Camera)

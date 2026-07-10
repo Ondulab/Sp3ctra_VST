@@ -18,9 +18,12 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-/* Compile-time switches kept identical to the legacy engine. */
+/* Compile-time switch kept identical to the legacy engine.
+ * (The frequency AXIS of the printed image is handled by the renderer:
+ * ScoreGenRenderer maps rows to bin cells on a LOG axis matching the synth's
+ * log-distributed oscillator bank. The engine data stays on the linear FFT
+ * bin grid.) */
 #define SCORE_USE_LOG_AMPLITUDE 1
-#define SCORE_USE_LOG_FREQUENCY 0   /* LINEAR frequency axis — do not change */
 
 /*---------------------------------------------------------------------------*/
 void score_settings_defaults(ScoreSettings *s)
@@ -51,6 +54,7 @@ void score_settings_defaults(ScoreSettings *s)
     s->fftSize             = SCORE_DEFAULT_FFT_SIZE;  /* match PhonoPaper's 4096 window */
     s->startTimeSec        = 0.0;
     s->enableStereoMode    = 0;
+    s->enableMultiRes      = 0;
 }
 
 /*---------------------------------------------------------------------------
@@ -156,22 +160,33 @@ void score_apply_highpass(double *signal, int num_samples, int sample_rate,
 
 /*---------------------------------------------------------------------------
  * STFT magnitude spectrogram (KissFFT port of compute_spectrogram).
+ * _ex variant: configurable zero-pad size, window-center alignment to a
+ * longer reference window (multi-resolution layers), optional coherent-gain
+ * normalization. See score_engine.h.
  *-------------------------------------------------------------------------*/
-int score_compute_spectrogram(const double *signal, int total_samples,
-                              int sample_rate, int fft_size, double bins_per_second,
-                              double min_freq, double max_freq,
-                              ScoreSpectrogramData *out)
+int score_compute_spectrogram_ex(const double *signal, int total_samples,
+                                 int sample_rate, int fft_size,
+                                 int fft_pad_size, int align_fft_size,
+                                 int normalize_gain, double bins_per_second,
+                                 double min_freq, double max_freq,
+                                 ScoreSpectrogramData *out)
 {
     if (signal == NULL || out == NULL || fft_size <= 0) return 1;
+    if (fft_pad_size < fft_size) fft_pad_size = fft_size;
+    if (fft_pad_size & 1) fft_pad_size++;            /* kiss_fftr needs even */
+    if (align_fft_size < fft_size) align_fft_size = fft_size;
     if (bins_per_second < 1.0) bins_per_second = 1.0;
 
-    const int fft_effective_size = SCORE_FFT_EFFECTIVE_SIZE;
+    const int fft_effective_size = fft_pad_size;
     const int num_bins = fft_effective_size / 2 + 1;
 
     int step = (int)((double)sample_rate / bins_per_second);
     if (step < 1) step = 1;
 
-    int num_windows = (total_samples - fft_size) / step + 1;
+    /* Frames are positioned so their CENTERS coincide with those of the
+     * reference (longest-window) layer: start = w·step + (align − size)/2. */
+    const int center_offset = (align_fft_size - fft_size) / 2;
+    int num_windows = (total_samples - align_fft_size) / step + 1;
     if (num_windows <= 0) return 2;   /* signal too short for the FFT window */
 
     double freq_resolution = (double)sample_rate / (double)fft_effective_size;
@@ -199,11 +214,27 @@ int score_compute_spectrogram(const double *signal, int total_samples,
         return 4;
     }
 
+    /* Coherent gain of the Blackman-Harris window (Σ w[i]) — a sinusoid's
+     * peak magnitude scales with it, so dividing by it makes levels directly
+     * comparable across layers with different window sizes. */
+    double mag_scale = 1.0;
+    if (normalize_gain)
+    {
+        double window_sum = 0.0;
+        for (int i = 0; i < fft_size; i++)
+            win[i] = 1.0;
+        score_apply_blackman_harris_window(win, fft_size);
+        for (int i = 0; i < fft_size; i++)
+            window_sum += win[i];
+        if (window_sum > 0.0)
+            mag_scale = 1.0 / window_sum;
+    }
+
     double global_max = 0.0;
 
     for (int w = 0; w < num_windows; w++)
     {
-        int start = w * step;
+        int start = w * step + center_offset;
 
         /* Copy frame (double), then window in double for precision. */
         for (int i = 0; i < fft_size; i++)
@@ -223,7 +254,7 @@ int score_compute_spectrogram(const double *signal, int total_samples,
         {
             double re = (double)fout[b].r;
             double im = (double)fout[b].i;
-            double mag = sqrt(re * re + im * im);
+            double mag = sqrt(re * re + im * im) * mag_scale;
             spectrogram[(size_t)w * num_bins + b] = mag;
             if (mag > global_max) global_max = mag;
         }
@@ -241,6 +272,18 @@ int score_compute_spectrogram(const double *signal, int total_samples,
     out->index_max   = index_max;
     out->global_max  = global_max;
     return 0;
+}
+
+/* Legacy single-layer entry — exact historical behaviour. */
+int score_compute_spectrogram(const double *signal, int total_samples,
+                              int sample_rate, int fft_size, double bins_per_second,
+                              double min_freq, double max_freq,
+                              ScoreSpectrogramData *out)
+{
+    return score_compute_spectrogram_ex(signal, total_samples, sample_rate,
+                                        fft_size, SCORE_FFT_EFFECTIVE_SIZE,
+                                        fft_size, 0, bins_per_second,
+                                        min_freq, max_freq, out);
 }
 
 /*---------------------------------------------------------------------------

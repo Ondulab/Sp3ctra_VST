@@ -61,10 +61,18 @@ public:
         int y = kTopPad;
 
         const ModuleCat order[] = { ModuleCat::SRC, ModuleCat::MIDI,
-                                    ModuleCat::UTILS, ModuleCat::SYNTH,
-                                    ModuleCat::OUT };
+                                    ModuleCat::FX, ModuleCat::UTILS,
+                                    ModuleCat::SYNTH, ModuleCat::OUT };
         for (auto cat : order)
         {
+            // Skip empty sections (SYNTH emptied by the synth split — the
+            // synths are OUT sends now, the engines live in the ZONE-5 dock).
+            bool any = false;
+            for (auto& chip : chips)
+                any = any || (moduleCategory(chip->getType()) == cat);
+            if (! any)
+                continue;
+
             sections.push_back({ cat, y });
             y += kHeaderH + 2;
 
@@ -81,7 +89,7 @@ public:
     /** Natural content height (for hosting in a viewport if ever needed). */
     int preferredHeight() const noexcept
     {
-        return kTopPad + 5 * (kHeaderH + 2 + kSecGap)
+        return kTopPad + 6 * (kHeaderH + 2 + kSecGap)
              + (int) chips.size() * (kChipH + kChipGap);
     }
 
@@ -95,7 +103,8 @@ private:
             : type(t), name(moduleDisplayName(t)), colour(moduleColour(t))
         {
             setRepaintsOnMouseActivity(true);
-            setTooltip("Drag into a chain");
+            setTooltip(moduleNeedsMidi(t) ? "Needs MIDI input \xE2\x80\xA2 Drag into a chain"
+                                          : "Drag into a chain");
         }
 
         ModuleType getType() const noexcept { return type; }
@@ -118,9 +127,20 @@ private:
                 g.fillEllipse(gx + 3.f, gy, 1.6f, 1.6f);
             }
 
+            // Name — a MIDI DIN badge leads the label for MIDI-input modules.
+            auto textArea = b.reduced(7.f, 0.f).withTrimmedRight(14.f);
+            if (moduleNeedsMidi(type))
+            {
+                const float icoW = 12.f, icoH = 11.f;
+                const juce::Rectangle<float> iconR(b.getX() + 5.f, b.getCentreY() - icoH * 0.5f,
+                                                   icoW, icoH);
+                ModuleIcons::drawMidiKeyboard(g, iconR, colour.withAlpha(isMouseOver() ? 0.90f : 0.62f));
+                textArea = textArea.withLeft(iconR.getRight() + 5.f);
+            }
+
             g.setColour(colour.brighter(0.35f));
             g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
-            g.drawText(name, b.reduced(7.f, 0.f).withTrimmedRight(14.f).toNearestInt(),
+            g.drawText(name, textArea.toNearestInt(),
                        juce::Justification::centredLeft, true);
         }
 

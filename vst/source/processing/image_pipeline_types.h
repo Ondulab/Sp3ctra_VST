@@ -105,6 +105,11 @@ typedef struct {
     float      stream_opacity;          /* Per-stream opacity [0.0, 1.0] */
     float      contrast_min;            /* Minimum contrast value for this stream */
 
+    /* Synth-split P1 — per-OUT conditioning, from g_sp3ctra_config.luxstral_out[slot]
+     * (slot picked by the builder: A=0, B=1). */
+    float      luxstral_db_range;       /* inverse-dB decode window (Range dB) */
+    float      luxstral_intensity;      /* pre-engine mix weight of this send (1.0 = unity) */
+
     /* Stereo and misc */
     int        stereo_enabled;          /* 1 = compute stereo panning, 0 = skip */
     float      stereo_temp_amp;         /* Colour-temperature amplification (pan) */
@@ -150,6 +155,10 @@ static inline PipelineConfig pipeline_config_default(void)
     cfg.fade_in_ms     = 0;
     cfg.stream_opacity = 1.0f;
     cfg.contrast_min   = 0.05f;
+
+    /* Per-OUT conditioning defaults (unity send) */
+    cfg.luxstral_db_range  = 50.0f;
+    cfg.luxstral_intensity = 1.0f;
 
     /* Misc */
     cfg.stereo_enabled  = 0;

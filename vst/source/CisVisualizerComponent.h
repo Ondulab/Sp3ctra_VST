@@ -74,6 +74,10 @@ public:
      */
     void setActiveSources(const std::vector<VisualizerMode>& sources);
 
+    /** Badge text for the SELECTED_TAP panel ("MASK - CHAIN 2"), pushed by the
+     *  editor on every selection change. Message thread only. */
+    void setSelectedTapLabel(const juce::String& label) { selectedTapLabel_ = label; }
+
 private:
     // ── Per-panel frame buffers ────────────────────────────────────────────────
     /**
@@ -276,6 +280,9 @@ private:
     // Message thread only (like blobRegions).  Defaults to a single MODULATED
     // panel until PluginEditor selects the initial block.
     std::vector<PanelData> panels_ = std::vector<PanelData>(1);
+
+    // Badge for the SELECTED_TAP panel — module + chain of the selection.
+    juce::String selectedTapLabel_;
 
     // ── Blob overlay ──────────────────────────────────────────────────────────
     bool blobOverlayVisible = false;

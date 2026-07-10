@@ -72,6 +72,35 @@ typedef struct AudioImageBuffers {
   uint8_t *insert_tap_G[AUDIO_IMAGE_NUM_INSERT_TAPS];
   uint8_t *insert_tap_B[AUDIO_IMAGE_NUM_INSERT_TAPS];
 
+  // ── Selection tap (contextual visualizer) ─────────────────────────────────
+  // Holds the stream frame AT THE SELECTED MODULE'S POSITION in ITS chain,
+  // published by whichever chain executor hosts the selection (plan-driven:
+  // SynthChainPlan.viz_tap_insert). Written by the executor thread (udpThread
+  // or feeder tick), read lock-free by the head visualizer (SELECTED_TAP).
+  uint8_t *selection_tap_R;
+  uint8_t *selection_tap_G;
+  uint8_t *selection_tap_B;
+
+  // ── Per-engine input taps (per-chain display, 2026-07-10) ─────────────────
+  // engine_tap[e] holds the EXACT RGB frame engine e's pipeline consumed on
+  // its last committed cycle — published by whichever thread owned that
+  // engine's preprocessed commit (udpThread / feeder tick / FramePlayerThread)
+  // under the same source-routing arbitration. White = engine unfed (chain
+  // with no signal, module absent, playback silence). The head panels
+  // (SPCTR_* / SYNTH_*) and the video waterfall read these instead of the
+  // legacy luxstral/luxsynth_source_type → RAW/SAMPLER/MODULATED switch, so
+  // the display follows each engine's OWN chain. LuxStral engine B is NOT
+  // here — it has its own display path (luxstral_b_copy_preprocessed_gray /
+  // selection tap).
+#define AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A 0
+#define AUDIO_IMAGE_ENGINE_TAP_PATHB      1  /* LuxSynth + LuxWave shared input */
+#define AUDIO_IMAGE_NUM_ENGINE_TAPS       2
+  uint8_t *engine_tap_R[AUDIO_IMAGE_NUM_ENGINE_TAPS];
+  uint8_t *engine_tap_G[AUDIO_IMAGE_NUM_ENGINE_TAPS];
+  uint8_t *engine_tap_B[AUDIO_IMAGE_NUM_ENGINE_TAPS];
+  // Generation counter per tap, bumped once per publish (same single-producer
+  // / atomic-reader pattern as lines_modulated).
+  uint64_t engine_tap_seq[AUDIO_IMAGE_NUM_ENGINE_TAPS];
 
   // Statistics and monitoring
   uint64_t lines_received;
@@ -206,5 +235,53 @@ int audio_image_buffers_get_insert_tap_pointers(const AudioImageBuffers *buffers
                                                 uint8_t **out_R,
                                                 uint8_t **out_G,
                                                 uint8_t **out_B);
+
+// ── Selection tap (contextual visualizer) ──────────────────────────────────
+// Publish the stream frame at the SELECTED module's chain position.  Called by
+// the chain executor (udpThread / feeder) when the plan carries a viz tap
+// (SynthChainPlan.viz_tap_insert >= 0).  Single producer / multi reader.
+void audio_image_buffers_publish_selection_tap(AudioImageBuffers *buffers,
+                                               const uint8_t *srcR,
+                                               const uint8_t *srcG,
+                                               const uint8_t *srcB,
+                                               int nb_pixels);
+
+// Lock-free read of the last published selection-tap frame.
+void audio_image_buffers_get_selection_tap_pointers(const AudioImageBuffers *buffers,
+                                                    uint8_t **out_R,
+                                                    uint8_t **out_G,
+                                                    uint8_t **out_B);
+
+// Reset the selection tap to white — called (message thread) when the selected
+// module changes so the view never shows the PREVIOUS selection's frame while
+// the new target's chain is silent/unfed.
+void audio_image_buffers_clear_selection_tap(AudioImageBuffers *buffers);
+
+// ── Per-engine input taps (per-chain display) ──────────────────────────────
+// Publish the RGB frame `engine`'s pipeline consumes this cycle. Pass
+// srcR == NULL to publish WHITE (engine unfed: no-signal chain, absent
+// module, playback silence). Must be called by the thread that owns the
+// engine's preprocessed commit this cycle (udpThread / feeder /
+// FramePlayerThread — mutually exclusive per the source-routing arbitration).
+void audio_image_buffers_publish_engine_input(AudioImageBuffers *buffers,
+                                              int engine,
+                                              const uint8_t *srcR,
+                                              const uint8_t *srcG,
+                                              const uint8_t *srcB,
+                                              int nb_pixels);
+
+// Lock-free read of the last published engine-input frame.
+// Returns 0 on success, -1 on invalid engine / uninitialized buffers.
+int audio_image_buffers_get_engine_input_pointers(const AudioImageBuffers *buffers,
+                                                  int engine,
+                                                  uint8_t **out_R,
+                                                  uint8_t **out_G,
+                                                  uint8_t **out_B);
+
+// Generation counter of an engine tap (bumped once per publish) — lets
+// pollers (video waterfall) detect fresh frames whichever thread produced
+// them. Returns 0 on invalid engine / uninitialized buffers.
+uint64_t audio_image_buffers_engine_input_seq(const AudioImageBuffers *buffers,
+                                              int engine);
 
 #endif /* AUDIO_IMAGE_BUFFERS_H */

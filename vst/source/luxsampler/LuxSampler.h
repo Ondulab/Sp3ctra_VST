@@ -58,6 +58,13 @@ namespace LuxSamplerConstants
     constexpr int     FREQ_BAND_HF        = 1;     // high freq — right pixels (treble)
     constexpr int     NUM_FREQ_BANDS      = 2;
 
+    // Image EQ (SCORE-style graphic EQ): octave-boundary gain nodes over the pixel
+    // axis, converted to a darkness shift (gain / EQ_DYN_RANGE_DB) at playback.
+    // 24 dB maps to the full darkness span, so a band at +24 dB reaches full black
+    // (max material) and at −24 dB reaches full white (total mask/silence).
+    constexpr int     MAX_EQ_NODES        = 16;    // ≥ (octaves+1) of the widest range
+    constexpr float   EQ_DYN_RANGE_DB     = 24.0f; // dB span that maps to full darkness
+
     // MIDI note bases (C0 = MIDI 12 — Ableton/GM convention)
     constexpr int MIDI_REC_NOTE_BASE  = 12; // C0..B0 → slots 0..11
     constexpr int MIDI_PLAY_NOTE_BASE = 24; // C1..B1 → slots 0..11
@@ -541,21 +548,54 @@ public:
                                         std::memory_order_relaxed);
     }
 
-    /** Fade curve type — shared by all fades (Attack, Decay, TrebleCut, BassCut).
-     *  Controls the shape of the crossfade transition. */
+    /** Legacy shared fade curve type — writes BOTH attack and decay so old
+     *  callers keep working; new UI uses the per-fade setters below. */
     void setSlotFadeCurveType(int i, FadeCurveType type) noexcept
     {
         if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
-            slotParams[i].fadeCurveType.store(static_cast<int>(type),
-                                              std::memory_order_relaxed);
+        {
+            const int t = static_cast<int>(type);
+            slotParams[i].fadeCurveType.store(t, std::memory_order_relaxed);
+            slotParams[i].attackCurveType.store(t, std::memory_order_relaxed);
+            slotParams[i].decayCurveType.store(t, std::memory_order_relaxed);
+        }
     }
-    /** Fade curve power [0.1..10.0] — controls the intensity of the curve shape.
-     *  1.0 = neutral (linear-equivalent for EXP/LOG), >1 = sharper, <1 = gentler. */
+    /** Legacy shared fade curve power — writes BOTH attack and decay. */
     void setSlotFadeCurvePower(int i, float v) noexcept
     {
         if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
-            slotParams[i].fadeCurvePower.store(juce::jlimit(0.1f, 10.0f, v),
+        {
+            const float p = juce::jlimit(0.1f, 10.0f, v);
+            slotParams[i].fadeCurvePower.store(p, std::memory_order_relaxed);
+            slotParams[i].attackCurvePower.store(p, std::memory_order_relaxed);
+            slotParams[i].decayCurvePower.store(p, std::memory_order_relaxed);
+        }
+    }
+    /** Per-fade curve type (independent attack / decay). */
+    void setSlotAttackCurveType(int i, FadeCurveType type) noexcept
+    {
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
+            slotParams[i].attackCurveType.store(static_cast<int>(type),
+                                                std::memory_order_relaxed);
+    }
+    void setSlotDecayCurveType(int i, FadeCurveType type) noexcept
+    {
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
+            slotParams[i].decayCurveType.store(static_cast<int>(type),
                                                std::memory_order_relaxed);
+    }
+    /** Per-fade curve power [0.1..10.0] (independent attack / decay). */
+    void setSlotAttackCurvePower(int i, float v) noexcept
+    {
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
+            slotParams[i].attackCurvePower.store(juce::jlimit(0.1f, 10.0f, v),
+                                                 std::memory_order_relaxed);
+    }
+    void setSlotDecayCurvePower(int i, float v) noexcept
+    {
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
+            slotParams[i].decayCurvePower.store(juce::jlimit(0.1f, 10.0f, v),
+                                                std::memory_order_relaxed);
     }
     /** Loop crossfade / overlap length [0..0.5] of the loop zone.
      *  Smooths the wrap in LOOP / INVERSE by fading the tail into the head. */
@@ -636,20 +676,54 @@ public:
         if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 1.0f;
         return slotParams[i].fadeCurvePower.load(std::memory_order_relaxed);
     }
+    FadeCurveType getSlotAttackCurveType(int i) const noexcept
+    {
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return FadeCurveType::LINEAR;
+        return static_cast<FadeCurveType>(
+            slotParams[i].attackCurveType.load(std::memory_order_relaxed));
+    }
+    float    getSlotAttackCurvePower(int i) const noexcept
+    {
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 1.0f;
+        return slotParams[i].attackCurvePower.load(std::memory_order_relaxed);
+    }
+    FadeCurveType getSlotDecayCurveType(int i) const noexcept
+    {
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return FadeCurveType::LINEAR;
+        return static_cast<FadeCurveType>(
+            slotParams[i].decayCurveType.load(std::memory_order_relaxed));
+    }
+    float    getSlotDecayCurvePower(int i) const noexcept
+    {
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 1.0f;
+        return slotParams[i].decayCurvePower.load(std::memory_order_relaxed);
+    }
+    /** Pre-EQ material floor [0..1]: remove darkness below this (→ white) before
+     *  the EQ. 1.0 = total white mask. */
+    void setSlotEqFloor(int i, float v) noexcept
+    {
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
+            slotParams[i].eqFloor.store(juce::jlimit(0.0f, 1.0f, v),
+                                        std::memory_order_relaxed);
+    }
+    float    getSlotEqFloor(int i) const noexcept
+    {
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0.0f;
+        return slotParams[i].eqFloor.load(std::memory_order_relaxed);
+    }
     float    getSlotLoopOverlap(int i) const noexcept
     {
         if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0.0f;
         return slotParams[i].loopOverlap.load(std::memory_order_relaxed);
     }
 
-    // ── Frequency-axis multi-point curves (message thread writes, RT reads LUT) ──
-    // Two bands per slot: FREQ_BAND_LF (bass, left pixels) and FREQ_BAND_HF
-    // (treble, right pixels), combined into one LUT split at the spectrum midpoint.
-    /** Replace slot i / @p band's curve with @p n points (clamped to MAX_FREQ_PTS,
-     *  kept sorted by x) and republish the slot LUT. Non-RT (message thread). */
-    void setSlotFreqCurve(int i, int band, const SamplerSpectralPoint* pts, int n) noexcept;
-    /** Copy slot i / @p band's points into @p out (up to maxN). Returns the count. */
-    int  getSlotFreqCurve(int i, int band, SamplerSpectralPoint* out, int maxN) const noexcept;
+    // ── Image EQ (SCORE-style ±dB, boost + cut) — message thread writes, RT reads LUT ──
+    // Stored as an encoded string in ScoreEqComponent::encodeState() format
+    // ("minF|maxF|g0;g1;…"); rebuildFreqLut() turns it into a per-position dB LUT.
+    /** Set slot i's EQ from an encoded curve string; republishes the LUT. Non-RT. */
+    void setSlotEq(int i, const juce::String& encoded) noexcept;
+    /** Return slot i's encoded EQ string ("" when flat). Non-RT. */
+    juce::String getSlotEq(int i) const;
     /** RT: true when the curve is not flat (worth applying). */
     bool isFreqCurveActive(int i) const noexcept
     {
@@ -970,6 +1044,23 @@ public:
     bool exportSlotImage(int slotIndex, const juce::File& file, bool asPng) const;
 
     /**
+     * Render a slot's recorded frames into an RGB image, Non-RT only (locks
+     * slotsMutex_). Native orientation: X = pixel column (frequency), Y = frame
+     * index (time, earliest on top) — this is what exportSlotImage writes.
+     *
+     * @param maxW/maxH  When > 0, nearest-neighbour downsample so the result fits
+     *                   within maxW × maxH (0 = full resolution).
+     * @param timeHorizontal  When true, transpose for the slot-editor backdrop:
+     *                        X = frame (time, left→right), Y = pixel with treble
+     *                        (high index) on top and bass (low index) on bottom.
+     * @return An RGB image, or an invalid Image if the slot is empty.
+     */
+    juce::Image renderSlotImage(int slotIndex,
+                                int maxW = 0,
+                                int maxH = 0,
+                                bool timeHorizontal = false) const;
+
+    /**
      * Export all slots containing data to a directory using a stable naming
      * pattern: "<baseName>_slot<NN>_<label>.<ext>".
      * @return number of images successfully written.
@@ -1130,6 +1221,15 @@ private:
         std::atomic<float> bassCut        { 0.0f };  // Low-freq  fade [0=none, 1=full bass  silence]
         std::atomic<int>   fadeCurveType  { static_cast<int>(FadeCurveType::LINEAR) };
         std::atomic<float> fadeCurvePower { 1.0f };   // Curve power [0.1..10.0], 1.0=neutral
+        // Independent attack / decay fade shaping (see setSlotAttackCurveType etc.).
+        std::atomic<int>   attackCurveType  { static_cast<int>(FadeCurveType::LINEAR) };
+        std::atomic<float> attackCurvePower { 1.0f };
+        std::atomic<int>   decayCurveType   { static_cast<int>(FadeCurveType::LINEAR) };
+        std::atomic<float> decayCurvePower  { 1.0f };
+        // Pre-EQ material floor [0..1]: darkness below this is pushed to white
+        // (removed) BEFORE the EQ, so boosting cannot resurrect the noise floor
+        // into black bands. 1.0 = everything removed (total white mask).
+        std::atomic<float> eqFloor          { 0.0f };
 
         SlotPlayParams() = default;
         SlotPlayParams(const SlotPlayParams&)            = delete;
@@ -1139,18 +1239,16 @@ private:
     SlotPlayParams slotParams[LuxSamplerConstants::NUM_SLOTS];
 
     // -------------------------------------------------------------------------
-    // Per-slot frequency-axis multi-point curve.
-    //   freqPts_/freqPtCount_ : authoritative breakpoints (message thread only).
+    // Per-slot image EQ (SCORE-style ±dB, boost + cut).
+    //   eqState_ : authoritative encoded curve (message thread only), in
+    //     ScoreEqComponent::encodeState() format ("minF|maxF|g0;g1;…").
     //   freqLut_ (double-buffered) + freqLutActive_ : RT-published look-up table
-    //     evaluated per pixel by FramePlayerThread. freqCurveActive_ lets the RT
-    //     loop skip the effect entirely when the curve is flat.
+    //     holding a GAIN IN dB per normalised pixel position, evaluated per pixel
+    //     by FramePlayerThread. freqCurveActive_ lets the RT loop skip the effect
+    //     entirely when the curve is flat.
     // Single-writer (message thread) / single-reader (player thread) publish.
     // -------------------------------------------------------------------------
-    SamplerSpectralPoint freqPts_[LuxSamplerConstants::NUM_SLOTS]
-                                 [LuxSamplerConstants::NUM_FREQ_BANDS]
-                                 [LuxSamplerConstants::MAX_FREQ_PTS];
-    int                  freqPtCount_[LuxSamplerConstants::NUM_SLOTS]
-                                     [LuxSamplerConstants::NUM_FREQ_BANDS];
+    juce::String         eqState_[LuxSamplerConstants::NUM_SLOTS];
     float                freqLut_[LuxSamplerConstants::NUM_SLOTS][2]
                                  [LuxSamplerConstants::FREQ_LUT_N];
     std::atomic<int>     freqLutActive_[LuxSamplerConstants::NUM_SLOTS];
@@ -1158,8 +1256,15 @@ private:
 
     /** Initialise every slot's curve to flat (2 points, level 1.0). */
     void initFreqCurveDefaults() noexcept;
+    /** Reset slot i's frequency curve to the flat default and republish its LUT
+     *  (message thread). Called by the clear paths so a wiped slot does not keep
+     *  applying a leftover vertical (HF/LF) filter to its next recording. */
+    void resetSlotFreqCurve(int i) noexcept;
     /** Rebuild + publish slot i's LUT from its current points (message thread). */
     void rebuildFreqLut(int i) noexcept;
+    /** Reset slot i's edit handles (start/end/attack/decay/floor) to defaults so a
+     *  cleared slot starts fresh. Called by the clear paths. */
+    void resetSlotEditHandles(int i) noexcept;
 
     // -------------------------------------------------------------------------
     // SCORE module — dedicated internal slot + params, played by the same
@@ -1177,7 +1282,7 @@ private:
     // Relay: the sampler slot that owned the shared playback channel when SCORE
     // took over (-1 = none). When SCORE stops, FramePlayerThread hands the channel
     // back to this slot so the sampler stream resumes underneath instead of going
-    // silent ("SCORE prend le relais ; à l'arrêt, le flux du sampler perdure").
+    // silent ("SCORE takes over the relay; when it stops, the sampler stream lives on").
     // Armed by uiPlayScore(); consumed (reset to -1) by FramePlayerThread.
     std::atomic<int>  scoreRelaySlot_ { -1 };
 

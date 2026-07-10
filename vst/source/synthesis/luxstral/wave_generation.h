@@ -60,6 +60,11 @@ struct wave
     float phase_acc;
     /* Phase increment per output sample: frequency × SINE_TABLE_SIZE / Fs    */
     float phase_inc;
+    /* Phase drift — per-onset random micro-detune. The RT sine precompute
+     * scales the increment by (1 + detune_offset); redrawn at each phase-reset
+     * onset (±luxstral_phase_drift_cents). Dynamic state like phase_acc, NOT
+     * static timbre. 0 = grid-exact pitch (legacy).                          */
+    float detune_offset;
 
     /* Volume envelope */
     float target_volume;

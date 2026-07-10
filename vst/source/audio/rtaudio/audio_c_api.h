@@ -1,4 +1,4 @@
-/* audio_c_api.h - Interface C pour RtAudio */
+/* audio_c_api.h - C interface for RtAudio */
 
 #ifndef audio_h
 #define audio_h

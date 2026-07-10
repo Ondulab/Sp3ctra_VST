@@ -37,6 +37,12 @@ private:
     juce::Slider numWorkersSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> numWorkersAttachment;
 
+    // MIDI — follow the module a controller edits (auto-navigate)
+    juce::Label        midiSectionLabel;
+    juce::Label        midiFollowLabel;
+    juce::ToggleButton midiFollowToggle;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> midiFollowAttachment;
+
     // Detached video window default size
     juce::Label  videoWindowSectionLabel;
     juce::Label  windowWLabel;

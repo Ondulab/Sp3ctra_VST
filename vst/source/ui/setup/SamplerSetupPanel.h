@@ -3,14 +3,17 @@
  * @brief SETUP face of the SAMPLER block (zone 3, M5).
  *
  * The whole former gear-wheel LuxSamplerSettingsTab component, moved and
- * re-parented (same logic, same APVTS parameter IDs):
- *   - MIDI Channel (1-16)                (luxSamplerMidiChannel)
- *   - Octave Offset (-2..+2)             (luxSamplerOctaveOffset)
- *   - Max Duration (1..60 s)             (luxSamplerMaxDuration)
+ * re-parented. Play params are PER-ENGINE (fsEngineParam: engine A keeps the
+ * legacy "luxSampler*" ids, engine B owns "luxSamplerB*"); setSamplerIndex()
+ * rebinds every engine-scoped attachment:
+ *   - MIDI Channel (1-16)                (luxSampler[B]MidiChannel)
+ *   - Octave Offset (-2..+2)             (luxSampler[B]OctaveOffset)
+ *   - Max Duration (1..60 s)             (luxSampler[B]MaxDuration)
+ *   - REC / PLAY / SAVE MIDI bindings with MIDI-learn
+ *       (luxSampler[B]Rec|Play|SaveBindType / ...BindNum)
+ * Shared (session-level, not per-engine):
  *   - Image export toggle + format       (luxSamplerExportImages/-Format)
  *   - Output directory browse / clear    (processor get/setSamplerOutputDir)
- *   - REC / PLAY / SAVE MIDI bindings with MIDI-learn
- *       (luxSamplerRec|Play|SaveBindType / ...BindNum)
  *   - 12-slot status grid (state, duration, clear), refreshed at 10 Hz
  */
 #pragma once
@@ -33,8 +36,10 @@ public:
     void paint(juce::Graphics&) override;
     void resized() override;
 
-    /** Bind this panel to sampler engine 0 (A) or 1 (B). */
-    void setSamplerIndex(int i) noexcept { samplerIndex_ = i; }
+    /** Bind this panel to sampler engine 0 (A) or 1 (B) — rebinds every
+     *  engine-scoped attachment (MIDI channel, octave, duration, bindings)
+     *  to that engine's APVTS bank and cancels any pending MIDI-learn. */
+    void setSamplerIndex(int i);
 
 private:
     // Timer — refreshes slot display at 10 Hz
@@ -119,11 +124,13 @@ private:
 
     void initBindingRow(ActionBindingRow& row,
                         const juce::String& title,
-                        const juce::String& typeParamId,
-                        const juce::String& numParamId,
-                        int learnTargetId);
+                        int actionId);   // 0 = REC, 1 = PLAY, 2 = SAVE
 
-    int  pendingLearnTarget = -1; // mirrors processor.getSamplerMidiLearnTarget()
+    /** (Re)create every engine-scoped attachment against the bank of
+     *  samplerIndex_ (fsEngineParam) and cancel any pending MIDI-learn. */
+    void rebindEngineParams();
+
+    int  pendingLearnTarget = -1; // engine * 3 + action, mirrors the processor
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SamplerSetupPanel)
 };

@@ -19,6 +19,11 @@ public:
     MaskSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour);
     ~MaskSetupPanel() override;
 
+    /** Bind every control to the MASK bank of `slot` (0..7) — the selected
+     *  instance's parameters. */
+    void setSlot(int slot);
+    int  slot() const noexcept { return slot_; }
+
     /** Natural content height (header + 7 rows). */
     static constexpr int kPreferredH = 295;
 
@@ -28,6 +33,7 @@ public:
 private:
     juce::AudioProcessorValueTreeState& apvts;
     juce::Colour accent;
+    int slot_ = 0;   // pool slot of the bound instance
 
     // Step Mode (LuxStral / Free)
     juce::Label    couplingLabel;

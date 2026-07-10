@@ -21,6 +21,7 @@
 #include <vector>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "../midi/MidiLearnAttachment.h"
 #include "../IconPaths.h"
 #include "ScoreGenThread.h"
 #include "ScoreGenRenderer.h"
@@ -108,6 +109,15 @@ public:
         speedAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
             processor.getAPVTS(), "scoreSpeed", speedSlider);
 
+        // Right-click MIDI Learn on the transport (SCORE is a singleton).
+        {
+            auto& mm = processor.getMidiMap();
+            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, playStopButton, "scorePlaying"));
+            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, loopBtn,        "scoreLoop"));
+            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, reverseBtn,     "scoreReverse"));
+            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, speedSlider,    "scoreSpeed"));
+        }
+
         // Disabled (greyed) until a score is generated — but frames generated
         // in a PREVIOUS life of this page survive in the engine (the page is
         // just a view), so re-enable the transport when a score is already
@@ -165,6 +175,20 @@ public:
                     p->setValueNotifyingHost(1.0f);
         };
         addAndMakeVisible(stereoToggle);
+
+        // ── Multi-resolution analysis: shorter FFT windows for the upper ────
+        // octaves (sharper transients in the highs, full harmonic resolution
+        // kept in the lows). Encoder-only — playback is unchanged. Takes
+        // effect on the next GENERATE.
+        multiResToggle.setButtonText("Multi-res transients");
+        multiResToggle.setToggleState(processor.getScoreSettings().enableMultiRes != 0,
+                                      juce::dontSendNotification);
+        multiResToggle.onClick = [this]
+        {
+            processor.getScoreSettings().enableMultiRes =
+                multiResToggle.getToggleState() ? 1 : 0;
+        };
+        addAndMakeVisible(multiResToggle);
 
         // ── Waveform region picker (which part of the WAV to extract) ───────
         waveform.onStartChange = [this](double startSec)
@@ -382,7 +406,12 @@ public:
             y += ch + gap + 4;
         }
 
-        stereoToggle.setBounds(pad, y, colW, ch); y += ch + gap + 4;
+        {
+            const int half = (colW - gap) / 2;
+            stereoToggle.setBounds(pad, y, half, ch);
+            multiResToggle.setBounds(pad + half + gap, y, half, ch);
+            y += ch + gap + 4;
+        }
 
         generateButton.setBounds(pad, y, colW, ch + 4); y += ch + 8;
         progressBar.setBounds(pad, y, colW, ch);        y += ch + gap;
@@ -1120,6 +1149,7 @@ private:
     juce::Label      pageLabel, dpiLabel;
     juce::ComboBox   pageCombo, dpiCombo;
     juce::ToggleButton stereoToggle;          // generate L/R spectrograms (red=L, blue=R)
+    juce::ToggleButton multiResToggle;        // multi-resolution STFT (encoder-only)
     ScoreEqComponent eqEditor { juce::Colour(kAccentARGB) };
     WaveformSelectorComponent waveform { juce::Colour(kAccentARGB) };
     juce::TextButton previewButton;          // audition the selected source region
@@ -1149,6 +1179,8 @@ private:
     std::unique_ptr<juce::FileChooser> fileChooser;
 
     ScoreGenJob job;
+
+    std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ScoreGenTabComponent)
 };

@@ -8,9 +8,11 @@
  *   - Cairo / file I/O → juce::Image / juce::Graphics (done in ScoreGenRenderer)
  *
  * This engine produces a printable greyscale spectrogram destined to be printed
- * then optically scanned by the Sp3ctra instrument. The frequency axis is LINEAR
- * (not logarithmic) — this is essential for faithful audio reconstruction and
- * must not be changed.
+ * then optically scanned by the Sp3ctra instrument. The engine's spectrogram
+ * matrix lives on the FFT's native LINEAR bin grid; the RENDERER
+ * (ScoreGenRenderer.cpp) then maps image rows to bin cells on a LOG frequency
+ * axis, matching the synth's log-distributed oscillator bank (equal vertical
+ * space per octave — see the per-row bin-cell block in renderScore).
  *
  * Pure C, no external dependency beyond <math.h> and KissFFT. Safe to call off
  * the message thread (no globals, no file I/O, no Qt).
@@ -103,6 +105,11 @@ typedef struct ScoreSettings
     int    fftSize;             /* useful window size; 0 ⇒ auto from bps     */
     double startTimeSec;        /* offset into the WAV where extraction begins */
     int    enableStereoMode;    /* 0/1 — generate L/R spectrograms (red=L, blue=R) */
+    int    enableMultiRes;      /* 0/1 — multi-resolution STFT: shorter analysis
+                                 * windows for the upper octaves (sharper
+                                 * transients in the highs, full harmonic
+                                 * resolution kept in the lows). Encoder-only:
+                                 * playback through the instrument is unchanged. */
 } ScoreSettings;
 
 /* Fills *s with the legacy defaults. */
@@ -138,6 +145,31 @@ int score_compute_spectrogram(const double *signal, int total_samples,
                               int sample_rate, int fft_size, double bins_per_second,
                               double min_freq, double max_freq,
                               ScoreSpectrogramData *out);
+
+/*-----------------------------------------------------------------------------
+ * Extended STFT for multi-resolution layers.
+ *
+ *   fft_pad_size    : zero-padded FFT length (even, ≥ fft_size). Bin spacing =
+ *                     sample_rate / fft_pad_size. The legacy path uses
+ *                     SCORE_FFT_EFFECTIVE_SIZE; shorter layers can use a
+ *                     smaller pad to keep memory bounded.
+ *   align_fft_size  : window CENTERS are aligned to those of a reference layer
+ *                     with this window size (≥ fft_size): each frame starts at
+ *                     w·step + (align − fft_size)/2 and num_windows is computed
+ *                     from align. Pass align == fft_size for the legacy layout.
+ *   normalize_gain  : 1 → divide magnitudes by the window's coherent gain
+ *                     (Σ window[i]) so sinusoid levels are directly comparable
+ *                     ACROSS layers with different window sizes. 0 → raw
+ *                     magnitudes (legacy single-layer behaviour).
+ *
+ * score_compute_spectrogram() ≡ _ex(..., SCORE_FFT_EFFECTIVE_SIZE, fft_size, 0).
+ *---------------------------------------------------------------------------*/
+int score_compute_spectrogram_ex(const double *signal, int total_samples,
+                                 int sample_rate, int fft_size,
+                                 int fft_pad_size, int align_fft_size,
+                                 int normalize_gain, double bins_per_second,
+                                 double min_freq, double max_freq,
+                                 ScoreSpectrogramData *out);
 
 /* Maps magnitude → inverted greyscale intensity in [0,1] (white = silence).
  * Operates in place on data->data over [index_min,index_max]. */

@@ -45,7 +45,15 @@ struct AudioImageBuffers;
                                             * image_chain_run; lets the executor know
                                             * where the sampler sits so VideoScroll
                                             * probes capture pre/post-sampler correctly */
-#define IMAGE_CHAIN_NUM_INSERTS        4
+#define IMAGE_CHAIN_INSERT_LUXREVERB   4   /* FX — visual reverberation (per-chain pool) */
+#define IMAGE_CHAIN_INSERT_LUXECHO     5   /* FX — echo, regenerated repeats (per-chain pool) */
+#define IMAGE_CHAIN_INSERT_SCORE       6   /* position marker only — pass-through in
+                                            * image_chain_run; locates the SCORE module so
+                                            * the player thread can apply the inserts BELOW
+                                            * it to the score playback frames */
+#define IMAGE_CHAIN_INSERT_LUXEQ       7   /* FX — graphic EQ on the pixel/frequency axis
+                                            * (per-chain pool) */
+#define IMAGE_CHAIN_NUM_INSERTS        8
 
 /* Chain order (APVTS param "chainInsertOrder"). */
 #define IMAGE_CHAIN_ORDER_PITCH_MASK 0   /* default — historical order */

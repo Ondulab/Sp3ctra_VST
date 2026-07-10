@@ -28,6 +28,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "../midi/MidiLearnAttachment.h"
 #include "../ui/AudioPanelWidgets.h"      // AudioPanelLayout + AudioPanelUI (shared look)
 #include "../ui/EnvelopeEditorComponent.h"
 #include "VisualizerMode.h"
@@ -52,19 +53,9 @@ public:
         initSlider(volumeSlider);
         volumeAttach.reset(new SldAttach(apvts, "luxsynthVolume", volumeSlider));
 
-        // ── IMAGE — conditioning (label is the toggle text itself) ──────────
-        negativeToggle.setButtonText("Negative");
-        addAndMakeVisible(negativeToggle);
-        negativeAttach.reset(new BtnAttach(apvts, "luxsynthInversion", negativeToggle));
-
-        dcBlockToggle.setButtonText("DC Blocking");
-        addAndMakeVisible(dcBlockToggle);
-        dcBlockAttach.reset(new BtnAttach(apvts, "luxsynthAcRemoval", dcBlockToggle));
-
-        initLabel(gammaLabel, "Gamma");
-        initSlider(gammaSlider);
-        gammaAttach.reset(new SldAttach(apvts, "luxsynthGammaValue", gammaSlider));
-
+        // ── IMAGE — the per-OUT conditioning (Negative/DC/Gamma/Intensity)
+        // moved to the OUT/send page (synth-split P2). Only the SAMPLER-stream
+        // contrast floor remains here (samplerContrastMin — not per-OUT).
         initLabel(contrastMinLabel, "Contrast Min");
         initSlider(contrastMinSlider);
         contrastMinAttach.reset(new SldAttach(apvts, "samplerContrastMin", contrastMinSlider));
@@ -72,6 +63,10 @@ public:
         // ── OSCILLATORS — additive voice: volume ADSR + oscillator count ─────
         volEnv = std::make_unique<EnvelopeEditorComponent>(
             apvts, juce::Colour(0xff66ccaa),
+            "luxsynthAttackMs", "luxsynthDecayMs", "luxsynthSustainLevel", "luxsynthReleaseMs",
+            "luxsynthAttackCurve", "luxsynthDecayCurve", "luxsynthReleaseCurve");
+        volEnv->setMidiMap(&p.getMidiMap());   // re-bind so the boxes get learn
+        volEnv->setParamIds(
             "luxsynthAttackMs", "luxsynthDecayMs", "luxsynthSustainLevel", "luxsynthReleaseMs",
             "luxsynthAttackCurve", "luxsynthDecayCurve", "luxsynthReleaseCurve");
         addAndMakeVisible(*volEnv);
@@ -118,6 +113,10 @@ public:
             apvts, juce::Colour(0xffcc88cc),
             "luxsynthFilterAttackMs", "luxsynthFilterDecayMs", "luxsynthFilterSustain", "luxsynthFilterReleaseMs",
             "luxsynthFilterAttackCurve", "luxsynthFilterDecayCurve", "luxsynthFilterReleaseCurve");
+        fltEnv->setMidiMap(&p.getMidiMap());   // re-bind so the boxes get learn
+        fltEnv->setParamIds(
+            "luxsynthFilterAttackMs", "luxsynthFilterDecayMs", "luxsynthFilterSustain", "luxsynthFilterReleaseMs",
+            "luxsynthFilterAttackCurve", "luxsynthFilterDecayCurve", "luxsynthFilterReleaseCurve");
         addAndMakeVisible(*fltEnv);
 
         AudioPanelUI::initKnob(fltCutoffSlider, " Hz");
@@ -135,6 +134,26 @@ public:
         AudioPanelUI::initKnob(lfoDepthSlider);
         addAndMakeVisible(lfoDepthSlider);
         lfoDepthAttach.reset(new SldAttach(apvts, "luxsynthLfoDepth", lfoDepthSlider));
+
+        // Right-click MIDI Learn (LuxSynth is a singleton — ids are global).
+        auto& mm = p.getMidiMap();
+        auto learn = [&](juce::Component& c, const char* id)
+        {
+            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, c, id));
+        };
+        learn(volumeSlider,        "luxsynthVolume");
+        learn(contrastMinSlider,   "samplerContrastMin");
+        learn(numOscSlider,        "luxsynthNumOscillators");
+        learn(blobThreshSlider,    "lxBlobThreshold");
+        learn(blobMinWidthSlider,  "lxBlobMinWidth");
+        learn(blobMergeGapSlider,  "lxBlobMergeGap");
+        learn(blobColorSplitSlider,"lxBlobColorSplit");
+        learn(fftBinsCombo,        "lxFftBins");
+        learn(fftSmoothingSlider,  "lxFftSmoothing");
+        learn(fltCutoffSlider,     "luxsynthFilterCutoff");
+        learn(fltDepthSlider,      "luxsynthFilterEnvDepth");
+        learn(lfoRateSlider,       "luxsynthLfoRate");
+        learn(lfoDepthSlider,      "luxsynthLfoDepth");
     }
 
     //==========================================================================
@@ -215,9 +234,6 @@ public:
         volumeLabel.setBounds(L.volLabel);
         volumeSlider.setBounds(L.volSlider);
 
-        negativeToggle.setBounds(L.negToggle);
-        dcBlockToggle.setBounds(L.dcToggle);
-        gammaLabel.setBounds(L.gammaLabel);          gammaSlider.setBounds(L.gammaSlider);
         contrastMinLabel.setBounds(L.contrastLabel); contrastMinSlider.setBounds(L.contrastSlider);
 
         volEnv->setBounds(L.oscEnv);
@@ -259,7 +275,7 @@ private:
     static constexpr int kEnvH      = AudioPanelLayout::kEnvH;        // 124
     static constexpr int kEnvGap    = AudioPanelLayout::kEnvGap;      // 10
 
-    static constexpr int kImgSecH = kBadgeH + kBadgeGap + (3 * kRowH + 2 * kRowGap) + kSecPadB;      // 110
+    static constexpr int kImgSecH = kBadgeH + kBadgeGap + (1 * kRowH) + kSecPadB;   // Contrast Min only
     static constexpr int kOscSecH = kBadgeH + kBadgeGap + kCapH + kEnvH + kEnvGap + kKnobH + kSecPadB; // 254
     static constexpr int kAnaSecH = kBadgeH + kBadgeGap + kCapH + (4 * kRowH + 3 * kRowGap) + kDivGap
                                   + kCapH + (2 * kRowH + kRowGap) + kSecPadB;                        // 220
@@ -280,8 +296,7 @@ private:
         int gx = 0, gw = 0, colW = 0, leftX = 0, rightX = 0;
         // left
         juce::Rectangle<int> volStrip, volLabel, volSlider;
-        juce::Rectangle<int> imgBg, imgBadge, negToggle, dcToggle,
-                             gammaLabel, gammaSlider, contrastLabel, contrastSlider;
+        juce::Rectangle<int> imgBg, imgBadge, contrastLabel, contrastSlider;
         juce::Rectangle<int> oscBg, oscBadge, oscEnv;
         int oscCaptionY = 0, oscGridX = 0, oscGridW = 0, oscGridY = 0;
         // right
@@ -319,19 +334,11 @@ private:
             }
             y += kHeaderH + kSecGapV;
 
-            // IMAGE
+            // IMAGE — Contrast Min (sampler stream floor) only; the per-OUT
+            // conditioning moved to the OUT/send page (synth-split P2).
             L.imgBg    = { leftX - 2, y, colW + 4, kImgSecH };
             L.imgBadge = { leftX, y, colW, kBadgeH };
             int cy = y + kBadgeH + kBadgeGap;
-            {
-                const int half = (cw - gap) / 2;
-                L.negToggle = { cx, cy, half, kRowH };
-                L.dcToggle  = { cx + half + gap, cy, half, kRowH };
-                cy += kRowH + kRowGap;
-            }
-            L.gammaLabel  = { cx, cy, kLabelW, kRowH };
-            L.gammaSlider = { cx + kLabelW + gap, cy, cw - kLabelW - gap, kRowH };
-            cy += kRowH + kRowGap;
             L.contrastLabel  = { cx, cy, kLabelW, kRowH };
             L.contrastSlider = { cx + kLabelW + gap, cy, cw - kLabelW - gap, kRowH };
             y += kImgSecH + kSecGapV;
@@ -413,9 +420,8 @@ private:
     // ── Controls ────────────────────────────────────────────────────────────
     juce::Slider       volumeSlider;                               // master (left top)
     juce::ComboBox     sourceCombo;                                // retired (plumbing only)
-    juce::ToggleButton negativeToggle, dcBlockToggle;
-    juce::Label        volumeLabel, gammaLabel, contrastMinLabel;
-    juce::Slider       gammaSlider, contrastMinSlider;
+    juce::Label        volumeLabel, contrastMinLabel;
+    juce::Slider       contrastMinSlider;
 
     // OSCILLATORS (left)
     std::unique_ptr<EnvelopeEditorComponent> volEnv;
@@ -438,14 +444,15 @@ private:
     using CmbAttach = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
 
     std::unique_ptr<CmbAttach> sourceAttach, fftBinsAttach;
-    std::unique_ptr<SldAttach> volumeAttach, gammaAttach, contrastMinAttach,
+    std::unique_ptr<SldAttach> volumeAttach, contrastMinAttach,
                                numOscAttach,
                                blobThreshAttach, blobMinWidthAttach,
                                blobMergeGapAttach, blobColorSplitAttach,
                                fftSmoothingAttach,
                                fltCutoffAttach, fltDepthAttach,
                                lfoRateAttach, lfoDepthAttach;
-    std::unique_ptr<BtnAttach> negativeAttach, dcBlockAttach;
+
+    std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxSynthTabComponent)
 };

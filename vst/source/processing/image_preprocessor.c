@@ -84,10 +84,9 @@ void image_preprocess_cleanup(void) {
  * All three image corrections are independent per-path toggles, identical in intent
  * to the LUXSTRAL pipeline but operating on out->polyphonic.grayscale (FFT input).
  *
- * STEP 2 — Inversion  : uses luxsynth_inversion  (NOT the global invert_intensity)
- * STEP 3 — DC Blocking: uses luxsynth_ac_removal  — subtracts per-line mean, clamps [0,1]
- * STEP 4 — Gamma      : uses luxsynth_enable_non_linear_mapping + luxsynth_gamma_value
- *                        photo convention: output = pow(input, 1/gamma)
+ * Synth-split P1: all conditioning comes from the LuxSynth OUT bank
+ * (g_sp3ctra_config.luxsynth_out[0]) — Negative / DC Blocking / Gamma
+ * (photo convention pow(x, 1/gamma), 1.0 = off) + pre-FFT Intensity.
  */
 void preprocess_luxsynth(
     const uint8_t *raw_r,
@@ -107,17 +106,15 @@ void preprocess_luxsynth(
         out->polyphonic.grayscale[i] = normalized;
     }
 
-    /* STEP 2: Inversion — per-path flag (luxsynth_inversion, NOT global invert_intensity).
-     * Bug fix: the old code used g_sp3ctra_config.invert_intensity which is the
-     * LUXSTRAL global flag; LUXSYNTH must use its own independent toggle. */
-    if (g_sp3ctra_config.luxsynth_inversion) {
+    /* STEP 2: Inversion — per-OUT bank (synth-split P1: LuxSynth OUT = slot 0;
+     * the legacy luxsynth_inversion global is no longer read). */
+    if (g_sp3ctra_config.luxsynth_out[0].negative) {
         for (i = 0; i < nb_pixels; i++)
             out->polyphonic.grayscale[i] = 1.0f - out->polyphonic.grayscale[i];
     }
 
-    /* STEP 3: DC Blocking (AC removal) — subtract per-line mean, clamp [0, 1].
-     * Bug fix: this step was entirely missing from the LUXSYNTH path. */
-    if (g_sp3ctra_config.luxsynth_ac_removal) {
+    /* STEP 3: DC Blocking (AC removal) — subtract per-line mean, clamp [0, 1]. */
+    if (g_sp3ctra_config.luxsynth_out[0].dc_blocking) {
         float sum = 0.0f;
         float mean;
         for (i = 0; i < nb_pixels; i++)
@@ -131,10 +128,9 @@ void preprocess_luxsynth(
     }
 
     /* STEP 4: Gamma correction (photo convention: pow(x, 1/gamma)).
-     * Always active when gamma_value != 1.0 (no separate enable flag).
-     * gamma_value == 1.0 is a mathematical no-op — skip for performance. */
+     * Per-OUT bank value; 1.0 = mathematical no-op — skip for performance. */
     {
-        float gamma = g_sp3ctra_config.luxsynth_gamma_value;
+        float gamma = g_sp3ctra_config.luxsynth_out[0].gamma;
         if (gamma > 0.0f && gamma != 1.0f) {
             const float exponent = 1.0f / gamma;
             for (i = 0; i < nb_pixels; i++) {
@@ -147,6 +143,18 @@ void preprocess_luxsynth(
                     result = val;
                 out->polyphonic.grayscale[i] = result;
             }
+        }
+    }
+
+    /* STEP 4b: per-OUT Intensity (synth-split P1) — pre-FFT mix weight of the
+     * LuxSynth send.  The FFT is linear, so scaling the line scales the
+     * magnitudes; 1.0 = bit-exact parity. */
+    {
+        float k = g_sp3ctra_config.luxsynth_out[0].intensity;
+        if (k < 0.0f) k = 0.0f;
+        if (k != 1.0f) {
+            for (i = 0; i < nb_pixels; i++)
+                out->polyphonic.grayscale[i] *= k;
         }
     }
 

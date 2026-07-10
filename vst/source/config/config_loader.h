@@ -9,6 +9,38 @@
 /**************************************************************************************
  * Sp3ctra Runtime Configuration Structure
  **************************************************************************************/
+
+/* LuxStral phase-management onset modes (luxstral_phase_mode) — the physical
+ * initial conditions applied to an oscillator's phase when its note attacks.
+ * See the field's comment block in the struct below for the full contract.
+ * Order matches the "luxstralPhaseMode" APVTS choice parameter.              */
+enum {
+  LUXSTRAL_PHASE_MODE_FREE   = 0,  /* legacy free-running phases              */
+  LUXSTRAL_PHASE_MODE_STRIKE = 1,  /* struck string: ±sine, sign by position  */
+  LUXSTRAL_PHASE_MODE_PLUCK  = 2,  /* plucked string: ±cosine, sign by pos.   */
+  LUXSTRAL_PHASE_MODE_BELL   = 3,  /* percussion: fixed hash (pos. = impact)  */
+  LUXSTRAL_PHASE_MODE_BREATH = 4,  /* reed/flute: fresh random per attack     */
+};
+
+/* ── Per-OUT (send) conditioning bank — synth-split P1 ─────────────────────
+ * One entry per OUT-module pool slot (0..7). An OUT module conditions its
+ * chain's image flux before sending it to the global synthesis engine.
+ * Values come from the luxstralOut{N}_* / luxsynthOut{N}_* / luxwaveOut{N}_*
+ * APVTS banks; the legacy global conditioning fields (luxstral_inversion,
+ * additive_gamma_value, luxsynth_inversion, …) are no longer read by the
+ * pipeline. Slot binding in P1 (fixed): LuxStral A=0, B=1; LuxSynth=0;
+ * LuxWave=0.
+ * contrast_min / range_db are LuxStral-only (ignored by the other banks). */
+#define LUX_OUT_MAX_SLOTS 8
+typedef struct {
+    int   negative;      /* Negative (inversion) toggle                     */
+    int   dc_blocking;   /* DC blocking (per-line mean removal) toggle      */
+    float gamma;         /* photographic gamma pow(x, 1/g); 1.0 = off       */
+    float contrast_min;  /* LuxStral: contrast floor for blurred images     */
+    float range_db;      /* LuxStral: inverse-dB decode window (Range dB)   */
+    float intensity;     /* pre-engine mix weight of this send (1.0=unity)  */
+} lux_out_params_t;
+
 typedef struct {
     // Logging configuration
     log_level_t log_level;               // Logging level (ERROR, WARNING, INFO, DEBUG)
@@ -59,9 +91,13 @@ typedef struct {
     // Threading parameters
     int num_workers;                           // Number of worker threads for additive synthesis (1-8)
     
-    // Summation normalization parameters
-    float volume_weighting_exponent;           // Volume weighting exponent (1.0=linear, 2.0=quadratic, 3.0=cubic)
-    float summation_response_exponent;         // Final response curve exponent (0.5=anti-compress, 1.0=linear, 1.5+=compress)
+    // Summation normalization parameters — LEGACY/INERT: the summation
+    // normalization curve was replaced by the RMS ceiling (rms_ceiling_gain,
+    // synth_luxstral.c; weighting exponent fixed at 2 in threading). These
+    // fields are still written from APVTS for state compatibility but are no
+    // longer read by the synth.
+    float volume_weighting_exponent;           // INERT (was: weighting exponent)
+    float summation_response_exponent;         // INERT (was: response curve exponent)
     
     // Soft limiter parameters
     float soft_limit_threshold;                // Soft limiter threshold (0.0-1.0)
@@ -202,12 +238,86 @@ typedef struct {
     float luxstral_b_contrast_min;          /* image: contrast floor             */
     float luxstral_b_tau_up_base_ms;        /* envelope: attack                  */
     float luxstral_b_tau_down_base_ms;      /* envelope: release                 */
-    float luxstral_b_summation_response_exponent; /* dynamics: Sum Exp           */
+    float luxstral_b_summation_response_exponent; /* INERT (was: Sum Exp — see
+                                                    * rms_ceiling_gain note above) */
     float luxstral_b_noise_gate_threshold;  /* dynamics: noise gate              */
     int   luxstral_b_stereo_mode_enabled;   /* stereo on/off                     */
     float luxstral_b_stereo_temperature_amplification; /* stereo Temp knob       */
     float luxstral_b_soft_limit_threshold;  /* setup: soft limiter threshold     */
     float luxstral_b_soft_limit_knee;       /* setup: soft limiter knee          */
+
+    /* ── Inverse-dB decode law — ALWAYS ON (single decode chain) ─────────────
+     * The grey → amplitude decode law is the exact inverse of the SCORE
+     * encoder's linear-in-dB brightness map (score_engine.c):
+     * amplitude = 10^((x−1)·range/20), applied AFTER the gamma stage (gamma
+     * 1.0 = pure dB decode). Applies to BOTH LuxStral engines A and B.
+     * No toggle, no forcing — every stage keeps its own knob.  The exact
+     * inverse of the SCORE encoder is recovered with:
+     *   Negative ON · DC Blocking OFF · Gamma 1.0 · Contrast Min 1.0 ·
+     *   Attack 2 ms · Release 6 ms · Equal-Loudness OFF
+     * (decay_freq_beta = 0 and phase reset are already law-independent).
+     * luxstral_db_decode_range_db MUST match the dynamicRangeDB used when the
+     * score was generated (SCORE default: 50 dB).                              */
+    float luxstral_db_decode_range_db; /* encoder dB window (default 50)         */
+
+    /* ── Per-OUT conditioning banks (synth-split P1) ─────────────────────────
+     * Written from the luxstralOut{N}_* / luxsynthOut{N}_* / luxwaveOut{N}_*
+     * APVTS banks by applyConfigurationToCore(); read by the pipeline config
+     * builders (image_pipeline.c), preprocess_luxsynth() and the LuxWave feed.
+     * These REPLACE the legacy per-engine conditioning fields above, which
+     * are kept for state compat but no longer consumed by the pipeline.      */
+    lux_out_params_t luxstral_out[LUX_OUT_MAX_SLOTS];
+    lux_out_params_t luxsynth_out[LUX_OUT_MAX_SLOTS];
+    lux_out_params_t luxwave_out[LUX_OUT_MAX_SLOTS];
+
+    /* ── Phase management: physical onset modes ──────────────────────────
+     * Selecting a mode is the ONLY required gesture — the onset gate is
+     * AUTO-CALIBRATED: the producer tracks a slow-decaying max of per-note
+     * target volumes (LuxStralEngine.phase_onset_ref, ~10 s decay) and sets
+     * the absolute gate to sensitivity_fraction × ref (floor 0.003), so the
+     * feature works regardless of the material's internal volume scale.
+     * luxstral_phase_sensitivity ∈ [0..1]: 1 = catch even soft onsets (3 %
+     * of recent peak), 0 = only the hardest attacks (~50 % of recent peak).
+     *
+     * While a mode is active (mode ≠ FREE), an INAUDIBLE oscillator
+     * (current_volume ≤ LUXSTRAL_PHASE_RESET_SILENCE_EPS) idles on a fresh
+     * random phase re-drawn every buffer: the bank's resting state is
+     * decorrelated, and a MODE CHANGE therefore never inherits the previous
+     * mode's phase organization (sounding notes keep their phase — touching
+     * them would click — and adopt the new law at their next attack). When
+     * a note fires (target volume crosses the gate from silence = a strong
+     * requested volume jump), the phase assigned depends on the mode's
+     * physical initial conditions:
+     *   STRIKE — struck string (piano): the hammer imparts VELOCITY → every
+     *            partial starts as a sine (phase 0 or π); the sign pattern
+     *            alternates along the bank with period 1/position notes
+     *            (≈ sign of sin(n·π·p)). position 0 → all partials on 0.
+     *   PLUCK  — plucked string (guitar/harp): initial SHAPE, zero velocity
+     *            → every partial starts at an extremum (cosine, ±π/2), same
+     *            position-driven sign pattern.
+     *   BELL   — percussion: each mode's phase is set by the impact point —
+     *            arbitrary-looking but FIXED per (note, position): every
+     *            re-strike is bit-identical (sampler-repeatable) yet the
+     *            band never phase-locks into a comb.
+     *   BREATH — reed/flute: the oscillation grows out of turbulence; the
+     *            phase is a fresh random draw at EVERY attack (living,
+     *            non-repeatable).
+     * Click-free by construction (only silent oscillators are touched); ε
+     * doubles as hysteresis (no retrigger until the envelope releases).
+     * Engines A and B.
+     *
+     * Phase drift — companion of the modes. Aligned onsets (STRIKE/PLUCK at
+     * low position) leave the whole active band beating in lockstep (the
+     * log-regular note grid gives every adjacent pair the same Δf) → a
+     * single deep comb sweeping coherently = flanger. At each onset the
+     * note also redraws a random micro-detune of ±drift cents
+     * (phase_inc × (1 + detune_offset)): each pair then beats at a slightly
+     * different rate and the post-attack coherence melts into ensemble
+     * texture — higher notes first, like inharmonic partials. 0 = off.     */
+    int   luxstral_phase_mode;             /* LUXSTRAL_PHASE_MODE_*, 0 = FREE (legacy) */
+    float luxstral_phase_sensitivity;      /* onset sensitivity [0..1], relative to recent peak */
+    float luxstral_phase_position;         /* strike/pluck position, BELL impact seed [0..1] */
+    float luxstral_phase_drift_cents;      /* per-onset random detune ±cents [0..3], 0 = off */
 
     /* image_freeze_mode : transport state for the live image stream           */
     /*   0 = PLAY  — normal frame update                                       */

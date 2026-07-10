@@ -66,6 +66,35 @@
 #define ALPHA_MIN 1e-5f           // Minimum effective alpha to ensure progress and avoid denormals
 
 /**************************************************************************************
+ * RMS Dynamics — applies whatever the decode law (gamma or SCORE dB)
+ * Replaces the legacy summation normalization (peak-compensated 1/x^(1/sumExp)
+ * curve), which over-attenuated sparse content. sumVolumeBuffer accumulates
+ * the physical energy Σa² (weighting exponent fixed at 2), and the output RMS
+ * of a bank of orthogonal partials is EXACTLY chain_gain·sqrt(Σa²/2):
+ *   • below LUXSTRAL_RMS_MAX  → unity ceiling, strictly linear chain
+ *     (dynamics fully preserved);
+ *   • above it (dense image, hand-drawn strokes, black frame ⇒ Σa² up to
+ *     3456) → RMS-normalized to a CONSTANT loud-but-clean level instead of
+ *     slamming the soft limiter into saturation.
+ * The Sum Exp / Vol Weight Exp knobs fed the retired curve and are now inert.
+ **************************************************************************************/
+/* Pre-normalization headroom scale applied when combining worker buffers
+ * (mono additiveBuffer AND stereo L/R). The RMS predictor accounts for it —
+ * keep the combine-stage scaling and this define in sync. */
+#define LUXSTRAL_SUM_SAFETY_SCALE      0.35f
+#define LUXSTRAL_RMS_BASE_GAIN         0.5f   // linear makeup gain (gain loops)
+#define LUXSTRAL_RMS_MAX               0.35f  // output-RMS ceiling
+
+/**************************************************************************************
+ * Phase Reset on Onset
+ * An oscillator's phase is reset to 0 only while its envelope is at (near)
+ * silence — the waveform discontinuity is bounded by this epsilon, i.e.
+ * inaudible. Also provides free hysteresis: once the envelope has ramped
+ * above ε no further reset can fire until the note fully releases.
+ **************************************************************************************/
+#define LUXSTRAL_PHASE_RESET_SILENCE_EPS 1.0e-4f
+
+/**************************************************************************************
  * Debug Configuration
  **************************************************************************************/
 // Enable debug traces for additive oscillators (compile-time flag)

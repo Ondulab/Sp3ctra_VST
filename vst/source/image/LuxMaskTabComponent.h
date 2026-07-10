@@ -21,6 +21,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "../midi/MidiLearnAttachment.h"
 #include "../ui/EnvelopeEditorComponent.h"
 #include "../ui/MaskFilterEditorComponent.h"
 #include "VisualizerMode.h"
@@ -36,20 +37,20 @@ public:
           // Alpha-only editor: the ADSR now drives the filter cutoff, so the
           // separate width lane is gone (no width param IDs passed).
           envelopeEditor(p.getAPVTS(), juce::Colour(kAccentARGB),
-                         "luxmaskAttackMs", "luxmaskDecayMs",
-                         "luxmaskSustainLevel", "luxmaskReleaseMs",
-                         "luxmaskAttackCurve", "luxmaskDecayCurve",
-                         "luxmaskReleaseCurve"),
+                         lmParam(0, "AttackMs"), lmParam(0, "DecayMs"),
+                         lmParam(0, "SustainLevel"), lmParam(0, "ReleaseMs"),
+                         lmParam(0, "AttackCurve"), lmParam(0, "DecayCurve"),
+                         lmParam(0, "ReleaseCurve")),
           filterEditor(p.getAPVTS(), juce::Colour(kAccentARGB),
-                       "luxmaskFilterWidth", "luxmaskFilterOffset",
-                       "luxmaskFilterSlope")
+                       lmParam(0, "FilterWidth"), lmParam(0, "FilterOffset"),
+                       lmParam(0, "FilterSlope"))
     {
-        auto& apvts = p.getAPVTS();
-
         // ── Integrated ADSR editor — owns the value boxes too
+        envelopeEditor.setMidiMap(&p.getMidiMap());   // right-click MIDI Learn
         addAndMakeVisible(envelopeEditor);
 
         // ── Interactive filter editor (Width / Bias / Slope + live fill) ─
+        filterEditor.setMidiMap(&p.getMidiMap());
         addAndMakeVisible(filterEditor);
 
         // ── Enable toggle ── moved to the rack LED + zone-3 header power switch
@@ -59,8 +60,6 @@ public:
         addAndMakeVisible(bgCombo);
         bgCombo.addItem("Black", 1);
         bgCombo.addItem("White", 2);
-        bgAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            apvts, "luxmaskBackgroundMode", bgCombo));
 
         // ── Step Mode / px-per-semitone / PB Range ── moved to MASK SETUP ──
 
@@ -70,27 +69,68 @@ public:
         // ── Glide ──────────────────────────────────────────────────────
         initLabel(glideLabel, "Glide");
         initSlider(glideSlider);
-        glideAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxmaskGlideMs", glideSlider));
 
         // ── LFO position ───────────────────────────────────────────────
         initLabel(lfoPosRateLabel,  "LFO Pos Rate");
         initSlider(lfoPosRateSlider);
-        lfoPosRateAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxmaskLfoPosRate", lfoPosRateSlider));
 
         initLabel(lfoPosDepthLabel, "LFO Pos Depth");
         initSlider(lfoPosDepthSlider);
-        lfoPosDepthAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxmaskLfoPosDepth", lfoPosDepthSlider));
 
         // ── Velocity coupling ──────────────────────────────────────────
         initLabel(velCouplingLabel, "Velocity");
         velCouplingToggle.setButtonText("Active");
         addAndMakeVisible(velCouplingToggle);
-        velCouplingAttach.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(
-            apvts, "luxmaskVelocityCoupling", velCouplingToggle));
+
+        setSlot(0);   // bind every attachment to bank 0 until a block is selected
     }
+
+    /** Bind every control to the MASK bank of `slot` (0..7) — the selected
+     *  instance's parameters (same per-instance pattern as VideoScrollPage). */
+    void setSlot(int slot)
+    {
+        slot_ = juce::jlimit(0, 7, slot);
+        auto& apvts = processor.getAPVTS();
+
+        bgAttach.reset(); glideAttach.reset();
+        lfoPosRateAttach.reset(); lfoPosDepthAttach.reset(); velCouplingAttach.reset();
+
+        envelopeEditor.setParamIds(
+            lmParam(slot_, "AttackMs"), lmParam(slot_, "DecayMs"),
+            lmParam(slot_, "SustainLevel"), lmParam(slot_, "ReleaseMs"),
+            lmParam(slot_, "AttackCurve"), lmParam(slot_, "DecayCurve"),
+            lmParam(slot_, "ReleaseCurve"));
+        filterEditor.setInstance(slot_,
+            lmParam(slot_, "FilterWidth"), lmParam(slot_, "FilterOffset"),
+            lmParam(slot_, "FilterSlope"));
+
+        bgAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
+            apvts, lmParam(slot_, "BackgroundMode"), bgCombo));
+        glideAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, lmParam(slot_, "GlideMs"), glideSlider));
+        lfoPosRateAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, lmParam(slot_, "LfoPosRate"), lfoPosRateSlider));
+        lfoPosDepthAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, lmParam(slot_, "LfoPosDepth"), lfoPosDepthSlider));
+        velCouplingAttach.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(
+            apvts, lmParam(slot_, "VelocityCoupling"), velCouplingToggle));
+
+        // Right-click MIDI Learn on every play control of THIS instance.
+        learnAtts_.clear();
+        auto& mm = processor.getMidiMap();
+        auto learn = [&](juce::Component& c, const char* suffix)
+        {
+            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
+                mm, c, lmParam(slot_, suffix)));
+        };
+        learn(glideSlider,       "GlideMs");
+        learn(lfoPosRateSlider,  "LfoPosRate");
+        learn(lfoPosDepthSlider, "LfoPosDepth");
+        learn(velCouplingToggle, "VelocityCoupling");
+        learn(bgCombo,           "BackgroundMode");
+    }
+
+    int slot() const noexcept { return slot_; }
 
     void paint(juce::Graphics& g) override
     {
@@ -153,7 +193,8 @@ public:
     }
 
 private:
-    [[maybe_unused]] Sp3ctraAudioProcessor& processor;
+    Sp3ctraAudioProcessor& processor;
+    int slot_ { 0 };   // pool slot of the bound instance
 
     // Labels — ADSR labels removed (now inside the graphic editor);
     //          Step Mode / px-per-semitone / PB Range moved to MASK SETUP.
@@ -176,6 +217,7 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
         glideAttach,
         lfoPosRateAttach, lfoPosDepthAttach;
+    std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
 
     // Graphic ADSR editor — binds the four envelope params + per-segment curves.
     EnvelopeEditorComponent envelopeEditor;

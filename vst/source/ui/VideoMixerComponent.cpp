@@ -1,4 +1,5 @@
 #include "VideoMixerComponent.h"
+#include <cmath>
 
 //==============================================================================
 // Detached master window — shows the composited master at any size / fullscreen.
@@ -10,12 +11,12 @@ public:
     {
         // renderMaster() fills the whole bounds (black + waterfall) every paint,
         // so the detached/fullscreen view is fully opaque — this prevents the
-        // window content from flickering under the 60 fps repaint driven by owner_.
+        // window content from flickering under the presenter-driven repaints.
         setOpaque(true);
     }
 
-    // Driven by the mixer's 60 fps clock (owner repaints us after each tick), so
-    // the fullscreen view scrolls at full rate without its own timer.
+    // Driven by the mixer's presenter clock (owner repaints us whenever the
+    // render thread publishes a new frame). paint() is a cheap image blit.
     void paint(juce::Graphics& g) override
     {
         owner_.renderMaster(g, getLocalBounds());
@@ -57,105 +58,21 @@ public:
 };
 
 //==============================================================================
-VideoMixerComponent::VideoMixerComponent(Sp3ctraAudioProcessor& proc)
-    : processor_(proc)
-{
-    // paint() fills every pixel (dark bg + master + strip). Marking the component
-    // opaque stops JUCE from repainting the (non-opaque) parent behind it on every
-    // 60 fps repaint — a non-opaque fast-repainting component is a classic flicker
-    // source. The original VideoDisplayComponent did the same (setOpaque(true)).
-    setOpaque(true);
-    refreshActiveSlots();
-    startTimerHz(kFps);
-}
-
-VideoMixerComponent::~VideoMixerComponent()
-{
-    stopTimer();
-    window_.reset();
-}
-
-//==============================================================================
-void VideoMixerComponent::refreshActiveSlots()
-{
-    auto slots = processor_.activeVideoSlots();
-    if (slots == activeSlots_)
-        return;                 // unchanged — keep existing cores/attachments
-    activeSlots_ = slots;
-    rebuildStrip();
-}
-
-void VideoMixerComponent::rebuildStrip()
-{
-    voices_.clear();
-    auto& apvts = processor_.getAPVTS();
-
-    for (int slot : activeSlots_)
-    {
-        auto v = std::make_unique<Voice>();
-        v->slot = slot;
-        v->core = std::make_unique<VideoScrollRenderCore>(processor_, slot);
-
-        v->level.setSliderStyle(juce::Slider::LinearHorizontal);
-        v->level.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
-        v->level.setRange(0.0, 1.0, 0.01);
-        addAndMakeVisible(v->level);
-
-        v->blend.addItem("Mix",    1);
-        v->blend.addItem("Add",    2);
-        v->blend.addItem("Screen", 3);
-        addAndMakeVisible(v->blend);
-
-        v->levelAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-            apvts, vsMixParam(slot, "level"), v->level);
-        v->blendAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-            apvts, vsMixParam(slot, "blend"), v->blend);
-
-        voices_.push_back(std::move(v));
-    }
-
-    layoutStrip();
-    repaint();
-}
-
-//==============================================================================
-void VideoMixerComponent::resized()
-{
-    layoutStrip();
-}
-
-void VideoMixerComponent::layoutStrip()
-{
-    auto r = getLocalBounds();
-    const int n = (int) voices_.size();
-    const int stripH = (n > 0) ? (kStripPad + n * (kRowH + kRowGap)) : 0;
-
-    stripArea_  = r.removeFromBottom(stripH);
-
-    // The preview is kept square so it reads correctly whatever the scroll
-    // direction is. Fit the largest centred square inside the remaining area.
-    auto avail = r.reduced(2);
-    const int side = juce::jmin(avail.getWidth(), avail.getHeight());
-    masterArea_ = juce::Rectangle<int>(0, 0, side, side).withCentre(avail.getCentre());
-
-    // Lay out each fader row: [label 38][level slider …][blend 72]
-    auto strip = stripArea_.reduced(kStripPad, kStripPad / 2);
-    for (auto& v : voices_)
-    {
-        auto row = strip.removeFromTop(kRowH);
-        strip.removeFromTop(kRowGap);
-        row.removeFromLeft(40);                      // label drawn in paint()
-        v->blend.setBounds(row.removeFromRight(72).reduced(0, 1));
-        row.removeFromRight(6);
-        v->level.setBounds(row.reduced(0, 2));
-    }
-}
-
+// Composite helpers (render thread)
 //==============================================================================
 namespace
 {
+    // Render-resolution ceiling for ONE output. The warp/blend passes are
+    // per-pixel scalar work, so their cost is O(W×H) per output per frame; 1600
+    // keeps a fullscreen window affordable while the final blit upscales with no
+    // visible loss for a waterfall. With N outputs the ceiling is divided by
+    // sqrt(N) (floor kMinRenderDim) so the TOTAL pixel cost stays roughly
+    // constant as outputs are added instead of scaling linearly.
+    constexpr int kMaxRenderDim = 1600;
+    constexpr int kMinRenderDim = 640;
+
     // Composite one rendered layer into the master with level + blend mode.
-    // Opaque ARGB line-pointer blend (fast enough for 60 fps at window resolution).
+    // Opaque ARGB line-pointer blend (fast enough for 60 fps at capped resolution).
     void blendLayer(juce::Image& dst, const juce::Image& src, float level, int mode)
     {
         const int w = juce::jmin(dst.getWidth(),  src.getWidth());
@@ -203,154 +120,377 @@ namespace
     }
 }
 
-bool VideoMixerComponent::singleDirect() const
+//==============================================================================
+// Renderer — the background render thread
+//==============================================================================
+VideoMixerComponent::Renderer::Renderer(Sp3ctraAudioProcessor& p)
+    : juce::Thread("VideoMixRender"), processor_(p)
 {
-    if (voices_.size() != 1) return false;
-    auto& apvts = processor_.getAPVTS();
-    const int slot = voices_[0]->slot;
-    // Disabled output → route through the offscreen path so composite() drops it
-    // and the master stays black (no crisp direct paint of a muted output).
-    if (auto* ep = apvts.getRawParameterValue(vsParam(slot, "enabled")))
-        if (ep->load() < 0.5f) return false;
-    float level = 1.0f;
-    if (auto* lp = apvts.getRawParameterValue(vsMixParam(slot, "level"))) level = lp->load();
-    // Blend mode is irrelevant with a SINGLE layer over a black base: Mix, Add and
-    // Screen at full level all reduce to "just the source". Requiring blend==Mix
-    // here needlessly forced the offscreen composite path (logical-res → upscaled
-    // to retina = soft), losing the crisp direct-into-retina render. Ignore blend.
-    return level >= 0.999f;
+    startThread();
 }
 
-bool VideoMixerComponent::composite()
+VideoMixerComponent::Renderer::~Renderer()
 {
-    // Engine (history) resolution = the view's LOGICAL size. The detached window
-    // (when open) is the biggest consumer, so size the history to it; otherwise to
-    // the in-column master area. Like the original renderer, the warp is built at
-    // this logical size and upscaled ONCE to physical by the destination's
-    // retina-backed Graphics — no extra offscreen resample.
-    int W = masterArea_.getWidth();
-    int H = masterArea_.getHeight();
-    if (window_ != nullptr && window_->isVisible())
-        if (auto* c = window_->getContentComponent())
-            if (c->getWidth() > 0 && c->getHeight() > 0) { W = c->getWidth(); H = c->getHeight(); }
-    if (W <= 0 || H <= 0) return false;
+    stopThread(2000);
+}
 
-    // Render-resolution ceiling. The whole warp is a per-pixel scalar pass on the
-    // message thread, so its cost is O(W×H) every tick — a 2560×1440 fullscreen
-    // window collapsed the frame-rate to ~8 fps. 1600 keeps the warp affordable
-    // while the final medium-quality blit upscales to the window's physical size
-    // with no visible loss for a waterfall. The small in-column preview is far
-    // below this ceiling, so it is unaffected.
-    constexpr int kMaxRenderDim = 1600;
-    const int big = juce::jmax(W, H);
-    if (big > kMaxRenderDim) { W = juce::jmax(1, W * kMaxRenderDim / big);
-                               H = juce::jmax(1, H * kMaxRenderDim / big); }
+void VideoMixerComponent::Renderer::setSlots(const std::vector<int>& slots)
+{
+    const juce::ScopedLock cl(coreLock_);
 
-    // Advance every output's waterfall once per 60 fps tick, then build the heavy
-    // warp ONCE here (shared by the column preview AND the detached window). The
-    // per-view draw is a cheap blit (drawWarp) — this is what keeps the message
-    // thread from melting when a large/fullscreen window is open.
+    std::vector<Layer> next;
+    next.reserve(slots.size());
+    for (int slot : slots)
+    {
+        Layer nl;
+        nl.slot = slot;
+        // Keep the existing core (and its waterfall history) when the slot
+        // survives the chain edit — previously every edit wiped ALL waterfalls.
+        for (auto& l : layers_)
+            if (l.slot == slot && l.core != nullptr)
+            {
+                nl.core    = std::move(l.core);
+                nl.scratch = l.scratch;
+                break;
+            }
+        if (nl.core == nullptr)
+            nl.core = std::make_unique<VideoScrollRenderCore>(processor_, slot);
+        next.push_back(std::move(nl));
+    }
+    layers_ = std::move(next);
+    lastSig_.clear();   // layer set changed → force a fresh publish
+}
+
+void VideoMixerComponent::Renderer::setViewState(int w, int h, bool visible) noexcept
+{
+    const uint64_t v = ((uint64_t) (uint32_t) juce::jlimit(0, 0xffffff, w) << 25)
+                     | ((uint64_t) (uint32_t) juce::jlimit(0, 0xffffff, h) << 1)
+                     | (visible ? 1u : 0u);
+    viewState_.store(v, std::memory_order_release);
+}
+
+juce::Image VideoMixerComponent::Renderer::frontImage() const
+{
+    const juce::ScopedLock fl(frontLock_);
+    return front_;
+}
+
+void VideoMixerComponent::Renderer::run()
+{
+    double last = juce::Time::getMillisecondCounterHiRes();
+    while (! threadShouldExit())
+    {
+        const double start = juce::Time::getMillisecondCounterHiRes();
+        const double dt = start - last;
+        last = start;
+
+        renderFrame(start, dt);
+
+        // Pace to ~60 fps: sleep whatever remains of the frame slot (min 1 ms so
+        // an overloaded pass still yields; wait() returns early on stopThread).
+        constexpr double kFrameMs = 1000.0 / 60.0;
+        const double elapsed = juce::Time::getMillisecondCounterHiRes() - start;
+        wait((int) juce::jlimit(1.0, kFrameMs, kFrameMs - elapsed));
+    }
+}
+
+// Pick a pool image that nothing else references (not the published front, not
+// an in-flight paint), (re)sized to w×h. Invalid return = all busy (transient).
+juce::Image VideoMixerComponent::Renderer::acquireTarget(int w, int h)
+{
+    // Only this thread mutates front_, so reading it here without frontLock_ is
+    // safe; the lock is for readers on the message thread.
+    for (auto& im : pool_)
+    {
+        if (im.isValid())
+        {
+            if (im.getPixelData() == front_.getPixelData()) continue;  // on display
+            if (im.getReferenceCount() > 1)                 continue;  // being painted
+        }
+        if (! im.isValid() || im.getWidth() != w || im.getHeight() != h)
+            im = juce::Image(juce::Image::ARGB, w, h, true);
+        return im;
+    }
+    return {};
+}
+
+bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
+{
+    const juce::ScopedLock cl(coreLock_);
+
+    // Transport Stop (any thread) → blank every waterfall once.
     bool changed = false;
-    for (auto& v : voices_)
+    const int cg = clearGen_.load(std::memory_order_acquire);
+    if (cg != lastClearGen_)
     {
-        v->core->setDisplaySize(W, H);
-        changed |= v->core->tick();
-        changed |= v->core->buildWarp();
+        lastClearGen_ = cg;
+        for (auto& l : layers_)
+            l.core->clear();
+        changed = true;
     }
 
-    auto& apvts = processor_.getAPVTS();
-    auto levelOf   = [&](int slot) { auto* p = apvts.getRawParameterValue(vsMixParam(slot, "level")); return p ? p->load() : 1.0f; };
-    auto modeOf    = [&](int slot) { auto* p = apvts.getRawParameterValue(vsMixParam(slot, "blend")); return p ? (int) p->load() : 0; };
-    auto enabledOf = [&](int slot) { auto* p = apvts.getRawParameterValue(vsParam(slot, "enabled")); return p ? p->load() >= 0.5f : true; };
-
-    // Signature of everything the views depend on OUTSIDE the warp itself: the
-    // render size, the per-voice mix controls, and the drawWarp-time params
-    // (zoom/mode are applied at draw time, not baked into warpBuf_). A frozen
-    // (paused) output with untouched controls yields an identical signature →
-    // composite() reports "unchanged" and the mixer skips the repaint. Without
-    // this, the 60 fps repaint of a static image occasionally gets presented
-    // half-painted by the OS → the pause "blinking".
-    std::vector<float> sig;
-    sig.reserve(2 + voices_.size() * 6);
-    sig.push_back((float) W);
-    sig.push_back((float) H);
-    auto zoomOf = [&](int slot) { auto* p = apvts.getRawParameterValue(vsParam(slot, "zoom")); return p ? p->load() : 1.0f; };
-    auto rotOf  = [&](int slot) { auto* p = apvts.getRawParameterValue(vsParam(slot, "mode")); return p ? p->load() : 0.0f; };
-    for (auto& v : voices_)
+    if (layers_.empty())
     {
-        sig.push_back((float) v->slot);
-        sig.push_back(levelOf(v->slot));
-        sig.push_back((float) modeOf(v->slot));
-        sig.push_back(enabledOf(v->slot) ? 1.f : 0.f);
-        sig.push_back(zoomOf(v->slot));
-        sig.push_back(rotOf(v->slot));
+        if (haveFrame_)
+        {
+            { const juce::ScopedLock fl(frontLock_); front_ = juce::Image(); }
+            haveFrame_ = false;
+            frameCounter_.fetch_add(1, std::memory_order_release);
+            return true;
+        }
+        return false;
     }
-    if (sig != mixSig_) { mixSig_ = std::move(sig); changed = true; }
 
-    // Single full-level Mix output → painted DIRECTLY by renderMaster() into the
-    // destination Graphics (no offscreen image, no blend, crisp). Skip the composite.
-    if (singleDirect())
-        return changed;
-
-    // Nothing changed → master_ already holds the current composite; skip the
-    // per-layer blend pass entirely (and tell the caller not to repaint).
-    if (! changed && master_.isValid() && master_.getWidth() == W && master_.getHeight() == H)
+    const uint64_t vs = viewState_.load(std::memory_order_acquire);
+    const bool visible = (vs & 1u) != 0;
+    int W = (int) ((vs >> 25) & 0xffffff);
+    int H = (int) ((vs >> 1)  & 0xffffff);
+    if (W <= 0 || H <= 0)
         return false;
 
-    // Multi-output → composite into the offscreen master_ at the engine resolution.
-    if (! master_.isValid() || master_.getWidth() != W || master_.getHeight() != H)
-        master_ = juce::Image(juce::Image::ARGB, W, H, true);
-    master_.clear(master_.getBounds(), juce::Colours::black);
+    // Per-output render budget (see kMaxRenderDim above).
+    const int n = (int) layers_.size();
+    int cap = kMaxRenderDim;
+    if (n > 1)
+        cap = juce::jmax(kMinRenderDim, (int) ((double) kMaxRenderDim / std::sqrt((double) n)));
+    const int big = juce::jmax(W, H);
+    if (big > cap) { W = juce::jmax(1, W * cap / big);
+                     H = juce::jmax(1, H * cap / big); }
 
-    for (auto& v : voices_)
+    // Advance every output's waterfall (real-dt scroll + ring drain). This runs
+    // even when no view is visible so the history stays truthful and the rings
+    // never back up; the warp/composite below is skipped in that case.
+    for (auto& l : layers_)
     {
-        if (! enabledOf(v->slot))
-            continue;   // output disabled → not composited into the master
-        if (! v->scratch.isValid() || v->scratch.getWidth() != W || v->scratch.getHeight() != H)
-            v->scratch = juce::Image(juce::Image::ARGB, W, H, true);
-        { juce::Graphics gs(v->scratch); v->core->drawWarp(gs, W, H); }  // warp already built above
-        blendLayer(master_, v->scratch, levelOf(v->slot), modeOf(v->slot));
+        l.core->setDisplaySize(W, H);
+        changed |= l.core->tick(nowMs, dtMs);
     }
+
+    if (! visible)
+        return false;
+
+    // Heavy warp ONCE per output per frame (cached while frozen).
+    for (auto& l : layers_)
+        changed |= l.core->buildWarp();
+
+    // Signature of everything the composite depends on OUTSIDE the warps: render
+    // size, per-output mix controls, and the drawWarp-time params (zoom/mode are
+    // applied at draw time, not baked into the warp). A frozen (paused) output
+    // with untouched controls yields an identical signature → no publish → the
+    // presenter never invalidates a static view (the pause "blinking" fix).
+    auto& apvts = processor_.getAPVTS();
+    auto rawOf = [&apvts](const juce::String& id, float def)
+    {
+        auto* p = apvts.getRawParameterValue(id);
+        return p ? p->load() : def;
+    };
+    std::vector<float> sig;
+    sig.reserve(2 + layers_.size() * 6);
+    sig.push_back((float) W);
+    sig.push_back((float) H);
+    for (auto& l : layers_)
+    {
+        sig.push_back((float) l.slot);
+        sig.push_back(rawOf(vsMixParam(l.slot, "level"), 1.0f));
+        sig.push_back(rawOf(vsMixParam(l.slot, "blend"), 0.0f));
+        sig.push_back(rawOf(vsParam(l.slot, "enabled"),  1.0f));
+        sig.push_back(rawOf(vsParam(l.slot, "zoom"),     1.0f));
+        sig.push_back(rawOf(vsParam(l.slot, "mode"),     0.0f));
+    }
+    if (sig != lastSig_) { lastSig_ = std::move(sig); changed = true; }
+
+    if (! changed && haveFrame_)
+        return false;
+
+    juce::Image target = acquireTarget(W, H);
+    if (! target.isValid())
+        return false;   // every pool buffer is momentarily referenced — retry next pass
+
+    target.clear(target.getBounds(), juce::Colours::black);
+
+    // Enabled outputs only (a disabled output is dropped → black contribution).
+    int numEnabled = 0;
+    Layer* single = nullptr;
+    for (auto& l : layers_)
+        if (rawOf(vsParam(l.slot, "enabled"), 1.0f) >= 0.5f)
+        {
+            ++numEnabled;
+            single = &l;
+        }
+
+    if (numEnabled == 1 && rawOf(vsMixParam(single->slot, "level"), 1.0f) >= 0.999f)
+    {
+        // One output at full level: over a black base Mix/Add/Screen all reduce
+        // to "just the source" — draw straight into the target, skip the blend.
+        juce::Graphics g(target);
+        single->core->drawWarp(g, W, H);
+    }
+    else if (numEnabled > 0)
+    {
+        for (auto& l : layers_)
+        {
+            if (rawOf(vsParam(l.slot, "enabled"), 1.0f) < 0.5f)
+                continue;
+            if (! l.scratch.isValid() || l.scratch.getWidth() != W || l.scratch.getHeight() != H)
+                l.scratch = juce::Image(juce::Image::ARGB, W, H, true);
+            { juce::Graphics gs(l.scratch); l.core->drawWarp(gs, W, H); }
+            blendLayer(target, l.scratch,
+                       rawOf(vsMixParam(l.slot, "level"), 1.0f),
+                       (int) rawOf(vsMixParam(l.slot, "blend"), 0.0f));
+        }
+    }
+
+    { const juce::ScopedLock fl(frontLock_); front_ = target; }
+    haveFrame_ = true;
+    frameCounter_.fetch_add(1, std::memory_order_release);
     return true;
 }
 
+//==============================================================================
+VideoMixerComponent::VideoMixerComponent(Sp3ctraAudioProcessor& proc)
+    : processor_(proc)
+{
+    // paint() fills every pixel (dark bg + master + strip). Marking the component
+    // opaque stops JUCE from repainting the (non-opaque) parent behind it on every
+    // presenter repaint — a non-opaque fast-repainting component is a classic
+    // flicker source. The original VideoDisplayComponent did the same.
+    setOpaque(true);
+    renderer_ = std::make_unique<Renderer>(proc);
+    refreshActiveSlots();
+    startTimerHz(kFps);
+}
+
+VideoMixerComponent::~VideoMixerComponent()
+{
+    stopTimer();
+    window_.reset();
+    renderer_.reset();   // joins the render thread before members are destroyed
+}
+
+//==============================================================================
+void VideoMixerComponent::refreshActiveSlots()
+{
+    auto slots = processor_.activeVideoSlots();
+    if (slots == activeSlots_)
+        return;                 // unchanged — keep existing cores/attachments
+    activeSlots_ = slots;
+    renderer_->setSlots(slots);
+    rebuildStrip();
+}
+
+void VideoMixerComponent::rebuildStrip()
+{
+    voices_.clear();
+    auto& apvts = processor_.getAPVTS();
+
+    for (int slot : activeSlots_)
+    {
+        auto v = std::make_unique<Voice>();
+        v->slot = slot;
+
+        v->level.setSliderStyle(juce::Slider::LinearHorizontal);
+        v->level.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        v->level.setRange(0.0, 1.0, 0.01);
+        addAndMakeVisible(v->level);
+
+        v->blend.addItem("Mix",    1);
+        v->blend.addItem("Add",    2);
+        v->blend.addItem("Screen", 3);
+        addAndMakeVisible(v->blend);
+
+        v->levelAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+            apvts, vsMixParam(slot, "level"), v->level);
+        v->blendAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, vsMixParam(slot, "blend"), v->blend);
+        v->levelLearn = std::make_unique<MidiLearnAttachment>(
+            processor_.getMidiMap(), v->level, vsMixParam(slot, "level"));
+        v->blendLearn = std::make_unique<MidiLearnAttachment>(
+            processor_.getMidiMap(), v->blend, vsMixParam(slot, "blend"));
+
+        voices_.push_back(std::move(v));
+    }
+
+    layoutStrip();
+    repaint();
+}
+
+//==============================================================================
+void VideoMixerComponent::resized()
+{
+    layoutStrip();
+}
+
+void VideoMixerComponent::layoutStrip()
+{
+    auto r = getLocalBounds();
+    const int n = (int) voices_.size();
+    const int stripH = (n > 0) ? (kStripPad + n * (kRowH + kRowGap)) : 0;
+
+    stripArea_  = r.removeFromTop(stripH);
+
+    // The preview is kept square so it reads correctly whatever the scroll
+    // direction is. Fit the largest centred square inside the remaining area.
+    auto avail = r.reduced(2);
+    const int side = juce::jmin(avail.getWidth(), avail.getHeight());
+    masterArea_ = juce::Rectangle<int>(0, 0, side, side).withCentre(avail.getCentre());
+
+    // Lay out each fader row: [label 38][level slider …][blend 72]
+    auto strip = stripArea_.reduced(kStripPad, kStripPad / 2);
+    for (auto& v : voices_)
+    {
+        auto row = strip.removeFromTop(kRowH);
+        strip.removeFromTop(kRowGap);
+        row.removeFromLeft(40);                      // label drawn in paint()
+        v->blend.setBounds(row.removeFromRight(72).reduced(0, 1));
+        row.removeFromRight(6);
+        v->level.setBounds(row.reduced(0, 2));
+    }
+}
+
+//==============================================================================
 void VideoMixerComponent::renderMaster(juce::Graphics& g, juce::Rectangle<int> dest)
 {
     if (dest.isEmpty()) return;
     g.setColour(juce::Colours::black);
     g.fillRect(dest);
-    if (voices_.empty()) return;
 
-    if (singleDirect())
-    {
-        // Paint the single output straight into g at the destination's own
-        // resolution (retina-backed for the fullscreen window → one resample).
-        juce::Graphics::ScopedSaveState s(g);
-        g.reduceClipRegion(dest);
-        g.setOrigin(dest.getX(), dest.getY());
-        voices_[0]->core->drawWarp(g, dest.getWidth(), dest.getHeight());  // warp built in composite()
-        return;
-    }
-
-    if (master_.isValid())
+    const juce::Image frame = renderer_->frontImage();
+    if (frame.isValid())
     {
         g.setImageResamplingQuality(juce::Graphics::highResamplingQuality);
-        g.drawImage(master_, dest.toFloat(), juce::RectanglePlacement::stretchToFit);
+        g.drawImage(frame, dest.toFloat(), juce::RectanglePlacement::stretchToFit);
     }
 }
 
 void VideoMixerComponent::timerCallback()
 {
-    // Only invalidate the views when this tick actually produced a new frame.
-    // While paused (or otherwise frozen) the previous — complete — frame stays on
-    // screen untouched: invalidating a static area 60×/s occasionally got a
-    // half-painted buffer presented (black flash over the frozen image).
-    if (! composite())
+    // Presenter only: tell the renderer what to render (view size in LOGICAL px,
+    // window content when open, else the column preview) and whether anything is
+    // on screen, then invalidate the views ONLY when a new frame was published.
+    // A frozen output publishes nothing → its static image is never repainted →
+    // it can never be presented half-painted (the historical pause flicker).
+    int w = masterArea_.getWidth();
+    int h = masterArea_.getHeight();
+    bool visible = isShowing() && ! masterArea_.isEmpty();
+    if (window_ != nullptr && window_->isVisible())
+        if (auto* c = window_->getContentComponent())
+            if (c->getWidth() > 0 && c->getHeight() > 0)
+            {
+                w = c->getWidth();
+                h = c->getHeight();
+                visible = true;
+            }
+    renderer_->setViewState(w, h, visible);
+
+    const uint32_t fc = renderer_->frameCounter();
+    if (fc == lastPresented_)
         return;
+    lastPresented_ = fc;
+
     repaint(masterArea_);
     if (window_ != nullptr)
         if (auto* c = window_->getContentComponent())
-            c->repaint();   // drive the detached/fullscreen view at the same 60 fps
+            c->repaint();
 }
 
 //==============================================================================
@@ -358,8 +498,7 @@ void VideoMixerComponent::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colour(0xff0c0c10));
 
-    // Master display — shared render path (direct-paint single output, or scale
-    // the offscreen composite).
+    // Master display — blit of the render thread's latest published composite.
     renderMaster(g, masterArea_);
 
     if (voices_.empty())
@@ -405,10 +544,7 @@ void VideoMixerComponent::setAllPaused(bool paused)
 void VideoMixerComponent::stopAll()
 {
     setAllPaused(true);
-    for (auto& voice : voices_)
-        voice->core->clear();
-    composite();
-    repaint();
+    renderer_->requestClear();   // consumed by the render thread on its next pass
 }
 
 //==============================================================================

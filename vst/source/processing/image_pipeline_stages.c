@@ -122,6 +122,43 @@ void img_stage_apply_gamma(float *pixels, int count, float gamma)
 }
 
 /* ============================================================================
+ * img_stage_apply_db_decode — Inverse-dB decode (SCORE dB decode law)
+ *
+ * Exact inverse of the SCORE encoder's magnitude→brightness map:
+ *   encoder: intensity = (dB − (max_dB − range)) / range, clamped to [0,1]
+ *   decoder: amplitude = 10^((x − 1) · range / 20)
+ * x is ink density (grayscale after inversion; 1 = black = peak energy).
+ * Values at/below half a grey quantum decode to true silence — the encoder
+ * maps everything at/below its dB floor to pure white, so the first visible
+ * grey level already sits ~range_db·(1/255) above the floor.
+ * ============================================================================ */
+void img_stage_apply_db_decode(float *pixels, int count, float range_db)
+{
+    int i;
+
+    if (pixels == NULL || count <= 0)
+        return;
+
+    if (range_db < 1.0f)  range_db = 1.0f;
+    const float k = range_db / 20.0f;          /* dB → log10 amplitude factor */
+    const float silence_floor = 0.5f / 255.0f; /* half a grey quantum         */
+
+    for (i = 0; i < count; i++)
+    {
+        float x = pixels[i];
+
+        if (!(x > silence_floor))   /* also catches NaN */
+        {
+            pixels[i] = 0.0f;
+            continue;
+        }
+        if (x > 1.0f) x = 1.0f;
+
+        pixels[i] = powf(10.0f, (x - 1.0f) * k);
+    }
+}
+
+/* ============================================================================
  * img_stage_calculate_contrast — Variance-based contrast measurement
  *
  * Extracted from image_preprocessor.c::calculate_contrast().

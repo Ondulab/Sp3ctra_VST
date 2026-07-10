@@ -40,6 +40,36 @@ EnvelopeEditorComponent::EnvelopeEditorComponent(
         const juce::String& widthReleaseParamId)
     : apvts(apvtsIn), accent(accentColour)
 {
+    setParamIds(attackParamId, decayParamId, sustainParamId, releaseParamId,
+                attackCurveParamId, decayCurveParamId, releaseCurveParamId,
+                widthBaseParamId, widthAttackParamId, widthReleaseParamId);
+
+    setRepaintsOnMouseActivity(true);
+}
+
+void EnvelopeEditorComponent::setParamIds(
+        const juce::String& attackParamId,
+        const juce::String& decayParamId,
+        const juce::String& sustainParamId,
+        const juce::String& releaseParamId,
+        const juce::String& attackCurveParamId,
+        const juce::String& decayCurveParamId,
+        const juce::String& releaseCurveParamId,
+        const juce::String& widthBaseParamId,
+        const juce::String& widthAttackParamId,
+        const juce::String& widthReleaseParamId)
+{
+    // Drop every previous binding first — this is also the per-instance rebind
+    // path (contextual pages switch the editor onto another slot's bank).
+    for (Bound* b : { &a, &d, &s, &r, &aCurve, &dCurve, &rCurve,
+                      &wBase, &wAtk, &wRel })
+    {
+        b->attach.reset();
+        b->param = nullptr;
+    }
+    boxAAtt.reset(); boxDAtt.reset(); boxSAtt.reset(); boxRAtt.reset();
+    boxWAtkAtt.reset(); boxWAtt.reset(); boxWRelAtt.reset();
+
     isAR = sustainParamId.isEmpty();   // AR envelope: no decay/sustain stage
 
     bind(a, attackParamId);
@@ -77,7 +107,32 @@ EnvelopeEditorComponent::EnvelopeEditorComponent(
         initBox(boxWRel, widthReleaseParamId, boxWRelAtt);
     }
 
-    setRepaintsOnMouseActivity(true);
+    // Right-click MIDI Learn on the value boxes (per-instance ids).
+    learnAtts_.clear();
+    if (midiMap_ != nullptr)
+    {
+        auto learn = [&](juce::Component& c, const juce::String& id)
+        {
+            if (id.isNotEmpty())
+                learnAtts_.push_back(
+                    std::make_unique<MidiLearnAttachment>(*midiMap_, c, id));
+        };
+        learn(boxA, attackParamId);
+        if (!isAR)
+        {
+            learn(boxD, decayParamId);
+            learn(boxS, sustainParamId);
+        }
+        learn(boxR, releaseParamId);
+        if (hasWidth)
+        {
+            learn(boxWAtk, widthAttackParamId);
+            learn(boxW,    widthBaseParamId);
+            learn(boxWRel, widthReleaseParamId);
+        }
+    }
+
+    repaint();
 }
 
 EnvelopeEditorComponent::~EnvelopeEditorComponent() = default;

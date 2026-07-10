@@ -175,4 +175,36 @@ void *audioProcessingThread(void *arg);
  * `arg` is the Context*. No-op when no internal source is active. */
 void internal_sources_process_tick(void *arg);
 
+/* Engine B ← sampler/score player feed (VST only; no-op stub otherwise).
+ * Called by FramePlayerThread (Non-RT) with the final blended playback frame
+ * so a [SCORE|SAMPLER → LUXSTRAL B] chain is fed independently of engine A.
+ * is_score: 1 = score playback frame, 0 = sampler slot playback frame.
+ * force_play: 1 = force the pipeline envelope to PLAY (sequencer/score).
+ * viz_bus: AudioImageBuffers for the zone-1 selection tap (may be NULL). */
+struct AudioImageBuffers;
+void luxstral_b_feed_player_frame(const uint8_t *r, const uint8_t *g,
+                                  const uint8_t *b, int nb_pixels,
+                                  int is_score, int force_play,
+                                  struct AudioImageBuffers *viz_bus);
+
+/* Player (sampler/score) stopped: silence engine B's input when its chain was
+ * player-fed (plan-gated no-op otherwise). VST only. */
+void luxstral_b_player_stopped(void);
+
+/* Engine A ← player-side chain inserts. Called by FramePlayerThread (Non-RT)
+ * with the final blended playback frame: applies IN PLACE the inserts of
+ * LuxStral A's chain placed BELOW the SCORE (is_score=1) / SAMPLER (is_score=0)
+ * module — REVERB/ECHO/probes — and publishes the zone-1 selection tap when it
+ * points into that span. The per-line producers skip those inserts while the
+ * player owns the channel, so this is their only execution. */
+void chain_player_apply_synth_a_inserts(int is_score,
+                                        struct AudioImageBuffers *viz_bus,
+                                        uint8_t *r, uint8_t *g, uint8_t *b,
+                                        int nb_pixels);
+
+/* UI (message thread): copy engine B's current preprocessed additive grayscale
+ * (the real data engine B plays) into gray_out. Returns pixels copied, 0 when
+ * engine B's input buffer is not initialised. VST only. */
+int luxstral_b_copy_preprocessed_gray(uint8_t *gray_out, int max_pixels);
+
 #endif

@@ -11,7 +11,7 @@
  *   │ ┌ OSCILLATORS ───┐  │ │ BLOB DETECTION │
  *   │ │ ATTACK/RELEASE │  │ │  Ampl/Pix/...  │
  *   │ │  [ env curve ] │  │ │ MORPHING       │
- *   │ │ Sum Exp / Gate │  │ │  Sq@W/Focus/.. │
+ *   │ │ Gate/Sens/Ps/Dr│  │ │  Sq@W/Focus/.. │
  *   │ └────────────────┘  │ └───────────────┘
  *
  * The page was previously split across two stacked components (image page +
@@ -27,11 +27,16 @@
 #include <functional>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "../midi/MidiLearnAttachment.h"
 #include "../ui/AudioPanelWidgets.h"      // AudioPanelLayout + AudioPanelUI (shared look)
 #include "../ui/EnvelopeEditorComponent.h"
 #include "VisualizerMode.h"
 
-class LuxStralTabComponent : public juce::Component
+// Phase-management activity counter (synth_luxstral.c) — polled by the page
+// timer to light the onset LED next to the phase-mode combo.
+extern "C" uint32_t synth_luxstral_get_phase_onset_total(int engine_idx);
+
+class LuxStralTabComponent : public juce::Component, private juce::Timer
 {
 public:
     explicit LuxStralTabComponent(Sp3ctraAudioProcessor& p)
@@ -48,26 +53,53 @@ public:
         initLabel(volumeLabel, "Volume");
         initSlider(luxstralVolumeSlider);
 
-        // ── IMAGE — conditioning (label is the toggle text itself) ──────────
-        negativeToggle.setButtonText("Negative");
-        addAndMakeVisible(negativeToggle);
+        // (IMAGE conditioning moved to the OUT/send page — synth-split P2:
+        //  Negative/DC/Gamma/Contrast/Range dB/Intensity live per-chain on
+        //  SynthOutPageComponent; this page is the ENGINE, reached from the
+        //  ZONE-5 dock.)
 
-        dcBlockToggle.setButtonText("DC Blocking");
-        addAndMakeVisible(dcBlockToggle);
-
-        initLabel(gammaLabel, "Gamma");
-        initSlider(gammaSlider);
-
-        initLabel(contrastMinLabel, "Contrast Min");
-        initSlider(contrastMinSlider);
-
-        // ── OSCILLATORS — additive voice: Sum Exp / Noise Gate knobs ─────────
+        // ── OSCILLATORS — additive voice: Noise Gate / Phase Rst knobs ───────
         // (the A/R envelope editor is created per-engine in bindEngineParams)
-        AudioPanelUI::initKnob(sumExpSlider);
-        addAndMakeVisible(sumExpSlider);
-
+        // The former Sum Exp knob fed the retired summation normalization —
+        // dynamics are now the RMS ceiling (rms_ceiling_gain), no user knob.
         AudioPanelUI::initKnob(noiseGateSlider);
         addAndMakeVisible(noiseGateSlider);
+
+        // Phase management — SHARED A+B (bound once, not per-engine). The
+        // mode combo (in the OSCILLATORS badge) selects the physical phase
+        // law applied at onset — selecting a mode is the ONLY required
+        // gesture (the onset gate auto-calibrates to the material). The LED
+        // next to the combo lights while onsets actually fire.
+        phaseModeCombo.addItemList({"Free", "Strike", "Pluck", "Bell", "Breath"}, 1);
+        addAndMakeVisible(phaseModeCombo);
+        phaseModeAttach.reset(new CmbAttach(apvts, "luxstralPhaseMode",
+                                            phaseModeCombo));
+        phaseModeCombo.onChange = [this] { updatePhaseEnablement(); };
+
+        // Onset sensitivity — RELATIVE to the material's recent peak volume
+        // (1 = catch soft onsets, 0 = only the hardest attacks).
+        AudioPanelUI::initKnob(phaseSensSlider);
+        addAndMakeVisible(phaseSensSlider);
+        phaseSensAttach.reset(new SldAttach(apvts, "luxstralPhaseSensitivity",
+                                            phaseSensSlider));
+
+        // Strike/Pluck: position along the string (0 = whole band aligned).
+        // Bell: impact point (16 stable phase fingerprints). Breath: unused.
+        AudioPanelUI::initKnob(phasePositionSlider);
+        addAndMakeVisible(phasePositionSlider);
+        phasePositionAttach.reset(new SldAttach(apvts, "luxstralPhasePosition",
+                                                phasePositionSlider));
+
+        // Phase drift — SHARED A+B: per-onset random micro-detune (±cents)
+        // that melts the post-attack phase coherence (flanger comb) into an
+        // ensemble texture. 0 = off.
+        AudioPanelUI::initKnob(phaseDriftSlider);
+        addAndMakeVisible(phaseDriftSlider);
+        phaseDriftAttach.reset(new SldAttach(apvts, "luxstralPhaseDriftCents",
+                                             phaseDriftSlider));
+
+        updatePhaseEnablement();
+        startTimerHz(8);   // onset-activity LED refresh
 
         // ── STEREO — spatialisation (enable toggle lives in the badge) ───────
         stereoEnableToggle.setButtonText({});
@@ -121,6 +153,26 @@ public:
         sfEnabledToggle.onClick     = [this] { updateStrokeForgeEnablement(); };
         updateStereoEnablement();
         updateStrokeForgeEnablement();
+
+        // Right-click MIDI Learn on the SHARED controls (bound once — the
+        // per-engine ones are wired in bindEngineParams).
+        auto& mm = processor.getMidiMap();
+        auto learn = [&](juce::Component& c, const char* id)
+        {
+            learnShared_.push_back(std::make_unique<MidiLearnAttachment>(mm, c, id));
+        };
+        learn(phaseSensSlider,       "luxstralPhaseSensitivity");
+        learn(phasePositionSlider,   "luxstralPhasePosition");
+        learn(phaseDriftSlider,      "luxstralPhaseDriftCents");
+        learn(blobThreshSlider,      "spctrBlobThreshold");
+        learn(blobMinWidthSlider,    "spctrBlobMinWidth");
+        learn(blobMergeGapSlider,    "spctrBlobMergeGap");
+        learn(blobColorSplitSlider,  "spctrBlobColorSplit");
+        learn(sfEnabledToggle,       "sfEnabled");
+        learn(sfFocusOnlyToggle,     "sfFocusOnly");
+        learn(sfMorphWidthSlider,    "sfMorphWidthScale");
+        learn(sfFocusSigmaSlider,    "sfBlobFocusSigma");
+        learn(sfSpectralThreshSlider,"sfSpectralWidthThreshold");
     }
 
     //==========================================================================
@@ -138,12 +190,10 @@ public:
             g.drawRoundedRectangle(r, 4.f, 1.f);
         }
 
-        // ── Engine identity chip (M8) — A vs B unmistakable at a glance ─────
-        // Top of the right column, mirroring the Volume strip's header row.
+        // ── Module identity chip — ONE LuxStral engine user-side (the hidden
+        // second voice mirrors these engine params; synth-split D1).
         {
-            const bool isB = (engineIndex_ == 1);
-            const juce::Colour tagCol = isB ? juce::Colour(0xffe0a35a)   // amber = B
-                                            : juce::Colour(0xff7ab0f0);  // blue  = A
+            const juce::Colour tagCol(0xff7ab0f0);
             const auto chip = L.engineChip.toFloat();
             g.setColour(tagCol.withAlpha(0.12f));
             g.fillRoundedRectangle(chip, 4.f);
@@ -151,14 +201,8 @@ public:
             g.drawRoundedRectangle(chip, 4.f, 1.f);
             g.setColour(tagCol);
             g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
-            g.drawText(isB ? "LUXSTRAL  --  ENGINE B" : "LUXSTRAL  --  ENGINE A",
-                       L.engineChip, juce::Justification::centred);
+            g.drawText("LUXSTRAL  --  ENGINE", L.engineChip, juce::Justification::centred);
         }
-
-        // ── LEFT: IMAGE ─────────────────────────────────────────────────────
-        drawSectionBg(g, L.imgBg.getX(), L.imgBg.getY(), L.imgBg.getWidth(), L.imgBg.getHeight());
-        drawBadge(g, L.imgBadge.getX(), L.imgBadge.getY(), L.imgBadge.getWidth(),
-                  0xff20303c, 0xff7aade0, "IMAGE");
 
         // ── LEFT: OSCILLATORS ───────────────────────────────────────────────
         drawSectionBg(g, L.oscBg.getX(), L.oscBg.getY(), L.oscBg.getWidth(), L.oscBg.getHeight());
@@ -167,8 +211,35 @@ public:
         drawEnvCaption(g, L.oscBadge.getX() + kSecInsetX, L.oscCaptionY,
                        L.oscBadge.getWidth() - 2 * kSecInsetX, 0xff7ab0f0, "ATTACK / RELEASE");
         {
-            static const char* const lbls[] = { "Sum Exp", "Noise Gate" };
-            for (int i = 0; i < 2; ++i) drawKnobLabel(g, L.oscGridX, L.oscGridW, L.oscGridY, i, lbls[i]);
+            // Phase knobs dim when the mode makes them inert (Free = all off,
+            // Breath ignores Position) — same affordance as the STEREO knob.
+            const int  pm    = phaseModeCombo.getSelectedItemIndex(); // 0=Free
+            const bool phOn  = pm > 0;
+            const bool posOn = phOn && pm != 4;                       // 4=Breath
+            const juce::uint32 cOn = 0xffb8c4d0;
+            drawKnobLabel(g, L.oscGridX, L.oscGridW, L.oscGridY, 0, "Noise Gate");
+            drawKnobLabel(g, L.oscGridX, L.oscGridW, L.oscGridY, 1, "Sens",
+                          phOn ? cOn : kDimText);
+            drawKnobLabel(g, L.oscGridX, L.oscGridW, L.oscGridY, 2, "Position",
+                          posOn ? cOn : kDimText);
+            drawKnobLabel(g, L.oscGridX, L.oscGridW, L.oscGridY, 3, "Drift",
+                          phOn ? cOn : kDimText);
+
+            // Onset-activity LED, left of the mode combo: bright while onsets
+            // fire, dim ring while the mode is armed but silent, off in Free.
+            const auto led = juce::Rectangle<float>(
+                (float)phaseModeCombo.getX() - 16.f,
+                (float)phaseModeCombo.getBounds().getCentreY() - 4.f, 8.f, 8.f);
+            if (phOn && onsetLedOn_)
+            {
+                g.setColour(juce::Colour(0xff7ae08a));
+                g.fillEllipse(led);
+            }
+            else
+            {
+                g.setColour(juce::Colour(phOn ? 0xff3a6a48 : 0xff2a3542));
+                g.drawEllipse(led, 1.2f);
+            }
         }
 
         // ── RIGHT: STEREO (enable toggle sits in the badge) ─────────────────
@@ -185,11 +256,8 @@ public:
         const juce::uint32 cap2 = sfOn ? 0xffb07af0 : kDimText;   // MORPHING
         const juce::uint32 klbl = sfOn ? 0xffb8c4d0 : kDimText;   // knob labels
         drawSectionBg(g, L.sfBg.getX(), L.sfBg.getY(), L.sfBg.getWidth(), L.sfBg.getHeight());
-        // StrokeForge settings are SHARED between engines A and B (single
-        // analysis config) — say so explicitly on the B page.
         drawBadge(g, L.sfBadge.getX(), L.sfBadge.getY(), L.sfBadge.getWidth(),
-                  0xff2a2a40, 0xff8888e0,
-                  engineIndex_ == 1 ? "STROKEFORGE (SHARED A+B)" : "STROKEFORGE");
+                  0xff2a2a40, 0xff8888e0, "STROKEFORGE");
 
         const int sdx = L.rightX + kSecInsetX;
         const int sdw = L.colW - 2 * kSecInsetX;
@@ -212,14 +280,16 @@ public:
         volumeLabel.setBounds(L.volLabel);
         luxstralVolumeSlider.setBounds(L.volSlider);
 
-        negativeToggle.setBounds(L.negToggle);
-        dcBlockToggle.setBounds(L.dcToggle);
-        gammaLabel.setBounds(L.gammaLabel);          gammaSlider.setBounds(L.gammaSlider);
-        contrastMinLabel.setBounds(L.contrastLabel); contrastMinSlider.setBounds(L.contrastSlider);
-
         arEnv->setBounds(L.env);
-        AudioPanelUI::placeKnob(sumExpSlider,    L.oscGridX, L.oscGridW, L.oscGridY, 0);
-        AudioPanelUI::placeKnob(noiseGateSlider, L.oscGridX, L.oscGridW, L.oscGridY, 1);
+        AudioPanelUI::placeKnob(noiseGateSlider,     L.oscGridX, L.oscGridW, L.oscGridY, 0);
+        AudioPanelUI::placeKnob(phaseSensSlider,     L.oscGridX, L.oscGridW, L.oscGridY, 1);
+        AudioPanelUI::placeKnob(phasePositionSlider, L.oscGridX, L.oscGridW, L.oscGridY, 2);
+        AudioPanelUI::placeKnob(phaseDriftSlider,    L.oscGridX, L.oscGridW, L.oscGridY, 3);
+        // Phase mode combo — right-aligned inside the OSCILLATORS badge row
+        // (same pattern as the STEREO badge toggle).
+        phaseModeCombo.setBounds(L.oscBadge.getRight() - 92,
+                                 L.oscBadge.getY() + 1,
+                                 88, L.oscBadge.getHeight() - 2);
 
         // RIGHT
         stereoEnableToggle.setBounds(L.stBadgeToggle);
@@ -276,22 +346,36 @@ private:
         auto& apvts = processor.getAPVTS();
 
         volumeAttach.reset(new SldAttach(apvts, pid("Volume"), luxstralVolumeSlider));
-        negativeAttach.reset(new BtnAttach(apvts, pid("Inversion"), negativeToggle));
-        dcBlockAttach.reset(new BtnAttach(apvts, pid("AcRemoval"), dcBlockToggle));
-        gammaAttach.reset(new SldAttach(apvts, pid("GammaValue"), gammaSlider));
-        contrastMinAttach.reset(new SldAttach(apvts, pid("ContrastMin"), contrastMinSlider));
+
+        // (IMAGE conditioning is per-OUT and lives on SynthOutPageComponent.)
 
         // The envelope editor captures its parameter IDs at construction —
         // recreate it against the selected engine's Attack/Release params.
         arEnv = std::make_unique<EnvelopeEditorComponent>(
             apvts, juce::Colour(0xff7ab0f0),
             pid("AttackMs"), juce::String(), juce::String(), pid("ReleaseMs"));
+        // Re-run the bind with the learn engine attached so the A/R value
+        // boxes get their right-click MIDI Learn popups.
+        arEnv->setMidiMap(&processor.getMidiMap());
+        arEnv->setParamIds(pid("AttackMs"), {}, {}, pid("ReleaseMs"));
         addAndMakeVisible(*arEnv);
 
-        sumExpAttach.reset(new SldAttach(apvts, pid("SummationResponseExp"), sumExpSlider));
         noiseGateAttach.reset(new SldAttach(apvts, pid("NoiseGateThreshold"), noiseGateSlider));
         stereoEnableAttach.reset(new BtnAttach(apvts, pid("StereoEnable"), stereoEnableToggle));
         stereoTempAttach.reset(new SldAttach(apvts, pid("StereoTempAmp"), stereoTempSlider));
+
+        // Right-click MIDI Learn — follows the selected engine's bank.
+        learnEngine_.clear();
+        auto& mm = processor.getMidiMap();
+        auto learn = [&](juce::Component& c, const char* base)
+        {
+            learnEngine_.push_back(
+                std::make_unique<MidiLearnAttachment>(mm, c, pid(base)));
+        };
+        learn(luxstralVolumeSlider, "Volume");
+        learn(noiseGateSlider,      "NoiseGateThreshold");
+        learn(stereoEnableToggle,   "StereoEnable");
+        learn(stereoTempSlider,     "StereoTempAmp");
     }
 
     // ── Vertical layout tokens ──────────────────────────────────────────────
@@ -314,13 +398,14 @@ private:
     static constexpr int kEnvGap    = AudioPanelLayout::kEnvGap;      // 10
     static constexpr juce::uint32 kDimText = 0xff5a5a66;             // greyed labels/captions
 
-    static constexpr int kImgSecH    = kBadgeH + kBadgeGap + (3 * kRowH + 2 * kRowGap) + kSecPadB;     // 110
+    // (IMAGE section removed — the per-OUT conditioning lives on the OUT/send
+    //  page since the synth split; the left column is Volume + OSCILLATORS.)
     static constexpr int kOscSecH    = kBadgeH + kBadgeGap + kCapH + kEnvH + kEnvGap + kKnobH + kSecPadB; // 254
     static constexpr int kStereoSecH = kBadgeH + kBadgeGap + kKnobH + kSecPadB;                        // 107
     static constexpr int kSfSecH     = kBadgeH + kBadgeGap + kCapH + (4 * kRowH + 3 * kRowGap) + kDivGap
                                      + kCapH + kRowH + kToggleGap + kKnobH + kSecPadB;                 // 271
 
-    static constexpr int kLeftColH   = kHeaderH + kSecGapV + kImgSecH + kSecGapV + kOscSecH;           // 414
+    static constexpr int kLeftColH   = kHeaderH + kSecGapV + kOscSecH;
     // Right column starts with the engine-identity chip (same height as the
     // Volume strip) so both columns share the top header row (M8).
     static constexpr int kRightColH  = kHeaderH + kSecGapV + kStereoSecH + kSecGapV + kSfSecH;         // 456
@@ -337,8 +422,6 @@ private:
         int gx = 0, gw = 0, colW = 0, leftX = 0, rightX = 0;
         // left
         juce::Rectangle<int> volStrip, volLabel, volSlider;
-        juce::Rectangle<int> imgBg, imgBadge, negToggle, dcToggle,
-                             gammaLabel, gammaSlider, contrastLabel, contrastSlider;
         juce::Rectangle<int> oscBg, oscBadge, env;
         int oscCaptionY = 0, oscGridX = 0, oscGridW = 0, oscGridY = 0;
         // right
@@ -386,27 +469,10 @@ private:
             }
             y += kHeaderH + kSecGapV;
 
-            // IMAGE
-            L.imgBg    = { leftX - 2, y, colW + 4, kImgSecH };
-            L.imgBadge = { leftX, y, colW, kBadgeH };
-            int cy = y + kBadgeH + kBadgeGap;
-            {
-                const int half = (cw - gap) / 2;
-                L.negToggle = { cx, cy, half, kRowH };
-                L.dcToggle  = { cx + half + gap, cy, half, kRowH };
-                cy += kRowH + kRowGap;
-            }
-            L.gammaLabel  = { cx, cy, kLabelW, kRowH };
-            L.gammaSlider = { cx + kLabelW + gap, cy, cw - kLabelW - gap, kRowH };
-            cy += kRowH + kRowGap;
-            L.contrastLabel  = { cx, cy, kLabelW, kRowH };
-            L.contrastSlider = { cx + kLabelW + gap, cy, cw - kLabelW - gap, kRowH };
-            y += kImgSecH + kSecGapV;
-
-            // OSCILLATORS
+            // OSCILLATORS (IMAGE conditioning moved to the OUT/send page)
             L.oscBg    = { leftX - 2, y, colW + 4, kOscSecH };
             L.oscBadge = { leftX, y, colW, kBadgeH };
-            cy = y + kBadgeH + kBadgeGap;
+            int cy = y + kBadgeH + kBadgeGap;
             L.oscCaptionY = cy;
             cy += kCapH;
             L.env = { cx, cy, cw, kEnvH };
@@ -465,6 +531,31 @@ private:
         if (onVisualizerSourcesChanged) onVisualizerSourcesChanged();
     }
 
+    void updatePhaseEnablement()
+    {
+        const int mode = phaseModeCombo.getSelectedItemIndex();   // 0 = Free
+        const bool on  = mode > 0;
+        phaseSensSlider.setEnabled(on);
+        phasePositionSlider.setEnabled(on && mode != 4);          // 4 = Breath
+        phaseDriftSlider.setEnabled(on);
+        repaint();  // refresh the phase knob label tints + LED state
+    }
+
+    // Onset-activity LED poll: the engines bump a cumulative counter on every
+    // buffer that fired phase onsets; a delta between two polls = activity.
+    void timerCallback() override
+    {
+        const uint32_t total = synth_luxstral_get_phase_onset_total(0)
+                             + synth_luxstral_get_phase_onset_total(1);
+        const bool lit = (total != lastOnsetTotal_);
+        lastOnsetTotal_ = total;
+        if (lit != onsetLedOn_)
+        {
+            onsetLedOn_ = lit;
+            repaint();
+        }
+    }
+
     void updateStrokeForgeEnablement()
     {
         const bool on = sfEnabledToggle.getToggleState();
@@ -512,15 +603,20 @@ private:
     }
 
     // ── Controls ────────────────────────────────────────────────────────────
+    // (IMAGE conditioning widgets moved to SynthOutPageComponent — P2.)
     juce::Slider       luxstralVolumeSlider;                       // master (left top)
     juce::ComboBox     sourceCombo;                                // retired (plumbing only)
-    juce::ToggleButton negativeToggle, dcBlockToggle;
-    juce::Label        volumeLabel, gammaLabel, contrastMinLabel;
-    juce::Slider       gammaSlider, contrastMinSlider;
+    juce::Label        volumeLabel;
 
     // OSCILLATORS (left)
     std::unique_ptr<EnvelopeEditorComponent> arEnv;
-    juce::Slider       sumExpSlider, noiseGateSlider;
+    juce::Slider       noiseGateSlider;
+    juce::Slider       phaseSensSlider;    // onset sensitivity (relative) — SHARED A+B
+    juce::ComboBox     phaseModeCombo;      // physical onset mode — SHARED A+B
+    uint32_t           lastOnsetTotal_ = 0; // last polled onset counter (LED)
+    bool               onsetLedOn_ = false; // LED lit state (repaint on change)
+    juce::Slider       phasePositionSlider; // strike/pluck position, BELL impact — SHARED A+B
+    juce::Slider       phaseDriftSlider;   // per-onset micro-detune — SHARED A+B
 
     // STEREO (right)
     juce::ToggleButton stereoEnableToggle;
@@ -538,14 +634,20 @@ private:
     using BtnAttach = juce::AudioProcessorValueTreeState::ButtonAttachment;
     using CmbAttach = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
 
-    std::unique_ptr<CmbAttach> sourceAttach;
-    std::unique_ptr<SldAttach> volumeAttach, gammaAttach, contrastMinAttach,
-                               sumExpAttach, noiseGateAttach, stereoTempAttach,
+    std::unique_ptr<CmbAttach> sourceAttach, phaseModeAttach;
+    std::unique_ptr<SldAttach> volumeAttach,
+                               noiseGateAttach, stereoTempAttach,
                                blobThreshAttach, blobMinWidthAttach,
                                blobMergeGapAttach, blobColorSplitAttach,
-                               sfMorphWidthAttach, sfFocusSigmaAttach, sfSpectralThreshAttach;
-    std::unique_ptr<BtnAttach> negativeAttach, dcBlockAttach, stereoEnableAttach,
+                               sfMorphWidthAttach, sfFocusSigmaAttach, sfSpectralThreshAttach,
+                               phaseSensAttach,
+                               phasePositionAttach, phaseDriftAttach;
+    std::unique_ptr<BtnAttach> stereoEnableAttach,
                                sfEnabledAttach, sfFocusOnlyAttach;
+
+    // MIDI-learn popups: shared controls bound once (ctor), engine-scoped
+    // ones recreated by bindEngineParams() on A/B selection.
+    std::vector<std::unique_ptr<MidiLearnAttachment>> learnShared_, learnEngine_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxStralTabComponent)
 };

@@ -21,9 +21,11 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "../midi/MidiLearnAttachment.h"
 #include "EnvelopeEditorComponent.h"
 #include "AudioPanelWidgets.h"   // AudioPanelLayout + AudioPanelUI (shared visual language)
 #include <memory>
+#include <vector>
 
 //==============================================================================
 // NOTE: AUDIOSTRAL was absorbed into LuxStralTabComponent and AUDIOSYNTH into
@@ -64,6 +66,7 @@ private:
     static constexpr int kBadgeH    = Sp3ctraTheme::kSectionH;       // 24
     static constexpr int kBadgeGap  = Sp3ctraTheme::kSectionGap;     // 4
     static constexpr int kRowH      = Sp3ctraTheme::kControlH;       // 22
+    static constexpr int kRowGap    = Sp3ctraTheme::kRowGap;         // 4
     static constexpr int kSecGapV   = 10;                            // between sections
     static constexpr int kSecPadB   = 8;                             // section bottom pad
     static constexpr int kSecInsetX = 8;                             // content inset
@@ -74,6 +77,7 @@ private:
     static constexpr int kEnvH      = AudioPanelLayout::kEnvH;       // 124
     static constexpr int kEnvGap    = AudioPanelLayout::kEnvGap;     // 10
 
+    // (The LuxWave OUT conditioning lives on the OUT/send page — P2.)
     static constexpr int kWaveSecH  = kBadgeH + kBadgeGap + kRowH + kToggleGap
                                     + kCapH + kEnvH + kEnvGap + kKnobH + kSecPadB;
     static constexpr int kFltSecH   = kBadgeH + kBadgeGap + kCapH + kKnobH + kSecPadB;
@@ -122,6 +126,7 @@ private:
                                lwFltCutoffAttach, lwFltDepthAttach,
                                lwLfoRateAttach, lwLfoDepthAttach;
     std::unique_ptr<CmbAttach> lwScanModeAttach;
+    std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioWavePanel)
 };

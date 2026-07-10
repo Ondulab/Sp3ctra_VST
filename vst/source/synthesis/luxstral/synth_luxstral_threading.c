@@ -162,6 +162,14 @@ int synth_init_thread_pool(LuxStralEngine *eng) {
     // Last worker handles all remaining notes (handles rounding)
     worker->end_note = (i == eng->num_workers - 1) ? current_notes : (i + 1) * notes_per_thread;
 
+    // Phase-drift RNG stream — distinct per worker AND per engine so A/B
+    // never draw correlated detunes. Any nonzero seed works (xorshift32).
+    worker->rng_state = 0x9E3779B9u
+                      ^ ((uint32_t)(worker->start_note + 1) * 2654435761u)
+                      ^ ((eng == &g_luxstral_engine_b) ? 0xA5A5A5A5u : 0u);
+    if (worker->rng_state == 0) worker->rng_state = 1;
+    worker->min_target_volume = 1.0f;   // resting-bed tracker (drained per buffer)
+
     // ✅ STATIC ALLOCATION: Use MAX_BUFFER_SIZE for all per-sample buffers
     // Industry standard: allocate once for maximum buffer size (4096)
     // Memory cost: ~114 MB for 8 workers (negligible on modern systems)
@@ -327,7 +335,27 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
   const int stereo_enabled = (worker->engine == &g_luxstral_engine_b)
       ? g_sp3ctra_config.luxstral_b_stereo_mode_enabled
       : g_sp3ctra_config.stereo_mode_enabled;
-  const float volume_weighting_exp = g_sp3ctra_config.volume_weighting_exponent;
+  // Volume weighting: FIXED exponent 2 — thread_sumVolumeBuffer accumulates
+  // the physical energy Σa² required by the RMS ceiling (rms_ceiling_gain in
+  // synth_luxstral.c, BOTH modes). The old user exponent fed the retired
+  // summation normalization and is no longer read.
+  const float volume_weighting_exp = 2.0f;
+  // Phase management (mode + auto-calibrated gate) — see config_loader.h.
+  // The absolute gate is computed by the producer (drain block, after the
+  // end barrier) from the rolling max note volume × sensitivity: workers
+  // read last frame's value, strictly ordered by the barriers.
+  const int   phase_mode         = g_sp3ctra_config.luxstral_phase_mode;
+  const float gate_raw           = worker->engine->phase_gate_abs;
+  const float phase_reset_thresh = (gate_raw > 0.003f) ? gate_raw : 0.003f;
+  const float phase_pos          = g_sp3ctra_config.luxstral_phase_position;
+  const int   phase_active       = (phase_mode != LUXSTRAL_PHASE_MODE_FREE);
+  // BELL impact seed — quantized from the position knob (16 distinct impacts).
+  const uint32_t bell_seed = ((uint32_t)(phase_pos * 15.99f) + 1u) * 0x9E3779B9u;
+  // Phase drift (companion of the modes): ±cents redrawn per onset, pre-scaled
+  // to a phase_inc offset factor. ln(2)/1200 linearizes 2^(c/1200) — exact to
+  // ~1e-6 over the ±3 cents range, no pow() in the RT path.
+  const float drift_scale =
+      g_sp3ctra_config.luxstral_phase_drift_cents * 5.7762265e-4f;
   const int capture_enabled = image_debug_is_oscillator_capture_enabled();
   
   // Main note processing loop - optimized for cache efficiency
@@ -346,6 +374,87 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
     // before the note loop avoids repeated volatile dereferences in the hot path.
     // -----------------------------------------------------------------------
 
+    /* ── Phase management ─────────────────────────────────────────────────
+     * RE-ARM AT HALF THE GATE, NOT AT ABSOLUTE SILENCE. The always-on dB
+     * decode law floors an EMPTY pixel at 10^(-range/20) (0.0032 @ 50 dB,
+     * never 0), so between notes the envelope rests on that bed — 30 dB
+     * ABOVE the old ε = 1e-4 re-arm point. With the old condition a note
+     * that had sounded once could never re-arm: only WHITE (a forced true
+     * 0.0) exposed the feature, which is why WHITE→PLAY was audible while
+     * sampler hits changed nothing. The gate is floored at 4× the tracked
+     * resting bed (see the producer drain), so rearm = gate/2 ≥ 2× bed:
+     * notes re-arm as soon as their envelope falls back near the bed, and
+     * an onset phase jump is ≥ 6 dB below the attack that masks it.
+     * True idle decorrelation (fresh random phase, and what makes a mode
+     * change forget the previous organization) still requires REAL silence
+     * (≤ ε): scrambling phases every buffer at the bed level would sum to
+     * broadband noise ≈ bed × √N. Evaluated before the sine precompute so
+     * it takes effect from this buffer's first sample. Workers own
+     * disjoint note ranges: no races (xorshift32 stream is worker-local). */
+    if (phase_active &&
+        worker->engine->waves[note].current_volume <=
+            phase_reset_thresh * 0.5f) {
+      uint32_t x = worker->rng_state;
+      x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+      worker->rng_state = x;
+      float phase = (float)(x & (uint32_t)SINE_TABLE_MASK); /* random draw */
+
+      if (worker->precomputed_volume[local_note_idx] >= phase_reset_thresh) {
+        switch (phase_mode) {
+          case LUXSTRAL_PHASE_MODE_STRIKE: {
+            /* Struck string: the hammer imparts VELOCITY → sine start
+             * (phase 0 or π). Sign alternates every 1/position notes
+             * (floor parity ≈ sign of sin(n·π·p)); position 0 → the whole
+             * band lands on 0 = the maximal coherent snap. */
+            const int flip = ((int)((float)note * phase_pos)) & 1;
+            phase = flip ? (float)(SINE_TABLE_SIZE / 2) : 0.0f;
+            break;
+          }
+          case LUXSTRAL_PHASE_MODE_PLUCK: {
+            /* Plucked string: initial SHAPE, zero velocity → every partial
+             * starts at an extremum (cosine, ±π/2), same sign pattern. */
+            const int flip = ((int)((float)note * phase_pos)) & 1;
+            phase = flip ? (float)(3 * SINE_TABLE_SIZE / 4)
+                         : (float)(SINE_TABLE_SIZE / 4);
+            break;
+          }
+          case LUXSTRAL_PHASE_MODE_BELL: {
+            /* Percussion: phases set by the impact point — arbitrary but
+             * FIXED per (note, impact): every re-strike is bit-identical
+             * (sampler-repeatable) yet the band never combs. */
+            uint32_t h = (uint32_t)note * 2654435761u ^ bell_seed;
+            h ^= h >> 16; h *= 0x85EBCA6Bu; h ^= h >> 13;
+            phase = (float)(h & (uint32_t)SINE_TABLE_MASK);
+            break;
+          }
+          default:
+            /* BREATH (reed/flute): the attack grows out of turbulence —
+             * keep the fresh random idle draw, different at every attack. */
+            break;
+        }
+
+        /* Phase drift: redraw this note's micro-detune for the life of the
+         * new note. Aligned onsets otherwise leave the active band beating
+         * in lockstep (log-regular grid → same Δf everywhere) = flanger
+         * comb; a random ±cents per note de-regularizes the beat rates so
+         * the attack coherence melts into ensemble texture, higher notes
+         * first. drift=0 writes offset 0 → exact grid pitch.              */
+        uint32_t x2 = worker->rng_state;
+        x2 ^= x2 << 13; x2 ^= x2 >> 17; x2 ^= x2 << 5;
+        worker->rng_state = x2;
+        const float r = (float)(int32_t)x2 * 4.6566129e-10f;  /* ∈ [-1, 1) */
+        worker->engine->waves[note].detune_offset = r * drift_scale;
+        worker->phase_reset_count++; /* diagnostics — drained by producer */
+        worker->engine->waves[note].phase_acc = phase;   /* mode's phase law */
+      } else if (worker->engine->waves[note].current_volume <=
+                 LUXSTRAL_PHASE_RESET_SILENCE_EPS) {
+        /* True silence only: idle decorrelation. Armed-but-resting notes
+         * (bed level) keep their phase — scrambling them every buffer would
+         * inject broadband noise ≈ bed × √N into the mix. */
+        worker->engine->waves[note].phase_acc = phase;   /* fresh random */
+      }
+    }
+
     /* Per-engine morph snapshot (M8) — copied from THIS engine's db in
      * synth_precompute_wave_data(); the global g_waveform_morph holds the last
      * pipeline call's frame and would cross-talk between engines A and B. */
@@ -354,7 +463,10 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
       float*      pre_wave_w = worker->precomputed_wave_data +
                                (size_t)local_note_idx * audio_buffer_size;
       float       phase = worker->engine->waves[note].phase_acc;
-      const float inc   = worker->engine->waves[note].phase_inc;
+      /* Phase drift applied here — hoisted per note/buffer, zero per-sample
+       * cost. detune_offset = 0 → bit-exact legacy increment.               */
+      const float inc   = worker->engine->waves[note].phase_inc *
+                          (1.0f + worker->engine->waves[note].detune_offset);
       const float fsize = (float)SINE_TABLE_SIZE;
       for (int s = 0; s < audio_buffer_size; s++) {
         phase += inc;
@@ -382,6 +494,17 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
     
     // Use preprocessed volume data (already has: RGB → Grayscale → Inversion → Gamma → Averaging)
     float target_volume = worker->precomputed_volume[local_note_idx];
+
+    // Phase management telemetry: max feeds the auto-gate reference, min
+    // tracks the decode law's resting bed (the gate is floored above it so
+    // the re-arm hysteresis can see through the bed). Gated on the feature
+    // flag — short-circuits to nothing when off.
+    if (phase_active) {
+      if (target_volume > worker->max_target_volume)
+        worker->max_target_volume = target_volume;
+      if (target_volume < worker->min_target_volume)
+        worker->min_target_volume = target_volume;
+    }
 
     // ✅ OPTIMIZATION: Compute pointers once (avoid repeated address calculations)
     const float* pre_wave = worker->precomputed_wave_data + (size_t)local_note_idx * audio_buffer_size;

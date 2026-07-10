@@ -60,6 +60,22 @@ void img_stage_remove_dc(float *pixels, int count);
 void img_stage_apply_gamma(float *pixels, int count, float gamma);
 
 /* ============================================================================
+ * Inverse-dB decode (SCORE dB decode law): exact inverse of the SCORE
+ * encoder's brightness map (score_engine.c: intensity linear in dB over a
+ * range_db window, white = silence).
+ *
+ *   input  x : ink density in [0,1] (grayscale AFTER inversion)
+ *   output   : amplitude = 10^((x − 1) · range_db / 20)
+ *              x ≤ half a grey quantum → 0 (true silence: the encoder maps
+ *              everything at/below its dB floor to pure white)
+ *
+ * Runs on the LuxStral path after img_stage_apply_gamma — ALWAYS ON (single
+ * decode chain, gamma 1.0 = pure dB decode); no other stage is forced.
+ * range_db must match the encoder's dynamicRangeDB (default 50).
+ * ============================================================================ */
+void img_stage_apply_db_decode(float *pixels, int count, float range_db);
+
+/* ============================================================================
  * Contrast calculation — measures pixel variance for volume modulation.
  * Must be called on RAW grayscale (before inversion/gamma) for accuracy.
  * Returns a value in [contrast_min, 1.0].

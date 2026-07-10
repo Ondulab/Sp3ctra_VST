@@ -76,6 +76,21 @@ void KeyboardRulerComponent::setModule(Module m)
     }
 }
 
+void KeyboardRulerComponent::setSlot(int slot)
+{
+    slot = juce::jlimit(0, 7, slot);
+    if (slot == slot_)
+        return;
+    slot_   = slot;
+    lastPps = -1.0f;          // force overlay rebuild + repaint on next tick
+    if (isShowing())
+    {
+        refreshSnapshot();
+        rebuildStaticOverlays();
+        repaint();
+    }
+}
+
 //==============================================================================
 void KeyboardRulerComponent::visibilityChanged()
 {
@@ -135,7 +150,8 @@ void KeyboardRulerComponent::refreshSnapshot()
      *     30 Hz overlay.  Do NOT use these reads for anything but display. */
     if (module == Module::Pitch)
     {
-        const LuxPitchConfig& cfg = g_lux_pitch_proc.config;
+        const LuxPitchState&  st  = *lux_pitch_instance(slot_);
+        const LuxPitchConfig& cfg = st.config;
         pps = (cfg.coupling_mode == LUX_PITCH_COUPLING_LUXSTRAL)
                   ? (float) pixN / ((float) octaves * 12.0f)
                   : cfg.free_pixels_per_semitone;
@@ -144,7 +160,7 @@ void KeyboardRulerComponent::refreshSnapshot()
         numVoices = cfg.polyphony_enabled ? LUX_PITCH_MAX_VOICES : 1;
         for (int v = 0; v < numVoices; ++v)
         {
-            const LuxPitchVoiceState& vs = g_lux_pitch_proc.voices[v];
+            const LuxPitchVoiceState& vs = st.voices[v];
             voices[v].posPx   = (float) pixN * 0.5f + vs.current_shift;
             voices[v].env     = vs.envelope_level;
             voices[v].widthPx = 0.0f;
@@ -153,7 +169,8 @@ void KeyboardRulerComponent::refreshSnapshot()
     }
     else
     {
-        const LuxMaskConfig& cfg = g_lux_mask_proc.config;
+        const LuxMaskState&  st  = *lux_mask_instance(slot_);
+        const LuxMaskConfig& cfg = st.config;
         pps = (cfg.coupling_mode == LUX_MASK_COUPLING_LUXSTRAL)
                   ? (float) pixN / ((float) octaves * 12.0f)
                   : cfg.free_pixels_per_semitone;
@@ -162,7 +179,7 @@ void KeyboardRulerComponent::refreshSnapshot()
         numVoices = cfg.polyphony_enabled ? LUX_MASK_MAX_VOICES : 1;
         for (int v = 0; v < numVoices; ++v)
         {
-            const LuxMaskVoiceState& vs = g_lux_mask_proc.voices[v];
+            const LuxMaskVoiceState& vs = st.voices[v];
             voices[v].posPx   = vs.current_pos;
             // Approximate the live band width: full-open width (% of image)
             // scaled by the current ADSR openness.  Exact bias skew is not
@@ -374,8 +391,9 @@ void KeyboardRulerComponent::mouseUp(const juce::MouseEvent& e)
         + (int) std::lround((px - pixelCount * 0.5f) / pps);
     const int clamped = juce::jlimit(24, 95, note);     // C1..B6 choice range
 
-    const char* paramId = (module == Module::Pitch) ? "luxpitchReferenceNote"
-                                                    : "luxmaskReferenceNote";
+    const juce::String paramId = (module == Module::Pitch)
+                                     ? lpParam(slot_, "ReferenceNote")
+                                     : lmParam(slot_, "ReferenceNote");
     if (auto* param = processor.getAPVTS().getParameter(paramId))
     {
         const float norm = param->convertTo0to1((float)(clamped - 24));

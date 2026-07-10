@@ -134,14 +134,14 @@ public:
                    juce::Justification::left, false);
         g.setColour(accent.withAlpha(0.4f));
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
-        g.drawText("aigu",  (int) plot.getRight() - 40, (int) plot.getY() - 1, 40, 10,
+        g.drawText("treble", (int) plot.getRight() - 40, (int) plot.getY() - 1, 40, 10,
                    juce::Justification::right, false);
-        g.drawText("grave", (int) plot.getRight() - 40, (int) plot.getBottom() - 1, 40, 10,
+        g.drawText("bass",  (int) plot.getRight() - 40, (int) plot.getBottom() - 1, 40, 10,
                    juce::Justification::right, false);
         if (isFlat())
         {
             g.setColour(juce::Colour(0xff55606f));
-            g.drawText("clic: +/-  ·  glisser: deplacer  ·  haut=aigu bas=grave",
+            g.drawText(juce::String::fromUTF8("click: +/-  \xc2\xb7  drag: move  \xc2\xb7  up=treble down=bass"), // ·
                        plot.getRight() - 320, (int) bf.getY() + 2, 320, 10,
                        juce::Justification::right, false);
         }
