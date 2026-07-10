@@ -576,7 +576,9 @@ static void chain_resolve_insert_states(const SynthChainPlan *sp,
  *
  * Slots CHAIN_SYNTH_COUNT..CHAIN_SYNTH_COUNT+CHAIN_MAX_CHAINS-1 belong to the
  * probe-only chains (plan.probe_chain[i] → slot CHAIN_SYNTH_COUNT + i). */
-static uint8_t s_synth_src_scratch[CHAIN_SYNTH_COUNT + CHAIN_MAX_CHAINS][3][INTERNAL_SRC_MAX_PIXELS];
+/* Slots: [0..3] synth engines, [4..11] probe chains, [12..19] P3 LuxStral
+ * sends (CHAIN_SYNTH_COUNT + CHAIN_MAX_CHAINS + chain_idx). */
+static uint8_t s_synth_src_scratch[CHAIN_SYNTH_COUNT + 2 * CHAIN_MAX_CHAINS][3][INTERNAL_SRC_MAX_PIXELS];
 
 static int synth_source_base(const SynthChainPlan *sp, int synth_slot,
                              DoubleBuffer *db, int nb_pixels,
@@ -586,6 +588,11 @@ static int synth_source_base(const SynthChainPlan *sp, int synth_slot,
     const int kind = internal_source_kind_for_chain_src(sp->source_kind);
     if (kind >= 0)
     {
+        /* Defensive clamp — every caller passes a slot < the scratch dim
+         * (engines 0..3, probes 4..11, P3 sends 12..19). */
+        if (synth_slot < 0
+            || synth_slot >= CHAIN_SYNTH_COUNT + 2 * CHAIN_MAX_CHAINS)
+            synth_slot = 0;
         uint8_t *r = s_synth_src_scratch[synth_slot][0];
         uint8_t *g = s_synth_src_scratch[synth_slot][1];
         uint8_t *b = s_synth_src_scratch[synth_slot][2];
