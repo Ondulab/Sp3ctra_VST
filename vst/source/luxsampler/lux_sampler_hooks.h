@@ -6,7 +6,12 @@
  *
  * C/C++ compatible declarations for the LuxSampler interception hooks.
  * These functions are implemented in LuxSampler.cpp (C++ side) and called
- * from udpThread() in multithreading.c (C side).
+ * from multithreading.c (C side) by whichever thread drives the per-synth
+ * processing: udpThread() while the SP3CTRA device streams, the internal
+ * source feeder tick (internal_sources_process_tick, MediaSourceService
+ * thread) otherwise — the 250 ms hand-over hysteresis keeps the two
+ * exclusive. Where the docs below say "udpThread()", read "the current
+ * per-line producer".
  *
  * Only active in VST_MODE (standalone build has no LuxSampler).
  */
@@ -145,6 +150,20 @@ int lux_sampler_is_passthrough(void);
  * @return 1 if sequencer STEP_LIVE is active, 0 otherwise
  */
 int lux_sampler_is_seq_live_step(void);
+
+/**
+ * @brief Returns non-zero while the SCORE player is actively playing back
+ *        (any engine's dedicated scoreSlot is in playback).
+ *
+ * Used by udpThread() / the feeder tick to leave engine B's input alone while
+ * FramePlayerThread owns it (luxstral_b_feed_player_frame), and to commit
+ * silence to a score-fed chain only when the score is idle.
+ *
+ * Thread: UDP receiver thread / feeder (Non-RT). Atomic read only.
+ *
+ * @return 1 if score playback active, 0 otherwise
+ */
+int lux_sampler_is_score_playing(void);
 
 #ifdef __cplusplus
 } /* extern "C" */

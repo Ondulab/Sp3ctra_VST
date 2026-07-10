@@ -37,6 +37,26 @@ SystemSettingsTab::SystemSettingsTab(Sp3ctraAudioProcessor& processor)
         std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
             apvts, "luxstralNumWorkers", numWorkersSlider);
 
+    // ── MIDI — auto-navigate to the module a controller edits ─────────────────
+    midiSectionLabel.setText("MIDI", juce::dontSendNotification);
+    midiSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
+    midiSectionLabel.setColour(juce::Label::textColourId, juce::Colour(0xff66cc88u));
+    midiSectionLabel.setJustificationType(juce::Justification::centredLeft);
+    addAndMakeVisible(midiSectionLabel);
+
+    midiFollowLabel.setText("Follow control:", juce::dontSendNotification);
+    midiFollowLabel.setJustificationType(juce::Justification::centredRight);
+    midiFollowLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+    addAndMakeVisible(midiFollowLabel);
+
+    midiFollowToggle.setButtonText("Show the module a MIDI control edits");
+    midiFollowToggle.setTooltip("When a mapped MIDI controller changes a parameter "
+                               "(played notes excluded), jump to that module's page.");
+    addAndMakeVisible(midiFollowToggle);
+    midiFollowAttachment =
+        std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, "midiFollowParam", midiFollowToggle);
+
     // ── Detached video window default size (from VideoScrollSettingsTab) ──────
     videoWindowSectionLabel.setText("Detached Video Window", juce::dontSendNotification);
     videoWindowSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
@@ -113,6 +133,11 @@ void SystemSettingsTab::resized()
     placeRow(logLevelLabel,   logLevelCombo);
     bounds.removeFromTop(Sp3ctraTheme::kSectionGap);
     placeRow(numWorkersLabel, numWorkersSlider);
+
+    bounds.removeFromTop(Sp3ctraTheme::kSectionGap * 3);
+    midiSectionLabel.setBounds(bounds.removeFromTop(Sp3ctraTheme::kSectionH));
+    bounds.removeFromTop(Sp3ctraTheme::kSectionGap);
+    placeRow(midiFollowLabel, midiFollowToggle);
 
     bounds.removeFromTop(Sp3ctraTheme::kSectionGap * 3);
     videoWindowSectionLabel.setBounds(bounds.removeFromTop(Sp3ctraTheme::kSectionH));

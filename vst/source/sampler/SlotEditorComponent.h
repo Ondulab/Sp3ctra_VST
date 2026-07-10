@@ -2,8 +2,8 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../luxsampler/LuxSampler.h"
-#include "SlotTimelineComponent.h"
-#include "SpectralCurveComponent.h"
+#include "SlotSpectralEditorComponent.h"
+#include "../image/ScoreEqComponent.h"
 
 class Sp3ctraAudioProcessor;
 
@@ -194,21 +194,16 @@ private:
 /**
  * @brief Edit panel for the currently selected LuxSampler slot.
  *
- * Layout — two vertical columns inside a full-width zone:
- *   Left  (~63 %):
- *     REC / PLAY-STOP / CLEAR   — state-aware action buttons
- *     Timeline                  — brightness waveform; drag handles set Start/End
- *                                 (Start/End sliders removed — edited directly on timeline)
- *   Right (~37 %):
- *     Speed    — playback speed multiplier [0.01..32.0×]; skewed so 1.0× is at centre
- *     Loop     — four radio-style buttons (NONE / LOOP / INV / PING)
- *     Resume   — toggle: resume from last stopped position
- *     Curve    — fade curve type selector (LIN / EXP / LOG / S)
- *     Power    — curve intensity slider [0.1..10.0]
+ * Layout — parameters in TWO columns on top, one merged editor below:
+ *   Left column  : [REC][PLAY][CLEAR] · Speed · Loop · Loop XF · IMG
+ *   Right column : [CROP][SAVE][LOAD] · Resume · Overdub · Curve · Power
+ *   Bottom       : SlotSpectralEditorComponent — the authentic captured image
+ *                  with the time handles (Start/End/fades/playhead) AND the
+ *                  frequency EQ curve overlaid on one surface.
  *
  * Control values are written directly to LuxSampler per-slot play params (Non-RT).
  * Values are refreshed from LuxSampler on slot switch (setSelectedSlot).
- * Button states are refreshed at ~5 Hz via internal Timer.
+ * Button states are refreshed at ~33 Hz via internal Timer.
  */
 class SlotEditorComponent : public juce::Component,
                             private juce::Timer
@@ -221,13 +216,9 @@ public:
     void setSelectedSlot(int idx);
     int  getSelectedSlot() const noexcept { return selectedSlot; }
 
-    /** Bind this editor (and its timeline) to sampler engine 0 (A) or 1 (B). */
-    void setSamplerIndex(int i)
-    {
-        samplerIndex_ = i;
-        timeline.setSamplerIndex(i);
-        setSelectedSlot(selectedSlot);   // refresh controls from the new engine
-    }
+    /** Bind this editor (and its timeline) to sampler engine 0 (A) or 1 (B).
+     *  Purges the engine's stale MIDI pulses before acting on them. */
+    void setSamplerIndex(int i);
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -249,18 +240,14 @@ private:
     int  samplerIndex_ = 0;   // 0 = engine A, 1 = engine B
     bool blinkOn       = false;
     bool prevRecording_ = false; // detect record-stop to refresh the curve backdrop
+    bool prevHasContent_ = false; // detect external CLEAR to reset the freq-curve view
 
-    // Bottom band reserved for the spectral-curve editor.
-    static constexpr int kCurveBandH = 170;
-    static constexpr int kCurveGap   = 6;
+    // ── Image + time + fades editor (middle) and SCORE-style EQ panel (bottom) ──
+    SlotSpectralEditorComponent spectralEditor;
+    ScoreEqComponent            eqEditor { juce::Colour(0xffcc88ff) };
+    bool                        suppressEqPush_ = false; // guard during refresh
 
-    // ── Timeline visualizer ───────────────────────────────────────────────────
-    SlotTimelineComponent timeline;
-
-    // ── Frequency-axis multi-point curve editor (replaces HF/LF) ──────────────
-    SpectralCurveComponent freqCurveEditor;
-
-    /** Reload freqCurveEditor points from the current slot (silent). */
+    /** Reload the EQ curve into eqEditor from the current slot (silent). */
     void refreshFreqCurve();
 
     // ── Action buttons ────────────────────────────────────────────────────────
@@ -282,6 +269,9 @@ private:
     // ── Labels ────────────────────────────────────────────────────────────────
     juce::Label  brightnessLabel { {}, "IMG" };
     juce::Slider brightnessSlider;
+    // Pre-EQ material floor (0 % = off … 100 % = total white mask).
+    juce::Label  floorLabel { {}, "Floor" };
+    juce::Slider floorSlider;
     juce::Label speedLabel { {}, "Speed" };
     juce::Label loopLabel  { {}, "Loop" };
 
@@ -303,11 +293,16 @@ private:
     // of erasing it (tape-style "continue recording").
     juce::ToggleButton overdubToggle { "Overdub (extend REC)" };
 
-    // ── Fade curve controls ───────────────────────────────────────────────────
-    juce::Label    fadeCurveLabel { {}, "Curve" };
-    juce::ComboBox fadeCurveTypeBox;
-    juce::Label    fadePowerLabel { {}, "Power" };
-    juce::Slider   fadePowerSlider;  // 0.1–10.0, default 1.0
+    // ── Per-fade curve controls (independent attack / decay) ──────────────────
+    juce::Label    fadeInLabel  { {}, "In" };
+    juce::ComboBox fadeInCurveBox;
+    juce::Slider   fadeInPowerSlider;   // 0.1–10.0
+    juce::Label    fadeOutLabel { {}, "Out" };
+    juce::ComboBox fadeOutCurveBox;
+    juce::Slider   fadeOutPowerSlider;  // 0.1–10.0
+
+    /** Populate a fade curve-type ComboBox with LIN/EXP/LOG/S. */
+    static void fillCurveBox(juce::ComboBox& box);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SlotEditorComponent)
 };

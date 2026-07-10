@@ -2,10 +2,9 @@
  * @file PitchSetupPanel.h
  * @brief SETUP face of the PITCH block (zone 3, M5).
  *
- * Migrated 1:1 from the former gear-wheel LuxPitchSettingsTab —
- * same controls, same APVTS parameter IDs:
- *   luxpitchMidiChannel / luxpitchOctaveOffset /
- *   luxpitchReferenceNote / luxpitchPolyphony
+ * Migrated 1:1 from the former gear-wheel LuxPitchSettingsTab — same controls,
+ * now bound to the selected instance's PER-INSTANCE bank (luxpitch{slot}_*):
+ * setSlot(slot) rebinds every attachment (same pattern as VideoScrollPage).
  */
 #pragma once
 
@@ -19,6 +18,11 @@ public:
     PitchSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour);
     ~PitchSetupPanel() override;
 
+    /** Bind every control to the PITCH bank of `slot` (0..7) — the selected
+     *  instance's parameters. */
+    void setSlot(int slot);
+    int  slot() const noexcept { return slot_; }
+
     /** Natural content height (header + 7 rows). */
     static constexpr int kPreferredH = 295;
 
@@ -28,6 +32,7 @@ public:
 private:
     juce::AudioProcessorValueTreeState& apvts;
     juce::Colour accent;
+    int slot_ = 0;   // pool slot of the bound instance
 
     // Step Mode (LuxStral / Free)
     juce::Label    couplingLabel;

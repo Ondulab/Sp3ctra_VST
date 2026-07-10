@@ -2,6 +2,7 @@
 #include "PluginEditor.h"
 #include "IconPaths.h"
 #include "ui/ScrollWheelGuard.h"
+#include "Sp3ctraVersion.h"
 
 //==============================================================================
 Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& p)
@@ -37,7 +38,14 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
 
     // ── ZONE 2: chain rack inside a vertical viewport ─────────────────────────
     chainRack = std::make_unique<ChainRackComponent>(audioProcessor);
-    chainRack->onBlockSelected = [this](ChainBlockId id) { selectBlock(id); };
+    // A rack click on a synth block opens its OUT/send page (the engine page
+    // is reached from the ZONE-5 dock card) — synth-split P2.
+    chainRack->onBlockSelected = [this](ChainBlockId id)
+    {
+        engineView_ = false;
+        selectBlock(id);
+        persistLayoutProps();
+    };
     // Selecting a VIDEO SCROLL output binds the contextual panel to that
     // instance's bank (fires just before onBlockSelected → selectBlock).
     chainRack->onVideoBlockSelected = [this](int slot)
@@ -53,14 +61,14 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         if (samplerPage)  samplerPage ->setSamplerIndex(slot);
         if (samplerSetup) samplerSetup->setSamplerIndex(slot);
     };
-    // Selecting a LUXSTRAL block binds the module page + setup to engine A/B
-    // (slot 0 = A, 1 = B), fired just before onBlockSelected → selectBlock —
-    // so the PLAY/SETUP faces edit the right engine's parameter set (M8).
+    // Selecting a LUXSTRAL send tracks its slot (0/1) — it drives the OUT
+    // page's conditioning bank and the per-send power button. The ENGINE
+    // page/setup stay bound to the main parameter set: there is ONE LuxStral
+    // engine user-side (synth-split D1 — the hidden B voice mirrors A's
+    // engine params, see applyConfigurationToCore).
     chainRack->onLuxStralBlockSelected = [this](int slot)
     {
         luxStralEngineIndex_ = (slot == 1) ? 1 : 0;
-        if (imgLuxStralPage) imgLuxStralPage->setEngineIndex(luxStralEngineIndex_);
-        if (stralSetup)      stralSetup->setEngineIndex(luxStralEngineIndex_);
     };
     // A chain edit changes the rack's preferred height → re-run the zone layout.
     chainRack->onModelChanged  = [this]
@@ -122,8 +130,20 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     scorePage = std::make_unique<ScoreGenTabComponent>(audioProcessor);
     zone3Content.addChildComponent(scorePage.get());
 
+    // TIMBRE — parametric instrument-spectrum generator (no SETUP face)
+    timbrePage = std::make_unique<TimbreGenTabComponent>(audioProcessor);
+    zone3Content.addChildComponent(timbrePage.get());
+
     videoScrollPage = std::make_unique<VideoScrollPage>(audioProcessor);
     zone3Content.addChildComponent(videoScrollPage.get());
+
+    // FX — REVERB / ECHO / EQ insert pages (all controls on the PLAY face)
+    reverbPage = std::make_unique<LuxReverbTabComponent>(audioProcessor);
+    echoPage   = std::make_unique<LuxEchoTabComponent>(audioProcessor);
+    eqPage     = std::make_unique<LuxEqTabComponent>(audioProcessor);
+    zone3Content.addChildComponent(reverbPage.get());
+    zone3Content.addChildComponent(echoPage.get());
+    zone3Content.addChildComponent(eqPage.get());
 
     // M9 — IMAGE / VIDEO / CAMERA source pages (preview + movable line + transport)
     imageSrcPage  = std::make_unique<MediaSourcePage>(audioProcessor, MediaSourcePage::Kind::Image);
@@ -138,6 +158,11 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     // now part of their module pages (imgLuxStralPage / imgLuxSynthPage).
     audioWavePanel  = std::make_unique<AudioWavePanel>(audioProcessor);
     zone3Content.addChildComponent(audioWavePanel.get());
+
+    // OUT/send page (synth-split P2) — one instance, rebound per selection to
+    // the selected send's conditioning bank (type + slot).
+    synthOutPage = std::make_unique<SynthOutPageComponent>(audioProcessor);
+    zone3Content.addChildComponent(synthOutPage.get());
 
     // SETUP faces (M5) — per-block settings migrated from the gear-wheel
     // window (same params & attachments), accent-matched to the chain rack.
@@ -157,18 +182,8 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         audioProcessor, ChainRackComponent::blockColour(ChainBlockId::Sampler));
     scoreSetup   = std::make_unique<ScoreSetupPanel>(
         audioProcessor, ChainRackComponent::blockColour(ChainBlockId::Score));
-    imageSrcSetup  = std::make_unique<MediaSourceSetupPanel>(
-        audioProcessor, MediaSourceSetupPanel::Kind::Image,
-        ChainRackComponent::blockColour(ChainBlockId::ImageSrc));
-    videoSrcSetup  = std::make_unique<MediaSourceSetupPanel>(
-        audioProcessor, MediaSourceSetupPanel::Kind::Video,
-        ChainRackComponent::blockColour(ChainBlockId::VideoSrc));
-    cameraSrcSetup = std::make_unique<MediaSourceSetupPanel>(
-        audioProcessor, MediaSourceSetupPanel::Kind::Camera,
-        ChainRackComponent::blockColour(ChainBlockId::CameraSrc));
-    zone3Content.addChildComponent(imageSrcSetup.get());
-    zone3Content.addChildComponent(videoSrcSetup.get());
-    zone3Content.addChildComponent(cameraSrcSetup.get());
+    // M9 — media modules: source picking lives on the PLAY page now
+    // (MediaSourcePage hosts LOAD/CLEAR/device combo); no SETUP face.
     zone3Content.addChildComponent(sourceSetup.get());
     zone3Content.addChildComponent(pitchSetup.get());
     zone3Content.addChildComponent(maskSetup.get());
@@ -190,6 +205,18 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     };
     addChildComponent(faceSwitch);
     addChildComponent(modulePowerButton);
+
+    // ── AUDIO MIX (bottom of ZONE 4) — engines + MASTER, faders + VU (P2b) ────
+    audioMixPanel = std::make_unique<AudioMixPanel>(audioProcessor);
+    audioMixPanel->onEngineSelected = [this](ModuleType t)
+    {
+        engineView_ = true;
+        selectBlock(t == ModuleType::LuxSynth ? ChainBlockId::LuxSynth
+                  : t == ModuleType::LuxWave  ? ChainBlockId::LuxWave
+                                              : ChainBlockId::LuxStral);
+        persistLayoutProps();
+    };
+    addAndMakeVisible(audioMixPanel.get());
 
     // ── ZONE 4: video scroll column (hosts the former VIDEO tab) ──────────────
     waterfallColumn = std::make_unique<VideoMixerColumn>(audioProcessor);
@@ -250,25 +277,25 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         (int) state.getProperty("selSamplerEngine", 0));
     videoSlotIndex_      = juce::jlimit(0, ChainModel::kMaxVideoSlots - 1,
         (int) state.getProperty("selVideoSlot", 0));
-    if (imgLuxStralPage) imgLuxStralPage->setEngineIndex(luxStralEngineIndex_);
-    if (stralSetup)      stralSetup     ->setEngineIndex(luxStralEngineIndex_);
     if (samplerPage)     samplerPage    ->setSamplerIndex(samplerEngineIndex_);
     if (samplerSetup)    samplerSetup   ->setSamplerIndex(samplerEngineIndex_);
     if (videoScrollPage) videoScrollPage->setSlot(videoSlotIndex_);
 
     // Selected block: fall back to the default when out of range or when its
     // module was deleted since the save (the rack can't highlight a ghost).
-    auto sel = ChainBlockId::Chain1Source;
+    // An entirely empty rack restores as "no selection" (zone 1/3 blank).
+    auto sel = chainRack->firstBlockId();
     {
         const int raw = (int) state.getProperty("selBlock", (int) sel);
         if (raw >= (int) ChainBlockId::Chain1Source
-            && raw <= (int) ChainBlockId::CameraSrc
+            && raw <= (int) ChainBlockId::Equalizer
             && chainRack->hasBlock((ChainBlockId) raw))
             sel = (ChainBlockId) raw;
     }
     // Pre-seed selectedBlock so selectBlock() keeps the restored face (it
     // resets to PLAY on a block CHANGE); blockHasSetup is re-checked inside.
     setupFace     = (bool) state.getProperty("selSetupFace", false);
+    engineView_   = (bool) state.getProperty("selEngineView", false);
     selectedBlock = sel;
     selectBlock(sel);
 
@@ -284,10 +311,18 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     // Scrolling a panel should never nudge the knob/slider under the cursor:
     // disable wheel-driven value changes on every Slider in the editor tree.
     Sp3ctraUI::disableSliderScrollWheel(*this);
+
+    // ── MIDI-follow poll ──────────────────────────────────────────────────────
+    // Sync the baseline so a controller move that happened while the editor was
+    // closed doesn't jump on open, then poll the mapping engine for the next
+    // touched parameter (auto-navigate when the setting is on).
+    audioProcessor.getMidiMap().resetTouchBaseline();
+    startTimerHz(20);
 }
 
 Sp3ctraAudioProcessorEditor::~Sp3ctraAudioProcessorEditor()
 {
+    stopTimer();
     audioProcessor.onStateRestoredUi = nullptr;   // this editor is going away
     juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
     settingsWindow.reset();
@@ -298,9 +333,26 @@ bool Sp3ctraAudioProcessorEditor::blockHasSetup(ChainBlockId id) noexcept
 {
     // Every block has a SETUP face — the SP3CTRA source hosts the network/CIS
     // configuration there (formerly the gear-wheel Network tab) — EXCEPT the
-    // SEQUENCER module, whose controls all live on its single PLAY page, and the
-    // VIDEO SCROLL output, whose params are all on its PLAY page (no setup).
-    return id != ChainBlockId::Sequencer && id != ChainBlockId::VideoScroll;
+    // SEQUENCER module, whose controls all live on its single PLAY page, the
+    // VIDEO SCROLL output, whose params are all on its PLAY page (no setup),
+    // the REVERB / ECHO / EQ FX inserts (single PLAY page too), and the
+    // IMAGE / VIDEO / CAMERA media modules (source picking lives on PLAY).
+    return id != ChainBlockId::Sequencer && id != ChainBlockId::VideoScroll
+        && id != ChainBlockId::Reverb    && id != ChainBlockId::Echo
+        && id != ChainBlockId::Equalizer
+        && id != ChainBlockId::Timbre
+        && id != ChainBlockId::None
+        && id != ChainBlockId::ImageSrc  && id != ChainBlockId::VideoSrc
+        && id != ChainBlockId::CameraSrc;
+}
+
+//==============================================================================
+// Synth-split P2 — the three synth blocks host two zone-3 views: the OUT/send
+// page (rack click) and the engine page (dock click).
+static bool isSynthBlock(ChainBlockId id) noexcept
+{
+    return id == ChainBlockId::LuxStral || id == ChainBlockId::LuxSynth
+        || id == ChainBlockId::LuxWave;
 }
 
 //==============================================================================
@@ -317,10 +369,17 @@ void Sp3ctraAudioProcessorEditor::applyZone3Visibility()
     if (maskPage)        maskPage       ->setVisible(play && id == ChainBlockId::Mask);
     if (samplerPage)     samplerPage    ->setVisible(play && id == ChainBlockId::Sampler);
     if (sequencerPage)   sequencerPage  ->setVisible(play && id == ChainBlockId::Sequencer);
-    if (imgLuxStralPage) imgLuxStralPage->setVisible(play && id == ChainBlockId::LuxStral);
-    if (imgLuxSynthPage) imgLuxSynthPage->setVisible(play && id == ChainBlockId::LuxSynth);
-    if (audioWavePanel)  audioWavePanel ->setVisible(play && id == ChainBlockId::LuxWave);
+    // Synth blocks (P2): engine pages only in ENGINE view (dock); the rack
+    // click shows the OUT/send page instead.
+    if (imgLuxStralPage) imgLuxStralPage->setVisible(play && engineView_ && id == ChainBlockId::LuxStral);
+    if (imgLuxSynthPage) imgLuxSynthPage->setVisible(play && engineView_ && id == ChainBlockId::LuxSynth);
+    if (audioWavePanel)  audioWavePanel ->setVisible(play && engineView_ && id == ChainBlockId::LuxWave);
+    if (synthOutPage)    synthOutPage   ->setVisible(play && !engineView_ && isSynthBlock(id));
     if (scorePage)       scorePage      ->setVisible(play && id == ChainBlockId::Score);
+    if (timbrePage)      timbrePage     ->setVisible(play && id == ChainBlockId::Timbre);
+    if (reverbPage)      reverbPage     ->setVisible(play && id == ChainBlockId::Reverb);
+    if (echoPage)        echoPage       ->setVisible(play && id == ChainBlockId::Echo);
+    if (eqPage)          eqPage         ->setVisible(play && id == ChainBlockId::Equalizer);
     if (videoScrollPage) videoScrollPage->setVisible(play && id == ChainBlockId::VideoScroll);
     if (imageSrcPage)    imageSrcPage   ->setVisible(play && id == ChainBlockId::ImageSrc);
     if (videoSrcPage)    videoSrcPage   ->setVisible(play && id == ChainBlockId::VideoSrc);
@@ -336,9 +395,54 @@ void Sp3ctraAudioProcessorEditor::applyZone3Visibility()
     if (stralSetup)   stralSetup  ->setVisible(setupFace && id == ChainBlockId::LuxStral);
     if (synthSetup)   synthSetup  ->setVisible(setupFace && id == ChainBlockId::LuxSynth);
     if (waveSetup)    waveSetup   ->setVisible(setupFace && id == ChainBlockId::LuxWave);
-    if (imageSrcSetup)  imageSrcSetup ->setVisible(setupFace && id == ChainBlockId::ImageSrc);
-    if (videoSrcSetup)  videoSrcSetup ->setVisible(setupFace && id == ChainBlockId::VideoSrc);
-    if (cameraSrcSetup) cameraSrcSetup->setVisible(setupFace && id == ChainBlockId::CameraSrc);
+}
+
+//==============================================================================
+// MIDI-follow — jump to the module whose parameter a controller just moved.
+//==============================================================================
+bool Sp3ctraAudioProcessorEditor::midiFollowEnabled() const
+{
+    if (auto* v = audioProcessor.getAPVTS().getRawParameterValue("midiFollowParam"))
+        return v->load() > 0.5f;
+    return false;
+}
+
+void Sp3ctraAudioProcessorEditor::timerCallback()
+{
+    juce::String paramId;
+    // Always drain the touch flag so turning the setting on later never replays
+    // a stale move; only navigate while the setting is enabled.
+    const bool touched = audioProcessor.getMidiMap().takeLastTouchedParam(paramId);
+    if (touched && midiFollowEnabled())
+        followMidiParam(paramId);
+}
+
+void Sp3ctraAudioProcessorEditor::followMidiParam(const juce::String& paramId)
+{
+    const auto tgt = audioProcessor.navTargetForParam(paramId);
+    if (! tgt.valid || chainRack == nullptr)
+        return;   // param not tied to a rack module, or the module isn't present
+
+    // Already showing this exact target? Don't re-select — a CC sweep fires many
+    // events and re-selecting would reset the zone-3 scroll position each tick.
+    if (chainRack->selectedInstanceId() == tgt.instanceId
+        && ! setupFace && engineView_ == tgt.engineView)
+        return;
+
+    // Drive the rack like a user click: it rebinds the per-instance page/setup
+    // bindings via its pre-callbacks and runs selectBlock() through our
+    // onBlockSelected handler (which lands on the OUT view for synths).
+    chainRack->selectInstanceById(tgt.instanceId);
+
+    // Land on the face/view where the mapped control actually lives. selectBlock
+    // only auto-resets the face on a block CHANGE, so force it for a same-block
+    // re-target (e.g. a PLAY param touched while the SETUP face was showing, or
+    // a synth ENGINE param that needs the engine page rather than the OUT page).
+    bool reselect = false;
+    if (setupFace)                     { setupFace = false;               reselect = true; }
+    if (engineView_ != tgt.engineView) { engineView_ = tgt.engineView;    reselect = true; }
+    if (reselect)
+        selectBlock(selectedBlock);
 }
 
 //==============================================================================
@@ -348,9 +452,88 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
     if (id != selectedBlock)
         setupFace = false;
 
+    // Engine view only exists for the synth blocks.
+    if (!isSynthBlock(id))
+        engineView_ = false;
+
     selectedBlock = id;
     if (chainRack)
         chainRack->setSelectedBlock(id);
+
+    // ── Contextual selection tap ──────────────────────────────────────────────
+    // Tell the processor WHICH INSTANCE is selected: the chain executor then
+    // publishes the stream at that module's position in ITS chain (selection-
+    // tap bus), and the SELECTED_TAP panel badge names the module + chain —
+    // clicking a module in chain 2 must never show chain 1's stream.
+    const juce::Uuid selUid = chainRack ? chainRack->selectedInstanceId()
+                                        : juce::Uuid::null();
+    audioProcessor.setVisualizerTapModule(selUid);
+
+    // Pooled inserts (Pitch/Mask/Reverb/Echo) are per-instance: rebind the
+    // zone-3 pages / setup panels to the SELECTED instance's param bank (pool
+    // slot keyed by its UUID) — two Pitch modules on two chains edit two
+    // independent parameter sets.
+    const int insertSlot = audioProcessor.poolSlotForInstance(selUid);
+    if (id == ChainBlockId::Pitch)
+    {
+        if (pitchPage)  pitchPage ->setSlot(insertSlot);
+        if (pitchSetup) pitchSetup->setSlot(insertSlot);
+    }
+    else if (id == ChainBlockId::Mask)
+    {
+        if (maskPage)  maskPage ->setSlot(insertSlot);
+        if (maskSetup) maskSetup->setSlot(insertSlot);
+    }
+    else if (id == ChainBlockId::Reverb)
+    {
+        if (reverbPage) reverbPage->setSlot(insertSlot);
+    }
+    else if (id == ChainBlockId::Echo)
+    {
+        if (echoPage) echoPage->setSlot(insertSlot);
+    }
+    else if (id == ChainBlockId::Equalizer)
+    {
+        if (eqPage) eqPage->setSlot(insertSlot);
+    }
+    // Synth blocks: rebind the OUT/send page to this send's conditioning bank.
+    // The LuxStral slot is resolved from the SELECTED INSTANCE (not from the
+    // restored engine index — a session restore may highlight another send).
+    if (id == ChainBlockId::LuxStral)
+    {
+        int sc = -1, si = -1;
+        if (const auto* m = audioProcessor.getChainModel().find(selUid, sc, si))
+            if (m->type == ModuleType::LuxStral)
+                luxStralEngineIndex_ = (m->slot == 1) ? 1 : 0;
+    }
+    if (synthOutPage != nullptr && isSynthBlock(id))
+    {
+        if (id == ChainBlockId::LuxStral)
+            synthOutPage->setTarget(ModuleType::LuxStral, luxStralEngineIndex_);
+        else if (id == ChainBlockId::LuxSynth)
+            synthOutPage->setTarget(ModuleType::LuxSynth, 0);
+        else
+            synthOutPage->setTarget(ModuleType::LuxWave, 0);
+    }
+    if (audioMixPanel != nullptr)
+    {
+        if (isSynthBlock(id) && engineView_)
+            audioMixPanel->setSelectedEngine(id == ChainBlockId::LuxSynth ? ModuleType::LuxSynth
+                                           : id == ChainBlockId::LuxWave  ? ModuleType::LuxWave
+                                                                          : ModuleType::LuxStral,
+                                             true);
+        else
+            audioMixPanel->clearSelection();
+    }
+    if (cisVisualizer)
+    {
+        juce::String tapLabel;
+        int sc = -1, si = -1;
+        if (const auto* m = audioProcessor.getChainModel().find(selUid, sc, si))
+            tapLabel = moduleDisplayName(m->type).toUpperCase()
+                     + " - CHAIN " + juce::String(sc + 1);
+        cisVisualizer->setSelectedTapLabel(tapLabel);
+    }
 
     // ── ZONE 1: stacked visualizer panels — ALL outputs of this block ─────────
     // The visualizer shows every output of the selected module simultaneously,
@@ -371,11 +554,12 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
         case ChainBlockId::Chain2Source:
             sources = { VisualizerMode::LIVE };         // Chain 2
             break;
+        // Mid-chain inserts are CONTEXTUAL: zone 1 shows the stream at the
+        // selected module's output IN ITS OWN CHAIN (selection tap) — the old
+        // global LUXPITCH/LUXMASK taps only reflected chain 1's executor.
         case ChainBlockId::Pitch:
-            sources = { VisualizerMode::LUXPITCH_OUTPUT };
-            break;
         case ChainBlockId::Mask:
-            sources = { VisualizerMode::LUXMASK_OUTPUT };
+            sources = { VisualizerMode::SELECTED_TAP };
             break;
         // No dedicated SAMPLER view exists any more (deprecated alias) — the
         // sampler lives inside the Modulated channel, so show MODULATED.
@@ -398,21 +582,40 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
         case ChainBlockId::Score:
             sources = { VisualizerMode::MODULATED };
             break;
+        // TIMBRE is an offline generator too — same neutral view.
+        case ChainBlockId::Timbre:
+            sources = { VisualizerMode::MODULATED };
+            break;
         // SEQUENCER drives the sampler engines — neutral Modulated view in zone 1.
         case ChainBlockId::Sequencer:
             sources = { VisualizerMode::MODULATED };
             break;
-        // VIDEO SCROLL output — neutral Modulated view in zone 1 (its own waterfall
-        // is composited in the right-band mixer, not here).
+        // VIDEO SCROLL probe — zone 1 shows the stream AT the probe's position
+        // in its chain (what the probe captures), not the global Modulated bus.
         case ChainBlockId::VideoScroll:
-            sources = { VisualizerMode::MODULATED };
+            sources = { VisualizerMode::SELECTED_TAP };
             break;
-        // M9 — media sources: their line feeds the raw/live bus when they drive
-        // the pipeline; the page's own preview is the primary view anyway.
+        // FX inserts — contextual: their output at their position in THEIR
+        // chain (a REVERB in chain 2 must never show chain 1's stream).
+        case ChainBlockId::Reverb:
+        case ChainBlockId::Echo:
+        case ChainBlockId::Equalizer:
+            sources = { VisualizerMode::SELECTED_TAP };
+            break;
+        // M9 — media sources: zone 1 shows the MODULE'S OWN line (internal
+        // source pool tap) — contextual to the selected module, never the
+        // global SP3CTRA live feed.
         case ChainBlockId::ImageSrc:
+            sources = { VisualizerMode::SRC_IMAGE };
+            break;
         case ChainBlockId::VideoSrc:
+            sources = { VisualizerMode::SRC_VIDEO };
+            break;
         case ChainBlockId::CameraSrc:
-            sources = { VisualizerMode::LIVE };
+            sources = { VisualizerMode::SRC_CAMERA };
+            break;
+        // Empty rack — nothing selected, zone 1 shows its idle state.
+        case ChainBlockId::None:
             break;
     }
     // The SOURCES page transport follows the selected chain (1 or 2).
@@ -429,14 +632,21 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
 
         // Blob overlay follows image-pipeline blocks (audio-only / sampler: off),
         // mirroring the former per-tab behaviour.
-        const bool imageMode = (id != ChainBlockId::Sampler && id != ChainBlockId::LuxWave);
+        const bool imageMode = (id != ChainBlockId::Sampler && id != ChainBlockId::LuxWave
+                             && id != ChainBlockId::None);
         cisVisualizer->setBlobOverlayVisible(imageMode);
     }
 
     // ── PLAY | SETUP switcher: visibility + accent follow the selection ──────
-    if (!blockHasSetup(id))
+    // Blocks without a SETUP face still show the bar with the single PLAY
+    // segment (uniform header across all modules); only the empty rack hides it.
+    // The synth OUT/send view is PLAY-only — the SETUP face (engine config)
+    // belongs to the engine view reached from the dock.
+    const bool outView = isSynthBlock(id) && !engineView_;
+    if (!blockHasSetup(id) || outView)
         setupFace = false;
-    faceSwitch.setVisible(blockHasSetup(id));
+    faceSwitch.setPlayOnly(!blockHasSetup(id) || outView);
+    faceSwitch.setVisible(id != ChainBlockId::None);
     faceSwitch.setAccent(ChainRackComponent::blockColour(id));
     faceSwitch.setFace(setupFace, false);
 
@@ -448,7 +658,21 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
         // mapping returns deviceEnabled, which is engine A's toggle).
         if (id == ChainBlockId::LuxStral && luxStralEngineIndex_ == 1)
             enableId = "luxstralBEnabled";
-        const bool showPower = blockHasSetup(id) && enableId.isNotEmpty();
+        // Pooled inserts: the enable lives in the selected INSTANCE's bank
+        // (the catalog's type-level id is empty for them).
+        else if (id == ChainBlockId::Pitch)
+            enableId = lpParam(insertSlot, "Enabled");
+        else if (id == ChainBlockId::Mask)
+            enableId = lmParam(insertSlot, "Enabled");
+        else if (id == ChainBlockId::Reverb)
+            enableId = rvParam(insertSlot, "Enabled");
+        else if (id == ChainBlockId::Echo)
+            enableId = ecParam(insertSlot, "Enabled");
+        else if (id == ChainBlockId::Equalizer)
+            enableId = eqParam(insertSlot, "Enabled");
+        // Power follows the enable param alone — blocks without a SETUP face
+        // (Sequencer, the FX inserts) still need their on/off switch here.
+        const bool showPower = enableId.isNotEmpty();
         modulePowerAttachment.reset();   // detach before rebinding to a new param
         if (showPower)
         {
@@ -463,6 +687,7 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
     // ── Keyboard ruler under zone 1 (M5): PITCH / MASK only ──────────────────
     if (keyboardRuler)
     {
+        keyboardRuler->setSlot(insertSlot);   // mirror the SELECTED instance
         if (id == ChainBlockId::Pitch)
             keyboardRuler->setModule(KeyboardRulerComponent::Module::Pitch);
         else if (id == ChainBlockId::Mask)
@@ -493,15 +718,22 @@ Sp3ctraAudioProcessorEditor::luxStralVisualizerSources() const
     // the per-oscillator panning); BLOB appears only when StrokeForge is on.
     // When a panel is hidden its computation is skipped too — see image_pipeline.c
     // Stage 8 (pan, gated on stereo) and Stage 9 (blob, gated on StrokeForge).
+    //
+    // ENGINE-AWARE: engine B gets ITS OWN views (SPCTR_B_*) — B's real
+    // preprocessed input + B's chain RGB — never engine A's global buses
+    // (selecting LUXSTRAL B used to show engine A's stream).
     auto& apvts = audioProcessor.getAPVTS();
-    std::vector<VisualizerMode> s { VisualizerMode::SPCTR_GRAY };
+    const bool isB = (luxStralEngineIndex_ == 1);
+    std::vector<VisualizerMode> s { isB ? VisualizerMode::SPCTR_B_GRAY
+                                        : VisualizerMode::SPCTR_GRAY };
     // COLOR follows the SELECTED engine's stereo toggle (A/B have their own).
-    const char* stereoId = (luxStralEngineIndex_ == 1) ? "luxstralBStereoEnable"
-                                                       : "luxstralStereoEnable";
+    const char* stereoId = isB ? "luxstralBStereoEnable"
+                               : "luxstralStereoEnable";
     if (apvts.getRawParameterValue(stereoId)->load() > 0.5f)
-        s.push_back(VisualizerMode::SPCTR_COLOR);
+        s.push_back(isB ? VisualizerMode::SPCTR_B_COLOR
+                        : VisualizerMode::SPCTR_COLOR);
     if (apvts.getRawParameterValue("sfEnabled")->load() > 0.5f)
-        s.push_back(VisualizerMode::SPCTR_BLOB);
+        s.push_back(VisualizerMode::SPCTR_BLOB);   // StrokeForge shared A+B (v1)
     return s;
 }
 
@@ -548,7 +780,7 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
     // Version — centred between logo and gear button
     g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
     g.setColour(juce::Colour(0xff777777));
-    g.drawText("v0.1.5", juce::Rectangle<int>(0, 0, getWidth(), kHeaderH),
+    g.drawText("v" SP3CTRA_VERSION_STRING, juce::Rectangle<int>(0, 0, getWidth(), kHeaderH),
                juce::Justification::centred, true);
 
     g.setColour(juce::Colour(0xff444444));
@@ -673,11 +905,10 @@ void Sp3ctraAudioProcessorEditor::layoutZones()
         keyboardRuler->setBounds(kHPad, kVisY + visHeight(),
                                  juce::jmax(50, W - 2 * kHPad), kRulerH);
 
-    // ZONE 5 (reserved — output / master / monitoring) is a collapsed strip
-    // h = 0 at the bottom: when it materialises, give zone5H its height here.
-    const int zone5H = 0;
+    // (Former ZONE 5 dock removed — the engines + MASTER live in the AUDIO MIX
+    //  half of ZONE 4, laid out with the column below.)
     const int zonesY = zonesTopY();
-    const int zonesH = juce::jmax(0, H - zonesY - zone5H);
+    const int zonesH = juce::jmax(0, H - zonesY);
 
     // ── Module catalogue rail (collapsible, far left; scrolls if tall) ────────
     // Collapsed → a thin grip with the expand button; expanded → a header band
@@ -738,7 +969,9 @@ void Sp3ctraAudioProcessorEditor::layoutZones()
         const int ph = kFaceBarH - 8;
         modulePowerButton.setBounds(x + z3w - pw - 8, z3y + (kFaceBarH - ph) / 2, pw, ph);
     }
-    if (faceSwitch.isVisible())          // PLAY | SETUP bar shifts the viewport
+    // The face row shifts the viewport when it hosts the PLAY | SETUP bar OR
+    // just the power switch (blocks with an enable param but no SETUP face).
+    if (faceSwitch.isVisible() || modulePowerButton.isVisible())
     {
         z3y += kFaceBarH;
         z3h  = juce::jmax(0, z3h - kFaceBarH);
@@ -753,7 +986,33 @@ void Sp3ctraAudioProcessorEditor::layoutZones()
         x += kSplitterW;
     }
 
-    waterfallColumn->setBounds(x, zonesY, z4w, zonesH);
+    // ── ZONE 4 — VIDEO MIX above, AUDIO MIX below (P2b) ──────────────────────
+    if (audioMixPanel != nullptr)
+    {
+        audioMixPanel->setMini(collapsed);
+        if (collapsed)
+        {
+            // 24 px band: video grip (expand + ▶ ⏸/⏹ transport) on top, the
+            // mini MASTER fader filling the rest.
+            const int gripH = juce::jmin(zonesH, 100);
+            waterfallColumn->setBounds(x, zonesY, z4w, gripH);
+            audioMixPanel  ->setBounds(x, zonesY + gripH, z4w,
+                                       juce::jmax(0, zonesH - gripH));
+        }
+        else
+        {
+            // AUDIO MIX takes its preferred height, VIDEO MIX keeps at least
+            // 120 px — shrink the mixer when the window gets very short.
+            const int amH = juce::jmin(AudioMixPanel::kPreferredH,
+                                       juce::jmax(120, zonesH - 120));
+            waterfallColumn->setBounds(x, zonesY, z4w, juce::jmax(0, zonesH - amH));
+            audioMixPanel  ->setBounds(x, zonesY + zonesH - amH, z4w, amH);
+        }
+    }
+    else
+    {
+        waterfallColumn->setBounds(x, zonesY, z4w, zonesH);
+    }
 
     // ── Rack content sizing (viewport scrolls when the window is short) ──────
     const int rackW = juce::jmax(60, zone2Width - rackViewport.getScrollBarThickness());
@@ -802,13 +1061,15 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
             case ChainBlockId::Chain2Source:
                 top = sourceSetup.get();  topMinH = SourceSetupPanel::kPreferredH;    break;
             case ChainBlockId::ImageSrc:
-                top = imageSrcSetup.get();  topMinH = MediaSourceSetupPanel::kPreferredH; break;
             case ChainBlockId::VideoSrc:
-                top = videoSrcSetup.get();  topMinH = MediaSourceSetupPanel::kPreferredH; break;
-            case ChainBlockId::CameraSrc:
-                top = cameraSrcSetup.get(); topMinH = MediaSourceSetupPanel::kPreferredH; break;
+            case ChainBlockId::CameraSrc:   // M9 — picking moved to the PLAY page
             case ChainBlockId::Sequencer:
             case ChainBlockId::VideoScroll:
+            case ChainBlockId::Reverb:
+            case ChainBlockId::Echo:
+            case ChainBlockId::Equalizer:
+            case ChainBlockId::Timbre:
+            case ChainBlockId::None:
                 break;   // no SETUP face (blockHasSetup == false)
         }
     }
@@ -827,24 +1088,40 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
                 top = samplerPage.get();     topMinH = 560; break;
             case ChainBlockId::Sequencer:
                 top = sequencerPage.get();   topMinH = 360; break;  // grid + transport
+            // Synth blocks (P2): OUT/send page from the rack, engine page from
+            // the dock — same slot in zone 3, view picked by engineView_.
             case ChainBlockId::LuxStral:
-                top = imgLuxStralPage.get(); topMinH = LuxStralTabComponent::kPreferredH;
+                if (engineView_) { top = imgLuxStralPage.get(); topMinH = LuxStralTabComponent::kPreferredH; }
+                else             { top = synthOutPage.get();    topMinH = SynthOutPageComponent::kPreferredH; }
                 break;
             case ChainBlockId::LuxSynth:
-                top = imgLuxSynthPage.get(); topMinH = LuxSynthTabComponent::kPreferredH;
+                if (engineView_) { top = imgLuxSynthPage.get(); topMinH = LuxSynthTabComponent::kPreferredH; }
+                else             { top = synthOutPage.get();    topMinH = SynthOutPageComponent::kPreferredH; }
                 break;
             case ChainBlockId::LuxWave:
-                top = audioWavePanel.get();  topMinH = AudioWavePanel::kPreferredH; break;
+                if (engineView_) { top = audioWavePanel.get();  topMinH = AudioWavePanel::kPreferredH; }
+                else             { top = synthOutPage.get();    topMinH = SynthOutPageComponent::kPreferredH; }
+                break;
             case ChainBlockId::Score:
                 top = scorePage.get();       topMinH = 360; break;  // actions + transport only
+            case ChainBlockId::Timbre:
+                top = timbrePage.get();      topMinH = TimbreGenTabComponent::kPreferredH; break;
             case ChainBlockId::VideoScroll:
                 top = videoScrollPage.get(); topMinH = VideoScrollPage::kPreferredH; break;
+            case ChainBlockId::Reverb:
+                top = reverbPage.get();      topMinH = LuxReverbTabComponent::kPreferredH; break;
+            case ChainBlockId::Echo:
+                top = echoPage.get();        topMinH = LuxEchoTabComponent::kPreferredH; break;
+            case ChainBlockId::Equalizer:
+                top = eqPage.get();          topMinH = LuxEqTabComponent::kPreferredH; break;
             case ChainBlockId::ImageSrc:
                 top = imageSrcPage.get();    topMinH = MediaSourcePage::kPreferredH; break;
             case ChainBlockId::VideoSrc:
                 top = videoSrcPage.get();    topMinH = MediaSourcePage::kPreferredH; break;
             case ChainBlockId::CameraSrc:
                 top = cameraSrcPage.get();   topMinH = MediaSourcePage::kPreferredH; break;
+            case ChainBlockId::None:
+                break;   // empty rack — zone 3 stays blank
         }
     }
 
@@ -891,6 +1168,7 @@ void Sp3ctraAudioProcessorEditor::persistLayoutProps()
     // face and the engine/instance bindings behind it. Restored in the ctor.
     state.setProperty("selBlock",          (int) selectedBlock,  nullptr);
     state.setProperty("selSetupFace",      setupFace,            nullptr);
+    state.setProperty("selEngineView",     engineView_,          nullptr);
     state.setProperty("selLuxStralEngine", luxStralEngineIndex_, nullptr);
     state.setProperty("selSamplerEngine",  samplerEngineIndex_,  nullptr);
     state.setProperty("selVideoSlot",      videoSlotIndex_,      nullptr);

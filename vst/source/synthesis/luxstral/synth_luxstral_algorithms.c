@@ -68,6 +68,7 @@ void update_gap_limiter_coefficients_for(volatile struct wave *w,
         w[note].alpha_up = alpha_up;
 
         // Compute frequency-dependent release weighting
+        // (decay_freq_beta = 0 → uniform release across the bank)
         float f = w[note].frequency;
         if (f < 1.0f) f = 1.0f;
 
@@ -106,7 +107,8 @@ void apply_gap_limiter_ramp(volatile struct wave *waves, int note, float target_
 
     // Apply per-note physiological (equal-loudness) gain.
     // Gain is RMS-normalized at init so total energy is preserved.
-    // waves[note].physiological_gain = 1.0 when filter is disabled.
+    // waves[note].physiological_gain = 1.0 when filter is disabled — for an
+    // exact SCORE reconstruction, disable the Equal-Loudness filter.
     target_volume *= waves[note].physiological_gain;
 
     // Set the target volume for the oscillator

@@ -97,11 +97,7 @@ public:
             dlg->cancelBtn_->onClick = [dlg]() { dlg->dismiss(); };
         }
 
-        parent->addAndMakeVisible(dlg);
-        dlg->setBounds((parent->getWidth()  - dw) / 2,
-                       (parent->getHeight() - dh) / 2,
-                       dw, dh);
-        dlg->toFront(true);
+        attach(dlg, parent, dw, dh);
         dlg->input_->grabKeyboardFocus();
     }
 
@@ -265,12 +261,37 @@ private:
             };
         }
 
-        parent->addAndMakeVisible(dlg);
-        dlg->setBounds((parent->getWidth()  - dw) / 2,
-                       (parent->getHeight() - dh) / 2,
-                       dw, dh);
+        attach(dlg, parent, dw, dh);
+    }
+
+    /// Parent the dialog to the top-level window and centre it there, so a
+    /// sub-page nested in a scrolling viewport can never clip or mis-place it.
+    /// Falls back to the given component if it has no top-level parent.
+    static void attach(Sp3ctraDialog* dlg, juce::Component* parent, int dw, int dh)
+    {
+        juce::Component* host = parent->getTopLevelComponent();
+        if (host == nullptr) host = parent;
+
+        dlg->setSize(dw, dh);
+        host->addAndMakeVisible(dlg);
+        dlg->centreOnParent();
         dlg->toFront(true);
     }
+
+    /// Re-centre on the parent, clamped so the dialog stays fully on-screen
+    /// even if the parent is momentarily smaller than the dialog (e.g. shown
+    /// before the first layout pass).
+    void centreOnParent()
+    {
+        if (auto* p = getParentComponent())
+        {
+            auto r = getBounds().withCentre(p->getLocalBounds().getCentre());
+            r.setPosition(juce::jmax(0, r.getX()), juce::jmax(0, r.getY()));
+            setBounds(r);
+        }
+    }
+
+    void parentSizeChanged() override { centreOnParent(); }
 
     void dismiss()
     {

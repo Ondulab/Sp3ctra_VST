@@ -11,11 +11,16 @@
  * The line cursor binds to the automatable APVTS param (imgSrcPos / vidSrcLine
  * / camSrcLine); a second thinner cursor shows the IMAGE engine's playhead
  * while its transport runs.
+ *
+ * Source picking (LOAD/CLEAR for files, device combo for CAMERA) lives HERE,
+ * on the PLAY face — the media modules have no SETUP face any more.
  */
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../../PluginProcessor.h"
+#include "../../midi/MidiLearnAttachment.h"
+#include <vector>
 
 class MediaSourcePage : public juce::Component,
                         private juce::Timer
@@ -38,6 +43,12 @@ private:
     juce::String lineParamId() const;
     float  lineParamValue() const;
     void   setLineParam(float v, bool gestureBegin, bool gestureEnd);
+
+    // Source picking (formerly the SETUP face)
+    void chooseMedia();
+    void clearMedia();
+    void refreshDevices();
+    void openSelectedDevice();
 
     //==========================================================================
     /** The media preview + draggable line cursor. */
@@ -67,6 +78,13 @@ private:
 
     PreviewComponent preview { *this };
 
+    // Source picker row (top): IMAGE/VIDEO — LOAD/CLEAR; CAMERA — device combo
+    juce::TextButton loadButton  { "LOAD..." };
+    juce::TextButton clearButton { "CLEAR" };
+    juce::ComboBox   deviceCombo;                 // CAMERA only
+    juce::TextButton refreshButton { "REFRESH" };
+    std::unique_ptr<juce::FileChooser> chooser_;
+
     // Transport row (kind-dependent subset)
     juce::TextButton playButton { "PLAY" };
     juce::ComboBox   loopCombo;
@@ -77,6 +95,7 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   playAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> loopAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   speedAttach;
+    std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
 
     bool scrubbing_ = false;
 

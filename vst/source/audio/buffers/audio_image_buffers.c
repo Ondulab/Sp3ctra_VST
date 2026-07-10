@@ -68,6 +68,18 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
     buffers->insert_tap_B[i] = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
   }
 
+  // Allocate selection-tap buffers (contextual visualizer)
+  buffers->selection_tap_R = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
+  buffers->selection_tap_G = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
+  buffers->selection_tap_B = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
+
+  // Allocate per-engine input tap buffers (per-chain display)
+  for (i = 0; i < AUDIO_IMAGE_NUM_ENGINE_TAPS; i++) {
+    buffers->engine_tap_R[i] = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
+    buffers->engine_tap_G[i] = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
+    buffers->engine_tap_B[i] = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
+  }
+
   // Check all allocations
   if (!buffers->buffer0_R   || !buffers->buffer0_G   || !buffers->buffer0_B   ||
       !buffers->buffer1_R   || !buffers->buffer1_G   || !buffers->buffer1_B   ||
@@ -83,6 +95,20 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
     if (!buffers->insert_tap_R[i] || !buffers->insert_tap_G[i] ||
         !buffers->insert_tap_B[i]) {
       fprintf(stderr, "ERROR: Failed to allocate insert tap buffers\n");
+      audio_image_buffers_cleanup(buffers);
+      return -1;
+    }
+  }
+  if (!buffers->selection_tap_R || !buffers->selection_tap_G ||
+      !buffers->selection_tap_B) {
+    fprintf(stderr, "ERROR: Failed to allocate selection tap buffers\n");
+    audio_image_buffers_cleanup(buffers);
+    return -1;
+  }
+  for (i = 0; i < AUDIO_IMAGE_NUM_ENGINE_TAPS; i++) {
+    if (!buffers->engine_tap_R[i] || !buffers->engine_tap_G[i] ||
+        !buffers->engine_tap_B[i]) {
+      fprintf(stderr, "ERROR: Failed to allocate engine input tap buffers\n");
       audio_image_buffers_cleanup(buffers);
       return -1;
     }
@@ -124,6 +150,20 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
     memset(buffers->insert_tap_R[i], 255, nb_pixels);
     memset(buffers->insert_tap_G[i], 255, nb_pixels);
     memset(buffers->insert_tap_B[i], 255, nb_pixels);
+  }
+
+  // Initialize the selection tap with white (nothing selected/published yet)
+  memset(buffers->selection_tap_R, 255, nb_pixels);
+  memset(buffers->selection_tap_G, 255, nb_pixels);
+  memset(buffers->selection_tap_B, 255, nb_pixels);
+
+  // Initialize engine input taps with white (no engine fed yet — white is
+  // silence in the image-to-sound mapping, matching the unfed contract)
+  for (i = 0; i < AUDIO_IMAGE_NUM_ENGINE_TAPS; i++) {
+    memset(buffers->engine_tap_R[i], 255, nb_pixels);
+    memset(buffers->engine_tap_G[i], 255, nb_pixels);
+    memset(buffers->engine_tap_B[i], 255, nb_pixels);
+    buffers->engine_tap_seq[i] = 0;
   }
 
 
@@ -235,6 +275,19 @@ void audio_image_buffers_cleanup(AudioImageBuffers *buffers) {
       if (buffers->insert_tap_R[t]) { free(buffers->insert_tap_R[t]); buffers->insert_tap_R[t] = NULL; }
       if (buffers->insert_tap_G[t]) { free(buffers->insert_tap_G[t]); buffers->insert_tap_G[t] = NULL; }
       if (buffers->insert_tap_B[t]) { free(buffers->insert_tap_B[t]); buffers->insert_tap_B[t] = NULL; }
+    }
+  }
+
+  if (buffers->selection_tap_R) { free(buffers->selection_tap_R); buffers->selection_tap_R = NULL; }
+  if (buffers->selection_tap_G) { free(buffers->selection_tap_G); buffers->selection_tap_G = NULL; }
+  if (buffers->selection_tap_B) { free(buffers->selection_tap_B); buffers->selection_tap_B = NULL; }
+
+  {
+    int e;
+    for (e = 0; e < AUDIO_IMAGE_NUM_ENGINE_TAPS; e++) {
+      if (buffers->engine_tap_R[e]) { free(buffers->engine_tap_R[e]); buffers->engine_tap_R[e] = NULL; }
+      if (buffers->engine_tap_G[e]) { free(buffers->engine_tap_G[e]); buffers->engine_tap_G[e] = NULL; }
+      if (buffers->engine_tap_B[e]) { free(buffers->engine_tap_B[e]); buffers->engine_tap_B[e] = NULL; }
     }
   }
 
@@ -652,5 +705,114 @@ int audio_image_buffers_get_insert_tap_pointers(const AudioImageBuffers *buffers
   *out_G = buffers->insert_tap_G[tap];
   *out_B = buffers->insert_tap_B[tap];
   return 0;
+}
+
+/**
+ * @brief Publish the selection-tap frame (contextual visualizer)
+ *
+ * Single producer (whichever chain executor hosts the selected module —
+ * udpThread or feeder tick, mutually exclusive by the 250 ms live/feeder
+ * hysteresis), multi reader (UI visualizer at 30 fps). Same tearing model as
+ * every other snapshot bus here: a torn line is repainted one frame later.
+ */
+void audio_image_buffers_publish_selection_tap(AudioImageBuffers *buffers,
+                                               const uint8_t *srcR,
+                                               const uint8_t *srcG,
+                                               const uint8_t *srcB,
+                                               int nb_pixels) {
+  if (!buffers || !buffers->initialized || !srcR || !srcG || !srcB)
+    return;
+
+  int max_pixels = get_cis_pixels_nb();
+  int count = (nb_pixels < max_pixels) ? nb_pixels : max_pixels;
+  if (count <= 0)
+    return;
+
+  memcpy(buffers->selection_tap_R, srcR, (size_t)count);
+  memcpy(buffers->selection_tap_G, srcG, (size_t)count);
+  memcpy(buffers->selection_tap_B, srcB, (size_t)count);
+}
+
+void audio_image_buffers_get_selection_tap_pointers(const AudioImageBuffers *buffers,
+                                                    uint8_t **out_R,
+                                                    uint8_t **out_G,
+                                                    uint8_t **out_B) {
+  if (!buffers || !buffers->initialized || !out_R || !out_G || !out_B)
+    return;
+  *out_R = buffers->selection_tap_R;
+  *out_G = buffers->selection_tap_G;
+  *out_B = buffers->selection_tap_B;
+}
+
+void audio_image_buffers_clear_selection_tap(AudioImageBuffers *buffers) {
+  if (!buffers || !buffers->initialized)
+    return;
+  int nb_pixels = get_cis_pixels_nb();
+  memset(buffers->selection_tap_R, 255, (size_t)nb_pixels);
+  memset(buffers->selection_tap_G, 255, (size_t)nb_pixels);
+  memset(buffers->selection_tap_B, 255, (size_t)nb_pixels);
+}
+
+/**
+ * @brief Publish the frame engine `engine` consumes this cycle (per-chain
+ *        display). srcR == NULL publishes WHITE (engine unfed).
+ *
+ * Single producer at any instant: the thread that owns the engine's
+ * preprocessed commit this cycle (udpThread / feeder tick /
+ * FramePlayerThread — mutually exclusive per the source-routing
+ * arbitration). Multi reader (UI). Same tearing model as the other
+ * snapshot buses: a torn line is repainted one frame later.
+ */
+void audio_image_buffers_publish_engine_input(AudioImageBuffers *buffers,
+                                              int engine,
+                                              const uint8_t *srcR,
+                                              const uint8_t *srcG,
+                                              const uint8_t *srcB,
+                                              int nb_pixels) {
+  if (!buffers || !buffers->initialized || engine < 0 ||
+      engine >= AUDIO_IMAGE_NUM_ENGINE_TAPS)
+    return;
+
+  int max_pixels = get_cis_pixels_nb();
+  int count = (nb_pixels < max_pixels) ? nb_pixels : max_pixels;
+  if (count <= 0)
+    return;
+
+  if (srcR && srcG && srcB) {
+    memcpy(buffers->engine_tap_R[engine], srcR, (size_t)count);
+    memcpy(buffers->engine_tap_G[engine], srcG, (size_t)count);
+    memcpy(buffers->engine_tap_B[engine], srcB, (size_t)count);
+  } else {
+    memset(buffers->engine_tap_R[engine], 255, (size_t)count);
+    memset(buffers->engine_tap_G[engine], 255, (size_t)count);
+    memset(buffers->engine_tap_B[engine], 255, (size_t)count);
+  }
+
+  __atomic_store_n(&buffers->engine_tap_seq[engine],
+                   buffers->engine_tap_seq[engine] + 1u,
+                   __ATOMIC_RELEASE);
+}
+
+int audio_image_buffers_get_engine_input_pointers(const AudioImageBuffers *buffers,
+                                                  int engine,
+                                                  uint8_t **out_R,
+                                                  uint8_t **out_G,
+                                                  uint8_t **out_B) {
+  if (!buffers || !buffers->initialized || engine < 0 ||
+      engine >= AUDIO_IMAGE_NUM_ENGINE_TAPS || !out_R || !out_G || !out_B)
+    return -1;
+
+  *out_R = buffers->engine_tap_R[engine];
+  *out_G = buffers->engine_tap_G[engine];
+  *out_B = buffers->engine_tap_B[engine];
+  return 0;
+}
+
+uint64_t audio_image_buffers_engine_input_seq(const AudioImageBuffers *buffers,
+                                              int engine) {
+  if (!buffers || !buffers->initialized || engine < 0 ||
+      engine >= AUDIO_IMAGE_NUM_ENGINE_TAPS)
+    return 0;
+  return __atomic_load_n(&buffers->engine_tap_seq[engine], __ATOMIC_ACQUIRE);
 }
 

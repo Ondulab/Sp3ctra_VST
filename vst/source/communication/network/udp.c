@@ -116,13 +116,13 @@ int udp_Init(struct sockaddr_in *si_other, struct sockaddr_in *si_me) {
     // Continue anyway, this is not critical for operation
   }
 
-  // Initialisation de la structure
+  // Initialize the structure
   memset(si_me, 0, sizeof(*si_me));
   si_me->sin_family = AF_INET;
   si_me->sin_port = htons(udp_port);
   si_me->sin_addr.s_addr = htonl(INADDR_ANY);
 
-  // Liaison de la socket au port
+  // Bind the socket to the port
   if (bind(s, (struct sockaddr *)si_me, sizeof(*si_me)) == -1) {
     log_error("UDP", "Failed to bind UDP socket to port %d", udp_port);
     log_error("UDP", "This usually means the port is already in use by another process");
@@ -179,7 +179,7 @@ int udp_Init(struct sockaddr_in *si_other, struct sockaddr_in *si_me) {
     log_info("UDP", "Unicast mode - listening on %s:%d", udp_address, udp_port);
   }
 
-  // Retourne le descripteur de la socket
+  // Return the socket descriptor
   return s;
 }
 

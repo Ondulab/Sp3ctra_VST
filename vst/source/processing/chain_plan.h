@@ -26,15 +26,16 @@ extern "C" {
 #endif
 
 /* Max ordered inserts before a synth in ONE chain. Worst case allowed by the
- * model: Pitch + Mask + up to CHAIN_MAX_CHAINS (8) VideoScroll probes (the
- * per-chain duplicate rule is relaxed for VideoScroll only) + up to 2 Sampler
- * position markers (IMAGE_CHAIN_INSERT_SAMPLER — engines A/B may share a chain)
- * = 12. The `num_inserts < CHAIN_PLAN_MAX_INSERTS` gate in
- * deriveAndPublishChainPlan is a defensive cap; at 12 it is unreachable for any
- * legal model (an overflow would silently drop entries — a dropped SAMPLER
- * marker misroutes every probe placed after the sampler). states[] locals in
- * multithreading.c grow to 12*sizeof(void*) = 96 B — negligible stack. */
-#define CHAIN_PLAN_MAX_INSERTS 12   /* max ordered processors/probes/markers before a synth */
+ * model: Pitch + Mask + Reverb + Echo + EQ + up to CHAIN_MAX_CHAINS (8)
+ * VideoScroll probes (the per-chain duplicate rule is relaxed for VideoScroll
+ * only) + up to 2 Sampler position markers (IMAGE_CHAIN_INSERT_SAMPLER —
+ * engines A/B may share a chain) + 1 Score position marker = 16. The
+ * `num_inserts < CHAIN_PLAN_MAX_INSERTS` gate in deriveAndPublishChainPlan is a
+ * defensive cap; at 17 it is unreachable for any legal model (an overflow would
+ * silently drop entries — a dropped marker misroutes every probe/FX placed
+ * after it). states[] locals in multithreading.c grow to 17*sizeof(void*) =
+ * 136 B — negligible stack. */
+#define CHAIN_PLAN_MAX_INSERTS 17   /* max ordered processors/probes/markers before a synth */
 #define CHAIN_MAX_CHAINS       8    /* per-instance state pool size (Pitch/Mask/VideoScroll) */
 
 /* Where a chain's input frame comes from. */
@@ -70,19 +71,26 @@ typedef struct {
                                                    *  state idx; VIDEOSCROLL → per-
                                                    *  instance slot (ModuleInstance.slot,
                                                    *  0..7). */
+
+    /* Contextual visualizer tap: -1 = none; k in [0..num_inserts] = publish
+     * the stream frame AFTER the first k inserts of THIS chain into the
+     * selection-tap bus (audio_image_buffers_publish_selection_tap). k = the
+     * SELECTED module's output position; 0 = the chain's base/source frame.
+     * Set on at most ONE plan entry (the chain hosting the selection). */
+    int viz_tap_insert;
 } SynthChainPlan;
 
 typedef struct {
     SynthChainPlan synth[CHAIN_SYNTH_COUNT];
 
-    /* Probe-only chains (no synth module placed): VideoScroll slots fed from
-     * the LIVE frame so a "monitor" chain ([SP3CTRA, VIDEOSCROLL]) shows the
-     * feed instead of staying black — such chains have no synth executor.
-     * v1 limitation: probes of a synth-less chain whose source is an INTERNAL
-     * module (IMAGE/VIDEO/CAMERA) are not fed (internal sources are pumped per
-     * synth slot). */
-    int num_live_probes;
-    int live_probe_slot[CHAIN_MAX_CHAINS];
+    /* Probe-only chains (no synth module placed): a full per-chain recipe
+     * (source + ordered inserts), executed for its SIDE EFFECTS only — each
+     * VideoScroll probe captures the stream AT ITS POSITION in the chain, with
+     * every processor (Pitch/Mask/FX) upstream of it applied. `present` is 1;
+     * `source_kind`/`has_sampler`/`has_score` follow the same rules as synth
+     * chains, so a source-less monitor chain stays static (no live leak). */
+    int num_probe_chains;
+    SynthChainPlan probe_chain[CHAIN_MAX_CHAINS];
 } ChainPlan;
 
 /* Message thread: publish a new plan (lock-free double buffer + atomic flip). */

@@ -108,6 +108,24 @@ TransportBarComponent::TransportBarComponent(Sp3ctraAudioProcessor& proc)
     dawSyncAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "seqDawSync", dawSyncToggle);
 
+    // Right-click MIDI Learn (SEQUENCER is a singleton). The three transport
+    // buttons share the seqTransport param (one CC spans 0=Stop / 1=Play /
+    // 2=Hold), so each carries the same mapping badge.
+    {
+        auto& mm = processor.getMidiMap();
+        auto learn = [&](juce::Component& c, const char* id)
+        {
+            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, c, id));
+        };
+        learn(seqPlayBtn,    "seqTransport");
+        learn(seqHoldBtn,    "seqTransport");
+        learn(seqStopBtn,    "seqTransport");
+        learn(bpmSlider,     "seqBpm");
+        learn(stepsCombo,    "seqNumSteps");
+        learn(loopToggle,    "seqLoop");
+        learn(dawSyncToggle, "seqDawSync");
+    }
+
     startTimer(200);
 }
 

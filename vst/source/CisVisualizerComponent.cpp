@@ -10,8 +10,10 @@ extern "C" {
     #include "config/config_loader.h"
     #include "processing/image_pipeline_types.h"
     #include "processing/image_chain.h"
+    #include "processing/chain_plan.h"
     #include "processing/lux_pitch.h"
     #include "processing/lux_mask.h"
+    #include "processing/internal_source.h"
     #include "synthesis/luxsynth/kissfft/kiss_fftr.h"
     #include "synthesis/luxsynth/synth_luxsynth_engine.h"
     #include "synthesis/luxsynth/luxsynth_vst_adapter.h"
@@ -20,6 +22,8 @@ extern "C" {
 // Forward-declare C hooks defined in LuxSampler.cpp.
 extern "C" int lux_sampler_is_playing(void);
 extern "C" int lux_sampler_is_recording(void);
+// Engine B's real preprocessed grayscale (multithreading.c) — LUXSTRAL B view.
+extern "C" int luxstral_b_copy_preprocessed_gray(uint8_t* gray_out, int max_pixels);
 
 //==============================================================================
 // CisHoverTooltip — desktop-level floating tooltip (never clipped by parent)
@@ -244,7 +248,15 @@ void CisVisualizerComponent::paint(juce::Graphics& g)
     // Each panel renders its own source from its own frame buffers, which were
     // filled by updateCisData() → fillSourceBuffers().
     const int n = static_cast<int>(panels_.size());
-    if (n <= 0) return;
+    if (n <= 0)
+    {
+        // No selection (empty rack): idle state, never a stale frame.
+        g.fillAll(juce::Colour(0xff1a1a1a));
+        g.setColour(juce::Colours::grey);
+        g.drawText("No module selected",
+                   getLocalBounds(), juce::Justification::centred);
+        return;
+    }
 
     for (int i = 0; i < n; ++i)
     {
@@ -326,7 +338,11 @@ void CisVisualizerComponent::paintSource(
                                 || source == VisualizerMode::LIVE
                                 || source == VisualizerMode::MIX
                                 || source == VisualizerMode::LUXPITCH_OUTPUT
-                                || source == VisualizerMode::LUXMASK_OUTPUT);
+                                || source == VisualizerMode::LUXMASK_OUTPUT
+                                || source == VisualizerMode::SRC_IMAGE
+                                || source == VisualizerMode::SRC_VIDEO
+                                || source == VisualizerMode::SRC_CAMERA
+                                || source == VisualizerMode::SELECTED_TAP);
 
         switch (renderMode)
         {
@@ -473,7 +489,12 @@ void CisVisualizerComponent::paintSourceLabel(
     juce::Graphics& g, VisualizerMode source, int W, int H) const
 {
     juce::ignoreUnused(W, H);
-    const char* label = visualizerModeLabel(source);
+    // SELECTED_TAP badges the actual module + chain ("MASK - CHAIN 2"),
+    // pushed by the editor on selection; other modes use the static label.
+    const juce::String label =
+        (source == VisualizerMode::SELECTED_TAP && selectedTapLabel_.isNotEmpty())
+            ? selectedTapLabel_
+            : juce::String(visualizerModeLabel(source));
 
     // Semi-transparent pill badge — top-left corner
     juce::GlyphArrangement ga;
@@ -493,8 +514,10 @@ void CisVisualizerComponent::paintSourceLabel(
             accent = juce::Colour(0xffa87ae0); // Sources — purple
             break;
         case VisualizerMode::SPCTR_GRAY:
+        case VisualizerMode::SPCTR_B_GRAY:
             accent = juce::Colour(0xff6bb8e0); break;
         case VisualizerMode::SPCTR_COLOR:
+        case VisualizerMode::SPCTR_B_COLOR:
             accent = juce::Colour(0xff4ae0c8); break;
         case VisualizerMode::SPCTR_BLOB:
             accent = juce::Colour(0xff8888e0); break;
@@ -687,6 +710,20 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
         }
         if (liveFreezeMode == 1) goto done;
     }
+    else if (vizSource == VisualizerMode::SRC_IMAGE
+          || vizSource == VisualizerMode::SRC_VIDEO
+          || vizSource == VisualizerMode::SRC_CAMERA
+          || vizSource == VisualizerMode::SELECTED_TAP
+          || vizSource == VisualizerMode::SPCTR_B_GRAY
+          || vizSource == VisualizerMode::SPCTR_B_COLOR)
+    {
+        // Media source modules own their transport (imgSrcPlay / vidSrcPlay /
+        // camera device) — the device/live/sampler freeze gates do not apply.
+        // The module's line is read from the internal source pool below.
+        // SELECTED_TAP and the ENGINE-B views mirror their executor's stream
+        // verbatim: whatever gating applies upstream is already reflected in
+        // the published frames (engine A's source_type gates never apply).
+    }
     else if (vizSource == VisualizerMode::SAMPLER)
     {
         // SAMPLER freeze: only the sampler's own transport (NOT propagated
@@ -714,36 +751,33 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
     }
     else
     {
-        // Downstream views (SPCTR_*, SYNTH_*): freeze logic must match their
-        // configured source (LIVE, SAMPLER, or MIX) — not the global samplerWriting
-        // flag.  Using samplerWriting here caused SPCTR_GRAY (Source=LIVE) to
-        // bypass the live freeze gate and switch to sampler_gamma whenever the
-        // sampler started playing, making the display look as if it showed sampler
-        // data.
+        // Downstream views (SPCTR_*, SYNTH_*) — PER-CHAIN freeze gating
+        // (2026-07-10): which transport may whiten/hold the panel follows the
+        // ENGINE'S OWN CHAIN (RT plan), not the legacy global source type:
+        //   • chain holds a SAMPLER → sampler transport gates (STOP → white,
+        //     HOLD → freeze), bypassed while recording;
+        //   • chain is DEVICE-fed (live source, or no source module = live
+        //     fallback / engine absent) → device transport gates;
+        //   • internal source (IMAGE/VIDEO/CAMERA) without sampler → NO
+        //     transport gate: media modules own their transport (mirror of
+        //     the SRC_* views exemption above); the engine input tap already
+        //     reflects the module's own play/pause state.
         const bool isSpctrLocal = (vizSource == VisualizerMode::SPCTR_GRAY
                                 || vizSource == VisualizerMode::SPCTR_COLOR
                                 || vizSource == VisualizerMode::SPCTR_BLOB);
-        const int downstreamSrcType = isSpctrLocal
-                                      ? g_sp3ctra_config.luxstral_source_type
-                                      : g_sp3ctra_config.luxsynth_source_type;
+        ChainPlan gatePlan;
+        chain_plan_get(&gatePlan);
+        const SynthChainPlan* spGate;
+        if (isSpctrLocal)
+            spGate = &gatePlan.synth[CHAIN_SYNTH_LUXSTRAL];
+        else
+            spGate = gatePlan.synth[CHAIN_SYNTH_LUXSYNTH].present
+                   ? &gatePlan.synth[CHAIN_SYNTH_LUXSYNTH]
+                   : &gatePlan.synth[CHAIN_SYNTH_LUXWAVE];
 
-        if (downstreamSrcType == IMAGE_SOURCE_LIVE)
+        if (spGate->present && spGate->has_sampler)
         {
-            // Source=LIVE: honour live freeze, ignore sampler state entirely.
-            if (liveFreezeMode == 2)
-            {
-                std::fill(localDataR.begin(),    localDataR.end(),    uint8_t{255});
-                std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
-                std::fill(localDataB.begin(),    localDataB.end(),    uint8_t{255});
-                std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-                publishGray();
-                goto done;
-            }
-            if (liveFreezeMode == 1) goto done;
-        }
-        else if (downstreamSrcType == IMAGE_SOURCE_SAMPLER)
-        {
-            // Source=SAMPLER: honour sampler freeze, bypass during recording.
+            // Sampler-fed chain: honour sampler freeze, bypass during recording.
             const bool isRecording = (lux_sampler_is_recording() != 0);
             if (!isRecording)
             {
@@ -759,10 +793,13 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
                 if (rawSmpFreeze == 1) goto done;
             }
         }
-        else // IMAGE_SOURCE_MIX
+        else if (!spGate->present
+                 || spGate->source_kind == CHAIN_SRC_LIVE
+                 || spGate->source_kind == CHAIN_SRC_NONE)
         {
-            // Source=MIX: combined logic — sampler can override the live freeze.
-            if (liveFreezeMode == 2 && !samplerWriting)
+            // Device-fed chain (or absent engine → legacy live fallback):
+            // honour the device transport, ignore sampler state entirely.
+            if (liveFreezeMode == 2)
             {
                 std::fill(localDataR.begin(),    localDataR.end(),    uint8_t{255});
                 std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
@@ -771,26 +808,65 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
                 publishGray();
                 goto done;
             }
-            if (liveFreezeMode == 1 && !samplerWriting)
-            {
-                auto* fs_hold = processor.getLuxSampler();
-                if (fs_hold && fs_hold->isSeqSilentStepActive())
-                {
-                    std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-                    if (isPrimary)
-                        fs_hold->setFinalGrayBuffer(localDataGray);
-                }
-                goto done;
-            }
+            if (liveFreezeMode == 1) goto done;
         }
+        // else: internal-source chain without sampler → no transport gate.
     }
 
     // ── Read from appropriate buffer ─────────────────────────────────────────
     // Source-level views read their dedicated buffer.
     // Downstream views (SPCTR_*, SYNTH_*) respect the per-path source selector
     //   so that changing the Source combo in the UI is reflected in the visualizer.
+    // Assignments (not initializations) — the freeze gates above jump over
+    // this point via `goto done`, and C++ forbids bypassing initializations.
     uint8_t *pR, *pG, *pB;
-    if (vizSource == VisualizerMode::RAW || vizSource == VisualizerMode::LIVE)
+    pR = pG = pB = nullptr;
+    if (vizSource == VisualizerMode::SRC_IMAGE
+     || vizSource == VisualizerMode::SRC_VIDEO
+     || vizSource == VisualizerMode::SRC_CAMERA)
+    {
+        // Contextual media-source view: the selected module's OWN line from
+        // the internal source pool — never the global live/device buffers.
+        const int kind = (vizSource == VisualizerMode::SRC_IMAGE) ? INTERNAL_SRC_IMAGE
+                       : (vizSource == VisualizerMode::SRC_VIDEO) ? INTERNAL_SRC_VIDEO
+                                                                  : INTERNAL_SRC_CAMERA;
+        if (internal_source_copy(kind, localDataR.data(), localDataG.data(),
+                                 localDataB.data(), cisPixelsCount) <= 0)
+        {
+            // Module inactive / nothing loaded → white (= silence), never a
+            // stale frame or the live device feed.
+            std::fill(localDataR.begin(), localDataR.end(), uint8_t{255});
+            std::fill(localDataG.begin(), localDataG.end(), uint8_t{255});
+            std::fill(localDataB.begin(), localDataB.end(), uint8_t{255});
+        }
+        // pR/pG/pB stay null — the data is already in localData*.
+    }
+    else if (vizSource == VisualizerMode::SELECTED_TAP
+          || vizSource == VisualizerMode::SPCTR_B_COLOR)
+    {
+        // Contextual view: the stream AT the selected module's position in ITS
+        // chain, published by the chain executor (selection-tap bus). White
+        // when the chain is silent/unfed (cleared on every selection change).
+        // ENGINE-B COLOR reads the same tap — B's own chain input RGB feeds
+        // the colour-temperature view (never engine A's buses).
+        audio_image_buffers_get_selection_tap_pointers(buffers, &pR, &pG, &pB);
+    }
+    else if (vizSource == VisualizerMode::SPCTR_B_GRAY)
+    {
+        // ENGINE B — the REAL preprocessed input it synthesises from (its own
+        // inversion/gamma/decode already applied by the RT pipeline). No
+        // UI-side re-simulation, no engine-A buses. Black = silence here
+        // (processed space); white only before the first commit.
+        if (luxstral_b_copy_preprocessed_gray(localDataGray.data(),
+                                              cisPixelsCount) <= 0)
+            std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
+        localDataR = localDataGray;
+        localDataG = localDataGray;
+        localDataB = localDataGray;
+        publishGray();
+        goto done;   // gray IS final — skip the source-view recompute below
+    }
+    else if (vizSource == VisualizerMode::RAW || vizSource == VisualizerMode::LIVE)
     {
         audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
     }
@@ -822,25 +898,30 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
     }
     else
     {
-        // Downstream views: route according to per-path source selector
+        // Downstream views — PER-CHAIN display (2026-07-10): read the ENGINE
+        // INPUT TAP, the exact RGB frame the engine's pipeline consumed on its
+        // last committed cycle, published by whichever thread owned that
+        // commit (udpThread / feeder tick / FramePlayerThread). The legacy
+        // luxstral/luxsynth_source_type → RAW/SAMPLER/MODULATED switch is gone
+        // from the display path: it routed by GLOBAL source type, so any
+        // topology the global buses did not carry (internal source + processor
+        // upstream, per-chain inserts, playback without device) showed a dead
+        // or wrong bus. White tap = engine unfed (chain without signal).
         const bool isSpctr = (vizSource == VisualizerMode::SPCTR_GRAY
                            || vizSource == VisualizerMode::SPCTR_COLOR
                            || vizSource == VisualizerMode::SPCTR_BLOB);
-        const int srcType = isSpctr ? g_sp3ctra_config.luxstral_source_type
-                                    : g_sp3ctra_config.luxsynth_source_type;
-
-        if (srcType == IMAGE_SOURCE_LIVE)
-            audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
-        else if (srcType == IMAGE_SOURCE_SAMPLER)
-            audio_image_buffers_get_sampler_pointers(buffers, &pR, &pG, &pB);
-        else
-            // MODULATED (and legacy LUXPITCH/LUXMASK/MIX aliases): the frame
-            // the engines actually consume, published once per chain run.
-            audio_image_buffers_get_modulated_pointers(buffers, &pR, &pG, &pB);
+        audio_image_buffers_get_engine_input_pointers(
+            buffers,
+            isSpctr ? AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A
+                    : AUDIO_IMAGE_ENGINE_TAP_PATHB,
+            &pR, &pG, &pB);
     }
-    std::memcpy(localDataR.data(), pR, cisPixelsCount);
-    std::memcpy(localDataG.data(), pG, cisPixelsCount);
-    std::memcpy(localDataB.data(), pB, cisPixelsCount);
+    if (pR != nullptr)   // null for SRC_* views (already filled localData* above)
+    {
+        std::memcpy(localDataR.data(), pR, cisPixelsCount);
+        std::memcpy(localDataG.data(), pG, cisPixelsCount);
+        std::memcpy(localDataB.data(), pB, cisPixelsCount);
+    }
 
     // (Insert-tap demand is set once per frame in updateCisData(), based on
     //  whichever panels are displayed — see the loop there.)
@@ -882,39 +963,37 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
     {
         const bool isSourceView = (vizSource == VisualizerMode::SAMPLER
                                 || vizSource == VisualizerMode::LIVE
-                                || vizSource == VisualizerMode::MIX);
+                                || vizSource == VisualizerMode::MIX
+                                || vizSource == VisualizerMode::SRC_IMAGE
+                                || vizSource == VisualizerMode::SRC_VIDEO
+                                || vizSource == VisualizerMode::SRC_CAMERA
+                                || vizSource == VisualizerMode::SELECTED_TAP
+                                || vizSource == VisualizerMode::SPCTR_B_COLOR);
         const bool isSpctrView = (vizSource == VisualizerMode::SPCTR_GRAY
                                || vizSource == VisualizerMode::SPCTR_COLOR
                                || vizSource == VisualizerMode::SPCTR_BLOB);
 
-        /* Per-path flags */
+        /* Per-path flags — synth-split P1: read the per-OUT conditioning banks
+         * (SPCTR_* = LuxStral OUT slot 0, SYNTH_* = LuxSynth OUT slot 0), the
+         * same values the pipeline consumes. */
         const int doInvert = isSourceView ? 0
-                           : (isSpctrView ? g_sp3ctra_config.luxstral_inversion
-                                          : g_sp3ctra_config.luxsynth_inversion);
+                           : (isSpctrView ? g_sp3ctra_config.luxstral_out[0].negative
+                                          : g_sp3ctra_config.luxsynth_out[0].negative);
         const int doDcBlock = isSourceView ? 0
-                            : (isSpctrView ? g_sp3ctra_config.luxstral_ac_removal
-                                           : g_sp3ctra_config.luxsynth_ac_removal);
+                            : (isSpctrView ? g_sp3ctra_config.luxstral_out[0].dc_blocking
+                                           : g_sp3ctra_config.luxsynth_out[0].dc_blocking);
 
-        /* Gamma: per-path.
-         *  SPCTR_* (LUXSTRAL): always use additive_gamma_value controlled by the
-         *    single "Gamma" slider in the LuxStral tab, regardless of source mode.
-         *    FIX(gamma): The old code switched to sampler_gamma when the sampler was
-         *    playing, but sampler_gamma is a separate hidden parameter that the user
-         *    cannot adjust from the LuxStral tab → gamma had no effect on the
-         *    visualization for Source=Sampler and Source=Mix.
-         *  SYNTH_*: no gamma (original behaviour). */
+        /* Gamma: per-OUT bank value; no enable toggle — identity at 1.0. */
         float gammaVal;
         int   gammaOn;
         if (isSourceView) {
             gammaVal = 0.0f;
             gammaOn  = 0;
         } else if (isSpctrView) {
-            gammaVal = g_sp3ctra_config.additive_gamma_value;
-            gammaOn  = g_sp3ctra_config.additive_enable_non_linear_mapping;
+            gammaVal = g_sp3ctra_config.luxstral_out[0].gamma;
+            gammaOn  = (gammaVal > 0.0f && gammaVal != 1.0f) ? 1 : 0;
         } else {
-            /* SYNTH_* — use per-path LuxSynth gamma (luxsynthGammaValue).
-             * Always active (no enable flag); identity when gamma == 1.0. */
-            gammaVal = g_sp3ctra_config.luxsynth_gamma_value;
+            gammaVal = g_sp3ctra_config.luxsynth_out[0].gamma;
             gammaOn  = (gammaVal > 0.0f && gammaVal != 1.0f) ? 1 : 0;
         }
 
@@ -1111,6 +1190,7 @@ bool CisVisualizerComponent::isColorSource(VisualizerMode m) const noexcept
     // Note: SYNTH_FFT_COLOR is intercepted before this call in paint() and
     // handled by its own dedicated renderer — do NOT include it here.
     return m == VisualizerMode::SPCTR_COLOR
+        || m == VisualizerMode::SPCTR_B_COLOR
         || m == VisualizerMode::SYNTH_COLOR;
 }
 
@@ -1130,6 +1210,11 @@ bool CisVisualizerComponent::supportsDisplayModes(VisualizerMode m) const noexce
         case VisualizerMode::SYNTH_GRAY:
         case VisualizerMode::LUXPITCH_OUTPUT:
         case VisualizerMode::LUXMASK_OUTPUT:
+        case VisualizerMode::SRC_IMAGE:
+        case VisualizerMode::SRC_VIDEO:
+        case VisualizerMode::SRC_CAMERA:
+        case VisualizerMode::SELECTED_TAP:
+        case VisualizerMode::SPCTR_B_GRAY:
             return true;
         default:
             return false;
@@ -1945,17 +2030,11 @@ void CisVisualizerComponent::computeFftMagnitudes()
         uint8_t* pG = nullptr;
         uint8_t* pB = nullptr;
 
-        const int srcType = g_sp3ctra_config.luxsynth_source_type;
-
-        if (srcType == IMAGE_SOURCE_LIVE)
-            audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
-        else if (srcType == IMAGE_SOURCE_SAMPLER)
-            audio_image_buffers_get_sampler_pointers(buffers, &pR, &pG, &pB);
-        else
-            // MODULATED (and legacy LUXPITCH/LUXMASK/MIX aliases): read the
-            // frame published by the synthesis-thread chain — no UI-side
-            // re-simulation (single-simulation model, M2).
-            audio_image_buffers_get_modulated_pointers(buffers, &pR, &pG, &pB);
+        // PER-CHAIN display (2026-07-10): the FFT view mirrors the exact frame
+        // LuxSynth's pipeline consumed (engine input tap) — same routing as
+        // the SYNTH_* head panels, no UI-side source-type guessing.
+        audio_image_buffers_get_engine_input_pointers(
+            buffers, AUDIO_IMAGE_ENGINE_TAP_PATHB, &pR, &pG, &pB);
 
         if (!pR || !pG || !pB)
         {
@@ -1969,11 +2048,15 @@ void CisVisualizerComponent::computeFftMagnitudes()
             std::memcpy(lxFftG_.data(), pG, static_cast<size_t>(cisPixelsCount));
             std::memcpy(lxFftB_.data(), pB, static_cast<size_t>(cisPixelsCount));
 
-            // LuxSynth preprocessing: inversion + DC blocking + gamma
-            const int doInvert  = g_sp3ctra_config.luxsynth_inversion;
-            const int doDcBlock = g_sp3ctra_config.luxsynth_ac_removal;
-            const float gammaVal = g_sp3ctra_config.luxsynth_gamma_value;
+            // LuxSynth preprocessing — synth-split P1: per-OUT bank (slot 0),
+            // the same values preprocess_luxsynth() consumes. Intensity is the
+            // pre-FFT mix weight of the send (1.0 = parity).
+            const int doInvert  = g_sp3ctra_config.luxsynth_out[0].negative;
+            const int doDcBlock = g_sp3ctra_config.luxsynth_out[0].dc_blocking;
+            const float gammaVal = g_sp3ctra_config.luxsynth_out[0].gamma;
             const int gammaOn   = (gammaVal > 0.0f && gammaVal != 1.0f) ? 1 : 0;
+            float outIntensity  = g_sp3ctra_config.luxsynth_out[0].intensity;
+            if (outIntensity < 0.0f) outIntensity = 0.0f;
 
             thread_local std::vector<float> grayF;
             grayF.resize(static_cast<size_t>(cisPixelsCount));
@@ -2006,12 +2089,13 @@ void CisVisualizerComponent::computeFftMagnitudes()
                 }
             }
 
-            // Pass 3: gamma + quantisation
+            // Pass 3: gamma + per-OUT intensity + quantisation
             for (int i = 0; i < cisPixelsCount; ++i)
             {
                 float gray = grayF[static_cast<size_t>(i)];
                 if (gammaOn && gammaVal > 0.0f)
                     gray = std::pow(gray, 1.0f / gammaVal);
+                gray *= outIntensity;
                 if (gray < 0.0f) gray = 0.0f;
                 if (gray > 1.0f) gray = 1.0f;
                 lxFftGray_[static_cast<size_t>(i)] =

@@ -19,6 +19,7 @@
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "../IconPaths.h"
+#include "../midi/MidiLearnAttachment.h"
 #include "../sampler/TransportBarComponent.h"   // IconTextButton
 #include "VisualizerMode.h"
 
@@ -100,6 +101,21 @@ public:
         fadeAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
             apvts, fadeParamId(), fadeSlider));
 
+        // Right-click MIDI Learn — follows the selected chain's params. The
+        // three transport buttons share the freeze-mode param (one CC spans
+        // 0=play / mid=hold / 1=stop), so each carries the same mapping badge;
+        // the acquisition rate is global (bound once semantics, rebound cheap).
+        learnAtts_.clear();
+        auto& mm = processor.getMidiMap();
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, fadeSlider,    fadeParamId()));
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, playBtn,       freezeParamId()));
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, holdBtn,       freezeParamId()));
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, stopBtn,       freezeParamId()));
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, acqRateSlider, "acqGateRateMs"));
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, acqModeCombo,    "acqGateMode"));
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, acqDivCombo,     "acqGateSyncDiv"));
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, acqMultDivCombo, "acqGateMultDiv"));
+
         updateTransportButtons();
         repaint();
     }
@@ -171,6 +187,7 @@ private:
     IconTextButton playBtn, holdBtn, stopBtn;
     juce::Slider   fadeSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> fadeAttach;
+    std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
 
     // ── Acquisition speed (global frame-advance brake) ──────────────────────────
     juce::ComboBox acqModeCombo, acqDivCombo, acqMultDivCombo;

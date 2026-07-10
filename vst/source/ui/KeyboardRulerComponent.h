@@ -51,6 +51,11 @@ public:
     void setModule(Module m);
     Module getModule() const noexcept { return module; }
 
+    /** Pool slot of the selected instance — the ruler mirrors THAT instance's
+     *  mapping/voices and its ALT-click writes THAT bank's reference note. */
+    void setSlot(int slot);
+    int  slot() const noexcept { return slot_; }
+
     void paint(juce::Graphics& g) override;
     void resized() override;
     void mouseUp(const juce::MouseEvent& e) override;
@@ -66,6 +71,7 @@ private:
 
     Sp3ctraAudioProcessor& processor;
     Module       module { Module::Pitch };
+    int          slot_  { 0 };              // pool slot of the mirrored instance
     juce::Colour accent { 0xffe06bb8 };     // pink (PITCH) / teal (MASK)
 
     // ── Mapping snapshot (mirrors lux_pitch.c / lux_mask.c) ──────────────────

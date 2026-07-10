@@ -83,4 +83,12 @@ int synth_luxstral_engine_b_ready(void);
  */
 float synth_get_last_contrast_factor(void);
 
+/**
+ * @brief Cumulative phase-management onset count (thread-safe, monotonic)
+ * @param engine_idx 0 = engine A, 1 = engine B
+ * @note Polled by the LUXSTRAL page timer: a growing value between two polls
+ *       lights the activity LED next to the phase-mode combo.
+ */
+uint32_t synth_luxstral_get_phase_onset_total(int engine_idx);
+
 #endif /* __SYNTH_LUXSTRAL_H */

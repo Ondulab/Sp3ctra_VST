@@ -62,6 +62,21 @@ typedef struct LuxStralEngine {
    * synth_luxstral_init_engine_b(). Workers read it via worker->engine->waves.  */
   volatile struct wave *waves;
 
+  /* ===== Phase management (auto-calibrated onset gate) ====================== */
+  /* Slow-decaying max of per-note target volumes — the reference the onset
+   * gate adapts to, so the user never tunes an absolute threshold against
+   * invisible internal volume scales. Updated by the producer in the drain
+   * block AFTER the end barrier; workers read phase_gate_abs the NEXT frame,
+   * strictly ordered by the barriers (no race).                              */
+  float phase_onset_ref;   /* rolling max note volume (decay ~10 s)          */
+  float phase_onset_floor; /* rolling min note volume = the decode law's
+                              resting bed (empty pixels decode to
+                              10^(-range/20), never 0) — fast-follow down,
+                              slow drift up                                  */
+  float phase_gate_abs;    /* gate = max(sens_frac × ref, 4 × bed, 1e-3);
+                              workers re-arm at gate/2 (≥ 2× bed, so the
+                              hysteresis sees through the bed)              */
+
   /* ===== Worker pool ======================================================== */
   synth_thread_worker_t *thread_pool;  /* Dynamically allocated (num_workers)  */
   pthread_t *worker_threads;           /* Dynamically allocated (num_workers)  */

@@ -20,7 +20,7 @@
  *   DAW Sync  — locked to the host transport (PPQ), period set as a musical
  *               division; holds while the transport is stopped.
  * A common refresh-rate factor (multiplier/divider) stretches the period for
- * very slow updates ("refresh rate très lent").
+ * very slow updates ("very slow refresh rate").
  */
 #pragma once
 

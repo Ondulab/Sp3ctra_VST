@@ -14,9 +14,6 @@ PitchSetupPanel::PitchSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
     couplingCombo.addItem("LuxStral", 1);
     couplingCombo.addItem("Free",     2);
     addAndMakeVisible(couplingCombo);
-    couplingAttachment.reset(
-        new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            apvts, "luxpitchCouplingMode", couplingCombo));
 
     // ── Free pixels per semitone ────────────────────────────────────────
     freeStepLabel.setText("px/semitone", juce::dontSendNotification);
@@ -28,9 +25,6 @@ PitchSetupPanel::PitchSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
     freeStepSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
                                    50, Sp3ctraTheme::kControlH);
     addAndMakeVisible(freeStepSlider);
-    freeStepAttachment.reset(
-        new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxpitchFreePixelsPerST", freeStepSlider));
 
     // ── Pitch Bend Range ────────────────────────────────────────────────
     pbRangeLabel.setText("PB Range", juce::dontSendNotification);
@@ -42,9 +36,6 @@ PitchSetupPanel::PitchSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
     pbRangeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
                                   50, Sp3ctraTheme::kControlH);
     addAndMakeVisible(pbRangeSlider);
-    pbRangeAttachment.reset(
-        new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxpitchPitchBendRange", pbRangeSlider));
 
     // ── MIDI Channel (1-16) ────────────────────────────────────────────
     midiChannelLabel.setText("MIDI Channel", juce::dontSendNotification);
@@ -55,9 +46,6 @@ PitchSetupPanel::PitchSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
     for (int ch = 1; ch <= 16; ++ch)
         midiChannelCombo.addItem("Channel " + juce::String(ch), ch);
     addAndMakeVisible(midiChannelCombo);
-    midiChannelAttachment.reset(
-        new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            apvts, "luxpitchMidiChannel", midiChannelCombo));
 
     // ── Octave Offset (-2..+2) ─────────────────────────────────────────
     octaveOffsetLabel.setText("Octave Offset", juce::dontSendNotification);
@@ -71,9 +59,6 @@ PitchSetupPanel::PitchSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
     octaveOffsetCombo.addItem("+1", 4);
     octaveOffsetCombo.addItem("+2", 5);
     addAndMakeVisible(octaveOffsetCombo);
-    octaveOffsetAttachment.reset(
-        new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            apvts, "luxpitchOctaveOffset", octaveOffsetCombo));
 
     // ── Reference Note (C1..B6, default A3) ────────────────────────────
     refNoteLabel.setText("Reference Note", juce::dontSendNotification);
@@ -87,9 +72,6 @@ PitchSetupPanel::PitchSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
         for (int note = 0; note < 12; ++note)
             refNoteCombo.addItem(juce::String(noteLetters[note]) + juce::String(octave), itemId++);
     addAndMakeVisible(refNoteCombo);
-    refNoteAttachment.reset(
-        new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            apvts, "luxpitchReferenceNote", refNoteCombo));
 
     // ── Polyphony (up to 10 voices) ──────────────────────────────────
     polyphonyLabel.setText("Polyphony", juce::dontSendNotification);
@@ -99,9 +81,43 @@ PitchSetupPanel::PitchSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
 
     polyphonyToggle.setButtonText("Enable (10 voices max)");
     addAndMakeVisible(polyphonyToggle);
+
+    setSlot(0);   // bind every attachment to bank 0 until a block is selected
+}
+
+void PitchSetupPanel::setSlot(int slot)
+{
+    slot_ = juce::jlimit(0, 7, slot);
+
+    couplingAttachment.reset();
+    freeStepAttachment.reset();
+    pbRangeAttachment.reset();
+    midiChannelAttachment.reset();
+    octaveOffsetAttachment.reset();
+    refNoteAttachment.reset();
+    polyphonyAttachment.reset();
+
+    couplingAttachment.reset(
+        new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
+            apvts, lpParam(slot_, "CouplingMode"), couplingCombo));
+    freeStepAttachment.reset(
+        new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, lpParam(slot_, "FreePixelsPerST"), freeStepSlider));
+    pbRangeAttachment.reset(
+        new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, lpParam(slot_, "PitchBendRange"), pbRangeSlider));
+    midiChannelAttachment.reset(
+        new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
+            apvts, lpParam(slot_, "MidiChannel"), midiChannelCombo));
+    octaveOffsetAttachment.reset(
+        new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
+            apvts, lpParam(slot_, "OctaveOffset"), octaveOffsetCombo));
+    refNoteAttachment.reset(
+        new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
+            apvts, lpParam(slot_, "ReferenceNote"), refNoteCombo));
     polyphonyAttachment.reset(
         new juce::AudioProcessorValueTreeState::ButtonAttachment(
-            apvts, "luxpitchPolyphony", polyphonyToggle));
+            apvts, lpParam(slot_, "Polyphony"), polyphonyToggle));
 }
 
 PitchSetupPanel::~PitchSetupPanel() {}

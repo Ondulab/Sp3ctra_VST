@@ -11,9 +11,9 @@ class Sp3ctraAudioProcessor;
  *
  * Extracted from VideoDisplayComponent (the original global SFML-style renderer)
  * so a mixer can own many engines and composite their outputs. This is a plain
- * class — NO JUCE Component, NO Timer, NO Thread. The mixer drives it on the
- * message thread by calling tick() (drain ring + advance scroll) then
- * renderInto() (blit the warped/aged waterfall into a target Image).
+ * class — NO JUCE Component, NO Timer, NO Thread. The mixer's render thread
+ * drives it by calling tick() (drain ring + advance scroll) then buildWarp() /
+ * drawWarp() (blit the warped/aged waterfall into a target).
  *
  * Architecture (vs. the original):
  * ─────────────────────────────────────────────────────────────────────────────
@@ -24,19 +24,20 @@ class Sp3ctraAudioProcessor;
  *   HERE:     synth thread  → video_scroll_capture_line() → VideoScrollState ring
  *                           → tick()  (drains the ring via video_scroll_ring_*,
  *                                       runs the SAME scroll/stamp logic)
- *                           → renderInto() (the SAME paint() draw code into `dest`)
+ *                           → buildWarp()+drawWarp() (the SAME paint() draw code)
  * ─────────────────────────────────────────────────────────────────────────────
  *
  * The capture path differs only in WHERE scanlines come from: instead of a
  * dedicated CaptureThread polling AudioImageBuffers, tick() drains the per-instance
  * lock-free ring (video_scroll_instance(slot)). The scroll/stamp/paint math —
  * compression (distance time-squish) and fade (distance aging) — is copied
- * verbatim from VideoDisplayComponent; both remain tuned display-time effects
- * applied in renderInto().
+ * verbatim from VideoDisplayComponent; both remain tuned display-time effects.
  *
- * Threading: message thread only. The ring read cursor (cursor_) and the
- * history/ping-pong buffers are owned here and touched only by tick()/renderInto().
- * The producer (synth thread) owns write_index + generation in VideoScrollState.
+ * Threading: SINGLE consumer thread (the mixer's render thread — historically
+ * the message thread). The ring read cursor (cursor_) and the history buffer
+ * are owned here and touched only by tick()/buildWarp()/drawWarp(). The producer
+ * (synth thread) owns write_index + generation in VideoScrollState. APVTS params
+ * are read through atomic raw-value pointers, safe from any thread.
  */
 class VideoScrollRenderCore
 {
@@ -49,36 +50,23 @@ public:
     void setSlot(int slot);
     int  slot() const noexcept { return slot_; }
 
-    // (Re)allocate the history/ping-pong buffers for a new display size. Cheap
-    // no-op when (w,h) is unchanged, so the mixer may call it every frame.
+    // (Re)allocate the history buffer for a new display size. Cheap no-op when
+    // (w,h) is unchanged, so the mixer may call it every frame. On a real size
+    // change the previous history is RESCALED into the new buffer (not blanked),
+    // so opening/resizing the master window no longer flashes the waterfall black.
     void setDisplaySize(int w, int h);
 
-    // Drain the capture ring and advance the scroll by one step. No-op while
-    // paused (matches the original: ring is consumed/re-anchored but no scroll)
-    // or when the display size is 0. Returns true when the history was mutated
-    // (scrolled/stamped/cleared) — false means the frozen image is untouched and
-    // the caller may skip repainting its views this tick.
-    bool tick();
-
-    // Blit the current waterfall into `dest` (a caller-sized ARGB/RGB Image),
-    // applying the display params (compression, fade, zoom, rotation/mode,
-    // invert handled at stamp time, colorMode handled at stamp time). `dest`
-    // is treated as the full target area; the engine fills it edge-to-edge.
-    void renderInto(juce::Image& dest);
-
-    // Paint the waterfall DIRECTLY into an existing Graphics at (0,0)..(destW,destH).
-    // Used by the mixer to render a single output straight into the (retina-backed)
-    // window/column Graphics — one resample, no offscreen image, no resolution cap,
-    // matching the original renderer's crispness. The caller sets up clip/origin.
-    // Convenience = buildWarp() + drawWarp(); prefer the split form in the hot path.
-    void renderInto(juce::Graphics& g, int destW, int destH);
+    // Drain the capture ring and advance the scroll. `nowMs`/`dtMs` come from the
+    // caller's frame clock (juce::Time::getMillisecondCounterHiRes): the scroll
+    // advance is TIME-based (px/s), not per-call, so an irregular tick cadence
+    // no longer distorts the time axis. No-op while paused (ring is consumed /
+    // re-anchored but no scroll) or when the display size is 0. Returns true when
+    // the history was mutated (scrolled/stamped/cleared) — false means the frozen
+    // image is untouched and the caller may skip repainting its views this tick.
+    bool tick(double nowMs, double dtMs);
 
     // ── Split render (perf): compute the expensive warp ONCE per tick, then blit
-    // it cheaply into any number of views. Previously renderInto() did BOTH per
-    // call, so the column preview AND the detached window each recomputed the full
-    // (window-resolution) warp every frame — doubling a 2560×1440 scalar pass and
-    // collapsing the message-thread frame-rate. Now the mixer calls buildWarp()
-    // once after tick(), then drawWarp() per destination.
+    // it cheaply into any number of views.
     //   buildWarp() : warp + age the linear history into warpBuf_ (bufW_×compH_).
     //                 Returns true when warpBuf_ was rebuilt (false = cache hit,
     //                 the previous warp is still current → no repaint needed).
@@ -86,7 +74,8 @@ public:
     bool buildWarp();
     void drawWarp(juce::Graphics& g, int destW, int destH);
 
-    // Blank both history buffers (transport Stop). May be called by the mixer.
+    // Blank the history buffer (transport Stop). May be called by the mixer's
+    // render thread only (same single-consumer discipline as tick()).
     void clear();
 
 private:
@@ -98,7 +87,7 @@ private:
 
     // ── Scroll + stamp (the original scrollStep + buildLineImage) ─────────────
     // scrollStep returns true when it mutated the history (see tick()).
-    bool scrollStep();
+    bool scrollStep(double nowMs, double dtMs);
     bool buildLineImage(juce::Image& out, int coreH, int bandH,
                         int captured, int captureCount);
 
@@ -128,17 +117,32 @@ private:
     // Scratch copy buffers for video_scroll_ring_get (each VIDEO_SCROLL_MAX_PIXELS).
     std::vector<uint8_t> tmpR_, tmpG_, tmpB_;
 
-    // ── Bidirectional history buffers (ping-pong, legacy birth-line model) ────
-    juce::Image historyA_, historyB_;
-    // Offscreen scratch for renderInto(): linear history warped (time-squish) +
-    // aged (fade), before the zoom/orientation transform. Sized bufW_ × compH_.
+    // ── Starvation bridge ("hold last line") ──────────────────────────────────
+    // The producer is bursty (UDP packets deliver several lines at once) while
+    // the scroll advances continuously: a tick that drains ZERO fresh lines but
+    // still scrolls used to stamp nothing, leaving a black 2×scroll gap — the
+    // "bandes noires". When a tick is starved we re-stamp the newest previously
+    // captured line for up to kHoldMs; past that the source is genuinely stopped
+    // and the honest black gap returns (no-signal contract).
+    static constexpr double kHoldMs = 250.0;
+    std::vector<uint8_t> heldR_, heldG_, heldB_;
+    int    heldPx_   { 0 };
+    double heldAtMs_ { -1.0e12 };
+
+    // ── History buffer (single, scrolled IN PLACE — legacy birth-line model) ──
+    // The original kept two ping-pong images and re-blitted the whole W×4H
+    // history through juce::Graphics every tick (plus a full black fill). The
+    // in-place row-move version does the same shift with row memcpys on one
+    // buffer: ~3-4× less memory traffic per tick and half the resident memory.
+    juce::Image history_;
+    // Offscreen scratch: linear history warped (time-squish) + aged (fade),
+    // before the zoom/orientation transform. Sized bufW_ × compH_.
     juce::Image warpBuf_;
-    // Reused paint() scratch (avoid per-frame allocation).
+    // Reused scratch (avoid per-frame allocation).
     std::vector<int> warpEdge_;
     std::vector<int> accR_, accG_, accB_;
     std::vector<int> psR_, psG_, psB_;
 
-    int  curBuf_  { 0 };       // after a step: 0 → A freshly drawn, 1 → B
     int  compW_   { 0 };       // viewport width
     int  compH_   { 0 };       // viewport height
     int  bufW_    { 0 };       // history width  (= compW_)
@@ -153,9 +157,9 @@ private:
     // buildWarp() is skipped when nothing that affects warpBuf_ changed since the
     // last build: the history is frozen (warpDirty_ stays false while paused) AND
     // the warp-shaping params are identical. This makes a paused waterfall cost
-    // essentially zero instead of re-running the full per-pixel pass every tick
-    // (the cause of the sluggish/flickery feel while paused). scrollStep() sets
-    // warpDirty_ whenever it mutates the history; clear()/alloc reset it too.
+    // essentially zero instead of re-running the full per-pixel pass every tick.
+    // scrollStep() sets warpDirty_ whenever it mutates the history; clear()/alloc
+    // reset it too.
     bool  warpDirty_   { true };
     float wsLinePos_   { 1e9f };
     float wsCompress_  { 1e9f };

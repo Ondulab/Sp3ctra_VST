@@ -19,6 +19,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "../midi/MidiLearnAttachment.h"
 #include "../ui/EnvelopeEditorComponent.h"
 #include "VisualizerMode.h"
 
@@ -28,14 +29,13 @@ public:
     explicit LuxPitchTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p),
           envelopeEditor(p.getAPVTS(), juce::Colour(0xffe06bb8),
-                         "luxpitchAttackMs", "luxpitchDecayMs",
-                         "luxpitchSustainLevel", "luxpitchReleaseMs",
-                         "luxpitchAttackCurve", "luxpitchDecayCurve",
-                         "luxpitchReleaseCurve")
+                         lpParam(0, "AttackMs"), lpParam(0, "DecayMs"),
+                         lpParam(0, "SustainLevel"), lpParam(0, "ReleaseMs"),
+                         lpParam(0, "AttackCurve"), lpParam(0, "DecayCurve"),
+                         lpParam(0, "ReleaseCurve"))
     {
-        auto& apvts = p.getAPVTS();
-
         // ── Integrated ADSR editor — owns the A/D/S/R value boxes too
+        envelopeEditor.setMidiMap(&p.getMidiMap());   // right-click MIDI Learn
         addAndMakeVisible(envelopeEditor);
 
         // ── Enable toggle ── moved to the rack LED + zone-3 header power switch
@@ -45,8 +45,6 @@ public:
         addAndMakeVisible(bgCombo);
         bgCombo.addItem("Black", 1);
         bgCombo.addItem("White", 2);
-        bgAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            apvts, "luxpitchBackgroundMode", bgCombo));
 
         // ── Step Mode / px-per-semitone / PB Range ── moved to PITCH SETUP ──
 
@@ -58,8 +56,6 @@ public:
         glideSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
                                     50, Sp3ctraTheme::kControlH);
         addAndMakeVisible(glideSlider);
-        glideAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxpitchGlideMs", glideSlider));
 
         // ── LFO ────────────────────────────────────────────────────────
         initLabel(lfoRateLabel, "LFO Rate");
@@ -67,24 +63,64 @@ public:
         lfoRateSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
                                       50, Sp3ctraTheme::kControlH);
         addAndMakeVisible(lfoRateSlider);
-        lfoRateAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxpitchLfoRate", lfoRateSlider));
 
         initLabel(lfoDepthLabel, "LFO Depth");
         lfoDepthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
         lfoDepthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
                                        50, Sp3ctraTheme::kControlH);
         addAndMakeVisible(lfoDepthSlider);
-        lfoDepthAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "luxpitchLfoDepth", lfoDepthSlider));
 
         // ── Velocity coupling ──────────────────────────────────────────
         initLabel(velCouplingLabel, "Velocity");
         velCouplingToggle.setButtonText("Active");
         addAndMakeVisible(velCouplingToggle);
-        velCouplingAttach.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(
-            apvts, "luxpitchVelocityCoupling", velCouplingToggle));
+
+        setSlot(0);   // bind every attachment to bank 0 until a block is selected
     }
+
+    /** Bind every control to the PITCH bank of `slot` (0..7) — the selected
+     *  instance's parameters (same per-instance pattern as VideoScrollPage). */
+    void setSlot(int slot)
+    {
+        slot_ = juce::jlimit(0, 7, slot);
+        auto& apvts = processor.getAPVTS();
+
+        bgAttach.reset(); glideAttach.reset();
+        lfoRateAttach.reset(); lfoDepthAttach.reset(); velCouplingAttach.reset();
+
+        envelopeEditor.setParamIds(
+            lpParam(slot_, "AttackMs"), lpParam(slot_, "DecayMs"),
+            lpParam(slot_, "SustainLevel"), lpParam(slot_, "ReleaseMs"),
+            lpParam(slot_, "AttackCurve"), lpParam(slot_, "DecayCurve"),
+            lpParam(slot_, "ReleaseCurve"));
+
+        bgAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
+            apvts, lpParam(slot_, "BackgroundMode"), bgCombo));
+        glideAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, lpParam(slot_, "GlideMs"), glideSlider));
+        lfoRateAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, lpParam(slot_, "LfoRate"), lfoRateSlider));
+        lfoDepthAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, lpParam(slot_, "LfoDepth"), lfoDepthSlider));
+        velCouplingAttach.reset(new juce::AudioProcessorValueTreeState::ButtonAttachment(
+            apvts, lpParam(slot_, "VelocityCoupling"), velCouplingToggle));
+
+        // Right-click MIDI Learn on every play control of THIS instance.
+        learnAtts_.clear();
+        auto& mm = processor.getMidiMap();
+        auto learn = [&](juce::Component& c, const char* suffix)
+        {
+            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
+                mm, c, lpParam(slot_, suffix)));
+        };
+        learn(glideSlider,       "GlideMs");
+        learn(lfoRateSlider,     "LfoRate");
+        learn(lfoDepthSlider,    "LfoDepth");
+        learn(velCouplingToggle, "VelocityCoupling");
+        learn(bgCombo,           "BackgroundMode");
+    }
+
+    int slot() const noexcept { return slot_; }
 
     void paint(juce::Graphics& g) override
     {
@@ -138,7 +174,8 @@ public:
     }
 
 private:
-    [[maybe_unused]] Sp3ctraAudioProcessor& processor;
+    Sp3ctraAudioProcessor& processor;
+    int slot_ { 0 };   // pool slot of the bound instance
 
     // Labels — ADSR labels removed (now inside the graphic editor);
     //          Step Mode / px-per-semitone / PB Range moved to PITCH SETUP.
@@ -157,6 +194,7 @@ private:
         bgAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
         glideAttach, lfoRateAttach, lfoDepthAttach;
+    std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
 
     // Graphic ADSR editor (M5) — binds the same four envelope params as the
     // slider rows; both stay in sync through the APVTS.

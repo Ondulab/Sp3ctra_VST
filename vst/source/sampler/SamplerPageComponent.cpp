@@ -289,8 +289,8 @@ void SamplerPageComponent::resized()
     constexpr int pad    = Sp3ctraTheme::kPad;
     constexpr int gap    = Sp3ctraTheme::kGap;
     constexpr int gridH  = 66;
-    // Editor grew a full-width spectral-curve band at the bottom (+ Loop XF row).
-    constexpr int editH  = 430;
+    // Editor: 2 param columns + image editor + a SCORE-style EQ panel underneath.
+    constexpr int editH  = 500;
     constexpr int bankH  = Sp3ctraTheme::kControlH;
 
     // ── Zone 1: sample bank ───────────────────────────────────────────────────

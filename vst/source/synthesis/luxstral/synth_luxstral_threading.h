@@ -33,6 +33,16 @@ typedef struct synth_thread_worker_s {
   int thread_id;      // Thread ID (0, 1, 2)
   int start_note;     // Start note for this thread
   int end_note;       // End note for this thread
+  uint32_t rng_state; // xorshift32 stream (phase-drift draws) — worker-local, RT-safe
+
+  // Phase-reset diagnostics — written by the worker, drained (read + reset)
+  // by the producer after the end barrier. Only tracked while the phase-reset
+  // feature is active (threshold > 0); zero-cost otherwise.
+  uint32_t phase_reset_count; // onsets that fired a reset since last drain
+  float max_target_volume;    // loudest per-note target seen since last drain
+  float min_target_volume;    // quietest per-note target since last drain —
+                              // tracks the decode law's resting bed (empty
+                              // pixels decode to 10^(-range/20), never 0)
   float *imageData;   // Input image data (shared, normalized float [0, 1])
 
   // Local output buffers per thread - Float32 (legacy)

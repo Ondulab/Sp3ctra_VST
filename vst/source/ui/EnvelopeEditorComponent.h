@@ -29,7 +29,9 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "../UITheme.h"
+#include "../midi/MidiLearnAttachment.h"
 #include <memory>
+#include <vector>
 
 class EnvelopeEditorComponent : public juce::Component
 {
@@ -58,6 +60,25 @@ public:
                             const juce::String& widthAttackParamId  = {},
                             const juce::String& widthReleaseParamId = {});
     ~EnvelopeEditorComponent() override;
+
+    /** Optional MIDI-learn wiring — call BEFORE setParamIds; the right-click
+     *  popups on the value boxes then follow every rebind. */
+    void setMidiMap(MidiMappingEngine* m) noexcept { midiMap_ = m; }
+
+    /** Rebind every handle/box to another parameter set — the per-instance
+     *  rebind path for the contextual pages (same id semantics as the
+     *  constructor: empty decay/sustain → AR, empty curves → linear, empty
+     *  width ids → no width lane). */
+    void setParamIds(const juce::String& attackParamId,
+                     const juce::String& decayParamId,
+                     const juce::String& sustainParamId,
+                     const juce::String& releaseParamId,
+                     const juce::String& attackCurveParamId  = {},
+                     const juce::String& decayCurveParamId   = {},
+                     const juce::String& releaseCurveParamId = {},
+                     const juce::String& widthBaseParamId    = {},
+                     const juce::String& widthAttackParamId  = {},
+                     const juce::String& widthReleaseParamId = {});
 
     /** Natural height for this instance (depends on whether the width lane exists). */
     int preferredHeight() const noexcept
@@ -132,6 +153,8 @@ private:
     juce::Slider boxWAtk, boxW, boxWRel;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
         boxAAtt, boxDAtt, boxSAtt, boxRAtt, boxWAtkAtt, boxWAtt, boxWRelAtt;
+    MidiMappingEngine* midiMap_ = nullptr;
+    std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
     void initBox(juce::Slider& box, const juce::String& paramId,
                  std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>& att);
 

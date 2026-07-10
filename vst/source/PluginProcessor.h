@@ -7,6 +7,7 @@
 #include "framesequencer/FrameSequencer.h"
 #include "processing/AcquisitionGate.h" // "Vitesse d'acquisition" — frame-advance brake clock
 #include "ui/ChainModel.h"      // M6 Phase 2 — editable chain topology (owned here)
+#include "midi/MidiMappingEngine.h" // MIDI CC/Note → any play param (MIDI learn)
 #include <map>                  // chainPoolSlots_ (stable chain → pool-slot binding)
 
 // M9 — IMAGE / VIDEO / CAMERA source engines (owned here, UI binds to them)
@@ -31,6 +32,68 @@ inline juce::String vsParam(int slot, const char* suffix)
 
 inline juce::String vsMixParam(int slot, const char* suffix)
 { return "videoMix" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
+
+//==============================================================================
+// Pooled-insert (Pitch/Mask/Reverb/Echo) per-instance APVTS bank id helpers.
+// Each instance owns a state-pool slot 0..7 (modulePoolSlots_, keyed by the
+// ModuleInstance UUID); its play params live under "luxpitch{slot}_*" etc. —
+// same banked pattern as VideoScroll. Suffixes match the legacy per-type ids
+// ("luxpitchAttackMs" → "luxpitch{N}_AttackMs"), which keeps the session
+// migration mechanical.
+inline juce::String lpParam(int slot, const char* suffix)
+{ return "luxpitch" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
+
+inline juce::String lmParam(int slot, const char* suffix)
+{ return "luxmask" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
+
+inline juce::String rvParam(int slot, const char* suffix)
+{ return "luxreverb" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
+
+inline juce::String ecParam(int slot, const char* suffix)
+{ return "luxecho" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
+
+inline juce::String eqParam(int slot, const char* suffix)
+{ return "luxeq" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
+
+//==============================================================================
+// Synth-split P1 — per-OUT (send) conditioning banks. An OUT module owns the
+// image conditioning of its chain's flux (Negative / DC Blocking / Gamma with
+// 1.0 = off / Contrast Min + Range dB for LuxStral / Intensity = pre-engine
+// mix weight). Same banked pattern as the pooled inserts. P1 slot binding is
+// fixed: LuxStral A=0, B=1; LuxSynth=0; LuxWave=0 — multi-send slots activate
+// with the mix bus (P3/P4).
+inline juce::String lsOutParam(int slot, const char* suffix)
+{ return "luxstralOut" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
+
+inline juce::String lxOutParam(int slot, const char* suffix)
+{ return "luxsynthOut" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
+
+inline juce::String lwOutParam(int slot, const char* suffix)
+{ return "luxwaveOut" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
+
+// Sampler per-engine APVTS bank (engines A/B, same pattern as LuxStral):
+// engine 0 keeps the legacy "luxSampler*" ids (sessions load unchanged),
+// engine 1 owns "luxSamplerB*" (same suffixes). Play params only — the enable
+// LED, export prefs and output dir stay shared.
+inline juce::String fsEngineParam(int engine, const char* suffix)
+{
+    return (engine == 1 ? juce::String("luxSamplerB") : juce::String("luxSampler"))
+         + suffix;
+}
+
+/** Bank id for any pooled insert type; empty for non-pooled types. */
+inline juce::String insertBankParam(ModuleType t, int slot, const char* suffix)
+{
+    switch (t)
+    {
+        case ModuleType::Pitch:  return lpParam(slot, suffix);
+        case ModuleType::Mask:   return lmParam(slot, suffix);
+        case ModuleType::Reverb:    return rvParam(slot, suffix);
+        case ModuleType::Echo:      return ecParam(slot, suffix);
+        case ModuleType::Equalizer: return eqParam(slot, suffix);
+        default:                    return {};
+    }
+}
 
 //==============================================================================
 /**
@@ -223,7 +286,8 @@ public:
     // set by processBlock (RT) and consumed by the message thread.
     //
     // MIDI Learn:
-    //   target  : -1 = idle, 0 = REC, 1 = PLAY, 2 = SAVE
+    //   target  : -1 = idle, otherwise engine * 3 + action
+    //             (action: 0 = REC, 1 = PLAY, 2 = SAVE; engine 0 = A, 1 = B)
     //   result  : -1 = no capture yet, otherwise (type << 8) | number
     //             where type: 1 = Note, 2 = CC
     // -------------------------------------------------------------------------
@@ -234,11 +298,13 @@ public:
     //   pressed  : key down  / CC value crossed >= 64  → start action
     //   released : key up    / CC value crossed <  64  → stop  action
     // SAVE keeps a single trigger-on-press semantic.
-    bool consumeSamplerRecPressed()   noexcept { return samplerRecPressed  .exchange(false, std::memory_order_acquire); }
-    bool consumeSamplerRecReleased()  noexcept { return samplerRecReleased .exchange(false, std::memory_order_acquire); }
-    bool consumeSamplerPlayPressed()  noexcept { return samplerPlayPressed .exchange(false, std::memory_order_acquire); }
-    bool consumeSamplerPlayReleased() noexcept { return samplerPlayReleased.exchange(false, std::memory_order_acquire); }
-    bool consumeSamplerSaveTrigger()  noexcept { return samplerSaveTriggered.exchange(false, std::memory_order_acquire); }
+    // `engine` selects the sampler instance (0 = A, 1 = B) — bindings are
+    // per-engine so a controller button drives ONE instance, not both.
+    bool consumeSamplerRecPressed  (int engine) noexcept { return samplerRecPressed  [engine & 1].exchange(false, std::memory_order_acquire); }
+    bool consumeSamplerRecReleased (int engine) noexcept { return samplerRecReleased [engine & 1].exchange(false, std::memory_order_acquire); }
+    bool consumeSamplerPlayPressed (int engine) noexcept { return samplerPlayPressed [engine & 1].exchange(false, std::memory_order_acquire); }
+    bool consumeSamplerPlayReleased(int engine) noexcept { return samplerPlayReleased[engine & 1].exchange(false, std::memory_order_acquire); }
+    bool consumeSamplerSaveTrigger (int engine) noexcept { return samplerSaveTriggered[engine & 1].exchange(false, std::memory_order_acquire); }
 
     /** All Notes Off (panic): ask the audio thread to release every held/stuck
      *  note next block. Safe to call from the UI (message) thread. */
@@ -261,11 +327,48 @@ public:
      *  onChainModelEdited() afterwards. */
     ChainModel& getChainModel() noexcept { return chainModel_; }
 
-    /** Pitch/Mask state-pool slot bound to chain `chainIdx` (0..7), or 0 when
-     *  unknown. The binding is keyed by the chain's UUID and STABLE across
-     *  edits: removing / reordering another chain never rebinds this chain's
-     *  live Pitch/Mask state (see updateChainPoolBindings). Message thread. */
-    int poolSlotForChain(int chainIdx) const noexcept;
+    /** MIDI CC/Note → parameter mapping engine (right-click MIDI Learn on any
+     *  play control; per-instance via the banked param ids). */
+    MidiMappingEngine& getMidiMap() noexcept { return midiMap_; }
+
+    /** UI VU meters (AUDIO MIX panel) — per-engine post-volume block peaks,
+     *  folded with an RT-side release in processBlock. [0..1+], relaxed reads. */
+    float meterLuxStral() const noexcept { return meterLuxStral_.load(std::memory_order_relaxed); }
+    float meterLuxSynth() const noexcept { return meterLuxSynth_.load(std::memory_order_relaxed); }
+    float meterLuxWave()  const noexcept { return meterLuxWave_ .load(std::memory_order_relaxed); }
+    float meterMaster()   const noexcept { return meterMaster_  .load(std::memory_order_relaxed); }
+
+    /** Pitch/Mask/FX state-pool slot bound to a MODULE INSTANCE (0..7), or 0
+     *  when unknown. The binding is keyed by the ModuleInstance UUID and
+     *  STABLE across edits: moving the module to another chain, or removing /
+     *  reordering other chains, never rebinds (and thus never corrupts or
+     *  swaps) its live state — the state belongs to the module, not to the
+     *  chain hosting it (see updateModulePoolBindings). Message thread. */
+    int poolSlotForInstance(const juce::Uuid& moduleId) const noexcept;
+
+    /** MIDI-follow auto-navigation — reverse of the per-instance bank id helpers
+     *  (lpParam/lmParam/vsParam/lsOutParam/…). Resolves a mapped parameter id to
+     *  the module INSTANCE that owns it so the editor can jump to its page.
+     *  `engineView` marks a synth ENGINE param (its own page) vs an OUT/send
+     *  param (the OUT page). Message thread; best-effort — `valid` is false for
+     *  parameters that don't belong to a rack module (global / source / master),
+     *  or whose module isn't currently in the rack. */
+    struct ParamNavTarget
+    {
+        bool       valid { false };
+        juce::Uuid instanceId;                    ///< instance to select in the rack
+        ModuleType type { ModuleType::Sp3ctra };
+        bool       engineView { false };          ///< synth engine page vs OUT page
+    };
+    ParamNavTarget navTargetForParam(const juce::String& paramId) const;
+
+    /** Contextual visualizer (zone 1): sets the SELECTED module instance whose
+     *  chain-position output feeds the selection tap. The chain executor then
+     *  publishes the stream frame AT that module's position in ITS chain
+     *  (SynthChainPlan.viz_tap_insert → selection-tap bus). Clears the tap to
+     *  white first so the previous selection's frame never lingers. Message
+     *  thread; cheap (plan republish). */
+    void setVisualizerTapModule(const juce::Uuid& moduleId);
 
     /** Called by the UI after a model mutation: pushes module presence onto the
      *  APVTS enable params, derives the per-synth source routing, and persists
@@ -459,17 +562,20 @@ private:
     // Cached raw-parameter pointers read by processBlock (audio thread):
     // apvts.getRawParameterValue("literal") builds a juce::String (malloc)
     // on every call, so the RT path reads through these pointers instead.
-    std::atomic<float>* luxSamplerMidiChannelParam  = nullptr;
-    std::atomic<float>* luxSamplerRecBindTypeParam  = nullptr;
-    std::atomic<float>* luxSamplerRecBindNumParam   = nullptr;
-    std::atomic<float>* luxSamplerPlayBindTypeParam = nullptr;
-    std::atomic<float>* luxSamplerPlayBindNumParam  = nullptr;
-    std::atomic<float>* luxSamplerSaveBindTypeParam = nullptr;
-    std::atomic<float>* luxSamplerSaveBindNumParam  = nullptr;
-    std::atomic<float>* luxpitchMidiChannelParam    = nullptr;
-    std::atomic<float>* luxpitchOctaveOffsetParam   = nullptr;
-    std::atomic<float>* luxmaskMidiChannelParam     = nullptr;
-    std::atomic<float>* luxmaskOctaveOffsetParam    = nullptr;
+    // Index = sampler engine (0 = A "luxSampler*", 1 = B "luxSamplerB*").
+    std::atomic<float>* luxSamplerMidiChannelParam [2] = {};
+    std::atomic<float>* luxSamplerRecBindTypeParam [2] = {};
+    std::atomic<float>* luxSamplerRecBindNumParam  [2] = {};
+    std::atomic<float>* luxSamplerPlayBindTypeParam[2] = {};
+    std::atomic<float>* luxSamplerPlayBindNumParam [2] = {};
+    std::atomic<float>* luxSamplerSaveBindTypeParam[2] = {};
+    std::atomic<float>* luxSamplerSaveBindNumParam [2] = {};
+    // Per-instance banks (index = pool slot): each Pitch/Mask instance filters
+    // MIDI on ITS OWN channel/octave params.
+    std::atomic<float>* luxpitchMidiChannelParam [ChainModel::kMaxChains] = {};
+    std::atomic<float>* luxpitchOctaveOffsetParam[ChainModel::kMaxChains] = {};
+    std::atomic<float>* luxmaskMidiChannelParam  [ChainModel::kMaxChains] = {};
+    std::atomic<float>* luxmaskOctaveOffsetParam [ChainModel::kMaxChains] = {};
     std::atomic<float>* luxsynthEnabledParam        = nullptr;
     std::atomic<float>* luxsynthMidiChannelParam    = nullptr;
     std::atomic<float>* luxsynthOctaveOffsetParam   = nullptr;
@@ -501,8 +607,9 @@ private:
 
     // CC1 mod-wheel targets driven from processBlock (setValueNotifyingHost):
     // cached to avoid the juce::String built by apvts.getParameter("literal").
-    juce::RangedAudioParameter* luxpitchLfoDepthParam   = nullptr;
-    juce::RangedAudioParameter* luxmaskLfoPosDepthParam = nullptr;
+    // Per-instance banks (index = pool slot).
+    juce::RangedAudioParameter* luxpitchLfoDepthParam  [ChainModel::kMaxChains] = {};
+    juce::RangedAudioParameter* luxmaskLfoPosDepthParam[ChainModel::kMaxChains] = {};
 
     // UDP Batch Update state (prevents multiple UDP restarts)
     std::atomic<bool> udpBatchUpdateActive{false};
@@ -516,6 +623,10 @@ private:
     // Defaults reproduce the legacy fixed topology (LuxStral=modulated, LuxSynth=live).
     std::atomic<int> chainSrcLuxstral { 0 };
     std::atomic<int> chainSrcLuxsynth { 1 };
+
+    // MIDI CC/Note → parameter mappings. Constructed after apvts (declaration
+    // order below the apvts member matters — it holds a reference to it).
+    MidiMappingEngine midiMap_ { apvts };
 
     // M6 Phase 2 — authoritative editable topology + last-known presence set
     // (used to diff the enable-param bridge). Message-thread owned.
@@ -532,29 +643,76 @@ private:
     // enable param (A = deviceEnabled, B = luxstralBEnabled) follows ITS OWN
     // placement, not type-level presence.
     std::set<int>        luxstralEngines_;
-    // Stable chain → Pitch/Mask pool-slot binding, keyed by chain UUID. A chain
-    // keeps its pool slot for its whole lifetime, so removing / reordering other
-    // chains never rebinds (and thus never corrupts) its live Pitch/Mask state.
-    // Rebuilt by updateChainPoolBindings() on every model load/edit.
-    std::map<juce::Uuid, int> chainPoolSlots_;
-    // Pool slots owning a Pitch/Mask instance after the LAST derive — diffed to
-    // reset instances whose module (or whole chain) was just removed.
-    uint32_t prevPitchSlots_ { 0 };
-    uint32_t prevMaskSlots_  { 0 };
+    // Stable MODULE-INSTANCE → pool-slot binding (Pitch/Mask/Reverb/Echo),
+    // keyed by the ModuleInstance UUID. A module keeps its pool slot for its
+    // whole lifetime — moving it to another chain, or removing / reordering
+    // other chains, never rebinds (and thus never corrupts or swaps) its live
+    // state. Slots are allocated PER TYPE (each type owns its own state pool).
+    // Rebuilt by updateModulePoolBindings() on every model load/edit.
+    struct PoolBinding { int slot; ModuleType type; };
+    std::map<juce::Uuid, PoolBinding> modulePoolSlots_;
+    // The binding keys the per-instance APVTS param BANK (luxpitch{slot}_*…),
+    // so it must survive a session reload — a rebuild in a different order
+    // would silently swap two instances' settings. Serialized as the
+    // POOL_SLOTS child tree; restored (seeded) before the first
+    // updateModulePoolBindings() of the load.
+    juce::ValueTree poolBindingsToTree() const;
+    void restorePoolBindingsFromTree(const juce::ValueTree& t);
+
+    // ── Per-chain memory of pooled-insert settings ────────────────────────────
+    // When a Pitch/Mask/Reverb/Echo instance leaves a chain (removed, or moved
+    // to another chain), its bank values are snapshotted under (chain UUID,
+    // type). Adding the same type back to that chain restores them — the chain
+    // "remembers" the module's last settings. Keyed per chain+type because the
+    // model allows at most one pooled instance of a type per chain.
+    // Serialized as the INSERT_MEMORY child tree. Message thread only.
+    struct InsertLoc { juce::Uuid chain; ModuleType type; int slot; };
+    std::map<juce::Uuid, InsertLoc> prevInsertLoc_;   // instance UUID → last location
+    std::map<std::pair<juce::String, int>,            // (chain UUID str, (int) type)
+             std::map<juce::String, float>> insertParamMemory_;  // suffix → raw value
+    void updateInsertParamMemory();                   // diff model vs prevInsertLoc_
+    void baselineInsertLocations();                   // session load: no snapshot/apply
+    juce::ValueTree insertMemoryToTree() const;
+    void restoreInsertMemoryFromTree(const juce::ValueTree& t);
+    // Contextual visualizer target — the selected module instance (see
+    // setVisualizerTapModule). Random/unmatched UUID ⇒ no tap in the plan.
+    juce::Uuid vizTapModuleId_;
+    // Per-type masks of pool slots whose binding changed in the LAST rebind
+    // (released or freshly assigned) — their pool state is stale.
+    struct PoolStale { uint32_t pitch = 0, mask = 0, reverb = 0, echo = 0, eq = 0; };
+    // Pool slots owning a Pitch/Mask/Reverb/Echo/EQ instance after the LAST
+    // derive — diffed to reset instances whose module (or whole chain) was just
+    // removed.
+    uint32_t prevPitchSlots_  { 0 };
+    uint32_t prevMaskSlots_   { 0 };
+    uint32_t prevReverbSlots_ { 0 };
+    uint32_t prevEchoSlots_   { 0 };
+    uint32_t prevEqSlots_     { 0 };
     // Bit i set ⇒ the chain bound to pool slot i has a Pitch/Mask instance →
     // fan MIDI to pool slot i. Default bit 0 = legacy single-instance behaviour.
     std::atomic<uint32_t> chainPitchMask_ { 1 };
     std::atomic<uint32_t> chainMaskMask_  { 1 };
+    // Same presence masks for the FX inserts (no MIDI fan-out — config sync only).
+    std::atomic<uint32_t> chainReverbMask_ { 0 };
+    std::atomic<uint32_t> chainEchoMask_   { 0 };
+    std::atomic<uint32_t> chainEqMask_     { 0 };
     // M8 — true when a 2nd LuxStral engine (slot B) is placed in the model; gates
     // the additive engine-B mix in processBlock(). Set in deriveChainRouting().
     std::atomic<bool>     luxstralBPresent_ { false };
+
+    // ── UI VU meters (AUDIO MIX) — written by processBlock only ─────────────
+    // Per-block peak accumulators (RT thread locals, folded + reset each block)
+    // and the atomics the UI reads (peak with exponential release).
+    float lsPkBlock_ { 0.0f }, lxPkBlock_ { 0.0f }, lwPkBlock_ { 0.0f };
+    std::atomic<float> meterLuxStral_ { 0.0f }, meterLuxSynth_ { 0.0f },
+                       meterLuxWave_  { 0.0f }, meterMaster_   { 0.0f };
     // Sampler A/B presence in the model (message thread, set in
     // deriveChainRouting) — combined with the shared luxSamplerEnabled param
     // to drive each engine's setEnabled().
     bool samplerAPresent_ { false };
     bool samplerBPresent_ { false };
     void deriveChainRouting();              // model → setChainSourceRouting + chain plan
-    uint32_t updateChainPoolBindings();     // model → chainPoolSlots_; returns slots to reset
+    PoolStale updateModulePoolBindings();   // model → modulePoolSlots_; returns per-type slots to reset
     void deriveAndPublishChainPlan();       // model → RT-safe per-synth ChainPlan
     void persistChainModel();              // model → apvts.state <CHAINS>
     void applyChainEnableBridge();         // presence → enable params (diff vs chainActiveTypes_)
@@ -580,17 +738,19 @@ private:
     std::atomic<int>  samplerSelectedSlot   { 0 };
     // Momentary state flags: track current "held" state of REC / PLAY bindings
     // (used by processBlock to detect press/release edges on each MIDI event).
-    std::atomic<bool> samplerRecHeld        { false };
-    std::atomic<bool> samplerPlayHeld       { false };
+    // Index = sampler engine (0 = A, 1 = B) — each engine owns its bindings.
+    std::atomic<bool> samplerRecHeld    [2] { false, false };
+    std::atomic<bool> samplerPlayHeld   [2] { false, false };
     // Edge pulses consumed by the UI timer thread (SlotEditorComponent).
-    std::atomic<bool> samplerRecPressed     { false };
-    std::atomic<bool> samplerRecReleased    { false };
-    std::atomic<bool> samplerPlayPressed    { false };
-    std::atomic<bool> samplerPlayReleased   { false };
+    std::atomic<bool> samplerRecPressed  [2] { false, false };
+    std::atomic<bool> samplerRecReleased [2] { false, false };
+    std::atomic<bool> samplerPlayPressed [2] { false, false };
+    std::atomic<bool> samplerPlayReleased[2] { false, false };
     // SAVE retains the one-shot trigger semantic (no momentary behaviour).
-    std::atomic<bool> samplerSaveTriggered  { false };
+    std::atomic<bool> samplerSaveTriggered[2] { false, false };
 
-    // MIDI Learn: target = -1 idle / 0 REC / 1 PLAY / 2 SAVE.
+    // MIDI Learn: target = -1 idle, otherwise engine * 3 + action
+    // (action: 0 REC / 1 PLAY / 2 SAVE — engine 0 = A, 1 = B).
     // Result encoding: -1 = none, else (type << 8) | number  (type: 1=Note, 2=CC).
     std::atomic<int>  samplerMidiLearnTarget{ -1 };
     std::atomic<int>  samplerMidiLearnResult{ -1 };
@@ -646,6 +806,9 @@ private:
     // timer executes the reset ≥40 ms later (frames last ~1 ms).
     uint32_t pendingPitchResets_      { 0 };
     uint32_t pendingMaskResets_       { 0 };
+    uint32_t pendingReverbResets_     { 0 };
+    uint32_t pendingEchoResets_       { 0 };
+    uint32_t pendingEqResets_         { 0 };
     uint32_t pendingVideoScrollInits_ { 0 };
     uint32_t poolResetArmedMs_        { 0 };
 

@@ -118,7 +118,7 @@ void VideoMixerColumn::TransportButton::paintButton(juce::Graphics& g,
 
 //==============================================================================
 VideoMixerColumn::VideoMixerColumn(Sp3ctraAudioProcessor& p)
-    : processor_(p), mixer_(p)
+    : mixer_(p)
 {
     // paint() fills the whole column (bg + header). Opaque so the mixer's 60 fps
     // repaints don't cascade a parent-background repaint through this container.
@@ -185,8 +185,10 @@ void VideoMixerColumn::resized()
     auto r = getLocalBounds();
 
     const bool showFull = ! collapsed_;
-    playBtn_.setVisible(showFull);
-    stopBtn_.setVisible(showFull);
+    // Transport stays reachable in the collapsed band (stacked under the
+    // expand grip) — the video outputs keep running while ZONE 4 is folded.
+    playBtn_.setVisible(true);
+    stopBtn_.setVisible(true);
     detachBtn_.setVisible(showFull);
     fullscreenBtn_.setVisible(showFull);
     collapseBtn_.setVisible(showFull);
@@ -196,6 +198,8 @@ void VideoMixerColumn::resized()
     if (collapsed_)
     {
         expandBtn_.setBounds(0, 2, kGripW, kGripW);
+        playBtn_.setBounds(2, 2 + kGripW + 6, kGripW - 4, kGripW - 4);
+        stopBtn_.setBounds(2, 2 + kGripW + 6 + kGripW, kGripW - 4, kGripW - 4);
         return;
     }
 

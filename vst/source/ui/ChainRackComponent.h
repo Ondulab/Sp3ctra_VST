@@ -39,7 +39,11 @@ enum class ChainBlockId
 {
     Chain1Source = 0, Pitch, Mask, Sampler, Score, LuxStral,
     Chain2Source, LuxSynth, LuxWave, Sequencer, VideoScroll,
-    ImageSrc, VideoSrc, CameraSrc      // M9 — media SRC modules (own pages)
+    ImageSrc, VideoSrc, CameraSrc,     // M9 — media SRC modules (own pages)
+    Reverb, Echo,                      // FX — image-line effect inserts
+    Timbre,                            // UTILS — parametric timbre-spectrum generator
+    Equalizer,                         // FX — graphic EQ insert (appended: ordinals persist)
+    None                               // empty rack — no module selected
 };
 
 /** Maps a selection key to its module type (sources → Sp3ctra). */
@@ -86,10 +90,24 @@ public:
     /** Updates the highlighted block (called back by the editor). */
     void setSelectedBlock(ChainBlockId id);
 
+    /** Programmatically select a module INSTANCE by id, firing the same pre-
+     *  callbacks + onBlockSelected as a user click (so the editor rebinds pages
+     *  and runs its selection path). No-op when the id isn't in the model. Used
+     *  by MIDI-follow auto-navigation. */
+    void selectInstanceById(const juce::Uuid& id);
+
     /** True if some instance in the model maps to this block id — used by the
      *  editor to validate a session-restored selection whose module may have
      *  been deleted since the save. */
     bool hasBlock(ChainBlockId id) const noexcept;
+
+    /** Block id of the first module in the rack — None when the rack is empty.
+     *  Editor restore fallback when the saved selection no longer exists. */
+    ChainBlockId firstBlockId() const noexcept;
+
+    /** UUID of the currently highlighted module INSTANCE — drives the
+     *  contextual zone-1 selection tap (processor.setVisualizerTapModule). */
+    juce::Uuid selectedInstanceId() const noexcept { return selectedId; }
 
     /** Locks the rack (performance mode): hides every delete affordance — the
      *  per-module × and the per-chain × — while keeping drag-to-reorder (within
@@ -208,8 +226,9 @@ private:
     void removeInstance(const juce::Uuid& id);
 
     void updateLeds();
+    // uid: the module instance (pool-state lookup for Pitch/Mask/FX).
     // engineSlot: per-instance engine index (LuxStral/Sampler A=0/B=1); -1 = n/a.
-    LedState ledFor(ModuleType type, int chainIdx, int engineSlot = -1) const;
+    LedState ledFor(ModuleType type, const juce::Uuid& uid, int engineSlot = -1) const;
 
     void selectInstance(const juce::Uuid& id, bool notify);
     juce::Uuid   firstInstanceId() const;

@@ -32,6 +32,9 @@ AudioWavePanel::AudioWavePanel(Sp3ctraAudioProcessor& p)
     addAndMakeVisible(luxwaveVolumeSlider);
     luxwaveVolumeAttachment = std::make_unique<SldAttach>(apvts, "luxwaveVolume", luxwaveVolumeSlider);
 
+    // (The LuxWave OUT conditioning — Negative/DC/Gamma/Intensity — lives on
+    //  the OUT/send page since P2; this page is the ENGINE.)
+
     // ── WAVETABLE — scan direction + amplitude ADSR voice ────────────────────
     addAndMakeVisible(lwScanModeCombo);
     lwScanModeCombo.addItem("Forward",   1);
@@ -42,6 +45,10 @@ AudioWavePanel::AudioWavePanel(Sp3ctraAudioProcessor& p)
     // Amplitude ADSR as a draggable envelope editor with curve bend handles.
     volEnv = std::make_unique<EnvelopeEditorComponent>(
         apvts, juce::Colour(0xffddaa44),
+        "luxwaveAttackMs", "luxwaveDecayMs", "luxwaveSustainLevel", "luxwaveReleaseMs",
+        "luxwaveAttackCurve", "luxwaveDecayCurve", "luxwaveReleaseCurve");
+    volEnv->setMidiMap(&p.getMidiMap());   // re-bind so the boxes get learn
+    volEnv->setParamIds(
         "luxwaveAttackMs", "luxwaveDecayMs", "luxwaveSustainLevel", "luxwaveReleaseMs",
         "luxwaveAttackCurve", "luxwaveDecayCurve", "luxwaveReleaseCurve");
     addAndMakeVisible(*volEnv);
@@ -60,6 +67,20 @@ AudioWavePanel::AudioWavePanel(Sp3ctraAudioProcessor& p)
     lwLfoRateAttach = std::make_unique<SldAttach>(apvts, "luxwaveLfoRate", lwLfoRateSlider);
     initKnob(lwLfoDepthSlider);        addAndMakeVisible(lwLfoDepthSlider);
     lwLfoDepthAttach = std::make_unique<SldAttach>(apvts, "luxwaveLfoDepth", lwLfoDepthSlider);
+
+    // Right-click MIDI Learn (LuxWave is a singleton — ids are global).
+    auto& mm = p.getMidiMap();
+    auto learn = [&](juce::Component& c, const char* id)
+    {
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, c, id));
+    };
+    learn(luxwaveVolumeSlider, "luxwaveVolume");
+    learn(lwAmplitudeSlider,   "luxwaveAmplitude");
+    learn(lwFltCutoffSlider,   "luxwaveFilterCutoff");
+    learn(lwFltDepthSlider,    "luxwaveFilterEnvDepth");
+    learn(lwLfoRateSlider,     "luxwaveLfoRate");
+    learn(lwLfoDepthSlider,    "luxwaveLfoDepth");
+    learn(lwScanModeCombo,     "luxwaveScanMode");
 }
 
 AudioWavePanel::Geom AudioWavePanel::computeGeom(int w) const

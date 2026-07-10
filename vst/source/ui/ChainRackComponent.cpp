@@ -6,6 +6,9 @@
 extern "C" {
     #include "processing/lux_pitch.h"                 // g_lux_pitch_proc
     #include "processing/lux_mask.h"                  // g_lux_mask_proc
+    #include "processing/lux_reverb.h"                // FX pools — LED monitoring
+    #include "processing/lux_echo.h"
+    #include "processing/lux_eq.h"
     #include "audio/buffers/audio_image_buffers.h"    // lines_received counter
 }
 
@@ -37,8 +40,12 @@ ModuleType chainBlockToModuleType(ChainBlockId id) noexcept
     {
         case ChainBlockId::Pitch:    return ModuleType::Pitch;
         case ChainBlockId::Mask:     return ModuleType::Mask;
+        case ChainBlockId::Reverb:   return ModuleType::Reverb;
+        case ChainBlockId::Echo:     return ModuleType::Echo;
+        case ChainBlockId::Equalizer:return ModuleType::Equalizer;
         case ChainBlockId::Sampler:  return ModuleType::Sampler;
         case ChainBlockId::Score:    return ModuleType::Score;
+        case ChainBlockId::Timbre:   return ModuleType::Timbre;
         case ChainBlockId::Sequencer:return ModuleType::Sequencer;
         case ChainBlockId::LuxStral: return ModuleType::LuxStral;
         case ChainBlockId::LuxSynth: return ModuleType::LuxSynth;
@@ -55,11 +62,15 @@ ModuleType chainBlockToModuleType(ChainBlockId id) noexcept
 
 juce::Colour ChainRackComponent::blockColour(ChainBlockId id) noexcept
 {
+    if (id == ChainBlockId::None)
+        return juce::Colours::grey;
     return moduleColour(chainBlockToModuleType(id));
 }
 
 juce::String ChainRackComponent::enableParamId(ChainBlockId id) noexcept
 {
+    if (id == ChainBlockId::None)
+        return {};
     return moduleEnableParam(chainBlockToModuleType(id));
 }
 
@@ -154,10 +165,21 @@ void ChainRackComponent::BlockComponent::paint(juce::Graphics& g)
     }
 
     // ── Name ──────────────────────────────────────────────────────────────────
+    // A tiny keyboard badge leads the label for modules that need a MIDI input.
+    auto textArea = b.reduced(9.f, 0.f).withTrimmedRight(40.f);
+    if (moduleNeedsMidi(type))
+    {
+        const float icoW = 12.f, icoH = 11.f;
+        const juce::Rectangle<float> iconR(b.getX() + 8.f, b.getCentreY() - icoH * 0.5f,
+                                           icoW, icoH);
+        ModuleIcons::drawMidiKeyboard(g, iconR, colour.withAlpha(selected ? 0.95f : 0.62f));
+        textArea = textArea.withLeft(iconR.getRight() + 6.f);
+    }
+
     g.setColour(selected ? juce::Colours::white : colour.brighter(0.3f));
     g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
     g.drawText(name,
-               b.reduced(9.f, 0.f).withTrimmedRight(40.f).toNearestInt(),
+               textArea.toNearestInt(),
                juce::Justification::centredLeft, true);
 }
 
@@ -245,28 +267,29 @@ void ChainRackComponent::rebuild()
 {
     blocks.clear();
 
-    // M8 — when both LuxStral engines (A/B) are placed, badge each block with its
-    // engine letter so they can be told apart. A lone engine stays plain "LUXSTRAL".
-    int luxstralCount = 0;
-    for (const auto& ch : model.chains)
-        for (const auto& m : ch.modules)
-            if (m.type == ModuleType::LuxStral) ++luxstralCount;
-
     for (int c = 0; c < model.numChains(); ++c)
     {
         for (auto& m : model.chains[(size_t) c].modules)
         {
             auto blk = std::make_unique<BlockComponent>(m.type, m.id);
             auto* bp = blk.get();
-            if (m.type == ModuleType::LuxStral && luxstralCount >= 2 && m.slot >= 0)
-                bp->setEngineSuffix(m.slot == 1 ? "B" : "A");
-            // Engine B's LED toggles its OWN enable param (independent of A).
+            // Synth-split: every LuxStral send is just "→ LUXSTRAL" — the A/B
+            // engine pair behind the two slots is an internal detail (no
+            // user-facing suffix). Each send keeps its OWN power LED though:
+            // the second slot's LED toggles its own enable param.
             if (m.type == ModuleType::LuxStral && m.slot == 1)
                 bp->setEnableParamOverride("luxstralBEnabled");
             // Each VideoScroll output is per-instance: its LED toggles the slot's
             // own enable param, so the mixer can drop just this output.
             if (m.type == ModuleType::VideoScroll && m.slot >= 0)
                 bp->setEnableParamOverride(vsParam(m.slot, "enabled"));
+            // Pooled inserts are per-instance too: the LED toggles the enable of
+            // THIS instance's bank (pool slot bound to the module UUID).
+            if (m.type == ModuleType::Pitch || m.type == ModuleType::Mask
+                || m.type == ModuleType::Reverb || m.type == ModuleType::Echo
+                || m.type == ModuleType::Equalizer)
+                bp->setEnableParamOverride(insertBankParam(
+                    m.type, processor.poolSlotForInstance(m.id), "Enabled"));
             bp->onClick        = [this](juce::Uuid id) { selectInstance(id, true); };
             bp->onToggleEnable = [this, bp]            { toggleEnable(bp->getEnableParam()); };
             bp->onRemove       = [this](juce::Uuid id) { removeInstance(id); };
@@ -320,6 +343,13 @@ void ChainRackComponent::refreshAfterModelEdit(bool notifySelection)
             if (m->type == ModuleType::LuxStral && onLuxStralBlockSelected)
                 onLuxStralBlockSelected(m->slot == 1 ? 1 : 0);   // engine A (0) / B (1)
             onBlockSelected(instanceToBlockId(m->type, sc));
+        }
+        else
+        {
+            // Rack is empty (every module was deleted): the editor must clear
+            // zone 1 (visualizer) and zone 3 (pages) — a stale "last module"
+            // view with nothing selected is a lie.
+            onBlockSelected(ChainBlockId::None);
         }
     }
 
@@ -381,8 +411,12 @@ ChainBlockId ChainRackComponent::instanceToBlockId(ModuleType type, int chainIdx
     {
         case ModuleType::Pitch:    return ChainBlockId::Pitch;
         case ModuleType::Mask:     return ChainBlockId::Mask;
+        case ModuleType::Reverb:   return ChainBlockId::Reverb;
+        case ModuleType::Echo:     return ChainBlockId::Echo;
+        case ModuleType::Equalizer:return ChainBlockId::Equalizer;
         case ModuleType::Sampler:  return ChainBlockId::Sampler;
         case ModuleType::Score:    return ChainBlockId::Score;
+        case ModuleType::Timbre:   return ChainBlockId::Timbre;
         case ModuleType::Sequencer:return ChainBlockId::Sequencer;
         case ModuleType::LuxStral: return ChainBlockId::LuxStral;
         case ModuleType::LuxSynth: return ChainBlockId::LuxSynth;
@@ -428,6 +462,13 @@ void ChainRackComponent::selectInstance(const juce::Uuid& id, bool notify)
     }
 }
 
+void ChainRackComponent::selectInstanceById(const juce::Uuid& id)
+{
+    int c = -1, i = -1;
+    if (model.find(id, c, i) != nullptr)
+        selectInstance(id, true);   // fires the same callbacks as a rack click
+}
+
 void ChainRackComponent::setSelectedBlock(ChainBlockId id)
 {
     // Keep the current instance if it already maps to this block id.
@@ -457,6 +498,14 @@ bool ChainRackComponent::hasBlock(ChainBlockId id) const noexcept
             if (instanceToBlockId(m.type, ci) == id)
                 return true;
     return false;
+}
+
+ChainBlockId ChainRackComponent::firstBlockId() const noexcept
+{
+    for (int ci = 0; ci < model.numChains(); ++ci)
+        if (! model.chains[(size_t) ci].modules.empty())
+            return instanceToBlockId(model.chains[(size_t) ci].modules.front().type, ci);
+    return ChainBlockId::None;
 }
 
 void ChainRackComponent::setLocked(bool shouldLock)
@@ -861,7 +910,7 @@ void ChainRackComponent::timerCallback()
     updateLeds();
 }
 
-ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, int chainIdx, int engineSlot) const
+ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const juce::Uuid& uid, int engineSlot) const
 {
     auto paramOn = [this](const char* id) -> bool
     {
@@ -892,19 +941,40 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, int cha
             return LedState::Off;
 
         case ModuleType::Pitch:
-        {   // per-chain instance — pool slot is UUID-bound (stable across edits)
-            const LuxPitchState* st = lux_pitch_instance(processor.poolSlotForChain(chainIdx));
+        {   // per-instance pool slot — bound to the module's UUID (follows moves)
+            const LuxPitchState* st = lux_pitch_instance(processor.poolSlotForInstance(uid));
             const bool en = (st->config.enabled != 0);
             const int  v  = (int) st->midi.voice_count;
             return ! en ? LedState::Off : (v > 0 ? LedState::Active : LedState::Idle);
         }
         case ModuleType::Mask:
-        {   // per-chain instance — pool slot is UUID-bound (stable across edits)
-            const LuxMaskState* st = lux_mask_instance(processor.poolSlotForChain(chainIdx));
+        {   // per-instance pool slot — bound to the module's UUID (follows moves)
+            const LuxMaskState* st = lux_mask_instance(processor.poolSlotForInstance(uid));
             const bool en = (st->config.enabled != 0);
             const int  v  = (int) st->midi.voice_count;
             return ! en ? LedState::Off : (v > 0 ? LedState::Active : LedState::Idle);
         }
+        // FX inserts — per-instance pool slot (UUID-bound, like Pitch/Mask):
+        // ● processing a stream / ◐ enabled but idle / ○ disabled.
+        case ModuleType::Reverb:
+        {
+            const LuxReverbState* st = lux_reverb_instance(processor.poolSlotForInstance(uid));
+            return st->config.enabled == 0 ? LedState::Off
+                 : (st->tail_active != 0   ? LedState::Active : LedState::Idle);
+        }
+        case ModuleType::Echo:
+        {
+            const LuxEchoState* st = lux_echo_instance(processor.poolSlotForInstance(uid));
+            return st->config.enabled == 0 ? LedState::Off
+                 : (st->ring_active != 0   ? LedState::Active : LedState::Idle);
+        }
+        case ModuleType::Equalizer:
+        {
+            const LuxEqState* st = lux_eq_instance(processor.poolSlotForInstance(uid));
+            return st->config.enabled == 0 ? LedState::Off
+                 : (st->eq_active != 0     ? LedState::Active : LedState::Idle);
+        }
+
         case ModuleType::Sampler:
             return paramOn("luxSamplerEnabled") ? LedState::Active : LedState::Off;
         case ModuleType::LuxStral:
@@ -916,7 +986,11 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, int cha
         case ModuleType::LuxWave:
             return paramOn("luxwaveEnabled") ? LedState::Active : LedState::Off;
 
+        // SCORE and TIMBRE both drive the SHARED score-player channel, so their
+        // block LED reflects that channel's transport identically:
+        //   ● playing / ◐ a page is loaded / ○ empty.
         case ModuleType::Score:
+        case ModuleType::Timbre:
             if (auto* fs = processor.getLuxSampler())
                 return fs->isScorePlaying()  ? LedState::Active
                      : fs->scoreHasContent() ? LedState::Idle
@@ -961,6 +1035,6 @@ void ChainRackComponent::updateLeds()
     {
         int c = -1, i = -1;
         const ModuleInstance* mi = model.find(blk->getUuid(), c, i);
-        blk->setLed(ledFor(blk->getType(), c < 0 ? 0 : c, mi ? mi->slot : -1));
+        blk->setLed(ledFor(blk->getType(), blk->getUuid(), mi ? mi->slot : -1));
     }
 }

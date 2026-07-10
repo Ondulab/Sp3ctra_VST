@@ -52,9 +52,7 @@ SamplerSetupPanel::SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Col
     for (int i = 1; i <= 16; ++i)
         midiChannelCombo.addItem("Channel " + juce::String(i), i);
     addAndMakeVisible(midiChannelCombo);
-    midiChannelAttachment = std::make_unique<
-        juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-        apvts, "luxSamplerMidiChannel", midiChannelCombo);
+    // Attachment created by rebindEngineParams() — the bank is per-engine.
 
     // ── Octave Offset ─────────────────────────────────────────────────────
     octaveOffsetLabel.setText("Octave Offset:", juce::dontSendNotification);
@@ -67,10 +65,7 @@ SamplerSetupPanel::SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Col
     octaveOffsetCombo.addItem(" 0", 3);
     octaveOffsetCombo.addItem("+1", 4);
     octaveOffsetCombo.addItem("+2", 5);
-    addAndMakeVisible(octaveOffsetCombo);
-    octaveOffsetAttachment = std::make_unique<
-        juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-        apvts, "luxSamplerOctaveOffset", octaveOffsetCombo);
+    addAndMakeVisible(octaveOffsetCombo);   // attachment: rebindEngineParams()
 
     // ── Max Duration ──────────────────────────────────────────────────────
     maxDurationLabel.setText("Max Duration:", juce::dontSendNotification);
@@ -82,10 +77,7 @@ SamplerSetupPanel::SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Col
     maxDurationSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
                                        Sp3ctraTheme::kTbXNarrow, Sp3ctraTheme::kTextBoxH);
     maxDurationSlider.setTextValueSuffix(" s");
-    addAndMakeVisible(maxDurationSlider);
-    maxDurationAttachment = std::make_unique<
-        juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "luxSamplerMaxDuration", maxDurationSlider);
+    addAndMakeVisible(maxDurationSlider);   // attachment: rebindEngineParams()
 
     // ── Image export on Save Session ──────────────────────────────────────
     exportImagesLabel.setText("Export Images:", juce::dontSendNotification);
@@ -181,14 +173,14 @@ SamplerSetupPanel::SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Col
     // ── Action button MIDI bindings (REC / PLAY / SAVE) ───────────────────
     // Each row exposes a Type combo (Off/Note/CC), a 0..127 number slider and
     // a "Learn" button.  The audio thread captures the next incoming MIDI
-    // event matching the configured channel and writes it into the APVTS
-    // parameters via the message thread (timerCallback).
-    initBindingRow(recBinding,  "REC Bind:",
-                   "luxSamplerRecBindType",  "luxSamplerRecBindNum",  0);
-    initBindingRow(playBinding, "PLAY Bind:",
-                   "luxSamplerPlayBindType", "luxSamplerPlayBindNum", 1);
-    initBindingRow(saveBinding, "SAVE Bind:",
-                   "luxSamplerSaveBindType", "luxSamplerSaveBindNum", 2);
+    // event matching the BOUND ENGINE's channel and writes it into that
+    // engine's APVTS bank via the message thread (timerCallback).
+    initBindingRow(recBinding,  "REC Bind:",  0);
+    initBindingRow(playBinding, "PLAY Bind:", 1);
+    initBindingRow(saveBinding, "SAVE Bind:", 2);
+
+    // Bind every engine-scoped attachment to engine A's bank (default).
+    rebindEngineParams();
 
     // ── Slot rows ─────────────────────────────────────────────────────────
     for (int i = 0; i < NUM_SLOTS; ++i)
@@ -237,13 +229,12 @@ SamplerSetupPanel::~SamplerSetupPanel()
 // =============================================================================
 
 // ─────────────────────────────────────────────────────────────────────────────
-// initBindingRow — wire one REC/PLAY/SAVE row to the matching APVTS params.
+// initBindingRow — build one REC/PLAY/SAVE row's widgets. The APVTS
+// attachments are engine-scoped and live in rebindEngineParams().
 // ─────────────────────────────────────────────────────────────────────────────
 void SamplerSetupPanel::initBindingRow(ActionBindingRow& row,
                                        const juce::String& title,
-                                       const juce::String& typeParamId,
-                                       const juce::String& numParamId,
-                                       int learnTargetId)
+                                       int actionId)
 {
     row.title.setText(title, juce::dontSendNotification);
     row.title.setJustificationType(juce::Justification::centredRight);
@@ -255,9 +246,6 @@ void SamplerSetupPanel::initBindingRow(ActionBindingRow& row,
     row.typeBox.addItem("Note", 2);
     row.typeBox.addItem("CC",   3);
     addAndMakeVisible(row.typeBox);
-    row.typeAtt = std::make_unique<
-        juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-        apvts, typeParamId, row.typeBox);
 
     // Number slider (0..127) — shown as "Note 60" / "CC 7" via text-from-value
     row.numberSlider.setSliderStyle(juce::Slider::IncDecButtons);
@@ -268,27 +256,26 @@ void SamplerSetupPanel::initBindingRow(ActionBindingRow& row,
                                       Sp3ctraTheme::kTextBoxH);
     row.numberSlider.setRange(0.0, 127.0, 1.0);
     addAndMakeVisible(row.numberSlider);
-    row.numberAtt = std::make_unique<
-        juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, numParamId, row.numberSlider);
 
     // Learn button — arms the processor to capture next matching MIDI event
+    // on the BOUND engine (target = samplerIndex_ * 3 + action).
     row.learnBtn.setClickingTogglesState(true);
     row.learnBtn.setColour(juce::TextButton::buttonOnColourId,
                             juce::Colours::orangered);
     row.learnBtn.setTooltip(
-        "Click then press any Note or send a CC on the configured MIDI channel "
+        "Click then press any Note or send a CC on this engine's MIDI channel "
         "to assign it to this action.");
-    row.learnBtn.onClick = [this, learnTargetId, &row]()
+    row.learnBtn.onClick = [this, actionId, &row]()
     {
         if (row.learnBtn.getToggleState())
         {
             // Cancel any other pending learn (only one at a time).
-            audioProcessor.startSamplerMidiLearn(learnTargetId);
-            pendingLearnTarget = learnTargetId;
-            recBinding .learnBtn.setToggleState(learnTargetId == 0, juce::dontSendNotification);
-            playBinding.learnBtn.setToggleState(learnTargetId == 1, juce::dontSendNotification);
-            saveBinding.learnBtn.setToggleState(learnTargetId == 2, juce::dontSendNotification);
+            const int target = samplerIndex_ * 3 + actionId;
+            audioProcessor.startSamplerMidiLearn(target);
+            pendingLearnTarget = target;
+            recBinding .learnBtn.setToggleState(actionId == 0, juce::dontSendNotification);
+            playBinding.learnBtn.setToggleState(actionId == 1, juce::dontSendNotification);
+            saveBinding.learnBtn.setToggleState(actionId == 2, juce::dontSendNotification);
         }
         else
         {
@@ -297,6 +284,57 @@ void SamplerSetupPanel::initBindingRow(ActionBindingRow& row,
         }
     };
     addAndMakeVisible(row.learnBtn);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// setSamplerIndex / rebindEngineParams — per-engine APVTS bank binding
+// ─────────────────────────────────────────────────────────────────────────────
+void SamplerSetupPanel::setSamplerIndex(int i)
+{
+    if (samplerIndex_ == i)
+        return;
+    samplerIndex_ = i;
+    rebindEngineParams();
+}
+
+void SamplerSetupPanel::rebindEngineParams()
+{
+    // A learn armed for the previous engine would write into the wrong bank.
+    if (pendingLearnTarget != -1)
+    {
+        audioProcessor.cancelSamplerMidiLearn();
+        pendingLearnTarget = -1;
+        recBinding .learnBtn.setToggleState(false, juce::dontSendNotification);
+        playBinding.learnBtn.setToggleState(false, juce::dontSendNotification);
+        saveBinding.learnBtn.setToggleState(false, juce::dontSendNotification);
+    }
+
+    using CA = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
+    using SA = juce::AudioProcessorValueTreeState::SliderAttachment;
+
+    midiChannelAttachment .reset();
+    octaveOffsetAttachment.reset();
+    maxDurationAttachment .reset();
+    midiChannelAttachment = std::make_unique<CA>(
+        apvts, fsEngineParam(samplerIndex_, "MidiChannel"),  midiChannelCombo);
+    octaveOffsetAttachment = std::make_unique<CA>(
+        apvts, fsEngineParam(samplerIndex_, "OctaveOffset"), octaveOffsetCombo);
+    maxDurationAttachment = std::make_unique<SA>(
+        apvts, fsEngineParam(samplerIndex_, "MaxDuration"),  maxDurationSlider);
+
+    auto rebindRow = [&](ActionBindingRow& row,
+                         const char* typeSuffix, const char* numSuffix)
+    {
+        row.typeAtt  .reset();
+        row.numberAtt.reset();
+        row.typeAtt = std::make_unique<CA>(
+            apvts, fsEngineParam(samplerIndex_, typeSuffix), row.typeBox);
+        row.numberAtt = std::make_unique<SA>(
+            apvts, fsEngineParam(samplerIndex_, numSuffix),  row.numberSlider);
+    };
+    rebindRow(recBinding,  "RecBindType",  "RecBindNum");
+    rebindRow(playBinding, "PlayBindType", "PlayBindNum");
+    rebindRow(saveBinding, "SaveBindType", "SaveBindNum");
 }
 
 void SamplerSetupPanel::timerCallback()
@@ -317,20 +355,23 @@ void SamplerSetupPanel::timerCallback()
         const int type   = (result >> 8) & 0xFF; // 1 = Note, 2 = CC
         const int number = result & 0xFF;
 
-        const char* typeParam = nullptr;
-        const char* numParam  = nullptr;
-        switch (pendingLearnTarget)
+        // target = engine * 3 + action → write into THAT engine's bank.
+        const int engine = pendingLearnTarget / 3;
+        const int action = pendingLearnTarget % 3;
+
+        juce::String typeParam, numParam;
+        switch (action)
         {
-            case 0: typeParam = "luxSamplerRecBindType";
-                    numParam  = "luxSamplerRecBindNum";  break;
-            case 1: typeParam = "luxSamplerPlayBindType";
-                    numParam  = "luxSamplerPlayBindNum"; break;
-            case 2: typeParam = "luxSamplerSaveBindType";
-                    numParam  = "luxSamplerSaveBindNum"; break;
+            case 0: typeParam = fsEngineParam(engine, "RecBindType");
+                    numParam  = fsEngineParam(engine, "RecBindNum");  break;
+            case 1: typeParam = fsEngineParam(engine, "PlayBindType");
+                    numParam  = fsEngineParam(engine, "PlayBindNum"); break;
+            case 2: typeParam = fsEngineParam(engine, "SaveBindType");
+                    numParam  = fsEngineParam(engine, "SaveBindNum"); break;
             default: break;
         }
 
-        if (typeParam != nullptr)
+        if (typeParam.isNotEmpty())
         {
             // ComboBox indices: 0=Off, 1=Note, 2=CC — matches captured type.
             if (auto* p = apvts.getParameter(typeParam))

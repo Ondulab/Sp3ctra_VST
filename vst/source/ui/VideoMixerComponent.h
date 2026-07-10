@@ -4,7 +4,9 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "../midi/MidiLearnAttachment.h"
 #include "../video/VideoScrollRenderCore.h"
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -15,10 +17,22 @@
  * For each VideoScroll output instance currently in a chain (processor.
  * activeVideoSlots()) the mixer owns a VideoScrollRenderCore that drains that
  * slot's capture ring and renders its waterfall. A dynamic fader strip (one row
- * per output: level + blend Mix/Add/Screen, bound to videoMix{slot}_*) controls
- * how each is composited into the master image shown above.
+ * per output: level + blend Mix/Add/Screen, bound to videoMix{slot}_*) sits at
+ * the top and controls how each is composited into the master image below it.
  *
- * Message-thread only. A 30 fps timer ticks every core then re-composites.
+ * Rendering architecture (perf):
+ * ─────────────────────────────────────────────────────────────────────────────
+ * All heavy work — ring drain, scroll, per-pixel warp, per-layer blend — runs on
+ * a dedicated BACKGROUND render thread (Renderer), paced at ~60 fps with a real
+ * dt. It publishes each finished composite into a small triple-buffered image
+ * pool. The message thread only runs a light presenter timer: it pushes the
+ * current view size/visibility to the renderer and, when a NEW frame counter is
+ * seen, invalidates the views. paint() just blits the front image — the message
+ * thread can therefore never be saturated by the video path, and only COMPLETE
+ * frames ever reach the screen (the historical half-painted flicker is gone by
+ * construction). Cost also stays bounded as outputs are added: the per-output
+ * render resolution is budgeted by 1/sqrt(numOutputs).
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 class VideoMixerComponent : public juce::Component,
                             private juce::Timer
@@ -41,63 +55,121 @@ public:
     bool isWindowOpen() const noexcept;
     std::function<void()> onWindowStateChanged;
 
-    /** Latest composited master (copied cheaply — JUCE Images are ref-counted). */
-    juce::Image masterImage() const { return master_; }
-
     int numActiveOutputs() const noexcept { return (int) voices_.size(); }
 
     void paint(juce::Graphics& g) override;
     void resized() override;
 
 private:
-    void timerCallback() override;
+    //==========================================================================
+    /** Background render thread. Owns the per-slot VideoScrollRenderCores and
+     *  the whole tick → warp → composite pipeline. Publishes finished frames
+     *  through a triple-buffered pool (front image + atomic frame counter); the
+     *  component's presenter timer picks them up on the message thread.
+     *
+     *  Thread-safety contract:
+     *   - layers_ is mutated ONLY under coreLock_ (setSlots on the message
+     *     thread vs. renderFrame on the render thread).
+     *   - front_ is swapped ONLY under frontLock_; readers take a ref-copy.
+     *   - A pool image is reused as a render target only while its refcount
+     *     shows no other owner (front_ / an in-flight paint), so a buffer being
+     *     displayed is never written to — no tearing. */
+    class Renderer : public juce::Thread
+    {
+    public:
+        explicit Renderer(Sp3ctraAudioProcessor& p);
+        ~Renderer() override;
+
+        /** Message thread: rebuild the layer list. Cores of slots that remain
+         *  are KEPT (their waterfall history survives chain edits). */
+        void setSlots(const std::vector<int>& slots);
+
+        /** Message thread (presenter tick): desired output size in LOGICAL px
+         *  (detached window content if open, else the column master area) and
+         *  whether any view is actually visible. Invisible → the renderer keeps
+         *  draining/scrolling (history stays truthful) but skips warp/composite. */
+        void setViewState(int w, int h, bool visible) noexcept;
+
+        /** Any thread: blank every waterfall on the next render pass. */
+        void requestClear() noexcept { clearGen_.fetch_add(1, std::memory_order_release); }
+
+        /** Message thread: latest published composite (ref-copy under lock). */
+        juce::Image frontImage() const;
+
+        uint32_t frameCounter() const noexcept { return frameCounter_.load(std::memory_order_acquire); }
+
+        void run() override;
+
+    private:
+        struct Layer
+        {
+            int slot { -1 };
+            std::unique_ptr<VideoScrollRenderCore> core;
+            juce::Image scratch;   // per-layer drawWarp target for the blend path
+        };
+
+        // One 60 fps pass: tick + warp every layer, composite, publish.
+        // Returns true when a new frame was published.
+        bool renderFrame(double nowMs, double dtMs);
+        juce::Image acquireTarget(int w, int h);
+
+        Sp3ctraAudioProcessor& processor_;
+
+        juce::CriticalSection coreLock_;
+        std::vector<Layer> layers_;
+
+        std::atomic<uint64_t> viewState_ { 0 };   // packed w:24 | h:24 | visible:1
+        std::atomic<int>      clearGen_  { 0 };
+        int                   lastClearGen_ { 0 };
+        std::vector<float>    lastSig_;           // mix/draw param signature (change detection)
+
+        mutable juce::CriticalSection frontLock_;
+        juce::Image           front_;
+        juce::Image           pool_[3];
+        std::atomic<uint32_t> frameCounter_ { 0 };
+        bool                  haveFrame_ { false };
+
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Renderer)
+    };
+
+    //==========================================================================
+    void timerCallback() override;    // presenter: push view state, repaint on new frames
     void rebuildStrip();
     void layoutStrip();
-    // Tick + warp every voice and (re)build the master composite. Returns true
-    // when anything visible changed this tick; false = the frozen frame already
-    // on screen is still current, so timerCallback() skips the repaint (a 60 fps
-    // repaint of a static image occasionally gets presented half-painted → the
-    // pause-time flicker).
-    bool composite();
-    // True when exactly one output is patched at full level in Mix mode — the
-    // common case, painted DIRECTLY (no offscreen / no blend / no cap).
-    bool singleDirect() const;
-    // Render the composited master into `dest` in the given Graphics: direct-paint
-    // the single output, or draw the offscreen master_ scaled. Used by the column
-    // preview AND the detached window so both share one render path.
+    // Draw the latest published composite into `dest` (shared by the column
+    // preview and the detached window).
     void renderMaster(juce::Graphics& g, juce::Rectangle<int> dest);
 
+    /** UI-only fader row (the render core lives in Renderer::Layer). */
     struct Voice
     {
         int slot { -1 };
-        std::unique_ptr<VideoScrollRenderCore> core;
         juce::Slider   level;
         juce::ComboBox blend;
         std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   levelAtt;
         std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> blendAtt;
-        juce::Image    scratch;
+        std::unique_ptr<MidiLearnAttachment> levelLearn, blendLearn;
     };
 
-    class MasterView;     // detached-window content (paints master_)
+    class MasterView;     // detached-window content (paints the front image)
     class MasterWindow;
 
     Sp3ctraAudioProcessor& processor_;
     std::vector<std::unique_ptr<Voice>> voices_;
     std::vector<int> activeSlots_;        // mirror of the current voice slots
 
-    juce::Image master_;                  // composited output
+    std::unique_ptr<Renderer> renderer_;
+    uint32_t lastPresented_ { 0 };
+
     juce::Rectangle<int> masterArea_;
     juce::Rectangle<int> stripArea_;
-    // Last-seen composite signature (render size + per-voice mix/draw params);
-    // composite() reports "changed" whenever it differs. See composite().
-    std::vector<float> mixSig_;
 
     std::unique_ptr<MasterWindow> window_;
 
     static constexpr int kRowH     = 24;
     static constexpr int kStripPad = 6;
     static constexpr int kRowGap   = 4;
-    static constexpr int kFps      = 60;   // match the original waterfall smoothness
+    static constexpr int kFps      = 60;   // presenter poll rate (renderer self-paces)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(VideoMixerComponent)
 };

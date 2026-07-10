@@ -254,53 +254,112 @@ RenderResult renderScore(const juce::File& wav,
     if (progress) progress(0.10f);
     if (shouldAbort && shouldAbort()) return fail("Aborted");
 
-    // ── STFT (left/primary, plus right when stereo) ──────────────────────────
-    ScoreSpectrogramData spec  = {};
-    ScoreSpectrogramData specR = {};
-    int rc = score_compute_spectrogram(signal.data(), totalSamples, sampleRate,
-                                       fftSize, binsPerSecond,
-                                       s.minFreq, s.maxFreq, &spec);
-    if (rc != 0)
-        return fail("Spectrogram computation failed (code " + juce::String(rc) + ")");
-
-    if (progress) progress(stereo ? 0.35f : 0.55f);
-    if (shouldAbort && shouldAbort()) { score_free_spectrogram(&spec); return fail("Aborted"); }
-
-    if (stereo)
+    // ── STFT analysis layers (left/primary, plus right when stereo) ─────────
+    //
+    // Single-resolution (legacy): one layer, exact historical behaviour.
+    //
+    // Multi-resolution (enableMultiRes): progressively shorter windows analyse
+    // the upper octaves — Gabor's time/frequency trade-off is applied PER BAND
+    // instead of globally. Lows keep the long window (full harmonic
+    // resolution); highs get windows short enough that transients stay sharp.
+    // Every layer's frames are CENTER-ALIGNED to layer 0's grid and magnitudes
+    // are normalised by each window's coherent gain, so the layers splice into
+    // one consistent dB map. Encoder-only: the printed image plays back through
+    // the unchanged instrument.
+    struct SpecLayer
     {
-        rc = score_compute_spectrogram(signalR.data(), totalSamples, sampleRate,
-                                       fftSize, binsPerSecond,
-                                       s.minFreq, s.maxFreq, &specR);
+        ScoreSpectrogramData data  {};
+        ScoreSpectrogramData dataR {};   // stereo right channel (mono: unused)
+        int    winSize = 0;
+        int    padSize = 0;
+        double freqRes = 0.0;
+        double fCross  = 0.0;   // rows with centre freq ≥ fCross prefer this layer
+    };
+
+    std::vector<int> winSizes { fftSize };
+    if (s.enableMultiRes != 0)
+    {
+        const int mid  = juce::jmax(256, fftSize / 4);
+        const int high = juce::jmax(128, fftSize / 16);
+        if (mid  < winSizes.back()) winSizes.push_back(mid);
+        if (high < winSizes.back()) winSizes.push_back(high);
+    }
+    const bool multiRes = winSizes.size() > 1;
+
+    // A layer takes over once its window still holds ≥ kCyclesTarget cycles —
+    // below that, pitch precision needs the longer window of the layer below.
+    constexpr double kCyclesTarget = 24.0;
+    constexpr double kBlend        = 1.1224620483; // 2^(1/6): ±1/6 octave crossfade
+
+    std::vector<SpecLayer> layers(winSizes.size());
+    auto freeLayers = [&layers]()
+    {
+        for (auto& L : layers)
+        {
+            score_free_spectrogram(&L.data);
+            score_free_spectrogram(&L.dataR);
+        }
+    };
+
+    for (size_t li = 0; li < layers.size(); ++li)
+    {
+        auto& L = layers[li];
+        L.winSize = winSizes[li];
+        L.padSize = juce::jmin(SCORE_FFT_EFFECTIVE_SIZE, L.winSize * 16);
+        L.freqRes = (double) sampleRate / (double) L.padSize;
+        L.fCross  = (li == 0) ? 0.0
+                              : kCyclesTarget * (double) sampleRate / (double) L.winSize;
+
+        int rc = score_compute_spectrogram_ex(signal.data(), totalSamples, sampleRate,
+                                              L.winSize, L.padSize, fftSize,
+                                              multiRes ? 1 : 0, binsPerSecond,
+                                              s.minFreq, s.maxFreq, &L.data);
+        if (rc == 0 && stereo)
+            rc = score_compute_spectrogram_ex(signalR.data(), totalSamples, sampleRate,
+                                              L.winSize, L.padSize, fftSize,
+                                              multiRes ? 1 : 0, binsPerSecond,
+                                              s.minFreq, s.maxFreq, &L.dataR);
         if (rc != 0)
         {
-            score_free_spectrogram(&spec);
+            freeLayers();
             return fail("Spectrogram computation failed (code " + juce::String(rc) + ")");
         }
 
-        // Share ONE magnitude reference across both channels so the dB/intensity
-        // mapping preserves the L-vs-R level difference (a quieter channel must
-        // stay quieter; independent self-normalisation would flatten the image
-        // toward centre).
-        const double sharedMax = juce::jmax(spec.global_max, specR.global_max);
-        spec.global_max  = sharedMax;
-        specR.global_max = sharedMax;
+        if (progress)
+            progress(0.10f + 0.45f * (float) (li + 1) / (float) layers.size());
+        if (shouldAbort && shouldAbort()) { freeLayers(); return fail("Aborted"); }
+    }
 
-        if (progress) progress(0.55f);
-        if (shouldAbort && shouldAbort())
+    // Share ONE magnitude reference across every layer and both channels so
+    // the dB/intensity mapping is consistent: across L-vs-R (a quieter channel
+    // must stay quieter) AND across layers (a partial must keep its level when
+    // it crosses a layer boundary).
+    {
+        double sharedMax = 0.0;
+        for (auto& L : layers)
         {
-            score_free_spectrogram(&spec);
-            score_free_spectrogram(&specR);
-            return fail("Aborted");
+            sharedMax = juce::jmax(sharedMax, L.data.global_max);
+            if (stereo) sharedMax = juce::jmax(sharedMax, L.dataR.global_max);
+        }
+        for (auto& L : layers)
+        {
+            L.data.global_max = sharedMax;
+            if (stereo) L.dataR.global_max = sharedMax;
         }
     }
 
-    score_apply_image_processing(&spec, s.dynamicRangeDB, s.gammaCorrection,
-                                 s.enableDithering, s.contrastFactor,
-                                 s.enableNoiseGate, s.noiseGateThreshold);
-    if (stereo)
-        score_apply_image_processing(&specR, s.dynamicRangeDB, s.gammaCorrection,
+    for (auto& L : layers)
+    {
+        score_apply_image_processing(&L.data, s.dynamicRangeDB, s.gammaCorrection,
                                      s.enableDithering, s.contrastFactor,
                                      s.enableNoiseGate, s.noiseGateThreshold);
+        if (stereo)
+            score_apply_image_processing(&L.dataR, s.dynamicRangeDB, s.gammaCorrection,
+                                         s.enableDithering, s.contrastFactor,
+                                         s.enableNoiseGate, s.noiseGateThreshold);
+    }
+
+    ScoreSpectrogramData& spec = layers[0].data;   // reference layer (windows/bins)
 
     if (progress) progress(0.60f);
 
@@ -320,8 +379,7 @@ RenderResult renderScore(const juce::File& wav,
     const double spectroBottom = pageH - bottomMarginPx;
     const double spectroTop    = spectroBottom - spectroHeightPx;
 
-    const double freqRange      = s.maxFreq - s.minFreq;
-    const double freqResolution = (double) sampleRate / (double) SCORE_FFT_EFFECTIVE_SIZE;
+    const double freqRange = s.maxFreq - s.minFreq;
 
     // Visible windows: clip to page width at the requested writing speed.
     int visibleWindows = spec.num_windows;
@@ -359,10 +417,6 @@ RenderResult renderScore(const juce::File& wav,
         g.fillAll(juce::Colours::white);
     }
 
-    const int numBins = spec.num_bins;
-    const double* data  = spec.data;
-    const double* dataR = stereo ? specR.data : spec.data;   // mono ⇒ same buffer
-
     const double drawnW = visibleWindows * windowWidth;
     int xStart = (int) std::floor(spectroLeft);
     int xEnd   = (int) std::ceil (spectroLeft + drawnW);
@@ -373,7 +427,7 @@ RenderResult renderScore(const juce::File& wav,
     yTop   = juce::jmax(0, yTop);
     yBot   = juce::jmin(imageH, yBot);
 
-    // ── Per-output-row FFT bin cell [lo,hi] (LOG frequency axis) ─────────────
+    // ── Per-output-row layer choice + FFT bin cell [lo,hi] (LOG freq axis) ───
     // Matches PhonoPaper and the Sp3ctra reader (image row → oscillator on a
     // LOG-distributed bank, equal vertical space per octave). Each output pixel
     // covers a *band* of frequencies; at high frequency that band spans many FFT
@@ -384,11 +438,23 @@ RenderResult renderScore(const juce::File& wav,
     // 0 = black = loud, so "loudest" = MIN intensity. The mapping is x-independent
     // so it is computed once here. At low frequency a cell is sub-bin → one bin,
     // identical to before.
+    //
+    // Multi-resolution: each row picks the layer whose window suits its centre
+    // frequency; rows within ±1/6 octave of a layer crossover crossfade the two
+    // layers' intensities so no seam is visible/audible at the boundary.
+    struct RowMap
+    {
+        int   lA  = -1, lB = -1;     // layer indices (lB used when t > 0)
+        float t   = 0.0f;            // 0 = pure lA … 1 = pure lB
+        int   aLo = -1, aHi = -1;    // bin cell in layer lA
+        int   bLo = -1, bHi = -1;    // bin cell in layer lB
+    };
+
     const bool   logMap    = (s.minFreq > 0.0 && s.maxFreq > s.minFreq);
     const double freqRatio = logMap ? (s.maxFreq / s.minFreq) : 1.0;
     const int    rows      = (yBot > yTop) ? (yBot - yTop) : 0;
-    std::vector<int> rowBinLo((size_t) rows, -1);
-    std::vector<int> rowBinHi((size_t) rows, -1);
+    std::vector<RowMap> rowMap((size_t) rows);
+
     for (int y = yTop; y < yBot; ++y)
     {
         double posLo = (spectroBottom - (y + 1)) / spectroHeightPx; // bottom edge (lower freq)
@@ -401,46 +467,103 @@ RenderResult renderScore(const juce::File& wav,
                                   : s.minFreq + posLo * freqRange;
         const double fHi = logMap ? s.minFreq * std::pow(freqRatio, posHi)
                                   : s.minFreq + posHi * freqRange;
-        int bLo = (int) std::floor(fLo / freqResolution);
-        int bHi = (int) std::ceil (fHi / freqResolution);
-        bLo = juce::jmax(bLo, spec.index_min);
-        bHi = juce::jmin(juce::jmin(bHi, spec.index_max), numBins - 1);
-        if (bLo > bHi)
-            continue;
-        rowBinLo[(size_t) (y - yTop)] = bLo;
-        rowBinHi[(size_t) (y - yTop)] = bHi;
+
+        auto binsFor = [&](int li, int& lo, int& hi) -> bool
+        {
+            const auto& L = layers[(size_t) li];
+            int bl = (int) std::floor(fLo / L.freqRes);
+            int bh = (int) std::ceil (fHi / L.freqRes);
+            bl = juce::jmax(bl, L.data.index_min);
+            bh = juce::jmin(juce::jmin(bh, L.data.index_max), L.data.num_bins - 1);
+            if (bl > bh) return false;
+            lo = bl; hi = bh;
+            return true;
+        };
+
+        auto& rm = rowMap[(size_t) (y - yTop)];
+
+        // Base layer: the shortest window still holding ≥ kCyclesTarget cycles
+        // at this row's (geometric) centre frequency.
+        const double fC = std::sqrt(fLo * fHi);
+        int k = 0;
+        for (size_t li = 1; li < layers.size(); ++li)
+            if (fC >= layers[li].fCross) k = (int) li;
+
+        rm.lA = rm.lB = k;
+        rm.t  = 0.0f;
+        if (k + 1 < (int) layers.size())            // approaching the next crossover
+        {
+            const double fx = layers[(size_t) (k + 1)].fCross;
+            if (fC > fx / kBlend)
+            {
+                rm.lB = k + 1;
+                rm.t  = (float) (0.5 * (std::log(fC) - std::log(fx / kBlend))
+                                     / std::log(kBlend));
+            }
+        }
+        if (k > 0)                                   // just past the previous one
+        {
+            const double fx = layers[(size_t) k].fCross;
+            if (fC < fx * kBlend)
+            {
+                rm.lA = k - 1;
+                rm.lB = k;
+                rm.t  = (float) (0.5 + 0.5 * (std::log(fC) - std::log(fx))
+                                           / std::log(kBlend));
+            }
+        }
+        rm.t = juce::jlimit(0.0f, 1.0f, rm.t);
+
+        if (! binsFor(rm.lA, rm.aLo, rm.aHi)) { rm.lA = -1; continue; }
+        if (rm.lB != rm.lA && ! binsFor(rm.lB, rm.bLo, rm.bHi))
+        { rm.lB = rm.lA; rm.t = 0.0f; }              // blend partner unusable → pure lA
     }
 
     {
         juce::Image::BitmapData bmp(img, juce::Image::BitmapData::readWrite);
         const int span = juce::jmax(1, xEnd - xStart);
 
+        // Peak-hold over a cell: darkest (loudest) bin = MIN intensity
+        // (0 = black = energy, 1 = white = silence).
+        auto cellMin = [](const double* col, int lo, int hi) -> double
+        {
+            double v = col[lo];
+            for (int b = lo + 1; b <= hi; ++b)
+                if (col[b] < v) v = col[b];
+            return v;
+        };
+
         for (int x = xStart; x < xEnd; ++x)
         {
             int w = (int) ((x - spectroLeft) / windowWidth);
             w = juce::jlimit(0, visibleWindows - 1, w);
-            const double* col  = data  + (size_t) w * numBins;
-            const double* colR = dataR + (size_t) w * numBins;
 
             for (int y = yTop; y < yBot; ++y)
             {
-                const int bLo = rowBinLo[(size_t) (y - yTop)];
-                if (bLo < 0)
+                const auto& rm = rowMap[(size_t) (y - yTop)];
+                if (rm.lA < 0)
                     continue;                                  // row outside the band
-                const int bHi = rowBinHi[(size_t) (y - yTop)];
 
-                // Peak-hold over the cell: darkest (loudest) bin = MIN intensity
-                // (0 = black = energy, 1 = white = silence).
-                double leftVal = col[bLo];
-                for (int b = bLo + 1; b <= bHi; ++b)
-                    if (col[b] < leftVal) leftVal = col[b];
+                const auto& LA = layers[(size_t) rm.lA];
+                const double* colA  = LA.data.data + (size_t) w * LA.data.num_bins;
+                const double* colAR = stereo ? LA.dataR.data + (size_t) w * LA.data.num_bins
+                                             : colA;
 
-                double rightVal = leftVal;
-                if (stereo)
+                double leftVal  = cellMin(colA,  rm.aLo, rm.aHi);
+                double rightVal = stereo ? cellMin(colAR, rm.aLo, rm.aHi) : leftVal;
+
+                if (rm.t > 0.0f && rm.lB != rm.lA)
                 {
-                    rightVal = colR[bLo];
-                    for (int b = bLo + 1; b <= bHi; ++b)
-                        if (colR[b] < rightVal) rightVal = colR[b];
+                    const auto& LB = layers[(size_t) rm.lB];
+                    const double* colB  = LB.data.data + (size_t) w * LB.data.num_bins;
+                    leftVal += rm.t * (cellMin(colB, rm.bLo, rm.bHi) - leftVal);
+                    if (stereo)
+                    {
+                        const double* colBR = LB.dataR.data + (size_t) w * LB.data.num_bins;
+                        rightVal += rm.t * (cellMin(colBR, rm.bLo, rm.bHi) - rightVal);
+                    }
+                    else
+                        rightVal = leftVal;
                 }
 
                 // Composite (inverted convention): R = right energy, B = left
@@ -458,8 +581,7 @@ RenderResult renderScore(const juce::File& wav,
                 progress(0.60f + 0.38f * (float) (x - xStart) / (float) span);
             if (shouldAbort && shouldAbort())
             {
-                score_free_spectrogram(&spec);
-                if (stereo) score_free_spectrogram(&specR);
+                freeLayers();
                 return fail("Aborted");
             }
         }
@@ -468,8 +590,17 @@ RenderResult renderScore(const juce::File& wav,
     logLines.add("Page: " + juce::String(imageW) + " x " + juce::String(imageH)
                  + " px @ " + juce::String(dpi, 0) + " DPI");
     logLines.add("Sample rate: " + juce::String(sampleRate) + " Hz");
-    logLines.add("FFT window: " + juce::String(fftSize)
-                 + " (pad " + juce::String(SCORE_FFT_EFFECTIVE_SIZE) + ")");
+    if (multiRes)
+    {
+        juce::StringArray desc;
+        for (const auto& L : layers)
+            desc.add(juce::String(L.winSize) + (L.fCross > 0.0
+                        ? " (>=" + juce::String(L.fCross, 0) + " Hz)" : ""));
+        logLines.add("FFT windows (multi-res): " + desc.joinIntoString(" / "));
+    }
+    else
+        logLines.add("FFT window: " + juce::String(fftSize)
+                     + " (pad " + juce::String(SCORE_FFT_EFFECTIVE_SIZE) + ")");
     logLines.add("Bins/s: " + juce::String(binsPerSecond, 1)
                  + "  windows: " + juce::String(spec.num_windows)
                  + " (visible " + juce::String(visibleWindows) + ")");
@@ -482,8 +613,7 @@ RenderResult renderScore(const juce::File& wav,
         logLines.add("Stereo ON but source is mono (" + juce::String(reader->numChannels)
                      + " ch) → greyscale. Load a stereo WAV for L/R.");
 
-    score_free_spectrogram(&spec);
-    if (stereo) score_free_spectrogram(&specR);
+    freeLayers();
 
     if (progress) progress(1.0f);
 

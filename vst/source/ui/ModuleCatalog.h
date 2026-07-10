@@ -33,14 +33,17 @@ enum class ModuleType
     Sampler, Score, Sequencer,     // UTILS
     LuxStral, LuxSynth, LuxWave,   // SYNTH
     VideoScroll,                   // VIDEO (waterfall probe — pass-through, slotted)
-    Camera                         // SRC (appended to keep table indices stable)
+    Camera,                        // SRC (appended to keep table indices stable)
+    Reverb, Echo,                  // FX (appended to keep table indices stable)
+    Timbre,                        // UTILS (appended to keep table indices stable)
+    Equalizer                      // FX (appended to keep table indices stable)
 };
 
 /** Behavioural role — drives the placement constraints. */
 enum class ModuleRole { Source, Processor, Util, Synth };
 
 /** Catalogue section a module belongs to. */
-enum class ModuleCat  { SRC, MIDI, UTILS, SYNTH, OUT };
+enum class ModuleCat  { SRC, MIDI, FX, UTILS, SYNTH, OUT };
 
 /** Immutable per-type metadata. */
 struct ModuleDesc
@@ -57,23 +60,33 @@ struct ModuleDesc
 //==============================================================================
 /** The whole catalogue. Table order MUST match the enum order (descFor indexes
  *  by ordinal); the catalogue panel buckets rows by category for display. */
-inline const std::array<ModuleDesc, 13>& moduleTable()
+inline const std::array<ModuleDesc, 17>& moduleTable()
 {
-    static const std::array<ModuleDesc, 13> table = {{
+    static const std::array<ModuleDesc, 17> table = {{
         // type                  category          role                  name                       colour       enableParam          id
         { ModuleType::Sp3ctra,     ModuleCat::SRC,   ModuleRole::Source,   "SP3CTRA",                 0xff68788f,  "",                  "Sp3ctra"  },
         { ModuleType::Image,       ModuleCat::SRC,   ModuleRole::Source,   "IMAGE",                   0xff68788f,  "",                  "Image"    },
         { ModuleType::Video,       ModuleCat::SRC,   ModuleRole::Source,   "VIDEO",                   0xff68788f,  "",                  "Video"    },
-        { ModuleType::Pitch,       ModuleCat::MIDI,  ModuleRole::Processor,"PITCH",                   0xffe06bb8,  "luxpitchEnabled",   "Pitch"    },
-        { ModuleType::Mask,        ModuleCat::MIDI,  ModuleRole::Processor,"MASK",                    0xff6be0d0,  "luxmaskEnabled",    "Mask"     },
+        // Pitch/Mask/Reverb/Echo/EQ enable lives in the PER-INSTANCE bank
+        // (luxpitch{slot}_Enabled…): the rack block and the zone-3 power switch
+        // resolve it from the selected instance's pool slot, not from here.
+        { ModuleType::Pitch,       ModuleCat::MIDI,  ModuleRole::Processor,"PITCH",                   0xffe06bb8,  "",                  "Pitch"    },
+        { ModuleType::Mask,        ModuleCat::MIDI,  ModuleRole::Processor,"MASK",                    0xff6be0d0,  "",                  "Mask"     },
         { ModuleType::Sampler,     ModuleCat::UTILS, ModuleRole::Util,     "SAMPLER",                 0xffe09040,  "luxSamplerEnabled", "Sampler"  },
         { ModuleType::Score,       ModuleCat::UTILS, ModuleRole::Util,     "SCORE",                   0xffe0a24a,  "",                  "Score"    },
         { ModuleType::Sequencer,   ModuleCat::UTILS, ModuleRole::Util,     "SEQUENCER",               0xff7ac0e0,  "seqEnabled",        "Sequencer" },
-        { ModuleType::LuxStral,    ModuleCat::SYNTH, ModuleRole::Synth,    "\xE2\x99\xAA LUXSTRAL",   0xff4fa3e0,  "deviceEnabled",     "LuxStral" },
-        { ModuleType::LuxSynth,    ModuleCat::SYNTH, ModuleRole::Synth,    "\xE2\x99\xAA LUXSYNTH",   0xffb07af0,  "luxsynthEnabled",   "LuxSynth" },
-        { ModuleType::LuxWave,     ModuleCat::SYNTH, ModuleRole::Synth,    "\xE2\x99\xAA LUXWAVE",    0xff8fd05a,  "luxwaveEnabled",    "LuxWave"  },
+        // Synth-split P2 — the three synths are OUT/send modules in the rack
+        // (the flux leaves the chain toward the global engine, which lives in
+        // the ZONE-5 dock): OUT category, arrow-prefixed names.
+        { ModuleType::LuxStral,    ModuleCat::OUT,   ModuleRole::Synth,    "\xE2\x86\x92 LUXSTRAL",   0xff4fa3e0,  "deviceEnabled",     "LuxStral" },
+        { ModuleType::LuxSynth,    ModuleCat::OUT,   ModuleRole::Synth,    "\xE2\x86\x92 LUXSYNTH",   0xffb07af0,  "luxsynthEnabled",   "LuxSynth" },
+        { ModuleType::LuxWave,     ModuleCat::OUT,   ModuleRole::Synth,    "\xE2\x86\x92 LUXWAVE",    0xff8fd05a,  "luxwaveEnabled",    "LuxWave"  },
         { ModuleType::VideoScroll, ModuleCat::OUT,   ModuleRole::Processor,"VIDEO SCROLL",            0xff5ad0c8,  "",                  "VideoScroll" },
         { ModuleType::Camera,      ModuleCat::SRC,   ModuleRole::Source,   "CAMERA",                  0xff68788f,  "",                  "Camera"   },
+        { ModuleType::Reverb,      ModuleCat::FX,    ModuleRole::Processor,"REVERB",                  0xff9d8ce0,  "",                  "Reverb"   },
+        { ModuleType::Echo,        ModuleCat::FX,    ModuleRole::Processor,"ECHO",                    0xffe0c95a,  "",                  "Echo"     },
+        { ModuleType::Timbre,      ModuleCat::UTILS, ModuleRole::Util,     "TIMBRE",                  0xffd97b52,  "",                  "Timbre"   },
+        { ModuleType::Equalizer,   ModuleCat::FX,    ModuleRole::Processor,"EQ",                      0xffe0847a,  "",                  "Equalizer" },
     }};
     return table;
 }
@@ -93,6 +106,12 @@ inline juce::String moduleDisplayName(ModuleType t)  { return juce::String::from
 inline ModuleRole   moduleRole(ModuleType t)         { return descFor(t).role; }
 inline ModuleCat    moduleCategory(ModuleType t)     { return descFor(t).category; }
 
+/** True when a module needs incoming MIDI to do anything — i.e. it consumes
+ *  NoteOn/NoteOff in processBlock. Keyed on the MIDI catalogue section (PITCH /
+ *  MASK today), so any future MIDI-category module inherits the picto for free.
+ *  Drives the DIN badge drawn by the catalogue chips and the rack blocks. */
+inline bool         moduleNeedsMidi(ModuleType t)    { return moduleCategory(t) == ModuleCat::MIDI; }
+
 /** Stable persistence id for a type ("Pitch", "LuxStral"…). */
 inline const char*  moduleTypeId(ModuleType t)       { return descFor(t).id; }
 
@@ -105,6 +124,49 @@ inline bool moduleTypeFromId(const juce::String& s, ModuleType& out)
     return false;
 }
 
+//==============================================================================
+// Shared module glyphs — drawn identically by the catalogue chips and the rack
+// blocks so a module reads the same wherever it appears.
+//==============================================================================
+namespace ModuleIcons
+{
+    /** Draws a tiny piano keyboard inside `area`, tinted `c`. Flags modules that
+     *  require a MIDI input / are keyboard-played (see moduleNeedsMidi): the
+     *  white-key bed is outlined with two black keys (the classic group-of-2).
+     *  Deliberately minimal so it stays legible at badge size. */
+    inline void drawMidiKeyboard(juce::Graphics& g, juce::Rectangle<float> area, juce::Colour c)
+    {
+        const float w   = area.getWidth();
+        const float kbH = juce::jmin(area.getHeight(), w * 0.82f);
+        const juce::Rectangle<float> body(area.getX(), area.getCentreY() - kbH * 0.5f, w, kbH);
+
+        const float stroke = juce::jmax(0.9f, w * 0.09f);
+        const float radius = juce::jmax(1.0f, w * 0.12f);
+
+        // White-key bed.
+        g.setColour(c);
+        g.drawRoundedRectangle(body.reduced(stroke * 0.5f), radius, stroke);
+
+        // White-key dividers (3 keys → 2 lines).
+        constexpr int whiteKeys = 3;
+        const float kw = body.getWidth() / (float) whiteKeys;
+        for (int i = 1; i < whiteKeys; ++i)
+        {
+            const float x = body.getX() + kw * (float) i;
+            g.drawLine(x, body.getY() + stroke, x, body.getBottom() - stroke, stroke * 0.85f);
+        }
+
+        // Two black keys on the upper ~55 %, at the C#/D# boundaries.
+        const float bkW = kw * 0.52f;
+        const float bkH = body.getHeight() * 0.55f;
+        for (int boundary : { 1, 2 })
+        {
+            const float cx = body.getX() + kw * (float) boundary;
+            g.fillRect(juce::Rectangle<float>(cx - bkW * 0.5f, body.getY(), bkW, bkH));
+        }
+    }
+}
+
 /** Human label for a catalogue section header. */
 inline const char* moduleCatLabel(ModuleCat c)
 {
@@ -112,6 +174,7 @@ inline const char* moduleCatLabel(ModuleCat c)
     {
         case ModuleCat::SRC:   return "SRC";
         case ModuleCat::MIDI:  return "MIDI";
+        case ModuleCat::FX:    return "FX";
         case ModuleCat::UTILS: return "UTILS";
         case ModuleCat::SYNTH: return "SYNTH";
         case ModuleCat::OUT:   return "OUT";

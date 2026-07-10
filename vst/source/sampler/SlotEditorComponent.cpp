@@ -22,13 +22,12 @@ static const char* kNoteNamesEd[LuxSamplerConstants::NUM_SLOTS] = {
 
 SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     : processor(proc),
-      timeline(proc) // SlotTimelineComponent ctor
+      spectralEditor(proc) // merged image + time-handles + EQ editor
 {
-    // ── Timeline ──────────────────────────────────────────────────────────────
-    // Start/End handles are dragged directly on the timeline and update
-    // LuxSampler atomics in SlotTimelineComponent::mouseDrag() — no sliders.
-    // The onStartChanged / onEndChanged callbacks are not used here.
-    addAndMakeVisible(timeline);
+    // ── Merged editor ─────────────────────────────────────────────────────────
+    // Start/End/fade handles are dragged directly on the editor and update
+    // LuxSampler atomics in SlotSpectralEditorComponent::mouseDrag().
+    addAndMakeVisible(spectralEditor);
 
     // ── Action buttons ────────────────────────────────────────────────────────
     recBtn.onClick = [this]
@@ -36,7 +35,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
         if (auto* fs = processor.getSampler(samplerIndex_))
         {
             fs->uiToggleRecord(selectedSlot);
-            timeline.markDirty(); // thumbnail may have changed after record
+            spectralEditor.markDirty(); // image may have changed after record
         }
     };
     addAndMakeVisible(recBtn);
@@ -60,7 +59,10 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
         if (auto* fs = processor.getSampler(samplerIndex_))
         {
             fs->uiClearSlot(selectedSlot);
-            timeline.markDirty();
+            // CLEAR reset the EQ AND the edit handles (start/end/fades/floor) —
+            // refresh every control so the UI reflects the fresh slot.
+            refreshSliderValues();     // also calls refreshFreqCurve() + markDirty
+            spectralEditor.markDirty();
         }
     };
     addAndMakeVisible(clearBtn);
@@ -73,7 +75,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
         if (auto* fs = processor.getSampler(samplerIndex_))
         {
             fs->cropSlotToBounds(selectedSlot);
-            timeline.markDirty();   // waveform + bounds changed
+            spectralEditor.markDirty();   // image + bounds changed
             refreshSliderValues();
         }
     };
@@ -151,7 +153,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
 
             if (sampler->loadSlotFromFile(selectedSlot, picked))
             {
-                timeline.markDirty();
+                spectralEditor.markDirty();
                 refreshSliderValues();
                 refreshLoopButtons();
             }
@@ -190,8 +192,32 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
         if (auto* fs = processor.getSampler(samplerIndex_))
             fs->setSlotBrightnessLift(selectedSlot,
                 1.0f - static_cast<float>(brightnessSlider.getValue()) * 0.01f);
+        spectralEditor.markDirty();
     };
     addAndMakeVisible(brightnessSlider);
+
+    // ── Pre-EQ material floor slider (0% = off … 100% = total white mask) ─────
+    floorLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
+    floorLabel.setColour(juce::Label::textColourId, juce::Colour(0xffb0b0c0));
+    floorLabel.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(floorLabel);
+
+    floorSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    floorSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                                Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
+    floorSlider.setRange(0.0, 100.0, 1.0);
+    floorSlider.setTextValueSuffix("%");
+    floorSlider.setValue(0.0, juce::dontSendNotification);
+    floorSlider.setTooltip("Remove material below this level BEFORE the EQ "
+                           "(avoids black bands when boosting; 100% = full mask)");
+    floorSlider.onValueChange = [this]
+    {
+        if (auto* fs = processor.getSampler(samplerIndex_))
+            fs->setSlotEqFloor(selectedSlot,
+                static_cast<float>(floorSlider.getValue()) * 0.01f);
+        spectralEditor.markDirty();   // preview the floor on the image
+    };
+    addAndMakeVisible(floorSlider);
 
     // ── Speed slider ──────────────────────────────────────────────────────────
     // Range 0.01–32.0×; skewed so that 1.0× sits at the physical centre.
@@ -241,21 +267,17 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     };
     addAndMakeVisible(loopXfSlider);
 
-    // ── Frequency-axis mirror curve editor (HF + LF bands) ────────────────────
-    freqCurveEditor.onChange = [this]
+    // ── Image EQ (SCORE-style ±24 dB) — separate panel below the image ────────
+    eqEditor.onChange = [this]
     {
+        if (suppressEqPush_) return;               // silent refresh, don't write back
         if (auto* fs = processor.getSampler(samplerIndex_))
         {
-            SamplerSpectralPoint pts[LuxSamplerConstants::MAX_FREQ_PTS];
-            for (int band = 0; band < LuxSamplerConstants::NUM_FREQ_BANDS; ++band)
-            {
-                const int n = freqCurveEditor.getBandPoints(band, pts,
-                                                            LuxSamplerConstants::MAX_FREQ_PTS);
-                fs->setSlotFreqCurve(selectedSlot, band, pts, n);
-            }
+            fs->setSlotEq(selectedSlot, eqEditor.encodeState());
+            spectralEditor.markDirty();            // preview the EQ on the image
         }
     };
-    addAndMakeVisible(freqCurveEditor);
+    addAndMakeVisible(eqEditor);
 
     // ── Resume mode toggle ────────────────────────────────────────────────────
     resumeToggle.setColour(juce::ToggleButton::textColourId,
@@ -278,58 +300,72 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     };
     addAndMakeVisible(overdubToggle);
 
-    // ── Fade curve type selector ─────────────────────────────────────────────
-    fadeCurveLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
-    fadeCurveLabel.setColour(juce::Label::textColourId,
-                             juce::Colour(0xff888899));
-    fadeCurveLabel.setJustificationType(juce::Justification::centredRight);
-    addAndMakeVisible(fadeCurveLabel);
+    // ── Per-fade curve controls (independent attack / decay) ──────────────────
+    for (auto* lbl : { &fadeInLabel, &fadeOutLabel })
+    {
+        lbl->setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
+        lbl->setColour(juce::Label::textColourId, juce::Colour(0xff888899));
+        lbl->setJustificationType(juce::Justification::centredRight);
+        addAndMakeVisible(lbl);
+    }
+    fillCurveBox(fadeInCurveBox);
+    fillCurveBox(fadeOutCurveBox);
 
-    fadeCurveTypeBox.addItem("LIN", 1);
-    fadeCurveTypeBox.addItem("EXP", 2);
-    fadeCurveTypeBox.addItem("LOG", 3);
-    fadeCurveTypeBox.addItem("S",   4);
-    fadeCurveTypeBox.setSelectedId(1, juce::dontSendNotification);
-    fadeCurveTypeBox.onChange = [this]
+    fadeInCurveBox.onChange = [this]
     {
         if (auto* fs = processor.getSampler(samplerIndex_))
-            fs->setSlotFadeCurveType(selectedSlot,
-                static_cast<FadeCurveType>(fadeCurveTypeBox.getSelectedId() - 1));
-        timeline.repaint(); // curve shape changed → refresh the fade overlays
+            fs->setSlotAttackCurveType(selectedSlot,
+                static_cast<FadeCurveType>(fadeInCurveBox.getSelectedId() - 1));
+        spectralEditor.markDirty();
     };
-    addAndMakeVisible(fadeCurveTypeBox);
-
-    // ── Fade curve power slider ──────────────────────────────────────────────
-    fadePowerLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
-    fadePowerLabel.setColour(juce::Label::textColourId,
-                             juce::Colour(0xff888899));
-    fadePowerLabel.setJustificationType(juce::Justification::centredRight);
-    addAndMakeVisible(fadePowerLabel);
-
-    fadePowerSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    fadePowerSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                    Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
-    fadePowerSlider.setRange(0.1, 10.0, 0.01);
-    fadePowerSlider.setNumDecimalPlacesToDisplay(2);
-    fadePowerSlider.setSkewFactorFromMidPoint(1.0);
-    fadePowerSlider.setValue(1.0, juce::dontSendNotification);
-    fadePowerSlider.onValueChange = [this]
+    fadeOutCurveBox.onChange = [this]
     {
         if (auto* fs = processor.getSampler(samplerIndex_))
-            fs->setSlotFadeCurvePower(selectedSlot,
-                static_cast<float>(fadePowerSlider.getValue()));
-        timeline.repaint(); // curve intensity changed → refresh the fade overlays
+            fs->setSlotDecayCurveType(selectedSlot,
+                static_cast<FadeCurveType>(fadeOutCurveBox.getSelectedId() - 1));
+        spectralEditor.markDirty();
     };
-    addAndMakeVisible(fadePowerSlider);
+    addAndMakeVisible(fadeInCurveBox);
+    addAndMakeVisible(fadeOutCurveBox);
+
+    for (auto* s : { &fadeInPowerSlider, &fadeOutPowerSlider })
+    {
+        s->setSliderStyle(juce::Slider::LinearHorizontal);
+        s->setTextBoxStyle(juce::Slider::TextBoxRight, false,
+                           Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
+        s->setRange(0.1, 10.0, 0.01);
+        s->setNumDecimalPlacesToDisplay(2);
+        s->setSkewFactorFromMidPoint(1.0);
+        s->setValue(1.0, juce::dontSendNotification);
+        addAndMakeVisible(s);
+    }
+    fadeInPowerSlider.onValueChange = [this]
+    {
+        if (auto* fs = processor.getSampler(samplerIndex_))
+            fs->setSlotAttackCurvePower(selectedSlot,
+                static_cast<float>(fadeInPowerSlider.getValue()));
+        spectralEditor.markDirty();
+    };
+    fadeOutPowerSlider.onValueChange = [this]
+    {
+        if (auto* fs = processor.getSampler(samplerIndex_))
+            fs->setSlotDecayCurvePower(selectedSlot,
+                static_cast<float>(fadeOutPowerSlider.getValue()));
+        spectralEditor.markDirty();
+    };
 
     // Purge stale MIDI pulses latched while NO editor was open: processBlock
     // keeps setting them, nobody consumes them, and acting on a press latched
     // minutes ago would start a phantom recording the moment the editor opens.
-    (void) processor.consumeSamplerRecPressed();
-    (void) processor.consumeSamplerRecReleased();
-    (void) processor.consumeSamplerPlayPressed();
-    (void) processor.consumeSamplerPlayReleased();
-    (void) processor.consumeSamplerSaveTrigger();
+    // Both engines: this editor rebinds A/B and either may hold stale pulses.
+    for (int e = 0; e < 2; ++e)
+    {
+        (void) processor.consumeSamplerRecPressed  (e);
+        (void) processor.consumeSamplerRecReleased (e);
+        (void) processor.consumeSamplerPlayPressed (e);
+        (void) processor.consumeSamplerPlayReleased(e);
+        (void) processor.consumeSamplerSaveTrigger (e);
+    }
 
     // 30 ms (~33 Hz) — frequent enough so MIDI press/release pulses get
     // consumed with low latency (worst-case ~30 ms after the MIDI event).
@@ -342,16 +378,35 @@ SlotEditorComponent::~SlotEditorComponent()
     stopTimer();
 }
 
+void SlotEditorComponent::setSamplerIndex(int i)
+{
+    samplerIndex_ = i;
+    spectralEditor.setSamplerIndex(i);
+    // Purge pulses the newly-bound engine latched while it had no editor —
+    // acting on a stale press would start a phantom recording right away.
+    (void) processor.consumeSamplerRecPressed  (samplerIndex_);
+    (void) processor.consumeSamplerRecReleased (samplerIndex_);
+    (void) processor.consumeSamplerPlayPressed (samplerIndex_);
+    (void) processor.consumeSamplerPlayReleased(samplerIndex_);
+    (void) processor.consumeSamplerSaveTrigger (samplerIndex_);
+    setSelectedSlot(selectedSlot);   // refresh controls from the new engine
+}
+
 void SlotEditorComponent::setSelectedSlot(int idx)
 {
     selectedSlot = idx;
     // Mirror selected slot to the audio processor so RT-triggered
     // REC/PLAY/SAVE bindings act on the slot the user is looking at.
     processor.setSamplerSelectedSlot(selectedSlot);
-    timeline.setSelectedSlot(selectedSlot);
+    spectralEditor.setSelectedSlot(selectedSlot);
     // Refresh UI state from new slot
     refreshSliderValues();
     refreshLoopButtons();
+    // Re-seed the content latch for the new slot so switching slots never fires
+    // the "external CLEAR" freq-curve refresh spuriously (setSelectedSlot →
+    // refreshSliderValues already reloaded the curve).
+    if (auto* fs = processor.getSampler(samplerIndex_))
+        prevHasContent_ = fs->slotHasContent(selectedSlot);
     repaint();
 }
 
@@ -371,17 +426,26 @@ void SlotEditorComponent::refreshSliderValues()
     brightnessSlider.setValue(
         (1.0 - static_cast<double>(fs->getSlotBrightnessLift(selectedSlot))) * 100.0,
         juce::dontSendNotification);
+    floorSlider.setValue(
+        static_cast<double>(fs->getSlotEqFloor(selectedSlot)) * 100.0,
+        juce::dontSendNotification);
     resumeToggle.setToggleState(fs->getSlotResumeMode(selectedSlot),
                                 juce::dontSendNotification);
     // Overdub is engine-wide (not per-slot) — mirror the engine flag.
     overdubToggle.setToggleState(fs->getOverdubMode(),
                                  juce::dontSendNotification);
-    // Fade curve controls
-    fadeCurveTypeBox.setSelectedId(
-        static_cast<int>(fs->getSlotFadeCurveType(selectedSlot)) + 1,
+    // Per-fade curve controls (independent attack / decay).
+    fadeInCurveBox.setSelectedId(
+        static_cast<int>(fs->getSlotAttackCurveType(selectedSlot)) + 1,
         juce::dontSendNotification);
-    fadePowerSlider.setValue(
-        static_cast<double>(fs->getSlotFadeCurvePower(selectedSlot)),
+    fadeInPowerSlider.setValue(
+        static_cast<double>(fs->getSlotAttackCurvePower(selectedSlot)),
+        juce::dontSendNotification);
+    fadeOutCurveBox.setSelectedId(
+        static_cast<int>(fs->getSlotDecayCurveType(selectedSlot)) + 1,
+        juce::dontSendNotification);
+    fadeOutPowerSlider.setValue(
+        static_cast<double>(fs->getSlotDecayCurvePower(selectedSlot)),
         juce::dontSendNotification);
     loopXfSlider.setValue(
         static_cast<double>(fs->getSlotLoopOverlap(selectedSlot)) * 100.0,
@@ -393,18 +457,23 @@ void SlotEditorComponent::refreshFreqCurve()
 {
     auto* fs = processor.getSampler(samplerIndex_);
     if (fs == nullptr) return;
-    SamplerSpectralPoint pts[LuxSamplerConstants::MAX_FREQ_PTS];
-    for (int band = 0; band < LuxSamplerConstants::NUM_FREQ_BANDS; ++band)
-    {
-        const int n = fs->getSlotFreqCurve(selectedSlot, band, pts,
-                                           LuxSamplerConstants::MAX_FREQ_PTS);
-        freqCurveEditor.setBandPoints(band, pts, n);   // does not fire onChange
-    }
-    // Backdrop: the slot's energy-per-frequency profile (updates on slot switch /
-    // record stop / crop / load).
-    float prof[256];
-    fs->sampleFreqProfileForCurve(selectedSlot, prof, 256);
-    freqCurveEditor.setSpectralProfile(prof, 256);
+    // Load the slot's EQ into eqEditor WITHOUT writing it back to the sampler.
+    suppressEqPush_ = true;
+    const juce::String enc = fs->getSlotEq(selectedSlot);
+    if (! eqEditor.decodeState(enc))
+        eqEditor.reset();          // flat when the slot has no EQ
+    suppressEqPush_ = false;
+    // Preview EQ + fades on the authentic image.
+    spectralEditor.markDirty();
+}
+
+void SlotEditorComponent::fillCurveBox(juce::ComboBox& box)
+{
+    box.addItem("LIN", 1);
+    box.addItem("EXP", 2);
+    box.addItem("LOG", 3);
+    box.addItem("S",   4);
+    box.setSelectedId(1, juce::dontSendNotification);
 }
 
 void SlotEditorComponent::refreshLoopButtons()
@@ -426,19 +495,26 @@ void SlotEditorComponent::applyLoopMode(LoopMode m)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// paint
-//
-// Full-width zone: title badge (top) then two columns side by side.
-//   Left  (~63 %): REC/PLAY/CLEAR buttons + large timeline
-//   Right (~37 %): Speed / Loop / Resume controls
-// A subtle vertical separator is drawn between the two panels.
+// Shared layout metrics — keeps paint() and resized() in lock-step.
+// Parameters occupy two columns of 5 rows below the title badge; the merged
+// image + time + EQ editor fills everything under them.
+// ─────────────────────────────────────────────────────────────────────────────
+static constexpr int kEdPad      = 4;
+static constexpr int kEdGap      = 6;
+static constexpr int kEdColGap   = 8;
+static constexpr int kEdTitleH   = 22;
+static constexpr int kEdParamTop = 30;   // first param row Y
+static constexpr int kEdRows     = 6;    // rows per column (incl. button row)
+
+static int edStep()        { return Sp3ctraTheme::kControlH + 4; }
+static int edParamBottom() { return kEdParamTop + kEdRows * edStep(); }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// paint — title badge + two-column separator. The editor paints its own zone.
 // ─────────────────────────────────────────────────────────────────────────────
 void SlotEditorComponent::paint(juce::Graphics& g)
 {
-    const int W   = getWidth();
-    const int H   = getHeight();
-    const int pad = 4;
-    const int gap = 6;
+    const int W = getWidth();
 
     // ── Background ───────────────────────────────────────────────────────────
     g.setColour(juce::Colour(0xff1a1a2a));
@@ -447,12 +523,12 @@ void SlotEditorComponent::paint(juce::Graphics& g)
     // ── Title badge (full width) ──────────────────────────────────────────────
     g.setColour(juce::Colour(0xff2a1a3a));
     g.fillRoundedRectangle(
-        juce::Rectangle<float>(4.0f, 4.0f, (float)(W - 8), 22.0f), 3.0f);
+        juce::Rectangle<float>(4.0f, 4.0f, (float)(W - 8), (float)kEdTitleH), 3.0f);
 
     g.setColour(juce::Colour(0xffcc88ff));
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
     g.drawText(juce::String("SLOT > ") + kNoteNamesEd[selectedSlot],
-               juce::Rectangle<int>(8, 4, W - 16, 22),
+               juce::Rectangle<int>(8, 4, W - 16, kEdTitleH),
                juce::Justification::centredLeft, false);
 
     // State indicator (right side of title badge)
@@ -481,131 +557,117 @@ void SlotEditorComponent::paint(juce::Graphics& g)
     }
     g.setColour(stateCol);
     g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
-    g.drawText(stateStr, juce::Rectangle<int>(8, 4, W - 16, 22),
+    g.drawText(stateStr, juce::Rectangle<int>(8, 4, W - 16, kEdTitleH),
                juce::Justification::centredRight, false);
 
-    // ── Vertical separator between left and right panels (middle band only) ──
-    const int midBottom = H - pad - kCurveBandH - kCurveGap;
-    const int leftW  = (W - 3 * pad - gap) * 63 / 100;
-    const int sepX   = pad + leftW + gap / 2;
+    // ── Vertical separator between the two parameter columns ──────────────────
+    const int sepX = kEdPad + (W - 2 * kEdPad - kEdColGap) / 2 + kEdColGap / 2;
     g.setColour(juce::Colour(0xff2a2a3a));
-    g.fillRect(sepX, 30, 1, midBottom - 30);
-
-    // ── Right panel subtle background ─────────────────────────────────────────
-    const int rightX = pad + leftW + gap + pad;
-    g.setColour(juce::Colour(0xff141422));
-    g.fillRoundedRectangle(
-        juce::Rectangle<float>((float)rightX - 2.0f, 28.0f,
-                                (float)(W - rightX - pad + 2), (float)(midBottom - 28)),
-        3.0f);
+    g.fillRect(sepX, kEdParamTop, 1, edParamBottom() - kEdParamTop);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // resized
 //
-// Two-column layout below the title badge (y=30 downward):
-//
-//   Left  (~63 %):
-//     y=30 : [REC] [PLAY] [CLEAR]       (h=30)
-//     y=64 : Timeline                   (fills remaining height)
-//
-//   Right (~37 %):
-//     y=30 : Speed  label + slider      (rowH=27)
-//     y=61 : Loop   label + 4 buttons   (rowH=27)
-//     y=92 : Resume toggle              (h=26)
+// Two parameter columns below the title badge, then the merged editor:
+//   Left column  : [REC][PLAY][CLEAR] · Speed · Loop · Loop XF · IMG
+//   Right column : [CROP][SAVE][LOAD] · Resume · Overdub · Curve · Power
+//   Bottom       : SlotSpectralEditorComponent (fills the remaining height)
 // ─────────────────────────────────────────────────────────────────────────────
 void SlotEditorComponent::resized()
 {
-    const int W   = getWidth();
-    const int H   = getHeight();
-    const int pad = 4;
-    const int gap = 6;
+    const int W = getWidth();
+    const int H = getHeight();
 
-    // Column split
-    const int leftW  = (W - 3 * pad - gap) * 63 / 100;
-    const int rightW = W - 3 * pad - gap - leftW;
-    const int leftX  = pad;
-    const int rightX = leftX + leftW + gap + pad;
+    const int colW  = (W - 2 * kEdPad - kEdColGap) / 2;
+    const int leftX = kEdPad;
+    const int rightX = kEdPad + colW + kEdColGap;
 
-    // Bottom of the two-column band (above the full-width spectral-curve editor).
-    const int midBottom = H - pad - kCurveBandH - kCurveGap;
-
-    // ── Left: REC / PLAY / CLEAR / CROP / SAVE / LOAD (y=30, 6 buttons in a row) ─
-    {
-        const int btnY   = 30;
-        constexpr int btnH   = Sp3ctraTheme::kControlH;
-        const int btnGap = Sp3ctraTheme::kGap;
-        const int bW     = (leftW - 5 * btnGap) / 6;
-        recBtn  .setBounds(leftX,                     btnY, bW, btnH);
-        playBtn .setBounds(leftX + 1 * (bW + btnGap), btnY, bW, btnH);
-        clearBtn.setBounds(leftX + 2 * (bW + btnGap), btnY, bW, btnH);
-        cropBtn .setBounds(leftX + 3 * (bW + btnGap), btnY, bW, btnH);
-        saveBtn .setBounds(leftX + 4 * (bW + btnGap), btnY, bW, btnH);
-        loadBtn .setBounds(leftX + 5 * (bW + btnGap), btnY, bW, btnH);
-    }
-
-    // ── Left: Timeline (y=64, fills the middle band) ──────────────────────────
-    {
-        const int tlY = 64;
-        const int tlH = midBottom - tlY;
-        timeline.setBounds(leftX, tlY, leftW, juce::jmax(40, tlH));
-    }
-
-    // ── Full-width spectral-curve editor (bottom band) ────────────────────────
-    freqCurveEditor.setBounds(pad, midBottom + kCurveGap, W - 2 * pad, kCurveBandH);
-
-    // ── Right panel controls ─────────────────────────────────────────────────
-    constexpr int rowH = Sp3ctraTheme::kControlH; // unified control height
-    // rowH + 2 (was +4) so the panel fits 7 rows: IMG / Speed / Loop / Resume /
-    // Overdub / Curve / Power — all inside the fixed editor height.
-    const int step = rowH + 2;
+    const int rowH = Sp3ctraTheme::kControlH;
+    const int step = edStep();
     const int lW   = 46; // label column width
-    const int ctrlX = rightX + lW + 4;
-    const int ctrlW = rightW - lW - 4;
-    int ry = 32; // slight top padding inside right panel
+    const int btnGap = Sp3ctraTheme::kGap;
 
-    // Brightness lift
-    brightnessLabel .setBounds(rightX, ry, lW, rowH);
-    brightnessSlider.setBounds(ctrlX,   ry, ctrlW, rowH);
-    ry += step;
-
-    // Speed
-    speedLabel .setBounds(rightX, ry, lW, rowH);
-    speedSlider.setBounds(ctrlX,   ry, ctrlW, rowH);
-    ry += step;
-
-    // Loop
+    // Helper: a 3-button row spanning a column.
+    const auto layoutButtonRow = [&](int x, int y,
+                                     juce::Button& a, juce::Button& b, juce::Button& c)
     {
-        const int bGap   = 3;
-        const int availW = rightW - lW - 4;
-        const int bW     = (availW - 3 * bGap) / 4;
-        loopLabel.setBounds(rightX, ry, lW, rowH);
-        for (int k = 0; k < 4; ++k)
-            loopBtns[k].setBounds(ctrlX + k * (bW + bGap), ry, bW, rowH);
+        const int bW = (colW - 2 * btnGap) / 3;
+        a.setBounds(x,                     y, bW, rowH);
+        b.setBounds(x + 1 * (bW + btnGap), y, bW, rowH);
+        c.setBounds(x + 2 * (bW + btnGap), y, colW - 2 * (bW + btnGap), rowH);
+    };
+
+    // ── Left column ───────────────────────────────────────────────────────────
+    {
+        const int ctrlX = leftX + lW + 4;
+        const int ctrlW = colW - lW - 4;
+        int ry = kEdParamTop;
+
+        layoutButtonRow(leftX, ry, recBtn, playBtn, clearBtn);
+        ry += step;
+
+        speedLabel .setBounds(leftX, ry, lW, rowH);
+        speedSlider.setBounds(ctrlX, ry, ctrlW, rowH);
+        ry += step;
+
+        {
+            const int bGap = 3;
+            const int bW   = (ctrlW - 3 * bGap) / 4;
+            loopLabel.setBounds(leftX, ry, lW, rowH);
+            for (int k = 0; k < 4; ++k)
+                loopBtns[k].setBounds(ctrlX + k * (bW + bGap), ry, bW, rowH);
+        }
+        ry += step;
+
+        loopXfLabel .setBounds(leftX, ry, lW, rowH);
+        loopXfSlider.setBounds(ctrlX, ry, ctrlW, rowH);
+        ry += step;
+
+        brightnessLabel .setBounds(leftX, ry, lW, rowH);
+        brightnessSlider.setBounds(ctrlX, ry, ctrlW, rowH);
+        ry += step;
+
+        floorLabel .setBounds(leftX, ry, lW, rowH);
+        floorSlider.setBounds(ctrlX, ry, ctrlW, rowH);
     }
-    ry += step;
 
-    // Loop crossfade (overlap)
-    loopXfLabel .setBounds(rightX, ry, lW, rowH);
-    loopXfSlider.setBounds(ctrlX,  ry, ctrlW, rowH);
-    ry += step;
+    // ── Right column ──────────────────────────────────────────────────────────
+    {
+        const int ctrlX = rightX + lW + 4;
+        const int ctrlW = colW - lW - 4;
+        int ry = kEdParamTop;
 
-    // Resume toggle
-    resumeToggle.setBounds(rightX, ry, rightW, rowH);
-    ry += step;
+        layoutButtonRow(rightX, ry, cropBtn, saveBtn, loadBtn);
+        ry += step;
 
-    // Overdub toggle
-    overdubToggle.setBounds(rightX, ry, rightW, rowH);
-    ry += step;
+        resumeToggle.setBounds(rightX, ry, colW, rowH);
+        ry += step;
 
-    // Fade curve type
-    fadeCurveLabel  .setBounds(rightX, ry, lW, rowH);
-    fadeCurveTypeBox.setBounds(ctrlX,  ry, ctrlW, rowH);
-    ry += step;
+        overdubToggle.setBounds(rightX, ry, colW, rowH);
+        ry += step;
 
-    // Fade curve power
-    fadePowerLabel .setBounds(rightX, ry, lW, rowH);
-    fadePowerSlider.setBounds(ctrlX,  ry, ctrlW, rowH);
+        // Per-fade rows: label · curve combo · power slider.
+        const int curveW = 74;
+        const int powerX = ctrlX + curveW + 4;
+        const int powerW = ctrlW - curveW - 4;
+        fadeInLabel      .setBounds(rightX, ry, lW, rowH);
+        fadeInCurveBox   .setBounds(ctrlX,  ry, curveW, rowH);
+        fadeInPowerSlider.setBounds(powerX, ry, powerW, rowH);
+        ry += step;
+
+        fadeOutLabel      .setBounds(rightX, ry, lW, rowH);
+        fadeOutCurveBox   .setBounds(ctrlX,  ry, curveW, rowH);
+        fadeOutPowerSlider.setBounds(powerX, ry, powerW, rowH);
+    }
+
+    // ── Image editor (middle) + SCORE-style EQ panel (bottom) ─────────────────
+    const int edY  = edParamBottom() + kEdGap;
+    const int eqH  = juce::jmin(ScoreEqComponent::kPreferredH, (H - edY) / 2);
+    const int eqY  = H - kEdPad - eqH;
+    const int imgH = juce::jmax(60, eqY - kEdGap - edY);
+    spectralEditor.setBounds(kEdPad, edY, W - 2 * kEdPad, imgH);
+    eqEditor      .setBounds(kEdPad, eqY, W - 2 * kEdPad, eqH);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -629,10 +691,10 @@ void SlotEditorComponent::timerCallback()
     // check the current slot state before invoking the toggle.
     auto* fs = processor.getSampler(samplerIndex_);
 
-    const bool recPressed   = processor.consumeSamplerRecPressed();
-    const bool recReleased  = processor.consumeSamplerRecReleased();
-    const bool playPressed  = processor.consumeSamplerPlayPressed();
-    const bool playReleased = processor.consumeSamplerPlayReleased();
+    const bool recPressed   = processor.consumeSamplerRecPressed  (samplerIndex_);
+    const bool recReleased  = processor.consumeSamplerRecReleased (samplerIndex_);
+    const bool playPressed  = processor.consumeSamplerPlayPressed (samplerIndex_);
+    const bool playReleased = processor.consumeSamplerPlayReleased(samplerIndex_);
 
     if (fs != nullptr)
     {
@@ -662,7 +724,7 @@ void SlotEditorComponent::timerCallback()
             playBtn.onClick();
     }
 
-    if (processor.consumeSamplerSaveTrigger() && saveBtn.onClick)
+    if (processor.consumeSamplerSaveTrigger(samplerIndex_) && saveBtn.onClick)
         saveBtn.onClick();
 
     if (fs == nullptr) return;
@@ -671,15 +733,21 @@ void SlotEditorComponent::timerCallback()
     const SlotState st         = fs->getSlotState(selectedSlot);
     const bool      hasContent = fs->slotHasContent(selectedSlot);
 
-    // Invalidate timeline thumbnail when recording stops
+    // Rebuild the authentic-image backdrop when recording stops
     if (st == SlotState::IDLE && hasContent)
-        timeline.markDirty(); // markDirty is idempotent (NOP if already clean)
+        spectralEditor.markDirty(); // markDirty is idempotent (NOP if already clean)
 
     // Refresh the spectral-curve backdrop once when a recording finishes.
     const bool nowRecording = (st == SlotState::RECORDING);
     if (prevRecording_ && !nowRecording)
         refreshFreqCurve();
     prevRecording_ = nowRecording;
+
+    // A CLEAR from elsewhere (slot grid, setup panel) resets this slot's EQ AND
+    // edit handles — mirror the whole state when the slot transitions to empty.
+    if (prevHasContent_ && !hasContent)
+        refreshSliderValues();
+    prevHasContent_ = hasContent;
 
     // ── REC button ───────────────────────────────────────────────────────────
     switch (st)

@@ -22,6 +22,11 @@ extern "C" {
 
 /* Function prototypes -------------------------------------------------------*/
 
+/* Forward decl (defined in wave_generation.h) — declared here so it stays
+ * visible across the algorithms.h <-> wave_generation.h include cycle,
+ * avoiding a -Wvisibility warning on the prototypes below. */
+struct wave;
+
 
 /**
  * @brief Apply GAP_LIMITER volume ramp for a single note

@@ -6,12 +6,13 @@ static_assert(ChainModel::kMaxVideoSlots == CHAIN_MAX_CHAINS,
 static_assert(ChainModel::kMaxChains == CHAIN_MAX_CHAINS,
               "ChainModel::kMaxChains must equal CHAIN_MAX_CHAINS (chain_plan.h) — "
               "every per-chain RT pool is sized with it.");
-static_assert(CHAIN_PLAN_MAX_INSERTS >= 12,
-              "The insert list holds Pitch + Mask + up to 8 VideoScroll probes AND up "
-              "to 2 Sampler position markers in a single chain = 12 entries, so "
-              "CHAIN_PLAN_MAX_INSERTS must be >= 12 or deriveAndPublishChainPlan "
-              "silently drops probes/markers (a dropped SAMPLER marker misroutes "
-              "every probe placed after the sampler).");
+static_assert(CHAIN_PLAN_MAX_INSERTS >= 16,
+              "The insert list holds Pitch + Mask + Reverb + Echo + EQ + up to 8 "
+              "VideoScroll probes AND up to 2 Sampler position markers AND 1 Score "
+              "position marker in a single chain = 16 entries, so "
+              "CHAIN_PLAN_MAX_INSERTS must be >= 16 or deriveAndPublishChainPlan "
+              "silently drops probes/markers (a dropped marker misroutes every "
+              "probe/FX placed after it).");
 
 //==============================================================================
 const juce::Identifier ChainModel::kChainsTag   { "CHAINS" };

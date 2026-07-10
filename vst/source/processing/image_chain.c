@@ -10,6 +10,9 @@
 #include "image_chain.h"
 #include "lux_pitch.h"
 #include "lux_mask.h"
+#include "lux_reverb.h"
+#include "lux_echo.h"
+#include "lux_eq.h"
 #include "video_scroll.h"
 #include "../audio/buffers/audio_image_buffers.h"
 
@@ -156,6 +159,21 @@ void image_chain_run(
                  * already equal cr/cg/cb. RT-safe SPSC push, no alloc/lock. */
                 video_scroll_capture_line((VideoScrollState *)insert_states[i],
                                           cr, cg, cb, pixel_count);
+                break;
+            case IMAGE_CHAIN_INSERT_LUXREVERB:
+                lux_reverb_process_frame((LuxReverbState *)insert_states[i],
+                                         cr, cg, cb, pixel_count,
+                                         luxstral_num_octaves, &nr, &ng, &nb);
+                break;
+            case IMAGE_CHAIN_INSERT_LUXECHO:
+                lux_echo_process_frame((LuxEchoState *)insert_states[i],
+                                       cr, cg, cb, pixel_count,
+                                       luxstral_num_octaves, &nr, &ng, &nb);
+                break;
+            case IMAGE_CHAIN_INSERT_LUXEQ:
+                lux_eq_process_frame((LuxEqState *)insert_states[i],
+                                     cr, cg, cb, pixel_count,
+                                     luxstral_num_octaves, &nr, &ng, &nb);
                 break;
             default:
                 break;   /* unknown insert → pass-through */

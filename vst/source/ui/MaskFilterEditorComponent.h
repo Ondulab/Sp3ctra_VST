@@ -20,6 +20,7 @@
 #include <cmath>
 #include <memory>
 #include "../UITheme.h"
+#include "../midi/MidiLearnAttachment.h"
 #include "../processing/lux_mask.h"   // self-manages extern "C" linkage
 
 class MaskFilterEditorComponent : public juce::Component,
@@ -35,17 +36,42 @@ public:
                               const juce::String& slopeParamId)
         : apvts(apvtsIn), accent(accentColour)
     {
+        setInstance(0, widthParamId, offsetParamId, slopeParamId);
+        setRepaintsOnMouseActivity(true);
+        startTimerHz(30);
+    }
+
+    ~MaskFilterEditorComponent() override { stopTimer(); }
+
+    /** Optional MIDI-learn wiring — set once (before the next setInstance);
+     *  the right-click popups then follow every rebind. */
+    void setMidiMap(MidiMappingEngine* m) noexcept { midiMap_ = m; }
+
+    /** (Re)bind the handles/boxes to one instance's bank and point the live
+     *  openness overlay at that instance's pool slot. */
+    void setInstance(int slot,
+                     const juce::String& widthParamId,
+                     const juce::String& offsetParamId,
+                     const juce::String& slopeParamId)
+    {
+        slot_ = juce::jlimit(0, 7, slot);
+        w.attach.reset(); o.attach.reset(); s.attach.reset();
+        boxWAtt.reset(); boxOAtt.reset(); boxSAtt.reset();
         bind(w, widthParamId);
         bind(o, offsetParamId);
         bind(s, slopeParamId);
         initBox(boxW, widthParamId,  boxWAtt);
         initBox(boxO, offsetParamId, boxOAtt);
         initBox(boxS, slopeParamId,  boxSAtt);
-        setRepaintsOnMouseActivity(true);
-        startTimerHz(30);
+        learnW_.reset(); learnO_.reset(); learnS_.reset();
+        if (midiMap_ != nullptr)
+        {
+            learnW_ = std::make_unique<MidiLearnAttachment>(*midiMap_, boxW, widthParamId);
+            learnO_ = std::make_unique<MidiLearnAttachment>(*midiMap_, boxO, offsetParamId);
+            learnS_ = std::make_unique<MidiLearnAttachment>(*midiMap_, boxS, slopeParamId);
+        }
+        repaint();
     }
-
-    ~MaskFilterEditorComponent() override { stopTimer(); }
 
     int preferredHeight() const noexcept { return kPreferredH; }
 
@@ -204,7 +230,7 @@ private:
         if (graphRect_.getWidth() < 30.0f || graphRect_.getHeight() < 16.0f) return geo;
 
         geo.plot = graphRect_.reduced(8.0f, 7.0f);
-        float N = (float) g_lux_mask_proc.last_pixel_count;
+        float N = (float) lux_mask_instance(slot_)->last_pixel_count;
         if (N <= 0.0f) N = (float) (LUX_MASK_MAX_PIXELS / 2);
         geo.Nimg = N;
 
@@ -333,14 +359,15 @@ private:
     }
 
     /* Most-open alive voice → live openness for the breathing fill. */
-    static float liveOpenness()
+    float liveOpenness() const
     {
-        const auto& cfg = g_lux_mask_proc.config;
+        const LuxMaskState& st = *lux_mask_instance(slot_);
+        const auto& cfg = st.config;
         const int maxV = cfg.polyphony_enabled ? LUX_MASK_MAX_VOICES : 1;
         float best = 0.0f;
         for (int v = 0; v < maxV; ++v)
         {
-            const auto& vs = g_lux_mask_proc.voices[v];
+            const auto& vs = st.voices[v];
             if (vs.envelope_stage == LUX_MASK_ENV_IDLE) continue;
             best = juce::jmax(best, juce::jlimit(0.0f, 1.0f, vs.envelope_level));
         }
@@ -390,10 +417,13 @@ private:
 
     juce::AudioProcessorValueTreeState& apvts;
     juce::Colour accent;
+    int slot_ { 0 };   // pool slot of the bound instance (live overlay)
 
     Bound w, o, s;   // width%, offset%, slope
     juce::Slider boxW, boxO, boxS;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> boxWAtt, boxOAtt, boxSAtt;
+    MidiMappingEngine* midiMap_ = nullptr;
+    std::unique_ptr<MidiLearnAttachment> learnW_, learnO_, learnS_;
 
     juce::Rectangle<float> graphRect_;
     Handle hovered  { Handle::None };

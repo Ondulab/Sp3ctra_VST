@@ -4,8 +4,10 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "../midi/MidiLearnAttachment.h"
 #include <array>
 #include <memory>
+#include <vector>
 
 /**
  * @brief Contextual zone-3 PLAY panel for a selected VIDEO SCROLL output module.
@@ -179,6 +181,7 @@ private:
         modeAtt_.reset();  speedAtt_.reset();  linePosAtt_.reset();
         thickAtt_.reset(); zoomAtt_.reset();   fadeAtt_.reset();
         compAtt_.reset();  invertAtt_.reset(); colorAtt_.reset();
+        learnAtts_.clear();
 
         if (slot_ < 0) { repaint(); return; }
 
@@ -192,6 +195,23 @@ private:
         compAtt_    = std::make_unique<SA>(apvts, vsParam(slot_, "compress"),  compressSlider_);
         invertAtt_  = std::make_unique<BA>(apvts, vsParam(slot_, "invert"),    invertButton_);
         colorAtt_   = std::make_unique<BA>(apvts, vsParam(slot_, "colorMode"), colorButton_);
+
+        // Right-click MIDI Learn on every play control of THIS instance.
+        auto& mm = processor_.getMidiMap();
+        auto learn = [&](juce::Component& c, const char* suffix)
+        {
+            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
+                mm, c, vsParam(slot_, suffix)));
+        };
+        learn(modeCombo_,       "mode");
+        learn(speedSlider_,     "speed");
+        learn(linePosSlider_,   "linePos");
+        learn(thicknessSlider_, "thickness");
+        learn(zoomSlider_,      "zoom");
+        learn(fadeSlider_,      "fade");
+        learn(compressSlider_,  "compress");
+        learn(invertButton_,    "invert");
+        learn(colorButton_,     "colorMode");
         repaint();
     }
 
@@ -207,6 +227,7 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   speedAtt_, linePosAtt_,
         thickAtt_, zoomAtt_, fadeAtt_, compAtt_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   invertAtt_, colorAtt_;
+    std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(VideoScrollPage)
 };

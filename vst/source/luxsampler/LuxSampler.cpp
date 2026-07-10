@@ -165,6 +165,18 @@ extern "C"
         }
         return liveStep;
     }
+
+    int lux_sampler_is_score_playing(void)
+    {
+        int playing = 0;
+        for (int i = 0; i < LuxSampler::kMaxEngines && !playing; ++i)
+        {
+            if (auto* e = LuxSampler::pinEngine(i))
+                playing = e->isScorePlaying() ? 1 : 0;
+            LuxSampler::unpinEngine(i);
+        }
+        return playing;
+    }
 }
 
 // ============================================================================
@@ -1030,8 +1042,8 @@ void LuxSampler::uiPlayScore() noexcept
     if (!scoreSlot.has_content) return; // nothing generated yet
 
     // Relay: if a sampler slot currently owns the shared channel, remember it so it
-    // resumes when SCORE stops — SCORE prend le relais ; à l'arrêt, le flux du
-    // sampler perdure. Halt the sampler's injection (slotState→IDLE) and free the
+    // resumes when SCORE stops — SCORE takes over the relay; when it stops, the
+    // sampler stream lives on. Halt the sampler's injection (slotState→IDLE) and free the
     // channel for SCORE. A non-slot owner leaves any armed relay untouched, so it
     // survives a live-EQ reload (stop → reallocate → re-play).
     // Encoding: engine * NUM_SLOTS + slot — the channel may be owned by
@@ -1094,6 +1106,12 @@ void LuxSampler::uiStopScore() noexcept
     atomicState.scoreScrubbing.store(false, std::memory_order_release); // also ends any scrub
     scorePlayHead.store(0, std::memory_order_relaxed);
     scoreResumeHead.store(-1, std::memory_order_relaxed); // drop any armed resume
+
+    // Engine B: a [SCORE → LUXSTRAL B] chain loses its player — silence its
+    // input now (plan-gated no-op otherwise). udpThread also re-silences it
+    // per line while the device streams, but this covers the offline case
+    // where nothing else would overwrite the last score frame.
+    luxstral_b_player_stopped();
 
     // Only touch the shared playback channel if SCORE actually owns it. A sampler
     // slot playing on the same channel must keep running: SCORE teardown (manual
@@ -1235,8 +1253,15 @@ void LuxSampler::uiClearSlot(int slotIndex) noexcept
 
     // Clear the slot data under slotsMutex_ so that sampleSpectralForTimeline
     // (message thread) cannot access slot.frames while clear() frees it.
-    std::lock_guard<std::mutex> lk(slotsMutex_);
-    slots[slotIndex].clear();
+    {
+        std::lock_guard<std::mutex> lk(slotsMutex_);
+        slots[slotIndex].clear();
+    }
+
+    // Wiping the recording also resets its vertical (HF/LF frequency) filter —
+    // otherwise a leftover curve would silently shape the NEXT take in this slot.
+    resetSlotFreqCurve(slotIndex);
+    resetSlotEditHandles(slotIndex);   // start/end/fades/floor back to defaults
 }
 
 // ============================================================================
@@ -1332,7 +1357,20 @@ void LuxSampler::clearSlot(int i)
         std::lock_guard<std::mutex> lk(slotsMutex_);
         slots[i].clear();
     }
+    // Also reset the vertical (HF/LF frequency) filter — see uiClearSlot.
+    resetSlotFreqCurve(i);
+    resetSlotEditHandles(i);   // start/end/fades/floor back to defaults
     log_info("FS", "Slot %d cleared", i);
+}
+
+void LuxSampler::resetSlotEditHandles(int i) noexcept
+{
+    if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return;
+    setSlotStartFrac(i, 0.0f);
+    setSlotEndFrac  (i, 1.0f);
+    setSlotAttackLen(i, 0.0f);
+    setSlotDecayLen (i, 0.0f);
+    setSlotEqFloor  (i, 0.0f);
 }
 
 void LuxSampler::clearAllSlots()
@@ -1399,13 +1437,13 @@ void LuxSampler::copySlotTo(int srcIdx, int dstIdx)
     setSlotBassCut       (dstIdx, getSlotBassCut       (srcIdx));
     setSlotFadeCurveType (dstIdx, getSlotFadeCurveType (srcIdx));
     setSlotFadeCurvePower(dstIdx, getSlotFadeCurvePower(srcIdx));
+    setSlotAttackCurveType (dstIdx, getSlotAttackCurveType (srcIdx));
+    setSlotAttackCurvePower(dstIdx, getSlotAttackCurvePower(srcIdx));
+    setSlotDecayCurveType  (dstIdx, getSlotDecayCurveType  (srcIdx));
+    setSlotDecayCurvePower (dstIdx, getSlotDecayCurvePower (srcIdx));
     setSlotLoopOverlap   (dstIdx, getSlotLoopOverlap   (srcIdx));
-    for (int band = 0; band < LuxSamplerConstants::NUM_FREQ_BANDS; ++band)
-    {
-        SamplerSpectralPoint pts[LuxSamplerConstants::MAX_FREQ_PTS];
-        const int n = getSlotFreqCurve(srcIdx, band, pts, LuxSamplerConstants::MAX_FREQ_PTS);
-        setSlotFreqCurve(dstIdx, band, pts, n);
-    }
+    setSlotEq            (dstIdx, getSlotEq            (srcIdx));
+    setSlotEqFloor       (dstIdx, getSlotEqFloor       (srcIdx));
 
     log_info("FS", "copySlotTo: slot %d → %d (%d frames)", srcIdx, dstIdx, count);
 }
@@ -1486,94 +1524,105 @@ void LuxSampler::cropSlotToBounds(int slotIndex)
 }
 
 // ============================================================================
-// Frequency-axis multi-point curve — LUT build + publish (message thread)
+// Image EQ (SCORE-style ±dB, boost + cut) — LUT build + publish (message thread)
+//
+// The per-slot EQ is stored as an encoded string in the SAME format as
+// ScoreEqComponent::encodeState():  "minF|maxF|g0;g1;…"  where the gains sit on
+// octave-boundary nodes. rebuildFreqLut() parses it and fills the double-buffered
+// freqLut_ with a GAIN IN dB per normalised pixel position (left=bass … right=
+// treble); the RT loop turns that into a darkness shift (see FramePlayerThread).
+// freqCurveActive_ stays false while the curve is flat so the RT loop skips it.
 // ============================================================================
+namespace {
+/** Parse the gains list out of an "minF|maxF|g0;g1;…" EQ string.
+ *  @return the number of gains written to @p out (0 → treat as flat). */
+int parseEqGains(const juce::String& s, float* out, int maxN) noexcept
+{
+    if (s.isEmpty()) return 0;
+    const int bar2 = s.lastIndexOfChar('|');
+    if (bar2 < 0) return 0;
+    const juce::String gainsStr = s.substring(bar2 + 1);
+    juce::StringArray toks;
+    toks.addTokens(gainsStr, ";", "");
+    int n = 0;
+    for (const auto& t : toks)
+    {
+        if (n >= maxN) break;
+        out[n++] = juce::jlimit(-24.0f, 24.0f, t.getFloatValue());
+    }
+    return n;
+}
+} // namespace
+
 void LuxSampler::initFreqCurveDefaults() noexcept
 {
     for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
     {
-        // Flat curves: keep everything (level 1.0) in both bands.
-        for (int band = 0; band < LuxSamplerConstants::NUM_FREQ_BANDS; ++band)
-        {
-            freqPts_[i][band][0] = { 0.0f, 1.0f };
-            freqPts_[i][band][1] = { 1.0f, 1.0f };
-            freqPtCount_[i][band] = 2;
-        }
+        eqState_[i].clear();
         for (int b = 0; b < 2; ++b)
             for (int j = 0; j < LuxSamplerConstants::FREQ_LUT_N; ++j)
-                freqLut_[i][b][j] = 1.0f;
+                freqLut_[i][b][j] = 0.0f;                 // 0 dB everywhere
         freqLutActive_[i].store(0, std::memory_order_relaxed);
         freqCurveActive_[i].store(false, std::memory_order_relaxed);
     }
+}
+
+void LuxSampler::resetSlotFreqCurve(int i) noexcept
+{
+    if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return;
+    eqState_[i].clear();
+    rebuildFreqLut(i);   // publishes a flat (0 dB) LUT + clears freqCurveActive_
 }
 
 void LuxSampler::rebuildFreqLut(int i) noexcept
 {
     if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return;
 
-    const int nLF = juce::jlimit(1, LuxSamplerConstants::MAX_FREQ_PTS,
-                                 freqPtCount_[i][LuxSamplerConstants::FREQ_BAND_LF]);
-    const int nHF = juce::jlimit(1, LuxSamplerConstants::MAX_FREQ_PTS,
-                                 freqPtCount_[i][LuxSamplerConstants::FREQ_BAND_HF]);
-    SamplerSpectralPoint* lf = freqPts_[i][LuxSamplerConstants::FREQ_BAND_LF];
-    SamplerSpectralPoint* hf = freqPts_[i][LuxSamplerConstants::FREQ_BAND_HF];
+    float gains[LuxSamplerConstants::MAX_EQ_NODES];
+    const int ng = parseEqGains(eqState_[i], gains, LuxSamplerConstants::MAX_EQ_NODES);
 
-    // Keep breakpoints sorted by x (defensive — UI already maintains order).
-    const auto byX = [](const SamplerSpectralPoint& a, const SamplerSpectralPoint& b)
-                     { return a.x < b.x; };
-    std::sort(lf, lf + nLF, byX);
-    std::sort(hf, hf + nHF, byX);
-
-    // Fill the inactive buffer, then publish it. The LF band drives the left
-    // half of the spectrum (xn < 0.5), the HF band the right half (xn ≥ 0.5),
-    // each remapped to its own [0..1] domain (mirror editor semantics).
+    // Fill the inactive buffer with a per-position GAIN IN dB, then publish.
+    // Nodes sit on octave boundaries → position xn maps linearly onto the node
+    // index axis (idx = xn·(ng-1)); we linear-interpolate the dB between nodes.
     const int cur    = freqLutActive_[i].load(std::memory_order_relaxed);
     const int target = 1 - cur;
     float*    lut    = freqLut_[i][target];
 
     bool active = false;
-    for (int j = 0; j < LuxSamplerConstants::FREQ_LUT_N; ++j)
+    if (ng >= 2)
     {
-        const float xn = (float) j / (float) (LuxSamplerConstants::FREQ_LUT_N - 1);
-        const float y  = (xn < 0.5f)
-            ? samplerSpectralCurveY(lf, nLF, xn * 2.0f)
-            : samplerSpectralCurveY(hf, nHF, (xn - 0.5f) * 2.0f);
-        lut[j] = y;
-        if (y < 0.999f) active = true;
+        for (int j = 0; j < LuxSamplerConstants::FREQ_LUT_N; ++j)
+        {
+            const float xn  = (float) j / (float) (LuxSamplerConstants::FREQ_LUT_N - 1);
+            const float idx = xn * (float) (ng - 1);
+            int   i0 = (int) idx;
+            if (i0 > ng - 2) i0 = ng - 2;
+            const float frac = idx - (float) i0;
+            const float g    = gains[i0] + frac * (gains[i0 + 1] - gains[i0]);
+            lut[j] = g;
+            if (std::abs(g) > 0.01f) active = true;
+        }
+    }
+    else
+    {
+        for (int j = 0; j < LuxSamplerConstants::FREQ_LUT_N; ++j) lut[j] = 0.0f;
     }
 
     freqLutActive_[i].store(target, std::memory_order_release);
     freqCurveActive_[i].store(active, std::memory_order_release);
 }
 
-void LuxSampler::setSlotFreqCurve(int i, int band,
-                                  const SamplerSpectralPoint* pts, int n) noexcept
+void LuxSampler::setSlotEq(int i, const juce::String& encoded) noexcept
 {
-    if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS
-        || band < 0 || band >= LuxSamplerConstants::NUM_FREQ_BANDS
-        || pts == nullptr)
-        return;
-    n = juce::jlimit(1, LuxSamplerConstants::MAX_FREQ_PTS, n);
-    for (int k = 0; k < n; ++k)
-    {
-        freqPts_[i][band][k].x = juce::jlimit(0.0f, 1.0f, pts[k].x);
-        freqPts_[i][band][k].y = juce::jlimit(0.0f, 1.0f, pts[k].y);
-    }
-    freqPtCount_[i][band] = n;
+    if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return;
+    eqState_[i] = encoded;
     rebuildFreqLut(i);
 }
 
-int LuxSampler::getSlotFreqCurve(int i, int band,
-                                 SamplerSpectralPoint* out, int maxN) const noexcept
+juce::String LuxSampler::getSlotEq(int i) const
 {
-    if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS
-        || band < 0 || band >= LuxSamplerConstants::NUM_FREQ_BANDS
-        || out == nullptr || maxN <= 0)
-        return 0;
-    const int n = juce::jmin(freqPtCount_[i][band], maxN);
-    for (int k = 0; k < n; ++k)
-        out[k] = freqPts_[i][band][k];
-    return n;
+    if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return {};
+    return eqState_[i];
 }
 
 // ============================================================================
@@ -1766,57 +1815,97 @@ bool LuxSampler::saveToFile(const juce::File& file) const
 // PNG = lossless, JPEG = quality 90.
 // ============================================================================
 
-bool LuxSampler::exportSlotImage(int slotIndex,
-                                  const juce::File& file,
-                                  bool asPng) const
+juce::Image LuxSampler::renderSlotImage(int slotIndex,
+                                        int maxW,
+                                        int maxH,
+                                        bool timeHorizontal) const
 {
     using namespace LuxSamplerConstants;
 
     if (slotIndex < 0 || slotIndex >= NUM_SLOTS)
-    {
-        log_error("FS", "exportSlotImage: invalid slot index %d", slotIndex);
-        return false;
-    }
+        return {};
 
-    // Snapshot slot under mutex (only metadata + pixel-count of first frame)
-    int      width  = 0;
-    int      height = 0;
+    // Snapshot slot dimensions under mutex (metadata + pixel-count of first frame)
+    int frameCount = 0;
+    int pixelCount = 0;
     {
         std::lock_guard<std::mutex> lk(slotsMutex_);
         const FrameSlot& slot = slots[slotIndex];
         if (!slot.has_content || slot.frame_count <= 0 || !slot.isAllocated())
-            return false;
-        height = slot.frame_count;
-        width  = slot.frames[0].pixel_count;
-        if (width <= 0)
-            return false;
+            return {};
+        frameCount = slot.frame_count;
+        pixelCount = slot.frames[0].pixel_count;
+        if (pixelCount <= 0)
+            return {};
     }
 
-    // Allocate destination JUCE image (RGB, no alpha)
-    juce::Image img(juce::Image::RGB, width, height, true);
+    // Native orientation: X = pixel (frequency), Y = frame (time, earliest on top).
+    // timeHorizontal transposes for the UI backdrop: X = frame (time, left→right),
+    // Y = pixel mapped so treble (high index) is on top and bass (low index) bottom.
+    const int srcW = timeHorizontal ? frameCount : pixelCount; // source columns
+    const int srcH = timeHorizontal ? pixelCount : frameCount; // source rows
+    const int outW = (maxW > 0) ? juce::jmin(srcW, maxW) : srcW;
+    const int outH = (maxH > 0) ? juce::jmin(srcH, maxH) : srcH;
+    if (outW <= 0 || outH <= 0)
+        return {};
 
+    // Nearest-neighbour striding when downsampled (0 caps = full resolution).
+    const auto srcIndex = [](int o, int outN, int srcN) noexcept
+    {
+        if (outN <= 1) return 0;
+        return juce::jlimit(0, srcN - 1,
+                            (int) ((long long) o * (srcN - 1) / (outN - 1)));
+    };
+
+    juce::Image img(juce::Image::RGB, outW, outH, true);
     {
         juce::Image::BitmapData bmp(img, juce::Image::BitmapData::writeOnly);
         std::lock_guard<std::mutex> lk(slotsMutex_);
         const FrameSlot& slot = slots[slotIndex];
+        const int fc = juce::jmin(frameCount, slot.frame_count); // re-check after lock
 
-        // Re-check after lock (frame_count could have changed)
-        const int rowCount = juce::jmin(height, slot.frame_count);
-        for (int y = 0; y < rowCount; ++y)
+        // Use setPixelColour() to be platform-independent: the in-memory byte
+        // order of juce::Image::RGB (PixelRGB) is platform-dependent (BGR on
+        // some targets, RGB on others). Writing raw bytes with a hard-coded
+        // order produced incorrect colours (export looked monochrome).
+        for (int y = 0; y < outH; ++y)
         {
-            const CapturedFrame& fr = slot.frames[y];
-            const int            px = juce::jmin(width, static_cast<int>(fr.pixel_count));
-
-            // Use setPixelColour() to be platform-independent: the in-memory byte
-            // order of juce::Image::RGB (PixelRGB) is platform-dependent (BGR on
-            // some targets, RGB on others). Writing raw bytes with a hard-coded
-            // order produced incorrect colours (export looked monochrome).
-            for (int x = 0; x < px; ++x)
+            for (int x = 0; x < outW; ++x)
             {
-                bmp.setPixelColour(x, y,
-                                   juce::Colour(fr.R[x], fr.G[x], fr.B[x]));
+                int frameIdx, pixIdx;
+                if (timeHorizontal)
+                {
+                    frameIdx = srcIndex(x, outW, fc);
+                    // Flip Y so the top row is the highest pixel index (treble).
+                    pixIdx   = srcIndex(outH - 1 - y, outH, pixelCount);
+                }
+                else
+                {
+                    pixIdx   = srcIndex(x, outW, pixelCount);
+                    frameIdx = srcIndex(y, outH, fc);
+                }
+                if (frameIdx >= fc) continue;
+                const CapturedFrame& fr = slot.frames[frameIdx];
+                const int px = juce::jmin(pixelCount, static_cast<int>(fr.pixel_count));
+                const int pi = juce::jmin(pixIdx, px - 1);
+                if (pi < 0) continue;
+                bmp.setPixelColour(x, y, juce::Colour(fr.R[pi], fr.G[pi], fr.B[pi]));
             }
         }
+    }
+    return img;
+}
+
+bool LuxSampler::exportSlotImage(int slotIndex,
+                                  const juce::File& file,
+                                  bool asPng) const
+{
+    // Full-resolution, native orientation (X = pixel, Y = frame).
+    juce::Image img = renderSlotImage(slotIndex, 0, 0, /*timeHorizontal=*/false);
+    if (!img.isValid())
+    {
+        log_error("FS", "exportSlotImage: slot %d empty or invalid", slotIndex);
+        return false;
     }
 
     // Write to file (overwrite if it exists)
@@ -1853,7 +1942,7 @@ bool LuxSampler::exportSlotImage(int slotIndex,
 
     log_info("FS", "Exported slot %d image to '%s' (%dx%d, %s)",
              slotIndex, file.getFullPathName().toRawUTF8(),
-             width, height, asPng ? "PNG" : "JPEG");
+             img.getWidth(), img.getHeight(), asPng ? "PNG" : "JPEG");
     return true;
 }
 
@@ -2107,25 +2196,16 @@ void LuxSampler::slotParamsToXml(int slotIndex, juce::XmlElement& xml) const
     xml.setAttribute("trebleCut",      static_cast<double>(getSlotTrebleCut(slotIndex)));
     xml.setAttribute("bassCut",        static_cast<double>(getSlotBassCut(slotIndex)));
     xml.setAttribute("loopOverlap",    static_cast<double>(getSlotLoopOverlap(slotIndex)));
-    // Frequency-axis multi-point curves → "x,y;x,y;…" per band (LF + HF).
-    {
-        auto encodeBand = [this, slotIndex](int band)
-        {
-            SamplerSpectralPoint pts[LuxSamplerConstants::MAX_FREQ_PTS];
-            const int n = getSlotFreqCurve(slotIndex, band, pts, LuxSamplerConstants::MAX_FREQ_PTS);
-            juce::String fc;
-            for (int k = 0; k < n; ++k)
-            {
-                if (k) fc << ';';
-                fc << juce::String(pts[k].x, 4) << ',' << juce::String(pts[k].y, 4);
-            }
-            return fc;
-        };
-        xml.setAttribute("freqCurveLF", encodeBand(LuxSamplerConstants::FREQ_BAND_LF));
-        xml.setAttribute("freqCurveHF", encodeBand(LuxSamplerConstants::FREQ_BAND_HF));
-    }
+    // Image EQ (SCORE-style ±dB) → encoded "minF|maxF|g0;g1;…" + pre-EQ floor.
+    xml.setAttribute("imageEq",  getSlotEq(slotIndex));
+    xml.setAttribute("eqFloor",  static_cast<double>(getSlotEqFloor(slotIndex)));
     xml.setAttribute("fadeCurveType",  static_cast<int>(getSlotFadeCurveType(slotIndex)));
     xml.setAttribute("fadeCurvePower", static_cast<double>(getSlotFadeCurvePower(slotIndex)));
+    // Independent attack / decay fade shaping.
+    xml.setAttribute("attackCurveType",  static_cast<int>(getSlotAttackCurveType(slotIndex)));
+    xml.setAttribute("attackCurvePower", static_cast<double>(getSlotAttackCurvePower(slotIndex)));
+    xml.setAttribute("decayCurveType",   static_cast<int>(getSlotDecayCurveType(slotIndex)));
+    xml.setAttribute("decayCurvePower",  static_cast<double>(getSlotDecayCurvePower(slotIndex)));
     xml.setAttribute("label",          juce::String(getSlotLabel(slotIndex)));
 }
 
@@ -2145,60 +2225,23 @@ void LuxSampler::slotParamsFromXml(int slotIndex, const juce::XmlElement& xml)
     setSlotBrightnessLift(slotIndex, static_cast<float>(xml.getDoubleAttribute("brightnessLift", 0.0)));
     setSlotTrebleCut     (slotIndex, static_cast<float>(xml.getDoubleAttribute("trebleCut",      0.0)));
     setSlotBassCut       (slotIndex, static_cast<float>(xml.getDoubleAttribute("bassCut",        0.0)));
+    // Legacy shared fade curve first (writes both attack+decay), then per-fade
+    // overrides when present (newer sessions).
     setSlotFadeCurveType (slotIndex, static_cast<FadeCurveType>(xml.getIntAttribute("fadeCurveType", 0)));
     setSlotFadeCurvePower(slotIndex, static_cast<float>(xml.getDoubleAttribute("fadeCurvePower", 1.0)));
+    if (xml.hasAttribute("attackCurveType"))
+        setSlotAttackCurveType(slotIndex, static_cast<FadeCurveType>(xml.getIntAttribute("attackCurveType", 0)));
+    if (xml.hasAttribute("attackCurvePower"))
+        setSlotAttackCurvePower(slotIndex, static_cast<float>(xml.getDoubleAttribute("attackCurvePower", 1.0)));
+    if (xml.hasAttribute("decayCurveType"))
+        setSlotDecayCurveType(slotIndex, static_cast<FadeCurveType>(xml.getIntAttribute("decayCurveType", 0)));
+    if (xml.hasAttribute("decayCurvePower"))
+        setSlotDecayCurvePower(slotIndex, static_cast<float>(xml.getDoubleAttribute("decayCurvePower", 1.0)));
     setSlotLoopOverlap   (slotIndex, static_cast<float>(xml.getDoubleAttribute("loopOverlap",   0.0)));
-    // Frequency curves: parse "x,y;…" per band if present, else migrate the
-    // legacy trebleCut / bassCut cuts into HF / LF curve points.
-    {
-        auto parseBand = [&](const juce::String& s, int band) -> bool
-        {
-            if (s.isEmpty()) return false;
-            SamplerSpectralPoint pts[LuxSamplerConstants::MAX_FREQ_PTS];
-            int n = 0;
-            juce::StringArray toks;
-            toks.addTokens(s, ";", "");
-            for (const auto& tok : toks)
-            {
-                if (n >= LuxSamplerConstants::MAX_FREQ_PTS) break;
-                const int comma = tok.indexOfChar(',');
-                if (comma < 0) continue;
-                pts[n].x = tok.substring(0, comma).getFloatValue();
-                pts[n].y = tok.substring(comma + 1).getFloatValue();
-                ++n;
-            }
-            if (n < 1) return false;
-            setSlotFreqCurve(slotIndex, band, pts, n);
-            return true;
-        };
-
-        const bool gotLF = parseBand(xml.getStringAttribute("freqCurveLF", ""),
-                                     LuxSamplerConstants::FREQ_BAND_LF);
-        const bool gotHF = parseBand(xml.getStringAttribute("freqCurveHF", ""),
-                                     LuxSamplerConstants::FREQ_BAND_HF);
-
-        if (!gotLF || !gotHF) // legacy migration for the missing band(s)
-        {
-            const float tc = static_cast<float>(xml.getDoubleAttribute("trebleCut", 0.0));
-            const float bc = static_cast<float>(xml.getDoubleAttribute("bassCut",   0.0));
-            // LF band from bassCut: keep at grave, dip toward the mid.
-            if (!gotLF && bc > 0.001f)
-            {
-                SamplerSpectralPoint p[3] = { {0.0f, 0.0f},
-                                              {juce::jlimit(0.0f,1.0f, bc), 1.0f},
-                                              {1.0f, 1.0f} };
-                setSlotFreqCurve(slotIndex, LuxSamplerConstants::FREQ_BAND_LF, p, 3);
-            }
-            // HF band from trebleCut: keep at mid, dip toward the aigu.
-            if (!gotHF && tc > 0.001f)
-            {
-                SamplerSpectralPoint p[3] = { {0.0f, 1.0f},
-                                              {juce::jlimit(0.0f,1.0f, 1.0f - tc), 1.0f},
-                                              {1.0f, 0.0f} };
-                setSlotFreqCurve(slotIndex, LuxSamplerConstants::FREQ_BAND_HF, p, 3);
-            }
-        }
-    }
+    // Image EQ (SCORE-style ±dB). Legacy freqCurveLF/HF / trebleCut / bassCut are
+    // no longer restored (the EQ was redesigned); a flat EQ is the safe default.
+    setSlotEq(slotIndex, xml.getStringAttribute("imageEq", ""));
+    setSlotEqFloor(slotIndex, static_cast<float>(xml.getDoubleAttribute("eqFloor", 0.0)));
     // Apply the label whenever the attribute is PRESENT — an empty value is a
     // deliberate clear and must round-trip (slotParamsToXml always writes it).
     // Only a truly absent attribute (legacy file) keeps the header's label.
@@ -2602,8 +2645,24 @@ void FramePlayerThread::injectWhiteFrame() noexcept
             }
             doubleBuffer->dataReady = 2; /* sampler source tag — consumer gating intact */
             pthread_mutex_unlock(&doubleBuffer->mutex);
+
+            // Per-engine input taps (per-chain display): mirror the silence
+            // injection above so the head panels show "unfed" (white) instead
+            // of the last playback frame. Same gating as the memsets: A always
+            // (Source=S), Path-B only when LuxSynth is also sampler-fed.
+            audio_image_buffers_publish_engine_input(
+                audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                nullptr, nullptr, nullptr, nbPx);
+            if (g_sp3ctra_config.luxsynth_source_type == 0 /* IMAGE_SOURCE_SAMPLER */)
+                audio_image_buffers_publish_engine_input(
+                    audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
+                    nullptr, nullptr, nullptr, nbPx);
         }
     }
+
+    // 4. Engine B: silence a player-fed [SCORE|SAMPLER → LUXSTRAL B] chain too.
+    // Plan-gated no-op otherwise (see luxstral_b_player_stopped).
+    luxstral_b_player_stopped();
 }
 
 void FramePlayerThread::run()
@@ -3021,9 +3080,11 @@ void FramePlayerThread::run()
                 std::memcpy(workB, frame.B, static_cast<size_t>(nb));
             }
 
-            // ── Read fade curve params once per frame (shared by all fades) ─────
-            const auto   p_curveType  = sampler.getSlotFadeCurveType(slotToPlay);
-            const float  p_curvePower = sampler.getSlotFadeCurvePower(slotToPlay);
+            // ── Read per-fade curve params once per frame ───────────────────────
+            const auto   p_atkCurveType  = sampler.getSlotAttackCurveType(slotToPlay);
+            const float  p_atkCurvePower = sampler.getSlotAttackCurvePower(slotToPlay);
+            const auto   p_decCurveType  = sampler.getSlotDecayCurveType(slotToPlay);
+            const float  p_decCurvePower = sampler.getSlotDecayCurvePower(slotToPlay);
 
             // ── Attack fade-in (exposure ramp): white at start → normal ─────────
             // attackLen is normalised over [startFrame, endFrame).
@@ -3043,7 +3104,7 @@ void FramePlayerThread::run()
                         // t: 0 at start bound → 1 at end of attack zone
                         const float t = static_cast<float>(headOffset) / attackFrames;
                         // Curve-shaped ramp: 1 (white) at t=0, 0 (normal) at t=1
-                        const float ramp = 1.0f - applyFadeCurve(t, p_curveType, p_curvePower);
+                        const float ramp = 1.0f - applyFadeCurve(t, p_atkCurveType, p_atkCurvePower);
                         for (int px = 0; px < nb; ++px)
                         {
                             workR[px] = static_cast<uint8_t>(
@@ -3076,7 +3137,7 @@ void FramePlayerThread::run()
                         // t: 0 at end bound → 1 at start of decay zone
                         const float t = static_cast<float>(tailOffset) / decayFrames;
                         // Curve-shaped ramp: 1 (white) at t=0, 0 (normal) at t=1
-                        const float ramp = 1.0f - applyFadeCurve(t, p_curveType, p_curvePower);
+                        const float ramp = 1.0f - applyFadeCurve(t, p_decCurveType, p_decCurvePower);
                         for (int px = 0; px < nb; ++px)
                         {
                             workR[px] = static_cast<uint8_t>(
@@ -3108,13 +3169,30 @@ void FramePlayerThread::run()
                 }
             }
 
-            // ── Frequency-axis multi-point curve (replaces the old HF/LF cuts) ──────
-            // A per-slot hand-drawn spectral envelope over the pixel axis
-            // (left = bass/low, right = treble/high). The LUT holds a level in
-            // [0..1] per normalised frequency: 1 = keep as recorded, 0 = push to
-            // white (silence). Uses the same "toward white" math as the old cuts.
-            // Shape comes entirely from the drawn points, so Curve/Power (temporal)
-            // no longer influence the frequency axis.
+            // ── Pre-EQ material floor ──────────────────────────────────────────────
+            // Remove everything below a darkness threshold (push to white) BEFORE
+            // the EQ, so a boost cannot resurrect the near-white noise floor into
+            // black bands. floor=1 → total white mask (silence). Per channel.
+            {
+                const float p_floor = sampler.getSlotEqFloor(slotToPlay);
+                if (p_floor > 0.001f)
+                {
+                    const float thr = p_floor * 255.0f; // darkness threshold in 0..255
+                    for (int px = 0; px < nb; ++px)
+                    {
+                        if ((255.0f - (float) workR[px]) < thr) workR[px] = 255;
+                        if ((255.0f - (float) workG[px]) < thr) workG[px] = 255;
+                        if ((255.0f - (float) workB[px]) < thr) workB[px] = 255;
+                    }
+                }
+            }
+
+            // ── Image EQ (SCORE-style ±dB, boost + cut) ────────────────────────────
+            // A per-slot graphic EQ over the pixel/frequency axis (left = bass/low,
+            // right = treble/high). The LUT holds a GAIN IN dB per normalised
+            // position; we convert it to a darkness shift (dShift = gain/dynRange)
+            // and apply it exactly like SCORE: darker = louder (boost), whiter =
+            // quieter (cut); silence (255) stays silent under boost.
             if (sampler.isFreqCurveActive(slotToPlay))
             {
                 const int    a   = sampler.getFreqLutActive(slotToPlay);
@@ -3122,22 +3200,26 @@ void FramePlayerThread::run()
                 if (lut != nullptr)
                 {
                     const float scale = static_cast<float>(LuxSamplerConstants::FREQ_LUT_N - 1);
+                    const float range = LuxSamplerConstants::EQ_DYN_RANGE_DB;
+                    const auto  shift = [](uint8_t v, float dShift) -> uint8_t
+                    {
+                        if (v >= 255 && dShift > 0.0f) return 255; // silence stays silent
+                        const float dk = juce::jlimit(0.0f, 1.0f,
+                                              (1.0f - (float) v / 255.0f) + dShift);
+                        return static_cast<uint8_t>(
+                            juce::jlimit(0, 255, (int) std::lround((1.0f - dk) * 255.0f)));
+                    };
                     for (int px = 0; px < nb; ++px)
                     {
-                        const float xn   = (nb > 1) ? static_cast<float>(px)
+                        const float xn  = (nb > 1) ? static_cast<float>(px)
                                                       / static_cast<float>(nb - 1)
-                                                    : 0.0f;
-                        const float mult = lut[static_cast<int>(xn * scale)]; // 1=keep, 0=white
-                        const float w    = 1.0f - mult;                       // amount → white
-                        if (w > 0.0001f)
-                        {
-                            workR[px] = static_cast<uint8_t>(
-                                workR[px] + w * (255.0f - (float)workR[px]));
-                            workG[px] = static_cast<uint8_t>(
-                                workG[px] + w * (255.0f - (float)workG[px]));
-                            workB[px] = static_cast<uint8_t>(
-                                workB[px] + w * (255.0f - (float)workB[px]));
-                        }
+                                                   : 0.0f;
+                        const float gdb = lut[static_cast<int>(xn * scale)];   // dB
+                        if (std::abs(gdb) < 0.01f) continue;
+                        const float dShift = gdb / range;
+                        workR[px] = shift(workR[px], dShift);
+                        workG[px] = shift(workG[px], dShift);
+                        workB[px] = shift(workB[px], dShift);
                     }
                 }
             }
@@ -3305,6 +3387,25 @@ void FramePlayerThread::run()
                         }
                     }
 
+                    // 2b. Feed engine B FIRST, with the RAW blended player frame —
+                    //     the feed applies the post-marker inserts of B's OWN chain
+                    //     internally (a chain's FX must not leak into the other's).
+                    luxstral_b_feed_player_frame(
+                        workR, workG, workB, nb,
+                        isScore ? 1 : 0,
+                        (state.seqControlledPlay.load(std::memory_order_relaxed)
+                         || isScore) ? 1 : 0,
+                        audioBuffers);
+
+                    // 2c. Engine A: apply the chain inserts placed BELOW the
+                    //     SCORE/SAMPLER module (REVERB/ECHO/probes) to the playback
+                    //     frame, in place. udpThread's short-circuit skips them
+                    //     while the player owns the channel, so this is their only
+                    //     execution — everything downstream (visual mix bus,
+                    //     preprocessed audio commit, resampling) sees post-FX.
+                    chain_player_apply_synth_a_inserts(
+                        isScore ? 1 : 0, audioBuffers, workR, workG, workB, nb);
+
                     // 3. Write mixed frame to AudioImageBuffers (the visual mix bus)
                     uint8_t* wR = nullptr;
                     uint8_t* wG = nullptr;
@@ -3340,6 +3441,10 @@ void FramePlayerThread::run()
             {
                 extern sp3ctra_config_t g_sp3ctra_config;
                 const int src = g_sp3ctra_config.luxstral_source_type;
+
+                // Engine B feed happens ABOVE (step 2b), with the RAW player
+                // frame — before engine A's chain inserts are applied to work*.
+
                 if (doubleBuffer != nullptr
                     && src == 0 /* IMAGE_SOURCE_SAMPLER */)
                 {
@@ -3369,6 +3474,21 @@ void FramePlayerThread::run()
                             doubleBuffer->preprocessed_data.polyphonic = ppData.polyphonic;
                         doubleBuffer->dataReady = 2; /* 2 = sampler source tag */
                         pthread_mutex_unlock(&doubleBuffer->mutex);
+
+                        // Per-engine input taps (per-chain display): the player
+                        // owns A's preprocessed commit here (Source=MODULATED
+                        // while a slot plays — udpThread/feeder skip both the
+                        // commit and the tap). Publish the exact frame fed to
+                        // the pipeline above, post-marker inserts included, so
+                        // the head panels track the playback chain. Path-B tap
+                        // only when the player also owns the polyphonic commit.
+                        audio_image_buffers_publish_engine_input(
+                            audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                            workR, workG, workB, nb);
+                        if (g_sp3ctra_config.luxsynth_source_type == 0)
+                            audio_image_buffers_publish_engine_input(
+                                audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
+                                workR, workG, workB, nb);
                     }
                 }
             }

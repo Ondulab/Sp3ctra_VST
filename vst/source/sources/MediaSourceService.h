@@ -43,16 +43,17 @@ public:
             vid_.tick(now);
             cam_.tick(now);
 
+            if (auto* ctx = ctx_.load(std::memory_order_acquire))
+                internal_sources_process_tick(ctx);
+
+            // The tick also runs with no active source: it drains the sampler
+            // start/stop record commands (their only drain site while the
+            // SP3CTRA device is silent — see multithreading.c), so REC
+            // arm/stop must stay alive at the idle poll rate.
             if (internal_source_any_active())
-            {
-                if (auto* ctx = ctx_.load(std::memory_order_acquire))
-                    internal_sources_process_tick(ctx);
                 wait(2);      // ~500 Hz — plenty for 30/60 fps media + inertia-free line moves
-            }
             else
-            {
-                wait(50);     // idle: no source active, just poll for activation
-            }
+                wait(50);     // idle: poll for activation + keep the REC drain alive
         }
     }
 

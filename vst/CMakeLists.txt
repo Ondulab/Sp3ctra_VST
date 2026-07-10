@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.15)
 
-project(Sp3ctraVST VERSION 0.0.1)
+# Base version lives in vst/VERSION (bump it manually for releases).
+# A per-build counter (vst/BUILD_NUMBER) is auto-incremented on every build
+# and injected through the generated header Sp3ctraVersion.h — see the
+# "Auto-incremented build version" section below.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" SP3CTRA_BASE_VERSION)
+string(STRIP "${SP3CTRA_BASE_VERSION}" SP3CTRA_BASE_VERSION)
+
+project(Sp3ctraVST VERSION ${SP3CTRA_BASE_VERSION})
 
 # ---------------------------------------------------------------------------
 # Suppress macOS ranlib "no symbols" warnings produced by conditionally
@@ -123,6 +130,11 @@ target_sources(Sp3ctraVST
         source/sources/ui/MediaSourceSetupPanel.cpp
         source/sources/ui/MediaSourceSetupPanel.h
 
+        # MIDI mapping (CC/Note → any play parameter, MIDI learn)
+        source/midi/MidiMappingEngine.cpp
+        source/midi/MidiMappingEngine.h
+        source/midi/MidiLearnAttachment.h
+
         # LuxSampler subsystem
         source/luxsampler/LuxSampler.cpp
         source/framesequencer/FrameSequencer.cpp
@@ -134,6 +146,8 @@ target_sources(Sp3ctraVST
         source/sampler/SlotGridComponent.h
         source/sampler/SlotEditorComponent.cpp
         source/sampler/SlotEditorComponent.h
+        source/sampler/SlotSpectralEditorComponent.cpp
+        source/sampler/SlotSpectralEditorComponent.h
         source/sampler/SlotTimelineComponent.cpp
         source/sampler/SlotTimelineComponent.h
         source/sampler/SequencerComponent.cpp
@@ -193,11 +207,22 @@ target_sources(Sp3ctraVST
         # LuxMask UI Tab
         source/image/LuxMaskTabComponent.h
 
+        # Reverb / Echo FX UI Tabs + interactive editors
+        source/image/LuxReverbTabComponent.h
+        source/image/LuxEchoTabComponent.h
+        source/ui/ReverbEditorComponent.h
+        source/ui/EchoEditorComponent.h
+
         # SCORE — offline printable spectrogram generator (ex Sp3ctraGen)
         source/image/ScoreGenTabComponent.h
         source/image/ScoreGenThread.h
         source/image/ScoreGenRenderer.h
         source/image/ScoreGenRenderer.cpp
+
+        # TIMBRE — parametric instrument-spectrum generator (6 sounds / A4)
+        source/image/TimbreGenTabComponent.h
+        source/image/TimbreGenRenderer.h
+        source/image/TimbreGenRenderer.cpp
 
         # Video scroll system
         source/video/VideoScrollMode.h
@@ -245,6 +270,12 @@ target_sources(Sp3ctraVST
         source/processing/chain_plan.h
         source/processing/lux_pitch.c
         source/processing/lux_mask.c
+        source/processing/lux_reverb.c
+        source/processing/lux_reverb.h
+        source/processing/lux_echo.c
+        source/processing/lux_echo.h
+        source/processing/lux_eq.c
+        source/processing/lux_eq.h
         source/processing/video_scroll.c
         source/processing/video_scroll.h
         source/processing/internal_source.c
@@ -261,9 +292,37 @@ target_sources(Sp3ctraVST
         source/audio/buffers/audio_image_buffers.c
 )
 
+# ---------------------------------------------------------------------------
+# Auto-incremented build version
+# vst/BUILD_NUMBER is bumped on every `cmake --build` and baked into the
+# generated header Sp3ctraVersion.h (used by PluginEditor's header bar).
+# ---------------------------------------------------------------------------
+set(SP3CTRA_VERSION_HEADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(SP3CTRA_VERSION_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_version_header.cmake")
+
+# Configure-time generation (no increment) so the header always exists.
+execute_process(COMMAND ${CMAKE_COMMAND}
+    -DVERSION_FILE=${CMAKE_CURRENT_SOURCE_DIR}/VERSION
+    -DBUILD_NUMBER_FILE=${CMAKE_CURRENT_SOURCE_DIR}/BUILD_NUMBER
+    -DOUTPUT_HEADER=${SP3CTRA_VERSION_HEADER_DIR}/Sp3ctraVersion.h
+    -DINCREMENT=OFF
+    -P ${SP3CTRA_VERSION_SCRIPT})
+
+add_custom_target(Sp3ctraVersionHeader
+    COMMAND ${CMAKE_COMMAND}
+        -DVERSION_FILE=${CMAKE_CURRENT_SOURCE_DIR}/VERSION
+        -DBUILD_NUMBER_FILE=${CMAKE_CURRENT_SOURCE_DIR}/BUILD_NUMBER
+        -DOUTPUT_HEADER=${SP3CTRA_VERSION_HEADER_DIR}/Sp3ctraVersion.h
+        -DINCREMENT=ON
+        -P ${SP3CTRA_VERSION_SCRIPT}
+    COMMENT "Bumping Sp3ctra build number"
+    VERBATIM)
+add_dependencies(Sp3ctraVST Sp3ctraVersionHeader)
+
 # Add include directories for C headers (all migrated into vst/source/)
 target_include_directories(Sp3ctraVST
     PRIVATE
+        ${SP3CTRA_VERSION_HEADER_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/source
         ${CMAKE_CURRENT_SOURCE_DIR}/source/core
         ${CMAKE_CURRENT_SOURCE_DIR}/source/config

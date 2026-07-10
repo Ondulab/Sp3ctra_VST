@@ -47,9 +47,10 @@ static uint64_t pipeline_get_timestamp_us(void)
  * LuxWave (Path B, Chain 2) read the raw live feed only, so a single state. */
 #define ENVELOPE_LIVE       0   /* Chain 1 — additive, live thread   */
 #define ENVELOPE_SAMPLER    1   /* Chain 1 — additive, sampler thread */
-#define ENVELOPE_CHAIN2     2   /* Chain 2 — polyphonic (LuxSynth/LuxWave) */
+#define ENVELOPE_CHAIN2     2   /* Chain 2 — polyphonic (LuxSynth) */
 #define ENVELOPE_LUXSTRAL_B 3   /* 2nd LuxStral engine — own held-frame state */
-#define ENVELOPE_COUNT      4
+#define ENVELOPE_LUXWAVE    4   /* LuxWave OUT — autonomous wavetable line (synth-split P1) */
+#define ENVELOPE_COUNT      5
 
 typedef struct {
     float    held_notes[PREPROCESS_MAX_NOTES];
@@ -65,7 +66,8 @@ static EnvelopeState g_envelope[ENVELOPE_COUNT] = {
     { .prev_freeze = -1 },   /* ENVELOPE_LIVE       */
     { .prev_freeze = -1 },   /* ENVELOPE_SAMPLER    */
     { .prev_freeze = -1 },   /* ENVELOPE_CHAIN2     */
-    { .prev_freeze = -1 }    /* ENVELOPE_LUXSTRAL_B */
+    { .prev_freeze = -1 },   /* ENVELOPE_LUXSTRAL_B */
+    { .prev_freeze = -1 }    /* ENVELOPE_LUXWAVE    */
 };
 
 /**
@@ -238,20 +240,24 @@ PipelineConfig pipeline_build_config_live(void)
 {
     PipelineConfig cfg;
 
-    /* Path A — LuxStral: per-path source/inversion/AC from APVTS config */
+    /* Path A — LuxStral: per-OUT conditioning bank, engine A = slot 0
+     * (synth-split P1: the pipeline reads luxstral_out[], not the legacy
+     * per-engine globals). Gamma convention: 1.0 = off (stage skips it). */
+    const lux_out_params_t *out_a = &g_sp3ctra_config.luxstral_out[0];
     cfg.luxstral_path.source     = (ImageSourceType)g_sp3ctra_config.luxstral_source_type;
-    cfg.luxstral_path.inversion  = g_sp3ctra_config.luxstral_inversion;
-    cfg.luxstral_path.ac_removal = g_sp3ctra_config.luxstral_ac_removal;
-    cfg.luxstral_path.gamma      = g_sp3ctra_config.additive_enable_non_linear_mapping
-                                   ? g_sp3ctra_config.additive_gamma_value : 0.0f;
+    cfg.luxstral_path.inversion  = out_a->negative;
+    cfg.luxstral_path.ac_removal = out_a->dc_blocking;
+    cfg.luxstral_path.gamma      = out_a->gamma;
+    cfg.luxstral_db_range        = out_a->range_db;
+    cfg.luxstral_intensity       = out_a->intensity;
 
-    /* Path B — LuxSynth+LuxWave: per-path source/inversion/AC from APVTS config */
+    /* Path B — LuxSynth+LuxWave: per-OUT bank, slot 0. These fields are
+     * informational for this path (preprocess_luxsynth and the LuxWave feed
+     * read their banks directly), kept coherent for any config consumer. */
     cfg.luxsynth_luxwave_path.source     = (ImageSourceType)g_sp3ctra_config.luxsynth_source_type;
-    cfg.luxsynth_luxwave_path.inversion  = g_sp3ctra_config.luxsynth_inversion;
-    cfg.luxsynth_luxwave_path.ac_removal = g_sp3ctra_config.luxsynth_ac_removal;
-    /* Gamma for LuxSynth FFT input (photo convention: pow(x, 1/gamma)).
-     * No enable flag — preprocess_luxsynth() skips it as a no-op when value == 1.0. */
-    cfg.luxsynth_luxwave_path.gamma      = g_sp3ctra_config.luxsynth_gamma_value;
+    cfg.luxsynth_luxwave_path.inversion  = g_sp3ctra_config.luxsynth_out[0].negative;
+    cfg.luxsynth_luxwave_path.ac_removal = g_sp3ctra_config.luxsynth_out[0].dc_blocking;
+    cfg.luxsynth_luxwave_path.gamma      = g_sp3ctra_config.luxsynth_out[0].gamma;
 
     /* Mix opacities (not used for live-only, kept for API consistency) */
     cfg.sampler_opacity = g_sp3ctra_config.image_sampler_opacity;
@@ -265,7 +271,7 @@ PipelineConfig pipeline_build_config_live(void)
      * Only in MIX mode does the crossfader-driven opacity apply. */
     cfg.stream_opacity = (cfg.luxstral_path.source == IMAGE_SOURCE_MIX)
                          ? g_sp3ctra_config.image_live_opacity : 1.0f;
-    cfg.contrast_min   = g_sp3ctra_config.additive_contrast_min;
+    cfg.contrast_min   = out_a->contrast_min;
 
     /* Misc */
     cfg.stereo_enabled  = g_sp3ctra_config.stereo_mode_enabled;
@@ -287,10 +293,14 @@ PipelineConfig pipeline_build_config_luxstral_b(void)
 {
     PipelineConfig cfg = pipeline_build_config_live();
 
-    cfg.luxstral_path.inversion  = g_sp3ctra_config.luxstral_b_inversion;
-    cfg.luxstral_path.ac_removal = g_sp3ctra_config.luxstral_b_ac_removal;
-    cfg.luxstral_path.gamma      = g_sp3ctra_config.luxstral_b_gamma_value;
-    cfg.contrast_min             = g_sp3ctra_config.luxstral_b_contrast_min;
+    /* Synth-split P1: engine B's conditioning = per-OUT bank slot 1. */
+    const lux_out_params_t *out_b = &g_sp3ctra_config.luxstral_out[1];
+    cfg.luxstral_path.inversion  = out_b->negative;
+    cfg.luxstral_path.ac_removal = out_b->dc_blocking;
+    cfg.luxstral_path.gamma      = out_b->gamma;
+    cfg.contrast_min             = out_b->contrast_min;
+    cfg.luxstral_db_range        = out_b->range_db;
+    cfg.luxstral_intensity       = out_b->intensity;
     cfg.stereo_enabled           = g_sp3ctra_config.luxstral_b_stereo_mode_enabled;
     cfg.stereo_temp_amp          = g_sp3ctra_config.luxstral_b_stereo_temperature_amplification;
     cfg.envelope_id              = ENVELOPE_LUXSTRAL_B;
@@ -302,23 +312,25 @@ PipelineConfig pipeline_build_config_sampler(void)
 {
     PipelineConfig cfg;
 
-    /* Path A — LuxStral: per-path source/inversion/AC from APVTS.
-     * FIX(gamma): Use the SAME gamma as the live path (additive_gamma_value)
-     * controlled by the single "Gamma" slider in the LuxStral tab.
-     * The old sampler_gamma was a separate hidden parameter with no UI control,
-     * causing gamma to have no effect when Source=Sampler. */
+    /* Path A — LuxStral: per-OUT conditioning bank, engine A = slot 0
+     * (synth-split P1 — same bank as the live builder: the OUT owns its
+     * conditioning regardless of which worker drives the pipeline).
+     * contrast_min stays on the sampler-specific floor below (parity with
+     * the legacy sampler stream); unification is a P3/P4 concern. */
+    const lux_out_params_t *out_a = &g_sp3ctra_config.luxstral_out[0];
     cfg.luxstral_path.source     = (ImageSourceType)g_sp3ctra_config.luxstral_source_type;
-    cfg.luxstral_path.inversion  = g_sp3ctra_config.luxstral_inversion;
-    cfg.luxstral_path.ac_removal = g_sp3ctra_config.luxstral_ac_removal;
-    cfg.luxstral_path.gamma      = g_sp3ctra_config.additive_enable_non_linear_mapping
-                                   ? g_sp3ctra_config.additive_gamma_value : 0.0f;
+    cfg.luxstral_path.inversion  = out_a->negative;
+    cfg.luxstral_path.ac_removal = out_a->dc_blocking;
+    cfg.luxstral_path.gamma      = out_a->gamma;
+    cfg.luxstral_db_range        = out_a->range_db;
+    cfg.luxstral_intensity       = out_a->intensity;
 
-    /* Path B — LuxSynth+LuxWave: per-path from APVTS */
+    /* Path B — LuxSynth+LuxWave: per-OUT bank, slot 0 (informational — the
+     * consumers read their banks directly, see pipeline_build_config_live). */
     cfg.luxsynth_luxwave_path.source     = (ImageSourceType)g_sp3ctra_config.luxsynth_source_type;
-    cfg.luxsynth_luxwave_path.inversion  = g_sp3ctra_config.luxsynth_inversion;
-    cfg.luxsynth_luxwave_path.ac_removal = g_sp3ctra_config.luxsynth_ac_removal;
-    /* Gamma for LuxSynth FFT input — mirrors the live path (same user control, no enable flag). */
-    cfg.luxsynth_luxwave_path.gamma      = g_sp3ctra_config.luxsynth_gamma_value;
+    cfg.luxsynth_luxwave_path.inversion  = g_sp3ctra_config.luxsynth_out[0].negative;
+    cfg.luxsynth_luxwave_path.ac_removal = g_sp3ctra_config.luxsynth_out[0].dc_blocking;
+    cfg.luxsynth_luxwave_path.gamma      = g_sp3ctra_config.luxsynth_out[0].gamma;
 
     /* Mix opacities */
     cfg.sampler_opacity = g_sp3ctra_config.image_sampler_opacity;
@@ -384,10 +396,18 @@ void pipeline_path_luxstral(
     if (config->luxstral_path.ac_removal)
         img_stage_remove_dc(out->additive.grayscale, nb_pixels);
 
-    /* Stage 5: Gamma correction */
+    /* Stage 5: Gamma — photographic shaping of the grey scale (1.0 = bypass) */
     if (config->luxstral_path.gamma > 0.0f && config->luxstral_path.gamma != 1.0f)
         img_stage_apply_gamma(out->additive.grayscale, nb_pixels,
                               config->luxstral_path.gamma);
+
+    /* Stage 5b: inverse-dB decode law — ALWAYS ON.  Exact inverse of the
+     * SCORE encoder's linear-in-dB brightness map, applied on top of the
+     * (possibly gamma-shaped) grey scale; gamma 1.0 = pure dB decode.  See
+     * config_loader.h for the knob recipe that recovers the exact encoder
+     * inverse.  Range dB is per-OUT (synth-split P1). */
+    img_stage_apply_db_decode(out->additive.grayscale, nb_pixels,
+                              config->luxstral_db_range);
 
     /* Stage 6: Per-note averaging */
     img_stage_grayscale_luxstral(
@@ -455,6 +475,19 @@ void pipeline_path_luxstral(
             effective_fade,
             out->additive.notes, num_notes,
             out->additive.grayscale, nb_pixels);
+    }
+
+    /* Stage 7b: per-OUT Intensity (synth-split P1) — pre-engine mix weight
+     * of this send.  Applied to the note amplitudes AFTER the envelope so a
+     * change acts immediately even on a HELD frame; 1.0 = bit-exact parity.
+     * The grayscale mirror is left untouched (display + deprecated path). */
+    if (config->luxstral_intensity != 1.0f)
+    {
+        float k = config->luxstral_intensity;
+        int   note;
+        if (k < 0.0f) k = 0.0f;
+        for (note = 0; note < num_notes; note++)
+            out->additive.notes[note] *= k;
     }
 
     /* Stage 8: Stereo pan from color temperature */
@@ -546,11 +579,55 @@ void pipeline_path_luxsynth_luxwave(
             NULL, 0,              /* no notes array on this path */
             out->polyphonic.grayscale, nb_pixels);
 
-        /* LuxWave wavetable feed (RT-safe O(1) double-buffer write). */
+        /* LuxWave wavetable feed — AUTONOMOUS conditioning (synth-split P1).
+         * LuxWave no longer inherits the LuxSynth-conditioned line: its OUT
+         * bank (luxwave_out[0]) owns Negative / DC Blocking / Gamma, applied
+         * on a private copy of the raw line.  Same freeze gating as Chain 2
+         * but with its OWN envelope state (held frames must not be shared
+         * with LuxSynth's).  Intensity scales the line around the bipolar
+         * midpoint 0.5 (the wavetable maps [0,1] → [−1,+1]), so 0 = flat
+         * 0.5 = true silence and 1.0 = bit-exact parity.
+         * Single writer: only the live worker reaches this branch. */
         if (g_luxwave_engine.initialized && nb_pixels > 0)
         {
+            static float s_luxwave_line[CIS_MAX_PIXELS_NB];
+            const lux_out_params_t *lw = &g_sp3ctra_config.luxwave_out[0];
+
+            img_stage_rgb_to_grayscale(raw_r, raw_g, raw_b, nb_pixels,
+                                       s_luxwave_line);
+            if (lw->negative)
+                img_stage_invert(s_luxwave_line, nb_pixels);
+            if (lw->dc_blocking)
+                img_stage_remove_dc(s_luxwave_line, nb_pixels);
+            if (lw->gamma > 0.0f && lw->gamma != 1.0f)
+                img_stage_apply_gamma(s_luxwave_line, nb_pixels, lw->gamma);
+
+            pipeline_apply_envelope(
+                ENVELOPE_LUXWAVE,
+                effective_freeze,
+                1.0f,
+                effective_fade,
+                NULL, 0,
+                s_luxwave_line, nb_pixels);
+
+            {
+                float k = lw->intensity;
+                int   i;
+                if (k < 0.0f) k = 0.0f;
+                if (k != 1.0f)
+                {
+                    for (i = 0; i < nb_pixels; i++)
+                    {
+                        float v = 0.5f + (s_luxwave_line[i] - 0.5f) * k;
+                        if (v < 0.0f) v = 0.0f;
+                        if (v > 1.0f) v = 1.0f;
+                        s_luxwave_line[i] = v;
+                    }
+                }
+            }
+
             luxwave_engine_set_image_line(&g_luxwave_engine,
-                                           out->polyphonic.grayscale,
+                                           s_luxwave_line,
                                            nb_pixels);
         }
     }

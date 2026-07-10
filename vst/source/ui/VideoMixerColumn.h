@@ -67,7 +67,6 @@ private:
     };
 
     //==========================================================================
-    Sp3ctraAudioProcessor& processor_;
     VideoMixerComponent    mixer_;
 
     TransportButton playBtn_  { TransportButton::Glyph::PlayPause };

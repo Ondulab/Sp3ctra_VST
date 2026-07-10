@@ -1,5 +1,5 @@
-// Stubs temporaires pour permettre la compilation du VST minimal
-// Ces variables seront remplacées par une architecture instanciée dans la version finale
+// Temporary stubs to let the minimal VST compile
+// These variables will be replaced by an instantiated architecture in the final version
 
 #include "core/context.h"
 #include "config/config_loader.h"
@@ -94,6 +94,28 @@ sp3ctra_config_t g_sp3ctra_config = {
     .luxstral_b_soft_limit_threshold = 0.8f,
     .luxstral_b_soft_limit_knee = 0.2f,
 
+    // Inverse-dB decode law (always on) — encoder dB window
+    .luxstral_db_decode_range_db = 50.0f,  // = SCORE_DEFAULT_DYNAMIC_RANGE_DB
+
+    // Per-OUT conditioning banks (synth-split P1) — unity defaults so the
+    // pipeline is sane before the first applyConfigurationToCore() sync.
+    .luxstral_out = {[0 ... LUX_OUT_MAX_SLOTS - 1] =
+        {.negative = 1, .dc_blocking = 1, .gamma = 1.0f,
+         .contrast_min = 0.21f, .range_db = 50.0f, .intensity = 1.0f}},
+    .luxsynth_out = {[0 ... LUX_OUT_MAX_SLOTS - 1] =
+        {.negative = 1, .dc_blocking = 1, .gamma = 1.0f,
+         .contrast_min = 0.21f, .range_db = 50.0f, .intensity = 1.0f}},
+    .luxwave_out = {[0 ... LUX_OUT_MAX_SLOTS - 1] =
+        {.negative = 1, .dc_blocking = 1, .gamma = 1.0f,
+         .contrast_min = 0.21f, .range_db = 50.0f, .intensity = 1.0f}},
+
+    // Phase management — mode FREE = legacy free-running phases
+    .luxstral_phase_mode = 0,               // LUXSTRAL_PHASE_MODE_FREE
+    .luxstral_phase_sensitivity = 0.7f,     // onset sensitivity (relative to recent peak)
+    .luxstral_phase_position = 0.0f,        // strike/pluck position / BELL impact
+    // Phase drift — per-onset random micro-detune (±cents), 0 = off
+    .luxstral_phase_drift_cents = 0.0f,
+
     // 🔧 CRITICAL: Stereo processing
     .stereo_mode_enabled = 1,
     .stereo_blue_red_weight = 0.7f,           // Primary color axis weight
@@ -113,8 +135,8 @@ sp3ctra_config_t g_sp3ctra_config = {
 // NOTE: synth_AudioProcess is now defined in synth_luxstral.c
 // Removed stub - using real LuxStral implementation
 
-// Note: get_cis_pixels_nb, logger_*, and load_luxstral_config sont déjà définis dans:
+// Note: get_cis_pixels_nb, logger_*, and load_luxstral_config are already defined in:
 // - config_instrument.h (get_cis_pixels_nb - inline)
 // - logger.c (logger_*)
 // - config_loader.c (load_luxstral_config)
-// Pas besoin de les redéfinir ici
+// No need to redefine them here
