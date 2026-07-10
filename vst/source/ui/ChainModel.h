@@ -84,13 +84,13 @@ public:
     /** Lowest free sampler-engine slot 0..kMaxSamplerEngines-1, or -1 if full. */
     int firstFreeSamplerSlot(const juce::Uuid* movingId = nullptr) const;
 
-    //── LuxStral engine slot pool (A=0, B=1) — INDEPENDENT of the pools above ────
-    // Like the Sampler, LuxStral has two independent engines. A LuxStral
-    // instance's `slot` is its engine index (first placed = A (0), second = B
-    // (1)). UNLIKE the Sampler, at most ONE LuxStral may sit in a given chain
-    // (the per-chain duplicate rule still applies) — the two engines live in
-    // different chains, each reading its own chain's processed input.
-    static constexpr int kMaxLuxStralEngines = 2;
+    //── LuxStral SEND slot pool — INDEPENDENT of the pools above ────────────────
+    // Synth-split P3: a LuxStral instance is a "→ LUXSTRAL" SEND toward the
+    // single global engine; its `slot` is its conditioning-bank index
+    // (luxstralOut{slot}_*). Up to one send per chain (per-chain duplicate
+    // rule), up to kMaxChains sends model-wide — the audio mixer blends every
+    // active send into the engine feed.
+    static constexpr int kMaxLuxStralEngines = kMaxChains;   // 8 sends
     static bool isLuxStralEngine(ModuleType t) noexcept { return t == ModuleType::LuxStral; }
     /** Lowest free LuxStral-engine slot 0..kMaxLuxStralEngines-1, or -1 if full. */
     int firstFreeLuxStralSlot(const juce::Uuid* movingId = nullptr) const;

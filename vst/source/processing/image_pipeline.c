@@ -50,7 +50,11 @@ static uint64_t pipeline_get_timestamp_us(void)
 #define ENVELOPE_CHAIN2     2   /* Chain 2 — polyphonic (LuxSynth) */
 #define ENVELOPE_LUXSTRAL_B 3   /* 2nd LuxStral engine — own held-frame state */
 #define ENVELOPE_LUXWAVE    4   /* LuxWave OUT — autonomous wavetable line (synth-split P1) */
-#define ENVELOPE_COUNT      5
+/* Synth-split P3 — one held-frame state PER LuxStral SEND (chain-indexed):
+ * N chains feed the engine mix concurrently, each send freezes/fades on its
+ * own. BASE + chain_idx, CHAIN_MAX_CHAINS (8) states. */
+#define ENVELOPE_LS_SEND_BASE 5
+#define ENVELOPE_COUNT      (ENVELOPE_LS_SEND_BASE + 8)
 
 typedef struct {
     float    held_notes[PREPROCESS_MAX_NOTES];
@@ -63,11 +67,7 @@ typedef struct {
 } EnvelopeState;
 
 static EnvelopeState g_envelope[ENVELOPE_COUNT] = {
-    { .prev_freeze = -1 },   /* ENVELOPE_LIVE       */
-    { .prev_freeze = -1 },   /* ENVELOPE_SAMPLER    */
-    { .prev_freeze = -1 },   /* ENVELOPE_CHAIN2     */
-    { .prev_freeze = -1 },   /* ENVELOPE_LUXSTRAL_B */
-    { .prev_freeze = -1 }    /* ENVELOPE_LUXWAVE    */
+    [0 ... ENVELOPE_COUNT - 1] = { .prev_freeze = -1 }
 };
 
 /**
@@ -280,6 +280,7 @@ PipelineConfig pipeline_build_config_live(void)
 
     /* Envelope identity: always LIVE for this builder, regardless of source routing */
     cfg.envelope_id = ENVELOPE_LIVE;
+    cfg.live_regate = 1;
 
     return cfg;
 }
@@ -304,6 +305,37 @@ PipelineConfig pipeline_build_config_luxstral_b(void)
     cfg.stereo_enabled           = g_sp3ctra_config.luxstral_b_stereo_mode_enabled;
     cfg.stereo_temp_amp          = g_sp3ctra_config.luxstral_b_stereo_temperature_amplification;
     cfg.envelope_id              = ENVELOPE_LUXSTRAL_B;
+    cfg.live_regate              = 0;   /* B kept its cfg freeze (parity) */
+
+    return cfg;
+}
+
+/* Synth-split P3 — config for ONE LuxStral send: engine-A shape, the SEND's
+ * conditioning bank (luxstral_out[bank_slot]) and its own envelope state
+ * (ENVELOPE_LS_SEND_BASE + chain_idx). Intensity stays 1.0 per frame — the
+ * audio-thread mixer applies the bank's intensity as the mix weight.
+ * player_fed = 1 → FramePlayerThread drives this send: its freeze_mode is
+ * authoritative (no live re-gate) and the sampler-stream base config applies. */
+PipelineConfig pipeline_build_config_ls_send(int bank_slot, int chain_idx,
+                                             int player_fed)
+{
+    PipelineConfig cfg = player_fed ? pipeline_build_config_sampler()
+                                    : pipeline_build_config_live();
+
+    if (bank_slot < 0) bank_slot = 0;
+    if (bank_slot > 7) bank_slot = 7;
+    if (chain_idx < 0) chain_idx = 0;
+    if (chain_idx > 7) chain_idx = 7;
+    const lux_out_params_t *out = &g_sp3ctra_config.luxstral_out[bank_slot];
+
+    cfg.luxstral_path.inversion  = out->negative;
+    cfg.luxstral_path.ac_removal = out->dc_blocking;
+    cfg.luxstral_path.gamma      = out->gamma;
+    cfg.contrast_min             = out->contrast_min;
+    cfg.luxstral_db_range        = out->range_db;
+    cfg.luxstral_intensity       = 1.0f;
+    cfg.envelope_id              = ENVELOPE_LS_SEND_BASE + chain_idx;
+    cfg.live_regate              = player_fed ? 0 : 1;
 
     return cfg;
 }
@@ -353,6 +385,7 @@ PipelineConfig pipeline_build_config_sampler(void)
 
     /* Envelope identity: always SAMPLER for this builder, regardless of source routing */
     cfg.envelope_id = ENVELOPE_SAMPLER;
+    cfg.live_regate = 0;   /* the player's freeze authority is preserved */
 
     return cfg;
 }
@@ -441,7 +474,9 @@ void pipeline_path_luxstral(
         int effective_freeze;
         int effective_fade;
 
-        if (config->envelope_id == ENVELOPE_LIVE)
+        /* live_regate covers ENVELOPE_LIVE and the live-fed P3 sends (their
+         * per-send envelope ids share the live transport authority). */
+        if (config->live_regate)
         {
             effective_freeze = g_sp3ctra_config.sampler_freeze_mode;
             effective_fade   = g_sp3ctra_config.sampler_fade_in_ms;

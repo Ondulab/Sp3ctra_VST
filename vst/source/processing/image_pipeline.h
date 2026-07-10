@@ -82,6 +82,17 @@ PipelineConfig pipeline_build_config_sampler(void);
  */
 PipelineConfig pipeline_build_config_luxstral_b(void);
 
+/**
+ * @brief Synth-split P3 — config for ONE LuxStral send (N-chain mix).
+ * Engine-A shape with the send's conditioning bank (luxstral_out[bank_slot])
+ * and a per-send envelope state (chain-indexed). player_fed = 1 when the
+ * FramePlayerThread drives the send (its freeze_mode stays authoritative).
+ * Per-frame intensity is forced to 1.0 — the audio mixer applies the bank's
+ * intensity as the mix weight (synth_staging_mix_luxstral).
+ */
+PipelineConfig pipeline_build_config_ls_send(int bank_slot, int chain_idx,
+                                             int player_fed);
+
 /* ============================================================================
  * Per-path processing (used internally and available for testing)
  * ============================================================================ */

@@ -412,6 +412,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             juce::ParameterID{lsOutParam(s, "intensity"), 1},
             "LS OUT" + n + " Intensity",
             juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 1.0f));
+        // Per-send power (rack LED) — the ENGINE enable stays deviceEnabled
+        // (AUDIO MIX strip LED). A disabled send contributes silence to the mix.
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{lsOutParam(s, "enabled"), 1},
+            "LS OUT" + n + " On", true));
 
         // LuxSynth OUT
         params.push_back(std::make_unique<juce::AudioParameterBool>(
@@ -428,6 +433,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             juce::ParameterID{lxOutParam(s, "intensity"), 1},
             "LX OUT" + n + " Intensity",
             juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 1.0f));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{lxOutParam(s, "enabled"), 1},
+            "LX OUT" + n + " On", true));
 
         // LuxWave OUT — autonomous conditioning (no longer inherits LuxSynth's)
         params.push_back(std::make_unique<juce::AudioParameterBool>(
@@ -444,6 +452,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             juce::ParameterID{lwOutParam(s, "intensity"), 1},
             "LW OUT" + n + " Intensity",
             juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 1.0f));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{lwOutParam(s, "enabled"), 1},
+            "LW OUT" + n + " On", true));
     }
 
     // ── Gameplay — StrokeForge enable ────────────────────────────────────────
@@ -1676,7 +1687,8 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     // all three end in applyConfigurationToCore(false).
     {
         static const char* const kOutSuffixes[] = { "negative", "dcBlocking",
-                                                    "gamma", "intensity" };
+                                                    "gamma", "intensity",
+                                                    "enabled" };
         for (int s = 0; s < LUX_OUT_MAX_SLOTS; ++s)
         {
             for (const char* sfx : kOutSuffixes)
@@ -3030,10 +3042,9 @@ void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     state.setProperty("lastSessionPath",  lastSessionPath,  nullptr);
     state.setProperty("samplerOutputDir", samplerOutputDir, nullptr);
     state.setProperty("scoreWavPath",     scoreWavPath,     nullptr);
-    // Synth-split state version — its ABSENCE marks a pre-split blob whose
-    // legacy conditioning params must be migrated into the per-OUT banks
-    // (see setStateInformation).
-    state.setProperty("synthSplitVersion", 1, nullptr);
+    // Synth-split state version — gates the staged migrations in
+    // setStateInformation (absent = pre-split blob; 1 = pre per-send enable).
+    state.setProperty("synthSplitVersion", 2, nullptr);
 
     // Non-APVTS module state → child trees. Replace (never append next to) any
     // stale copy restored at load time.
@@ -3146,7 +3157,7 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
             // (state compat) but the pipeline no longer reads them. Gamma
             // collapses enable+value → single knob (1.0 = off); Intensity
             // keeps its default (1.0 = unity send).
-            if (! xmlState->hasAttribute("synthSplitVersion"))
+            const int splitVer = xmlState->getIntAttribute("synthSplitVersion", 0);
             {
                 std::map<juce::String, double> restored;   // id → value
                 for (auto* e : xmlState->getChildWithTagNameIterator("PARAM"))
@@ -3162,11 +3173,20 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
                                                        double v)
                 {
                     if (restored.count(bankId) != 0)
-                        return;   // paranoia — legacy blobs never carry bank ids
+                        return;   // an already-banked value always wins
                     auto* e = xmlState->createNewChildElement("PARAM");
                     e->setAttribute("id", bankId);
                     e->setAttribute("value", v);
                 };
+
+                // v2 — per-send enable: the 2nd send's power used to be
+                // luxstralBEnabled (rack LED of the B slot).
+                if (splitVer < 2)
+                    seedBank(lsOutParam(1, "enabled"),
+                             legacy("luxstralBEnabled", 1.0));
+
+                if (splitVer < 1)
+                {
 
                 const double aGamma  = legacy("luxstralGammaEnable", 1.0) >= 0.5
                                      ? legacy("luxstralGammaValue", 1.0) : 1.0;
@@ -3200,6 +3220,7 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
 
                 log_info("VST", "Synth-split migration: legacy conditioning "
                                 "params seeded into the per-OUT banks");
+                }
             }
 
             apvts.replaceState(juce::ValueTree::fromXml(*xmlState));
@@ -4485,6 +4506,32 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
     fill(ModuleType::LuxWave,  CHAIN_SYNTH_LUXWAVE);
     fill(ModuleType::LuxStral, CHAIN_SYNTH_LUXSTRAL_B, 1);  // engine B (slot 1)
 
+    // Synth-split P3 — LuxStral SENDS: every "→ LUXSTRAL" OUT across all
+    // chains becomes one ls_send entry (recipe compiled up to the OUT's
+    // position, bank = the instance's slot). The audio-thread mixer blends
+    // every staged send into the single engine feed; the legacy synth[A/B]
+    // entries above stay filled for visualizer compatibility only.
+    for (int c = 0; c < chainModel_.numChains()
+                    && plan.num_ls_sends < CHAIN_MAX_CHAINS; ++c)
+    {
+        const auto& mods = chainModel_.chains[(size_t) c].modules;
+        for (int i = 0; i < (int) mods.size()
+                        && plan.num_ls_sends < CHAIN_MAX_CHAINS; ++i)
+        {
+            const auto& mi = mods[(size_t) i];
+            if (mi.type != ModuleType::LuxStral)
+                continue;
+            LsSendPlan& snd = plan.ls_send[plan.num_ls_sends];
+            snd.chain_idx = c;
+            snd.bank_slot = juce::jlimit(0, CHAIN_MAX_CHAINS - 1,
+                                         mi.slot >= 0 ? mi.slot : 0);
+            fillFromChain(snd.recipe, c, i);
+            if (mi.id == vizTapModuleId_)
+                snd.recipe.viz_tap_insert = snd.recipe.num_inserts;
+            ++plan.num_ls_sends;
+        }
+    }
+
     // Probe-only chains (no synth placed, e.g. [SP3CTRA, MASK, VIDEOSCROLL]):
     // publish the FULL chain recipe so the executor runs its ordered inserts —
     // each probe then captures the stream AT ITS POSITION (mask/pitch/FX
@@ -5199,18 +5246,21 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
             ls->contrast_min = rawf(lsOutParam(s, "contrastMin"));
             ls->range_db     = rawf(lsOutParam(s, "rangeDb"));
             ls->intensity    = rawf(lsOutParam(s, "intensity"));
+            ls->enabled      = (int)rawf(lsOutParam(s, "enabled"));
 
             lux_out_params_t* lx = &g_sp3ctra_config.luxsynth_out[s];
             lx->negative    = (int)rawf(lxOutParam(s, "negative"));
             lx->dc_blocking = (int)rawf(lxOutParam(s, "dcBlocking"));
             lx->gamma       = rawf(lxOutParam(s, "gamma"));
             lx->intensity   = rawf(lxOutParam(s, "intensity"));
+            lx->enabled     = (int)rawf(lxOutParam(s, "enabled"));
 
             lux_out_params_t* lw = &g_sp3ctra_config.luxwave_out[s];
             lw->negative    = (int)rawf(lwOutParam(s, "negative"));
             lw->dc_blocking = (int)rawf(lwOutParam(s, "dcBlocking"));
             lw->gamma       = rawf(lwOutParam(s, "gamma"));
             lw->intensity   = rawf(lwOutParam(s, "intensity"));
+            lw->enabled     = (int)rawf(lwOutParam(s, "enabled"));
         }
 
         // ── LuxPitch source routing (S/M/L — no P option for its own source) ──

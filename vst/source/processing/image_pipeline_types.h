@@ -108,7 +108,14 @@ typedef struct {
     /* Synth-split P1 — per-OUT conditioning, from g_sp3ctra_config.luxstral_out[slot]
      * (slot picked by the builder: A=0, B=1). */
     float      luxstral_db_range;       /* inverse-dB decode window (Range dB) */
-    float      luxstral_intensity;      /* pre-engine mix weight of this send (1.0 = unity) */
+    float      luxstral_intensity;      /* pre-engine mix weight of this send (1.0 = unity;
+                                         * P3 send configs keep 1.0 — the mixer weighs) */
+
+    /* Freeze re-gate authority (P3): 1 = live-style — pipeline_path_luxstral
+     * re-gates the envelope to the chain-1 transport (sampler_freeze_mode) +
+     * RAW gate; 0 = the caller's freeze_mode is authoritative
+     * (FramePlayerThread overrides / engine-B parity). */
+    int        live_regate;
 
     /* Stereo and misc */
     int        stereo_enabled;          /* 1 = compute stereo panning, 0 = skip */
@@ -159,6 +166,7 @@ static inline PipelineConfig pipeline_config_default(void)
     /* Per-OUT conditioning defaults (unity send) */
     cfg.luxstral_db_range  = 50.0f;
     cfg.luxstral_intensity = 1.0f;
+    cfg.live_regate        = 1;   /* default envelope is LIVE */
 
     /* Misc */
     cfg.stereo_enabled  = 0;

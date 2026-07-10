@@ -654,10 +654,11 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
     // param, or hide for blocks without a power switch (SOURCE CIS, SCORE).
     {
         juce::String enableId = ChainRackComponent::enableParamId(id);
-        // LuxStral engine B powers through its own param (the type-level
-        // mapping returns deviceEnabled, which is engine A's toggle).
-        if (id == ChainBlockId::LuxStral && luxStralEngineIndex_ == 1)
-            enableId = "luxstralBEnabled";
+        // LuxStral sends power through THEIR bank's enable (per-send LED);
+        // the type-level id (deviceEnabled) is the ENGINE enable, which
+        // lives on the AUDIO MIX strip.
+        if (id == ChainBlockId::LuxStral)
+            enableId = lsOutParam(luxStralEngineIndex_, "enabled");
         // Pooled inserts: the enable lives in the selected INSTANCE's bank
         // (the catalog's type-level id is empty for them).
         else if (id == ChainBlockId::Pitch)

@@ -101,13 +101,16 @@ sp3ctra_config_t g_sp3ctra_config = {
     // pipeline is sane before the first applyConfigurationToCore() sync.
     .luxstral_out = {[0 ... LUX_OUT_MAX_SLOTS - 1] =
         {.negative = 1, .dc_blocking = 1, .gamma = 1.0f,
-         .contrast_min = 0.21f, .range_db = 50.0f, .intensity = 1.0f}},
+         .contrast_min = 0.21f, .range_db = 50.0f, .intensity = 1.0f,
+         .enabled = 1}},
     .luxsynth_out = {[0 ... LUX_OUT_MAX_SLOTS - 1] =
         {.negative = 1, .dc_blocking = 1, .gamma = 1.0f,
-         .contrast_min = 0.21f, .range_db = 50.0f, .intensity = 1.0f}},
+         .contrast_min = 0.21f, .range_db = 50.0f, .intensity = 1.0f,
+         .enabled = 1}},
     .luxwave_out = {[0 ... LUX_OUT_MAX_SLOTS - 1] =
         {.negative = 1, .dc_blocking = 1, .gamma = 1.0f,
-         .contrast_min = 0.21f, .range_db = 50.0f, .intensity = 1.0f}},
+         .contrast_min = 0.21f, .range_db = 50.0f, .intensity = 1.0f,
+         .enabled = 1}},
 
     // Phase management — mode FREE = legacy free-running phases
     .luxstral_phase_mode = 0,               // LUXSTRAL_PHASE_MODE_FREE
