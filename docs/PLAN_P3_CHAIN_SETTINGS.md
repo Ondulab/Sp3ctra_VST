@@ -200,7 +200,36 @@ Validation : 2-3 OUT LuxSynth sur chains distinctes, chaque page OUT édite SON 
 (pas de « linked params » — piège attachments : reset(nullptr) avant recréation) ;
 badges « n SEND » ; save/reload conserve slots et bancs ; 9e send refusé proprement.
 
-## M7 — Purge de la double autorité `*_source_type` + tags `dataReady`
+## M6b — Bus modulé par chaîne propriétaire — ✅ FAIT (538ea94) + dette « sampler par chaîne »
+
+Bug user (2026-07-11) : probe post-SAMPLER d'une chaîne IMAGE affichait le flux
+SP3CTRA. Fix : owner = 1re chaîne sampler (ordre modèle), build modulé depuis SA
+source (udp + feeder), shortcut réservé à l'owner — les autres chaînes sampler
+s'exécutent positionnellement sur leur propre flux.
+**Dette restante (nouveau chantier « sampler par chaîne », après M7/M8)** :
+1. hook `lux_sampler_playing_engine()` à créer — l'ownership playback est sur le flag
+   global `is_playing` (2 samplers ⇒ approximations pendant la lecture) ;
+2. ✅ RÉSOLU (5056f77) pour l'IDLE : marqueur SAMPLER = slot moteur, chaque moteur
+   enregistre le flux de SA chaîne (`lux_sampler_record_chain_frame`) ; pendant la
+   LECTURE le resampling global reste (feature) — à raffiner avec le hook (1) ;
+3. `ls/lx_sends_stage_player_frame` nourrit toutes les chaînes has_sampler depuis la
+   même frame de playback (canal partagé one-plays-at-a-time).
+**Décision actée (user 2026-07-11) : 8 chaînes max** (`kMaxChains == CHAIN_MAX_CHAINS
+== 8`, déjà câblé partout — dimensionne pools, stagings, banques ×8).
+
+## M7 — Purge de la double autorité `*_source_type` + tags `dataReady` — ✅ FAIT (05b5f7e)
+
+Statut : implémenté, build vert, smoke OK (0 underruns). Le plan est l'unique autorité
+de routage : consommateur moteur sans gate/fallback (buffer vide = silence, plus
+jamais de pipeline sur le live), `source_type_override` supprimé, `dataReady` =
+booléen partout ; commits udp plan-driven (additive : mixeur si sends, tick brut
+sinon ; polyphonic : ssi la chaîne pb a tourné cette ligne) ; gates player via
+`chain_additive_player_candidate()` / `chain_pathb_player_candidate(is_score)`
+(opacité, darken-blend, injection de silence, commit pp) ; waterfall VIDEO MIX sur
+les taps moteurs. RESTE M8 : purge des champs config `*_source_type` + chainSrc* +
+setChainSourceRouting + sourceChannelForSynth + champs « informatifs » des builders
+(stream_opacity/need_modulated), et la matrice de scénarios À VALIDER À LA MAIN
+(live UDP device, sampler REC/PLAY/STEP, score relay, hot-swap device↔feeder).
 
 - Le plan (recettes + stagings) devient l'unique autorité de routage : suppression des gardes
   `luxstral_source_type`/`luxsynth_source_type` sur les commits (udpThread ~1910-1955,
@@ -217,7 +246,16 @@ Validation : matrice complète — live UDP ; feeder IMAGE/VIDEO/CAMERA ; sample
 idle/REC/PLAY/STEP_EMPTY/STEP_LIVE ; score relay ; chain sans source → silence vrai ;
 hot-swap device↔feeder.
 
-## M8 — Nettoyage final
+## M8 — Nettoyage final — ✅ FAIT (1c84aae) — **P3 COMPLET (M1..M8)**
+
+Statut : PathConfig.source + enum ImageSourceType supprimés ; les deux sémantiques
+restantes portées par `cfg.sampler_relayed` (gate RAW sauté + opacité crossfader
+pour les flux relayés), posé par les builders et surchargé PAR SEND par
+l'exécuteur — un send live pur n'hérite plus du dimming crossfader d'une autre
+chaîne ; need_modulated réduit à ses vrais déclencheurs ; g_sp3ctra_config purgé
+(luxstral/luxsynth_source_type + inversion/ac_removal/gamma legacy) ; chainSrc*/
+setChainSourceRouting/sourceChannelForSynth supprimés. Matrice de scénarios réels
+toujours à valider à la main (device UDP, sampler REC/PLAY/STEP, score relay).
 
 `pipeline_build_config_live/sampler` purgés des champs lus depuis `luxstral_out[0]`/
 `luxsynth_out[0]` au profit du per-send ; `ENVELOPE_CHAIN2`/`ENVELOPE_LUXWAVE` si remplacés ;
@@ -248,7 +286,17 @@ Projection chain→banque au chargement/à l'édition ; snapshot banque→chain 
 retrait. **Pas de write-through continu** knob→tree (inutile + source classique de boucles
 `parameterChanged`→`replaceState`). Pas de listener ValueTree sur CHAINS → aucune boucle possible.
 
-## J1 — Manifest unique des params par module (refactor iso-comportement)
+## J1 — Manifest unique des params par module (refactor iso-comportement) — ✅ FAIT (39d862d)
+
+Statut : `ui/ModuleParamManifest.h` créé (header-only) : table type → {numSlots,
+suffixes, paramId(slot,sfx)} pour les 5 inserts poolés, VideoScroll (+ voix
+videoMix via mapping MixLevel/MixBlend), les 3 bancs OUT et les 2 moteurs sampler ;
+les helpers d'id (lpParam…fsEngineParam, insertBankParam) y ont migré depuis
+PluginProcessor.h (ré-exportés par include — aucun site UI touché) ; kInsertBanks
+supprimé — listeners (inserts + OUT en une boucle), migration legacy et
+INSERT_MEMORY itèrent le manifest. Exclusions documentées : params moteurs
+globaux, sources, SCORE/SEQ, prefs sampler partagées. Piège vécu : `*/` dans un
+commentaire de bloc (`luxstral*/luxsynth*`) le termine — écrire `luxstral*, …`.
 
 Nouveau `ui/ModuleParamManifest.h/.cpp` : table unique `ModuleType` → { builder d'id
 `(slot, suffix)`, suffixes, numSlots, foncteur de résolution de slot (pooled UUID→slot vs
