@@ -216,17 +216,10 @@ typedef struct {
     /* raw_fade_in_ms : fade-in/out when RAW transport changes (0-2000 ms)     */
     int raw_fade_in_ms;
 
-    /* ── Per-path pipeline routing (set from APVTS, read by pipeline config builders) */
-    /* Source type mapping: 0=IMAGE_SOURCE_SAMPLER, 1=IMAGE_SOURCE_LIVE, 2=IMAGE_SOURCE_MIX */
-    int luxstral_source_type;              /* Which source feeds the LuxStral path */
-    int luxstral_inversion;                /* Per-path inversion toggle (0=off, 1=on) */
-    int luxstral_ac_removal;               /* Per-path AC removal toggle (0=off, 1=on) */
+    /* (M8: the legacy per-path source-routing/conditioning globals are gone —
+     * the ChainPlan routes, the per-OUT banks condition.) */
     int luxpitch_source_type;              /* Which source feeds LuxPitch (0=S, 1=L, 2=M) */
     int luxmask_source_type;               /* Which source feeds LuxMask (0=S, 1=L, 2=M) */
-    int luxsynth_source_type;              /* Which source feeds the LuxSynth+LuxWave path */
-    int luxsynth_inversion;                /* Per-path inversion toggle (0=off, 1=on) */
-    int luxsynth_ac_removal;               /* Per-path AC removal toggle (0=off, 1=on) */
-    float luxsynth_gamma_value;             /* Gamma value for LUXSYNTH image preprocessing (photo conv.: pow(x, 1/gamma)); 1.0=no-op */
 
     /* ── M4 — core-side LuxSynth engine feed (luxsynth_feed_tick) ─────────── */
     int   lx_fft_bins_choice;              /* 0=32, 1=64, 2=128, 3=256 harmonics */

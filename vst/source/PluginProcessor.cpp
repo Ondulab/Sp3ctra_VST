@@ -3662,20 +3662,6 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
 }
 
 //==============================================================================
-// M6 Phase 2 — chain-derived source routing (message thread → C config).
-// Stores the per-synth channel and pushes it straight into g_sp3ctra_config so
-// the change is audible immediately, without waiting for the next param sync.
-void Sp3ctraAudioProcessor::setChainSourceRouting(int luxstralSrc, int luxsynthSrc) noexcept
-{
-    luxstralSrc = (luxstralSrc == 1) ? 1 : 0;   // clamp to {MODULATED, LIVE}
-    luxsynthSrc = (luxsynthSrc == 1) ? 1 : 0;
-    chainSrcLuxstral.store(luxstralSrc, std::memory_order_relaxed);
-    chainSrcLuxsynth.store(luxsynthSrc, std::memory_order_relaxed);
-    g_sp3ctra_config.luxstral_source_type = luxstralSrc;
-    g_sp3ctra_config.luxsynth_source_type = luxsynthSrc;
-}
-
-//==============================================================================
 // M6 Phase 2 — chain topology ownership (model lives here, not in the editor)
 //==============================================================================
 void Sp3ctraAudioProcessor::loadChainModelFromState()
@@ -3743,13 +3729,8 @@ void Sp3ctraAudioProcessor::loadChainModelFromState()
 
 void Sp3ctraAudioProcessor::deriveChainRouting()
 {
-    // Engine A specifically (slot 0) — this global routing drives engine A; engine
-    // B reads its own DoubleBuffer (source_type_override), independent of this.
-    const int luxstralSrc = chainModel_.sourceChannelForSynth(ModuleType::LuxStral, 0, /*engineSlot*/ 0);
-    int       luxsynthSrc = chainModel_.sourceChannelForSynth(ModuleType::LuxSynth, 1);
-    if (luxsynthSrc == 1)   // LuxSynth absent/live → let a placed LuxWave decide
-        luxsynthSrc = chainModel_.sourceChannelForSynth(ModuleType::LuxWave, luxsynthSrc);
-    setChainSourceRouting(luxstralSrc, luxsynthSrc);
+    // (M8: the legacy per-synth source routing is gone — the ChainPlan is the
+    // single routing authority; see deriveAndPublishChainPlan.)
 
     // Stable MODULE-INSTANCE → pool-slot binding (keyed by instance UUID). The
     // state belongs to the module: moving it across chains carries its live
@@ -5083,25 +5064,8 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         //         → LuxSynth + LuxWave read the raw live CIS (IMAGE_SOURCE_LIVE = 1)
         // The luxstralSource / luxsynthSource params are kept (plumbing) for the
         // future modular-chain routing, but their value no longer drives audio.
-        // ── M6 Phase 2 — model-driven (ChainRackComponent → setChainSourceRouting).
-        // Read the chain-derived routing instead of hardcoding; defaults (0, 1)
-        // reproduce the legacy fixed topology before any edit.
-        g_sp3ctra_config.luxstral_source_type = chainSrcLuxstral.load(std::memory_order_relaxed);
-        g_sp3ctra_config.luxsynth_source_type = chainSrcLuxsynth.load(std::memory_order_relaxed);
-
-        g_sp3ctra_config.luxstral_inversion   =
-            static_cast<int>(apvts.getRawParameterValue("luxstralInversion")->load());
-        g_sp3ctra_config.luxstral_ac_removal  =
-            static_cast<int>(apvts.getRawParameterValue("luxstralAcRemoval")->load());
-
-        g_sp3ctra_config.luxsynth_inversion   =
-            static_cast<int>(apvts.getRawParameterValue("luxsynthInversion")->load());
-        g_sp3ctra_config.luxsynth_ac_removal  =
-            static_cast<int>(apvts.getRawParameterValue("luxsynthAcRemoval")->load());
-        // Image Processing - LuxSynth pipeline: gamma is always active (no enable flag).
-        // preprocess_luxsynth() skips it as a no-op when gamma_value == 1.0.
-        g_sp3ctra_config.luxsynth_gamma_value =
-            apvts.getRawParameterValue("luxsynthGammaValue")->load();
+        // (M8: the legacy per-path routing/conditioning globals are gone —
+        // the ChainPlan routes, the per-OUT banks condition.)
 
         // M4 — core-side LuxSynth engine feed (luxsynth_feed_tick): FFT bins
         // choice + temporal smoothing, mirrored from the APVTS params the UI
@@ -5317,14 +5281,6 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
             }
         }
 
-        log_debug("VST", "Per-path routing: LS source=%d inv=%d ac=%d  |  LX source=%d inv=%d ac=%d gamma=%.2f",
-                  g_sp3ctra_config.luxstral_source_type,
-                  g_sp3ctra_config.luxstral_inversion,
-                  g_sp3ctra_config.luxstral_ac_removal,
-                  g_sp3ctra_config.luxsynth_source_type,
-                  g_sp3ctra_config.luxsynth_inversion,
-                  g_sp3ctra_config.luxsynth_ac_removal,
-                  (double)g_sp3ctra_config.luxsynth_gamma_value);
     }
 
     // ========================================================================

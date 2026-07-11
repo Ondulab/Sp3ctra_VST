@@ -38,25 +38,9 @@
 extern "C" {
 #endif
 
-/* ============================================================================
- * ImageSourceType — Channel selector for each synthesis path
- *
- * Two values only.  Previous values (SAMPLER / MIX / LUXPITCH / LUXMASK) are
- * retained as deprecated aliases for source compatibility during the
- * transition; they all map to MODULATED at runtime since their effect is now
- * automatically baked into the modulated chain.
- * ============================================================================ */
-typedef enum {
-    IMAGE_SOURCE_MODULATED = 0,  /* Channel A : Live ► [Pitch ⇄ Mask] ► Sampler */
-    IMAGE_SOURCE_LIVE      = 1,  /* Channel B : direct live UDP feed */
-
-    /* ── Deprecated aliases — kept so any leftover preset/code keeps compiling.
-     * They all behave as IMAGE_SOURCE_MODULATED at runtime. ─────────────── */
-    IMAGE_SOURCE_SAMPLER   = IMAGE_SOURCE_MODULATED,
-    IMAGE_SOURCE_MIX       = IMAGE_SOURCE_MODULATED,
-    IMAGE_SOURCE_LUXPITCH  = IMAGE_SOURCE_MODULATED,
-    IMAGE_SOURCE_LUXMASK   = IMAGE_SOURCE_MODULATED
-} ImageSourceType;
+/* (M8: the ImageSourceType channel selector is gone — the ChainPlan recipes
+ * route every stream; cfg.sampler_relayed carries the only per-stream
+ * semantic the pipeline still needs.) */
 
 /* ============================================================================
  * ImageFrameRGB — Lightweight descriptor for an RGB pixel frame
@@ -78,7 +62,6 @@ typedef struct {
  * These are populated from APVTS parameters each frame.
  * ============================================================================ */
 typedef struct {
-    ImageSourceType source;     /* MODULATED | LIVE — which channel feeds this path */
     int             inversion;  /* 0 = off, 1 = on — invert pixel intensities */
     int             ac_removal; /* 0 = off, 1 = on — subtract per-line DC offset */
     float           gamma;      /* γ value for non-linear mapping (0.0 = bypass) */
@@ -104,6 +87,10 @@ typedef struct {
     int        fade_in_ms;              /* Ramp duration in ms (0 = instant) */
     float      stream_opacity;          /* Per-stream opacity [0.0, 1.0] */
     float      contrast_min;            /* Minimum contrast value for this stream */
+    /* M8 — 1 = the stream is sampler/score-relayed (player or idle
+     * passthrough of a sampler chain): the RAW upstream transport gate is
+     * skipped (a stopped RAW input must not silence a playing sampler). */
+    int        sampler_relayed;
 
     /* Synth-split P1 — per-OUT conditioning, from g_sp3ctra_config.luxstral_out[slot]
      * (slot picked by the builder: A=0, B=1). */
@@ -141,14 +128,12 @@ static inline PipelineConfig pipeline_config_default(void)
 {
     PipelineConfig cfg;
 
-    /* Path A — LuxStral: MODULATED channel, inversion ON, AC removal ON, gamma 2.2 */
-    cfg.luxstral_path.source     = IMAGE_SOURCE_MODULATED;
+    /* Path A — LuxStral: inversion ON, AC removal ON, gamma 2.2 */
     cfg.luxstral_path.inversion  = 1;
     cfg.luxstral_path.ac_removal = 1;
     cfg.luxstral_path.gamma      = 2.2f;
 
-    /* Path B — LuxSynth+LuxWave: MODULATED channel, inversion ON, AC removal ON, no gamma */
-    cfg.luxsynth_luxwave_path.source     = IMAGE_SOURCE_MODULATED;
+    /* Path B — LuxSynth+LuxWave: inversion ON, AC removal ON, no gamma */
     cfg.luxsynth_luxwave_path.inversion  = 1;
     cfg.luxsynth_luxwave_path.ac_removal = 1;
     cfg.luxsynth_luxwave_path.gamma      = 0.0f; /* Linear for FFT */
@@ -162,6 +147,7 @@ static inline PipelineConfig pipeline_config_default(void)
     cfg.fade_in_ms     = 0;
     cfg.stream_opacity = 1.0f;
     cfg.contrast_min   = 0.05f;
+    cfg.sampler_relayed = 0;
 
     /* Per-OUT conditioning defaults (unity send) */
     cfg.luxstral_db_range  = 50.0f;

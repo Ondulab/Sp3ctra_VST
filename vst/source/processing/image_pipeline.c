@@ -244,7 +244,6 @@ PipelineConfig pipeline_build_config_live(void)
      * (synth-split P1: the pipeline reads luxstral_out[], not the legacy
      * per-engine globals). Gamma convention: 1.0 = off (stage skips it). */
     const lux_out_params_t *out_a = &g_sp3ctra_config.luxstral_out[0];
-    cfg.luxstral_path.source     = (ImageSourceType)g_sp3ctra_config.luxstral_source_type;
     cfg.luxstral_path.inversion  = out_a->negative;
     cfg.luxstral_path.ac_removal = out_a->dc_blocking;
     cfg.luxstral_path.gamma      = out_a->gamma;
@@ -254,7 +253,6 @@ PipelineConfig pipeline_build_config_live(void)
     /* Path B — LuxSynth+LuxWave: per-OUT bank, slot 0. These fields are
      * informational for this path (preprocess_luxsynth and the LuxWave feed
      * read their banks directly), kept coherent for any config consumer. */
-    cfg.luxsynth_luxwave_path.source     = (ImageSourceType)g_sp3ctra_config.luxsynth_source_type;
     cfg.luxsynth_luxwave_path.inversion  = g_sp3ctra_config.luxsynth_out[0].negative;
     cfg.luxsynth_luxwave_path.ac_removal = g_sp3ctra_config.luxsynth_out[0].dc_blocking;
     cfg.luxsynth_luxwave_path.gamma      = g_sp3ctra_config.luxsynth_out[0].gamma;
@@ -266,11 +264,10 @@ PipelineConfig pipeline_build_config_live(void)
     /* Freeze / Fade (live stream parameters) */
     cfg.freeze_mode    = g_sp3ctra_config.image_freeze_mode;
     cfg.fade_in_ms     = g_sp3ctra_config.image_fade_in_ms;
-    /* Source-aware opacity: when Source=L (pure live), bypass the mix-balance
-     * crossfader that might have reduced image_live_opacity to 0.
-     * Only in MIX mode does the crossfader-driven opacity apply. */
-    cfg.stream_opacity = (cfg.luxstral_path.source == IMAGE_SOURCE_MIX)
-                         ? g_sp3ctra_config.image_live_opacity : 1.0f;
+    /* M8 — live streams: full opacity, RAW gate applies. Sampler-relayed
+     * chains override sampler_relayed + stream_opacity per send (executor). */
+    cfg.sampler_relayed = 0;
+    cfg.stream_opacity  = 1.0f;
     cfg.contrast_min   = out_a->contrast_min;
 
     /* Misc */
@@ -325,7 +322,6 @@ PipelineConfig pipeline_build_config_sampler(void)
      * contrast_min stays on the sampler-specific floor below (parity with
      * the legacy sampler stream); unification is a P3/P4 concern. */
     const lux_out_params_t *out_a = &g_sp3ctra_config.luxstral_out[0];
-    cfg.luxstral_path.source     = (ImageSourceType)g_sp3ctra_config.luxstral_source_type;
     cfg.luxstral_path.inversion  = out_a->negative;
     cfg.luxstral_path.ac_removal = out_a->dc_blocking;
     cfg.luxstral_path.gamma      = out_a->gamma;
@@ -334,7 +330,6 @@ PipelineConfig pipeline_build_config_sampler(void)
 
     /* Path B — LuxSynth+LuxWave: per-OUT bank, slot 0 (informational — the
      * consumers read their banks directly, see pipeline_build_config_live). */
-    cfg.luxsynth_luxwave_path.source     = (ImageSourceType)g_sp3ctra_config.luxsynth_source_type;
     cfg.luxsynth_luxwave_path.inversion  = g_sp3ctra_config.luxsynth_out[0].negative;
     cfg.luxsynth_luxwave_path.ac_removal = g_sp3ctra_config.luxsynth_out[0].dc_blocking;
     cfg.luxsynth_luxwave_path.gamma      = g_sp3ctra_config.luxsynth_out[0].gamma;
@@ -346,11 +341,10 @@ PipelineConfig pipeline_build_config_sampler(void)
     /* Freeze / Fade (sampler stream parameters) */
     cfg.freeze_mode    = g_sp3ctra_config.sampler_freeze_mode;
     cfg.fade_in_ms     = g_sp3ctra_config.sampler_fade_in_ms;
-    /* Source-aware opacity: when Source=S (pure sampler), bypass the mix-balance
-     * crossfader that might have reduced image_sampler_opacity to 0.
-     * Only in MIX mode does the crossfader-driven opacity apply. */
-    cfg.stream_opacity = (cfg.luxstral_path.source == IMAGE_SOURCE_MIX)
-                         ? g_sp3ctra_config.image_sampler_opacity : 1.0f;
+    /* M8 — the player stream IS a sampler relay: RAW gate skipped, the
+     * crossfader-driven opacity applies (legacy MIX-mode parity). */
+    cfg.sampler_relayed = 1;
+    cfg.stream_opacity  = g_sp3ctra_config.image_sampler_opacity;
     cfg.contrast_min   = g_sp3ctra_config.sampler_contrast_min;
 
     /* Misc */
@@ -462,8 +456,9 @@ void pipeline_path_luxstral(
             effective_fade   = config->fade_in_ms;
         }
 
-        /* Apply RAW upstream gate only for non-SAMPLER sources */
-        if (config->luxstral_path.source != IMAGE_SOURCE_SAMPLER)
+        /* Apply RAW upstream gate only for non-relayed streams (a stopped RAW
+         * input must not silence a playing sampler/sequencer). */
+        if (!config->sampler_relayed)
         {
             int raw_freeze = g_sp3ctra_config.raw_freeze_mode;
             if (raw_freeze > effective_freeze)

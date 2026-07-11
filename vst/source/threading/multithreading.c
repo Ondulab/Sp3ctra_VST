@@ -560,6 +560,13 @@ static void chain_execute_positional(const SynthChainPlan *sp, int chain_idx,
             const int bank = sp->insert_state_idx[i];
             PipelineConfig scfg =
                 pipeline_build_config_ls_send(bank, chain_idx, player_fed);
+            if (sp->has_sampler || sp->has_score)
+            {
+                /* M8 — sampler/score-relayed chain: RAW gate skipped, the
+                 * crossfader opacity applies (legacy parity). */
+                scfg.sampler_relayed = 1;
+                scfg.stream_opacity  = g_sp3ctra_config.image_live_opacity;
+            }
             pipeline_path_luxstral(cr, cg, cb, &scfg, pp_scratch);
             int nnotes = nb_pixels / (scfg.pixels_per_note > 0
                                       ? scfg.pixels_per_note : 1);
@@ -1327,14 +1334,7 @@ void *udpThread(void *arg) {
          * publishers below must then skip their raw-frame approximation. */
         int premarker_tap_done = 0;
         int            need_modulated =
-            (live_cfg.luxstral_path.source         == IMAGE_SOURCE_MODULATED) ||
-            (live_cfg.luxsynth_luxwave_path.source == IMAGE_SOURCE_MODULATED) ||
-            image_chain_any_tap_demand() || /* a visualizer watches an insert tap */
-            /* deriveChainRouting only routes engine A's global source —
-             * engine A's clause is included for symmetry (normally already
-             * covered by luxstral_path.source above). */
-            (frame_plan.synth[CHAIN_SYNTH_LUXSTRAL].present
-             && frame_plan.synth[CHAIN_SYNTH_LUXSTRAL].has_sampler);
+            image_chain_any_tap_demand();   /* a visualizer watches an insert tap */
         /* MOD-BUS OWNER: the FIRST chain (model order) hosting a sampler —
          * the single modulated channel is built from ITS recipe and ITS OWN
          * source (fix: a sampler chain fed by IMAGE/VIDEO must never build
@@ -1624,6 +1624,10 @@ void *udpThread(void *arg) {
                 {
                     PipelineConfig scfg = pipeline_build_config_ls_send(
                         ls_bank, c, /*player_fed*/ 0);
+                    /* M8 — sampler-relayed stream: RAW gate skipped, the
+                     * crossfader opacity applies (legacy parity). */
+                    scfg.sampler_relayed = 1;
+                    scfg.stream_opacity  = g_sp3ctra_config.image_live_opacity;
                     pipeline_path_luxstral(ex.lsR, ex.lsG, ex.lsB, &scfg,
                                            &s_ls_send_pp);
                     int nnotes = nb_pixels / (scfg.pixels_per_note > 0
@@ -2049,6 +2053,10 @@ void internal_sources_process_tick(void *arg)
       {
         PipelineConfig scfg =
             pipeline_build_config_ls_send(ls_bank, c, /*player_fed*/ 0);
+        /* M8 — sampler-relayed stream (owner chain): RAW gate skipped, the
+         * crossfader opacity applies (legacy parity). */
+        scfg.sampler_relayed = 1;
+        scfg.stream_opacity  = g_sp3ctra_config.image_live_opacity;
         pipeline_path_luxstral(ex.lsR, ex.lsG, ex.lsB, &scfg,
                                &s_ls_send_pp_feeder);
         int nnotes = nb_pixels / (scfg.pixels_per_note > 0
