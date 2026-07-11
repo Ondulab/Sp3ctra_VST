@@ -288,9 +288,9 @@ void SamplerPageComponent::resized()
     const int w      = getWidth();
     constexpr int pad    = Sp3ctraTheme::kPad;
     constexpr int gap    = Sp3ctraTheme::kGap;
-    constexpr int gridH  = 66;
+    constexpr int gridH  = kGridH;
     // Editor: 2 param columns + image editor + a SCORE-style EQ panel underneath.
-    constexpr int editH  = 500;
+    constexpr int editH  = kEditH;
     constexpr int bankH  = Sp3ctraTheme::kControlH;
 
     // ── Zone 1: sample bank ───────────────────────────────────────────────────
