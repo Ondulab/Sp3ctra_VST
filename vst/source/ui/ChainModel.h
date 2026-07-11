@@ -46,6 +46,13 @@ struct Chain
 {
     juce::Uuid                  id;
     std::vector<ModuleInstance> modules;   ///< order is significant
+
+    /** J3 — the chain REMEMBERS the settings of modules that left it, per
+     *  type (VALUES-shaped trees: manifest suffixes → raw values, Enabled
+     *  excluded). A re-added module of that type inherits them (chain
+     *  inheritance); the memory dies with the chain. Serialized as MEMORY
+     *  children of the CHAIN node (subsumes the legacy INSERT_MEMORY blob). */
+    std::map<ModuleType, juce::ValueTree> typeMemory;
 };
 
 //==============================================================================
@@ -126,6 +133,13 @@ public:
     int  addChain();                 ///< appends an empty chain, returns its index (-1 when at kMaxChains)
     bool removeChain(int chainIdx);  ///< refuses to delete the last chain
 
+    /** J3 — insert a full copy of chain `chainIdx` right after it: fresh
+     *  UUIDs everywhere, deep-copied VALUES + type memory. validateAndRepair()
+     *  then drops whatever cannot be duplicated (singletons, exhausted pools)
+     *  and heals the slots. Returns the new chain's index, or -1 (cap/range).
+     *  Caller (processor) projects the copied VALUES onto the fresh banks. */
+    int duplicateChain(int chainIdx);
+
     //── Lookups ───────────────────────────────────────────────────────────────
     int  numChains() const noexcept { return (int) chains.size(); }
     const ModuleInstance* find(const juce::Uuid& id, int& outChain, int& outIdx) const;
@@ -160,6 +174,7 @@ public:
     static const juce::Identifier kVersionProp; // "version"
     static const juce::Identifier kSlotProp;    // "slot" (VideoScroll bank index)
     static const juce::Identifier kValuesTag;   // "VALUES" (J2 — chain-owned settings)
+    static const juce::Identifier kMemoryTag;   // "MEMORY" (J3 — chain type memory)
 
     /** CHAINS schema version written by toValueTree(). Migrations gate on the
      *  version read back from a loaded tree:

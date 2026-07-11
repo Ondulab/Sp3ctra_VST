@@ -305,6 +305,12 @@ public:
      *  the topology. (Message thread.) */
     void onChainModelEdited();
 
+    /** J3 — duplicate chain `chainIdx` (fresh UUIDs, settings carried over via
+     *  the copied VALUES; modules that can't be duplicated — singletons,
+     *  exhausted pools — are dropped). Returns the new chain's index or -1.
+     *  Message thread. */
+    int duplicateChain(int chainIdx);
+
     /** Loads the topology from apvts.state (or the legacy default) and derives
      *  routing — WITHOUT touching enable params (those are restored from state).
      *  Headless-safe; called from the constructor and setStateInformation. */
@@ -580,21 +586,19 @@ private:
     juce::ValueTree poolBindingsToTree() const;
     void restorePoolBindingsFromTree(const juce::ValueTree& t);
 
-    // ── Per-chain memory of pooled-insert settings ────────────────────────────
-    // When a Pitch/Mask/Reverb/Echo instance leaves a chain (removed, or moved
-    // to another chain), its bank values are snapshotted under (chain UUID,
-    // type). Adding the same type back to that chain restores them — the chain
-    // "remembers" the module's last settings. Keyed per chain+type because the
-    // model allows at most one pooled instance of a type per chain.
-    // Serialized as the INSERT_MEMORY child tree. Message thread only.
+    // ── J3 — per-chain memory of module settings (ALL manifest types) ────────
+    // When an instance leaves a chain (removed, or moved to another chain),
+    // its bank values are snapshotted into Chain::typeMemory (the CHAIN owns
+    // it — serialized with the model, carried by presets). Adding the same
+    // type back to that chain restores them. Keyed per chain+type: the model
+    // allows at most one instance of a type per chain (VideoScroll excepted —
+    // its multi-instances share the type memory, acceptable). Message thread.
     struct InsertLoc { juce::Uuid chain; ModuleType type; int slot; };
     std::map<juce::Uuid, InsertLoc> prevInsertLoc_;   // instance UUID → last location
-    std::map<std::pair<juce::String, int>,            // (chain UUID str, (int) type)
-             std::map<juce::String, float>> insertParamMemory_;  // suffix → raw value
+    int  bankSlotForModule(const ModuleInstance& m) const; // pool slot or instance slot
     void updateInsertParamMemory();                   // diff model vs prevInsertLoc_
     void baselineInsertLocations();                   // session load: no snapshot/apply
-    juce::ValueTree insertMemoryToTree() const;
-    void restoreInsertMemoryFromTree(const juce::ValueTree& t);
+    void restoreInsertMemoryFromTree(const juce::ValueTree& t); // legacy blob → typeMemory
     // Contextual visualizer target — the selected module instance (see
     // setVisualizerTapModule). Random/unmatched UUID ⇒ no tap in the plan.
     juce::Uuid vizTapModuleId_;
