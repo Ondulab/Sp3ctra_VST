@@ -23,6 +23,7 @@ const juce::Identifier ChainModel::kUuidProp    { "uuid" };
 const juce::Identifier ChainModel::kVersionProp { "version" };
 const juce::Identifier ChainModel::kSlotProp    { "slot" };
 const juce::Identifier ChainModel::kValuesTag   { "VALUES" };
+const juce::Identifier ChainModel::kMemoryTag   { "MEMORY" };
 
 //==============================================================================
 // Queries
@@ -336,6 +337,19 @@ juce::ValueTree ChainModel::toValueTree() const
                 mt.appendChild(m.values.createCopy(), nullptr);   // J2 — settings at rest
             ct.appendChild(mt, nullptr);
         }
+        // J3 — the chain's per-type memory of departed modules.
+        for (const auto& [type, mem] : ch.typeMemory)
+        {
+            if (! mem.isValid())
+                continue;
+            juce::ValueTree et(kMemoryTag);
+            et.setProperty(kTypeProp, juce::String(moduleTypeId(type)), nullptr);
+            et.copyPropertiesFrom(mem, nullptr);
+            // copyPropertiesFrom would clobber "type" if the memory tree ever
+            // carried one — re-stamp it (suffix names never collide with it).
+            et.setProperty(kTypeProp, juce::String(moduleTypeId(type)), nullptr);
+            ct.appendChild(et, nullptr);
+        }
         root.appendChild(ct, nullptr);
     }
     return root;
@@ -358,6 +372,19 @@ void ChainModel::fromValueTree(const juce::ValueTree& root)
 
         for (const auto& mt : ct)
         {
+            if (mt.hasType(kMemoryTag))
+            {
+                // J3 — per-type chain memory.
+                ModuleType type;
+                if (moduleTypeFromId(mt.getProperty(kTypeProp).toString(), type))
+                {
+                    juce::ValueTree mem(kValuesTag);
+                    mem.copyPropertiesFrom(mt, nullptr);
+                    mem.removeProperty(kTypeProp, nullptr);
+                    ch.typeMemory[type] = std::move(mem);
+                }
+                continue;
+            }
             if (! mt.hasType(kModuleTag))
                 continue;
             ModuleType type;
@@ -375,6 +402,33 @@ void ChainModel::fromValueTree(const juce::ValueTree& root)
         }
         chains.push_back(std::move(ch));
     }
+}
+
+int ChainModel::duplicateChain(int chainIdx)
+{
+    if (chainIdx < 0 || chainIdx >= numChains() || ! canAddChain())
+        return -1;
+
+    Chain copy;
+    copy.id = juce::Uuid();
+    const Chain& src = chains[(size_t) chainIdx];
+    for (const auto& m : src.modules)
+    {
+        ModuleInstance mi{ m.type, juce::Uuid(), -1 };   // fresh identity + slot
+        if (m.values.isValid())
+            mi.values = m.values.createCopy();           // settings travel along
+        copy.modules.push_back(std::move(mi));
+    }
+    for (const auto& [type, mem] : src.typeMemory)
+        if (mem.isValid())
+            copy.typeMemory[type] = mem.createCopy();
+
+    chains.insert(chains.begin() + chainIdx + 1, std::move(copy));
+    // Enforce every placement rule on the copy (singletons, per-type send
+    // pools, sampler/video budgets) and heal the fresh slots — modules that
+    // cannot be duplicated are silently dropped, the rest survives.
+    validateAndRepair();
+    return chainIdx + 1;
 }
 
 void ChainModel::validateAndRepair()

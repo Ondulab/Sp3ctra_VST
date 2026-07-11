@@ -2891,8 +2891,10 @@ void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     // UUID → pool-slot bindings: the per-instance param banks are keyed by the
     // slot, so the binding must reload identically (else settings would swap).
     replaceChild(poolBindingsToTree());
-    // Per-chain memory of removed Pitch/Mask/Reverb/Echo settings.
-    replaceChild(insertMemoryToTree());
+    // (J3: the per-chain settings memory now lives IN the CHAINS tree —
+    // Chain::typeMemory, serialized as CHAIN/MEMORY children. The legacy
+    // INSERT_MEMORY blob is no longer written; it is still read once as a
+    // migration on load.)
     replaceChild(midiMap_.toValueTree());    // MIDI CC/Note → param mappings
 
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
@@ -3156,11 +3158,15 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
             // (the per-instance banks are keyed by slot) instead of assigning
             // fresh ones in a different order.
             restorePoolBindingsFromTree(apvts.state.getChildWithName("POOL_SLOTS"));
-            restoreInsertMemoryFromTree(apvts.state.getChildWithName("INSERT_MEMORY"));
 
             // M6 Phase 2 — restore the chain topology and derive per-chain
             // routing (headless-correct; enable params are already restored).
             loadChainModelFromState();
+
+            // J3 — legacy INSERT_MEMORY blob → the chains' own type memory
+            // (one-shot migration; v3 blobs restored it with the model and
+            // win). Must run AFTER the model is loaded.
+            restoreInsertMemoryFromTree(apvts.state.getChildWithName("INSERT_MEMORY"));
 
             // J2 — chain-owned settings: project each module's VALUES onto
             // its runtime bank. Idempotent for a v3 blob (the flat PARAMs
@@ -4023,83 +4029,118 @@ void Sp3ctraAudioProcessor::restorePoolBindingsFromTree(const juce::ValueTree& t
 }
 
 //==============================================================================
-// Per-chain settings memory for the pooled inserts (Pitch/Mask/Reverb/Echo).
+// J3 — per-chain settings memory, generalized to EVERY manifest type (pooled
+// inserts, VideoScroll, OUT sends, sampler engines) and stored IN THE CHAIN
+// (Chain::typeMemory — serialized with the model, carried by presets).
 // Diffs the model against the previous instance locations:
 //   • instance removed (or moved to another chain) → its LAST chain snapshots
-//     the bank values under (chain UUID, type);
+//     the bank values under its type (Enabled excluded);
 //   • instance added → its bank is reset to defaults (never inherit a dead
 //     instance's values via slot reuse), then the hosting chain's remembered
-//     settings are applied, then the module starts enabled.
+//     settings are applied (chain inheritance), then the module starts
+//     enabled. Moved/kept instances carry their settings (stable slots).
 // Runs on every model edit, AFTER updateModulePoolBindings() (fresh slots).
 //==============================================================================
+namespace
+{
+    inline bool isEnableSuffix(const char* sfx)
+    {
+        return std::strcmp(sfx, "Enabled") == 0
+            || std::strcmp(sfx, "enabled") == 0;
+    }
+}
+
+int Sp3ctraAudioProcessor::bankSlotForModule(const ModuleInstance& m) const
+{
+    const auto* d = moduleParamManifest(m.type);
+    if (d == nullptr)
+        return 0;
+    return isPooledInsertType(m.type)
+               ? poolSlotForInstance(m.id)
+               : juce::jlimit(0, d->numSlots - 1, m.slot >= 0 ? m.slot : 0);
+}
+
 void Sp3ctraAudioProcessor::updateInsertParamMemory()
 {
     std::map<juce::Uuid, InsertLoc> now;
-    std::set<juce::String> liveChains;
     for (const auto& ch : chainModel_.chains)
-    {
-        liveChains.insert(ch.id.toString());
         for (const auto& m : ch.modules)
-            if (isPooledInsertType(m.type))
-                now[m.id] = { ch.id, m.type, poolSlotForInstance(m.id) };
-    }
+            if (moduleParamManifest(m.type) != nullptr)
+                now[m.id] = { ch.id, m.type, bankSlotForModule(m) };
 
-    auto snapshot = [this](const InsertLoc& loc)
+    auto chainByUuid = [this](const juce::Uuid& id) -> Chain*
     {
-        const auto* d = insertBankDescFor(loc.type);
-        if (d == nullptr)
-            return;
-        auto& mem = insertParamMemory_[{ loc.chain.toString(), (int) loc.type }];
-        mem.clear();
-        for (int i = 0; i < d->numSuffixes; ++i)
-        {
-            const char* sfx = d->suffixes[i];
-            if (std::strcmp(sfx, "Enabled") == 0)
-                continue;   // a re-added module always starts enabled
-            if (auto* raw = apvts.getRawParameterValue(insertBankParam(loc.type, loc.slot, sfx)))
-                mem[sfx] = raw->load();
-        }
+        for (auto& ch : chainModel_.chains)
+            if (ch.id == id)
+                return &ch;
+        return nullptr;
     };
 
     // The banks of departed instances still hold their values (pool resets only
     // touch the transient C state) — snapshot them into the chain's memory.
+    // (A memory of a REMOVED chain needs no cleanup: it died with the chain.)
     for (const auto& [uuid, prev] : prevInsertLoc_)
     {
         const auto it = now.find(uuid);
-        if (it == now.end() || it->second.chain != prev.chain)
-            snapshot(prev);
+        if (it != now.end() && it->second.chain == prev.chain)
+            continue;
+        Chain* src = chainByUuid(prev.chain);
+        const auto* d = moduleParamManifest(prev.type);
+        if (src == nullptr || d == nullptr)
+            continue;
+        juce::ValueTree mem(ChainModel::kValuesTag);
+        for (int i = 0; i < d->numSuffixes; ++i)
+        {
+            const char* sfx = d->suffixes[i];
+            if (isEnableSuffix(sfx))
+                continue;   // a re-added module always starts enabled
+            if (auto* raw = apvts.getRawParameterValue(d->paramId(prev.slot, sfx)))
+                mem.setProperty(juce::Identifier(sfx), (double) raw->load(),
+                                nullptr);
+        }
+        src->typeMemory[prev.type] = std::move(mem);
     }
 
     for (const auto& [uuid, loc] : now)
     {
         if (prevInsertLoc_.count(uuid) != 0)
             continue;   // moved/kept instances carry their settings with them
-        const auto* d = insertBankDescFor(loc.type);
+        const auto* d = moduleParamManifest(loc.type);
         if (d == nullptr)
             continue;
 
         for (int i = 0; i < d->numSuffixes; ++i)
-            if (auto* p = apvts.getParameter(insertBankParam(loc.type, loc.slot, d->suffixes[i])))
+            if (auto* p = apvts.getParameter(d->paramId(loc.slot, d->suffixes[i])))
                 if (p->getValue() != p->getDefaultValue())
                     p->setValueNotifyingHost(p->getDefaultValue());
 
-        const auto memIt = insertParamMemory_.find({ loc.chain.toString(), (int) loc.type });
-        if (memIt != insertParamMemory_.end())
-            for (const auto& [sfx, rawVal] : memIt->second)
-                if (auto* p = apvts.getParameter(insertBankParam(loc.type, loc.slot, sfx.toRawUTF8())))
-                    p->setValueNotifyingHost(p->convertTo0to1(rawVal));
+        // Chain inheritance: the hosting chain's remembered settings.
+        if (Chain* host = chainByUuid(loc.chain))
+        {
+            const auto memIt = host->typeMemory.find(loc.type);
+            if (memIt != host->typeMemory.end() && memIt->second.isValid())
+                for (int i = 0; i < d->numSuffixes; ++i)
+                {
+                    const juce::Identifier sfx(d->suffixes[i]);
+                    if (! memIt->second.hasProperty(sfx))
+                        continue;
+                    if (auto* p = apvts.getParameter(
+                            d->paramId(loc.slot, d->suffixes[i])))
+                        p->setValueNotifyingHost(p->convertTo0to1(
+                            (float) (double) memIt->second.getProperty(sfx)));
+                }
+        }
 
         // Newly placed ⇒ enabled (same semantics as the former type-level
         // enable bridge and the VideoScroll slot forcing).
-        if (auto* p = apvts.getParameter(insertBankParam(loc.type, loc.slot, "Enabled")))
-            if (p->getValue() < 0.5f)
-                p->setValueNotifyingHost(1.0f);
+        for (const char* en : { "Enabled", "enabled" })
+            if (auto* p = apvts.getParameter(d->paramId(loc.slot, en)))
+            {
+                if (p->getValue() < 0.5f)
+                    p->setValueNotifyingHost(1.0f);
+                break;
+            }
     }
-
-    // A removed chain can never host these modules again — drop its memory.
-    for (auto it = insertParamMemory_.begin(); it != insertParamMemory_.end();)
-        it = (liveChains.count(it->first.first) == 0) ? insertParamMemory_.erase(it)
-                                                      : std::next(it);
 
     prevInsertLoc_ = std::move(now);
 }
@@ -4111,29 +4152,16 @@ void Sp3ctraAudioProcessor::baselineInsertLocations()
     prevInsertLoc_.clear();
     for (const auto& ch : chainModel_.chains)
         for (const auto& m : ch.modules)
-            if (isPooledInsertType(m.type))
-                prevInsertLoc_[m.id] = { ch.id, m.type, poolSlotForInstance(m.id) };
-}
-
-juce::ValueTree Sp3ctraAudioProcessor::insertMemoryToTree() const
-{
-    juce::ValueTree t("INSERT_MEMORY");
-    for (const auto& [key, values] : insertParamMemory_)
-    {
-        juce::ValueTree e("MEM");
-        e.setProperty("chain", key.first, nullptr);
-        e.setProperty("type",
-                      juce::String(moduleTypeId((ModuleType) key.second)), nullptr);
-        for (const auto& [suffix, v] : values)
-            e.setProperty(juce::Identifier(suffix), v, nullptr);
-        t.appendChild(e, nullptr);
-    }
-    return t;
+            if (moduleParamManifest(m.type) != nullptr)
+                prevInsertLoc_[m.id] = { ch.id, m.type, bankSlotForModule(m) };
 }
 
 void Sp3ctraAudioProcessor::restoreInsertMemoryFromTree(const juce::ValueTree& t)
 {
-    insertParamMemory_.clear();
+    // J3 — one-shot MIGRATION of the legacy INSERT_MEMORY blob into the
+    // chains' own type memory (Chain::typeMemory). Only fills chains that
+    // carry no memory of that type yet (a v3+ blob already restored it via
+    // the CHAIN/MEMORY children). Call AFTER loadChainModelFromState().
     if (! t.isValid())
         return;
     for (const auto& e : t)
@@ -4141,24 +4169,29 @@ void Sp3ctraAudioProcessor::restoreInsertMemoryFromTree(const juce::ValueTree& t
         if (! e.hasType(juce::Identifier("MEM")))
             continue;
         ModuleType type;
-        if (! moduleTypeFromId(e.getProperty("type").toString(), type)
-            || ! isPooledInsertType(type))
+        if (! moduleTypeFromId(e.getProperty("type").toString(), type))
             continue;
-        const juce::String chain = e.getProperty("chain").toString();
-        if (chain.isEmpty())
+        const auto* d = moduleParamManifest(type);
+        const juce::String chainId = e.getProperty("chain").toString();
+        if (d == nullptr || chainId.isEmpty())
             continue;
-        const auto* d = insertBankDescFor(type);
-        if (d == nullptr)
-            continue;
-        auto& mem = insertParamMemory_[{ chain, (int) type }];
-        for (int i = 0; i < d->numSuffixes; ++i)
+        for (auto& ch : chainModel_.chains)
         {
-            const juce::Identifier sfx(d->suffixes[i]);
-            if (e.hasProperty(sfx))
-                mem[d->suffixes[i]] = (float) (double) e.getProperty(sfx);
+            if (ch.id.toString() != chainId)
+                continue;
+            if (ch.typeMemory.count(type) != 0)
+                break;   // v3 memory wins
+            juce::ValueTree mem(ChainModel::kValuesTag);
+            for (int i = 0; i < d->numSuffixes; ++i)
+            {
+                const juce::Identifier sfx(d->suffixes[i]);
+                if (e.hasProperty(sfx))
+                    mem.setProperty(sfx, e.getProperty(sfx), nullptr);
+            }
+            if (mem.getNumProperties() > 0)
+                ch.typeMemory[type] = std::move(mem);
+            break;
         }
-        if (mem.empty())
-            insertParamMemory_.erase({ chain, (int) type });
     }
 }
 
@@ -4871,6 +4904,23 @@ void Sp3ctraAudioProcessor::teardownAbsentModules(const std::set<ModuleType>& no
         videoScrollSlotIds_ = std::move(vsIdsNow);
     }
     videoScrollSlots_ = vsNow;
+}
+
+int Sp3ctraAudioProcessor::duplicateChain(int chainIdx)
+{
+    // Fresh VALUES on every module first, so the copies carry the CURRENT
+    // settings (VALUES are otherwise only refreshed at save time).
+    snapshotBankValuesIntoModel();
+    const int newIdx = chainModel_.duplicateChain(chainIdx);
+    if (newIdx < 0)
+        return -1;
+    // Bindings (fresh pool slots) + new-instance reset/inherit + enable
+    // bridge + plan republish…
+    onChainModelEdited();
+    // …then the copied VALUES override the freshly-reset banks: the duplicate
+    // plays with the source chain's exact settings, fully independent.
+    projectChainValuesToBanks();
+    return newIdx;
 }
 
 void Sp3ctraAudioProcessor::onChainModelEdited()

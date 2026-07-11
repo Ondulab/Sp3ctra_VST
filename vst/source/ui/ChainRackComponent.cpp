@@ -883,6 +883,40 @@ void ChainRackComponent::mouseUp(const juce::MouseEvent& e)
     if (! e.mouseWasClicked())
         return;
 
+    // J3 — chain header context menu (right-click): duplicate the chain with
+    // its modules AND their settings (dropped where a module can't be
+    // duplicated — singletons, exhausted pools).
+    if (e.mods.isPopupMenu() && ! locked)
+    {
+        for (const auto& band : bands)
+        {
+            const juce::Rectangle<int> header(0, band.headerY,
+                                              getWidth(), kHeaderH);
+            if (! header.contains(e.getPosition()))
+                continue;
+            juce::PopupMenu menu;
+            menu.addItem(1, "Duplicate chain",
+                         model.canAddChain());
+            const int chainIdx = band.chainIdx;
+            menu.showMenuAsync(
+                juce::PopupMenu::Options().withTargetComponent(this),
+                [this, chainIdx](int result)
+                {
+                    if (result != 1)
+                        return;
+                    // duplicateChain runs the whole edit flow itself
+                    // (bindings, inherit, plan, VALUES projection).
+                    if (processor.duplicateChain(chainIdx) >= 0)
+                    {
+                        rebuild();
+                        if (onModelChanged)
+                            onModelChanged();
+                    }
+                });
+            return;
+        }
+    }
+
     if (addRowRect.contains(e.getPosition()))
     {
         if (model.addChain() >= 0)   // refused at the kMaxChains cap
