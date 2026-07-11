@@ -2884,6 +2884,9 @@ void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     // earlier: rack edits persist via a deferred callAsync (persistChainModel),
     // so a save taken before that dispatch would write a stale topology; and a
     // fresh session has no CHAINS child at all until the first rack edit.
+    // J2 — the chain owns its modules' settings: refresh each module's VALUES
+    // from the runtime banks (atomic reads) before serialising.
+    snapshotBankValuesIntoModel();
     replaceChild(chainModel_.toValueTree());
     // UUID → pool-slot bindings: the per-instance param banks are keyed by the
     // slot, so the binding must reload identically (else settings would swap).
@@ -3158,6 +3161,13 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
             // M6 Phase 2 — restore the chain topology and derive per-chain
             // routing (headless-correct; enable params are already restored).
             loadChainModelFromState();
+
+            // J2 — chain-owned settings: project each module's VALUES onto
+            // its runtime bank. Idempotent for a v3 blob (the flat PARAMs
+            // restored the same values — the only-if-different guard makes it
+            // a no-op); pre-v3 sessions have no VALUES and skip naturally.
+            // This is the nominal path of the chain presets (J4).
+            projectChainValuesToBanks();
 
             // SCORE settings + frequency override (processor members, not APVTS).
             restoreScoreStateFromTree(apvts.state.getChildWithName("SCORE"));
@@ -4415,6 +4425,72 @@ std::vector<int> Sp3ctraAudioProcessor::activeVideoSlots() const
                 out.push_back(m.slot);
     std::sort(out.begin(), out.end());
     return out;
+}
+
+//==============================================================================
+// J2 — the chain OWNS its modules' settings (chantier « chain porteuse »).
+// snapshotBankValuesIntoModel: runtime banks → each ModuleInstance.values
+// (called at save time; atomic reads, any thread). projectChainValuesToBanks:
+// ModuleInstance.values → runtime banks (load/preset time; MESSAGE THREAD
+// ONLY, guarded "only if different" so reopening a project never marks host
+// automation lanes as touched).
+//==============================================================================
+void Sp3ctraAudioProcessor::snapshotBankValuesIntoModel()
+{
+    for (auto& ch : chainModel_.chains)
+        for (auto& m : ch.modules)
+        {
+            const auto* d = moduleParamManifest(m.type);
+            if (d == nullptr)
+                continue;
+            const int slot = isPooledInsertType(m.type)
+                                 ? poolSlotForInstance(m.id)
+                                 : juce::jlimit(0, d->numSlots - 1,
+                                                m.slot >= 0 ? m.slot : 0);
+            juce::ValueTree values(ChainModel::kValuesTag);
+            for (int i = 0; i < d->numSuffixes; ++i)
+            {
+                if (auto* raw = apvts.getRawParameterValue(
+                        d->paramId(slot, d->suffixes[i])))
+                    values.setProperty(juce::Identifier(d->suffixes[i]),
+                                       (double) raw->load(), nullptr);
+            }
+            m.values = std::move(values);
+        }
+}
+
+void Sp3ctraAudioProcessor::projectChainValuesToBanks()
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    for (const auto& ch : chainModel_.chains)
+        for (const auto& m : ch.modules)
+        {
+            if (! m.values.isValid())
+                continue;
+            const auto* d = moduleParamManifest(m.type);
+            if (d == nullptr)
+                continue;
+            const int slot = isPooledInsertType(m.type)
+                                 ? poolSlotForInstance(m.id)
+                                 : juce::jlimit(0, d->numSlots - 1,
+                                                m.slot >= 0 ? m.slot : 0);
+            for (int i = 0; i < d->numSuffixes; ++i)
+            {
+                const juce::Identifier key(d->suffixes[i]);
+                if (! m.values.hasProperty(key))
+                    continue;
+                const float target = (float) (double) m.values.getProperty(key);
+                const juce::String id = d->paramId(slot, d->suffixes[i]);
+                auto* param = apvts.getParameter(id);
+                auto* raw   = apvts.getRawParameterValue(id);
+                if (param == nullptr || raw == nullptr)
+                    continue;
+                if (std::abs(raw->load() - target) < 1.0e-6f)
+                    continue;   // identical → never touch the host lane
+                param->setValueNotifyingHost(
+                    param->convertTo0to1(target));
+            }
+        }
 }
 
 void Sp3ctraAudioProcessor::persistChainModel()
