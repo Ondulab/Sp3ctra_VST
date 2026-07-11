@@ -1286,12 +1286,16 @@ void *udpThread(void *arg) {
              * covered by luxstral_path.source above). */
             (frame_plan.synth[CHAIN_SYNTH_LUXSTRAL].present
              && frame_plan.synth[CHAIN_SYNTH_LUXSTRAL].has_sampler);
-        /* P3 — a sampler on ANY LuxStral send's chain needs the modulated
-         * channel (the legacy synth[A/B] clauses above only see the first
-         * two sends). */
-        for (int k = 0; k < frame_plan.num_ls_sends && !need_modulated; k++)
-            if (frame_plan.ls_send[k].recipe.has_sampler)
-                need_modulated = 1;
+        /* MOD-BUS OWNER: the FIRST chain (model order) hosting a sampler —
+         * the single modulated channel is built from ITS recipe and ITS OWN
+         * source (fix: a sampler chain fed by IMAGE/VIDEO must never build
+         * its passthrough/record stream from the live device frames). Other
+         * sampler chains run positionally on their own stream. Any sampler
+         * chain needs the modulated machinery (REC hooks). */
+        int mod_owner_chain = -1;
+        for (int c = 0; c < frame_plan.num_chains; c++)
+            if (frame_plan.chain[c].present && frame_plan.chain[c].has_sampler)
+            { mod_owner_chain = c; need_modulated = 1; break; }
 
         if (need_modulated)
         {
@@ -1369,32 +1373,48 @@ void *udpThread(void *arg) {
                  * another pool slot — forces the chain-specific run. Pool
                  * slot 0 Pitch/Mask-only chains keep the legacy path
                  * (identical behaviour + live per-insert visual taps). */
-                const SynthChainPlan *spSmp = NULL;
-                for (int s = 0; s < CHAIN_SYNTH_COUNT && !spSmp; s++)
-                    if (frame_plan.synth[s].present && frame_plan.synth[s].has_sampler)
-                        spSmp = &frame_plan.synth[s];
+                const SynthChainPlan *spSmp =
+                    (mod_owner_chain >= 0)
+                        ? &frame_plan.chain[mod_owner_chain] : NULL;
+
+                /* Base frame = the OWNER CHAIN's own source (IMAGE/VIDEO/
+                 * CAMERA line, or the live frame for a SP3CTRA/legacy chain).
+                 * A no-signal chain builds NO modulated frame this line —
+                 * never the live device fallback. */
+                const uint8_t *smbR = db->activeBuffer_R;
+                const uint8_t *smbG = db->activeBuffer_G;
+                const uint8_t *smbB = db->activeBuffer_B;
+                int smp_no_signal = 0;
+                if (spSmp)
+                {
+                    const int smSig = synth_source_base(
+                        spSmp, CHAIN_SYNTH_COUNT + mod_owner_chain, db,
+                        nb_pixels, &smbR, &smbG, &smbB);
+                    smp_no_signal = synth_chain_has_no_signal(spSmp, smSig)
+                                    || smSig < 0;
+                }
 
                 SynthChainPlan pre;          /* pre-marker processor sub-plan */
                 pre.num_inserts    = 0;
                 pre.viz_tap_insert = -1;
                 int chain_specific = 0;
-                if (spSmp)
+                if (spSmp && !smp_no_signal)
                     chain_specific = chain_build_sampler_premarker_plan(spSmp, &pre);
 
-                if (chain_specific)
+                if (smp_no_signal)
+                {
+                    /* owner chain carries no stream → mod stays NULL */
+                }
+                else if (chain_specific)
                 {
                     chain_run_inserts_with_viz_tap(&pre, audioBuffers,
-                                                   db->activeBuffer_R,
-                                                   db->activeBuffer_G,
-                                                   db->activeBuffer_B,
+                                                   smbR, smbG, smbB,
                                                    nb_pixels,
                                                    &mod_R, &mod_G, &mod_B);
                     premarker_tap_done = (pre.viz_tap_insert >= 0);
                 }
                 else
-                image_chain_process_inserts(db->activeBuffer_R,
-                                            db->activeBuffer_G,
-                                            db->activeBuffer_B,
+                image_chain_process_inserts(smbR, smbG, smbB,
                                             nb_pixels,
                                             g_sp3ctra_config.num_octaves,
                                             &mod_R, &mod_G, &mod_B,
@@ -1519,16 +1539,16 @@ void *udpThread(void *arg) {
             /* LuxSynth staging: single writer — while the player owns the
              * stream, FramePlayerThread stages (lx_send_stage_player_frame). */
             float *lx_line = stream_player_owned ? NULL : s_lx_line;
-            if (mod_R && (sp->has_sampler
+            if (mod_R && ((sp->has_sampler && c == mod_owner_chain)
                           || (sp->has_score && score_playing_now)))
             {
-                /* Sampler/score-relay chain: the modulated/player channel IS
-                 * the stream below the marker — probes/OUTs observe base or
-                 * mod by position; the exact pre-marker processors already
-                 * ran in the modulated build. Post-marker probes are captured
-                 * by the player thread only while it RUNS (only reachable
-                 * here for non-LuxStral chains — probe/Path-B chains have no
-                 * player-side executor). */
+                /* MOD-BUS OWNER chain (or score relay): the modulated/player
+                 * channel IS the stream below the marker — probes/OUTs
+                 * observe base or mod by position; the exact pre-marker
+                 * processors already ran in the modulated build. Other
+                 * sampler chains run POSITIONALLY on their own stream (their
+                 * SAMPLER marker is pass-through) — a chain fed by IMAGE
+                 * must never display/send the live device flux. */
                 chain_shortcut_walk(sp, c,
                                     /*skip_post_marker_probes*/
                                     stream_player_owned && ls_bank >= 0,
@@ -1852,11 +1872,14 @@ void internal_sources_process_tick(void *arg)
    * record commands, and phase 2 the only capture site. Runs BEFORE the
    * any-active early-out — the drain and the resampling capture need no
    * internal source (MediaSourceService keeps ticking at its idle rate). */
+  /* MOD-BUS OWNER: the FIRST chain (model order) hosting a sampler — the
+   * modulated channel is built from ITS recipe and ITS OWN source (mirror of
+   * udpThread's owner rule). */
   const SynthChainPlan *spSmp = NULL;
-  int smp_slot = -1;
-  for (int s = 0; s < CHAIN_SYNTH_COUNT && !spSmp; s++)
-      if (frame_plan.synth[s].present && frame_plan.synth[s].has_sampler)
-      { spSmp = &frame_plan.synth[s]; smp_slot = s; }
+  int smp_owner_chain = -1;
+  for (int c = 0; c < frame_plan.num_chains && !spSmp; c++)
+      if (frame_plan.chain[c].present && frame_plan.chain[c].has_sampler)
+      { spSmp = &frame_plan.chain[c]; smp_owner_chain = c; }
 
   /* Set when the idle build below ran: the sampler chain's pre-marker stream
    * (its modulated channel). The per-synth blocks further down consume it
@@ -1867,8 +1890,9 @@ void internal_sources_process_tick(void *arg)
   {
       static uint32_t s_feeder_line_id = 0;   /* debug/sync id (no UDP line) */
       const uint8_t *sbR, *sbG, *sbB;
-      const int sbSig = synth_source_base(spSmp, smp_slot, db, nb_pixels,
-                                          &sbR, &sbG, &sbB);
+      const int sbSig = synth_source_base(spSmp,
+                                          CHAIN_SYNTH_COUNT + smp_owner_chain,
+                                          db, nb_pixels, &sbR, &sbG, &sbB);
 
       /* Phase 1 — drain start/stop REC commands + cache the chain's source
        * frame for the player's darken-blend. */
@@ -2003,10 +2027,11 @@ void internal_sources_process_tick(void *arg)
     const int pb_here = (c == pb_chain) ? pb_marker : -1;
     float *lx_line = stream_player_owned ? NULL : s_lx_line_feeder;
 #ifdef VST_MODE
-    if (sp->has_sampler && smpMod_R)
+    if (c == smp_owner_chain && smpMod_R)
     {
-      /* The chain holding the sampler consumes the pre-marker stream built by
-       * the sampler block above (stateful FX tick once per line). */
+      /* MOD-BUS OWNER chain: consume the pre-marker stream built by the
+       * sampler block above (stateful FX tick once per line). Other sampler
+       * chains run positionally on their own stream. */
       chain_shortcut_walk(sp, c, /*skip_post_marker_probes*/ 0, pb_here,
                           lx_line,
                           sbR, sbG, sbB,
