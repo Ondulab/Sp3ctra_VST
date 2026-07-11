@@ -905,8 +905,13 @@ void ChainRackComponent::mouseUp(const juce::MouseEvent& e)
             menu.addItem(4, "Load preset as new chain...",
                          model.canAddChain());
             const int chainIdx = band.chainIdx;
+            // Anchor at the click, not the rack component (which would drop
+            // the menu at the component's corner, far from the cursor).
+            const auto click = e.getScreenPosition();
             menu.showMenuAsync(
-                juce::PopupMenu::Options().withTargetComponent(this),
+                juce::PopupMenu::Options()
+                    .withTargetComponent(this)
+                    .withTargetScreenArea({ click.x, click.y, 1, 1 }),
                 [this, chainIdx](int result)
                 {
                     switch (result)
