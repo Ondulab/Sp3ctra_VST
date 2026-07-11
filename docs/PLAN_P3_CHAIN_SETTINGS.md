@@ -409,11 +409,22 @@ types partagés avec l'ancienne composition → remplacer un Pitch par un Pitch 
 (badge « mapping orphelin » optionnel via `navTargetForParam`) ; limite documentée dans le
 dialogue de load. Validation : CC mappé sur `luxpitch0_*` survit à un save/load de preset.
 
-## J6 — Purge et durcissement
+## J6 — Purge et durcissement — ✅ FAIT (2026-07-11, périmètre révisé)
 
 Suppression `insertParamMemory_`/`prevInsertLoc_`/`baselineInsertLocations` (lecture-migration
 conservée 2 versions) ; log debug de la taille du blob ; test de non-régression migration
 (blob synthSplitVersion=0/1 + INSERT_MEMORY + POOL_SLOTS → charge, se resauve en v3 propre).
+
+**État réel (2026-07-11).** L'item « suppression prevInsertLoc_ » était périmé : J3 a REPURPOSÉ
+`prevInsertLoc_`/`updateInsertParamMemory`/`baselineInsertLocations` comme mécanique VIVANTE de
+la type-memory (diff du modèle → écrit la mémoire dans `Chain::typeMemory` au retrait) — on les
+GARDE. `insertParamMemory_` (l'ancienne map blob) n'existait déjà plus. Fait ici :
+`getStateInformation` retire activement le child `INSERT_MEMORY` périmé que porte encore un
+blob migré (les vieilles sessions se resauvent en v3 propre ; la LECTURE-migration one-shot
+reste en place 2 versions) + log de la taille du blob au save (KB). Test de migration : PAS de
+harnais de test dans le repo — instancier le processeur headless serait un chantier dédié ;
+validation MANUELLE (charger une vieille session → réglages restaurés → resave → child
+INSERT_MEMORY absent du nouveau blob).
 
 ## Risques B
 
