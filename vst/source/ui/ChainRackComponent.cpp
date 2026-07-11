@@ -1,6 +1,8 @@
 #include "ChainRackComponent.h"
 #include "../Sp3ctraCore.h"
 #include "../sources/MediaSourceEngines.h"   // M9 — media source LEDs
+#include "ChainPresetIO.h"                   // J4 — .sp3chain presets
+#include "../Sp3ctraDialog.h"
 
 // C engine state — read-only here (LED monitoring)
 extern "C" {
@@ -897,20 +899,32 @@ void ChainRackComponent::mouseUp(const juce::MouseEvent& e)
             juce::PopupMenu menu;
             menu.addItem(1, "Duplicate chain",
                          model.canAddChain());
+            menu.addSeparator();
+            menu.addItem(2, "Save chain preset...");
+            menu.addItem(3, "Load preset into this chain...");
+            menu.addItem(4, "Load preset as new chain...",
+                         model.canAddChain());
             const int chainIdx = band.chainIdx;
             menu.showMenuAsync(
                 juce::PopupMenu::Options().withTargetComponent(this),
                 [this, chainIdx](int result)
                 {
-                    if (result != 1)
-                        return;
-                    // duplicateChain runs the whole edit flow itself
-                    // (bindings, inherit, plan, VALUES projection).
-                    if (processor.duplicateChain(chainIdx) >= 0)
+                    switch (result)
                     {
-                        rebuild();
-                        if (onModelChanged)
-                            onModelChanged();
+                        case 1:
+                            // duplicateChain runs the whole edit flow itself
+                            // (bindings, inherit, plan, VALUES projection).
+                            if (processor.duplicateChain(chainIdx) >= 0)
+                            {
+                                rebuild();
+                                if (onModelChanged)
+                                    onModelChanged();
+                            }
+                            break;
+                        case 2: savePresetFlow(chainIdx);  break;
+                        case 3: loadPresetFlow(chainIdx);  break;
+                        case 4: loadPresetFlow(-1);        break;
+                        default: break;
                     }
                 });
             return;
@@ -937,6 +951,88 @@ void ChainRackComponent::mouseUp(const juce::MouseEvent& e)
             }
         }
     }
+}
+
+//==============================================================================
+// J4 — .sp3chain preset flows
+//==============================================================================
+void ChainRackComponent::savePresetFlow(int chainIdx)
+{
+    const auto dir = juce::File::getSpecialLocation(
+                         juce::File::userDocumentsDirectory)
+                         .getChildFile("Sp3ctra Chain Presets");
+    dir.createDirectory();
+    presetChooser_ = std::make_unique<juce::FileChooser>(
+        "Save chain preset",
+        dir.getChildFile("Chain " + juce::String(chainIdx + 1) + ".sp3chain"),
+        "*.sp3chain");
+    presetChooser_->launchAsync(
+        juce::FileBrowserComponent::saveMode
+            | juce::FileBrowserComponent::canSelectFiles
+            | juce::FileBrowserComponent::warnAboutOverwriting,
+        [this, chainIdx](const juce::FileChooser& fc)
+        {
+            auto file = fc.getResult();
+            if (file == juce::File{})
+                return;
+            if (file.getFileExtension().isEmpty())
+                file = file.withFileExtension(".sp3chain");
+            if (! processor.saveChainPreset(chainIdx, file))
+            {
+                const juce::String msg = "Could not write\n"
+                                       + file.getFullPathName();
+                Sp3ctraDialog::showWarning(this, "Chain preset",
+                                           msg.toRawUTF8());
+            }
+        });
+}
+
+void ChainRackComponent::loadPresetFlow(int targetChainIdx)
+{
+    const auto dir = juce::File::getSpecialLocation(
+                         juce::File::userDocumentsDirectory)
+                         .getChildFile("Sp3ctra Chain Presets");
+    presetChooser_ = std::make_unique<juce::FileChooser>(
+        targetChainIdx >= 0 ? "Load preset into this chain"
+                            : "Load preset as new chain",
+        dir, "*.sp3chain");
+    presetChooser_->launchAsync(
+        juce::FileBrowserComponent::openMode
+            | juce::FileBrowserComponent::canSelectFiles,
+        [this, targetChainIdx](const juce::FileChooser& fc)
+        {
+            const auto file = fc.getResult();
+            if (file == juce::File{})
+                return;
+            const auto preset = ChainPresetIO::loadFromFile(file);
+            if (! preset.isValid())
+            {
+                const juce::String msg = file.getFileName()
+                                       + " is not a valid .sp3chain preset.";
+                Sp3ctraDialog::showWarning(this, "Chain preset",
+                                           msg.toRawUTF8());
+                return;
+            }
+            const auto res = processor.loadChainPreset(preset, targetChainIdx);
+            if (res.chainIdx < 0)
+            {
+                Sp3ctraDialog::showWarning(this, "Chain preset",
+                    "Could not load the preset (chain limit reached?).");
+                return;
+            }
+            rebuild();
+            if (onModelChanged)
+                onModelChanged();
+            if (! res.skipped.isEmpty())
+            {
+                const juce::String msg =
+                    "Loaded, but some modules could not be placed\n"
+                    "(singleton already used elsewhere, or pool exhausted):\n\n"
+                    + res.skipped.joinIntoString(", ");
+                Sp3ctraDialog::showInfo(this, "Chain preset",
+                                        msg.toRawUTF8());
+            }
+        });
 }
 
 //==============================================================================

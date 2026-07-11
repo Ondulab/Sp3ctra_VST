@@ -23,6 +23,9 @@ extern "C" {
     #include "processing/image_chain.h"                       // Insert chain executor (order + taps)
     #include "processing/chain_plan.h"                         // M6 Phase 2 — RT chain descriptor
     #include "processing/synth_staging.h"                      // deferred staging resets (M3)
+}
+#include "ui/ChainPresetIO.h"                                  // J4 — .sp3chain presets
+extern "C" {
     #include "audio/buffers/audio_image_buffers.h"             // selection tap (contextual zone 1)
     #include "synthesis/luxsynth/luxsynth_vst_adapter.h"      // luxsynth_push_midi_event(), buffers, engine
     #include "synthesis/luxwave/luxwave_vst_adapter.h"        // luxwave_push_midi_event(), g_luxwave_engine
@@ -4904,6 +4907,113 @@ void Sp3ctraAudioProcessor::teardownAbsentModules(const std::set<ModuleType>& no
         videoScrollSlotIds_ = std::move(vsIdsNow);
     }
     videoScrollSlots_ = vsNow;
+}
+
+bool Sp3ctraAudioProcessor::saveChainPreset(int chainIdx, const juce::File& file)
+{
+    if (chainIdx < 0 || chainIdx >= chainModel_.numChains())
+        return false;
+    snapshotBankValuesIntoModel();   // the preset carries the CURRENT settings
+    const auto preset = ChainPresetIO::makePresetTree(
+        chainModel_.chains[(size_t) chainIdx],
+        file.getFileNameWithoutExtension());
+    return ChainPresetIO::saveToFile(preset, file);
+}
+
+Sp3ctraAudioProcessor::ChainPresetLoadResult
+Sp3ctraAudioProcessor::loadChainPreset(const juce::ValueTree& preset,
+                                       int targetChainIdx)
+{
+    ChainPresetLoadResult res;
+    const auto ct = preset.getChildWithName(ChainModel::kChainTag);
+    if (! ct.isValid())
+        return res;
+
+    // Refresh every chain's VALUES first: the projection at the end walks the
+    // whole model, and the OTHER chains must project as no-ops (their trees
+    // would otherwise hold save-time values and revert live knob moves).
+    snapshotBankValuesIntoModel();
+
+    int target = targetChainIdx;
+    if (target < 0)
+    {
+        target = chainModel_.addChain();
+        if (target < 0)
+            return res;   // 8-chain cap
+    }
+    else if (target >= chainModel_.numChains())
+        return res;
+
+    Chain& ch = chainModel_.chains[(size_t) target];
+
+    // J5 — automation/MIDI stability: a same-type module in the preset lands
+    // on the bank slot the OLD composition used, so host lanes and MIDI
+    // mappings keep driving "the module of this chain".
+    std::map<ModuleType, int> oldSlot;
+    for (const auto& m : ch.modules)
+        if (moduleParamManifest(m.type) != nullptr)
+            oldSlot.try_emplace(m.type, bankSlotForModule(m));
+
+    // "Load into": replace the content, the chain identity survives.
+    ch.modules.clear();
+    ch.typeMemory.clear();
+
+    for (const auto& mt : ct)
+    {
+        if (mt.hasType(ChainModel::kMemoryTag))
+        {
+            ModuleType type;
+            if (moduleTypeFromId(
+                    mt.getProperty(ChainModel::kTypeProp).toString(), type))
+            {
+                juce::ValueTree mem(ChainModel::kValuesTag);
+                mem.copyPropertiesFrom(mt, nullptr);
+                mem.removeProperty(ChainModel::kTypeProp, nullptr);
+                ch.typeMemory[type] = std::move(mem);
+            }
+            continue;
+        }
+        if (! mt.hasType(ChainModel::kModuleTag))
+            continue;
+        ModuleType type;
+        const juce::String typeId =
+            mt.getProperty(ChainModel::kTypeProp).toString();
+        if (! moduleTypeFromId(typeId, type))
+        {
+            res.skipped.add(typeId);   // newer/unknown type
+            continue;
+        }
+        const int at = (int) ch.modules.size();
+        if (! chainModel_.insert(target, type, at))
+        {
+            // Singleton placed elsewhere / exhausted pool / duplicate — skip,
+            // the rest of the preset still loads.
+            res.skipped.add(moduleDisplayName(type));
+            continue;
+        }
+
+        ModuleInstance& mi = ch.modules[(size_t) at];
+        const auto values = mt.getChildWithName(ChainModel::kValuesTag);
+        if (values.isValid())
+            mi.values = values.createCopy();
+
+        // J5 pre-seed: reuse the old composition's slot for this type.
+        const auto it = oldSlot.find(type);
+        if (it != oldSlot.end())
+        {
+            if (isPooledInsertType(type))
+                modulePoolSlots_[mi.id] = { it->second, type };
+            else if (ChainModel::hasSlot(type))
+                mi.slot = it->second;   // collisions healed below
+            oldSlot.erase(it);
+        }
+    }
+    chainModel_.validateAndRepair();
+
+    onChainModelEdited();          // bindings + reset/inherit + bridge + plan
+    projectChainValuesToBanks();   // preset VALUES → the fresh banks
+    res.chainIdx = target;
+    return res;
 }
 
 int Sp3ctraAudioProcessor::duplicateChain(int chainIdx)

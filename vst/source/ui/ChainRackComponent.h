@@ -204,6 +204,10 @@ private:
 
     void rebuild();                       // (re)create block components from model
     void mutateAndRefresh(bool notifySelection); // after a model change: processor bridge + rebuild + relayout
+
+    // J4 — .sp3chain preset flows (async FileChooser, then processor API)
+    void savePresetFlow(int chainIdx);
+    void loadPresetFlow(int targetChainIdx);  // −1 = load as a NEW chain
     void refreshAfterModelEdit(bool notifySelection); // UI-only part (rebuild + selection + relayout)
     void scheduleRefresh(bool notifySelection);  // processor bridge NOW, UI refresh next tick (lifetime-safe)
 
@@ -241,6 +245,9 @@ private:
 
     juce::Uuid           selectedId;      // currently highlighted instance
     bool                 locked { false };// performance mode: delete affordances off
+
+    // J4 — .sp3chain presets: async FileChooser must outlive the callback
+    std::unique_ptr<juce::FileChooser> presetChooser_;
 
     // Source-activity tracking (UDP feed advancing → source LED active)
     juce::uint64 lastLinesSeen { 0 };

@@ -311,6 +311,21 @@ public:
      *  Message thread. */
     int duplicateChain(int chainIdx);
 
+    /** J4 — write chain `chainIdx` (fresh VALUES + type memory) as a
+     *  .sp3chain preset. Atomic write; returns false on any I/O error. */
+    bool saveChainPreset(int chainIdx, const juce::File& file);
+
+    /** J4 — load a .sp3chain preset tree. targetChainIdx >= 0 replaces that
+     *  chain's content (its UUID survives; same-type modules keep their bank
+     *  slot — J5 automation/MIDI stability); -1 appends a new chain. Modules
+     *  the placement rules refuse here (singletons placed elsewhere,
+     *  exhausted pools) are SKIPPED, never a total failure — their names come
+     *  back in `skipped`. chainIdx == -1 when nothing could be loaded.
+     *  Message thread. */
+    struct ChainPresetLoadResult { int chainIdx = -1; juce::StringArray skipped; };
+    ChainPresetLoadResult loadChainPreset(const juce::ValueTree& preset,
+                                          int targetChainIdx);
+
     /** Loads the topology from apvts.state (or the legacy default) and derives
      *  routing — WITHOUT touching enable params (those are restored from state).
      *  Headless-safe; called from the constructor and setStateInformation. */
