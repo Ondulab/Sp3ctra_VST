@@ -44,57 +44,12 @@ RTProfiler g_vst_rt_profiler = {};
 // MUST match the ids created in createParameterLayout().
 namespace
 {
-    const char* const kPitchSuffixes[] = {
-        "Enabled", "Polyphony", "BackgroundMode", "CouplingMode",
-        "FreePixelsPerST", "PitchBendRange",
-        "AttackMs", "DecayMs", "SustainLevel", "ReleaseMs",
-        "AttackCurve", "DecayCurve", "ReleaseCurve",
-        "GlideMs", "LfoRate", "LfoDepth", "VelocityCoupling",
-        "MidiChannel", "OctaveOffset", "ReferenceNote",
-    };
-    const char* const kMaskSuffixes[] = {
-        "Enabled", "Polyphony", "BackgroundMode", "CouplingMode",
-        "FreePixelsPerST", "PitchBendRange",
-        "FilterWidth", "FilterOffset", "FilterSlope",
-        "AttackMs", "DecayMs", "SustainLevel", "ReleaseMs",
-        "AttackCurve", "DecayCurve", "ReleaseCurve",
-        "GlideMs", "LfoPosRate", "LfoPosDepth", "VelocityCoupling",
-        "MidiChannel", "OctaveOffset", "ReferenceNote",
-    };
-    const char* const kReverbSuffixes[] = {
-        "Enabled", "Decay", "Diffusion", "Mix", "BackgroundMode",
-    };
-    const char* const kEchoSuffixes[] = {
-        "Enabled", "Delay", "Feedback", "Mix", "BackgroundMode",
-    };
-    const char* const kEqSuffixes[] = {
-        "Enabled",
-        "Band0", "Band1", "Band2", "Band3", "Band4",
-        "Band5", "Band6", "Band7", "Band8",
-        "BackgroundMode",
-    };
-
-    struct InsertBankDesc
+    // (J1: the per-type suffix tables and InsertBankDesc moved to the single
+    // manifest — ui/ModuleParamManifest.h. This alias keeps the call sites
+    // readable.)
+    inline const ModuleParamManifest* insertBankDescFor(ModuleType t)
     {
-        ModuleType         type;
-        const char*        legacyPrefix;   // "luxpitch" — also the bank prefix
-        const char* const* suffixes;
-        int                numSuffixes;
-    };
-    const InsertBankDesc kInsertBanks[] = {
-        { ModuleType::Pitch,  "luxpitch",  kPitchSuffixes,  (int) std::size(kPitchSuffixes)  },
-        { ModuleType::Mask,   "luxmask",   kMaskSuffixes,   (int) std::size(kMaskSuffixes)   },
-        { ModuleType::Reverb,    "luxreverb", kReverbSuffixes, (int) std::size(kReverbSuffixes) },
-        { ModuleType::Echo,      "luxecho",   kEchoSuffixes,   (int) std::size(kEchoSuffixes)   },
-        { ModuleType::Equalizer, "luxeq",     kEqSuffixes,     (int) std::size(kEqSuffixes)     },
-    };
-
-    const InsertBankDesc* insertBankDescFor(ModuleType t)
-    {
-        for (const auto& d : kInsertBanks)
-            if (d.type == t)
-                return &d;
-        return nullptr;
+        return moduleParamManifest(t);
     }
 
     bool isPooledInsertType(ModuleType t)
@@ -1608,35 +1563,24 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("rawFreezeMode",        this);
     apvts.addParameterListener("rawFadeInMs",          this);
 
-    // Pitch / Mask / Reverb / Echo — per-instance banks: every bank param of
-    // every slot funnels into the same applyConfigurationToCore() sync.
-    for (const auto& bank : kInsertBanks)
-        for (int s = 0; s < ChainModel::kMaxChains; ++s)
-            for (int i = 0; i < bank.numSuffixes; ++i)
-                apvts.addParameterListener(
-                    insertBankParam(bank.type, s, bank.suffixes[i]), this);
-
-    // Synth-split — per-OUT conditioning banks: same funnel. Without these
-    // registrations a knob move never re-syncs g_sp3ctra_config.*_out[] and
-    // the conditioning silently keeps its load-time values ("no effect").
+    // Pitch/Mask/Reverb/Echo/EQ per-instance banks + per-OUT conditioning
+    // banks (J1: iterate the SINGLE manifest): every bank param of every slot
+    // funnels into the same applyConfigurationToCore() sync. RULE learned in
+    // P2b: creating APVTS params is NOT enough — without addParameterListener
+    // a knob move never re-syncs g_sp3ctra_config ("no effect").
     // "luxstralOut…" rides the startsWith("luxstral") branch of
-    // applyParameterChange; the other two land on the generic fallback —
-    // all three end in applyConfigurationToCore(false).
+    // applyParameterChange; the others land on the generic fallback — all end
+    // in applyConfigurationToCore(false). VideoScroll and the Sampler keep
+    // their own dedicated listening mechanisms (excluded here, iso-behaviour).
+    for (const auto& bank : kModuleParamManifest)
     {
-        static const char* const kOutSuffixes[] = { "negative", "dcBlocking",
-                                                    "gamma", "intensity",
-                                                    "enabled" };
-        for (int s = 0; s < LUX_OUT_MAX_SLOTS; ++s)
-        {
-            for (const char* sfx : kOutSuffixes)
-            {
-                apvts.addParameterListener(lsOutParam(s, sfx), this);
-                apvts.addParameterListener(lxOutParam(s, sfx), this);
-                apvts.addParameterListener(lwOutParam(s, sfx), this);
-            }
-            apvts.addParameterListener(lsOutParam(s, "contrastMin"), this);
-            apvts.addParameterListener(lsOutParam(s, "rangeDb"),     this);
-        }
+        if (bank.type == ModuleType::VideoScroll
+            || bank.type == ModuleType::Sampler)
+            continue;
+        for (int s = 0; s < bank.numSlots; ++s)
+            for (int i = 0; i < bank.numSuffixes; ++i)
+                apvts.addParameterListener(bank.paramId(s, bank.suffixes[i]),
+                                           this);
     }
     // Global (non-banked) source routing selectors.
     apvts.addParameterListener("luxpitchSource",           this);
@@ -3003,17 +2947,21 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
                     restored[e->getStringAttribute("id")] =
                         e->getDoubleAttribute("value");
 
-                for (const auto& bank : kInsertBanks)
+                for (const auto& bank : kModuleParamManifest)
+                {
+                    if (! isPooledInsertType(bank.type))
+                        continue;   // legacy per-type ids existed for the
+                                    // 5 pooled inserts only (iso-behaviour)
                     for (int i = 0; i < bank.numSuffixes; ++i)
                     {
                         const auto legacyIt = restored.find(
-                            juce::String(bank.legacyPrefix) + bank.suffixes[i]);
+                            juce::String(bank.bankPrefix) + bank.suffixes[i]);
                         if (legacyIt == restored.end())
                             continue;
                         for (int s = 0; s < CHAIN_MAX_CHAINS; ++s)
                         {
                             const juce::String bankId =
-                                insertBankParam(bank.type, s, bank.suffixes[i]);
+                                bank.paramId(s, bank.suffixes[i]);
                             if (restored.count(bankId) != 0)
                                 continue;   // already saved per instance
                             auto* e = xmlState->createNewChildElement("PARAM");
@@ -3021,6 +2969,7 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
                             e->setAttribute("value", legacyIt->second);
                         }
                     }
+                }
             }
 
             // Migration — synth-split P1: blobs saved before the per-OUT

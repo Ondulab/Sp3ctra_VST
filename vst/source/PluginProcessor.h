@@ -23,77 +23,10 @@ extern "C" {
 }
 
 //==============================================================================
-// VideoScroll per-instance APVTS bank id helpers. A VideoScroll module instance
-// owns a slot 0..7 (ModuleInstance.slot); its params live under "videoScroll{slot}_*"
-// and its mixer voice under "videoMix{slot}_*". One source of truth shared by the
-// contextual panel, the per-instance renderer and the right-band mixer.
-inline juce::String vsParam(int slot, const char* suffix)
-{ return "videoScroll" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
-
-inline juce::String vsMixParam(int slot, const char* suffix)
-{ return "videoMix" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
-
-//==============================================================================
-// Pooled-insert (Pitch/Mask/Reverb/Echo) per-instance APVTS bank id helpers.
-// Each instance owns a state-pool slot 0..7 (modulePoolSlots_, keyed by the
-// ModuleInstance UUID); its play params live under "luxpitch{slot}_*" etc. —
-// same banked pattern as VideoScroll. Suffixes match the legacy per-type ids
-// ("luxpitchAttackMs" → "luxpitch{N}_AttackMs"), which keeps the session
-// migration mechanical.
-inline juce::String lpParam(int slot, const char* suffix)
-{ return "luxpitch" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
-
-inline juce::String lmParam(int slot, const char* suffix)
-{ return "luxmask" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
-
-inline juce::String rvParam(int slot, const char* suffix)
-{ return "luxreverb" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
-
-inline juce::String ecParam(int slot, const char* suffix)
-{ return "luxecho" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
-
-inline juce::String eqParam(int slot, const char* suffix)
-{ return "luxeq" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
-
-//==============================================================================
-// Synth-split P1 — per-OUT (send) conditioning banks. An OUT module owns the
-// image conditioning of its chain's flux (Negative / DC Blocking / Gamma with
-// 1.0 = off / Contrast Min + Range dB for LuxStral / Intensity = pre-engine
-// mix weight). Same banked pattern as the pooled inserts. P1 slot binding is
-// fixed: LuxStral A=0, B=1; LuxSynth=0; LuxWave=0 — multi-send slots activate
-// with the mix bus (P3/P4).
-inline juce::String lsOutParam(int slot, const char* suffix)
-{ return "luxstralOut" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
-
-inline juce::String lxOutParam(int slot, const char* suffix)
-{ return "luxsynthOut" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
-
-inline juce::String lwOutParam(int slot, const char* suffix)
-{ return "luxwaveOut" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
-
-// Sampler per-engine APVTS bank (engines A/B, same pattern as LuxStral):
-// engine 0 keeps the legacy "luxSampler*" ids (sessions load unchanged),
-// engine 1 owns "luxSamplerB*" (same suffixes). Play params only — the enable
-// LED, export prefs and output dir stay shared.
-inline juce::String fsEngineParam(int engine, const char* suffix)
-{
-    return (engine == 1 ? juce::String("luxSamplerB") : juce::String("luxSampler"))
-         + suffix;
-}
-
-/** Bank id for any pooled insert type; empty for non-pooled types. */
-inline juce::String insertBankParam(ModuleType t, int slot, const char* suffix)
-{
-    switch (t)
-    {
-        case ModuleType::Pitch:  return lpParam(slot, suffix);
-        case ModuleType::Mask:   return lmParam(slot, suffix);
-        case ModuleType::Reverb:    return rvParam(slot, suffix);
-        case ModuleType::Echo:      return ecParam(slot, suffix);
-        case ModuleType::Equalizer: return eqParam(slot, suffix);
-        default:                    return {};
-    }
-}
+// Per-instance bank id helpers + the type→params manifest (J1): moved to
+// ui/ModuleParamManifest.h — the single source of truth every consumer of
+// "all the params of THIS module instance" iterates.
+#include "ui/ModuleParamManifest.h"
 
 //==============================================================================
 /**
