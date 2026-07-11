@@ -146,7 +146,21 @@ Validation : mono-send intensity 1 → spectre/timbre identiques ; 2 chains → 
 (poids intensity respectés) ; `lxFftSmoothing` inchangé ; freeze/HOLD conservé ;
 0 underruns avec la FFT sur l'audio thread (mesure rt_profiler ; repli : thread dédié non-RT).
 
-## M5 — Staging + mix pull LuxWave
+## M5 — Staging + mix pull LuxWave — ✅ FAIT (2026-07-11, commité avec M5)
+
+Statut : implémenté, build vert, smoke test OK (0 underruns ; chemin no-send validé —
+le test d'écoute avec un module → LUXWAVE + MIDI reste à faire, matrice M7).
+Réalisation effective : `luxwave_condition_line()` (banc, sans intensity) +
+`synth_staging_stage_luxwave/mix_luxwave` (mix bipolaire 0.5 + Σ w·(line−0.5), gaté
+par le plan, D3) ; `pipeline_luxwave_feed_tick()` sur audioProcessingThread (mix →
+ENVELOPE_LUXWAVE avec gates live/raw — fade timestamp-driven donc insensible à la
+cadence — → `luxwave_engine_set_image_line`, ~86 Hz vs line-rate avant : moins de
+pushes qu'avant, pas plus) ; feed inline retiré de `pipeline_path_luxsynth_luxwave`
+(qui ne garde que l'enveloppe Chain-2 des vues polyphoniques + copy photowave) ;
+producteurs aux marqueurs OUT_LUXWAVE (positionnel + shortcut) ; resets/no-signal
+étendus. Divergence assumée : l'enveloppe s'applique après le mix (identique à 1 send
+intensity 1 ; transitoire de fade légèrement différent à k≠1). LuxWave n'est jamais
+player-fed (parité : c'était déjà le cas).
 
 - Producteur au marqueur OUT_LUXWAVE : conditioning `luxwave_out[bank]` + envelope per-send →
   `synth_staging_stage_luxwave(chain_idx, bank, line)`.
