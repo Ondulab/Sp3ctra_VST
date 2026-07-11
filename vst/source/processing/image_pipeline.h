@@ -19,6 +19,7 @@
 
 #include "image_pipeline_types.h"
 #include "image_preprocessor.h"
+#include "chain_plan.h"        /* ChainPlan (M5 — LuxWave feed tick) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -74,6 +75,27 @@ PipelineConfig pipeline_build_config_live(void);
  *       sampler_fade_in_ms, image_sampler_opacity, sampler_contrast_min, etc.
  */
 PipelineConfig pipeline_build_config_sampler(void);
+
+/**
+ * @brief M5 — LuxWave per-send conditioning: grayscale + Negative / DC
+ * Blocking / Gamma from the luxwave_out bank `bank_slot`, WITHOUT intensity
+ * (the bipolar mix applies it as the send weight). line_out = nb_pixels floats.
+ */
+void luxwave_condition_line(
+    const uint8_t *raw_r,
+    const uint8_t *raw_g,
+    const uint8_t *raw_b,
+    int bank_slot,
+    float *line_out,
+    int nb_pixels);
+
+/**
+ * @brief M5 — audio-thread LuxWave wavetable feed: pull the bipolar mix of
+ * the staged "→ LUXWAVE" sends, apply the Chain-2 transport envelope
+ * (ENVELOPE_LUXWAVE) and push the wavetable line. No active send → no push
+ * (the wavetable keeps its last content; it only sounds under MIDI).
+ */
+void pipeline_luxwave_feed_tick(const ChainPlan *plan);
 
 /**
  * @brief Synth-split P3 — config for ONE LuxStral send (N-chain mix).

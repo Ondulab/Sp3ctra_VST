@@ -84,6 +84,22 @@ int synth_staging_mix_luxsynth(const ChainPlan* plan,
                                int max_pixels, int* nb_pixels_out,
                                uint32_t* generation_out);
 
+/* ── M5 — LuxWave sends (conditioned wavetable LINE at the OUT position) ───
+ * Producers stage the send's conditioned line (luxwave_condition_line,
+ * WITHOUT intensity). The consumer (pipeline_luxwave_feed_tick) pulls the
+ * BIPOLAR mix around the wavetable midpoint:
+ *   mixed[i] = clamp01(0.5 + Σ w_k·(line_k[i] − 0.5))     w_k = intensity_k
+ * (one send at intensity 1 = bit-exact parity; intensity 0 = flat 0.5 =
+ * true wavetable silence). Plan-gated on the OUT_LUXWAVE marker. */
+void synth_staging_stage_luxwave(int chain_idx, int bank_slot,
+                                 const float* line, int nb_pixels);
+
+void synth_staging_luxwave_set_inactive(int chain_idx);
+
+int synth_staging_mix_luxwave(const ChainPlan* plan,
+                              float* line_out, int max_pixels,
+                              int* nb_pixels_out);
+
 #ifdef __cplusplus
 }
 #endif

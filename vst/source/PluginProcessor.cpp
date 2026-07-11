@@ -3347,6 +3347,7 @@ void Sp3ctraAudioProcessor::timerCallback()
             {
                 synth_staging_set_inactive(i);
                 synth_staging_luxsynth_set_inactive(i);
+                synth_staging_luxwave_set_inactive(i);
             }
         }
         pendingPitchResets_ = pendingMaskResets_ = pendingVideoScrollInits_ = 0;
@@ -4458,7 +4459,8 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
             sendChains |= (1u << plan.ls_send[k].chain_idx);
         for (int c = 0; c < plan.num_chains && c < CHAIN_MAX_CHAINS; ++c)
             for (int i = 0; i < plan.chain[c].num_inserts; ++i)
-                if (plan.chain[c].insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
+                if (plan.chain[c].insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH
+                    || plan.chain[c].insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXWAVE)
                     sendChains |= (1u << c);
         pendingStagingResets_ |= (prevLsSendChains_ & ~sendChains);
         prevLsSendChains_ = sendChains;

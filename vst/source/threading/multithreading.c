@@ -582,6 +582,15 @@ static void chain_execute_positional(const SynthChainPlan *sp, int chain_idx,
         }
         else if (id == IMAGE_CHAIN_INSERT_OUT_LUXWAVE)
         {
+            /* M5 — stage the conditioned wavetable line at the send's
+             * position; the audio thread pulls the bipolar mix. */
+            if (lx_line != NULL)
+            {
+                const int bank = sp->insert_state_idx[i];
+                luxwave_condition_line(cr, cg, cb, bank, lx_line, nb_pixels);
+                synth_staging_stage_luxwave(chain_idx, bank, lx_line,
+                                            nb_pixels);
+            }
             if (pb_marker_id == id && !out->pb_found)
             { out->pbR = cr; out->pbG = cg; out->pbB = cb; out->pb_found = 1; }
         }
@@ -647,12 +656,20 @@ static void chain_shortcut_walk(const SynthChainPlan *sp, int chain_idx,
             if (pb_marker_id == id && !out->pb_found)
             { out->pbR = fr; out->pbG = fg; out->pbB = fb; out->pb_found = 1; }
         }
-        else if (pb_marker_id >= 0 && id == pb_marker_id && !out->pb_found)
+        else if (id == IMAGE_CHAIN_INSERT_OUT_LUXWAVE)
         {
-            out->pbR = after_marker ? modR : baseR;
-            out->pbG = after_marker ? modG : baseG;
-            out->pbB = after_marker ? modB : baseB;
-            out->pb_found = 1;
+            const uint8_t *fr = after_marker ? modR : baseR;
+            const uint8_t *fg = after_marker ? modG : baseG;
+            const uint8_t *fb = after_marker ? modB : baseB;
+            if (lx_line != NULL)
+            {
+                const int bank = sp->insert_state_idx[i];
+                luxwave_condition_line(fr, fg, fb, bank, lx_line, nb_pixels);
+                synth_staging_stage_luxwave(chain_idx, bank, lx_line,
+                                            nb_pixels);
+            }
+            if (pb_marker_id == id && !out->pb_found)
+            { out->pbR = fr; out->pbG = fg; out->pbB = fb; out->pb_found = 1; }
         }
     }
     /* LuxStral OUT stream = the modulated channel (staged by the caller). */
@@ -1455,9 +1472,9 @@ void *udpThread(void *arg) {
             const SynthChainPlan *sp = &frame_plan.chain[c];
             if (!sp->present) continue;
 
-            /* This chain's LuxStral OUT bank + LuxSynth OUT presence
+            /* This chain's LuxStral OUT bank + LuxSynth/LuxWave OUT presence
              * (V1: at most one OUT per type per chain). */
-            int ls_bank = -1, has_lx = 0;
+            int ls_bank = -1, has_lx = 0, has_lw = 0;
             for (int i = 0; i < sp->num_inserts; i++)
             {
                 if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSTRAL
@@ -1465,6 +1482,8 @@ void *udpThread(void *arg) {
                     ls_bank = sp->insert_state_idx[i];
                 else if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
                     has_lx = 1;
+                else if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXWAVE)
+                    has_lw = 1;
             }
 
             const int stream_player_owned =
@@ -1488,6 +1507,8 @@ void *udpThread(void *arg) {
                     synth_staging_set_inactive(c);
                 if (has_lx)
                     synth_staging_luxsynth_set_inactive(c);
+                if (has_lw)
+                    synth_staging_luxwave_set_inactive(c);
                 if (c == pb_chain)
                     pb_no_signal = 1;
                 continue;   /* no stream at any position of this chain */
@@ -1930,13 +1951,15 @@ void internal_sources_process_tick(void *arg)
     const SynthChainPlan *sp = &frame_plan.chain[c];
     if (!sp->present) continue;
 
-    int ls_bank = -1, has_lx = 0;
+    int ls_bank = -1, has_lx = 0, has_lw = 0;
     for (int i = 0; i < sp->num_inserts; i++)
     {
       if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSTRAL && ls_bank < 0)
         ls_bank = sp->insert_state_idx[i];
       else if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
         has_lx = 1;
+      else if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXWAVE)
+        has_lw = 1;
     }
 
     const int stream_player_owned =
@@ -1964,6 +1987,8 @@ void internal_sources_process_tick(void *arg)
         }
         if (has_lx)
           synth_staging_luxsynth_set_inactive(c);
+        if (has_lw)
+          synth_staging_luxwave_set_inactive(c);
         if (c == pb_chain)
           audio_image_buffers_publish_engine_input(
               audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
@@ -2269,6 +2294,10 @@ void *audioProcessingThread(void *arg) {
        * Replaces the UI-thread bridge — the engine sounds with the editor
        * closed. */
       luxsynth_feed_tick(&planB_render);
+
+      /* M5 — LuxWave wavetable feed: bipolar mix of the staged "→ LUXWAVE"
+       * sends + Chain-2 transport envelope. */
+      pipeline_luxwave_feed_tick(&planB_render);
 
       if (planB_render.num_ls_sends > 0)
       {

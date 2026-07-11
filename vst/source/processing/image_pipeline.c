@@ -10,6 +10,7 @@
 
 #include "image_pipeline.h"
 #include "image_pipeline_stages.h"
+#include "synth_staging.h"     /* M5 — LuxWave send mix (audio-thread feed) */
 #include "config/config_loader.h"
 #include "config/config_instrument.h"
 #include "synthesis/luxwave/luxwave_vst_adapter.h"
@@ -588,63 +589,72 @@ void pipeline_path_luxsynth_luxwave(
             NULL, 0,              /* no notes array on this path */
             out->polyphonic.grayscale, nb_pixels);
 
-        /* LuxWave wavetable feed — AUTONOMOUS conditioning (synth-split P1).
-         * LuxWave no longer inherits the LuxSynth-conditioned line: its OUT
-         * bank (luxwave_out[0]) owns Negative / DC Blocking / Gamma, applied
-         * on a private copy of the raw line.  Same freeze gating as Chain 2
-         * but with its OWN envelope state (held frames must not be shared
-         * with LuxSynth's).  Intensity scales the line around the bipolar
-         * midpoint 0.5 (the wavetable maps [0,1] → [−1,+1]), so 0 = flat
-         * 0.5 = true silence and 1.0 = bit-exact parity.
-         * Single writer: only the live worker reaches this branch. */
-        if (g_luxwave_engine.initialized && nb_pixels > 0)
-        {
-            static float s_luxwave_line[CIS_MAX_PIXELS_NB];
-            const lux_out_params_t *lw = &g_sp3ctra_config.luxwave_out[0];
-
-            img_stage_rgb_to_grayscale(raw_r, raw_g, raw_b, nb_pixels,
-                                       s_luxwave_line);
-            if (lw->negative)
-                img_stage_invert(s_luxwave_line, nb_pixels);
-            if (lw->dc_blocking)
-                img_stage_remove_dc(s_luxwave_line, nb_pixels);
-            if (lw->gamma > 0.0f && lw->gamma != 1.0f)
-                img_stage_apply_gamma(s_luxwave_line, nb_pixels, lw->gamma);
-
-            pipeline_apply_envelope(
-                ENVELOPE_LUXWAVE,
-                effective_freeze,
-                1.0f,
-                effective_fade,
-                NULL, 0,
-                s_luxwave_line, nb_pixels);
-
-            {
-                float k = lw->intensity;
-                int   i;
-                if (k < 0.0f) k = 0.0f;
-                if (k != 1.0f)
-                {
-                    for (i = 0; i < nb_pixels; i++)
-                    {
-                        float v = 0.5f + (s_luxwave_line[i] - 0.5f) * k;
-                        if (v < 0.0f) v = 0.0f;
-                        if (v > 1.0f) v = 1.0f;
-                        s_luxwave_line[i] = v;
-                    }
-                }
-            }
-
-            luxwave_engine_set_image_line(&g_luxwave_engine,
-                                           s_luxwave_line,
-                                           nb_pixels);
-        }
+        /* (M5: the LuxWave wavetable feed moved to pipeline_luxwave_feed_tick
+         * — the audio thread mixes the staged "→ LUXWAVE" sends. This path
+         * only keeps the Chain-2 envelope above for the polyphonic views.) */
     }
 
     /* LuxWave path: direct RGB copy (kept for future photowave use) */
     img_stage_copy_rgb_raw(
         raw_r, raw_g, raw_b, nb_pixels,
         out->photowave.r, out->photowave.g, out->photowave.b);
+}
+
+/* ============================================================================
+ * M5 — LuxWave send conditioning + audio-thread wavetable feed
+ * ============================================================================ */
+
+void luxwave_condition_line(
+    const uint8_t *raw_r,
+    const uint8_t *raw_g,
+    const uint8_t *raw_b,
+    int bank_slot,
+    float *line_out,
+    int nb_pixels)
+{
+    if (bank_slot < 0 || bank_slot >= LUX_OUT_MAX_SLOTS)
+        bank_slot = 0;
+    const lux_out_params_t *lw = &g_sp3ctra_config.luxwave_out[bank_slot];
+
+    img_stage_rgb_to_grayscale(raw_r, raw_g, raw_b, nb_pixels, line_out);
+    if (lw->negative)
+        img_stage_invert(line_out, nb_pixels);
+    if (lw->dc_blocking)
+        img_stage_remove_dc(line_out, nb_pixels);
+    if (lw->gamma > 0.0f && lw->gamma != 1.0f)
+        img_stage_apply_gamma(line_out, nb_pixels, lw->gamma);
+}
+
+void pipeline_luxwave_feed_tick(const ChainPlan *plan)
+{
+    static float s_mixed_line[CIS_MAX_PIXELS_NB];   /* audio thread only */
+
+    if (plan == NULL || !g_luxwave_engine.initialized)
+        return;
+
+    int nb = 0;
+    const int mixed = synth_staging_mix_luxwave(plan, s_mixed_line,
+                                                get_cis_pixels_nb(), &nb);
+    if (mixed == 0 || nb <= 0)
+        return;   /* no "→ LUXWAVE" send → the wavetable keeps its last
+                   * content (it only sounds under held MIDI notes) */
+
+    /* Chain-2 transport gate — LuxWave's OWN envelope state (held frames are
+     * never shared with LuxSynth's), same live/raw gating as before. The
+     * envelope fade is timestamp-driven, so the audio-thread cadence (~86 Hz
+     * vs the historical line rate) changes nothing. */
+    int effective_freeze = g_sp3ctra_config.image_freeze_mode;
+    int effective_fade   = g_sp3ctra_config.image_fade_in_ms;
+    if (g_sp3ctra_config.raw_freeze_mode > effective_freeze)
+    {
+        effective_freeze = g_sp3ctra_config.raw_freeze_mode;
+        effective_fade   = g_sp3ctra_config.raw_fade_in_ms;
+    }
+    pipeline_apply_envelope(ENVELOPE_LUXWAVE,
+                            effective_freeze, 1.0f, effective_fade,
+                            NULL, 0, s_mixed_line, nb);
+
+    luxwave_engine_set_image_line(&g_luxwave_engine, s_mixed_line, nb);
 }
 
 /* ============================================================================

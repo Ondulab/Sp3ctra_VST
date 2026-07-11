@@ -354,3 +354,118 @@ int synth_staging_mix_luxsynth(const ChainPlan* plan,
     if (generation_out) *generation_out = gen;
     return mixed;
 }
+
+/* ══ M5 — LuxWave sends (conditioned line, bipolar mix) ════════════════════ */
+
+typedef struct {
+    volatile uint32_t seq;
+    volatile int      active;
+    int               bank_slot;
+    int               nb_pixels;
+    float             line[CIS_MAX_PIXELS_NB];
+} LwSendStaging;
+
+static LwSendStaging s_lw_staging[CHAIN_MAX_CHAINS];
+static LwSendStaging s_lw_snap;   /* consumer-side snapshot (audio thread) */
+
+void synth_staging_stage_luxwave(int chain_idx, int bank_slot,
+                                 const float* line, int nb_pixels)
+{
+    if (chain_idx < 0 || chain_idx >= CHAIN_MAX_CHAINS || line == NULL)
+        return;
+    if (nb_pixels < 0) nb_pixels = 0;
+    if (nb_pixels > CIS_MAX_PIXELS_NB) nb_pixels = CIS_MAX_PIXELS_NB;
+
+    LwSendStaging* s = &s_lw_staging[chain_idx];
+    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+    s->bank_slot = (bank_slot >= 0 && bank_slot < CHAIN_MAX_CHAINS)
+                   ? bank_slot : 0;
+    s->nb_pixels = nb_pixels;
+    memcpy(s->line, line, (size_t) nb_pixels * sizeof(float));
+    s->active = 1;
+    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+}
+
+void synth_staging_luxwave_set_inactive(int chain_idx)
+{
+    if (chain_idx < 0 || chain_idx >= CHAIN_MAX_CHAINS)
+        return;
+    LwSendStaging* s = &s_lw_staging[chain_idx];
+    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+    s->active = 0;
+    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+}
+
+static int lw_staging_snapshot(const LwSendStaging* s, LwSendStaging* out)
+{
+    for (int attempt = 0; attempt < 4; ++attempt)
+    {
+        const uint32_t s0 = __atomic_load_n(&s->seq, __ATOMIC_ACQUIRE);
+        if (s0 & 1u)
+            continue;
+        if (! s->active)
+            return 0;
+        memcpy(out, (const void*) s, sizeof(*out));
+        const uint32_t s1 = __atomic_load_n(&s->seq, __ATOMIC_ACQUIRE);
+        if (s0 == s1)
+            return out->active;
+    }
+    return 0;
+}
+
+int synth_staging_mix_luxwave(const ChainPlan* plan,
+                              float* line_out, int max_pixels,
+                              int* nb_pixels_out)
+{
+    if (plan == NULL || line_out == NULL || max_pixels <= 0)
+        return 0;
+
+    /* Bipolar accumulation around the wavetable midpoint. */
+    for (int i = 0; i < max_pixels; ++i)
+        line_out[i] = 0.5f;
+
+    int mixed  = 0;
+    int out_px = 0;
+
+    for (int c = 0; c < plan->num_chains && c < CHAIN_MAX_CHAINS; ++c)
+    {
+        const SynthChainPlan* sp = &plan->chain[c];
+        if (! sp->present) continue;
+        int has_lw = 0;
+        for (int i = 0; i < sp->num_inserts && ! has_lw; ++i)
+            if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXWAVE)
+                has_lw = 1;
+        if (! has_lw) continue;
+
+        if (! lw_staging_snapshot(&s_lw_staging[c], &s_lw_snap))
+            continue;
+
+        const lux_out_params_t* bank =
+            &g_sp3ctra_config.luxwave_out[s_lw_snap.bank_slot];
+        if (! bank->enabled) continue;
+        float w = bank->intensity;
+        if (w < 0.0f) w = 0.0f;
+        if (w <= 0.0f) { ++mixed; continue; }   /* silent send still counts */
+
+        const int n = s_lw_snap.nb_pixels < max_pixels ? s_lw_snap.nb_pixels
+                                                       : max_pixels;
+        if (n > out_px) out_px = n;
+        for (int i = 0; i < n; ++i)
+            line_out[i] += w * (s_lw_snap.line[i] - 0.5f);
+        ++mixed;
+    }
+
+    if (mixed == 0)
+    {
+        if (nb_pixels_out) *nb_pixels_out = 0;
+        return 0;
+    }
+
+    for (int i = 0; i < out_px; ++i)
+    {
+        if (line_out[i] < 0.0f) line_out[i] = 0.0f;
+        if (line_out[i] > 1.0f) line_out[i] = 1.0f;
+    }
+    if (nb_pixels_out) *nb_pixels_out = (out_px > 0 ? out_px : max_pixels);
+    return mixed;
+}
