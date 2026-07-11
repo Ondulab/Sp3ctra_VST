@@ -360,7 +360,7 @@ joue avec les réglages exacts de la source, indépendant. Vérif interactive du
 Validation : retrait/ré-ajout d'un Pitch réglé → restauré (parité) ; idem VideoScroll et OUT
 (nouveau) ; 2 Pitch sur 2 chains indépendants ; déplacement inter-chain conserve les réglages.
 
-## J4 — Presets de chain `.sp3chain`
+## J4 — Presets de chain `.sp3chain` — ✅ FAIT (2026-07-11, non testé UI)
 
 - Format XML ValueTree lisible : `<SP3CHAIN version name synthSplitVersion chainsSchema>` +
   `<CHAIN>` avec `<MODULE type><VALUES/></MODULE>` — sans UUIDs (régénérés), sans slots
@@ -382,7 +382,25 @@ Validation : retrait/ré-ajout d'un Pitch réglé → restauré (parité) ; idem
 Validation : save → New session → load → XML identique ; pool plein → dialogue + chain partielle ;
 load pendant lecture → 0 xrun.
 
-## J5 — Stabilité automation DAW / MIDI
+**État réel (2026-07-11).** `ui/ChainPresetIO.h` (header-only, pas de .cpp) : `makePresetTree`
+(MODULE+VALUES et MEMORY de la chain, sans uuids/slots), `saveToFile` (TemporaryFile atomique,
+`XmlElement::writeTo` renvoie void — vérifier `getStatus()` du stream, pas le writeTo),
+`loadFromFile` (racine SP3CHAIN + enfant CHAIN exigés). Processeur : `saveChainPreset`
+(snapshot d'abord — le preset porte l'état LIVE), `loadChainPreset(preset, target)` (−1 = new
+chain ; refus au cap 8) : **`snapshotBankValuesIntoModel()` AVANT toute mutation** (sinon la
+projection finale reverse les réglages non sauvés des AUTRES chains), oldSlot par type via
+`bankSlotForModule` sur l'ancienne composition, clear modules+typeMemory, MEMORY → typeMemory
+(prop `type` retirée), MODULE → `chainModel_.insert` (échec → `skipped`, jamais atomique),
+VALUES `createCopy()`, pré-seed slot : pooled → `modulePoolSlots_[id]={oldSlot,type}` (survit à
+`updateModulePoolBindings` car l'uuid est vivant ; l'ancien binding pruné marque le slot stale →
+reset pool différé, la projection ré-applique par-dessus), slotted → `mi.slot=oldSlot`
+(collisions guéries par `validateAndRepair`). Rack : items 2/3/4 du menu header J3, flows
+`savePresetFlow`/`loadPresetFlow`, dossier par défaut `~/Documents/Sp3ctra Chain Presets`,
+`presetChooser_` membre (doit survivre au callback async), messages `Sp3ctraDialog` en
+`.toRawUTF8()` sur String nommée (signatures `const char*`). RESTE : test UI utilisateur
+(save/load into/load as new, récap skipped, automation qui survit).
+
+## J5 — Stabilité automation DAW / MIDI — ✅ replié dans J4 (pré-seed), limite documentée
 
 Les params automatables restent les banques par slot ; recharger un preset peut réassigner N.
 Politique : *Load into this chain* pré-seed `modulePoolSlots_[nouveauUuid] = ancienSlot` pour les
