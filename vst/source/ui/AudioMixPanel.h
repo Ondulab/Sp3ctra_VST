@@ -166,10 +166,15 @@ public:
                 if (s.led) s.led->setVisible(false);
             miniMaster.setVisible(true);
 
-            const int w = getWidth();
+            // Fader capped to a strip-like height and anchored at the bottom
+            // of the band (where AUDIO MIX lives expanded) — a full-window
+            // track reads as broken.
+            const int w  = getWidth();
             const int vuW = 6;
-            miniVuArea = { w - vuW - 1, 4, vuW, getHeight() - 8 };
-            miniMaster.setBounds(0, 4, juce::jmax(10, w - vuW - 2), getHeight() - 8);
+            const int fh = juce::jlimit(10, kMiniFaderMaxH, getHeight() - 8);
+            const int fy = getHeight() - 4 - fh;
+            miniVuArea = { w - vuW - 1, fy, vuW, fh };
+            miniMaster.setBounds(0, fy, juce::jmax(10, w - vuW - 2), fh);
             return;
         }
 
@@ -233,6 +238,7 @@ public:
 
 private:
     static constexpr int kHeaderH = 24;
+    static constexpr int kMiniFaderMaxH = 180;   // mini MASTER fader cap
 
     //── Power LED — same visual language as the rack block dot ───────────────
     struct LedButton : juce::ToggleButton
