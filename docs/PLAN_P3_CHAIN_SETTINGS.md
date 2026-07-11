@@ -328,7 +328,20 @@ d'une instance avant tout pkill — l'user travaille dessus en continu.
 Règle définitive : knob/automation → banque uniquement ; banque → tree aux snapshots
 (save, retrait/déplacement) ; tree → banque aux projections (load, ajout héritant, preset).
 
-## J3 — Cycle de vie : la chain mémorise, INSERT_MEMORY subsumé
+## J3 — Cycle de vie : la chain mémorise, INSERT_MEMORY subsumé — ✅ FAIT (27fd7d9)
+
+Statut : implémenté, build vert, smoke OK. `Chain::typeMemory` (trees VALUES par
+type, Enabled exclu) remplace insertParamMemory_ et couvre désormais TOUS les types
+du manifest (VideoScroll/OUT/Sampler n'avaient AUCUNE mémoire de chaîne) ; sérialisé
+en enfants MEMORY du nœud CHAIN ; INSERT_MEMORY plus jamais écrit, migration de
+lecture one-shot APRÈS loadChainModelFromState (les MEMORY v3 gagnent). Nouvelle
+instance = reset défauts → héritage chain → Enabled ON (généralisé, y compris OUT :
+un send fraîchement posé part des défauts du banc — comportement doctrine).
+**Duplication de chaîne** : clic droit sur l'en-tête → « Duplicate chain » —
+deep-copy (UUIDs neufs, VALUES + mémoire), validateAndRepair droppe l'indéductible
+(singletons/pools épuisés), snapshot préalable + projection post-édit ⇒ le duplicata
+joue avec les réglages exacts de la source, indépendant. Vérif interactive du menu
+à faire à la main.
 
 - Mémoire par chain, par type, **dans le tree de la chain** (`<TYPE_MEMORY>`), étendue à TOUS les
   types du manifest (aujourd'hui limitée aux 5 pooled inserts — VideoScroll et OUT n'ont aucune
