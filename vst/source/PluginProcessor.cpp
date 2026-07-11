@@ -4426,7 +4426,8 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
     for (int c = 0; c < plan.num_chains && c < CHAIN_MAX_CHAINS; ++c)
     {
         const auto& ch = chainModel_.chains[(size_t) c];
-        bool hasOut = false, hasProbe = false, hasVizTarget = false;
+        bool hasOut = false, hasProbe = false, hasVizTarget = false,
+             hasPlayer = false;
         for (const auto& m : ch.modules)
         {
             if (m.type == ModuleType::LuxStral || m.type == ModuleType::LuxSynth
@@ -4435,10 +4436,13 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
             if (m.type == ModuleType::VideoScroll
                 && m.slot >= 0 && m.slot < CHAIN_MAX_CHAINS)
                 hasProbe = true;
+            if (m.type == ModuleType::Sampler || m.type == ModuleType::Score
+                || m.type == ModuleType::Timbre)
+                hasPlayer = true;   // mod-bus owner candidate (REC/relay hooks)
             if (m.id == vizTapModuleId_)
                 hasVizTarget = true;   // selection tap lives in this chain
         }
-        if (! (hasOut || hasProbe || hasVizTarget))
+        if (! (hasOut || hasProbe || hasVizTarget || hasPlayer))
             continue;   // present stays 0 — nothing observes this chain
 
         fillFromChain(plan.chain[c], c, (int) ch.modules.size());
