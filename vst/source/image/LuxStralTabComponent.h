@@ -108,9 +108,7 @@ public:
         AudioPanelUI::initKnob(stereoTempSlider);
         addAndMakeVisible(stereoTempSlider);
 
-        // Per-engine attachments (Volume / IMAGE / OSCILLATORS / STEREO) —
-        // bound to luxstral* (A) or luxstralB* (B) depending on the selected
-        // rack instance. StrokeForge below stays SHARED between engines.
+        // Engine attachments (Volume / IMAGE / OSCILLATORS / STEREO).
         bindEngineParams();
 
         // ── STROKEFORGE — blob detection (sliders) ──────────────────────────
@@ -311,33 +309,13 @@ public:
      *  shown (COLOR ⟺ Stereo, BLOB ⟺ StrokeForge) when a toggle flips. */
     std::function<void()> onVisualizerSourcesChanged;
 
-    /** Bind the per-engine controls to LuxStral A (0) or B (1) — fired by the
-     *  rack on selection (M8). Volume / IMAGE / OSCILLATORS / STEREO rebind to
-     *  the luxstral* / luxstralB* parameter sets; STROKEFORGE stays shared. */
-    void setEngineIndex(int idx)
-    {
-        idx = (idx == 1) ? 1 : 0;
-        if (idx == engineIndex_)
-            return;
-        engineIndex_ = idx;
-        bindEngineParams();
-        resized();               // place the recreated envelope editor
-        updateStereoEnablement();
-        updateStrokeForgeEnablement();
-        repaint();
-    }
-
-    int engineIndex() const noexcept { return engineIndex_; }
-
 private:
     Sp3ctraAudioProcessor& processor;
-    int engineIndex_ = 0;    // 0 = LuxStral A (luxstral*), 1 = B (luxstralB*)
 
-    /** Per-engine parameter ID: "luxstral"+base (A) or "luxstralB"+base (B). */
+    /** Engine parameter ID: "luxstral"+base. */
     juce::String pid(const char* base) const
     {
-        return (engineIndex_ == 1 ? juce::String("luxstralB")
-                                  : juce::String("luxstral")) + base;
+        return juce::String("luxstral") + base;
     }
 
     /** (Re)create every per-engine attachment + the A/R envelope editor. */

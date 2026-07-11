@@ -61,6 +61,29 @@ int synth_staging_mix_luxstral(const ChainPlan* plan,
                                float* left_out, float* right_out,
                                float* contrast_out, int* stereo_valid_out);
 
+/* ── M4 — LuxSynth sends (conditioned LINE + raw RGB at the OUT position) ──
+ * Producers stage the send's conditioned grayscale line (luxsynth_condition_
+ * line, WITHOUT intensity) plus the raw RGB stream at the OUT marker (colour
+ * data for harmonicity). The engine-feed consumer (luxsynth_feed_tick, audio
+ * thread) pulls the intensity-weighted mix and runs ONE FFT. */
+void synth_staging_stage_luxsynth(int chain_idx, int bank_slot,
+                                  const float* line,
+                                  const uint8_t* r, const uint8_t* g,
+                                  const uint8_t* b, int nb_pixels);
+
+void synth_staging_luxsynth_set_inactive(int chain_idx);
+
+/* Consumer: mix every staged LuxSynth send of a chain whose plan recipe
+ * carries an OUT_LUXSYNTH marker. line_out = clamp01(Σ w·line_k), RGB =
+ * w-weighted average (harmonicity/colour). Returns the number of sends mixed
+ * (0 → silence). generation_out (may be NULL) receives a counter that changes
+ * whenever any contributing slot was restaged — cheap dirty check. */
+int synth_staging_mix_luxsynth(const ChainPlan* plan,
+                               float* line_out,
+                               uint8_t* r_out, uint8_t* g_out, uint8_t* b_out,
+                               int max_pixels, int* nb_pixels_out,
+                               uint32_t* generation_out);
+
 #ifdef __cplusplus
 }
 #endif

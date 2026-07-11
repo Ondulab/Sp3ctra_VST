@@ -162,11 +162,10 @@ int synth_init_thread_pool(LuxStralEngine *eng) {
     // Last worker handles all remaining notes (handles rounding)
     worker->end_note = (i == eng->num_workers - 1) ? current_notes : (i + 1) * notes_per_thread;
 
-    // Phase-drift RNG stream — distinct per worker AND per engine so A/B
-    // never draw correlated detunes. Any nonzero seed works (xorshift32).
+    // Phase-drift RNG stream — distinct per worker so workers never draw
+    // correlated detunes. Any nonzero seed works (xorshift32).
     worker->rng_state = 0x9E3779B9u
-                      ^ ((uint32_t)(worker->start_note + 1) * 2654435761u)
-                      ^ ((eng == &g_luxstral_engine_b) ? 0xA5A5A5A5u : 0u);
+                      ^ ((uint32_t)(worker->start_note + 1) * 2654435761u);
     if (worker->rng_state == 0) worker->rng_state = 1;
     worker->min_target_volume = 1.0f;   // resting-bed tracker (drained per buffer)
 
@@ -331,10 +330,7 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
 
   // ✅ OPTIMIZATION: Hoist invariant calculations and improve cache locality
   const int audio_buffer_size = g_sp3ctra_config.audio_buffer_size;
-  // Per-engine stereo flag (M8): engine B has its own Stereo toggle.
-  const int stereo_enabled = (worker->engine == &g_luxstral_engine_b)
-      ? g_sp3ctra_config.luxstral_b_stereo_mode_enabled
-      : g_sp3ctra_config.stereo_mode_enabled;
+  const int stereo_enabled = g_sp3ctra_config.stereo_mode_enabled;
   // Volume weighting: FIXED exponent 2 — thread_sumVolumeBuffer accumulates
   // the physical energy Σa² required by the RMS ceiling (rms_ceiling_gain in
   // synth_luxstral.c, BOTH modes). The old user exponent fed the retired
@@ -619,15 +615,10 @@ void synth_precompute_wave_data(LuxStralEngine *eng, float *imageData, DoubleBuf
   uint64_t wait_us = (uint64_t)(sec_diff * 1000000LL + usec_diff);
   rt_profiler_mutex_lock_end(&g_rt_profiler, wait_us);
   
-  // Per-engine stereo flag (M8): engine B has its own Stereo toggle, and its
-  // pan data comes from ITS pipeline config (cfg_b.stereo_enabled matches).
-  const int eng_stereo_enabled = (eng == &g_luxstral_engine_b)
-      ? g_sp3ctra_config.luxstral_b_stereo_mode_enabled
-      : g_sp3ctra_config.stereo_mode_enabled;
+  const int eng_stereo_enabled = g_sp3ctra_config.stereo_mode_enabled;
 
-  // StrokeForge morph is per-frame, per-engine data (M8): snapshot this db's
-  // analysed morph under the mutex; workers read eng->sf_morph (the global
-  // g_waveform_morph would leak the LAST pipeline call's frame across engines).
+  // StrokeForge morph is per-frame data: snapshot this db's analysed morph
+  // under the mutex; workers read eng->sf_morph.
   eng->sf_morph = db->preprocessed_data.strokeforge.morph;
 
   // Copy all preprocessed data for all workers in one shot
@@ -899,7 +890,4 @@ static void synth_shutdown_thread_pool_impl(LuxStralEngine *eng) {
  */
 void synth_shutdown_thread_pool(void) {
   synth_shutdown_thread_pool_impl(&g_luxstral_engine_a);
-  // M8 — engine B (no-op if its pool never initialised)
-  if (g_luxstral_engine_b.pool_initialized)
-    synth_shutdown_thread_pool_impl(&g_luxstral_engine_b);
 }

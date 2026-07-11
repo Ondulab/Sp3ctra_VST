@@ -30,18 +30,12 @@ public:
      *  the zone-3 viewport scrolls). Enable row removed (−47 px). */
     static constexpr int kPreferredH = 505;
 
-    /** Bind the SETUP face to LuxStral A (0) or B (1) — fired by the rack on
-     *  selection (M8). Soft Limit rebinds to the engine's own params; Tuning /
-     *  Physiological / StrokeForge-blob settings are SHARED and labelled so. */
-    void setEngineIndex(int idx);
-
     void paint(juce::Graphics&) override;
     void resized() override;
 
 private:
     juce::AudioProcessorValueTreeState& apvts;
     juce::Colour accent;
-    int engineIndex_ = 0;    // 0 = LuxStral A (luxstral*), 1 = B (luxstralB*)
 
     // Section: Musical Tuning
     juce::Label tuningRangeSectionLabel;

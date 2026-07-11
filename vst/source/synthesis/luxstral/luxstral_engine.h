@@ -53,13 +53,10 @@ typedef struct LuxStralEngine {
   float *grayScale_live;      /* live grayscale input (normalized float [0,1]) */
   float *processed_grayScale; /* data passed to synth_IfftMode                 */
 
-  /* ===== Per-oscillator state (M8 — dual-engine) ============================ */
+  /* ===== Per-oscillator state ============================================== */
   /* Per-engine oscillator array. Holds MUTABLE runtime state (phase_acc,
-   * current_volume, target_volume) advanced every frame — it MUST be private to
-   * each engine or two engines corrupt each other's phase/envelope (robotic
-   * artefacts). Engine A points at the historical global waves[]; engine B owns
-   * its own copy (same static timbre: frequency/phase_inc/coeffs). See
-   * synth_luxstral_init_engine_b(). Workers read it via worker->engine->waves.  */
+   * current_volume, target_volume) advanced every frame. Points at the
+   * historical global waves[]. Workers read it via worker->engine->waves.      */
   volatile struct wave *waves;
 
   /* ===== Phase management (auto-calibrated onset gate) ====================== */
@@ -96,29 +93,22 @@ typedef struct LuxStralEngine {
 #endif
   _Atomic int use_barriers;            /* Enabled by default (set to 1 at def) */
 
-  /* ===== Output publish target (de-globalised, M8 — dual engine A/B) ======= */
-  /* Where synth_AudioProcess publishes its final stereo result. Engine A points
-   * at the historical globals (luxstral_buffers_L/R + luxstral_buffer_index);
-   * engine B points at its own second set. Kept as opaque pointers so the heavy
-   * vst_adapters header stays out of this widely-included struct - cast to
-   * AudioImageBuffer (and volatile int) in synth_luxstral.c.                    */
+  /* ===== Output publish target (de-globalised) ============================= */
+  /* Where synth_AudioProcess publishes its final stereo result — the historical
+   * globals (luxstral_buffers_L/R + luxstral_buffer_index). Kept as opaque
+   * pointers so the heavy vst_adapters header stays out of this widely-included
+   * struct - cast to AudioImageBuffer (and volatile int) in synth_luxstral.c.   */
   void         *out_L;       /* AudioImageBuffer[2] */
   void         *out_R;       /* AudioImageBuffer[2] */
   volatile int *out_index;   /* publish double-buffer index */
-  /* Buffer slot the last frame was written to. When synth_AudioProcess_impl is
-   * called with commit_now = 0 (dual-engine A+B), it records the slot here and
-   * defers the index flip so the caller can publish A and B with two ADJACENT
-   * atomic stores — eliminating the A-published/B-not window that otherwise
-   * duplicates/skips whole B frames (robotic artefact). */
+  /* Buffer slot the last frame was written to (deferred index flip support in
+   * synth_AudioProcess_impl). */
   int           last_write_index;
   /* Source-type gating override: -1 = use the global luxstral_source_type
-   * (engine A, exact legacy behaviour); otherwise a fixed value (engine B reads
-   * its OWN DoubleBuffer which it fully controls, so it accepts either → 2).   */
+   * (exact legacy behaviour); otherwise a fixed value. */
   int           source_type_override;
-  /* StrokeForge waveform-morph snapshot for THIS engine's current frame (M8).
-   * Copied from the engine's DoubleBuffer in synth_precompute_wave_data();
-   * workers read it instead of the global g_waveform_morph (which holds the
-   * LAST pipeline call's frame -> cross-talk between engines A and B).         */
+  /* StrokeForge waveform-morph snapshot for THIS engine's current frame.
+   * Copied from the engine's DoubleBuffer in synth_precompute_wave_data().     */
   float         sf_morph;
 
   /* ===== Freeze / display state ============================================ */
@@ -154,41 +144,8 @@ typedef struct LuxStralEngine {
 
 /* Exported variables --------------------------------------------------------*/
 
-/* Engine A (M3 phase A). Shares the read-only waves[]/sine-table/runtime-config
- * with engine B — see synth_luxstral_init_engine_b().                         */
+/* The LuxStral engine (single instance since the P3 mix-pull migration). */
 extern LuxStralEngine g_luxstral_engine_a;
-
-/* Engine B (M8 — dual-engine). Independent DSP buffers, worker pool and output
- * target; reads its OWN chain's input from a second DoubleBuffer. It shares the
- * read-only waves[]/config with A (Option A: independent input, shared timbre).*/
-extern LuxStralEngine g_luxstral_engine_b;
-
-/* Per-instance init for engine B: allocates imageRef + inits the synth mutex
- * ONLY. The global waves[]/sine-table/runtime-config were already set up once
- * by synth_IfftInit() for engine A and must not be re-run. The worker pool, RT
- * output buffers and grayscale staging self-initialise lazily on first render.
- * Safe to call once, after synth_IfftInit(). Returns 0 on success.            */
-int32_t synth_luxstral_init_engine_b(void);
-
-/* M8 — recompute engine B's envelope coefficients from its OWN Attack/Release
- * params (luxstral_b_tau_*). Safe no-op before engine B is initialised.      */
-void synth_luxstral_update_engine_b_envelope(void);
-
-/* M8 — after a frequency hot-reload regenerated the global waves[] (engine A),
- * re-copy the shared static timbre into engine B's private array (preserving
- * B's dynamic state) and re-derive B's envelope coefficients.                 */
-void synth_luxstral_resync_engine_b_timbre(void);
-
-/* Render one frame on engine B, publishing to its own output buffers. Mirrors
- * synth_AudioProcess() but for g_luxstral_engine_b + its own DoubleBuffer.     */
-void synth_AudioProcess_b(uint8_t *buffer_R, uint8_t *buffer_G,
-                          uint8_t *buffer_B, struct DoubleBuffer *db);
-
-/* Render BOTH engines and publish them atomically (adjacent index flips) — use
- * this instead of separate synth_AudioProcess()/_b() calls whenever engine B is
- * active, so the consumer never sees A's new frame paired with B's stale one. */
-void synth_AudioProcess_ab(uint8_t *buffer_R, uint8_t *buffer_G, uint8_t *buffer_B,
-                           struct DoubleBuffer *db_a, struct DoubleBuffer *db_b);
 
 /* Public accessors for external consumers ------------------------------------
  * These wrap the display buffers of g_luxstral_engine_a so external files

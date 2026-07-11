@@ -70,13 +70,6 @@ void synth_IfftMode(float *imageData, float *audioLeft, float *audioRight, float
 void synth_luxstral_cleanup(void);
 
 /**
- * @brief True once engine B's private state (oscillator clone…) is initialised.
- * @note  Drives audioProcessingThread's lazy engine-B init — survives (and is
- *        re-armed by) a full core teardown, unlike a function-local static.
- */
-int synth_luxstral_engine_b_ready(void);
-
-/**
  * @brief Get the last calculated contrast factor (thread-safe)
  * @return Last contrast factor value (0.0-1.0 range typically)
  * @note Used by auto-volume system to detect audio intensity for adaptive thresholding
@@ -85,7 +78,7 @@ float synth_get_last_contrast_factor(void);
 
 /**
  * @brief Cumulative phase-management onset count (thread-safe, monotonic)
- * @param engine_idx 0 = engine A, 1 = engine B
+ * @param engine_idx must be 0 (single engine)
  * @note Polled by the LUXSTRAL page timer: a growing value between two polls
  *       lights the activity LED next to the phase-mode combo.
  */

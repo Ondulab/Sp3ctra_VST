@@ -442,7 +442,6 @@ private:
     // -1 = no buffer consumed yet (startup)
     int lastConsumedReadIdx = -1;
     int lastConsumedReadIdxLuxSynth = -1;
-    int lastConsumedReadIdxLuxstralB = -1;   // M8 — 2nd LuxStral engine consumer
     // pixels_per_note used during the last synth_IfftInit() call.
     // If it changes on SR switch (e.g. 96kHz→48kHz: ppn 4→2), the waves[]
     // array must be reallocated via synth_luxstral_cleanup() + synth_IfftInit().
@@ -602,8 +601,6 @@ private:
     std::atomic<float>* acqGateSyncDivParam         = nullptr;
     std::atomic<float>* acqGateMultDivParam         = nullptr;
     std::atomic<float>* luxstralVolumeParam         = nullptr;
-    std::atomic<float>* luxstralBEnabledParam       = nullptr;
-    std::atomic<float>* luxstralBVolumeParam        = nullptr;
 
     // CC1 mod-wheel targets driven from processBlock (setValueNotifyingHost):
     // cached to avoid the juce::String built by apvts.getParameter("literal").
@@ -639,9 +636,8 @@ private:
     // previously-used slot must not inherit the removed instance's parameter
     // bank / automation values (see teardownAbsentModules).
     std::map<int, juce::Uuid> videoScrollSlotIds_;
-    // LuxStral engines (0 = A, 1 = B) present last edit — diffed so each engine's
-    // enable param (A = deviceEnabled, B = luxstralBEnabled) follows ITS OWN
-    // placement, not type-level presence.
+    // LuxStral send slots present last edit — diffed so the engine enable
+    // (deviceEnabled) follows the presence of ANY "→ LUXSTRAL" send.
     std::set<int>        luxstralEngines_;
     // Stable MODULE-INSTANCE → pool-slot binding (Pitch/Mask/Reverb/Echo),
     // keyed by the ModuleInstance UUID. A module keeps its pool slot for its
@@ -696,9 +692,6 @@ private:
     std::atomic<uint32_t> chainReverbMask_ { 0 };
     std::atomic<uint32_t> chainEchoMask_   { 0 };
     std::atomic<uint32_t> chainEqMask_     { 0 };
-    // M8 — true when a 2nd LuxStral engine (slot B) is placed in the model; gates
-    // the additive engine-B mix in processBlock(). Set in deriveChainRouting().
-    std::atomic<bool>     luxstralBPresent_ { false };
 
     // ── UI VU meters (AUDIO MIX) — written by processBlock only ─────────────
     // Per-block peak accumulators (RT thread locals, folded + reset each block)
@@ -810,6 +803,10 @@ private:
     uint32_t pendingEchoResets_       { 0 };
     uint32_t pendingEqResets_         { 0 };
     uint32_t pendingVideoScrollInits_ { 0 };
+    // M3 — chain slots whose "→ LUXSTRAL" send disappeared: their staging must
+    // go inactive (silence) once the in-flight frame is done.
+    uint32_t pendingStagingResets_    { 0 };
+    uint32_t prevLsSendChains_        { 0 };
     uint32_t poolResetArmedMs_        { 0 };
 
     JUCE_DECLARE_WEAK_REFERENCEABLE (Sp3ctraAudioProcessor)

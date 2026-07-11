@@ -80,22 +80,12 @@ sp3ctra_config_t g_sp3ctra_config = {
     .soft_limit_threshold = 0.8f,                // Start soft limit at 80%
     .soft_limit_knee = 0.2f,                     // Smooth transition
 
-    // LuxStral engine B (M8 dual-engine) — same defaults as engine A
-    .luxstral_b_inversion = 1,
-    .luxstral_b_ac_removal = 1,
-    .luxstral_b_gamma_value = 1.0f,
-    .luxstral_b_contrast_min = 0.21f,
-    .luxstral_b_tau_up_base_ms = 0.5f,
-    .luxstral_b_tau_down_base_ms = 0.5f,
-    .luxstral_b_summation_response_exponent = 2.0f,
-    .luxstral_b_noise_gate_threshold = 0.005f,
-    .luxstral_b_stereo_mode_enabled = 1,
-    .luxstral_b_stereo_temperature_amplification = 2.5f,
-    .luxstral_b_soft_limit_threshold = 0.8f,
-    .luxstral_b_soft_limit_knee = 0.2f,
-
     // Inverse-dB decode law (always on) — encoder dB window
     .luxstral_db_decode_range_db = 50.0f,  // = SCORE_DEFAULT_DYNAMIC_RANGE_DB
+
+    // M4 — core-side LuxSynth engine feed (mirrors lxFftBins/lxFftSmoothing)
+    .lx_fft_bins_choice = 2,               // 128 harmonics (param default)
+    .lx_fft_smoothing   = 0.3f,            // param default
 
     // Per-OUT conditioning banks (synth-split P1) — unity defaults so the
     // pipeline is sane before the first applyConfigurationToCore() sync.

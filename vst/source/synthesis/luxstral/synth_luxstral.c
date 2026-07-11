@@ -60,27 +60,16 @@ LuxStralEngine g_luxstral_engine_a = {
     .source_type_override = -1,           /* use global luxstral_source_type */
 };
 
-/* Engine B (M8 — dual-engine). Independent DSP/worker/output; publishes to its
- * own second buffer set and reads its own DoubleBuffer (so it accepts either
- * source tag → source_type_override = 2). Shares read-only waves[]/config. */
-LuxStralEngine g_luxstral_engine_b = {
-    .use_barriers = 1,
-    .out_L = luxstral_b_buffers_L,
-    .out_R = luxstral_b_buffers_R,
-    .out_index = &luxstral_b_buffer_index,
-    .source_type_override = 2,
-};
-
-/* Phase-management activity counters (UI LED) — cumulative onsets per engine
- * (0 = A, 1 = B). Each engine's producer thread adds in the drain block; the
- * LUXSTRAL page timer polls via synth_luxstral_get_phase_onset_total() and
- * lights the LED on deltas. Monotonic, wraps harmlessly. */
-static _Atomic uint32_t g_phase_onset_total[2];
+/* Phase-management activity counter (UI LED) — cumulative onsets. The
+ * producer thread adds in the drain block; the LUXSTRAL page timer polls via
+ * synth_luxstral_get_phase_onset_total() and lights the LED on deltas.
+ * Monotonic, wraps harmlessly. */
+static _Atomic uint32_t g_phase_onset_total[1];
 
 uint32_t synth_luxstral_get_phase_onset_total(int engine_idx) {
-  if (engine_idx < 0 || engine_idx > 1)
+  if (engine_idx != 0)
     return 0;
-  return atomic_load_explicit(&g_phase_onset_total[engine_idx],
+  return atomic_load_explicit(&g_phase_onset_total[0],
                               memory_order_relaxed);
 }
 
@@ -124,23 +113,8 @@ static void synth_luxstral_cleanup_impl(LuxStralEngine *eng) {
 // Public wrapper (registered via atexit; called by Sp3ctraSharedCore)
 void synth_luxstral_cleanup(void) {
   synth_luxstral_cleanup_impl(&g_luxstral_engine_a);
-  synth_luxstral_cleanup_impl(&g_luxstral_engine_b);   // M8 — free engine B too
-  // Engine B OWNS its oscillator array (private clone malloc'd in
-  // synth_luxstral_init_engine_b); engine A only BORROWS the runtime's global
-  // waves[] (freed by synth_runtime_free_buffers) — never free that one here.
-  // NULLing it also re-arms the lazy engine-B init after a full core teardown
-  // + restart in the same DAW process (see synth_luxstral_engine_b_ready).
-  if (g_luxstral_engine_b.waves) {
-    free((void *)g_luxstral_engine_b.waves);   /* cast: waves is volatile-qualified */
-    g_luxstral_engine_b.waves = NULL;
-  }
-}
-
-// M8 — true once engine B's private state (oscillator clone…) is initialised.
-// Used by audioProcessingThread's lazy init: a function-local static flag
-// survived a core teardown and skipped re-initialisation on the next start.
-int synth_luxstral_engine_b_ready(void) {
-  return g_luxstral_engine_b.waves != NULL;
+  // The engine only BORROWS the runtime's global waves[] (freed by
+  // synth_runtime_free_buffers) — never free it here.
 }
 
 /* Public functions ----------------------------------------------------------*/
@@ -348,17 +322,9 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
     // === OPTIMIZED VERSION WITH THREAD POOL ===
 
     // HOT-RELOAD CHECK: Process pending frequency reinit BEFORE workers start
-    // This is safe because workers are waiting on start_barrier.
-    // ONLY engine A: check_and_process_frequency_reinit() mutates the GLOBAL waves[]
-    // (engine A's array). Running it from engine B would regenerate/zero A's phases
-    // mid-flight (a robotic glitch on A during a hot-reload). When a reinit DID
-    // happen, resync engine B's static timbre from the fresh table (tuning/root/
-    // physiological are SHARED between engines) while preserving B's own dynamic
-    // state and its own envelope coefficients.
-    if (eng == &g_luxstral_engine_a) {
-      if (check_and_process_frequency_reinit())
-        synth_luxstral_resync_engine_b_timbre();
-    }
+    // This is safe because workers are waiting on start_barrier
+    // (check_and_process_frequency_reinit() mutates the GLOBAL waves[]).
+    check_and_process_frequency_reinit();
 
     // Phase 1: Pre-compute data in single-thread (avoids contention)
     synth_precompute_wave_data(eng, imageData, db);
@@ -382,9 +348,8 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
      *  3. onset totals feed the UI activity LED (atomic, polled by the
      *     LUXSTRAL page timer) and a ~5 s log line.                        */
     if (g_sp3ctra_config.luxstral_phase_mode != LUXSTRAL_PHASE_MODE_FREE) {
-      const int ei = (eng == &g_luxstral_engine_b) ? 1 : 0;
-      static uint32_t rst_acc[2];   /* per-engine — each engine's producer
-                                       thread only touches its own index */
+      const int ei = 0;
+      static uint32_t rst_acc[2];
       static uint32_t burst_max[2]; /* peak resets in a SINGLE buffer: the
                                        flanger comb needs COLLECTIVE alignment
                                        (a whole band resetting together);
@@ -541,18 +506,9 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
     const float base_gain  = LUXSTRAL_RMS_BASE_GAIN;
     const float chain_gain = LUXSTRAL_RMS_BASE_GAIN * LUXSTRAL_SUM_SAFETY_SCALE;
 
-    // Per-engine DSP knobs (M8): engine B reads its own luxstral_b_* config
-    // mirror; engine A keeps the legacy global fields (behaviour unchanged).
-    const int is_engine_b = (eng == &g_luxstral_engine_b);
-    const float soft_limit_threshold = is_engine_b
-        ? g_sp3ctra_config.luxstral_b_soft_limit_threshold
-        : g_sp3ctra_config.soft_limit_threshold;
-    const float soft_limit_knee = is_engine_b
-        ? g_sp3ctra_config.luxstral_b_soft_limit_knee
-        : g_sp3ctra_config.soft_limit_knee;
-    const int stereo_enabled = is_engine_b
-        ? g_sp3ctra_config.luxstral_b_stereo_mode_enabled
-        : g_sp3ctra_config.stereo_mode_enabled;
+    const float soft_limit_threshold = g_sp3ctra_config.soft_limit_threshold;
+    const float soft_limit_knee      = g_sp3ctra_config.soft_limit_knee;
+    const int   stereo_enabled       = g_sp3ctra_config.stereo_mode_enabled;
 
     for (buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
         // ONE gain implementation for mono AND stereo: linear below the RMS
@@ -744,9 +700,9 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
     log_error("SYNTH", "One of the input buffers is NULL");
     return;
   }
-  /* De-globalised output target (M8): engine A → global luxstral_buffers,
-   * engine B → its own second set. Cast here to keep the heavy vst_adapters
-   * header out of the widely-included engine struct. */
+  /* De-globalised output target: the global luxstral_buffers. Cast here to
+   * keep the heavy vst_adapters header out of the widely-included engine
+   * struct. */
   AudioImageBuffer *obL   = (AudioImageBuffer*)eng->out_L;
   AudioImageBuffer *obR   = (AudioImageBuffer*)eng->out_R;
   volatile int     *obIdx = eng->out_index;
@@ -865,9 +821,7 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
 #endif
     {
       PreprocessedImageData preprocessed_temp;
-      PipelineConfig fallback_cfg = (eng == &g_luxstral_engine_b)
-                                        ? pipeline_build_config_luxstral_b()
-                                        : pipeline_build_config_live();
+      PipelineConfig fallback_cfg = pipeline_build_config_live();
       if (pipeline_process_frame(buffer_R, buffer_G, buffer_B, &fallback_cfg, &preprocessed_temp) == 0) {
         memcpy(eng->grayScale_live, preprocessed_temp.additive.grayscale,
                nb_pixels * sizeof(float));
@@ -1008,8 +962,7 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
   __atomic_store_n(&obR[index].ready, 1, __ATOMIC_RELEASE);
   // pthread_cond_signal removed - RT callback polls atomically
 
-  // Record the written slot. Publish now (single engine) or DEFER the flip so the
-  // dual-engine caller can publish A and B with two adjacent stores (see below).
+  // Record the written slot, then publish the flip.
   eng->last_write_index = index;
   if (commit_now)
     __atomic_store_n(obIdx, 1 - index, __ATOMIC_RELEASE);
@@ -1019,121 +972,6 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
 void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
                         uint8_t *buffer_B, DoubleBuffer *db) {
   synth_AudioProcess_impl(&g_luxstral_engine_a, buffer_R, buffer_G, buffer_B, db, /*commit_now*/1);
-}
-
-// M8 — render engine B (dual-engine). Same entry as A but on g_luxstral_engine_b
-// + its own DoubleBuffer. Worker pool + RT output buffers self-init lazily.
-void synth_AudioProcess_b(uint8_t *buffer_R, uint8_t *buffer_G,
-                          uint8_t *buffer_B, DoubleBuffer *db) {
-  synth_AudioProcess_impl(&g_luxstral_engine_b, buffer_R, buffer_G, buffer_B, db, /*commit_now*/1);
-}
-
-// M8 — render BOTH LuxStral engines and publish them ATOMICALLY. Engine A and B
-// are synthesised first (flip deferred), then their output double-buffer indices
-// are flipped with two ADJACENT atomic stores. This closes the window where the
-// consumer would otherwise see engine A's new frame while engine B's is still the
-// previous one — that window (≈ engine B's whole synthesis time) is what
-// duplicated/skipped B frames and produced the robotic artefact. `db_a`/`db_b`
-// are each engine's own input DoubleBuffer.
-void synth_AudioProcess_ab(uint8_t *buffer_R, uint8_t *buffer_G, uint8_t *buffer_B,
-                           DoubleBuffer *db_a, DoubleBuffer *db_b) {
-  synth_AudioProcess_impl(&g_luxstral_engine_a, buffer_R, buffer_G, buffer_B, db_a, /*commit_now*/0);
-  synth_AudioProcess_impl(&g_luxstral_engine_b, buffer_R, buffer_G, buffer_B, db_b, /*commit_now*/0);
-  // Adjacent publish (≈ 2 instructions apart): both engines become visible at once.
-  __atomic_store_n(g_luxstral_engine_a.out_index,
-                   1 - g_luxstral_engine_a.last_write_index, __ATOMIC_RELEASE);
-  __atomic_store_n(g_luxstral_engine_b.out_index,
-                   1 - g_luxstral_engine_b.last_write_index, __ATOMIC_RELEASE);
-}
-
-// M8 — per-instance init for engine B. Runs ONLY the per-engine setup; the
-// global waves[]/sine-table/runtime-config were already initialised once by
-// synth_IfftInit() for engine A. Safe to call once, after synth_IfftInit().
-int32_t synth_luxstral_init_engine_b(void) {
-  LuxStralEngine *eng = &g_luxstral_engine_b;
-  if (eng->waves) return 0;   // already initialised
-
-  const int n = get_current_number_of_notes();
-
-  // Private oscillator array: clone engine A's (same static timbre — frequency,
-  // phase_inc, alpha coeffs, physiological_gain) then give it INDEPENDENT dynamic
-  // state (fresh random phase, zero volume) so the two engines never share the
-  // per-frame phase_acc/current_volume that would otherwise cause robotic artefacts.
-  struct wave *wb = (struct wave*)malloc((size_t)(n > 0 ? n : 1) * sizeof(struct wave));
-  if (!wb) { log_error("SYNTH", "Failed to allocate waves[] (engine B)"); return -1; }
-  memcpy(wb, (const void*)waves, (size_t)n * sizeof(struct wave));   // copy static timbre
-  for (int i = 0; i < n; i++) {
-#ifdef __APPLE__
-    uint32_t r = arc4random();
-#else
-    uint32_t r = (uint32_t)rand();
-#endif
-    wb[i].phase_acc      = (float)(r % (uint32_t)SINE_TABLE_SIZE);
-    wb[i].detune_offset  = 0.0f;   /* dynamic per-onset state, not timbre */
-    wb[i].current_volume = 0.0f;
-    wb[i].target_volume  = 0.0f;
-  }
-  eng->waves = wb;
-
-  // The clone above copied engine A's alpha_up/alpha_down_weighted — replace
-  // them with coefficients derived from B's OWN Attack/Release parameters.
-  synth_luxstral_update_engine_b_envelope();
-
-  eng->imageRef = (int32_t*)calloc(n > 0 ? n : 1, sizeof(int32_t));
-  if (!eng->imageRef) {
-    log_error("SYNTH", "Failed to allocate imageRef (engine B)");
-    return -1;
-  }
-  fill_int32(1000000, eng->imageRef, n);
-
-  if (pthread_mutex_init(&eng->synth_process_mutex, NULL) != 0) {
-    log_error("SYNTH", "Failed to init synth_process_mutex (engine B)");
-    return -1;
-  }
-
-  // Freeze/fade state (mutex + frozen buffer): synth_AudioProcess_impl locks
-  // eng->synth_data_freeze_mutex every frame — leaving it zero-initialised is UB.
-  synth_data_freeze_init_engine(eng);
-
-  log_info("SYNTH", "LuxStral engine B initialised (private oscillator array + state)");
-  return 0;
-}
-
-// M8 — recompute engine B's envelope coefficients from ITS OWN Attack/Release
-// parameters (luxstral_b_tau_*). Safe no-op before engine B is initialised.
-// Called from: engine B init, the luxstralBAttackMs/ReleaseMs parameter
-// listener, and the post-frequency-reinit timbre resync below.
-void synth_luxstral_update_engine_b_envelope(void) {
-  if (!g_luxstral_engine_b.waves) return;
-  update_gap_limiter_coefficients_for(g_luxstral_engine_b.waves,
-                                      g_sp3ctra_config.luxstral_b_tau_up_base_ms,
-                                      g_sp3ctra_config.luxstral_b_tau_down_base_ms);
-}
-
-// M8 — after a frequency hot-reload regenerated the GLOBAL waves[] (engine A),
-// re-copy the shared static timbre (frequency, phase_inc, physiological gain…)
-// into engine B's private array so both engines stay in tune. B's dynamic state
-// (phase_acc, volumes) is preserved, and B's envelope coefficients are re-derived
-// from B's own taus (the fresh table carries A's). Runs on the producer thread
-// while both engines' workers are idle — no locking needed.
-void synth_luxstral_resync_engine_b_timbre(void) {
-  LuxStralEngine *eng = &g_luxstral_engine_b;
-  if (!eng->waves || !waves) return;
-
-  const int n = get_current_number_of_notes();
-  for (int i = 0; i < n; i++) {
-    float pa = eng->waves[i].phase_acc;
-    float dt = eng->waves[i].detune_offset;   /* per-onset state, like phase_acc */
-    float cv = eng->waves[i].current_volume;
-    float tv = eng->waves[i].target_volume;
-    memcpy((void*)&eng->waves[i], (const void*)&waves[i], sizeof(struct wave));
-    eng->waves[i].phase_acc      = pa;
-    eng->waves[i].detune_offset  = dt;
-    eng->waves[i].current_volume = cv;
-    eng->waves[i].target_volume  = tv;
-  }
-  synth_luxstral_update_engine_b_envelope();
-  log_info("SYNTH", "Engine B timbre resynced after frequency reinit (%d notes)", n);
 }
 
 /**

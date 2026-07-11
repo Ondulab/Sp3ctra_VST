@@ -53,7 +53,14 @@ struct AudioImageBuffers;
                                             * it to the score playback frames */
 #define IMAGE_CHAIN_INSERT_LUXEQ       7   /* FX — graphic EQ on the pixel/frequency axis
                                             * (per-chain pool) */
-#define IMAGE_CHAIN_NUM_INSERTS        8
+/* OUT send markers (synth-split M3) — pass-through in image_chain_run; they
+ * locate each "→ ENGINE" module so the chain executor can tap the stream AT
+ * the send's position. insert_state_idx = the send's conditioning-bank slot
+ * (luxstral_out[]/luxsynth_out[]/luxwave_out[]). */
+#define IMAGE_CHAIN_INSERT_OUT_LUXSTRAL 8
+#define IMAGE_CHAIN_INSERT_OUT_LUXSYNTH 9
+#define IMAGE_CHAIN_INSERT_OUT_LUXWAVE  10
+#define IMAGE_CHAIN_NUM_INSERTS        11
 
 /* Chain order (APVTS param "chainInsertOrder"). */
 #define IMAGE_CHAIN_ORDER_PITCH_MASK 0   /* default — historical order */

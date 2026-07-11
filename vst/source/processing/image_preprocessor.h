@@ -86,6 +86,19 @@ typedef struct {
 /* Module cleanup */
 void image_preprocess_cleanup(void);
 
+/* M4 — LuxSynth per-send conditioning (steps 1-4 of preprocess_luxsynth):
+ * RGB → grayscale → Negative → DC blocking → Gamma, from the luxsynth_out
+ * bank `bank_slot`. WITHOUT the bank intensity — the mix applies it as the
+ * send weight. line_out must hold nb_pixels floats. */
+void luxsynth_condition_line(
+    const uint8_t *raw_r,
+    const uint8_t *raw_g,
+    const uint8_t *raw_b,
+    int bank_slot,
+    float *line_out,
+    int nb_pixels
+);
+
 /* LuxSynth synthesis preprocessing
  * Pipeline: RGB → Grayscale → Inversion (optional) → FFT (no gamma for linear response)
  */

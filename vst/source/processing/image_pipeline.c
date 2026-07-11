@@ -48,12 +48,11 @@ static uint64_t pipeline_get_timestamp_us(void)
 #define ENVELOPE_LIVE       0   /* Chain 1 — additive, live thread   */
 #define ENVELOPE_SAMPLER    1   /* Chain 1 — additive, sampler thread */
 #define ENVELOPE_CHAIN2     2   /* Chain 2 — polyphonic (LuxSynth) */
-#define ENVELOPE_LUXSTRAL_B 3   /* 2nd LuxStral engine — own held-frame state */
-#define ENVELOPE_LUXWAVE    4   /* LuxWave OUT — autonomous wavetable line (synth-split P1) */
+#define ENVELOPE_LUXWAVE    3   /* LuxWave OUT — autonomous wavetable line (synth-split P1) */
 /* Synth-split P3 — one held-frame state PER LuxStral SEND (chain-indexed):
  * N chains feed the engine mix concurrently, each send freezes/fades on its
  * own. BASE + chain_idx, CHAIN_MAX_CHAINS (8) states. */
-#define ENVELOPE_LS_SEND_BASE 5
+#define ENVELOPE_LS_SEND_BASE 4
 #define ENVELOPE_COUNT      (ENVELOPE_LS_SEND_BASE + 8)
 
 typedef struct {
@@ -281,31 +280,6 @@ PipelineConfig pipeline_build_config_live(void)
     /* Envelope identity: always LIVE for this builder, regardless of source routing */
     cfg.envelope_id = ENVELOPE_LIVE;
     cfg.live_regate = 1;
-
-    return cfg;
-}
-
-/* M8 — LuxStral engine B: the live config with engine B's OWN image/stereo
- * knobs (luxstral_b_* mirror of the luxstralB* APVTS params) and its OWN
- * envelope state. envelope_id != ENVELOPE_LIVE also means pipeline_path_luxstral
- * gates the freeze with cfg.freeze_mode (= image_freeze_mode, the Chain 2 /
- * live transport) instead of Chain 1's sampler_freeze_mode.                   */
-PipelineConfig pipeline_build_config_luxstral_b(void)
-{
-    PipelineConfig cfg = pipeline_build_config_live();
-
-    /* Synth-split P1: engine B's conditioning = per-OUT bank slot 1. */
-    const lux_out_params_t *out_b = &g_sp3ctra_config.luxstral_out[1];
-    cfg.luxstral_path.inversion  = out_b->negative;
-    cfg.luxstral_path.ac_removal = out_b->dc_blocking;
-    cfg.luxstral_path.gamma      = out_b->gamma;
-    cfg.contrast_min             = out_b->contrast_min;
-    cfg.luxstral_db_range        = out_b->range_db;
-    cfg.luxstral_intensity       = out_b->intensity;
-    cfg.stereo_enabled           = g_sp3ctra_config.luxstral_b_stereo_mode_enabled;
-    cfg.stereo_temp_amp          = g_sp3ctra_config.luxstral_b_stereo_temperature_amplification;
-    cfg.envelope_id              = ENVELOPE_LUXSTRAL_B;
-    cfg.live_regate              = 0;   /* B kept its cfg freeze (parity) */
 
     return cfg;
 }
