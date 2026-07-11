@@ -306,7 +306,16 @@ Nouveau `ui/ModuleParamManifest.h/.cpp` : table unique `ModuleType` → { builde
 SCORE/SEQ (non-APVTS). Listeners + migration legacy itèrent le manifest.
 Validation : dump des paramIDs identique avant/après ; sessions existantes sans diff.
 
-## J2 — CHAINS v3 : valeurs embarquées
+## J2 — CHAINS v3 : valeurs embarquées — ✅ FAIT (3422c49)
+
+Statut : implémenté, build vert, smoke OK. `ModuleInstance.values` (tree VALUES,
+suffixes du manifest → valeurs brutes), sérialisé par to/fromValueTree (schema v3) ;
+`snapshotBankValuesIntoModel()` dans getStateInformation avant la sérialisation ;
+`projectChainValuesToBanks()` après loadChainModelFromState (thread message, garde
+only-if-different — idempotent sur un blob v3, no-op sur pré-v3). **Round-trip
+complet (fermeture propre → réouverture) à confirmer à la prochaine vraie session**
+(SIGTERM ne sauve pas ; je ne pilote plus l'UI). NOTE opérationnelle : vérifier l'âge
+d'une instance avant tout pkill — l'user travaille dessus en continu.
 
 - `ModuleInstance` gagne un `ValueTree values` (`<VALUES suffix="raw">`) ; `kSchemaVersion = 3`.
 - `snapshotBankValuesIntoModel()` : lit `getRawParameterValue` (atomique) par module/suffixe —
