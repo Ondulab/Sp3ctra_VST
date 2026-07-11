@@ -2645,8 +2645,11 @@ void FramePlayerThread::injectWhiteFrame() noexcept
     // dataReady = 1) and do not require any action from injectWhiteFrame().
     if (doubleBuffer != nullptr)
     {
-        extern sp3ctra_config_t g_sp3ctra_config;
-        if (g_sp3ctra_config.luxstral_source_type == 0 /* IMAGE_SOURCE_SAMPLER */)
+        // M7 — plan-driven gates: the additive/pathB sections may only be
+        // silenced here when the player actually relays those paths.
+        const bool addOwned = chain_additive_player_candidate() != 0;
+        const bool pbOwned  = chain_pathb_player_candidate(0) != 0;
+        if (addOwned)
         {
             pthread_mutex_lock(&doubleBuffer->mutex);
             // Zero additive synthesis input — identical to multithreading.c silence branch.
@@ -2655,10 +2658,10 @@ void FramePlayerThread::injectWhiteFrame() noexcept
             std::memset(doubleBuffer->preprocessed_data.additive.notes, 0,
                         sizeof(doubleBuffer->preprocessed_data.additive.notes));
             doubleBuffer->preprocessed_data.additive.contrast_factor = 0.0f;
-            // FIX(silence): Also zero polyphonic.* when LuxSynth source is SAMPLER.
-            // Without this, LuxSynth keeps generating audio from the last played
-            // frame during STEP_EMPTY / rtStop / LoopMode::NONE end.
-            if (g_sp3ctra_config.luxsynth_source_type == 0 /* IMAGE_SOURCE_SAMPLER */)
+            // FIX(silence): Also zero polyphonic.* when its chain is
+            // sampler-relayed. Without this, LuxSynth keeps generating audio
+            // from the last played frame during STEP_EMPTY / rtStop / end.
+            if (pbOwned)
             {
                 std::memset(doubleBuffer->preprocessed_data.polyphonic.grayscale, 0,
                             sizeof(doubleBuffer->preprocessed_data.polyphonic.grayscale));
@@ -2666,17 +2669,16 @@ void FramePlayerThread::injectWhiteFrame() noexcept
                             sizeof(doubleBuffer->preprocessed_data.polyphonic.magnitudes));
                 doubleBuffer->preprocessed_data.polyphonic.valid = 0;
             }
-            doubleBuffer->dataReady = 2; /* sampler source tag — consumer gating intact */
+            doubleBuffer->dataReady = 1;
             pthread_mutex_unlock(&doubleBuffer->mutex);
 
             // Per-engine input taps (per-chain display): mirror the silence
             // injection above so the head panels show "unfed" (white) instead
-            // of the last playback frame. Same gating as the memsets: A always
-            // (Source=S), Path-B only when LuxSynth is also sampler-fed.
+            // of the last playback frame.
             audio_image_buffers_publish_engine_input(
                 audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
                 nullptr, nullptr, nullptr, nbPx);
-            if (g_sp3ctra_config.luxsynth_source_type == 0 /* IMAGE_SOURCE_SAMPLER */)
+            if (pbOwned)
                 audio_image_buffers_publish_engine_input(
                     audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
                     nullptr, nullptr, nullptr, nbPx);
@@ -3344,10 +3346,11 @@ void FramePlayerThread::run()
                 // At ramp=0 → effectiveSmpOp=0 → frame=white (silence).
                 // At ramp=1 → effectiveSmpOp=smpOp → normal brightness.
                 //
-                // Source-aware: when Source=S (pure sampler), bypass the MIX
-                // crossfader opacity — only the transport fade ramp applies.
-                // The crossfader balance (smpOp) is only meaningful in MIX mode.
-                const int srcType = g_sp3ctra_config.luxstral_source_type;
+                // Plan-aware (M7): when the additive path is sampler-relayed,
+                // bypass the MIX crossfader opacity — only the transport fade
+                // ramp applies. The crossfader balance (smpOp) is only
+                // meaningful for the legacy MIX blending.
+                const bool addRelayed = chain_additive_player_candidate() != 0;
                 // ── Module bypass ───────────────────────────────────────────────
                 // When the SAMPLER module is DISABLED in the chain rack, its player
                 // output must be IGNORED — but the players are NOT stopped. Forcing
@@ -3360,9 +3363,9 @@ void FramePlayerThread::run()
                 const bool moduleIgnored = (! isScore && ! sampler.isEnabled());
                 const float effectiveSmpOp = moduleIgnored
                     ? 0.0f
-                    : (srcType == 0 /* IMAGE_SOURCE_SAMPLER */ || isScore)
-                        ? transportFadeRamp_           // Source=S / Score: full opacity, fade only
-                        : smpOp * transportFadeRamp_;  // Source=M: crossfader × fade
+                    : (addRelayed || isScore)
+                        ? transportFadeRamp_           // relay/Score: full opacity, fade only
+                        : smpOp * transportFadeRamp_;  // legacy MIX: crossfader × fade
 
                 if (smpFreeze != 2) // Do not inject when sampler transport is STOP
                 {
@@ -3379,8 +3382,9 @@ void FramePlayerThread::run()
                     }
 
                     // 2. Darken-blend with live when live transport is active
-                    //    Skip entirely for Source=S and for the Score (no live contribution).
-                    if (srcType != 0 /* not IMAGE_SOURCE_SAMPLER */ && !isScore
+                    //    Skip entirely when the additive path is sampler-
+                    //    relayed and for the Score (no live contribution).
+                    if (!addRelayed && !isScore
                         && liveFreeze != 2 && liveOp > 0.001f)
                     {
                         uint8_t lvR[LuxSamplerConstants::MAX_PIXELS] {};
@@ -3459,14 +3463,18 @@ void FramePlayerThread::run()
             // causing stale audio while the visual animated correctly.
             // ---------------------------------------------------------------
             {
-                extern sp3ctra_config_t g_sp3ctra_config;
-                const int src = g_sp3ctra_config.luxstral_source_type;
+                // M7 — plan-driven ownership: the player writes the sections
+                // whose chains it actually relays (additive when a sampler
+                // sits on a "→ LUXSTRAL" chain; polyphonic when the
+                // "→ LUXSYNTH" chain is sampler/score-relayed).
+                const bool addOwned = chain_additive_player_candidate() != 0;
+                const bool pbOwned  =
+                    chain_pathb_player_candidate(isScore ? 1 : 0) != 0;
 
                 // Engine B feed happens ABOVE (step 2b), with the RAW player
                 // frame — before engine A's chain inserts are applied to work*.
 
-                if (doubleBuffer != nullptr
-                    && src == 0 /* IMAGE_SOURCE_SAMPLER */)
+                if (doubleBuffer != nullptr && (addOwned || pbOwned))
                 {
                     PreprocessedImageData ppData {};
                     PipelineConfig sampler_cfg = pipeline_build_config_sampler();
@@ -3480,40 +3488,33 @@ void FramePlayerThread::run()
                     {
                         ppData.timestamp_us = static_cast<uint64_t>(currentTimeUs());
                         pthread_mutex_lock(&doubleBuffer->mutex);
-                        // FIX(routing): Do NOT overwrite the entire preprocessed_data struct.
-                        // polyphonic.* (LuxSynth) may be fed by a different source (e.g. Live)
-                        // and must not be clobbered with sampler-derived data.
-                        // Only copy sections owned by the sampler/LuxStral path.
                         // Synth-split P3: with sends staged (s_playerSendCount
                         // > 0) the audio-thread MIXER owns the additive/stereo/
                         // strokeforge sections — commit only Path-B products.
-                        if (s_playerSendCount == 0)
+                        if (addOwned && s_playerSendCount == 0)
                         {
                             doubleBuffer->preprocessed_data.additive    = ppData.additive;
                             doubleBuffer->preprocessed_data.stereo      = ppData.stereo;
                             doubleBuffer->preprocessed_data.strokeforge = ppData.strokeforge;
                             doubleBuffer->preprocessed_data.timestamp_us = ppData.timestamp_us;
-                            doubleBuffer->dataReady = 2; /* 2 = sampler source tag */
+                            doubleBuffer->dataReady = 1;
                         }
                         doubleBuffer->preprocessed_data.photowave   = ppData.photowave;
-                        // Only update polyphonic if LuxSynth source is also SAMPLER.
-                        if (g_sp3ctra_config.luxsynth_source_type == 0 /* IMAGE_SOURCE_SAMPLER */)
+                        // Polyphonic only when the player relays the pb chain.
+                        if (pbOwned)
                             doubleBuffer->preprocessed_data.polyphonic = ppData.polyphonic;
                         pthread_mutex_unlock(&doubleBuffer->mutex);
 
-                        // Per-engine input taps (per-chain display): the player
-                        // owns A's preprocessed commit here (Source=MODULATED
-                        // while a slot plays — udpThread/feeder skip both the
-                        // commit and the tap). Publish the exact frame fed to
-                        // the pipeline above, post-marker inserts included, so
-                        // the head panels track the playback chain. Path-B tap
-                        // only when the player also owns the polyphonic commit.
+                        // Per-engine input taps (per-chain display): publish
+                        // the exact frame fed to the pipeline above, post-
+                        // marker inserts included, so the head panels track
+                        // the playback chain.
                         // (P3: tap A already published by the send loop.)
-                        if (s_playerSendCount == 0)
+                        if (addOwned && s_playerSendCount == 0)
                             audio_image_buffers_publish_engine_input(
                                 audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
                                 workR, workG, workB, nb);
-                        if (g_sp3ctra_config.luxsynth_source_type == 0)
+                        if (pbOwned)
                         {
                             audio_image_buffers_publish_engine_input(
                                 audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,

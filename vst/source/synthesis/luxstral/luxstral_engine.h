@@ -104,9 +104,6 @@ typedef struct LuxStralEngine {
   /* Buffer slot the last frame was written to (deferred index flip support in
    * synth_AudioProcess_impl). */
   int           last_write_index;
-  /* Source-type gating override: -1 = use the global luxstral_source_type
-   * (exact legacy behaviour); otherwise a fixed value. */
-  int           source_type_override;
   /* StrokeForge waveform-morph snapshot for THIS engine's current frame.
    * Copied from the engine's DoubleBuffer in synth_precompute_wave_data().     */
   float         sf_morph;

@@ -89,40 +89,24 @@ void VideoDisplayComponent::captureCurrentFrame()
     const int count = get_cis_pixels_nb();
     if (count <= 0) return;
 
-    // ── Source selection (Modulated / Live refactor) ─────────────────────────
+    // ── Source selection (M7 — per-chain engine taps) ────────────────────────
     // videoScrollSource (APVTS choice) selects which synthesis engine the
     // waterfall mirrors:
-    //   0 = LuxStral         → follows g_sp3ctra_config.luxstral_source_type
-    //   1 = LuxSynth/LuxWave → follows g_sp3ctra_config.luxsynth_source_type
-    //   2 = AllSynth         → 50/50 blend of the two engines above
-    //
-    // Each engine's own channel selector is binary:
-    //   IMAGE_SOURCE_MODULATED (= 0) → use the pre-processed MIX buffer
-    //       which already contains Live ► LuxSampler ► LuxPitch ► LuxMask.
-    //   IMAGE_SOURCE_LIVE      (= 1) → use the raw UDP frame, no processing.
-    //
-    // Deprecated values (SAMPLER, MIX, LUXPITCH, LUXMASK) all collapse to
-    // IMAGE_SOURCE_MODULATED at compile time (see image_pipeline_types.h),
-    // so a simple equality test against IMAGE_SOURCE_LIVE is sufficient.
+    //   0 = LuxStral         → engine input tap A  (frame the engine consumed)
+    //   1 = LuxSynth/LuxWave → engine input tap Path-B
+    //   2 = AllSynth         → 50/50 blend of the two taps
+    // The taps are published by whichever thread owns each engine's commit
+    // (udpThread / feeder / FramePlayerThread) — the display follows each
+    // engine's OWN chain, never the legacy global source types.
     const int srcChoice = static_cast<int>(
         processor_.getAPVTS().getRawParameterValue("videoScrollSource")->load());
 
-    auto resolveEngineInput = [&](int engineSourceType,
+    auto resolveEngineInput = [&](int tapIndex,
                                   uint8_t*& outR, uint8_t*& outG, uint8_t*& outB)
     {
         outR = outG = outB = nullptr;
-        if (engineSourceType == IMAGE_SOURCE_LIVE)
-        {
-            // Channel B (LIVE): always the raw UDP frame, untouched.
-            audio_image_buffers_get_raw_pointers(aib, &outR, &outG, &outB);
-        }
-        else
-        {
-            // Channel A (MODULATED): the published post-insert snapshot
-            // (Live ► LuxSampler ► LuxPitch ► LuxMask).  Single producer
-            // (synthesis thread) → safe to read here without locking.
-            audio_image_buffers_get_modulated_pointers(aib, &outR, &outG, &outB);
-        }
+        audio_image_buffers_get_engine_input_pointers(aib, tapIndex,
+                                                      &outR, &outG, &outB);
     };
 
 
@@ -141,8 +125,8 @@ void VideoDisplayComponent::captureCurrentFrame()
         // AllSynth: 50/50 blend per channel.
         uint8_t *lsR = nullptr, *lsG = nullptr, *lsB = nullptr;
         uint8_t *lxR = nullptr, *lxG = nullptr, *lxB = nullptr;
-        resolveEngineInput(g_sp3ctra_config.luxstral_source_type, lsR, lsG, lsB);
-        resolveEngineInput(g_sp3ctra_config.luxsynth_source_type, lxR, lxG, lxB);
+        resolveEngineInput(AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A, lsR, lsG, lsB);
+        resolveEngineInput(AUDIO_IMAGE_ENGINE_TAP_PATHB,      lxR, lxG, lxB);
         const bool lsOk = (lsR && lsG && lsB);
         const bool lxOk = (lxR && lxG && lxB);
         if (lsOk && lxOk)
@@ -161,10 +145,9 @@ void VideoDisplayComponent::captureCurrentFrame()
     else
     {
         // LuxStral (srcChoice 0) or LuxSynth/LuxWave (srcChoice 1).
-        const int engineSrc = (srcChoice == 1)
-                              ? g_sp3ctra_config.luxsynth_source_type
-                              : g_sp3ctra_config.luxstral_source_type;
-        resolveEngineInput(engineSrc, pR, pG, pB);
+        resolveEngineInput(srcChoice == 1 ? AUDIO_IMAGE_ENGINE_TAP_PATHB
+                                          : AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                           pR, pG, pB);
     }
 
     if (!pR || !pG || !pB) return;

@@ -50,6 +50,8 @@ static float s_lx_line[CIS_MAX_PIXELS_NB];         /* udpThread */
 static float s_lx_line_feeder[CIS_MAX_PIXELS_NB];  /* feeder tick */
 static int s_udp_frame_ls_sends = 0;   /* udpThread-only: plan.num_ls_sends of
                                         * the current line (commit-scope read) */
+static int s_udp_frame_pb_ran = 0;     /* udpThread-only: Path-B products of
+                                        * preprocessed_temp valid this line */
 
 #ifdef VST_MODE
 /* Player-side execution of the inserts placed AFTER a SCORE/SAMPLER marker —
@@ -689,6 +691,38 @@ static void chain_shortcut_walk(const SynthChainPlan *sp, int chain_idx,
     }
     /* LuxStral OUT stream = the modulated channel (staged by the caller). */
     out->lsR = modR; out->lsG = modG; out->lsB = modB;
+}
+
+/* ── M7 — plan-driven ownership queries (replace the *_source_type gates) ────
+ * Used by FramePlayerThread/LuxSampler: which db sections may the player own?
+ * Cheap (one plan snapshot + scan); Non-RT callers only. */
+int chain_additive_player_candidate(void)
+{
+    ChainPlan plan;
+    chain_plan_get(&plan);
+    if (plan.num_ls_sends > 0)
+        return plan.ls_send[0].recipe.has_sampler
+            || plan.ls_send[0].recipe.has_score;
+    /* no send → legacy additive tick; the first sampler chain owns it */
+    for (int c = 0; c < plan.num_chains; c++)
+        if (plan.chain[c].present && plan.chain[c].has_sampler)
+            return 1;
+    return 0;
+}
+
+int chain_pathb_player_candidate(int is_score)
+{
+    ChainPlan plan;
+    chain_plan_get(&plan);
+    for (int c = 0; c < plan.num_chains; c++)
+    {
+        const SynthChainPlan *sp = &plan.chain[c];
+        if (!sp->present) continue;
+        for (int i = 0; i < sp->num_inserts; i++)
+            if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
+                return is_score ? sp->has_score : sp->has_sampler;
+    }
+    return 0;
 }
 
 /* ── M4 — FramePlayerThread: stage the "→ LUXSYNTH" send from the blended
@@ -1626,21 +1660,12 @@ void *udpThread(void *arg) {
         }
 
         /* Per-engine input tap A — no-LuxStral topologies only (with sends,
-         * the chain loop above published it from the first send). */
-        if (frame_plan.num_ls_sends == 0)
-        {
-#ifdef VST_MODE
-          const int a_commit_here =
-              (g_sp3ctra_config.luxstral_source_type != 0) ||
-              (!lux_sampler_is_playing() && lux_sampler_is_passthrough());
-#else
-          const int a_commit_here = 1;
-#endif
-          if (a_commit_here)
+         * the chain loop above published it from the first send). While a
+         * player runs, FramePlayerThread owns the tap. */
+        if (frame_plan.num_ls_sends == 0 && !player_running_now)
             audio_image_buffers_publish_engine_input(
                 audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
                 src_R, src_G, src_B, nb_pixels);
-        }
 
         /* ── Path B (LuxSynth + LuxWave) — fed at its OUT marker position ────
          * The chain loop above captured the stream AT the "→ LUXSYNTH" OUT
@@ -1668,14 +1693,13 @@ void *udpThread(void *arg) {
             }
             else if (pb_found)
             {
-                /* Per-engine input tap Path-B (per-chain display) — skip
-                 * while a player owns the polyphonic commit (luxsynth source
-                 * MODULATED + playback: FramePlayerThread publishes then). */
-                if (!(g_sp3ctra_config.luxsynth_source_type == 0
-                      && lux_sampler_is_playing()))
-                    audio_image_buffers_publish_engine_input(
-                        audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
-                        pb_R, pb_G, pb_B, nb_pixels);
+                /* Per-engine input tap Path-B (per-chain display). A player-
+                 * owned pb chain never reaches this branch (skipped in the
+                 * loop → pb_found stays 0), so no playback gating is needed:
+                 * the plan is the routing authority (M7). */
+                audio_image_buffers_publish_engine_input(
+                    audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
+                    pb_R, pb_G, pb_B, nb_pixels);
 
                 pipeline_path_luxsynth_luxwave(pb_R, pb_G, pb_B, &live_cfg,
                                                &preprocessed_temp);
@@ -1684,6 +1708,9 @@ void *udpThread(void *arg) {
              * chain skipped) — the player commit path owns polyphonic. */
             (void) pb_player_owned;
         }
+        /* Commit-scope flag (the db commit below runs outside this scope):
+         * the Path-B products of preprocessed_temp are valid this line. */
+        s_udp_frame_pb_ran = (pb_chain >= 0) && (pb_found || pb_no_signal);
 #endif
       }
 
@@ -1695,20 +1722,9 @@ void *udpThread(void *arg) {
       swapBuffers(db);
       updateLastValidImage(db);
 
-      /* During LuxSampler playback, FramePlayerThread owns preprocessed_data.
-       * Skipping the live update here prevents overwriting playback preprocessing
-       * that FramePlayerThread already wrote for the current synthesis cycle.
-       * synth_AudioProcess reads db->preprocessed_data directly for audio gen. */
+      /* ── M7 — plan-driven commits (no legacy source-type routing) ───────── */
 #ifdef VST_MODE
-      /* Source routing: allow live preprocessed data to flow based on
-       * luxstral_source_type.
-       * Source=S(0): UDP thread writes ONLY while recording (the RAW incoming
-       *   stream must drive the synth during rec; FramePlayerThread is idle).
-       *   During playback, FramePlayerThread is the sole writer.
-       * Source=L(1): UDP thread always writes (live data).
-       * Source=M(2): UDP thread always writes (live component of mix). */
       {
-        int src = g_sp3ctra_config.luxstral_source_type;
         if (s_udp_frame_ls_sends > 0)
         {
           /* Synth-split P3 — the audio-thread MIXER owns the additive/stereo/
@@ -1717,74 +1733,30 @@ void *udpThread(void *arg) {
            * own dedicated block below; photowave rides along). */
           db->preprocessed_data.photowave = preprocessed_temp.photowave;
         }
-        else if (src == 1 /* IMAGE_SOURCE_LIVE */ ||
-            src == 2 /* IMAGE_SOURCE_MIX  */ ||
-            src == 3 /* IMAGE_SOURCE_LUXPITCH */ ||
-            src == 4 /* IMAGE_SOURCE_LUXMASK */)
+        else if (!lux_sampler_is_playing() && lux_sampler_is_passthrough())
         {
+          /* No "→ LUXSTRAL" send anywhere: the raw tick is the additive
+           * writer (engine disabled by the enable bridge — display paths
+           * only). While a player runs, FramePlayerThread owns the commit. */
           db->preprocessed_data = preprocessed_temp;
           db->dataReady = 1;
         }
-        else if (src == 0 /* IMAGE_SOURCE_SAMPLER */)
-        {
-          /* Source=S routing — RAW pass-through whenever no slot is playing.
-           *
-           * Behaviour change: the sampler now propagates the live UDP stream
-           * (preprocessed_temp) to db->preprocessed_data continuously while
-           * idle / recording / STEP_LIVE, mirroring the visual snapshot
-           * mirror added in LuxSampler::onFrameAssembled().  The previous
-           * silence-injection branch (idle ⇒ zero additive/polyphonic) is
-           * gone — silence is now driven exclusively by the consumer paths
-           * (STEP_EMPTY / sampler transport STOP / FramePlayerThread end).
-           *
-           * Cases:
-           *   • !is_playing() && is_passthrough()  → idle / REC / STEP_LIVE:
-           *       write preprocessed_temp, tag=2 (sampler).
-           *       (passthroughEnabled stays true during recording and during
-           *        STEP_LIVE; it only goes false during PLAY or STEP_EMPTY.)
-           *   • is_playing()                       → FramePlayerThread is the
-           *       sole writer of preprocessed_data; do not touch.
-           *   • !is_passthrough() && !is_playing() → STEP_EMPTY (or transient
-           *       PLAY-pending state) — the sequencer / injectSilenceCmd will
-           *       inject silence; do not overwrite preprocessed_data here. */
-          if (!lux_sampler_is_playing() && lux_sampler_is_passthrough())
-          {
-            db->preprocessed_data = preprocessed_temp;
-            db->dataReady = 2; /* tag=2: sampler slot — consumer gating intact */
-          }
-        }
-
       }
 #else
         db->preprocessed_data = preprocessed_temp;
         db->dataReady = 1;
 #endif
 
-      /* FIX(routing): LuxSynth polyphonic independent write path.
-       * The LuxStral routing block above is gated entirely by luxstral_source_type.
-       * When LuxStral=S and lux_sampler_is_playing(), the ENTIRE block is skipped,
-       * leaving polyphonic.* (LuxSynth input) frozen on its last written value.
-       * This causes the LuxSynth "Synth Grey" visualisation to freeze whenever
-       * the sampler is playing, regardless of LuxSynth's own source setting.
-       *
-       * Fix: always update polyphonic.* from preprocessed_temp when
-       * luxsynth_source_type is LIVE or MIX.  This write is independent of
-       * LuxStral's transport state and of lux_sampler_is_playing().
-       * preprocessed_temp.polyphonic was already recomputed from LuxSynth's
-       * designated source (live UDP / sampler / mix) by preprocess_luxsynth()
-       * in the pipeline processing block above (Change A). */
+      /* LuxSynth polyphonic independent write path — plan-driven (M7): the
+       * Path-B products are committed exactly when the pb chain ran this
+       * line (pb_found → recomputed, pb_no_signal → zeroed). A player-owned
+       * pb chain never runs here — FramePlayerThread owns polyphonic then. */
 #ifdef VST_MODE
+      if (s_udp_frame_pb_ran)
       {
-        int luxsynth_src = g_sp3ctra_config.luxsynth_source_type;
-        if (luxsynth_src == 1 /* IMAGE_SOURCE_LIVE */ ||
-            luxsynth_src == 2 /* IMAGE_SOURCE_MIX  */ ||
-            luxsynth_src == 3 /* IMAGE_SOURCE_LUXPITCH */ ||
-            luxsynth_src == 4 /* IMAGE_SOURCE_LUXMASK */)
-        {
           db->preprocessed_data.polyphonic = preprocessed_temp.polyphonic;
           if (db->dataReady == 0)
             db->dataReady = 1; /* polyphonic data is now valid */
-        }
       }
 #endif
       /* 🎨 DISPLAY: update global display buffers from the just-assembled
@@ -2132,18 +2104,12 @@ void internal_sources_process_tick(void *arg)
       audio_image_buffers_snapshot_modulated(audioBuffers, pb_R, pb_G, pb_B,
                                              nb_pixels);
 
-    /* Per-engine input tap Path-B — skip while a player owns the polyphonic
-     * commit (luxsynth source MODULATED + playback). */
-#ifdef VST_MODE
-    const int pb_player_owned =
-        (g_sp3ctra_config.luxsynth_source_type == 0) && sampler_playing;
-#else
-    const int pb_player_owned = 0;
-#endif
-    if (!pb_player_owned)
-      audio_image_buffers_publish_engine_input(
-          audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
-          pb_R, pb_G, pb_B, nb_pixels);
+    /* Per-engine input tap Path-B (per-chain display). A player-owned pb
+     * chain never reaches here (skipped in the loop → pb_found stays 0) —
+     * the plan is the routing authority (M7). */
+    audio_image_buffers_publish_engine_input(
+        audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
+        pb_R, pb_G, pb_B, nb_pixels);
 
     PipelineConfig cfg = pipeline_build_config_live();
     pipeline_path_luxsynth_luxwave(pb_R, pb_G, pb_B, &cfg, &s_feeder_pp);
@@ -2422,8 +2388,8 @@ void *audioProcessingThread(void *arg) {
           mdb->preprocessed_data.timestamp_us =
               (uint64_t) tv.tv_sec * 1000000ULL + (uint64_t) tv.tv_usec;
         }
-        /* Tag must match the engine's source gating (src==0 wants tag 2). */
-        mdb->dataReady = (g_sp3ctra_config.luxstral_source_type == 0) ? 2 : 1;
+        /* M7 — dataReady is a plain has-data flag (source tags removed). */
+        mdb->dataReady = 1;
         pthread_mutex_unlock(&mdb->mutex);
 
         synth_AudioProcess(audio_read_R, audio_read_G, audio_read_B,

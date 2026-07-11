@@ -203,4 +203,10 @@ void chain_player_apply_synth_a_inserts(int is_score,
 void lx_send_stage_player_frame(const uint8_t *r, const uint8_t *g,
                                 const uint8_t *b, int nb_pixels);
 
+/* M7 — plan-driven ownership queries (replace the legacy *_source_type
+ * gates in the player paths). Non-RT callers. */
+int chain_additive_player_candidate(void);   /* additive path sampler/score-relayed */
+int chain_pathb_player_candidate(int is_score); /* the "→ LUXSYNTH" chain hosts a
+                                                 * sampler (0) / score (1) */
+
 #endif
