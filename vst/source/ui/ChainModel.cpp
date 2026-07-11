@@ -22,6 +22,7 @@ const juce::Identifier ChainModel::kTypeProp    { "type" };
 const juce::Identifier ChainModel::kUuidProp    { "uuid" };
 const juce::Identifier ChainModel::kVersionProp { "version" };
 const juce::Identifier ChainModel::kSlotProp    { "slot" };
+const juce::Identifier ChainModel::kValuesTag   { "VALUES" };
 
 //==============================================================================
 // Queries
@@ -331,6 +332,8 @@ juce::ValueTree ChainModel::toValueTree() const
             mt.setProperty(kUuidProp, m.id.toString(), nullptr);
             if (hasSlot(m.type) && m.slot >= 0)
                 mt.setProperty(kSlotProp, m.slot, nullptr);
+            if (m.values.isValid())
+                mt.appendChild(m.values.createCopy(), nullptr);   // J2 — settings at rest
             ct.appendChild(mt, nullptr);
         }
         root.appendChild(ct, nullptr);
@@ -363,8 +366,12 @@ void ChainModel::fromValueTree(const juce::ValueTree& root)
             const juce::String muuid = mt.getProperty(kUuidProp).toString();
             const int slot = hasSlot(type)
                                ? (int) mt.getProperty(kSlotProp, juce::var(-1)) : -1;
-            ch.modules.push_back(ModuleInstance{
-                type, muuid.isNotEmpty() ? juce::Uuid(muuid) : juce::Uuid(), slot });
+            ModuleInstance mi{
+                type, muuid.isNotEmpty() ? juce::Uuid(muuid) : juce::Uuid(), slot };
+            const auto values = mt.getChildWithName(kValuesTag);
+            if (values.isValid())
+                mi.values = values.createCopy();   // J2 — settings at rest
+            ch.modules.push_back(std::move(mi));
         }
         chains.push_back(std::move(ch));
     }

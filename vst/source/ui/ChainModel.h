@@ -29,8 +29,17 @@ struct ModuleInstance
     ModuleType  type;
     juce::Uuid  id;       ///< stable identity (survives reordering)
     int         slot{-1}; ///< per-instance index: VideoScroll bank (0..7),
-                          ///  sampler engine (0=A, 1=B) OR LuxStral engine
-                          ///  (0=A, 1=B); -1 for non-slotted types.
+                          ///  sampler engine (0=A, 1=B) OR engine-send bank
+                          ///  (0..7); -1 for non-slotted types.
+
+    /** J2 — the module's settings AT REST (chain-owned): a "VALUES" tree whose
+     *  properties are the manifest suffixes → raw param values. Written by
+     *  snapshotBankValuesIntoModel() at save time, projected back onto the
+     *  runtime banks at load (projectChainValuesToBanks()). Non-structural:
+     *  invalid when never snapshotted (pre-v3 sessions). NOTE — ValueTree
+     *  copies share the underlying node; deep-copy (createCopy) when
+     *  duplicating an instance. */
+    juce::ValueTree values;
 };
 
 struct Chain
@@ -150,11 +159,15 @@ public:
     static const juce::Identifier kUuidProp;    // "uuid"
     static const juce::Identifier kVersionProp; // "version"
     static const juce::Identifier kSlotProp;    // "slot" (VideoScroll bank index)
+    static const juce::Identifier kValuesTag;   // "VALUES" (J2 — chain-owned settings)
 
     /** CHAINS schema version written by toValueTree(). Migrations gate on the
      *  version read back from a loaded tree:
      *   1 — pre-SEQUENCER-module era (a missing Sequencer means "old save")
      *   2 — Sequencer is a chain block; a missing Sequencer means the user
-     *       deleted it and it must NOT be re-injected on load. */
-    static constexpr int kSchemaVersion = 2;
+     *       deleted it and it must NOT be re-injected on load.
+     *   3 — each MODULE may carry a VALUES child (its settings at rest) —
+     *       the chain owns its modules' settings; projected onto the runtime
+     *       banks at load. */
+    static constexpr int kSchemaVersion = 3;
 };

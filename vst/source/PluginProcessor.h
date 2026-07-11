@@ -633,6 +633,9 @@ private:
     PoolStale updateModulePoolBindings();   // model → modulePoolSlots_; returns per-type slots to reset
     void deriveAndPublishChainPlan();       // model → RT-safe per-synth ChainPlan
     void persistChainModel();              // model → apvts.state <CHAINS>
+    // J2 — chain-owned settings (chantier « chain porteuse ») —————————————
+    void snapshotBankValuesIntoModel();    // runtime banks → ModuleInstance.values (save)
+    void projectChainValuesToBanks();      // values → runtime banks (load/preset, msg thread)
     void applyChainEnableBridge();         // presence → enable params (diff vs chainActiveTypes_)
 
     // Non-APVTS state ↔ session blob (see the public flags above).
