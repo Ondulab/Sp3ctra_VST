@@ -531,6 +531,7 @@ static void chain_execute_positional(const SynthChainPlan *sp, int chain_idx,
                                      PreprocessedImageData *pp_scratch,
                                      float *lx_line,
                                      int player_fed, int pb_marker_id,
+                                     int allow_sampler_record,
                                      ChainExecOut *out)
 {
     void *states[CHAIN_PLAN_MAX_INSERTS];
@@ -593,6 +594,20 @@ static void chain_execute_positional(const SynthChainPlan *sp, int chain_idx,
             }
             if (pb_marker_id == id && !out->pb_found)
             { out->pbR = cr; out->pbG = cg; out->pbB = cb; out->pb_found = 1; }
+        }
+        else if (id == IMAGE_CHAIN_INSERT_SAMPLER)
+        {
+            /* Per-chain sampler feed (2026-07-11): a positionally-executed
+             * SAMPLER marker records ITS chain's stream into ITS engine's
+             * armed slot (idle only — the caller clears the flag during
+             * playback, when the resampling path owns every recording).
+             * Pass-through: the idle sampler is a passthrough module. */
+#ifdef VST_MODE
+            if (allow_sampler_record)
+                lux_sampler_record_chain_frame(sp->insert_state_idx[i],
+                                               cr, cg, cb,
+                                               (uint16_t) nb_pixels);
+#endif
         }
         else
         {
@@ -1429,12 +1444,23 @@ void *udpThread(void *arg) {
                     /* LuxSampler hook (phase 2 — modulated frame ready).
                      * Mirrors the post-mask frame into the sampler snapshot
                      * (so the sampler visualiser stays alive in idle) and
-                     * writes it into the active recording slot, so recorded
-                     * samples are Pitch+Mask "printed". */
+                     * writes it into the OWNER ENGINE's active recording
+                     * slot, so recorded samples are Pitch+Mask "printed".
+                     * Other sampler engines record their own chain's stream
+                     * at their marker (per-chain feed). */
 #ifdef VST_MODE
-                    lux_sampler_on_modulated_frame_ready(mod_R, mod_G, mod_B,
-                                                         (uint16_t)nb_pixels,
-                                                         packet.line_id);
+                    {
+                        int owner_engine = 0;
+                        if (spSmp)
+                            for (int i = 0; i < spSmp->num_inserts; i++)
+                                if (spSmp->insert_id[i]
+                                    == IMAGE_CHAIN_INSERT_SAMPLER)
+                                { owner_engine = spSmp->insert_state_idx[i];
+                                  break; }
+                        lux_sampler_on_modulated_frame_ready(
+                            owner_engine, mod_R, mod_G, mod_B,
+                            (uint16_t)nb_pixels, packet.line_id);
+                    }
 #endif
                 }
             }
@@ -1579,7 +1605,9 @@ void *udpThread(void *arg) {
             {
                 chain_execute_positional(sp, c, audioBuffers, sbR, sbG, sbB,
                                          nb_pixels, &s_ls_send_pp, lx_line,
-                                         /*player_fed*/ 0, pb_here, &ex);
+                                         /*player_fed*/ 0, pb_here,
+                                         /*allow_sampler_record*/
+                                         !player_running_now, &ex);
             }
 
             if (c == pb_chain && ex.pb_found)
@@ -1928,7 +1956,12 @@ void internal_sources_process_tick(void *arg)
               audio_image_buffers_snapshot_modulated(audioBuffers,
                                                      smpMod_R, smpMod_G,
                                                      smpMod_B, nb_pixels);
-              lux_sampler_on_modulated_frame_ready(smpMod_R, smpMod_G,
+              int owner_engine = 0;
+              for (int i = 0; i < spSmp->num_inserts; i++)
+                  if (spSmp->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER)
+                  { owner_engine = spSmp->insert_state_idx[i]; break; }
+              lux_sampler_on_modulated_frame_ready(owner_engine,
+                                                   smpMod_R, smpMod_G,
                                                    smpMod_B,
                                                    (uint16_t)nb_pixels,
                                                    ++s_feeder_line_id);
@@ -2059,7 +2092,8 @@ void internal_sources_process_tick(void *arg)
     {
       chain_execute_positional(sp, c, audioBuffers, sbR, sbG, sbB,
                                nb_pixels, &s_ls_send_pp_feeder, lx_line,
-                               /*player_fed*/ 0, pb_here, &ex);
+                               /*player_fed*/ 0, pb_here,
+                               /*allow_sampler_record*/ !sampler_playing, &ex);
     }
 
     if (c == pb_chain && ex.pb_found)
