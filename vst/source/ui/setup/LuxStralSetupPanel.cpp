@@ -176,43 +176,9 @@ LuxStralSetupPanel::~LuxStralSetupPanel()
 {
 }
 
-void LuxStralSetupPanel::setEngineIndex(int idx)
-{
-    idx = (idx == 1) ? 1 : 0;
-    if (idx == engineIndex_)
-        return;
-    engineIndex_ = idx;
-    const bool isB = (engineIndex_ == 1);
-
-    // Soft Limit is per-engine — rebind to the selected engine's parameters.
-    softLimitThresholdAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, isB ? "luxstralBSoftLimitThreshold" : "luxstralSoftLimitThreshold",
-        softLimitThresholdSlider);
-    softLimitKneeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, isB ? "luxstralBSoftLimitKnee" : "luxstralSoftLimitKnee",
-        softLimitKneeSlider);
-
-    // Tuning / Physiological / StrokeForge-blob settings are SHARED between
-    // the two engines (B clones A's oscillator table — v1): label them so the
-    // B page never pretends these are independent.
-    tuningRangeSectionLabel.setText(isB ? "Musical Tuning (shared A+B)"
-                                        : "Musical Tuning",
-                                    juce::dontSendNotification);
-    dynamicsSectionLabel.setText(isB ? "Dynamics Processing — Engine B"
-                                     : "Dynamics Processing",
-                                 juce::dontSendNotification);
-    sfBlobSectionLabel.setText(isB ? "StrokeForge — Advanced Blob Detection (shared A+B)"
-                                   : "StrokeForge — Advanced Blob Detection",
-                               juce::dontSendNotification);
-    repaint();
-}
-
 void LuxStralSetupPanel::paint(juce::Graphics& g)
 {
-    SetupUI::paintHeader(g, *this,
-                         engineIndex_ == 1 ? "LUXSTRAL B -- SETUP"
-                                           : "LUXSTRAL A -- SETUP",
-                         accent);
+    SetupUI::paintHeader(g, *this, "LUXSTRAL -- SETUP", accent);
 }
 
 void LuxStralSetupPanel::resized()

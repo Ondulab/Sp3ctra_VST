@@ -61,14 +61,12 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         if (samplerPage)  samplerPage ->setSamplerIndex(slot);
         if (samplerSetup) samplerSetup->setSamplerIndex(slot);
     };
-    // Selecting a LUXSTRAL send tracks its slot (0/1) — it drives the OUT
+    // Selecting a LUXSTRAL send tracks its slot (0..7) — it drives the OUT
     // page's conditioning bank and the per-send power button. The ENGINE
-    // page/setup stay bound to the main parameter set: there is ONE LuxStral
-    // engine user-side (synth-split D1 — the hidden B voice mirrors A's
-    // engine params, see applyConfigurationToCore).
+    // page/setup stay bound to the single LuxStral engine's parameter set.
     chainRack->onLuxStralBlockSelected = [this](int slot)
     {
-        luxStralEngineIndex_ = (slot == 1) ? 1 : 0;
+        luxStralEngineIndex_ = juce::jlimit(0, ChainModel::kMaxChains - 1, slot);
     };
     // A chain edit changes the rack's preferred height → re-run the zone layout.
     chainRack->onModelChanged  = [this]
@@ -271,7 +269,7 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     // Bindings first, so the restored selection lands on the same engine /
     // video instance the user was editing (rack clicks set these callbacks-
     // first for the same reason).
-    luxStralEngineIndex_ = juce::jlimit(0, 1,
+    luxStralEngineIndex_ = juce::jlimit(0, ChainModel::kMaxChains - 1,
         (int) state.getProperty("selLuxStralEngine", 0));
     samplerEngineIndex_  = juce::jlimit(0, 1,
         (int) state.getProperty("selSamplerEngine", 0));
@@ -504,7 +502,9 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
         int sc = -1, si = -1;
         if (const auto* m = audioProcessor.getChainModel().find(selUid, sc, si))
             if (m->type == ModuleType::LuxStral)
-                luxStralEngineIndex_ = (m->slot == 1) ? 1 : 0;
+                luxStralEngineIndex_ =
+                    juce::jlimit(0, ChainModel::kMaxChains - 1,
+                                 m->slot >= 0 ? m->slot : 0);
     }
     if (synthOutPage != nullptr && isSynthBlock(id))
     {
@@ -719,22 +719,12 @@ Sp3ctraAudioProcessorEditor::luxStralVisualizerSources() const
     // the per-oscillator panning); BLOB appears only when StrokeForge is on.
     // When a panel is hidden its computation is skipped too — see image_pipeline.c
     // Stage 8 (pan, gated on stereo) and Stage 9 (blob, gated on StrokeForge).
-    //
-    // ENGINE-AWARE: engine B gets ITS OWN views (SPCTR_B_*) — B's real
-    // preprocessed input + B's chain RGB — never engine A's global buses
-    // (selecting LUXSTRAL B used to show engine A's stream).
     auto& apvts = audioProcessor.getAPVTS();
-    const bool isB = (luxStralEngineIndex_ == 1);
-    std::vector<VisualizerMode> s { isB ? VisualizerMode::SPCTR_B_GRAY
-                                        : VisualizerMode::SPCTR_GRAY };
-    // COLOR follows the SELECTED engine's stereo toggle (A/B have their own).
-    const char* stereoId = isB ? "luxstralBStereoEnable"
-                               : "luxstralStereoEnable";
-    if (apvts.getRawParameterValue(stereoId)->load() > 0.5f)
-        s.push_back(isB ? VisualizerMode::SPCTR_B_COLOR
-                        : VisualizerMode::SPCTR_COLOR);
+    std::vector<VisualizerMode> s { VisualizerMode::SPCTR_GRAY };
+    if (apvts.getRawParameterValue("luxstralStereoEnable")->load() > 0.5f)
+        s.push_back(VisualizerMode::SPCTR_COLOR);
     if (apvts.getRawParameterValue("sfEnabled")->load() > 0.5f)
-        s.push_back(VisualizerMode::SPCTR_BLOB);   // StrokeForge shared A+B (v1)
+        s.push_back(VisualizerMode::SPCTR_BLOB);
     return s;
 }
 
@@ -994,7 +984,7 @@ void Sp3ctraAudioProcessorEditor::layoutZones()
         if (collapsed)
         {
             // 24 px band: video grip (expand + ▶ ⏸/⏹ transport) on top, the
-            // mini MASTER fader filling the rest.
+            // mini MASTER fader anchored at the bottom of the rest.
             const int gripH = juce::jmin(zonesH, 100);
             waterfallColumn->setBounds(x, zonesY, z4w, gripH);
             audioMixPanel  ->setBounds(x, zonesY + gripH, z4w,

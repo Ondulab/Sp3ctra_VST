@@ -9,10 +9,11 @@
  * input through ONLY the modules on that synth's chain, in that chain's order.
  *
  * Most synth engines are singletons → at most one chain per synth (enforced in
- * the model). LuxStral is the exception: it has TWO independent engines (A/B,
- * like the Sampler), so it owns two plan slots (LUXSTRAL = engine A, LUXSTRAL_B
- * = engine B). Pitch/Mask are per-instance: each chain uses its own pool slot
- * (insert_state_idx) so chains never share state.
+ * the model). LuxStral is the exception since P3-M1: N sends across chains are
+ * described by ls_send[] and pull-mixed by the audio thread (the synth[] slot
+ * stays filled for visualizer compatibility). Pitch/Mask are per-instance:
+ * each chain uses its own pool slot (insert_state_idx) so chains never share
+ * state.
  *
  * Author: zhonx
  */
@@ -25,17 +26,17 @@
 extern "C" {
 #endif
 
-/* Max ordered inserts before a synth in ONE chain. Worst case allowed by the
- * model: Pitch + Mask + Reverb + Echo + EQ + up to CHAIN_MAX_CHAINS (8)
- * VideoScroll probes (the per-chain duplicate rule is relaxed for VideoScroll
- * only) + up to 2 Sampler position markers (IMAGE_CHAIN_INSERT_SAMPLER —
- * engines A/B may share a chain) + 1 Score position marker = 16. The
- * `num_inserts < CHAIN_PLAN_MAX_INSERTS` gate in deriveAndPublishChainPlan is a
- * defensive cap; at 17 it is unreachable for any legal model (an overflow would
+/* Max ordered inserts in ONE chain recipe. Worst case allowed by the model:
+ * Pitch + Mask + Reverb + Echo + EQ + up to CHAIN_MAX_CHAINS (8) VideoScroll
+ * probes (the per-chain duplicate rule is relaxed for VideoScroll only) + up
+ * to 2 Sampler position markers + 1 Score position marker + 3 OUT send
+ * markers (M3: 1 per type per chain) = 19. The `num_inserts <
+ * CHAIN_PLAN_MAX_INSERTS` gate in deriveAndPublishChainPlan is a defensive
+ * cap; at 20 it is unreachable for any legal model (an overflow would
  * silently drop entries — a dropped marker misroutes every probe/FX placed
- * after it). states[] locals in multithreading.c grow to 17*sizeof(void*) =
- * 136 B — negligible stack. */
-#define CHAIN_PLAN_MAX_INSERTS 17   /* max ordered processors/probes/markers before a synth */
+ * after it). states[] locals in multithreading.c grow to 20*sizeof(void*) =
+ * 160 B — negligible stack. */
+#define CHAIN_PLAN_MAX_INSERTS 20   /* max ordered processors/probes/markers per chain */
 #define CHAIN_MAX_CHAINS       8    /* per-instance state pool size (Pitch/Mask/VideoScroll) */
 
 /* Where a chain's input frame comes from. */
@@ -51,11 +52,13 @@ typedef enum {
                            * of older sessions valid. */
 } ChainSourceKind;
 
-/* Synth slot indices in ChainPlan.synth[]. LuxStral has two engines (A/B). */
-#define CHAIN_SYNTH_LUXSTRAL   0   /* LuxStral engine A */
+/* Synth slot indices in ChainPlan.synth[].
+ * Slot 3 was the removed LuxStral engine B — kept as a hole until the M3
+ * uniform-recipe rewrite so scratch-index maths (CHAIN_SYNTH_COUNT offsets)
+ * stay untouched. Never filled: present == 0. */
+#define CHAIN_SYNTH_LUXSTRAL   0
 #define CHAIN_SYNTH_LUXSYNTH   1
 #define CHAIN_SYNTH_LUXWAVE    2
-#define CHAIN_SYNTH_LUXSTRAL_B 3   /* LuxStral engine B */
 #define CHAIN_SYNTH_COUNT      4
 
 /* Recipe to build one synth engine's input from its chain. */
@@ -97,19 +100,23 @@ typedef struct {
 typedef struct {
     SynthChainPlan synth[CHAIN_SYNTH_COUNT];
 
-    /* Probe-only chains (no synth module placed): a full per-chain recipe
-     * (source + ordered inserts), executed for its SIDE EFFECTS only — each
-     * VideoScroll probe captures the stream AT ITS POSITION in the chain, with
-     * every processor (Pitch/Mask/FX) upstream of it applied. `present` is 1;
+    /* M3 — uniform per-chain recipes: chain[i] mirrors MODEL chain i (index-
+     * stable across republishes while the model topology holds). A chain is
+     * executed once per frame by its producer thread (udpThread / feeder):
+     * source → ordered inserts, with probes capturing and OUT markers tapping
+     * the stream AT THEIR POSITION. present=1 only when the chain needs that
+     * execution (it carries an OUT, a probe, or the zone-1 selection);
      * `source_kind`/`has_sampler`/`has_score` follow the same rules as synth
      * chains, so a source-less monitor chain stays static (no live leak). */
-    int num_probe_chains;
-    SynthChainPlan probe_chain[CHAIN_MAX_CHAINS];
+    int num_chains;
+    SynthChainPlan chain[CHAIN_MAX_CHAINS];
 
     /* Synth-split P3 — LuxStral sends (N-chain mix). When num_ls_sends > 0
      * the audio thread's mixer owns db->preprocessed_data (additive/stereo/
-     * strokeforge sections) and synth[CHAIN_SYNTH_LUXSTRAL(_B)] are IGNORED by
-     * the audio path (kept filled for visualizer compatibility). */
+     * strokeforge sections) and synth[CHAIN_SYNTH_LUXSTRAL] is IGNORED by
+     * the audio path (kept filled for visualizer compatibility). The mixer
+     * reads the send list (chain_idx + bank weights) from here; the recipes
+     * are executed via chain[] above. */
     int num_ls_sends;
     LsSendPlan ls_send[CHAIN_MAX_CHAINS];
 } ChainPlan;

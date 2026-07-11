@@ -1112,12 +1112,6 @@ void LuxSampler::uiStopScore() noexcept
     scorePlayHead.store(0, std::memory_order_relaxed);
     scoreResumeHead.store(-1, std::memory_order_relaxed); // drop any armed resume
 
-    // Engine B: a [SCORE → LUXSTRAL B] chain loses its player — silence its
-    // input now (plan-gated no-op otherwise). udpThread also re-silences it
-    // per line while the device streams, but this covers the offline case
-    // where nothing else would overwrite the last score frame.
-    luxstral_b_player_stopped();
-
     // Only touch the shared playback channel if SCORE actually owns it. A sampler
     // slot playing on the same channel must keep running: SCORE teardown (manual
     // STOP, GENERATE, live-EQ reload, tab close) must never interrupt the sampler.
@@ -2664,10 +2658,6 @@ void FramePlayerThread::injectWhiteFrame() noexcept
                     nullptr, nullptr, nullptr, nbPx);
         }
     }
-
-    // 4. Engine B: silence a player-fed [SCORE|SAMPLER → LUXSTRAL B] chain too.
-    // Plan-gated no-op otherwise (see luxstral_b_player_stopped).
-    luxstral_b_player_stopped();
 }
 
 void FramePlayerThread::run()
@@ -3395,21 +3385,13 @@ void FramePlayerThread::run()
                     // 2b. Synth-split P3: stage every PLAYER-OWNED LuxStral
                     //     send from the RAW blended frame (each send applies
                     //     its own post-marker inserts + conditioning bank; the
-                    //     audio-thread mixer blends them). Legacy engine-B
-                    //     feed only when no send exists (pre-split sessions).
+                    //     audio-thread mixer blends them).
                     s_playerSendCount = ls_sends_stage_player_frame(
                         workR, workG, workB, nb,
                         isScore ? 1 : 0,
                         (state.seqControlledPlay.load(std::memory_order_relaxed)
                          || isScore) ? 1 : 0,
                         audioBuffers);
-                    if (s_playerSendCount == 0)
-                        luxstral_b_feed_player_frame(
-                            workR, workG, workB, nb,
-                            isScore ? 1 : 0,
-                            (state.seqControlledPlay.load(std::memory_order_relaxed)
-                             || isScore) ? 1 : 0,
-                            audioBuffers);
 
                     // 2c. Engine A: apply the chain inserts placed BELOW the
                     //     SCORE/SAMPLER module (REVERB/ECHO/probes) to the playback
@@ -3508,9 +3490,17 @@ void FramePlayerThread::run()
                                 audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
                                 workR, workG, workB, nb);
                         if (g_sp3ctra_config.luxsynth_source_type == 0)
+                        {
                             audio_image_buffers_publish_engine_input(
                                 audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
                                 workR, workG, workB, nb);
+                            // M4 — the player owns the LuxSynth chain's
+                            // stream: stage the "→ LUXSYNTH" send from the
+                            // same frame (engine feed, mixed + FFT'd by the
+                            // audio thread).
+                            lx_send_stage_player_frame(workR, workG, workB,
+                                                       nb);
+                        }
                     }
                 }
             }

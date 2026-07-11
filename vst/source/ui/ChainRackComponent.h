@@ -157,16 +157,8 @@ private:
         void setLed(LedState s)    { if (led != s)       { led = s;        repaint(); } }
         void setSelected(bool sel) { if (selected != sel) { selected = sel; repaint(); } }
 
-        /** Append an engine letter (e.g. "A"/"B") to the shown name — used to tell
-         *  the two LuxStral engines apart in the rack. */
-        void setEngineSuffix(const juce::String& letter)
-        {
-            name = moduleDisplayName(type) + " " + letter;
-            repaint();
-        }
-
-        /** Override the APVTS enable param this block's LED toggles — e.g. the 2nd
-         *  LuxStral engine (B) drives "luxstralBEnabled", independent of A. */
+        /** Override the APVTS enable param this block's LED toggles — e.g. a
+         *  LuxStral send's per-bank power (lsOutParam(slot, "enabled")). */
         void setEnableParamOverride(const juce::String& id) { enableParam = id; }
 
         /** When false the × remove glyph is hidden + its click is ignored

@@ -22,8 +22,6 @@ extern "C" {
 // Forward-declare C hooks defined in LuxSampler.cpp.
 extern "C" int lux_sampler_is_playing(void);
 extern "C" int lux_sampler_is_recording(void);
-// Engine B's real preprocessed grayscale (multithreading.c) — LUXSTRAL B view.
-extern "C" int luxstral_b_copy_preprocessed_gray(uint8_t* gray_out, int max_pixels);
 
 //==============================================================================
 // CisHoverTooltip — desktop-level floating tooltip (never clipped by parent)
@@ -514,10 +512,8 @@ void CisVisualizerComponent::paintSourceLabel(
             accent = juce::Colour(0xffa87ae0); // Sources — purple
             break;
         case VisualizerMode::SPCTR_GRAY:
-        case VisualizerMode::SPCTR_B_GRAY:
             accent = juce::Colour(0xff6bb8e0); break;
         case VisualizerMode::SPCTR_COLOR:
-        case VisualizerMode::SPCTR_B_COLOR:
             accent = juce::Colour(0xff4ae0c8); break;
         case VisualizerMode::SPCTR_BLOB:
             accent = juce::Colour(0xff8888e0); break;
@@ -713,16 +709,13 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
     else if (vizSource == VisualizerMode::SRC_IMAGE
           || vizSource == VisualizerMode::SRC_VIDEO
           || vizSource == VisualizerMode::SRC_CAMERA
-          || vizSource == VisualizerMode::SELECTED_TAP
-          || vizSource == VisualizerMode::SPCTR_B_GRAY
-          || vizSource == VisualizerMode::SPCTR_B_COLOR)
+          || vizSource == VisualizerMode::SELECTED_TAP)
     {
         // Media source modules own their transport (imgSrcPlay / vidSrcPlay /
         // camera device) — the device/live/sampler freeze gates do not apply.
         // The module's line is read from the internal source pool below.
-        // SELECTED_TAP and the ENGINE-B views mirror their executor's stream
-        // verbatim: whatever gating applies upstream is already reflected in
-        // the published frames (engine A's source_type gates never apply).
+        // SELECTED_TAP mirrors its executor's stream verbatim: whatever gating
+        // applies upstream is already reflected in the published frames.
     }
     else if (vizSource == VisualizerMode::SAMPLER)
     {
@@ -841,30 +834,12 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
         }
         // pR/pG/pB stay null — the data is already in localData*.
     }
-    else if (vizSource == VisualizerMode::SELECTED_TAP
-          || vizSource == VisualizerMode::SPCTR_B_COLOR)
+    else if (vizSource == VisualizerMode::SELECTED_TAP)
     {
         // Contextual view: the stream AT the selected module's position in ITS
         // chain, published by the chain executor (selection-tap bus). White
         // when the chain is silent/unfed (cleared on every selection change).
-        // ENGINE-B COLOR reads the same tap — B's own chain input RGB feeds
-        // the colour-temperature view (never engine A's buses).
         audio_image_buffers_get_selection_tap_pointers(buffers, &pR, &pG, &pB);
-    }
-    else if (vizSource == VisualizerMode::SPCTR_B_GRAY)
-    {
-        // ENGINE B — the REAL preprocessed input it synthesises from (its own
-        // inversion/gamma/decode already applied by the RT pipeline). No
-        // UI-side re-simulation, no engine-A buses. Black = silence here
-        // (processed space); white only before the first commit.
-        if (luxstral_b_copy_preprocessed_gray(localDataGray.data(),
-                                              cisPixelsCount) <= 0)
-            std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-        localDataR = localDataGray;
-        localDataG = localDataGray;
-        localDataB = localDataGray;
-        publishGray();
-        goto done;   // gray IS final — skip the source-view recompute below
     }
     else if (vizSource == VisualizerMode::RAW || vizSource == VisualizerMode::LIVE)
     {
@@ -967,8 +942,7 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
                                 || vizSource == VisualizerMode::SRC_IMAGE
                                 || vizSource == VisualizerMode::SRC_VIDEO
                                 || vizSource == VisualizerMode::SRC_CAMERA
-                                || vizSource == VisualizerMode::SELECTED_TAP
-                                || vizSource == VisualizerMode::SPCTR_B_COLOR);
+                                || vizSource == VisualizerMode::SELECTED_TAP);
         const bool isSpctrView = (vizSource == VisualizerMode::SPCTR_GRAY
                                || vizSource == VisualizerMode::SPCTR_COLOR
                                || vizSource == VisualizerMode::SPCTR_BLOB);
@@ -1190,7 +1164,6 @@ bool CisVisualizerComponent::isColorSource(VisualizerMode m) const noexcept
     // Note: SYNTH_FFT_COLOR is intercepted before this call in paint() and
     // handled by its own dedicated renderer — do NOT include it here.
     return m == VisualizerMode::SPCTR_COLOR
-        || m == VisualizerMode::SPCTR_B_COLOR
         || m == VisualizerMode::SYNTH_COLOR;
 }
 
@@ -1214,7 +1187,6 @@ bool CisVisualizerComponent::supportsDisplayModes(VisualizerMode m) const noexce
         case VisualizerMode::SRC_VIDEO:
         case VisualizerMode::SRC_CAMERA:
         case VisualizerMode::SELECTED_TAP:
-        case VisualizerMode::SPCTR_B_GRAY:
             return true;
         default:
             return false;
@@ -2261,28 +2233,14 @@ void CisVisualizerComponent::computeFftMagnitudes()
     // PLAY values so the frozen timbre keeps sounding while MIDI notes play.
 
     // ========================================================================
-    // 🎯 BRIDGE: Feed spectral data to the LuxSynth additive synthesis engine.
-    //
-    // fftMagnitudesSmoothed_[1..nDisplay] → oscillator amplitudes
-    // fftHarmonicity_[1..nDisplay]        → per-bin harmonicity (future use)
-    // Left/right gains = NULL → engine defaults to center pan (0.707, 0.707).
-    //
-    // This is called from the UI timer thread (~30 fps).  The engine reads
-    // the spectral struct from the LuxSynthProcessingThread — a benign race
-    // on aligned floats, same pattern as LuxStral's image data pipeline.
+    // M4/D2 — the spectral ENGINE feed now lives in the core
+    // (processing/luxsynth_feed.c, audio thread): it mixes the staged
+    // "→ LUXSYNTH" sends and pushes the FFT even with the editor closed.
+    // The FFT computed above is DISPLAY-ONLY (this view). Only the engine
+    // CONFIG sync remains here (UI → engine, non-RT, ~30 fps).
     // ========================================================================
     if (luxsynth_are_buffers_ready() && nDisplay > 0)
     {
-        // Skip DC bin (index 0) — engine expects magnitudes[0] = 1st harmonic
-        luxsynth_engine_set_spectral_data(
-            &g_luxsynth_engine,
-            fftMagnitudesSmoothed_.data() + 1,   // magnitudes (skip DC)
-            nullptr,                              // pan_positions (unused)
-            fftHarmonicity_.data() + 1,           // harmonicity
-            nullptr,                              // left_gains  (center default)
-            nullptr,                              // right_gains (center default)
-            nDisplay);                            // num_bins
-
         // ── Sync engine config from APVTS (non-RT, ~30 fps) ──────────────────
         auto& apvts = processor.getAPVTS();
         LuxSynthConfig cfg;

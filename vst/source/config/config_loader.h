@@ -228,30 +228,15 @@ typedef struct {
     int luxsynth_ac_removal;               /* Per-path AC removal toggle (0=off, 1=on) */
     float luxsynth_gamma_value;             /* Gamma value for LUXSYNTH image preprocessing (photo conv.: pow(x, 1/gamma)); 1.0=no-op */
 
-    /* ── LuxStral engine B (M8 dual-engine) — independent PLAY/SETUP set ────── */
-    /* Mirrors of the engine-A knobs above, set from the luxstralB* APVTS params.
-     * Engine A keeps reading the legacy fields (exact historical behaviour);
-     * engine B and its image pipeline read these. Tuning/octaves/physiological
-     * stay SHARED (B clones A's oscillator table — v1).                        */
-    int   luxstral_b_inversion;             /* image: Negative toggle            */
-    int   luxstral_b_ac_removal;            /* image: DC Blocking toggle         */
-    float luxstral_b_gamma_value;           /* image: gamma (0 = disabled)       */
-    float luxstral_b_contrast_min;          /* image: contrast floor             */
-    float luxstral_b_tau_up_base_ms;        /* envelope: attack                  */
-    float luxstral_b_tau_down_base_ms;      /* envelope: release                 */
-    float luxstral_b_summation_response_exponent; /* INERT (was: Sum Exp — see
-                                                    * rms_ceiling_gain note above) */
-    float luxstral_b_noise_gate_threshold;  /* dynamics: noise gate              */
-    int   luxstral_b_stereo_mode_enabled;   /* stereo on/off                     */
-    float luxstral_b_stereo_temperature_amplification; /* stereo Temp knob       */
-    float luxstral_b_soft_limit_threshold;  /* setup: soft limiter threshold     */
-    float luxstral_b_soft_limit_knee;       /* setup: soft limiter knee          */
+    /* ── M4 — core-side LuxSynth engine feed (luxsynth_feed_tick) ─────────── */
+    int   lx_fft_bins_choice;              /* 0=32, 1=64, 2=128, 3=256 harmonics */
+    float lx_fft_smoothing;                /* [0..1] temporal smoothing (attack/release) */
 
     /* ── Inverse-dB decode law — ALWAYS ON (single decode chain) ─────────────
      * The grey → amplitude decode law is the exact inverse of the SCORE
      * encoder's linear-in-dB brightness map (score_engine.c):
      * amplitude = 10^((x−1)·range/20), applied AFTER the gamma stage (gamma
-     * 1.0 = pure dB decode). Applies to BOTH LuxStral engines A and B.
+     * 1.0 = pure dB decode).
      * No toggle, no forcing — every stage keeps its own knob.  The exact
      * inverse of the SCORE encoder is recovered with:
      *   Negative ON · DC Blocking OFF · Gamma 1.0 · Contrast Min 1.0 ·

@@ -88,6 +88,68 @@ void image_preprocess_cleanup(void) {
  * (g_sp3ctra_config.luxsynth_out[0]) — Negative / DC Blocking / Gamma
  * (photo convention pow(x, 1/gamma), 1.0 = off) + pre-FFT Intensity.
  */
+void luxsynth_condition_line(
+    const uint8_t *raw_r,
+    const uint8_t *raw_g,
+    const uint8_t *raw_b,
+    int bank_slot,
+    float *line_out,
+    int nb_pixels
+) {
+    int i;
+    if (bank_slot < 0 || bank_slot >= LUX_OUT_MAX_SLOTS)
+        bank_slot = 0;
+    const lux_out_params_t *bank = &g_sp3ctra_config.luxsynth_out[bank_slot];
+
+    /* STEP 1: RGB → Grayscale [0.0, 1.0] with preventive clamping */
+    for (i = 0; i < nb_pixels; i++) {
+        float gray = (0.299f * raw_r[i] + 0.587f * raw_g[i] + 0.114f * raw_b[i]);
+        float normalized = gray / 255.0f;
+        if (normalized < 0.0f) normalized = 0.0f;
+        if (normalized > 1.0f) normalized = 1.0f;
+        line_out[i] = normalized;
+    }
+
+    /* STEP 2: Inversion — per-OUT bank (synth-split P1). */
+    if (bank->negative) {
+        for (i = 0; i < nb_pixels; i++)
+            line_out[i] = 1.0f - line_out[i];
+    }
+
+    /* STEP 3: DC Blocking (AC removal) — subtract per-line mean, clamp [0, 1]. */
+    if (bank->dc_blocking) {
+        float sum = 0.0f;
+        float mean;
+        for (i = 0; i < nb_pixels; i++)
+            sum += line_out[i];
+        mean = sum / (float)nb_pixels;
+        for (i = 0; i < nb_pixels; i++) {
+            line_out[i] -= mean;
+            if (line_out[i] < 0.0f) line_out[i] = 0.0f;
+            if (line_out[i] > 1.0f) line_out[i] = 1.0f;
+        }
+    }
+
+    /* STEP 4: Gamma correction (photo convention: pow(x, 1/gamma)).
+     * Per-OUT bank value; 1.0 = mathematical no-op — skip for performance. */
+    {
+        float gamma = bank->gamma;
+        if (gamma > 0.0f && gamma != 1.0f) {
+            const float exponent = 1.0f / gamma;
+            for (i = 0; i < nb_pixels; i++) {
+                float val = line_out[i];
+                if (val < 0.0f) val = 0.0f;
+                if (val > 1.0f) val = 1.0f;
+                float result = powf(val, exponent);
+                /* NaN/Inf protection (portable, no isnan/isinf) */
+                if (result != result || result * 0.0f != 0.0f)
+                    result = val;
+                line_out[i] = result;
+            }
+        }
+    }
+}
+
 void preprocess_luxsynth(
     const uint8_t *raw_r,
     const uint8_t *raw_g,
@@ -97,54 +159,10 @@ void preprocess_luxsynth(
     int nb_pixels = get_cis_pixels_nb();
     int i;
 
-    /* STEP 1: RGB → Grayscale [0.0, 1.0] with preventive clamping */
-    for (i = 0; i < nb_pixels; i++) {
-        float gray = (0.299f * raw_r[i] + 0.587f * raw_g[i] + 0.114f * raw_b[i]);
-        float normalized = gray / 255.0f;
-        if (normalized < 0.0f) normalized = 0.0f;
-        if (normalized > 1.0f) normalized = 1.0f;
-        out->polyphonic.grayscale[i] = normalized;
-    }
-
-    /* STEP 2: Inversion — per-OUT bank (synth-split P1: LuxSynth OUT = slot 0;
-     * the legacy luxsynth_inversion global is no longer read). */
-    if (g_sp3ctra_config.luxsynth_out[0].negative) {
-        for (i = 0; i < nb_pixels; i++)
-            out->polyphonic.grayscale[i] = 1.0f - out->polyphonic.grayscale[i];
-    }
-
-    /* STEP 3: DC Blocking (AC removal) — subtract per-line mean, clamp [0, 1]. */
-    if (g_sp3ctra_config.luxsynth_out[0].dc_blocking) {
-        float sum = 0.0f;
-        float mean;
-        for (i = 0; i < nb_pixels; i++)
-            sum += out->polyphonic.grayscale[i];
-        mean = sum / (float)nb_pixels;
-        for (i = 0; i < nb_pixels; i++) {
-            out->polyphonic.grayscale[i] -= mean;
-            if (out->polyphonic.grayscale[i] < 0.0f) out->polyphonic.grayscale[i] = 0.0f;
-            if (out->polyphonic.grayscale[i] > 1.0f) out->polyphonic.grayscale[i] = 1.0f;
-        }
-    }
-
-    /* STEP 4: Gamma correction (photo convention: pow(x, 1/gamma)).
-     * Per-OUT bank value; 1.0 = mathematical no-op — skip for performance. */
-    {
-        float gamma = g_sp3ctra_config.luxsynth_out[0].gamma;
-        if (gamma > 0.0f && gamma != 1.0f) {
-            const float exponent = 1.0f / gamma;
-            for (i = 0; i < nb_pixels; i++) {
-                float val = out->polyphonic.grayscale[i];
-                if (val < 0.0f) val = 0.0f;
-                if (val > 1.0f) val = 1.0f;
-                float result = powf(val, exponent);
-                /* NaN/Inf protection (portable, no isnan/isinf) */
-                if (result != result || result * 0.0f != 0.0f)
-                    result = val;
-                out->polyphonic.grayscale[i] = result;
-            }
-        }
-    }
+    /* STEPS 1-4: conditioning from the LuxSynth OUT bank (slot 0) — shared
+     * with the M4 staging producers (luxsynth_condition_line). */
+    luxsynth_condition_line(raw_r, raw_g, raw_b, 0,
+                            out->polyphonic.grayscale, nb_pixels);
 
     /* STEP 4b: per-OUT Intensity (synth-split P1) — pre-FFT mix weight of the
      * LuxSynth send.  The FFT is linear, so scaling the line scales the

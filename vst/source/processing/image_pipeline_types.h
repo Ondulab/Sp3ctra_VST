@@ -126,7 +126,7 @@ typedef struct {
      * 0 = ENVELOPE_LIVE  (set by live/UDP callers)
      * 1 = ENVELOPE_SAMPLER (set by FramePlayerThread callers)
      * 2 = ENVELOPE_CHAIN2 (LuxSynth/LuxWave)
-     * 3 = ENVELOPE_LUXSTRAL_B (2nd LuxStral engine — its own freeze state)
+     * 3 = ENVELOPE_LUXWAVE, 4+ = ENVELOPE_LS_SEND_BASE (per-send states)
      * Prevents the live thread from corrupting the sampler envelope state. */
     int        envelope_id;
 } PipelineConfig;

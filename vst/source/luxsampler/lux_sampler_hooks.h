@@ -155,9 +155,9 @@ int lux_sampler_is_seq_live_step(void);
  * @brief Returns non-zero while the SCORE player is actively playing back
  *        (any engine's dedicated scoreSlot is in playback).
  *
- * Used by udpThread() / the feeder tick to leave engine B's input alone while
- * FramePlayerThread owns it (luxstral_b_feed_player_frame), and to commit
- * silence to a score-fed chain only when the score is idle.
+ * Used by udpThread() / the feeder tick to leave a score-fed chain's input
+ * alone while FramePlayerThread owns it, and to commit silence to a score-fed
+ * chain only when the score is idle.
  *
  * Thread: UDP receiver thread / feeder (Non-RT). Atomic read only.
  *

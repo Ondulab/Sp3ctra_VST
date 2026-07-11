@@ -912,7 +912,7 @@ void ChainRackComponent::timerCallback()
 
 ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const juce::Uuid& uid, int engineSlot) const
 {
-    auto paramOn = [this](const char* id) -> bool
+    auto paramOn = [this](const juce::String& id) -> bool
     {
         if (auto* raw = processor.getAPVTS().getRawParameterValue(id))
             return raw->load() >= 0.5f;
@@ -978,8 +978,10 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const j
         case ModuleType::Sampler:
             return paramOn("luxSamplerEnabled") ? LedState::Active : LedState::Off;
         case ModuleType::LuxStral:
-            // Engine A → deviceEnabled, engine B → luxstralBEnabled (independent).
-            return paramOn(engineSlot == 1 ? "luxstralBEnabled" : "deviceEnabled")
+            // Per-send power (the send's own conditioning bank); the ENGINE
+            // enable (deviceEnabled) lives on the AUDIO MIX strip.
+            return paramOn(engineSlot >= 0 ? lsOutParam(engineSlot, "enabled")
+                                           : juce::String("deviceEnabled"))
                        ? LedState::Active : LedState::Off;
         case ModuleType::LuxSynth:
             return paramOn("luxsynthEnabled") ? LedState::Active : LedState::Off;

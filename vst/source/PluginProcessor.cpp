@@ -22,13 +22,11 @@ extern "C" {
     #include "processing/video_scroll.h"                      // VideoScroll capture-ring pool
     #include "processing/image_chain.h"                       // Insert chain executor (order + taps)
     #include "processing/chain_plan.h"                         // M6 Phase 2 — RT chain descriptor
+    #include "processing/synth_staging.h"                      // deferred staging resets (M3)
     #include "audio/buffers/audio_image_buffers.h"             // selection tap (contextual zone 1)
     #include "synthesis/luxsynth/luxsynth_vst_adapter.h"      // luxsynth_push_midi_event(), buffers, engine
     #include "synthesis/luxwave/luxwave_vst_adapter.h"        // luxwave_push_midi_event(), g_luxwave_engine
 
-    // M8 — engine B envelope hot-reload (declared in luxstral_engine.h, whose
-    // full include drags the worker-pool types into this TU; prototype suffices).
-    void synth_luxstral_update_engine_b_envelope(void);
 }
 // Note: synth_luxstral_threading.h / synth_luxstral_runtime.h / AudioProcessingThread.h
 // are now included transitively via Sp3ctraSharedCore.h and handled by Sp3ctraSharedCore.
@@ -255,10 +253,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxstralVolume", 1}, "LuxStral Vol.",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
-    // M8 — dual-engine: independent gain for the 2nd LuxStral engine (B).
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxstralBVolume", 1}, "LuxStral B Vol.",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxsynthVolume", 1}, "LuxSynth Vol.",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
@@ -266,9 +260,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     // ── Gameplay — Device On ─────────────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"deviceEnabled", 1}, "Device On", true));
-    // M8 — independent enable for the 2nd LuxStral engine (B).
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"luxstralBEnabled", 1}, "LuxStral B On", true));
 
     // ── Setup — Soft limiter (LuxStral A) ────────────────────────────────────
     // These IDs were referenced by LuxStralSetupPanel but never created — the
@@ -333,48 +324,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"luxstralPhaseDriftCents", 1}, "Phase Drift",
         juce::NormalisableRange<float>(0.0f, 3.0f, 0.01f), 0.0f,
         juce::AudioParameterFloatAttributes{}.withLabel("ct")));
-
-    // ── M8 — LuxStral engine B: independent PLAY/SETUP parameter set ─────────
-    // Mirrors of the engine-A knobs bound by LuxStralTabComponent /
-    // LuxStralSetupPanel when the rack selects the B instance (slot 1).
-    // Tuning / octaves / physiological filter stay SHARED (B clones A's
-    // oscillator table — v1); StrokeForge settings are shared too.
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"luxstralBInversion", 1}, "B Inversion", true));
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"luxstralBAcRemoval", 1}, "B DC Blocking", true));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxstralBGammaValue", 1}, "B Gamma",
-        juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f, 0.30f), 1.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxstralBContrastMin", 1}, "B Contrast Min",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.21f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxstralBAttackMs", 1}, "B Attack",
-        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 0.5f,
-        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxstralBReleaseMs", 1}, "B Release",
-        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 0.5f,
-        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxstralBSummationResponseExp", 1}, "B Sum. Exp.",
-        juce::NormalisableRange<float>(2.0f, 10.0f, 0.1f), 2.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxstralBNoiseGateThreshold", 1}, "B Noise Gate",
-        juce::NormalisableRange<float>(0.0f, 0.1f, 0.001f), 0.005f));
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"luxstralBStereoEnable", 1}, "B Stereo Enable",
-        true));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxstralBStereoTempAmp", 1}, "B Stereo Temp.",
-        juce::NormalisableRange<float>(0.0f, 5.0f, 0.01f), 2.5f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxstralBSoftLimitThreshold", 1}, "B Soft Limit Thr.",
-        juce::NormalisableRange<float>(0.1f, 1.0f, 0.01f), 0.8f, kHiddenFloat));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxstralBSoftLimitKnee", 1}, "B Soft Limit Knee",
-        juce::NormalisableRange<float>(0.01f, 1.0f, 0.01f), 0.2f, kHiddenFloat));
 
     // ── Synth-split P1 — per-OUT conditioning banks (pool slots 0..7) ────────
     // One bank per OUT-module instance: the OUT conditions its chain's flux
@@ -1561,8 +1510,6 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     acqGateSyncDivParam         = apvts.getRawParameterValue("acqGateSyncDiv");
     acqGateMultDivParam         = apvts.getRawParameterValue("acqGateMultDiv");
     luxstralVolumeParam         = apvts.getRawParameterValue("luxstralVolume");
-    luxstralBEnabledParam       = apvts.getRawParameterValue("luxstralBEnabled");
-    luxstralBVolumeParam        = apvts.getRawParameterValue("luxstralBVolume");
 
     // CC1 mod-wheel targets driven from processBlock (setValueNotifyingHost)
     for (int s = 0; s < ChainModel::kMaxChains; ++s)
@@ -1600,26 +1547,16 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("luxstralPhysiologicalDepth", this);
     apvts.addParameterListener("luxstralSoftLimitThreshold", this);
     apvts.addParameterListener("luxstralSoftLimitKnee", this);
-    // Inverse-dB decode range — shared by engines A and B (historical param ID)
+    // Inverse-dB decode range (historical param ID)
     apvts.addParameterListener("luxstralFidelityRangeDb", this);
-    // Phase management (mode + gate + position + drift) — shared A and B
+    // M4 — core-side LuxSynth engine feed (lx_fft_* config mirror)
+    apvts.addParameterListener("lxFftBins", this);
+    apvts.addParameterListener("lxFftSmoothing", this);
+    // Phase management (mode + gate + position + drift)
     apvts.addParameterListener("luxstralPhaseMode", this);
     apvts.addParameterListener("luxstralPhaseSensitivity", this);
     apvts.addParameterListener("luxstralPhasePosition", this);
     apvts.addParameterListener("luxstralPhaseDriftCents", this);
-    // M8 — LuxStral engine B parameter set (independent PLAY/SETUP)
-    apvts.addParameterListener("luxstralBInversion", this);
-    apvts.addParameterListener("luxstralBAcRemoval", this);
-    apvts.addParameterListener("luxstralBGammaValue", this);
-    apvts.addParameterListener("luxstralBContrastMin", this);
-    apvts.addParameterListener("luxstralBAttackMs", this);
-    apvts.addParameterListener("luxstralBReleaseMs", this);
-    apvts.addParameterListener("luxstralBSummationResponseExp", this);
-    apvts.addParameterListener("luxstralBNoiseGateThreshold", this);
-    apvts.addParameterListener("luxstralBStereoEnable", this);
-    apvts.addParameterListener("luxstralBStereoTempAmp", this);
-    apvts.addParameterListener("luxstralBSoftLimitThreshold", this);
-    apvts.addParameterListener("luxstralBSoftLimitKnee", this);
     
     // Register StrokeForge parameter listeners
     apvts.addParameterListener("sfEnabled", this);
@@ -2105,7 +2042,6 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     // ── Reset consumer tracking (prevent stale buffer re-output at startup) ──
     lastConsumedReadIdx = -1;
     lastConsumedReadIdxLuxSynth = -1;
-    lastConsumedReadIdxLuxstralB = -1;   // M8 — 2nd LuxStral engine
 
     // ── Start the shared pipeline (idempotent: no-op if already running) ─────
     if (coreNeedsInit)
@@ -2783,67 +2719,6 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     }
 
     // ========================================================================
-    // 🎯 LUXSTRAL ENGINE B (M8 — dual-engine, ADDITIVE mix)
-    //
-    // The 2nd LuxStral engine renders in the SAME audio-thread iteration as A
-    // (paced by A's consumed-buffer handshake), so it needs NO separate handshake
-    // here — we just read its own double-buffer and ADD it (engine A above WROTE
-    // the buffer; A + B + LuxSynth + LuxWave sum). Gated by model presence + its
-    // own volume. Independent chain input is prepared in multithreading.c.
-    // ========================================================================
-    const bool luxstralBEnabled = luxstralBEnabledParam->load() >= 0.5f;
-    if (luxstralBEnabled && luxstralBPresent_.load(std::memory_order_relaxed)
-        && sharedCore && sharedCore->isReady() && luxstral_are_audio_buffers_ready()) {
-        extern AudioImageBuffer luxstral_b_buffers_L[2];
-        extern AudioImageBuffer luxstral_b_buffers_R[2];
-        extern volatile int luxstral_b_buffer_index;
-        extern sp3ctra_config_t g_sp3ctra_config;
-
-        int readIdx = 1 - __atomic_load_n(&luxstral_b_buffer_index, __ATOMIC_ACQUIRE);
-        int leftReady  = __atomic_load_n(&luxstral_b_buffers_L[readIdx].ready, __ATOMIC_ACQUIRE);
-        int rightReady = __atomic_load_n(&luxstral_b_buffers_R[readIdx].ready, __ATOMIC_ACQUIRE);
-
-        // Clamp to the ALLOCATED size (see engine A block above).
-        const int synthBufferSize = luxstral_get_audio_buffer_size();
-        const int samplesToRead = (numSamples <= synthBufferSize) ? numSamples : synthBufferSize;
-
-        if (leftReady && rightReady) {
-            // New OR stale frame — either way, add it (continuous 2nd voice).
-            if (readIdx == lastConsumedReadIdxLuxstralB)
-                rt_profiler_report_stale_luxstral(&g_vst_rt_profiler);
-            float* leftData  = luxstral_b_buffers_L[readIdx].data;
-            float* rightData = luxstral_b_buffers_R[readIdx].data;
-            if (leftData && rightData) {
-                // Synth-split D1: ONE LuxStral engine user-side — the hidden
-                // B voice follows the same engine volume (AUDIO MIX fader).
-                // Per-send level lives in the OUT banks (Intensity).
-                const float lsVolB = luxstralVolumeParam->load();
-                float pk = lsPkBlock_;   // VU: B folds into the LuxStral meter
-                if (totalNumOutputChannels >= 1) {
-                    float* destLeft = buffer.getWritePointer(0);
-                    for (int i = 0; i < samplesToRead; ++i) {
-                        const float v = leftData[i] * lsVolB;
-                        destLeft[i] += v;
-                        const float a = v < 0.0f ? -v : v;
-                        if (a > pk) pk = a;
-                    }
-                }
-                if (totalNumOutputChannels >= 2) {
-                    float* destRight = buffer.getWritePointer(1);
-                    for (int i = 0; i < samplesToRead; ++i) {
-                        const float v = rightData[i] * lsVolB;
-                        destRight[i] += v;
-                        const float a = v < 0.0f ? -v : v;
-                        if (a > pk) pk = a;
-                    }
-                }
-                lsPkBlock_ = pk;
-                lastConsumedReadIdxLuxstralB = readIdx;
-            }
-        }
-    }
-
-    // ========================================================================
     // 🎯 LUXSYNTH INLINE SYNTHESIS (RT-SAFE, ADDITIVE)
     //
     // The LuxSynth engine is fully RT-safe (no allocation, no lock, no I/O),
@@ -3455,7 +3330,8 @@ void Sp3ctraAudioProcessor::timerCallback()
 
     // ── Deferred Pitch/Mask/Reverb/Echo/VideoScroll pool resets (see header) ──
     if ((pendingPitchResets_ | pendingMaskResets_ | pendingReverbResets_
-         | pendingEchoResets_ | pendingEqResets_ | pendingVideoScrollInits_) != 0
+         | pendingEchoResets_ | pendingEqResets_ | pendingVideoScrollInits_
+         | pendingStagingResets_) != 0
         && juce::Time::getMillisecondCounter() - poolResetArmedMs_ >= 40)
     {
         for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
@@ -3467,9 +3343,15 @@ void Sp3ctraAudioProcessor::timerCallback()
             if ((pendingEqResets_     >> i) & 1u) lux_eq_reset(lux_eq_instance(i));
             if ((pendingVideoScrollInits_ >> i) & 1u)
                 video_scroll_init(video_scroll_instance(i));
+            if ((pendingStagingResets_ >> i) & 1u)
+            {
+                synth_staging_set_inactive(i);
+                synth_staging_luxsynth_set_inactive(i);
+            }
         }
         pendingPitchResets_ = pendingMaskResets_ = pendingVideoScrollInits_ = 0;
         pendingReverbResets_ = pendingEchoResets_ = pendingEqResets_ = 0;
+        pendingStagingResets_ = 0;
     }
 
     // ── RT profiler: drain deferred logs (RT threads never log directly) ─────
@@ -3697,19 +3579,9 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
         
         // 🔧 HOT-RELOAD: Envelope parameters (Attack/Release) require coefficient update
         // Recalculates alpha_up and alpha_down_weighted for all oscillators.
-        // The hidden B voice mirrors A's envelope (synth-split D1) — refresh
-        // its private alphas too.
         if (parameterID == "luxstralAttackMs" || parameterID == "luxstralReleaseMs") {
             log_info("VST", "Envelope parameter changed - updating coefficients");
             update_gap_limiter_coefficients();
-            synth_luxstral_update_engine_b_envelope();
-        }
-
-        // M8 — engine B envelope: recompute B's private alphas from its own taus
-        // (update_gap_limiter_coefficients() above only touches A's waves[]).
-        if (parameterID == "luxstralBAttackMs" || parameterID == "luxstralBReleaseMs") {
-            log_info("VST", "Engine B envelope parameter changed - updating coefficients");
-            synth_luxstral_update_engine_b_envelope();
         }
 
         return;  // Done - synthesis engine will pick up changes automatically
@@ -3935,7 +3807,6 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
     // in the model AND the shared luxSamplerEnabled param (rack LED / host
     // automation) is on — presence alone made the LED a dead toggle.
     bool samplerAPresent = false, samplerBPresent = false;
-    bool luxstralBPresent = false;                        // M8 — 2nd LuxStral engine
     for (const auto& ch : chainModel_.chains)
         for (const auto& m : ch.modules)
         {
@@ -3944,8 +3815,6 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
                 if (m.slot == 1) samplerBPresent = true;
                 else             samplerAPresent = true;   // slot 0 (or unhealed -1)
             }
-            else if (m.type == ModuleType::LuxStral && m.slot == 1)
-                luxstralBPresent = true;
         }
     samplerAPresent_ = samplerAPresent;
     samplerBPresent_ = samplerBPresent;
@@ -3953,7 +3822,6 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
         apvts.getRawParameterValue(PARAM_FS_ENABLED)->load() > 0.5f;
     if (luxSampler)  luxSampler ->setEnabled(samplerAPresent && fsParamOn);
     if (luxSamplerB) luxSamplerB->setEnabled(samplerBPresent && fsParamOn);
-    luxstralBPresent_.store(luxstralBPresent, std::memory_order_relaxed);
 
     // Insert order for the GLOBAL Modulated channel (image_chain_process_inserts),
     // which LuxStral consumes whenever a Sampler sits on its chain — the default
@@ -4437,6 +4305,25 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
                 sp.insert_state_idx[sp.num_inserts] = mi.slot;
                 sp.num_inserts++;
             }
+            else if ((t == ModuleType::LuxStral || t == ModuleType::LuxSynth
+                      || t == ModuleType::LuxWave)
+                     && sp.num_inserts < CHAIN_PLAN_MAX_INSERTS)
+            {
+                // OUT SEND MARKER (M3) — pass-through; locates the send so the
+                // chain executor taps the stream at its position.
+                // insert_state_idx = the send's conditioning-bank slot
+                // (LuxSynth/LuxWave stay on bank 0 until the M6 pooling).
+                sp.insert_id[sp.num_inserts] =
+                      (t == ModuleType::LuxStral) ? IMAGE_CHAIN_INSERT_OUT_LUXSTRAL
+                    : (t == ModuleType::LuxSynth) ? IMAGE_CHAIN_INSERT_OUT_LUXSYNTH
+                    :                               IMAGE_CHAIN_INSERT_OUT_LUXWAVE;
+                sp.insert_state_idx[sp.num_inserts] =
+                    (t == ModuleType::LuxStral)
+                        ? juce::jlimit(0, CHAIN_MAX_CHAINS - 1,
+                                       mi.slot >= 0 ? mi.slot : 0)
+                        : 0;
+                sp.num_inserts++;
+            }
             else if (t == ModuleType::Sampler)
             {
                 sp.has_sampler = 1;
@@ -4501,16 +4388,15 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
             sp.viz_tap_insert = sp.num_inserts;
     };
 
-    fill(ModuleType::LuxStral, CHAIN_SYNTH_LUXSTRAL,   0);  // engine A (slot 0)
+    fill(ModuleType::LuxStral, CHAIN_SYNTH_LUXSTRAL,   0);  // slot 0 (viz compat)
     fill(ModuleType::LuxSynth, CHAIN_SYNTH_LUXSYNTH);
     fill(ModuleType::LuxWave,  CHAIN_SYNTH_LUXWAVE);
-    fill(ModuleType::LuxStral, CHAIN_SYNTH_LUXSTRAL_B, 1);  // engine B (slot 1)
 
     // Synth-split P3 — LuxStral SENDS: every "→ LUXSTRAL" OUT across all
     // chains becomes one ls_send entry (recipe compiled up to the OUT's
     // position, bank = the instance's slot). The audio-thread mixer blends
-    // every staged send into the single engine feed; the legacy synth[A/B]
-    // entries above stay filled for visualizer compatibility only.
+    // every staged send into the single engine feed; the legacy synth[A]
+    // entry above stays filled for visualizer compatibility only.
     for (int c = 0; c < chainModel_.numChains()
                     && plan.num_ls_sends < CHAIN_MAX_CHAINS; ++c)
     {
@@ -4532,36 +4418,52 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
         }
     }
 
-    // Probe-only chains (no synth placed, e.g. [SP3CTRA, MASK, VIDEOSCROLL]):
-    // publish the FULL chain recipe so the executor runs its ordered inserts —
-    // each probe then captures the stream AT ITS POSITION (mask/pitch/FX
-    // upstream of the probe applied), with the same source rules as synth
-    // chains (internal sources honoured; no source → static, no live leak).
-    for (int c = 0; c < chainModel_.numChains(); ++c)
+    // M3 — uniform per-chain recipes: chain[i] mirrors model chain i. A chain
+    // is executed (present=1) when something observes its stream: an OUT send
+    // (LuxStral staging / Path-B feed), a VideoScroll probe, or the SELECTED
+    // module (so zone 1 can show ANY module's stream, even in an otherwise
+    // inert chain). Probes capture and OUT markers tap AT THEIR POSITION.
+    plan.num_chains = chainModel_.numChains();
+    for (int c = 0; c < plan.num_chains && c < CHAIN_MAX_CHAINS; ++c)
     {
         const auto& ch = chainModel_.chains[(size_t) c];
-        bool hasSynth = false, hasProbe = false, hasVizTarget = false;
+        bool hasOut = false, hasProbe = false, hasVizTarget = false;
         for (const auto& m : ch.modules)
         {
             if (m.type == ModuleType::LuxStral || m.type == ModuleType::LuxSynth
                 || m.type == ModuleType::LuxWave)
-                hasSynth = true;
+                hasOut = true;
             if (m.type == ModuleType::VideoScroll
                 && m.slot >= 0 && m.slot < CHAIN_MAX_CHAINS)
                 hasProbe = true;
             if (m.id == vizTapModuleId_)
                 hasVizTarget = true;   // selection tap lives in this chain
         }
-        // Synth chains are executed via plan.synth. A synth-less chain is
-        // executed when something observes it: a VideoScroll probe, or the
-        // SELECTED module (so zone 1 can show ANY module's stream, even in an
-        // otherwise inert chain).
-        if (hasSynth || !(hasProbe || hasVizTarget))
-            continue;
+        if (! (hasOut || hasProbe || hasVizTarget))
+            continue;   // present stays 0 — nothing observes this chain
 
-        if (plan.num_probe_chains < CHAIN_MAX_CHAINS)
-            fillFromChain(plan.probe_chain[plan.num_probe_chains++],
-                          c, (int) ch.modules.size());
+        fillFromChain(plan.chain[c], c, (int) ch.modules.size());
+    }
+
+    // Deferred staging reset: a chain slot that LOST its "→ LUXSTRAL" or
+    // "→ LUXSYNTH" send (module removed / chain deleted / reorder) must stop
+    // contributing to the mixes — the producers no longer iterate it, so its
+    // last staged frame would linger (the plan-gated mixers already ignore
+    // it; the reset guards against chain-index reuse). Reset ≥40 ms later
+    // (pool-reset pattern: the in-flight frame may still write under the OLD
+    // plan).
+    {
+        uint32_t sendChains = 0;
+        for (int k = 0; k < plan.num_ls_sends; ++k)
+            sendChains |= (1u << plan.ls_send[k].chain_idx);
+        for (int c = 0; c < plan.num_chains && c < CHAIN_MAX_CHAINS; ++c)
+            for (int i = 0; i < plan.chain[c].num_inserts; ++i)
+                if (plan.chain[c].insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
+                    sendChains |= (1u << c);
+        pendingStagingResets_ |= (prevLsSendChains_ & ~sendChains);
+        prevLsSendChains_ = sendChains;
+        if (pendingStagingResets_ != 0)
+            poolResetArmedMs_ = juce::Time::getMillisecondCounter();
     }
 
     chain_plan_publish(&plan);
@@ -4813,10 +4715,9 @@ void Sp3ctraAudioProcessor::applyChainEnableBridge()
     std::set<ModuleType> now;
     chainModel_.deriveActiveTypes(now);
 
-    // LuxStral is handled PER ENGINE below (A = deviceEnabled, B =
-    // luxstralBEnabled) — a type-level diff would flip A's param when only B
-    // was added/removed, and would leave A audible (raw live fallback) after
-    // its block is removed while B stays placed.
+    // LuxStral's engine enable (deviceEnabled) is handled below on the
+    // presence of ANY "→ LUXSTRAL" send; the per-send power lives in the
+    // luxstralOut{N}_enabled banks.
     // Pitch/Mask/Reverb/Echo are handled PER INSTANCE in
     // updateInsertParamMemory() (their enable lives in the per-slot bank).
     static const ModuleType kEnableTypes[] = {
@@ -4833,7 +4734,7 @@ void Sp3ctraAudioProcessor::applyChainEnableBridge()
             setParam(moduleEnableParam(t), false);   // absent ⇒ force off
     }
 
-    // Per-engine LuxStral enable (same add ⇒ on / absent ⇒ off diff semantics).
+    // LuxStral engine enable (same add ⇒ on / absent ⇒ off diff semantics).
     {
         std::set<int> enginesNow;
         for (const auto& ch : chainModel_.chains)
@@ -4842,17 +4743,12 @@ void Sp3ctraAudioProcessor::applyChainEnableBridge()
                     && m.slot < ChainModel::kMaxLuxStralEngines)
                     enginesNow.insert(m.slot);
 
-        static const char* kEngineParam[ChainModel::kMaxLuxStralEngines] =
-            { "deviceEnabled", "luxstralBEnabled" };
-        for (int s = 0; s < ChainModel::kMaxLuxStralEngines; ++s)
-        {
-            const bool isNow = enginesNow.count(s) > 0;
-            const bool was   = luxstralEngines_.count(s) > 0;
-            if (isNow && ! was)
-                setParam(kEngineParam[s], true);
-            else if (! isNow)
-                setParam(kEngineParam[s], false);
-        }
+        const bool anyNow = ! enginesNow.empty();
+        const bool anyWas = ! luxstralEngines_.empty();
+        if (anyNow && ! anyWas)
+            setParam("deviceEnabled", true);
+        else if (! anyNow)
+            setParam("deviceEnabled", false);
         luxstralEngines_ = enginesNow;
     }
 
@@ -5095,7 +4991,7 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     g_sp3ctra_config.luxstral_db_decode_range_db =
         apvts.getRawParameterValue("luxstralFidelityRangeDb")->load();
 
-    // Phase management (mode + sensitivity + position + drift) — shared A+B
+    // Phase management (mode + sensitivity + position + drift)
     g_sp3ctra_config.luxstral_phase_mode =
         (int)apvts.getRawParameterValue("luxstralPhaseMode")->load();
     g_sp3ctra_config.luxstral_phase_sensitivity =
@@ -5105,35 +5001,6 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     g_sp3ctra_config.luxstral_phase_drift_cents =
         apvts.getRawParameterValue("luxstralPhaseDriftCents")->load();
 
-    // Synth-split D1 — ONE LuxStral engine user-side: the hidden B voice
-    // MIRRORS engine A's ENGINE parameters (envelope, dynamics, stereo, soft
-    // limit). Its per-send image conditioning comes from luxstral_out[1]
-    // (the b_ conditioning fields below are inert for the pipeline but kept
-    // coherent). The luxstralB* engine params still exist for state compat
-    // and are no longer read (P6 purges them).
-    g_sp3ctra_config.luxstral_b_inversion =
-        (int)apvts.getRawParameterValue("luxstralBInversion")->load();
-    g_sp3ctra_config.luxstral_b_ac_removal =
-        (int)apvts.getRawParameterValue("luxstralBAcRemoval")->load();
-    g_sp3ctra_config.luxstral_b_gamma_value =
-        apvts.getRawParameterValue("luxstralBGammaValue")->load();
-    g_sp3ctra_config.luxstral_b_contrast_min =
-        apvts.getRawParameterValue("luxstralBContrastMin")->load();
-    g_sp3ctra_config.luxstral_b_tau_up_base_ms   = g_sp3ctra_config.tau_up_base_ms;
-    g_sp3ctra_config.luxstral_b_tau_down_base_ms = g_sp3ctra_config.tau_down_base_ms;
-    g_sp3ctra_config.luxstral_b_summation_response_exponent =
-        g_sp3ctra_config.summation_response_exponent;
-    g_sp3ctra_config.luxstral_b_noise_gate_threshold =
-        g_sp3ctra_config.noise_gate_threshold;
-    g_sp3ctra_config.luxstral_b_stereo_mode_enabled =
-        g_sp3ctra_config.stereo_mode_enabled;
-    g_sp3ctra_config.luxstral_b_stereo_temperature_amplification =
-        g_sp3ctra_config.stereo_temperature_amplification;
-    g_sp3ctra_config.luxstral_b_soft_limit_threshold =
-        g_sp3ctra_config.soft_limit_threshold;
-    g_sp3ctra_config.luxstral_b_soft_limit_knee =
-        g_sp3ctra_config.soft_limit_knee;
-    
     // Performance
     g_sp3ctra_config.num_workers = 
         (int)apvts.getRawParameterValue("luxstralNumWorkers")->load();
@@ -5228,6 +5095,14 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         // preprocess_luxsynth() skips it as a no-op when gamma_value == 1.0.
         g_sp3ctra_config.luxsynth_gamma_value =
             apvts.getRawParameterValue("luxsynthGammaValue")->load();
+
+        // M4 — core-side LuxSynth engine feed (luxsynth_feed_tick): FFT bins
+        // choice + temporal smoothing, mirrored from the APVTS params the UI
+        // FFT view uses (same values → view matches what the engine hears).
+        g_sp3ctra_config.lx_fft_bins_choice =
+            static_cast<int>(apvts.getRawParameterValue("lxFftBins")->load());
+        g_sp3ctra_config.lx_fft_smoothing =
+            apvts.getRawParameterValue("lxFftSmoothing")->load();
 
         // ── Synth-split P1 — per-OUT conditioning banks → g_sp3ctra_config ──
         // The pipeline reads THESE (not the legacy globals above, kept for

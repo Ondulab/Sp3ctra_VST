@@ -120,20 +120,14 @@ void synth_data_freeze_init(void) {
   synth_data_freeze_init_impl(&g_luxstral_engine_a);
 }
 
-/* M8 — engine-B (and any non-A engine) freeze-state init. synth_AudioProcess_impl
- * locks eng->synth_data_freeze_mutex every frame, so it MUST be initialised. */
+/* Per-engine freeze-state init. synth_AudioProcess_impl locks
+ * eng->synth_data_freeze_mutex every frame, so it MUST be initialised. */
 void synth_data_freeze_init_engine(LuxStralEngine *eng) {
   synth_data_freeze_init_impl(eng);
 }
 
 void synth_data_freeze_cleanup(void) {
   synth_data_freeze_cleanup_impl(&g_luxstral_engine_a);
-  // Engine B allocates its own freeze state (synth_data_freeze_init_engine in
-  // synth_luxstral_init_engine_b) — cleaning A only leaked B's frozen buffer
-  // and left its mutex alive on every core teardown. Guarded: B may never
-  // have been initialised (destroying a never-inited mutex is UB).
-  if (g_luxstral_engine_b.frozen_grayscale_buffer != NULL)
-    synth_data_freeze_cleanup_impl(&g_luxstral_engine_b);
 }
 
 void displayable_synth_buffers_init(void) {

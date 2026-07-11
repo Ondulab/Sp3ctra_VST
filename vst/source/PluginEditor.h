@@ -494,7 +494,7 @@ private:
     // false = OUT page (per-chain send conditioning, reached from the rack),
     // true  = ENGINE page (reached from the ZONE-5 synth dock card).
     bool engineView_ { false };
-    int  luxStralEngineIndex_ { 0 };   // selected LuxStral engine (0 = A, 1 = B) — M8
+    int  luxStralEngineIndex_ { 0 };   // selected LuxStral SEND slot (0..7, OUT bank)
     int  samplerEngineIndex_  { 0 };   // selected Sampler engine (0 = A, 1 = B)
     int  videoSlotIndex_      { 0 };   // selected VideoScroll instance slot (0..7)
     int zone2Width { kZone2DefaultW };

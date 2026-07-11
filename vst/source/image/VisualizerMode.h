@@ -35,10 +35,6 @@ enum class VisualizerMode
     SRC_VIDEO,          // VIDEO module's own line (internal source pool, M9)
     SRC_CAMERA,         // CAMERA module's own line (internal source pool, M9)
     SELECTED_TAP,       // stream AT the selected module's position in ITS chain
-    SPCTR_B_GRAY,       // LuxStral ENGINE B grayscale — the REAL preprocessed
-                        // input B plays (its own pipeline already applied)
-    SPCTR_B_COLOR,      // LuxStral ENGINE B colour temperature — B's own chain
-                        // input RGB (selection tap at the synth position)
     COUNT,
 
     /* ── Deprecated aliases — silently map to MODULATED ────────────────── */
@@ -69,8 +65,6 @@ inline const char* visualizerModeLabel(VisualizerMode m)
         case VisualizerMode::SRC_VIDEO:       return "VIDEO SRC";
         case VisualizerMode::SRC_CAMERA:      return "CAMERA SRC";
         case VisualizerMode::SELECTED_TAP:    return "MODULE";   // editor overrides with "NAME - CHAIN n"
-        case VisualizerMode::SPCTR_B_GRAY:    return "LUXSTRAL B GRAY";
-        case VisualizerMode::SPCTR_B_COLOR:   return "LUXSTRAL B COLOR";
         default:                              return "???";
     }
 }
