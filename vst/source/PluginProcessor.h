@@ -317,9 +317,6 @@ public:
      *  them here; applyConfigurationToCore() then feeds g_sp3ctra_config
      *  (replacing the old hardcoded "LuxStral=modulated / LuxSynth=live").
      *  Safe to call from the UI (message) thread. */
-    void setChainSourceRouting(int luxstralSrc, int luxsynthSrc) noexcept;
-    int  chainLuxstralSource() const noexcept { return chainSrcLuxstral.load(std::memory_order_relaxed); }
-    int  chainLuxsynthSource() const noexcept { return chainSrcLuxsynth.load(std::memory_order_relaxed); }
 
     /** M6 Phase 2 — the editable chain topology lives here (not in the editor) so
      *  per-chain routing applies headless and is reachable by the RT thread.
@@ -616,11 +613,6 @@ private:
     // cleared by processBlock (audio thread) to release every held/stuck note.
     std::atomic<bool> panicRequested{false};
 
-    // M6 Phase 2 — chain-derived source routing (0 = MODULATED, 1 = LIVE).
-    // Defaults reproduce the legacy fixed topology (LuxStral=modulated, LuxSynth=live).
-    std::atomic<int> chainSrcLuxstral { 0 };
-    std::atomic<int> chainSrcLuxsynth { 1 };
-
     // MIDI CC/Note → parameter mappings. Constructed after apvts (declaration
     // order below the apvts member matters — it holds a reference to it).
     MidiMappingEngine midiMap_ { apvts };
@@ -704,7 +696,7 @@ private:
     // to drive each engine's setEnabled().
     bool samplerAPresent_ { false };
     bool samplerBPresent_ { false };
-    void deriveChainRouting();              // model → setChainSourceRouting + chain plan
+    void deriveChainRouting();              // model → pool bindings + enable bridge + plan
     PoolStale updateModulePoolBindings();   // model → modulePoolSlots_; returns per-type slots to reset
     void deriveAndPublishChainPlan();       // model → RT-safe per-synth ChainPlan
     void persistChainModel();              // model → apvts.state <CHAINS>

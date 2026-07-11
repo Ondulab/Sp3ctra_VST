@@ -128,14 +128,6 @@ public:
      *  the first chain containing both has Mask before Pitch. */
     bool isMaskBeforePitch() const;
 
-    /** Phase-2 source routing: the channel a synth should read given its chain
-     *  placement — 0 = MODULATED (an image Processor/Util sits upstream of it in
-     *  its chain), 1 = LIVE (raw source upstream, or none). Returns `fallback`
-     *  when the synth isn't placed in any chain. `engineSlot` >= 0 additionally
-     *  matches ModuleInstance.slot — used for dual-engine types (LuxStral A/B)
-     *  so the routing follows the RIGHT engine, not the first instance found. */
-    int sourceChannelForSynth(ModuleType synthType, int fallback,
-                              int engineSlot = -1) const;
 
     //── Persistence ───────────────────────────────────────────────────────────
     juce::ValueTree toValueTree() const;

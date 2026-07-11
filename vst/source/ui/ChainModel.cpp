@@ -309,34 +309,8 @@ bool ChainModel::isMaskBeforePitch() const
     return false;   // default: Pitch first (legacy)
 }
 
-int ChainModel::sourceChannelForSynth(ModuleType synthType, int fallback,
-                                      int engineSlot) const
-{
-    for (const auto& ch : chains)
-    {
-        for (int i = 0; i < (int) ch.modules.size(); ++i)
-        {
-            if (ch.modules[(size_t) i].type != synthType)
-                continue;
-            if (engineSlot >= 0 && ch.modules[(size_t) i].slot != engineSlot)
-                continue;   // dual-engine type: only the requested engine counts
-
-            // Found the synth — does any image processor / utility sit upstream?
-            for (int j = 0; j < i; ++j)
-            {
-                const ModuleType ut = ch.modules[(size_t) j].type;
-                if (isSlottedType(ut))
-                    continue;   // VideoScroll is a PASSIVE output tap — pass-through,
-                                // it must NOT flip the synth to the MODULATED channel.
-                const ModuleRole r = moduleRole(ut);
-                if (r == ModuleRole::Processor || r == ModuleRole::Util)
-                    return 0;   // MODULATED — processed signal upstream
-            }
-            return 1;           // LIVE — only a raw source (or nothing) upstream
-        }
-    }
-    return fallback;            // synth not placed anywhere
-}
+/* (M8: sourceChannelForSynth removed — the ChainPlan recipes are the single
+ * routing authority.) */
 
 //==============================================================================
 // Persistence
