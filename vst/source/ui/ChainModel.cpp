@@ -89,17 +89,18 @@ int ChainModel::firstFreeSamplerSlot(const juce::Uuid* movingId) const
     return -1;
 }
 
-int ChainModel::firstFreeLuxStralSlot(const juce::Uuid* movingId) const
+int ChainModel::firstFreeEngineSendSlot(ModuleType type,
+                                        const juce::Uuid* movingId) const
 {
-    bool used[kMaxLuxStralEngines] = { false };
+    bool used[kMaxEngineSends] = { false };
     for (const auto& ch : chains)
         for (const auto& m : ch.modules)
         {
-            if (! isLuxStralEngine(m.type)) continue;
+            if (m.type != type) continue;
             if (movingId != nullptr && m.id == *movingId) continue;
-            if (m.slot >= 0 && m.slot < kMaxLuxStralEngines) used[m.slot] = true;
+            if (m.slot >= 0 && m.slot < kMaxEngineSends) used[m.slot] = true;
         }
-    for (int s = 0; s < kMaxLuxStralEngines; ++s)
+    for (int s = 0; s < kMaxEngineSends; ++s)
         if (! used[s]) return s;
     return -1;
 }
@@ -116,15 +117,17 @@ bool ChainModel::canInsertIntoNewChain(ModuleType type, const juce::Uuid* moving
     if (isSamplerEngine(type) && firstFreeSamplerSlot(movingId) < 0)
         return false;   // both sampler engines (A + B) already placed
 
-    // LuxStral is dual-engine (A/B), bounded by its own 2-slot pool. Unlike the
-    // Sampler it stays subject to the per-chain duplicate rule (1 per chain),
-    // so the two engines necessarily live in different chains.
-    if (isLuxStralEngine(type) && firstFreeLuxStralSlot(movingId) < 0)
-        return false;   // both LuxStral engines (A + B) already placed
+    // Engine sends (→ LUXSTRAL / → LUXSYNTH / → LUXWAVE, M6) are bounded by
+    // their per-type 8-slot pools. They stay subject to the per-chain
+    // duplicate rule (1 per type per chain, D5), so N sends of one type
+    // necessarily live in N different chains.
+    if (isEngineSend(type) && firstFreeEngineSendSlot(type, movingId) < 0)
+        return false;   // this type's 8 send slots are all placed
 
-    // Engine-backed modules (synths + Score/Sequencer) are singletons: at most one
-    // across the whole model. Pitch/Mask (processors), the SP3CTRA source, the
-    // Sampler and LuxStral (their own pools above) stay multi-instance.
+    // Engine-backed UTIL modules (Score/Sequencer/Timbre) are singletons: at
+    // most one across the whole model. Pitch/Mask (processors), the SP3CTRA
+    // source, the Sampler and the engine sends (their own pools above) stay
+    // multi-instance.
     // M9: the internal media sources (IMAGE/VIDEO/CAMERA) are engine singletons
     // too — each engine holds ONE media/transport, so at most one instance each.
     const ModuleRole role = moduleRole(type);
@@ -133,7 +136,7 @@ bool ChainModel::canInsertIntoNewChain(ModuleType type, const juce::Uuid* moving
                            || type == ModuleType::Camera);
     if (mediaSource
         || ((role == ModuleRole::Synth || role == ModuleRole::Util)
-            && ! isSamplerEngine(type) && ! isLuxStralEngine(type)))
+            && ! isSamplerEngine(type) && ! isEngineSend(type)))
     {
         for (const auto& ch : chains)
             for (const auto& m : ch.modules)
@@ -178,9 +181,9 @@ bool ChainModel::insert(int chainIdx, ModuleType type, int dropIdx)
     if (! canInsert(chainIdx, type))
         return false;
 
-    const int slot = isSlottedType(type)    ? firstFreeVideoSlot()
-                   : isSamplerEngine(type)  ? firstFreeSamplerSlot()
-                   : isLuxStralEngine(type) ? firstFreeLuxStralSlot()
+    const int slot = isSlottedType(type)   ? firstFreeVideoSlot()
+                   : isSamplerEngine(type) ? firstFreeSamplerSlot()
+                   : isEngineSend(type)    ? firstFreeEngineSendSlot(type)
                    : -1;
     jassert(! hasSlot(type) || slot >= 0);   // canInsert already gated pool-full
     auto& mods = chains[(size_t) chainIdx].modules;
@@ -419,7 +422,11 @@ void ChainModel::validateAndRepair()
     std::set<ModuleType> seenSingletons;   // synth/util types already placed (global)
     int videoBudget    = kMaxVideoSlots;    // at most 8 slotted instances model-wide
     int samplerBudget  = kMaxSamplerEngines;// at most 2 sampler engines (A/B) model-wide
-    int luxstralBudget = kMaxLuxStralEngines;// up to 8 LuxStral sends model-wide (P3)
+    // M6 — engine sends: up to 8 per TYPE model-wide (independent pools).
+    auto sendIdx = [](ModuleType t) noexcept {
+        return t == ModuleType::LuxStral ? 0 : t == ModuleType::LuxSynth ? 1 : 2;
+    };
+    int sendBudget[3] = { kMaxEngineSends, kMaxEngineSends, kMaxEngineSends };
 
     for (auto& ch : chains)
     {
@@ -446,13 +453,13 @@ void ChainModel::validateAndRepair()
                 kept.push_back(m);
                 continue;
             }
-            if (isLuxStralEngine(m.type)) // up to 2 engines (A/B); but max 1 PER chain
+            if (isEngineSend(m.type)) // up to 8 sends per type; max 1 PER chain (D5)
             {
-                if (luxstralBudget <= 0)
-                    continue;            // 3rd+ LuxStral across model → drop
+                if (sendBudget[sendIdx(m.type)] <= 0)
+                    continue;            // 9th+ send of this type across model → drop
                 if (seenTypes.count(m.type))
                     continue;            // duplicate in this chain → drop (1 per chain)
-                --luxstralBudget;
+                --sendBudget[sendIdx(m.type)];
                 seenTypes.insert(m.type);
                 kept.push_back(m);
                 continue;
@@ -487,7 +494,7 @@ void ChainModel::validateAndRepair()
     // Non-slotted types forced to -1.
     bool usedVid[kMaxVideoSlots]     = { false };
     bool usedSmp[kMaxSamplerEngines] = { false };
-    bool usedLux[kMaxLuxStralEngines] = { false };
+    bool usedSend[3][kMaxEngineSends] = {{ false }};
     for (auto& ch : chains)
         for (auto& m : ch.modules)
         {
@@ -505,10 +512,11 @@ void ChainModel::validateAndRepair()
                 else
                     m.slot = -1;
             }
-            else if (isLuxStralEngine(m.type))
+            else if (isEngineSend(m.type))
             {
-                if (m.slot >= 0 && m.slot < kMaxLuxStralEngines && ! usedLux[m.slot])
-                    usedLux[m.slot] = true;
+                bool* used = usedSend[sendIdx(m.type)];
+                if (m.slot >= 0 && m.slot < kMaxEngineSends && ! used[m.slot])
+                    used[m.slot] = true;
                 else
                     m.slot = -1;
             }
@@ -530,11 +538,12 @@ void ChainModel::validateAndRepair()
                     if (! usedSmp[s]) { m.slot = s; usedSmp[s] = true; break; }
                 jassert(m.slot >= 0);   // guaranteed by the samplerBudget cap above
             }
-            else if (isLuxStralEngine(m.type) && m.slot < 0)
+            else if (isEngineSend(m.type) && m.slot < 0)
             {
-                for (int s = 0; s < kMaxLuxStralEngines; ++s)
-                    if (! usedLux[s]) { m.slot = s; usedLux[s] = true; break; }
-                jassert(m.slot >= 0);   // guaranteed by the luxstralBudget cap above
+                bool* used = usedSend[sendIdx(m.type)];
+                for (int s = 0; s < kMaxEngineSends; ++s)
+                    if (! used[s]) { m.slot = s; used[s] = true; break; }
+                jassert(m.slot >= 0);   // guaranteed by the sendBudget cap above
             }
         }
 }

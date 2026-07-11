@@ -1456,10 +1456,10 @@ void *udpThread(void *arg) {
             if (!sp->present) continue;
             for (int i = 0; i < sp->num_inserts; i++)
             {
-                if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
+                if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH
+                    && pb_marker != IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
                 { pb_chain = c; pb_marker = IMAGE_CHAIN_INSERT_OUT_LUXSYNTH; }
                 else if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXWAVE
-                         && pb_marker != IMAGE_CHAIN_INSERT_OUT_LUXSYNTH
                          && pb_chain < 0)
                 { pb_chain = c; pb_marker = IMAGE_CHAIN_INSERT_OUT_LUXWAVE; }
             }
@@ -1933,10 +1933,10 @@ void internal_sources_process_tick(void *arg)
     if (!sp->present) continue;
     for (int i = 0; i < sp->num_inserts; i++)
     {
-      if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
+      if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH
+          && pb_marker != IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
       { pb_chain = c; pb_marker = IMAGE_CHAIN_INSERT_OUT_LUXSYNTH; }
       else if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXWAVE
-               && pb_marker != IMAGE_CHAIN_INSERT_OUT_LUXSYNTH
                && pb_chain < 0)
       { pb_chain = c; pb_marker = IMAGE_CHAIN_INSERT_OUT_LUXWAVE; }
     }

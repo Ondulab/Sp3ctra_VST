@@ -61,10 +61,10 @@ public:
     bool canInsert(int chainIdx, ModuleType type, const juce::Uuid* movingId = nullptr) const;
 
     /** True if `type` could be inserted into a freshly created empty chain —
-     *  i.e. it passes the GLOBAL limits only (singleton synth/util types,
-     *  VideoScroll/Sampler/LuxStral slot pools). Used by the rack to validate
-     *  a drop on the "+ CHAIN" row BEFORE the chain is actually created, so an
-     *  invalid drop never leaves a phantom empty chain behind. */
+     *  i.e. it passes the GLOBAL limits only (singleton util/media types,
+     *  VideoScroll/Sampler/engine-send slot pools). Used by the rack to
+     *  validate a drop on the "+ CHAIN" row BEFORE the chain is actually
+     *  created, so an invalid drop never leaves a phantom empty chain behind. */
     bool canInsertIntoNewChain(ModuleType type, const juce::Uuid* movingId = nullptr) const;
 
     //── VideoScroll per-instance slot pool ─────────────────────────────────────
@@ -84,21 +84,28 @@ public:
     /** Lowest free sampler-engine slot 0..kMaxSamplerEngines-1, or -1 if full. */
     int firstFreeSamplerSlot(const juce::Uuid* movingId = nullptr) const;
 
-    //── LuxStral SEND slot pool — INDEPENDENT of the pools above ────────────────
-    // Synth-split P3: a LuxStral instance is a "→ LUXSTRAL" SEND toward the
-    // single global engine; its `slot` is its conditioning-bank index
-    // (luxstralOut{slot}_*). Up to one send per chain (per-chain duplicate
-    // rule), up to kMaxChains sends model-wide — the audio mixer blends every
-    // active send into the engine feed.
-    static constexpr int kMaxLuxStralEngines = kMaxChains;   // 8 sends
+    //── Engine SEND slot pools (LuxStral / LuxSynth / LuxWave) ──────────────────
+    // Synth-split M6: an OUT instance is a "→ ENGINE" SEND toward its single
+    // global engine; its `slot` is its conditioning-bank index
+    // ({luxstral,luxsynth,luxwave}Out{slot}_*). One send per type per chain
+    // (per-chain duplicate rule, D5), up to kMaxChains sends PER TYPE
+    // model-wide — the audio-thread mixers blend every active send into the
+    // engine feed.
+    static constexpr int kMaxEngineSends = kMaxChains;       // 8 sends per type
+    static constexpr int kMaxLuxStralEngines = kMaxEngineSends; // legacy alias
+    static bool isEngineSend(ModuleType t) noexcept
+        { return t == ModuleType::LuxStral || t == ModuleType::LuxSynth
+              || t == ModuleType::LuxWave; }
     static bool isLuxStralEngine(ModuleType t) noexcept { return t == ModuleType::LuxStral; }
-    /** Lowest free LuxStral-engine slot 0..kMaxLuxStralEngines-1, or -1 if full. */
-    int firstFreeLuxStralSlot(const juce::Uuid* movingId = nullptr) const;
+    /** Lowest free send slot of `type` (0..kMaxEngineSends-1), or -1 if full.
+     *  Each send type owns an independent pool. */
+    int firstFreeEngineSendSlot(ModuleType type,
+                                const juce::Uuid* movingId = nullptr) const;
 
     /** Types that carry a per-instance `slot` (VideoScroll bank, sampler engine
-     *  OR LuxStral engine). */
+     *  OR engine send). */
     static bool hasSlot(ModuleType t) noexcept
-        { return isSlottedType(t) || isSamplerEngine(t) || isLuxStralEngine(t); }
+        { return isSlottedType(t) || isSamplerEngine(t) || isEngineSend(t); }
 
     //── Mutations (return false when the rule check fails) ─────────────────────
     bool insert(int chainIdx, ModuleType type, int dropIdx);
