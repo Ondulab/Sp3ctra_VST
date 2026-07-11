@@ -86,24 +86,48 @@ extern "C"
         }
     }
 
-    void lux_sampler_on_modulated_frame_ready(const uint8_t* R,
-                                               const uint8_t* G,
-                                               const uint8_t* B,
-                                               uint16_t       pixel_count,
-                                               uint32_t       line_id)
+    void lux_sampler_on_modulated_frame_ready(int            owner_engine,
+                                              const uint8_t* R,
+                                              const uint8_t* G,
+                                              const uint8_t* B,
+                                              uint16_t       pixel_count,
+                                              uint32_t       line_id)
     {
+        // Per-chain sampler feed (2026-07-11): the modulated bus carries the
+        // OWNER CHAIN's stream only — mirror the shared snapshot and record
+        // into the OWNER's engine alone. Every other sampler engine records
+        // its own chain's stream at its marker (lux_sampler_record_chain_
+        // frame, chain executor).
+        if (owner_engine < 0 || owner_engine >= LuxSampler::kMaxEngines)
+            owner_engine = 0;
         if (!lux_sampler_is_playing())
         {
-            if (auto* e0 = LuxSampler::pinEngine(0))
-                e0->mirrorSamplerSnapshot(R, G, B, pixel_count);
-            LuxSampler::unpinEngine(0);
+            if (auto* e = LuxSampler::pinEngine(owner_engine))
+                e->mirrorSamplerSnapshot(R, G, B, pixel_count);
+            LuxSampler::unpinEngine(owner_engine);
         }
-        for (int i = 0; i < LuxSampler::kMaxEngines; ++i)
-        {
-            if (auto* e = LuxSampler::pinEngine(i))
-                e->recordModulatedFrame(R, G, B, pixel_count, line_id);
-            LuxSampler::unpinEngine(i);
-        }
+        if (auto* e = LuxSampler::pinEngine(owner_engine))
+            e->recordModulatedFrame(R, G, B, pixel_count, line_id);
+        LuxSampler::unpinEngine(owner_engine);
+    }
+
+    void lux_sampler_record_chain_frame(int engine_slot,
+                                        const uint8_t* R,
+                                        const uint8_t* G,
+                                        const uint8_t* B,
+                                        uint16_t       pixel_count)
+    {
+        // Per-chain sampler feed: a SAMPLER marker executed positionally
+        // records ITS OWN chain's stream into ITS engine's armed slot (idle
+        // only — during playback the resampling path owns every recording).
+        if (engine_slot < 0 || engine_slot >= LuxSampler::kMaxEngines)
+            return;
+        static std::atomic<uint32_t> s_chainLineId[LuxSampler::kMaxEngines];
+        const uint32_t line_id =
+            s_chainLineId[engine_slot].fetch_add(1, std::memory_order_relaxed);
+        if (auto* e = LuxSampler::pinEngine(engine_slot))
+            e->recordModulatedFrame(R, G, B, pixel_count, line_id);
+        LuxSampler::unpinEngine(engine_slot);
     }
 
     void lux_samplers_record_modulated(const uint8_t* R,

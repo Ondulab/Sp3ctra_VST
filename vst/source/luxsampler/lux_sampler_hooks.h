@@ -64,18 +64,37 @@ void lux_sampler_on_live_frame_assembled(const uint8_t* R,
 /**
  * @brief Phase 2 — modulated frame ready (after LuxPitch + LuxMask).
  *
- * Called by udpThread() AFTER LuxPitch + LuxMask have produced the
- * post-mask frame.  Responsibilities:
+ * Called by udpThread()/the feeder AFTER the mod-bus OWNER CHAIN's
+ * pre-marker processors have produced the post-mask frame.
+ * Responsibilities (OWNER ENGINE only — per-chain feed, 2026-07-11):
  *   • Mirror the post-mask frame into the sampler snapshot (so the
  *     Modulated channel stays alive in idle / REC / STEP_LIVE).
- *   • Write the post-mask frame into the active recording slot, so
- *     recorded samples include LuxPitch + LuxMask processing.
+ *   • Write the post-mask frame into the OWNER engine's active recording
+ *     slot, so recorded samples include LuxPitch + LuxMask processing.
+ * `owner_engine` = the engine slot of the owner chain's SAMPLER marker.
  */
-void lux_sampler_on_modulated_frame_ready(const uint8_t* R,
-                                           const uint8_t* G,
-                                           const uint8_t* B,
-                                           uint16_t       pixel_count,
-                                           uint32_t       line_id);
+void lux_sampler_on_modulated_frame_ready(int            owner_engine,
+                                          const uint8_t* R,
+                                          const uint8_t* G,
+                                          const uint8_t* B,
+                                          uint16_t       pixel_count,
+                                          uint32_t       line_id);
+
+/**
+ * @brief Per-chain sampler capture — record ONE chain's stream into ITS
+ *        engine's armed recording slot (idle only; during playback the
+ *        resampling path lux_samplers_record_modulated() owns recording).
+ *
+ * Called by the chain executor (udpThread / feeder, Non-RT) at a SAMPLER
+ * position marker executed positionally — the stream at that position is
+ * the chain's OWN flux (its source + its upstream processors), never the
+ * shared modulated bus.
+ */
+void lux_sampler_record_chain_frame(int engine_slot,
+                                    const uint8_t* R,
+                                    const uint8_t* G,
+                                    const uint8_t* B,
+                                    uint16_t       pixel_count);
 
 /**
  * @brief Resampling capture — record the FINAL modulated channel into every

@@ -4328,10 +4328,13 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
                 sp.has_sampler = 1;
                 // Record the sampler's POSITION in the insert list so the executor
                 // can feed VideoScroll probes pre- vs post-sampler correctly.
+                // insert_state_idx = the instance's ENGINE slot (A=0/B=1) — the
+                // per-chain feed records the chain's stream into THAT engine.
                 if (sp.num_inserts < CHAIN_PLAN_MAX_INSERTS)
                 {
                     sp.insert_id[sp.num_inserts]        = IMAGE_CHAIN_INSERT_SAMPLER;
-                    sp.insert_state_idx[sp.num_inserts] = 0;   // unused for the marker
+                    sp.insert_state_idx[sp.num_inserts] =
+                        juce::jlimit(0, 1, mi.slot >= 0 ? mi.slot : 0);
                     sp.num_inserts++;
                 }
             }
