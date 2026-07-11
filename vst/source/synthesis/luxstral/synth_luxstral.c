@@ -57,7 +57,6 @@ LuxStralEngine g_luxstral_engine_a = {
     .out_L = luxstral_buffers_L,          /* legacy globals — A behaviour unchanged */
     .out_R = luxstral_buffers_R,
     .out_index = &luxstral_buffer_index,
-    .source_type_override = -1,           /* use global luxstral_source_type */
 };
 
 /* Phase-management activity counter (UI LED) — cumulative onsets. The
@@ -739,57 +738,32 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
   // The stereo pan positions and gains are already calculated and stored in preprocessed data
   // TODO: Use db->preprocessed_active.stereo.pan_positions[] and gains[] when implementing preprocessed data usage
 
-  // Use preprocessed data when available; fallback to local preprocessing
+  // M7 — the plan is the single routing authority: consume whatever the
+  // plan-driven writers committed (audio-thread mixer / udp / feeder /
+  // player). No source-tag gating, and NEVER a live-pipeline fallback — a
+  // chain without signal was already committed as zeroed sections
+  // (no-signal contract), so an empty buffer simply means silence.
   float contrast_factor = 0.0f;
   int has_preprocessed = 0;
 
-  /* SRC-GATE diagnostic snapshot — captured under db->mutex, logged after
-   * unlock (never log while holding a mutex shared with the UDP thread). */
-  int      _diag_print = 0, _diag_src = -1, _diag_tag = -1;
+  int      _diag_print = 0;
   float    _diag_gray_sum = 0.0f, _diag_notes_sum = 0.0f, _diag_cf = 0.0f;
   uint64_t _diag_ts = 0;
 
   pthread_mutex_lock(&db->mutex);
   has_preprocessed = (db->dataReady != 0) && (db->preprocessed_data.timestamp_us != 0);
-#ifdef VST_MODE
-  {
-    /* Source-tag gating: dataReady=1 means live, dataReady=2 means sampler.
-     * Reject preprocessed data that came from the wrong source.
-     *   Source=S (0): accept only tag 2 (sampler)
-     *   Source=L (1): accept only tag 1 (live)
-     *   Source=M (2): accept either tag */
-    int src = (eng->source_type_override >= 0)
-                ? eng->source_type_override
-                : g_sp3ctra_config.luxstral_source_type;
-    int tag = db->dataReady;
-
-    /* Diagnostic: print source routing state every ~500 synth calls (~0.5s).
-     * Values are captured under db->mutex; the log_info itself runs AFTER the
-     * unlock below — logging (logger mutex + fprintf + fflush) while holding
-     * db->mutex stalled the UDP thread and the FramePlayerThread on every
-     * slow stderr flush (periodic crackle synced to the log cadence). */
-    _diag_print = ((eng->diag_ctr++ % 500) == 0);
-
-    if (has_preprocessed) {
-      if ((src == 0 && tag != 2) || (src == 1 && tag != 1)) {
-        has_preprocessed = 0;
-      }
-    }
-
-    if (_diag_print) {
-      if (has_preprocessed) {
-        for (int _d = 0; _d < nb_pixels && _d < 3456; _d++)
-          _diag_gray_sum += db->preprocessed_data.additive.grayscale[_d];
-        for (int _d = 0; _d < 3456; _d++)
-          _diag_notes_sum += db->preprocessed_data.additive.notes[_d];
-        _diag_cf = db->preprocessed_data.additive.contrast_factor;
-      }
-      _diag_src = src;
-      _diag_tag = tag;
-      _diag_ts  = db->preprocessed_data.timestamp_us;
-    }
+  /* Diagnostic snapshot every ~500 synth calls (~0.5 s) — captured under
+   * db->mutex, logged after unlock (logging under a mutex shared with the
+   * producers caused periodic crackle). */
+  _diag_print = ((eng->diag_ctr++ % 500) == 0);
+  if (_diag_print && has_preprocessed) {
+    for (int _d = 0; _d < nb_pixels && _d < 3456; _d++)
+      _diag_gray_sum += db->preprocessed_data.additive.grayscale[_d];
+    for (int _d = 0; _d < 3456; _d++)
+      _diag_notes_sum += db->preprocessed_data.additive.notes[_d];
+    _diag_cf = db->preprocessed_data.additive.contrast_factor;
+    _diag_ts = db->preprocessed_data.timestamp_us;
   }
-#endif
   if (has_preprocessed) {
     memcpy(eng->grayScale_live, db->preprocessed_data.additive.grayscale,
            nb_pixels * sizeof(float));
@@ -797,45 +771,15 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
   }
   pthread_mutex_unlock(&db->mutex);
 
-#ifdef VST_MODE
   if (_diag_print)
-    log_info("SRC-GATE", "src=%d tag=%d has_pre=%d cf=%.4f gray_sum=%.2f notes_sum=%.2f ts=%llu",
-             _diag_src, _diag_tag, has_preprocessed, _diag_cf,
+    log_info("SRC-GATE", "has_pre=%d cf=%.4f gray_sum=%.2f notes_sum=%.2f ts=%llu",
+             has_preprocessed, _diag_cf,
              _diag_gray_sum, _diag_notes_sum, (unsigned long long)_diag_ts);
-#endif
 
   if (!has_preprocessed) {
-#ifdef VST_MODE
-    /* Source-aware fallback: buffer_R/G/B comes from AudioImageBuffers which
-     * always contains LIVE data.  Only use this fallback when the selected
-     * source includes live (L or M).  For Source=S, produce silence and wait
-     * for FramePlayerThread to provide sampler preprocessed data. */
-    int fallback_src = (eng->source_type_override >= 0)
-                         ? eng->source_type_override
-                         : g_sp3ctra_config.luxstral_source_type;
-    if (fallback_src == 0 /* IMAGE_SOURCE_SAMPLER */) {
-      /* Source=S: silence until sampler data arrives */
-      memset(eng->grayScale_live, 0, nb_pixels * sizeof(float));
-      contrast_factor = 0.0f;
-    } else
-#endif
-    {
-      PreprocessedImageData preprocessed_temp;
-      PipelineConfig fallback_cfg = pipeline_build_config_live();
-      if (pipeline_process_frame(buffer_R, buffer_G, buffer_B, &fallback_cfg, &preprocessed_temp) == 0) {
-        memcpy(eng->grayScale_live, preprocessed_temp.additive.grayscale,
-               nb_pixels * sizeof(float));
-        contrast_factor = preprocessed_temp.additive.contrast_factor;
-
-        pthread_mutex_lock(&db->mutex);
-        db->preprocessed_data = preprocessed_temp;
-        db->dataReady = 1;
-        pthread_mutex_unlock(&db->mutex);
-      } else {
-        memset(eng->grayScale_live, 0, nb_pixels * sizeof(float));
-        contrast_factor = 0.0f;
-      }
-    }
+    /* Nothing committed yet (startup) → silence. */
+    memset(eng->grayScale_live, 0, nb_pixels * sizeof(float));
+    contrast_factor = 0.0f;
   }
 
   // Capture raw scanner line for debug visualization
