@@ -2897,13 +2897,20 @@ void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     // (J3: the per-chain settings memory now lives IN the CHAINS tree —
     // Chain::typeMemory, serialized as CHAIN/MEMORY children. The legacy
     // INSERT_MEMORY blob is no longer written; it is still read once as a
-    // migration on load.)
+    // migration on load.) J6 — drop the stale copy a migrated session still
+    // carries, so old blobs resave as clean v3.
+    {
+        auto legacy = state.getChildWithName("INSERT_MEMORY");
+        if (legacy.isValid())
+            state.removeChild(legacy, nullptr);
+    }
     replaceChild(midiMap_.toValueTree());    // MIDI CC/Note → param mappings
 
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
 
     copyXmlToBinary(*xml, destData);
-    log_info("VST", "State saved to DAW project");
+    log_info("VST", "State saved to DAW project (%d KB)",
+             (int) ((destData.getSize() + 1023) / 1024));
 }
 
 void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
