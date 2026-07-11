@@ -497,23 +497,28 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
     // Synth blocks: rebind the OUT/send page to this send's conditioning bank.
     // The LuxStral slot is resolved from the SELECTED INSTANCE (not from the
     // restored engine index — a session restore may highlight another send).
-    if (id == ChainBlockId::LuxStral)
+    // M6 — every send type is instance-pooled: resolve the selected send's
+    // bank slot from the INSTANCE (not from a restored index — a session
+    // restore may highlight another send).
+    int sendSlot = 0;
+    if (isSynthBlock(id))
     {
         int sc = -1, si = -1;
         if (const auto* m = audioProcessor.getChainModel().find(selUid, sc, si))
-            if (m->type == ModuleType::LuxStral)
-                luxStralEngineIndex_ =
-                    juce::jlimit(0, ChainModel::kMaxChains - 1,
-                                 m->slot >= 0 ? m->slot : 0);
+            if (ChainModel::isEngineSend(m->type))
+                sendSlot = juce::jlimit(0, ChainModel::kMaxChains - 1,
+                                        m->slot >= 0 ? m->slot : 0);
+        if (id == ChainBlockId::LuxStral)
+            luxStralEngineIndex_ = sendSlot;
     }
     if (synthOutPage != nullptr && isSynthBlock(id))
     {
         if (id == ChainBlockId::LuxStral)
-            synthOutPage->setTarget(ModuleType::LuxStral, luxStralEngineIndex_);
+            synthOutPage->setTarget(ModuleType::LuxStral, sendSlot);
         else if (id == ChainBlockId::LuxSynth)
-            synthOutPage->setTarget(ModuleType::LuxSynth, 0);
+            synthOutPage->setTarget(ModuleType::LuxSynth, sendSlot);
         else
-            synthOutPage->setTarget(ModuleType::LuxWave, 0);
+            synthOutPage->setTarget(ModuleType::LuxWave, sendSlot);
     }
     if (audioMixPanel != nullptr)
     {
@@ -654,11 +659,15 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
     // param, or hide for blocks without a power switch (SOURCE CIS, SCORE).
     {
         juce::String enableId = ChainRackComponent::enableParamId(id);
-        // LuxStral sends power through THEIR bank's enable (per-send LED);
-        // the type-level id (deviceEnabled) is the ENGINE enable, which
-        // lives on the AUDIO MIX strip.
+        // Engine sends power through THEIR bank's enable (per-send LED, M6);
+        // the type-level ids (deviceEnabled/luxsynthEnabled/luxwaveEnabled)
+        // are the ENGINE enables, which live on the AUDIO MIX strips.
         if (id == ChainBlockId::LuxStral)
-            enableId = lsOutParam(luxStralEngineIndex_, "enabled");
+            enableId = lsOutParam(sendSlot, "enabled");
+        else if (id == ChainBlockId::LuxSynth)
+            enableId = lxOutParam(sendSlot, "enabled");
+        else if (id == ChainBlockId::LuxWave)
+            enableId = lwOutParam(sendSlot, "enabled");
         // Pooled inserts: the enable lives in the selected INSTANCE's bank
         // (the catalog's type-level id is empty for them).
         else if (id == ChainBlockId::Pitch)

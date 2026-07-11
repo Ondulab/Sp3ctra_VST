@@ -173,7 +173,18 @@ player-fed (parité : c'était déjà le cas).
 
 Validation : mono-send parité ; 2 sends → table = mix bipolaire ; intensity 0 → table plate 0.5.
 
-## M6 — OUT poolés par instance + levée des contraintes d'insertion
+## M6 — OUT poolés par instance + levée des contraintes d'insertion — ✅ FAIT (2026-07-11)
+
+Statut : implémenté, build vert, smoke test OK. Réalisation effective :
+`ChainModel::isEngineSend` + `firstFreeEngineSendSlot(type)` (pool 8 slots PAR TYPE,
+indépendants) ; LuxSynth/LuxWave retirés de la règle singleton (multi-chain N≤8,
+1/type/chaîne conservé — D5) ; `validateAndRepair` budgets + healing par type ;
+marqueurs OUT lx/lw portent le slot d'instance réel ; pb_chain = premier OUT_LUXSYNTH
+en ordre modèle (vues polyphoniques mono-chaîne assumées) ; éditeur : `setTarget(type,
+slot d'instance)` + power zone-3 par banc pour les 3 types ; rack : LED +
+setEnableParamOverride par banc pour les 3 types. Anciennes sessions : slot=-1 →
+heal vers slot 0 (banc legacy, parité). Vérif interactive multi-send (2-3 OUT
+LuxSynth, pages indépendantes, badges) à faire à la main — je ne pilote plus l'UI.
 
 - `ChainModel` : pool généralisé `isEngineSend(t)` (LuxStral/LuxSynth/LuxWave,
   `kMaxEngineSends = kMaxChains`) ; retirer LuxSynth/LuxWave de la règle singleton de

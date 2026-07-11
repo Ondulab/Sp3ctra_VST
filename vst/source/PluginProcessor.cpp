@@ -4310,19 +4310,17 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
                       || t == ModuleType::LuxWave)
                      && sp.num_inserts < CHAIN_PLAN_MAX_INSERTS)
             {
-                // OUT SEND MARKER (M3) — pass-through; locates the send so the
-                // chain executor taps the stream at its position.
+                // OUT SEND MARKER (M3/M6) — pass-through; locates the send so
+                // the chain executor taps the stream at its position.
                 // insert_state_idx = the send's conditioning-bank slot
-                // (LuxSynth/LuxWave stay on bank 0 until the M6 pooling).
+                // (ModuleInstance.slot, per-type pools).
                 sp.insert_id[sp.num_inserts] =
                       (t == ModuleType::LuxStral) ? IMAGE_CHAIN_INSERT_OUT_LUXSTRAL
                     : (t == ModuleType::LuxSynth) ? IMAGE_CHAIN_INSERT_OUT_LUXSYNTH
                     :                               IMAGE_CHAIN_INSERT_OUT_LUXWAVE;
                 sp.insert_state_idx[sp.num_inserts] =
-                    (t == ModuleType::LuxStral)
-                        ? juce::jlimit(0, CHAIN_MAX_CHAINS - 1,
-                                       mi.slot >= 0 ? mi.slot : 0)
-                        : 0;
+                    juce::jlimit(0, CHAIN_MAX_CHAINS - 1,
+                                 mi.slot >= 0 ? mi.slot : 0);
                 sp.num_inserts++;
             }
             else if (t == ModuleType::Sampler)

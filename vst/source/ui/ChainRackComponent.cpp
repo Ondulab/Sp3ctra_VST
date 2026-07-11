@@ -273,12 +273,15 @@ void ChainRackComponent::rebuild()
         {
             auto blk = std::make_unique<BlockComponent>(m.type, m.id);
             auto* bp = blk.get();
-            // Synth-split: every LuxStral send is just "→ LUXSTRAL" (no A/B
-            // suffix) and its LED is the PER-SEND power, from the send's own
-            // conditioning bank — the ENGINE enable lives on the AUDIO MIX
-            // strip (deviceEnabled).
+            // Synth-split M6: every engine send's LED is the PER-SEND power,
+            // from the send's own conditioning bank — the ENGINE enables live
+            // on the AUDIO MIX strips.
             if (m.type == ModuleType::LuxStral && m.slot >= 0)
                 bp->setEnableParamOverride(lsOutParam(m.slot, "enabled"));
+            if (m.type == ModuleType::LuxSynth && m.slot >= 0)
+                bp->setEnableParamOverride(lxOutParam(m.slot, "enabled"));
+            if (m.type == ModuleType::LuxWave && m.slot >= 0)
+                bp->setEnableParamOverride(lwOutParam(m.slot, "enabled"));
             // Each VideoScroll output is per-instance: its LED toggles the slot's
             // own enable param, so the mixer can drop just this output.
             if (m.type == ModuleType::VideoScroll && m.slot >= 0)
@@ -979,14 +982,18 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const j
             return paramOn("luxSamplerEnabled") ? LedState::Active : LedState::Off;
         case ModuleType::LuxStral:
             // Per-send power (the send's own conditioning bank); the ENGINE
-            // enable (deviceEnabled) lives on the AUDIO MIX strip.
+            // enables live on the AUDIO MIX strips (M6).
             return paramOn(engineSlot >= 0 ? lsOutParam(engineSlot, "enabled")
                                            : juce::String("deviceEnabled"))
                        ? LedState::Active : LedState::Off;
         case ModuleType::LuxSynth:
-            return paramOn("luxsynthEnabled") ? LedState::Active : LedState::Off;
+            return paramOn(engineSlot >= 0 ? lxOutParam(engineSlot, "enabled")
+                                           : juce::String("luxsynthEnabled"))
+                       ? LedState::Active : LedState::Off;
         case ModuleType::LuxWave:
-            return paramOn("luxwaveEnabled") ? LedState::Active : LedState::Off;
+            return paramOn(engineSlot >= 0 ? lwOutParam(engineSlot, "enabled")
+                                           : juce::String("luxwaveEnabled"))
+                       ? LedState::Active : LedState::Off;
 
         // SCORE and TIMBRE both drive the SHARED score-player channel, so their
         // block LED reflects that channel's transport identically:
