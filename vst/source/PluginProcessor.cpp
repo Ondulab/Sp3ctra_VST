@@ -2931,21 +2931,28 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
 
     if (xmlState.get() != nullptr) {
         if (xmlState->hasTagName(apvts.state.getType())) {
-            // Never-auto-run: every transport must open STOPPED. Patch the
-            // tree BEFORE replaceState so "stopped" IS the restored value —
-            // the previous setValueNotifyingHost(0) push after the restore
-            // marked host automation lanes as overridden on every project
-            // open (and could write a point in Latch/Write modes). A missing
-            // PARAM entry needs no patch: the parameter defaults are stopped.
+            // Transport open-state is patched into the tree BEFORE replaceState
+            // so it IS the restored value — the previous setValueNotifyingHost()
+            // push after the restore marked host automation lanes as overridden
+            // on every project open (and could write a point in Latch/Write
+            // modes). A missing PARAM entry needs no patch: the defaults already
+            // match the open-state below.
+            //   AUDIO transports (SEQ/SCORE/media sources) open STOPPED so a
+            //   project never blasts sound on load (never-auto-run).
+            //   The VIDEO SCROLL is a visual output, not audio: it opens RUNNING
+            //   so the right-band waterfall scrolls immediately on launch — the
+            //   play/pause button already defaults to "running", so button and
+            //   param now agree (previously it opened frozen-but-labelled-play,
+            //   requiring a pause/play dance to start).
             auto forceRestoredParam = [&xmlState](const juce::String& id, double v)
             {
                 for (auto* e : xmlState->getChildWithTagNameIterator("PARAM"))
                     if (e->getStringAttribute("id") == id)
                     { e->setAttribute("value", v); return; }
             };
-            forceRestoredParam("videoScrollPaused", 1.0);
+            forceRestoredParam("videoScrollPaused", 0.0);       // legacy global
             for (int s = 0; s < CHAIN_MAX_CHAINS; ++s)
-                forceRestoredParam(vsParam(s, "paused"), 1.0);  // per-instance
+                forceRestoredParam(vsParam(s, "paused"), 0.0);  // per-instance: run
             forceRestoredParam(PARAM_SEQ_TRANSPORT, 0.0);       // Stop
             forceRestoredParam(PARAM_SCORE_PLAYING, 0.0);
             forceRestoredParam(PARAM_IMGSRC_PLAY,   0.0);       // M9 sources
@@ -3090,32 +3097,32 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
 {
     {
         {
-            // Never-auto-run is enforced by patching the restored tree BEFORE
-            // replaceState (see setStateInformation) — no host-visible pushes
-            // on the nominal path. Clearing makes the video scroll a true
-            // Stop (frozen + blank), not just a pause.
+            // Transport open-state is patched into the tree BEFORE replaceState
+            // (see setStateInformation) — no host-visible pushes on the nominal
+            // path. Clearing blanks the waterfall history so the video scroll
+            // starts from a fresh (empty) waterfall and scrolls in live data.
             requestVideoScrollClear();
 
             // Belt-and-suspenders for blobs saved by OLDER plugin versions:
             // replaceState KEEPS the current value of any parameter absent
             // from the restored tree, so the pre-replace patch cannot reach
-            // those. Fold any still-running transport back to stopped —
-            // host-visible only in this corner case (old preset loaded while
-            // something is playing).
+            // those. Fold each transport to its open-state — host-visible only
+            // in this corner case (old preset loaded while something differs).
             {
-                auto forceStopped = [this](const juce::String& id, float stoppedNorm)
+                auto forceTo = [this](const juce::String& id, float openNorm)
                 {
                     if (auto* p = apvts.getParameter(id))
-                        if (std::abs(p->getValue() - stoppedNorm) > 1.0e-4f)
-                            p->setValueNotifyingHost(stoppedNorm);
+                        if (std::abs(p->getValue() - openNorm) > 1.0e-4f)
+                            p->setValueNotifyingHost(openNorm);
                 };
-                forceStopped("videoScrollPaused", 1.0f);
+                // VIDEO SCROLL opens RUNNING (paused = 0); audio transports STOPPED.
+                forceTo("videoScrollPaused", 0.0f);
                 for (int s = 0; s < CHAIN_MAX_CHAINS; ++s)
-                    forceStopped(vsParam(s, "paused"), 1.0f);
-                forceStopped(PARAM_SEQ_TRANSPORT, 0.0f);
-                forceStopped(PARAM_SCORE_PLAYING, 0.0f);
-                forceStopped(PARAM_IMGSRC_PLAY,   0.0f);
-                forceStopped(PARAM_VIDSRC_PLAY,   0.0f);
+                    forceTo(vsParam(s, "paused"), 0.0f);
+                forceTo(PARAM_SEQ_TRANSPORT, 0.0f);
+                forceTo(PARAM_SCORE_PLAYING, 0.0f);
+                forceTo(PARAM_IMGSRC_PLAY,   0.0f);
+                forceTo(PARAM_VIDSRC_PLAY,   0.0f);
             }
             // Push the restored SCORE speed/loop into the engine (the listener
             // does not fire for values equal to the pre-restore state).
@@ -3648,6 +3655,19 @@ void Sp3ctraAudioProcessor::loadChainModelFromState()
     else
         chainModel_ = ChainModel::makeDefault();
     chainModel_.validateAndRepair();
+
+    // VIDEO SCROLL opens RUNNING (see setStateInformation). "paused" is a
+    // chain-owned VALUE, so projectChainValuesToBanks() would otherwise
+    // re-apply a saved paused=1 on top of the flat-param patch and re-freeze
+    // the waterfall. Normalise the transport bit to "running" in the loaded
+    // model so the projection reinforces it instead of fighting it. The
+    // artistic settings (speed/zoom/fade/…) are untouched.
+    for (auto& ch : chainModel_.chains)
+        for (auto& m : ch.modules)
+            if (m.type == ModuleType::VideoScroll
+                && m.values.isValid()
+                && m.values.hasProperty("paused"))
+                m.values.setProperty("paused", 0.0, nullptr);
 
     // Migration: the step sequencer became a dedicated SEQUENCER module. A model
     // saved before that has no Sequencer block — inject one so the sequencer

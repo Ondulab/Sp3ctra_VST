@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "../UITheme.h"
 #include "SlotGridComponent.h"
 #include "SlotEditorComponent.h"
 
@@ -26,6 +27,17 @@ public:
 
     void paint(juce::Graphics& g) override;
     void resized() override;
+
+    // ── Layout constants (single source of truth for resized() + kPreferredH) ──
+    static constexpr int kGridH = 66;   // sample-bank row
+    static constexpr int kEditH = 500;  // slot editor: 2 param cols + image + EQ
+
+    // Natural height — must match the layout in resized(): pad + grid + gap +
+    // editor + gap + session toolbar + pad.  PluginEditor uses this to size the
+    // zone-3 viewport content so the whole page scrolls into view at min size.
+    static constexpr int kPreferredH = Sp3ctraTheme::kPad + kGridH + Sp3ctraTheme::kGap
+                                     + kEditH + Sp3ctraTheme::kGap + Sp3ctraTheme::kControlH
+                                     + Sp3ctraTheme::kPad;
 
     /** Bind this page (grid + editor + session I/O) to engine 0 (A) or 1 (B). */
     void setSamplerIndex(int i)

@@ -1085,7 +1085,7 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
             case ChainBlockId::Mask:
                 top = maskPage.get();        topMinH = 570; break;  // +100 env editor
             case ChainBlockId::Sampler:
-                top = samplerPage.get();     topMinH = 560; break;
+                top = samplerPage.get();     topMinH = SamplerPageComponent::kPreferredH; break;
             case ChainBlockId::Sequencer:
                 top = sequencerPage.get();   topMinH = 360; break;  // grid + transport
             // Synth blocks (P2): OUT/send page from the rack, engine page from

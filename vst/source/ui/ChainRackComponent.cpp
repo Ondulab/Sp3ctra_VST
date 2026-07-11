@@ -918,13 +918,16 @@ void ChainRackComponent::mouseUp(const juce::MouseEvent& e)
                     {
                         case 1:
                             // duplicateChain runs the whole edit flow itself
-                            // (bindings, inherit, plan, VALUES projection).
+                            // (bindings, inherit, plan, VALUES projection); the
+                            // rack refresh is UI-only — refreshAfterModelEdit
+                            // rebuilds AND repaints. A bare rebuild()+
+                            // onModelChanged() grows the component via setSize,
+                            // so JUCE only dirties the new bottom strip: the new
+                            // chain's header lands in the un-repainted middle
+                            // band (invisible) while the old "+ CHAIN" row keeps
+                            // its stale pixels there.
                             if (processor.duplicateChain(chainIdx) >= 0)
-                            {
-                                rebuild();
-                                if (onModelChanged)
-                                    onModelChanged();
-                            }
+                                refreshAfterModelEdit(false);
                             break;
                         case 2: savePresetFlow(chainIdx);  break;
                         case 3: loadPresetFlow(chainIdx);  break;
@@ -1025,9 +1028,7 @@ void ChainRackComponent::loadPresetFlow(int targetChainIdx)
                     "Could not load the preset (chain limit reached?).");
                 return;
             }
-            rebuild();
-            if (onModelChanged)
-                onModelChanged();
+            refreshAfterModelEdit(true);   // rebuild + repaint (see duplicateChain)
             if (! res.skipped.isEmpty())
             {
                 const juce::String msg =
