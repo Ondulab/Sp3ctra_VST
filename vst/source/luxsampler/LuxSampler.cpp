@@ -156,6 +156,23 @@ extern "C"
         return playing;
     }
 
+    int lux_sampler_playing_engine(void)
+    {
+        // One-plays-at-a-time arbiter ⇒ at most one engine drives the channel.
+        // Score relay reports -1: the SCORE path is gated by has_score, never
+        // by engine matching.
+        for (int i = 0; i < LuxSampler::kMaxEngines; ++i)
+        {
+            int driving = 0;
+            if (auto* e = LuxSampler::pinEngine(i))
+                driving = (e->isDrivingChannel() && ! e->isScorePlaying()) ? 1 : 0;
+            LuxSampler::unpinEngine(i);
+            if (driving)
+                return i;
+        }
+        return -1;
+    }
+
     int lux_sampler_is_recording(void)
     {
         int recording = 0;
@@ -2646,9 +2663,16 @@ void FramePlayerThread::injectWhiteFrame() noexcept
     if (doubleBuffer != nullptr)
     {
         // M7 — plan-driven gates: the additive/pathB sections may only be
-        // silenced here when the player actually relays those paths.
-        const bool addOwned = chain_additive_player_candidate() != 0;
-        const bool pbOwned  = chain_pathb_player_candidate(0) != 0;
+        // silenced here when the player actually relays those paths. The
+        // white frame runs when THIS engine's player goes idle — silence the
+        // paths this engine's chain (or the score relay it hosts) fed.
+        const int  engineIdx = sampler.getEngineIndex();
+        const bool addOwned  =
+            chain_additive_player_candidate(0, engineIdx) != 0
+            || chain_additive_player_candidate(1, engineIdx) != 0;
+        const bool pbOwned   =
+            chain_pathb_player_candidate(0, engineIdx) != 0
+            || chain_pathb_player_candidate(1, engineIdx) != 0;
         if (addOwned)
         {
             pthread_mutex_lock(&doubleBuffer->mutex);
@@ -3350,7 +3374,8 @@ void FramePlayerThread::run()
                 // bypass the MIX crossfader opacity — only the transport fade
                 // ramp applies. The crossfader balance (smpOp) is only
                 // meaningful for the legacy MIX blending.
-                const bool addRelayed = chain_additive_player_candidate() != 0;
+                const bool addRelayed = chain_additive_player_candidate(
+                    0, sampler.getEngineIndex()) != 0;
                 // ── Module bypass ───────────────────────────────────────────────
                 // When the SAMPLER module is DISABLED in the chain rack, its player
                 // output must be IGNORED — but the players are NOT stopped. Forcing
@@ -3417,6 +3442,7 @@ void FramePlayerThread::run()
                     s_playerSendCount = ls_sends_stage_player_frame(
                         workR, workG, workB, nb,
                         isScore ? 1 : 0,
+                        sampler.getEngineIndex(),
                         (state.seqControlledPlay.load(std::memory_order_relaxed)
                          || isScore) ? 1 : 0,
                         audioBuffers);
@@ -3428,7 +3454,8 @@ void FramePlayerThread::run()
                     //     execution — everything downstream (visual mix bus,
                     //     preprocessed audio commit, resampling) sees post-FX.
                     chain_player_apply_synth_a_inserts(
-                        isScore ? 1 : 0, audioBuffers, workR, workG, workB, nb);
+                        isScore ? 1 : 0, sampler.getEngineIndex(),
+                        audioBuffers, workR, workG, workB, nb);
 
                     // 3. Write mixed frame to AudioImageBuffers (the visual mix bus)
                     uint8_t* wR = nullptr;
@@ -3467,9 +3494,10 @@ void FramePlayerThread::run()
                 // whose chains it actually relays (additive when a sampler
                 // sits on a "→ LUXSTRAL" chain; polyphonic when the
                 // "→ LUXSYNTH" chain is sampler/score-relayed).
-                const bool addOwned = chain_additive_player_candidate() != 0;
-                const bool pbOwned  =
-                    chain_pathb_player_candidate(isScore ? 1 : 0) != 0;
+                const bool addOwned = chain_additive_player_candidate(
+                    isScore ? 1 : 0, sampler.getEngineIndex()) != 0;
+                const bool pbOwned  = chain_pathb_player_candidate(
+                    isScore ? 1 : 0, sampler.getEngineIndex()) != 0;
 
                 // Engine B feed happens ABOVE (step 2b), with the RAW player
                 // frame — before engine A's chain inserts are applied to work*.
@@ -3523,8 +3551,9 @@ void FramePlayerThread::run()
                             // stream: stage the "→ LUXSYNTH" send from the
                             // same frame (engine feed, mixed + FFT'd by the
                             // audio thread).
-                            lx_send_stage_player_frame(workR, workG, workB,
-                                                       nb);
+                            lx_send_stage_player_frame(
+                                workR, workG, workB, nb,
+                                isScore ? 1 : 0, sampler.getEngineIndex());
                         }
                     }
                 }

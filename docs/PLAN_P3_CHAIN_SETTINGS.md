@@ -206,14 +206,31 @@ Bug user (2026-07-11) : probe post-SAMPLER d'une chaîne IMAGE affichait le flux
 SP3CTRA. Fix : owner = 1re chaîne sampler (ordre modèle), build modulé depuis SA
 source (udp + feeder), shortcut réservé à l'owner — les autres chaînes sampler
 s'exécutent positionnellement sur leur propre flux.
-**Dette restante (nouveau chantier « sampler par chaîne », après M7/M8)** :
-1. hook `lux_sampler_playing_engine()` à créer — l'ownership playback est sur le flag
-   global `is_playing` (2 samplers ⇒ approximations pendant la lecture) ;
+**Dette « sampler par chaîne » — ✅ SOLDÉE (2026-07-12, playback par moteur)** :
+1. ✅ hook `lux_sampler_playing_engine()` (LuxSampler.cpp) : moteur dont la LECTURE
+   sampler possède le canal, −1 si idle OU relay SCORE (le SCORE reste gate par
+   has_score, jamais par moteur). Un seul moteur joue (arbitre one-plays-at-a-time).
 2. ✅ RÉSOLU (5056f77) pour l'IDLE : marqueur SAMPLER = slot moteur, chaque moteur
    enregistre le flux de SA chaîne (`lux_sampler_record_chain_frame`) ; pendant la
-   LECTURE le resampling global reste (feature) — à raffiner avec le hook (1) ;
-3. `ls/lx_sends_stage_player_frame` nourrit toutes les chaînes has_sampler depuis la
-   même frame de playback (canal partagé one-plays-at-a-time).
+   LECTURE le resampling global reste (FEATURE conservée — un double write par ligne
+   sinon : per-chain record ET resampling nourriraient le même slot armé).
+3. ✅ ownership par moteur partout : prédicat `chain_hosts_sampler_engine(sp, engine)`
+   (scan des marqueurs SAMPLER, hors VST_MODE aussi) + `chain_player_owned(sp,
+   is_score, engine)`. `ls/lx_send(s)_stage_player_frame`, les candidats
+   `chain_additive/pathb_player_candidate` et `chain_player_apply_synth_a_inserts`
+   prennent (is_score, engine_slot) — le FramePlayerThread passe
+   `sampler.getEngineIndex()`. udpThread/feeder : `stream_player_owned` = la chaîne
+   héberge LE moteur qui joue (ou has_score×score) — une chaîne du moteur idle
+   continue son exécution positionnelle pendant que l'autre joue (avant : toutes les
+   chaînes sampler étaient gelées/nourries par la même frame). Owner du bus modulé
+   pendant la lecture = la chaîne du moteur JOUANT (idle : 1re chaîne sampler comme
+   avant) ; garde `mod_is_chain_stream` — pendant un playback SCORE (ou un moteur
+   jouant hébergé par aucune chaîne) une chaîne sampler ne shortcute JAMAIS sur le
+   canal modulé (elle verrait le flux d'un autre). injectWhiteFrame silencie les
+   sections que CE moteur (ou le relay score) alimentait.
+   À VALIDER à la main : 2 samplers A/B sur 2 chaînes, play A → chaîne B vivante sur
+   son propre flux ; SCORE play → chaînes sampler vivantes ; REC pendant play = 
+   resampling (inchangé).
 **Décision actée (user 2026-07-11) : 8 chaînes max** (`kMaxChains == CHAIN_MAX_CHAINS
 == 8`, déjà câblé partout — dimensionne pools, stagings, banques ×8).
 
