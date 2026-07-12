@@ -176,37 +176,43 @@ void *audioProcessingThread(void *arg);
 void internal_sources_process_tick(void *arg);
 
 /* Synth-split P3 — FramePlayerThread: stage every PLAYER-OWNED LuxStral send
- * (sampler chain, or score chain during score playback) from the blended
- * playback frame; each send applies its own post-marker inserts + bank on a
- * private copy. Returns the plan's num_ls_sends (0 → caller keeps the legacy
- * engine-A player path alive). VST only. */
+ * from the blended playback frame; each send applies its own post-marker
+ * inserts + bank on a private copy. Per-chain playback: a sampler send is
+ * player-owned only when its chain hosts THIS engine (`engine_slot` = the
+ * calling player's engine); is_score=1 matches has_score chains instead.
+ * Returns the plan's num_ls_sends (0 → caller keeps the legacy engine-A
+ * player path alive). VST only. */
 struct AudioImageBuffers;
 int ls_sends_stage_player_frame(const uint8_t *r, const uint8_t *g,
                                 const uint8_t *b, int nb_pixels,
-                                int is_score, int force_play,
+                                int is_score, int engine_slot, int force_play,
                                 struct AudioImageBuffers *viz_bus);
 
 /* Engine A ← player-side chain inserts. Called by FramePlayerThread (Non-RT)
  * with the final blended playback frame: applies IN PLACE the inserts of
- * LuxStral A's chain placed BELOW the SCORE (is_score=1) / SAMPLER (is_score=0)
- * module — REVERB/ECHO/probes — and publishes the zone-1 selection tap when it
- * points into that span. The per-line producers skip those inserts while the
- * player owns the channel, so this is their only execution. */
-void chain_player_apply_synth_a_inserts(int is_score,
+ * LuxStral A's chain placed BELOW the SCORE (is_score=1) / SAMPLER (is_score=0,
+ * marker matching `engine_slot`) module — REVERB/ECHO/probes — and publishes
+ * the zone-1 selection tap when it points into that span. The per-line
+ * producers skip those inserts while the player owns the channel, so this is
+ * their only execution. */
+void chain_player_apply_synth_a_inserts(int is_score, int engine_slot,
                                         struct AudioImageBuffers *viz_bus,
                                         uint8_t *r, uint8_t *g, uint8_t *b,
                                         int nb_pixels);
 
 /* M4 — FramePlayerThread: stage the "→ LUXSYNTH" send from the blended
  * playback frame while the player owns its chain's stream (single writer —
- * udpThread/feeder skip the LuxSynth staging of player-owned chains). */
+ * udpThread/feeder skip the LuxSynth staging of player-owned chains).
+ * Ownership: has_score (is_score=1) or SAMPLER marker == engine_slot. */
 void lx_send_stage_player_frame(const uint8_t *r, const uint8_t *g,
-                                const uint8_t *b, int nb_pixels);
+                                const uint8_t *b, int nb_pixels,
+                                int is_score, int engine_slot);
 
 /* M7 — plan-driven ownership queries (replace the legacy *_source_type
- * gates in the player paths). Non-RT callers. */
-int chain_additive_player_candidate(void);   /* additive path sampler/score-relayed */
-int chain_pathb_player_candidate(int is_score); /* the "→ LUXSYNTH" chain hosts a
-                                                 * sampler (0) / score (1) */
+ * gates in the player paths). Non-RT callers. Per-chain playback: the
+ * sampler case (is_score=0) matches the chain's SAMPLER marker against
+ * `engine_slot`; the score case (is_score=1) ignores it. */
+int chain_additive_player_candidate(int is_score, int engine_slot);
+int chain_pathb_player_candidate(int is_score, int engine_slot);
 
 #endif

@@ -128,6 +128,22 @@ void lux_samplers_record_modulated(const uint8_t* R,
 int lux_sampler_is_playing(void);
 
 /**
+ * @brief Which sampler ENGINE's playback drives the modulated channel.
+ *
+ * Per-chain playback (2026-07-12): the chain executors gate a chain's
+ * player-ownership on ITS OWN engine (the SAMPLER marker's slot) matching
+ * this value — a chain hosting the idle engine keeps running positionally
+ * on its own stream while the other engine plays.
+ *
+ * Thread: any Non-RT producer. Atomic reads only.
+ *
+ * @return engine slot (0=A, 1=B) whose SAMPLER playback owns the channel;
+ *         -1 when idle OR when the channel is score-relayed (the SCORE path
+ *         has its own has_score gates — never engine-matched).
+ */
+int lux_sampler_playing_engine(void);
+
+/**
  * @brief Returns non-zero if any LuxSampler slot is currently RECORDING.
  *
  * Used by udpThread() to allow preprocessed_data writes for Source=Sampler

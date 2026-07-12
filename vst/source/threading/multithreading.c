@@ -53,7 +53,33 @@ static int s_udp_frame_ls_sends = 0;   /* udpThread-only: plan.num_ls_sends of
 static int s_udp_frame_pb_ran = 0;     /* udpThread-only: Path-B products of
                                         * preprocessed_temp valid this line */
 
+/* ── Per-chain playback (2026-07-12) ─────────────────────────────────────────
+ * Does this chain host `engine`'s SAMPLER? (marker slot = engine A=0/B=1).
+ * The player-ownership gates match the PLAYING engine against the chain's
+ * own marker — a chain hosting the idle engine keeps its positional run.
+ * (Outside VST_MODE the engine is always -1 → never player-owned.) */
+static int chain_hosts_sampler_engine(const SynthChainPlan *sp, int engine)
+{
+    if (engine < 0 || !sp->has_sampler)
+        return 0;
+    for (int i = 0; i < sp->num_inserts; i++)
+        if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER
+            && sp->insert_state_idx[i] == engine)
+            return 1;
+    return 0;
+}
+
 #ifdef VST_MODE
+/* One predicate for every player-ownership gate: SCORE relay matches
+ * has_score (channel-wide, never engine-matched); sampler playback matches
+ * the chain's own SAMPLER marker against the playing engine. */
+static int chain_player_owned(const SynthChainPlan *sp, int is_score,
+                              int engine_slot)
+{
+    return is_score ? sp->has_score
+                    : chain_hosts_sampler_engine(sp, engine_slot);
+}
+
 /* Player-side execution of the inserts placed AFTER a SCORE/SAMPLER marker —
  * defined below chain_run_inserts_with_viz_tap (which it reuses). */
 static int chain_apply_post_marker_inserts(const SynthChainPlan *sp,
@@ -64,15 +90,15 @@ static int chain_apply_post_marker_inserts(const SynthChainPlan *sp,
 
 /* ── Synth-split P3 — FramePlayerThread: stage every PLAYER-OWNED LuxStral
  * send from the blended playback frame. A send is player-owned when its chain
- * hosts the SAMPLER (the caller only runs while a slot plays), or the SCORE
- * during score playback. Each send applies ITS OWN chain's post-marker
- * inserts on a private copy (FX must not leak between chains) and its own
- * conditioning bank; intensity is applied at MIX time by the audio thread.
- * Returns plan.num_ls_sends so the caller keeps the legacy engine-A path
- * alive when no send exists. */
+ * hosts THIS PLAYER'S engine (`engine_slot` — a chain hosting the other,
+ * idle engine keeps its positional run), or the SCORE during score playback.
+ * Each send applies ITS OWN chain's post-marker inserts on a private copy
+ * (FX must not leak between chains) and its own conditioning bank; intensity
+ * is applied at MIX time by the audio thread. Returns plan.num_ls_sends so
+ * the caller keeps the legacy engine-A path alive when no send exists. */
 int ls_sends_stage_player_frame(const uint8_t *r, const uint8_t *g,
                                 const uint8_t *b, int nb_pixels,
-                                int is_score, int force_play,
+                                int is_score, int engine_slot, int force_play,
                                 struct AudioImageBuffers *viz_bus)
 {
     static PreprocessedImageData s_pp_send_player; /* FramePlayerThread scratch */
@@ -89,8 +115,9 @@ int ls_sends_stage_player_frame(const uint8_t *r, const uint8_t *g,
         const LsSendPlan     *snd = &plan.ls_send[k];
         const SynthChainPlan *sp  = &snd->recipe;
 
-        if (! (is_score ? sp->has_score : sp->has_sampler))
-            continue;   /* live/internal send — udpThread/feeder stage it */
+        if (! chain_player_owned(sp, is_score, engine_slot))
+            continue;   /* live/internal/other-engine send — its own producer
+                         * (udpThread/feeder) stages it */
 
         int nb = nb_pixels;
         if (nb > (int) sizeof(s_snd_fx_r)) nb = (int) sizeof(s_snd_fx_r);
@@ -702,22 +729,26 @@ static void chain_shortcut_walk(const SynthChainPlan *sp, int chain_idx,
 
 /* ── M7 — plan-driven ownership queries (replace the *_source_type gates) ────
  * Used by FramePlayerThread/LuxSampler: which db sections may the player own?
- * Cheap (one plan snapshot + scan); Non-RT callers only. */
-int chain_additive_player_candidate(void)
+ * Per-chain playback: the sampler case matches the chain's SAMPLER marker
+ * against the CALLING player's engine — the other engine's playback never
+ * grants ownership of this chain. Cheap (one plan snapshot + scan); Non-RT
+ * callers only. */
+int chain_additive_player_candidate(int is_score, int engine_slot)
 {
     ChainPlan plan;
     chain_plan_get(&plan);
     if (plan.num_ls_sends > 0)
-        return plan.ls_send[0].recipe.has_sampler
-            || plan.ls_send[0].recipe.has_score;
+        return chain_player_owned(&plan.ls_send[0].recipe, is_score,
+                                  engine_slot);
     /* no send → legacy additive tick; the first sampler chain owns it */
     for (int c = 0; c < plan.num_chains; c++)
-        if (plan.chain[c].present && plan.chain[c].has_sampler)
+        if (plan.chain[c].present
+            && chain_player_owned(&plan.chain[c], is_score, engine_slot))
             return 1;
     return 0;
 }
 
-int chain_pathb_player_candidate(int is_score)
+int chain_pathb_player_candidate(int is_score, int engine_slot)
 {
     ChainPlan plan;
     chain_plan_get(&plan);
@@ -727,18 +758,19 @@ int chain_pathb_player_candidate(int is_score)
         if (!sp->present) continue;
         for (int i = 0; i < sp->num_inserts; i++)
             if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
-                return is_score ? sp->has_score : sp->has_sampler;
+                return chain_player_owned(sp, is_score, engine_slot);
     }
     return 0;
 }
 
 /* ── M4 — FramePlayerThread: stage the "→ LUXSYNTH" send from the blended
- * playback frame while the player owns its chain's stream (sampler on the
- * chain, or score relay). Single writer: udpThread/feeder skip the LuxSynth
- * staging of player-owned chains. Called at the same site that publishes the
- * Path-B engine tap. */
+ * playback frame while the player owns its chain's stream (THIS engine's
+ * sampler on the chain, or score relay). Single writer: udpThread/feeder skip
+ * the LuxSynth staging of player-owned chains. Called at the same site that
+ * publishes the Path-B engine tap. */
 void lx_send_stage_player_frame(const uint8_t *r, const uint8_t *g,
-                                const uint8_t *b, int nb_pixels)
+                                const uint8_t *b, int nb_pixels,
+                                int is_score, int engine_slot)
 {
     static float s_line_player[CIS_MAX_PIXELS_NB];   /* FramePlayerThread only */
     ChainPlan plan;
@@ -748,7 +780,7 @@ void lx_send_stage_player_frame(const uint8_t *r, const uint8_t *g,
     for (int c = 0; c < plan.num_chains && c < CHAIN_MAX_CHAINS; c++)
     {
         const SynthChainPlan *sp = &plan.chain[c];
-        if (!sp->present || !(sp->has_sampler || sp->has_score))
+        if (!sp->present || !chain_player_owned(sp, is_score, engine_slot))
             continue;
         for (int i = 0; i < sp->num_inserts; i++)
             if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
@@ -809,8 +841,9 @@ static int chain_apply_post_marker_inserts(const SynthChainPlan *sp,
 
 /* Engine A's entry point for the FramePlayerThread (LuxSampler.cpp): apply the
  * inserts of LuxStral A's chain placed below the SCORE (is_score=1) or SAMPLER
- * (is_score=0) module to the final blended playback frame, in place. */
-void chain_player_apply_synth_a_inserts(int is_score,
+ * (is_score=0, marker matching the caller's engine) module to the final
+ * blended playback frame, in place. */
+void chain_player_apply_synth_a_inserts(int is_score, int engine_slot,
                                         struct AudioImageBuffers *viz_bus,
                                         uint8_t *r, uint8_t *g, uint8_t *b,
                                         int nb_pixels)
@@ -820,7 +853,7 @@ void chain_player_apply_synth_a_inserts(int is_score,
     const SynthChainPlan *spA = &plan.synth[CHAIN_SYNTH_LUXSTRAL];
     if (!spA->present)
         return;
-    if (is_score ? !spA->has_score : !spA->has_sampler)
+    if (!chain_player_owned(spA, is_score, engine_slot))
         return;
     chain_apply_post_marker_inserts(spA,
                                     is_score ? IMAGE_CHAIN_INSERT_SCORE
@@ -1335,16 +1368,35 @@ void *udpThread(void *arg) {
         int premarker_tap_done = 0;
         int            need_modulated =
             image_chain_any_tap_demand();   /* a visualizer watches an insert tap */
-        /* MOD-BUS OWNER: the FIRST chain (model order) hosting a sampler —
-         * the single modulated channel is built from ITS recipe and ITS OWN
-         * source (fix: a sampler chain fed by IMAGE/VIDEO must never build
-         * its passthrough/record stream from the live device frames). Other
-         * sampler chains run positionally on their own stream. Any sampler
-         * chain needs the modulated machinery (REC hooks). */
-        int mod_owner_chain = -1;
+        /* Per-chain playback: WHICH engine's sampler playback drives the
+         * channel this line (-1 = idle or score relay). Chains gate their
+         * player-ownership on their OWN marker matching this engine. */
+#ifdef VST_MODE
+        const int playing_engine_now = lux_sampler_playing_engine();
+#else
+        const int playing_engine_now = -1;
+#endif
+        /* MOD-BUS OWNER: while an engine PLAYS, the chain hosting THAT
+         * engine (the modulated channel carries ITS playback); otherwise the
+         * FIRST chain (model order) hosting a sampler — the single modulated
+         * channel is built from ITS recipe and ITS OWN source (fix: a
+         * sampler chain fed by IMAGE/VIDEO must never build its passthrough/
+         * record stream from the live device frames). Other sampler chains
+         * run positionally on their own stream. Any sampler chain needs the
+         * modulated machinery (REC hooks). */
+        int mod_owner_chain = -1, first_sampler_chain = -1;
         for (int c = 0; c < frame_plan.num_chains; c++)
-            if (frame_plan.chain[c].present && frame_plan.chain[c].has_sampler)
-            { mod_owner_chain = c; need_modulated = 1; break; }
+        {
+            const SynthChainPlan *spc = &frame_plan.chain[c];
+            if (!spc->present || !spc->has_sampler) continue;
+            if (first_sampler_chain < 0)
+            { first_sampler_chain = c; need_modulated = 1; }
+            if (playing_engine_now >= 0 && mod_owner_chain < 0
+                && chain_hosts_sampler_engine(spc, playing_engine_now))
+                mod_owner_chain = c;
+        }
+        if (mod_owner_chain < 0)
+            mod_owner_chain = first_sampler_chain;
 
         if (need_modulated)
         {
@@ -1566,8 +1618,12 @@ void *udpThread(void *arg) {
                     has_lw = 1;
             }
 
+            /* Per-chain playback: this chain is player-owned only when ITS
+             * OWN engine is the one playing (or the SCORE relay for a score
+             * chain) — a chain hosting the idle engine keeps its positional
+             * run on its own stream. */
             const int stream_player_owned =
-                (sp->has_sampler && player_running_now)
+                chain_hosts_sampler_engine(sp, playing_engine_now)
                 || (sp->has_score && score_playing_now);
 
             if (ls_bank >= 0 && stream_player_owned)
@@ -1599,7 +1655,16 @@ void *udpThread(void *arg) {
             /* LuxSynth staging: single writer — while the player owns the
              * stream, FramePlayerThread stages (lx_send_stage_player_frame). */
             float *lx_line = stream_player_owned ? NULL : s_lx_line;
-            if (mod_R && ((sp->has_sampler && c == mod_owner_chain)
+            /* The modulated frame is this chain's OWN stream only when its
+             * engine drives it (playback) or when it is the idle build from
+             * its own source. Score playback — and a playing engine hosted
+             * by no chain — belong to no sampler chain. */
+            const int mod_is_chain_stream =
+                playing_engine_now >= 0
+                    ? chain_hosts_sampler_engine(sp, playing_engine_now)
+                    : !score_playing_now;
+            if (mod_R && ((sp->has_sampler && c == mod_owner_chain
+                           && mod_is_chain_stream)
                           || (sp->has_score && score_playing_now)))
             {
                 /* MOD-BUS OWNER chain (or score relay): the modulated/player
@@ -1864,9 +1929,12 @@ void internal_sources_process_tick(void *arg)
 #ifdef VST_MODE
   const int sampler_playing = lux_sampler_is_playing();
   const int score_playing   = lux_sampler_is_score_playing();
+  /* Per-chain playback: the engine driving the channel (-1 = idle/score). */
+  const int playing_engine  = lux_sampler_playing_engine();
 #else
   const int sampler_playing = 0;
   const int score_playing   = 0;
+  const int playing_engine  = -1;
 #endif
 
 #ifdef VST_MODE
@@ -1995,8 +2063,10 @@ void internal_sources_process_tick(void *arg)
         has_lw = 1;
     }
 
+    /* Per-chain playback: owned only when ITS OWN engine plays (or the
+     * SCORE relay for a score chain) — mirror of udpThread's gate. */
     const int stream_player_owned =
-        (sp->has_sampler && sampler_playing)
+        chain_hosts_sampler_engine(sp, playing_engine)
         || (sp->has_score && score_playing);
     if (ls_bank >= 0 && stream_player_owned)
       continue;   /* staged + post-marker probes by FramePlayerThread */
