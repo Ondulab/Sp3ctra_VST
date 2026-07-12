@@ -481,6 +481,20 @@ Audit complet code mort + doc à la demande du user. Supprimés :
 Anciens mappings MIDI visant les params supprimés : silencieusement inertes
 (le mapping engine ignore les ids inconnus) → re-learn sur les banques OUT.
 
+**2e vague (772bbf5, 2026-07-12) — passe GLOBALE scriptée** (chaque champ config
+→ lecteurs, chaque param statique → références, chaque fonction déclarée →
+appelants, CMake vs disque, liens docs/scripts) : bloc `poly_*` entier (21
+champs, l'ancien config moteur polyphonique — la paire harmonicity reste, lue
+par image_preprocessor.c) + paire anti-vibrations ; 6 singletons globaux
+VideoScroll morts + `luxsynthGamma` jamais lu ; 25 déclarations RtAudio sans
+définition (audio_c_api.h — les types de buffers restent) ; décls
+imageProcessingThread/dmxSendingThread ; `synth_staging_init`,
+`image_chain_get_order/tap_demand`, `engine_input_seq` + compteur
+`engine_tap_seq` écrit-jamais-lu ; VST-UI-description.pdf supprimé. Piège
+vécu : purger un getter au regex a emporté les SETTERS voisins du header
+(image_chain_set_order/set_tap_demand) — cassé au build, réparé ; toujours
+rebuilder après une purge de header.
+
 ## Risques B
 
 - `getStateInformation` hors message thread (certains hôtes) : le snapshot lit des atomiques mais
