@@ -11,7 +11,6 @@
  *   - onFrameAssembled() runs on udpThread (Non-RT) → alloc allowed on first use
  *   - FramePlayerThread runs Non-RT → alloc/lock/I/O allowed
  *
- * Architecture: see docs/SPEC_LuxSampler.html §9
  */
 
 #include "FadeCurve.h"

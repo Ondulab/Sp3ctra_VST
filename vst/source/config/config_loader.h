@@ -26,10 +26,8 @@ enum {
  * One entry per OUT-module pool slot (0..7). An OUT module conditions its
  * chain's image flux before sending it to the global synthesis engine.
  * Values come from the luxstralOut{N}_* / luxsynthOut{N}_* / luxwaveOut{N}_*
- * APVTS banks; the legacy global conditioning fields (luxstral_inversion,
- * additive_gamma_value, luxsynth_inversion, …) are no longer read by the
- * pipeline. Slot binding in P1 (fixed): LuxStral A=0, B=1; LuxSynth=0;
- * LuxWave=0.
+ * APVTS banks — the ONLY conditioning authority (the legacy global fields
+ * were deleted on 2026-07-12). One bank slot per OUT-module instance.
  * contrast_min / range_db are LuxStral-only (ignored by the other banks). */
 #define LUX_OUT_MAX_SLOTS 8
 typedef struct {
@@ -58,8 +56,7 @@ typedef struct {
     float low_frequency;          // Starting frequency in Hz
     float high_frequency;         // Ending frequency in Hz
     int sensor_dpi;               // Sensor DPI (200 or 400)
-    int invert_intensity;         // 0 = white brightest gives loudest sound, 1 = dark pixels give more energy
-    
+
     // Synthesis parameters (automatically calculated from above)
     float start_frequency;        // Same as low_frequency (kept for backward compatibility)
     int semitone_per_octave;      // Always 12 (standard musical scale)
@@ -70,9 +67,8 @@ typedef struct {
     float physiological_correction_depth;   // Correction depth in dB-domain (0.0=none, 1.0=full, default 0.3)
     
     // Image processing parameters - LUXSTRAL SYNTHESIS
-    int additive_enable_non_linear_mapping;    // Enable/disable gamma correction (0/1)
-    float additive_gamma_value;                // Gamma value for non-linear intensity correction
-    float additive_contrast_min;               // Minimum volume for blurred images (0.0-1.0)
+    // (inversion/gamma/contrast_min are per-OUT bank fields now — see
+    // lux_out_params_t; only the contrast-scan tuning stays global.)
     float additive_contrast_stride;            // Pixel sampling stride for optimization
     float additive_contrast_adjustment_power;  // Exponent for adjusting the contrast curve
 
@@ -92,14 +88,9 @@ typedef struct {
     // Threading parameters
     int num_workers;                           // Number of worker threads for additive synthesis (1-8)
     
-    // Summation normalization parameters — LEGACY/INERT: the summation
-    // normalization curve was replaced by the RMS ceiling (rms_ceiling_gain,
-    // synth_luxstral.c; weighting exponent fixed at 2 in threading). These
-    // fields are still written from APVTS for state compatibility but are no
-    // longer read by the synth.
-    float volume_weighting_exponent;           // INERT (was: weighting exponent)
-    float summation_response_exponent;         // INERT (was: response curve exponent)
-    
+    // (Summation-normalization exponents deleted 2026-07-12 — replaced by the
+    // RMS ceiling: rms_ceiling_gain in synth_luxstral.c.)
+
     // Soft limiter parameters
     float soft_limit_threshold;                // Soft limiter threshold (0.0-1.0)
     float soft_limit_knee;                     // Soft limiter knee width (0.0-1.0)
@@ -216,10 +207,8 @@ typedef struct {
     /* raw_fade_in_ms : fade-in/out when RAW transport changes (0-2000 ms)     */
     int raw_fade_in_ms;
 
-    /* (M8: the legacy per-path source-routing/conditioning globals are gone —
-     * the ChainPlan routes, the per-OUT banks condition.) */
-    int luxpitch_source_type;              /* Which source feeds LuxPitch (0=S, 1=L, 2=M) */
-    int luxmask_source_type;               /* Which source feeds LuxMask (0=S, 1=L, 2=M) */
+    /* (M8/purge 2026-07-12: the legacy per-path source-routing globals are
+     * gone — the ChainPlan routes, inserts read the stream at their position.) */
 
     /* ── M4 — core-side LuxSynth engine feed (luxsynth_feed_tick) ─────────── */
     int   lx_fft_bins_choice;              /* 0=32, 1=64, 2=128, 3=256 harmonics */
@@ -231,20 +220,18 @@ typedef struct {
      * amplitude = 10^((x−1)·range/20), applied AFTER the gamma stage (gamma
      * 1.0 = pure dB decode).
      * No toggle, no forcing — every stage keeps its own knob.  The exact
-     * inverse of the SCORE encoder is recovered with:
+     * inverse of the SCORE encoder is recovered PER SEND with the OUT bank:
      *   Negative ON · DC Blocking OFF · Gamma 1.0 · Contrast Min 1.0 ·
      *   Attack 2 ms · Release 6 ms · Equal-Loudness OFF
      * (decay_freq_beta = 0 and phase reset are already law-independent).
-     * luxstral_db_decode_range_db MUST match the dynamicRangeDB used when the
-     * score was generated (SCORE default: 50 dB).                              */
-    float luxstral_db_decode_range_db; /* encoder dB window (default 50)         */
+     * The dB window is the PER-OUT range_db (luxstralOut{N}_rangeDb) and MUST
+     * match the dynamicRangeDB the score was generated with (default 50).    */
 
     /* ── Per-OUT conditioning banks (synth-split P1) ─────────────────────────
      * Written from the luxstralOut{N}_* / luxsynthOut{N}_* / luxwaveOut{N}_*
      * APVTS banks by applyConfigurationToCore(); read by the pipeline config
      * builders (image_pipeline.c), preprocess_luxsynth() and the LuxWave feed.
-     * These REPLACE the legacy per-engine conditioning fields above, which
-     * are kept for state compat but no longer consumed by the pipeline.      */
+     * The ONLY conditioning authority (legacy globals deleted 2026-07-12).   */
     lux_out_params_t luxstral_out[LUX_OUT_MAX_SLOTS];
     lux_out_params_t luxsynth_out[LUX_OUT_MAX_SLOTS];
     lux_out_params_t luxwave_out[LUX_OUT_MAX_SLOTS];

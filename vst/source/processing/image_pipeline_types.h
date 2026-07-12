@@ -4,7 +4,6 @@
  * Shared type definitions for the dual-path image processing pipeline.
  * These types are used across source routing, blending, and processing stages.
  *
- * Architecture: see docs/SPEC_ImagePipeline_Architecture.html
  *
  * ── Channel model (since "Modulated / Live" refactor) ──────────────────────
  *

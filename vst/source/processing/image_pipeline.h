@@ -64,15 +64,15 @@ int pipeline_process_frame(
 
 /**
  * @brief Build a PipelineConfig for the LIVE stream from g_sp3ctra_config.
- * Maps: invert_intensity, additive_gamma_value, image_freeze_mode,
- *       image_fade_in_ms, image_live_opacity, additive_contrast_min, etc.
+ * Maps: luxstral_out[0]/luxsynth_out[0] conditioning banks, image_freeze_mode,
+ *       image_fade_in_ms, image_live_opacity, stereo, etc.
  */
 PipelineConfig pipeline_build_config_live(void);
 
 /**
  * @brief Build a PipelineConfig for the SAMPLER stream from g_sp3ctra_config.
- * Maps: invert_intensity, sampler_gamma, sampler_freeze_mode,
- *       sampler_fade_in_ms, image_sampler_opacity, sampler_contrast_min, etc.
+ * Maps: sampler_gamma, sampler_freeze_mode, sampler_fade_in_ms,
+ *       image_sampler_opacity, sampler_contrast_min, etc.
  */
 PipelineConfig pipeline_build_config_sampler(void);
 

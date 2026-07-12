@@ -11,7 +11,7 @@
  *       For each oscillator (FFT bin):
  *         freq = fundamental * (bin+1)
  *         if freq > Nyquist: skip
- *         amplitude = magnitude[bin]^gamma * filter_attenuation
+ *         amplitude = magnitude[bin] * filter_attenuation
  *         sample += amplitude * sin(phase) * pan
  *         phase += phase_increment
  *       Apply volume ADSR * velocity
@@ -229,18 +229,6 @@ static AdsrState luxsynth_get_voice_state(void *voices, int idx)
 }
 
 /* ============================================================================
- * INTERNAL: Fast powf approximation for gamma correction
- * ========================================================================== */
-
-static float fast_powf(float base, float exp)
-{
-    if (base <= 0.0f) return 0.0f;
-    if (exp == 1.0f) return base;
-    /* Use exp(exp * log(base)) — acceptable for RT with small exp values */
-    return expf(exp * logf(base));
-}
-
-/* ============================================================================
  * PUBLIC: Initialization
  * ========================================================================== */
 
@@ -286,7 +274,6 @@ int luxsynth_engine_init(LuxSynthEngine *engine, float sample_rate, int buffer_s
     engine->config.filter_env_depth = 0.5f;
     engine->config.lfo_rate_hz = 5.0f;
     engine->config.lfo_depth_semitones = 0.1f;
-    engine->config.gamma = 1.0f;
     engine->config.num_oscillators = LUXSYNTH_MAX_OSCILLATORS;
     engine->config.master_volume = 0.20f;  /* match legacy default — attenuate 128-oscillator sum before hard clip */
     engine->config.sample_rate = sample_rate;
@@ -539,7 +526,6 @@ void luxsynth_engine_process(LuxSynthEngine *engine, int num_samples,
     memset(out_right, 0, (size_t)num_samples * sizeof(float));
 
     const float nyquist = engine->sample_rate * 0.5f;
-    const float gamma = engine->config.gamma;
     const float master_vol = engine->config.master_volume;
     const int num_bins = engine->spectral.num_bins;
 
@@ -605,10 +591,10 @@ void luxsynth_engine_process(LuxSynthEngine *engine, int num_samples,
                     filter_atten = ratio * ratio; /* 2nd order rolloff */
                 }
 
-                /* FFT magnitude with gamma correction */
+                /* FFT magnitude — gamma lives in the per-OUT conditioning
+                 * bank (pixel domain, luxsynth_condition_line), never here:
+                 * a second spectral gamma would double-apply it. */
                 float mag = engine->spectral.magnitudes[osc];
-                if (gamma != 1.0f && mag > 0.0f)
-                    mag = fast_powf(mag, gamma);
 
                 /* Generate sine sample */
                 float osc_sample = sinf(v->oscillators[osc].phase);

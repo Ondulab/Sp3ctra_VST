@@ -44,11 +44,6 @@ public:
     {
         auto& apvts = p.getAPVTS();
 
-        // ── Source selector — RETIRED (source follows chain placement) ──────
-        sourceCombo.addItem("Chain 1", 1);
-        sourceCombo.addItem("Chain 2", 2);
-        sourceAttach.reset(new CmbAttach(apvts, "luxstralSource", sourceCombo));
-
         // ── Master Volume (top of left column) ────────────────────────────
         initLabel(volumeLabel, "Volume");
         initSlider(luxstralVolumeSlider);
@@ -583,7 +578,6 @@ private:
     // ── Controls ────────────────────────────────────────────────────────────
     // (IMAGE conditioning widgets moved to SynthOutPageComponent — P2.)
     juce::Slider       luxstralVolumeSlider;                       // master (left top)
-    juce::ComboBox     sourceCombo;                                // retired (plumbing only)
     juce::Label        volumeLabel;
 
     // OSCILLATORS (left)
@@ -612,7 +606,7 @@ private:
     using BtnAttach = juce::AudioProcessorValueTreeState::ButtonAttachment;
     using CmbAttach = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
 
-    std::unique_ptr<CmbAttach> sourceAttach, phaseModeAttach;
+    std::unique_ptr<CmbAttach> phaseModeAttach;
     std::unique_ptr<SldAttach> volumeAttach,
                                noiseGateAttach, stereoTempAttach,
                                blobThreshAttach, blobMinWidthAttach,

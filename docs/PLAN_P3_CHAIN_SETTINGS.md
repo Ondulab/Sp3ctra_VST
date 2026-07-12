@@ -443,6 +443,44 @@ harnais de test dans le repo — instancier le processeur headless serait un cha
 validation MANUELLE (charger une vieille session → réglages restaurés → resave → child
 INSERT_MEMORY absent du nouveau blob).
 
+## Purge finale — ✅ FAIT (2026-07-12)
+
+Audit complet code mort + doc à la demande du user. Supprimés :
+- **17 params APVTS legacy pré-split** (déclarations + listeners + loads) :
+  `luxstralInvertIntensity/GammaEnable/GammaValue/ContrastMin`,
+  `luxstral/luxsynth Source/Inversion/AcRemoval`, `luxsynthGammaValue`,
+  `luxpitchSource/luxmaskSource`, `luxstralFidelityMode/RangeDb`,
+  `luxstralVolumeWeightingExp/SummationResponseExp`. La migration
+  `synthSplitVersion` lit les ANCIENS ids dans le XML brut de session → elle
+  survit à la suppression des params (vérifié : `legacy()` lit `restored`,
+  pas l'APVTS).
+- **9 champs config écrits-jamais-lus** (config_loader.h + global_stubs.c) :
+  `invert_intensity`, `additive_gamma_value/contrast_min/enable_non_linear`,
+  `volume_weighting_exponent`, `summation_response_exponent`,
+  `luxstral_db_decode_range_db`, `luxpitch/luxmask_source_type`.
+  (`additive_contrast_stride/adjustment_power` VIVANTS — gardés.)
+- **PIÈGE double gamma LuxSynth corrigé** : le moteur appliquait ENCORE
+  `luxsynthGammaValue` aux magnitudes FFT (`synth_luxsynth_engine.c`,
+  champ `config.gamma` + `fast_powf`) en plus du gamma par-OUT du
+  conditionnement pixel — une vieille session avec gamma≠1 l'appliquait 2×,
+  sans aucun knob. Champ + application + sync CisVisualizer supprimés.
+- **UI** : combos « Source » retired (plumbing invisible) retirés des tabs
+  LuxStral/LuxSynth ; branche `luxstralSource` d'applyParameterChange.
+- **Commentaires périmés** corrigés : routage `source_type`/ImageSourceType
+  (processor, VideoScrollTab, CisVisualizer, image_pipeline.h « Maps: »,
+  config_loader.h, tooltips).
+- **Docs supprimées** : PLAN_DEVELOPPEMENT.md (vision 2 chaînes/moteur B),
+  LuxSynth_LuxWave_Documentation.md, PLAN_VIDEOSCROLL_MODULE.md,
+  SPEC_LuxSampler/LuxMask/ImagePipeline*.html, PLAN_ImagePipeline_*.html,
+  screenshot d'avril. Références du code vers ces docs corrigées
+  (image_chain.h, LuxSampler.h, image_pipeline_types.h). **README.md réécrit**
+  (décrivait une arborescence `src/` et un MIGRATION.md inexistants) —
+  architecture chaînes/OUT/3 synthèses actuelle. Restent : CHARTE_GRAPHIQUE.md
+  (vivante), ce plan, QUICKSTART/DISTRIBUTION/TROUBLESHOOTING (à jour).
+
+Anciens mappings MIDI visant les params supprimés : silencieusement inertes
+(le mapping engine ignore les ids inconnus) → re-learn sur les banques OUT.
+
 ## Risques B
 
 - `getStateInformation` hors message thread (certains hôtes) : le snapshot lit des atomiques mais

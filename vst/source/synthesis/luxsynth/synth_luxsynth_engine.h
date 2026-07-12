@@ -108,7 +108,7 @@ typedef struct {
     float lfo_depth_semitones;
 
     /* Spectral parameters */
-    float gamma;                /* Spectral gamma correction */
+    /* (gamma removed 2026-07-12 — conditioning is per-OUT, pixel domain) */
     int   num_oscillators;      /* Active oscillators per voice (1-128) */
 
     /* Master */
