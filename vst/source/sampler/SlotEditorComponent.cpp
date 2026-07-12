@@ -1,6 +1,7 @@
 #include "SlotEditorComponent.h"
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "SamplerMidiTargets.h"   // synthetic target ids for MIDI-Learn
 
 // Loop-mode buttons are now pictograms (see LoopModeButton). Order matches the
 // LoopMode enum: NONE / LOOP / INVERSE / PINGPONG.
@@ -83,50 +84,8 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
 
     // ── SAVE button — direct write (no dialog) ────────────────────────────────
     // Filename pattern: YYYYMMDD-HHMMSS_slotNN.fslot (+ optional .png/.jpg).
-    saveBtn.onClick = [this]
-    {
-        auto* fs = processor.getSampler(samplerIndex_);
-        if (fs == nullptr || !fs->slotHasContent(selectedSlot))
-            return;
-
-        const juce::File dir = resolveSaveDirectory();
-        if (!dir.isDirectory())
-            return;
-
-        // Build timestamp prefix
-        const juce::Time now = juce::Time::getCurrentTime();
-        const juce::String stamp = juce::String::formatted(
-            "%04d%02d%02d-%02d%02d%02d",
-            now.getYear(),
-            now.getMonth() + 1,
-            now.getDayOfMonth(),
-            now.getHours(),
-            now.getMinutes(),
-            now.getSeconds());
-
-        const juce::String base = stamp + "_slot"
-                                  + juce::String(selectedSlot).paddedLeft('0', 2);
-
-        const juce::File slotFile = dir.getChildFile(base + ".fslot");
-        fs->saveSlotToFile(selectedSlot, slotFile);
-
-        // Optional image export — controlled by user settings (luxSamplerExportImages).
-        auto& apvts = processor.getAPVTS();
-        const bool exportImg =
-            apvts.getRawParameterValue("luxSamplerExportImages") != nullptr
-            && apvts.getRawParameterValue("luxSamplerExportImages")->load() > 0.5f;
-
-        if (exportImg)
-        {
-            bool asPng = true; // 0 = PNG, 1 = JPEG
-            if (auto* p = apvts.getRawParameterValue("luxSamplerExportFormat"))
-                asPng = (p->load() < 0.5f);
-
-            const juce::String ext = asPng ? ".png" : ".jpg";
-            const juce::File imgFile = dir.getChildFile(base + ext);
-            fs->exportSlotImage(selectedSlot, imgFile, asPng);
-        }
-    };
+    // Shared with the MIDI-mapped SAVE trigger via saveSlotToDisk().
+    saveBtn.onClick = [this] { saveSlotToDisk(selectedSlot); };
     addAndMakeVisible(saveBtn);
 
     // ── LOAD button — file chooser, loads into selected slot ──────────────────
@@ -354,18 +313,24 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
         spectralEditor.markDirty();
     };
 
-    // Purge stale MIDI pulses latched while NO editor was open: processBlock
-    // keeps setting them, nobody consumes them, and acting on a press latched
-    // minutes ago would start a phantom recording the moment the editor opens.
-    // Both engines: this editor rebinds A/B and either may hold stale pulses.
+    // Purge stale MIDI action pulses latched while NO editor was open: the MIDI
+    // engine keeps latching them, nobody drains them, and acting on a press
+    // latched minutes ago would start a phantom recording the moment the editor
+    // opens. Both engines × every slot.
     for (int e = 0; e < 2; ++e)
-    {
-        (void) processor.consumeSamplerRecPressed  (e);
-        (void) processor.consumeSamplerRecReleased (e);
-        (void) processor.consumeSamplerPlayPressed (e);
-        (void) processor.consumeSamplerPlayReleased(e);
-        (void) processor.consumeSamplerSaveTrigger (e);
-    }
+        for (int s = 0; s < LuxSamplerConstants::NUM_SLOTS; ++s)
+        {
+            (void) processor.consumeSmpRecPressed  (e, s);
+            (void) processor.consumeSmpRecReleased (e, s);
+            (void) processor.consumeSmpPlayPressed (e, s);
+            (void) processor.consumeSmpPlayReleased(e, s);
+            (void) processor.consumeSmpSaveTrigger (e, s);
+        }
+    lastValueTouchGen_ = processor.smpValueTouchGen();
+
+    // Bind right-click MIDI-Learn to every play control / action button (targets
+    // engine A · slot 0 until the first setSelectedSlot/setSamplerIndex).
+    rebindMidiLearn();
 
     // 30 ms (~33 Hz) — frequent enough so MIDI press/release pulses get
     // consumed with low latency (worst-case ~30 ms after the MIDI event).
@@ -384,21 +349,26 @@ void SlotEditorComponent::setSamplerIndex(int i)
     spectralEditor.setSamplerIndex(i);
     // Purge pulses the newly-bound engine latched while it had no editor —
     // acting on a stale press would start a phantom recording right away.
-    (void) processor.consumeSamplerRecPressed  (samplerIndex_);
-    (void) processor.consumeSamplerRecReleased (samplerIndex_);
-    (void) processor.consumeSamplerPlayPressed (samplerIndex_);
-    (void) processor.consumeSamplerPlayReleased(samplerIndex_);
-    (void) processor.consumeSamplerSaveTrigger (samplerIndex_);
-    setSelectedSlot(selectedSlot);   // refresh controls from the new engine
+    for (int s = 0; s < LuxSamplerConstants::NUM_SLOTS; ++s)
+    {
+        (void) processor.consumeSmpRecPressed  (samplerIndex_, s);
+        (void) processor.consumeSmpRecReleased (samplerIndex_, s);
+        (void) processor.consumeSmpPlayPressed (samplerIndex_, s);
+        (void) processor.consumeSmpPlayReleased(samplerIndex_, s);
+        (void) processor.consumeSmpSaveTrigger (samplerIndex_, s);
+    }
+    setSelectedSlot(selectedSlot);   // refresh controls + rebind MIDI-Learn
 }
 
 void SlotEditorComponent::setSelectedSlot(int idx)
 {
     selectedSlot = idx;
-    // Mirror selected slot to the audio processor so RT-triggered
-    // REC/PLAY/SAVE bindings act on the slot the user is looking at.
+    // Mirror selected slot to the audio processor (kept for other consumers).
     processor.setSamplerSelectedSlot(selectedSlot);
     spectralEditor.setSelectedSlot(selectedSlot);
+    // Retarget every right-click MIDI-Learn to this (engine, slot) — "fixed slot
+    // per button": a mapping learned now drives THIS slot forever.
+    rebindMidiLearn();
     // Refresh UI state from new slot
     refreshSliderValues();
     refreshLoopButtons();
@@ -492,6 +462,141 @@ void SlotEditorComponent::applyLoopMode(LoopMode m)
     if (auto* fs = processor.getSampler(samplerIndex_))
         fs->setSlotLoopMode(selectedSlot, m);
     refreshLoopButtons();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unified MIDI-Learn — right-click any play control / action button.
+//
+// Each control gets a MidiLearnAttachment whose target is a synthetic id
+// encoding (engine, THIS slot, kind). Recreated on every slot / engine change so
+// the mapping learned while a slot is shown drives THAT slot forever ("fixed
+// slot per button"). The controls keep writing LuxSampler directly (unchanged);
+// MIDI is an additional writer through the processor's IVirtualMidiSink.
+// ─────────────────────────────────────────────────────────────────────────────
+void SlotEditorComponent::rebindMidiLearn()
+{
+    using K = SamplerMidiTargets::Kind;
+    midiLearn_.clear();
+
+    auto& mm = processor.getMidiMap();
+    const int e = samplerIndex_;
+    const int s = selectedSlot;
+
+    auto add = [&](juce::Component& c, K kind)
+    {
+        midiLearn_.push_back(std::make_unique<MidiLearnAttachment>(
+            mm, c, SamplerMidiTargets::makeId(e, s, kind)));
+    };
+
+    // Value play params.
+    add(speedSlider,        K::Speed);
+    add(loopXfSlider,       K::LoopXf);
+    add(brightnessSlider,   K::Img);
+    add(floorSlider,        K::Floor);
+    add(resumeToggle,       K::Resume);
+    add(overdubToggle,      K::Overdub);          // engine-wide (slot ignored)
+    add(fadeInCurveBox,     K::FadeInType);
+    add(fadeInPowerSlider,  K::FadeInPow);
+    add(fadeOutCurveBox,    K::FadeOutType);
+    add(fadeOutPowerSlider, K::FadeOutPow);
+    // Loop mode is 4 radio buttons — right-click ANY of them maps the one
+    // discrete "loop mode" target (Note cycles NONE→LOOP→INV→PING).
+    for (int k = 0; k < 4; ++k)
+        add(loopBtns[k], K::LoopMode);
+
+    // Action buttons — momentary REC / PLAY, one-shot SAVE.
+    add(recBtn,  K::Rec);
+    add(playBtn, K::Play);
+    add(saveBtn, K::Save);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// saveSlotToDisk — timestamped .fslot (+ optional image) for ONE slot. Shared by
+// the SAVE button (selected slot) and the MIDI-mapped SAVE trigger (fixed slot).
+// ─────────────────────────────────────────────────────────────────────────────
+void SlotEditorComponent::saveSlotToDisk(int slot)
+{
+    auto* fs = processor.getSampler(samplerIndex_);
+    if (fs == nullptr || !fs->slotHasContent(slot))
+        return;
+
+    const juce::File dir = resolveSaveDirectory();
+    if (!dir.isDirectory())
+        return;
+
+    const juce::Time now = juce::Time::getCurrentTime();
+    const juce::String stamp = juce::String::formatted(
+        "%04d%02d%02d-%02d%02d%02d",
+        now.getYear(), now.getMonth() + 1, now.getDayOfMonth(),
+        now.getHours(), now.getMinutes(), now.getSeconds());
+
+    const juce::String base = stamp + "_slot"
+                              + juce::String(slot).paddedLeft('0', 2);
+
+    fs->saveSlotToFile(slot, dir.getChildFile(base + ".fslot"));
+
+    // Optional image export — controlled by user settings.
+    auto& apvts = processor.getAPVTS();
+    const bool exportImg =
+        apvts.getRawParameterValue("luxSamplerExportImages") != nullptr
+        && apvts.getRawParameterValue("luxSamplerExportImages")->load() > 0.5f;
+
+    if (exportImg)
+    {
+        bool asPng = true; // 0 = PNG, 1 = JPEG
+        if (auto* p = apvts.getRawParameterValue("luxSamplerExportFormat"))
+            asPng = (p->load() < 0.5f);
+        const juce::String ext = asPng ? ".png" : ".jpg";
+        fs->exportSlotImage(slot, dir.getChildFile(base + ext), asPng);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// drainMidiActionPulses — run REC / PLAY / SAVE triggers latched by the MIDI
+// engine for the bound engine, across ALL slots (fixed slot per button). Uses
+// LuxSampler's idempotent toggles (uiToggleRecord/uiPlaySlot stop when already
+// in the matching state, so we gate on the current slot state).
+// ─────────────────────────────────────────────────────────────────────────────
+void SlotEditorComponent::drainMidiActionPulses()
+{
+    auto* fs = processor.getSampler(samplerIndex_);
+    if (fs == nullptr) return;
+
+    for (int s = 0; s < LuxSamplerConstants::NUM_SLOTS; ++s)
+    {
+        const bool recP  = processor.consumeSmpRecPressed  (samplerIndex_, s);
+        const bool recR  = processor.consumeSmpRecReleased (samplerIndex_, s);
+        const bool playP = processor.consumeSmpPlayPressed (samplerIndex_, s);
+        const bool playR = processor.consumeSmpPlayReleased(samplerIndex_, s);
+        const bool saveT = processor.consumeSmpSaveTrigger (samplerIndex_, s);
+
+        // REC press → start if not recording; release → stop if recording.
+        // Sequential ifs: a quick tap can land press+release in the same tick.
+        if (recP && fs->getSlotState(s) != SlotState::RECORDING)
+        {
+            fs->uiToggleRecord(s);
+            if (s == selectedSlot) spectralEditor.markDirty();
+        }
+        if (recR && fs->getSlotState(s) == SlotState::RECORDING)
+        {
+            fs->uiToggleRecord(s);
+            if (s == selectedSlot) spectralEditor.markDirty();
+        }
+
+        // PLAY press → start if not playing (and arm the sampler transport, like
+        // the PLAY button does); release → stop if playing.
+        if (playP && fs->getSlotState(s) != SlotState::PLAYING)
+        {
+            fs->uiPlaySlot(s);
+            if (auto* p = processor.getAPVTS().getParameter("samplerFreezeMode"))
+                p->setValueNotifyingHost(0.0f); // 0 = PLAY
+        }
+        if (playR && fs->getSlotState(s) == SlotState::PLAYING)
+            fs->uiPlaySlot(s);
+
+        if (saveT)
+            saveSlotToDisk(s);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -677,56 +782,27 @@ void SlotEditorComponent::timerCallback()
 {
     blinkOn = !blinkOn;
 
-    // ── Consume MIDI-triggered REC / PLAY / SAVE pulses ──────────────────────
-    // REC / PLAY now follow a momentary (press-and-hold) semantic:
-    //   press   → start the action (only if not already running on this slot)
-    //   release → stop  the action (only if currently running on this slot)
-    // This avoids re-triggering the UI toggle in the wrong direction (which
-    // would otherwise stop the action on release, or restart it on press if
-    // it was already running).
-    //
-    // We rely on the LuxSampler's idempotent toggle behaviour: calling
-    // uiToggleRecord() / uiPlaySlot() while in the matching state stops the
-    // action, calling it while in any other state starts it.  We therefore
-    // check the current slot state before invoking the toggle.
-    auto* fs = processor.getSampler(samplerIndex_);
+    // ── Run MIDI-triggered REC / PLAY / SAVE action pulses (fixed slot each) ──
+    drainMidiActionPulses();
 
-    const bool recPressed   = processor.consumeSamplerRecPressed  (samplerIndex_);
-    const bool recReleased  = processor.consumeSamplerRecReleased (samplerIndex_);
-    const bool playPressed  = processor.consumeSamplerPlayPressed (samplerIndex_);
-    const bool playReleased = processor.consumeSamplerPlayReleased(samplerIndex_);
-
-    if (fs != nullptr)
+    // ── Reflect MIDI-driven value moves on the shown slot ────────────────────
+    // A mapped controller writes LuxSampler straight from the audio thread, so
+    // the sliders won't follow unless we resync. Refresh only when a value on
+    // the shown (engine, slot) actually moved since last tick.
     {
-        const SlotState midiSt = fs->getSlotState(selectedSlot);
-
-        // REC press → start recording if not already in RECORDING state.
-        if (recPressed && midiSt != SlotState::RECORDING && recBtn.onClick)
-            recBtn.onClick();
-        // REC release → stop recording if currently in RECORDING state.
-        // Sequential `if` (NOT else-if): press and release often land in the
-        // SAME timer tick — the release must still close the take, otherwise a
-        // quick tap leaves the recording running (momentary semantic violated).
-        if (recReleased && recBtn.onClick
-            && fs->getSlotState(selectedSlot) == SlotState::RECORDING)
-            recBtn.onClick();
-
-        // Re-read state because REC may have just changed it.
-        const SlotState midiSt2 = fs->getSlotState(selectedSlot);
-
-        // PLAY press → start playback if not already in PLAYING state.
-        if (playPressed && midiSt2 != SlotState::PLAYING && playBtn.onClick)
-            playBtn.onClick();
-        // PLAY release → stop playback if currently in PLAYING state (same
-        // sequential handling as REC above).
-        if (playReleased && playBtn.onClick
-            && fs->getSlotState(selectedSlot) == SlotState::PLAYING)
-            playBtn.onClick();
+        const uint32_t g = processor.smpValueTouchGen();
+        if (g != lastValueTouchGen_)
+        {
+            lastValueTouchGen_ = g;
+            if (processor.smpValueTouchWhere() == ((samplerIndex_ << 8) | selectedSlot))
+            {
+                refreshSliderValues();   // also refreshFreqCurve() + markDirty()
+                refreshLoopButtons();
+            }
+        }
     }
 
-    if (processor.consumeSamplerSaveTrigger(samplerIndex_) && saveBtn.onClick)
-        saveBtn.onClick();
-
+    auto* fs = processor.getSampler(samplerIndex_);
     if (fs == nullptr) return;
 
 

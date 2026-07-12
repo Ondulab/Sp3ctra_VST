@@ -170,14 +170,8 @@ SamplerSetupPanel::SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Col
             juce::dontSendNotification);
     }
 
-    // ── Action button MIDI bindings (REC / PLAY / SAVE) ───────────────────
-    // Each row exposes a Type combo (Off/Note/CC), a 0..127 number slider and
-    // a "Learn" button.  The audio thread captures the next incoming MIDI
-    // event matching the BOUND ENGINE's channel and writes it into that
-    // engine's APVTS bank via the message thread (timerCallback).
-    initBindingRow(recBinding,  "REC Bind:",  0);
-    initBindingRow(playBinding, "PLAY Bind:", 1);
-    initBindingRow(saveBinding, "SAVE Bind:", 2);
+    // REC / PLAY / SAVE MIDI triggering now lives on the editor's transport
+    // buttons via the unified right-click MIDI-Learn (no bindings panel here).
 
     // Bind every engine-scoped attachment to engine A's bank (default).
     rebindEngineParams();
@@ -229,64 +223,6 @@ SamplerSetupPanel::~SamplerSetupPanel()
 // =============================================================================
 
 // ─────────────────────────────────────────────────────────────────────────────
-// initBindingRow — build one REC/PLAY/SAVE row's widgets. The APVTS
-// attachments are engine-scoped and live in rebindEngineParams().
-// ─────────────────────────────────────────────────────────────────────────────
-void SamplerSetupPanel::initBindingRow(ActionBindingRow& row,
-                                       const juce::String& title,
-                                       int actionId)
-{
-    row.title.setText(title, juce::dontSendNotification);
-    row.title.setJustificationType(juce::Justification::centredRight);
-    row.title.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-    addAndMakeVisible(row.title);
-
-    // Type combo (Off / Note / CC)
-    row.typeBox.addItem("Off",  1);
-    row.typeBox.addItem("Note", 2);
-    row.typeBox.addItem("CC",   3);
-    addAndMakeVisible(row.typeBox);
-
-    // Number slider (0..127) — shown as "Note 60" / "CC 7" via text-from-value
-    row.numberSlider.setSliderStyle(juce::Slider::IncDecButtons);
-    row.numberSlider.setIncDecButtonsMode(
-        juce::Slider::incDecButtonsDraggable_Vertical);
-    row.numberSlider.setTextBoxStyle(juce::Slider::TextBoxLeft, false,
-                                      Sp3ctraTheme::kTbXNarrow,
-                                      Sp3ctraTheme::kTextBoxH);
-    row.numberSlider.setRange(0.0, 127.0, 1.0);
-    addAndMakeVisible(row.numberSlider);
-
-    // Learn button — arms the processor to capture next matching MIDI event
-    // on the BOUND engine (target = samplerIndex_ * 3 + action).
-    row.learnBtn.setClickingTogglesState(true);
-    row.learnBtn.setColour(juce::TextButton::buttonOnColourId,
-                            juce::Colours::orangered);
-    row.learnBtn.setTooltip(
-        "Click then press any Note or send a CC on this engine's MIDI channel "
-        "to assign it to this action.");
-    row.learnBtn.onClick = [this, actionId, &row]()
-    {
-        if (row.learnBtn.getToggleState())
-        {
-            // Cancel any other pending learn (only one at a time).
-            const int target = samplerIndex_ * 3 + actionId;
-            audioProcessor.startSamplerMidiLearn(target);
-            pendingLearnTarget = target;
-            recBinding .learnBtn.setToggleState(actionId == 0, juce::dontSendNotification);
-            playBinding.learnBtn.setToggleState(actionId == 1, juce::dontSendNotification);
-            saveBinding.learnBtn.setToggleState(actionId == 2, juce::dontSendNotification);
-        }
-        else
-        {
-            audioProcessor.cancelSamplerMidiLearn();
-            pendingLearnTarget = -1;
-        }
-    };
-    addAndMakeVisible(row.learnBtn);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // setSamplerIndex / rebindEngineParams — per-engine APVTS bank binding
 // ─────────────────────────────────────────────────────────────────────────────
 void SamplerSetupPanel::setSamplerIndex(int i)
@@ -299,16 +235,6 @@ void SamplerSetupPanel::setSamplerIndex(int i)
 
 void SamplerSetupPanel::rebindEngineParams()
 {
-    // A learn armed for the previous engine would write into the wrong bank.
-    if (pendingLearnTarget != -1)
-    {
-        audioProcessor.cancelSamplerMidiLearn();
-        pendingLearnTarget = -1;
-        recBinding .learnBtn.setToggleState(false, juce::dontSendNotification);
-        playBinding.learnBtn.setToggleState(false, juce::dontSendNotification);
-        saveBinding.learnBtn.setToggleState(false, juce::dontSendNotification);
-    }
-
     using CA = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
     using SA = juce::AudioProcessorValueTreeState::SliderAttachment;
 
@@ -321,82 +247,12 @@ void SamplerSetupPanel::rebindEngineParams()
         apvts, fsEngineParam(samplerIndex_, "OctaveOffset"), octaveOffsetCombo);
     maxDurationAttachment = std::make_unique<SA>(
         apvts, fsEngineParam(samplerIndex_, "MaxDuration"),  maxDurationSlider);
-
-    auto rebindRow = [&](ActionBindingRow& row,
-                         const char* typeSuffix, const char* numSuffix)
-    {
-        row.typeAtt  .reset();
-        row.numberAtt.reset();
-        row.typeAtt = std::make_unique<CA>(
-            apvts, fsEngineParam(samplerIndex_, typeSuffix), row.typeBox);
-        row.numberAtt = std::make_unique<SA>(
-            apvts, fsEngineParam(samplerIndex_, numSuffix),  row.numberSlider);
-    };
-    rebindRow(recBinding,  "RecBindType",  "RecBindNum");
-    rebindRow(playBinding, "PlayBindType", "PlayBindNum");
-    rebindRow(saveBinding, "SaveBindType", "SaveBindNum");
 }
 
 void SamplerSetupPanel::timerCallback()
 {
     updateSlotDisplays();
-
-    // ── MIDI Learn polling ───────────────────────────────────────────────────
-    // The audio thread writes the captured event into samplerMidiLearnResult
-    // (encoded as (type << 8) | number) and resets the target to -1 once done.
-    // On the message thread we copy the captured values into the APVTS so the
-    // ComboBox/Slider attachments reflect the new binding and trigger param
-    // change notifications to the host.
-    const int currentTarget = audioProcessor.getSamplerMidiLearnTarget();
-    const int result        = audioProcessor.getSamplerMidiLearnResult();
-
-    if (currentTarget == -1 && result != -1 && pendingLearnTarget != -1)
-    {
-        const int type   = (result >> 8) & 0xFF; // 1 = Note, 2 = CC
-        const int number = result & 0xFF;
-
-        // target = engine * 3 + action → write into THAT engine's bank.
-        const int engine = pendingLearnTarget / 3;
-        const int action = pendingLearnTarget % 3;
-
-        juce::String typeParam, numParam;
-        switch (action)
-        {
-            case 0: typeParam = fsEngineParam(engine, "RecBindType");
-                    numParam  = fsEngineParam(engine, "RecBindNum");  break;
-            case 1: typeParam = fsEngineParam(engine, "PlayBindType");
-                    numParam  = fsEngineParam(engine, "PlayBindNum"); break;
-            case 2: typeParam = fsEngineParam(engine, "SaveBindType");
-                    numParam  = fsEngineParam(engine, "SaveBindNum"); break;
-            default: break;
-        }
-
-        if (typeParam.isNotEmpty())
-        {
-            // ComboBox indices: 0=Off, 1=Note, 2=CC — matches captured type.
-            if (auto* p = apvts.getParameter(typeParam))
-                p->setValueNotifyingHost(p->convertTo0to1((float)type));
-            if (auto* p = apvts.getParameter(numParam))
-                p->setValueNotifyingHost(p->convertTo0to1((float)number));
-        }
-
-        audioProcessor.clearSamplerMidiLearnResult();
-        pendingLearnTarget = -1;
-        recBinding .learnBtn.setToggleState(false, juce::dontSendNotification);
-        playBinding.learnBtn.setToggleState(false, juce::dontSendNotification);
-        saveBinding.learnBtn.setToggleState(false, juce::dontSendNotification);
-    }
-
-    // Keep the toggle visible state in sync if Learn was cancelled elsewhere
-    if (currentTarget == -1 && result == -1 && pendingLearnTarget != -1)
-    {
-        pendingLearnTarget = -1;
-        recBinding .learnBtn.setToggleState(false, juce::dontSendNotification);
-        playBinding.learnBtn.setToggleState(false, juce::dontSendNotification);
-        saveBinding.learnBtn.setToggleState(false, juce::dontSendNotification);
-    }
 }
-
 
 void SamplerSetupPanel::updateSlotDisplays()
 {
@@ -444,11 +300,12 @@ void SamplerSetupPanel::paint(juce::Graphics& g)
     SetupUI::paintHeader(g, *this, "SAMPLER -- SETUP", accent);
 
     // Column headers for slot grid — position must match resized() exactly:
-    //   headerH(30) + 9 control rows (MIDI, Octave, MaxDur, ExportToggle,
-    //   ExportFormat, OutputDir, REC / PLAY / SAVE bindings) * kRowStep + kHPad
-    //   (Enable row removed — power lives in the rack LED + zone-3 header.)
+    //   headerH(30) + 6 control rows (MIDI, Octave, MaxDur, ExportToggle,
+    //   ExportFormat, OutputDir) * kRowStep + kHPad.
+    //   (Enable row removed — power lives in the rack LED + zone-3 header;
+    //    REC/PLAY/SAVE bind rows removed — unified MIDI-Learn on the buttons.)
     const int titleH  = SetupUI::kHeaderH + Sp3ctraTheme::kSectionGap;
-    const int headerY = titleH + 9 * Sp3ctraTheme::kRowStep + Sp3ctraTheme::kHPad;
+    const int headerY = titleH + 6 * Sp3ctraTheme::kRowStep + Sp3ctraTheme::kHPad;
     const int headerH = 20;
 
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
@@ -513,27 +370,6 @@ void SamplerSetupPanel::resized()
                                        y + vc, clearW, ctrlH);
         y += rowH;
     }
-
-    // ── REC / PLAY / SAVE binding rows ──────────────────────────────────────
-    // Layout per row:  [LABEL] [Type combo] [Number slider] [LEARN btn]
-    auto bindingRow = [&](ActionBindingRow& br)
-    {
-        const int vc       = (rowH - ctrlH) / 2;
-        const int typeW    = 70;
-        const int learnW   = 70;
-        const int gap      = 4;
-        const int numberW  = ctrlW - typeW - learnW - 2 * gap;
-
-        br.title       .setBounds(pad,                           y + vc, labelW,  ctrlH);
-        br.typeBox     .setBounds(ctrlX,                         y + vc, typeW,   ctrlH);
-        br.numberSlider.setBounds(ctrlX + typeW + gap,           y + vc, numberW, ctrlH);
-        br.learnBtn    .setBounds(ctrlX + typeW + gap + numberW + gap,
-                                   y + vc, learnW,  ctrlH);
-        y += rowH;
-    };
-    bindingRow(recBinding);
-    bindingRow(playBinding);
-    bindingRow(saveBinding);
 
     y += pad; // gap before slot grid
 
