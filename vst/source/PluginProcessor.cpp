@@ -151,21 +151,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 0.5f,
         juce::AudioParameterFloatAttributes{}.withLabel("ms")));
 
-    // ── Infrastructure — Image pipeline flags ────────────────────────────────
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"luxstralInvertIntensity", 1}, "Invert Intensity",
-        true, kHiddenBool));
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"luxstralGammaEnable", 1}, "Gamma Enable",
-        true, kHiddenBool));
-
-    // ── Gameplay — Gamma / Contrast ──────────────────────────────────────────
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxstralGammaValue", 1}, "Gamma",
-        juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f, 0.30f), 1.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxstralContrastMin", 1}, "Contrast Min",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.21f));
+    // (Purge 2026-07-12: the legacy pre-split conditioning params —
+    // luxstralInvertIntensity/GammaEnable/GammaValue/ContrastMin,
+    // luxstral/luxsynth Inversion/AcRemoval/Source, luxsynthGammaValue,
+    // luxpitch/luxmask Source, luxstralFidelityMode/RangeDb and the
+    // VolumeWeighting/SummationResponse exponents — are DELETED. The per-OUT
+    // banks are the only conditioning authority; the synthSplitVersion
+    // migration still reads the OLD ids from the raw session XML, which does
+    // not require the params to exist.)
 
     // ── Gameplay — Stereo enable (PLAY-page badge toggle) ────────────────────
     params.push_back(std::make_unique<juce::AudioParameterBool>(
@@ -177,15 +170,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"luxstralStereoTempAmp", 1}, "Stereo Temp.",
         juce::NormalisableRange<float>(0.0f, 5.0f, 0.01f), 2.5f));
 
-    // ── Infrastructure — Volume weighting ────────────────────────────────────
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxstralVolumeWeightingExp", 1}, "Vol. Weight Exp.",
-        juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f), 0.1f, kHiddenFloat));
-
-    // ── Gameplay — Summation exponent / Noise gate ───────────────────────────
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxstralSummationResponseExp", 1}, "Sum. Exp.",
-        juce::NormalisableRange<float>(2.0f, 10.0f, 0.1f), 2.0f));
+    // ── Gameplay — Noise gate ────────────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxstralNoiseGateThreshold", 1}, "Noise Gate",
         juce::NormalisableRange<float>(0.0f, 0.1f, 0.001f), 0.005f));
@@ -229,24 +214,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"luxstralSoftLimitKnee", 1}, "Soft Limit Knee",
         juce::NormalisableRange<float>(0.01f, 1.0f, 0.01f), 0.2f, kHiddenFloat));
 
-    // ── Gameplay — inverse-dB decode range (shared A+B) ──────────────────────
-    // The inverse-dB decode law (exact inverse of the SCORE encoder's dB
-    // brightness map, applied after the gamma stage) is ALWAYS ON — this knob
-    // sets its dB window. Must match the dynamicRangeDB the score was
-    // generated with (50 dB) for an exact decode; see config_loader.h for the
-    // full exact-inverse knob recipe. Param ID keeps the historical
-    // "Fidelity" name so saved sessions/presets keep their value.
-    // luxstralFidelityMode is INERT (the law no longer toggles) — kept only
-    // for session compat; no UI binding, not read anywhere.
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"luxstralFidelityMode", 1}, "SCORE dB Decode",
-        false, kHiddenBool));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxstralFidelityRangeDb", 1}, "Decode Range",
-        juce::NormalisableRange<float>(20.0f, 80.0f, 0.5f), 50.0f,
-        juce::AudioParameterFloatAttributes{}.withLabel("dB")));
+    // (Purge 2026-07-12: luxstralFidelityMode/RangeDb deleted — the inverse-dB
+    // decode law is ALWAYS ON with its dB window PER OUT SEND, from the
+    // luxstralOut{N}_rangeDb bank; the migration seeds the banks from the old
+    // shared knob read out of the raw session XML.)
 
-    // ── Gameplay — Phase management: physical onset modes (shared A+B) ──────
+    // ── Gameplay — Phase management: physical onset modes ───────────────────
     // When a note attacks (strong volume jump crossing the gate from silence),
     // its oscillator's phase is set by the mode's physical initial conditions:
     //   Strike = struck string (velocity → ±sine)  Pluck = plucked (±cosine)
@@ -288,9 +261,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     // before sending it to the global engine. Gamma has NO enable toggle
     // (1.0 = off); Intensity is the pre-engine mix weight of the send.
     // Defaults mirror the legacy conditioning defaults so a fresh session is
-    // bit-identical. The legacy globals (luxstralInversion, luxstralGamma*,
-    // luxsynthInversion, …) stay in the layout for state compat but are no
-    // longer read by the pipeline.
+    // bit-identical. (The legacy pre-split globals were deleted from the
+    // layout on 2026-07-12 — the migration reads their OLD ids from the raw
+    // session XML, see setStateInformation.)
     for (int s = 0; s < 8; ++s)
     {
         const juce::String n(s);
@@ -440,25 +413,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"imageMixBalance", 1}, "Mix Balance",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f, kHiddenFloat));
 
-    // ── Pipeline routing — per-path source selection & toggles ────────────────
-    params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID{"luxstralSource", 1}, "LuxStral Source",
-        juce::StringArray{"S - Sampler", "M - Mix", "L - Live", "P - LuxPitch", "K - LuxMask"}, 1));
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"luxstralInversion", 1}, "LuxStral Inversion", true));
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"luxstralAcRemoval", 1}, "LuxStral DC Blocking", true));
-
-    params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID{"luxsynthSource", 1}, "LuxSynth Source",
-        juce::StringArray{"S - Sampler", "M - Mix", "L - Live", "P - LuxPitch", "K - LuxMask"}, 1));
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"luxsynthInversion", 1}, "LuxSynth Inversion", true));
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"luxsynthAcRemoval", 1}, "LuxSynth DC Blocking", true));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxsynthGammaValue", 1}, "LuxSynth Gamma",
-        juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f, 0.30f), 1.0f));
+    // (Purge 2026-07-12: the per-path routing/conditioning params —
+    // luxstral/luxsynth Source/Inversion/AcRemoval, luxsynthGammaValue — are
+    // deleted: the ChainPlan routes, the per-OUT banks condition.)
 
     // ── LuxSynth blob detection — independent of StrokeForge/LuxStral ────────
     // These parameters are owned exclusively by the SYNTH_BLOB visualizer
@@ -699,14 +656,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"chainInsertOrder", 1}, "Chain Insert Order",
         juce::StringArray{"Pitch > Mask", "Mask > Pitch"}, 0));
-    // LuxPitch / LuxMask source selectors (S/M/L — cannot take themselves).
-    // Global routing (g_sp3ctra_config) — deliberately NOT banked per instance.
-    params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID{"luxpitchSource", 1}, "LuxPitch Source",
-        juce::StringArray{"S - Sampler", "M - Mix", "L - Live"}, 1));
-    params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID{"luxmaskSource", 1}, "LuxMask Source",
-        juce::StringArray{"S - Sampler", "M - Mix", "L - Live"}, 1));
+    // (Purge 2026-07-12: luxpitchSource/luxmaskSource deleted — Pitch/Mask are
+    // positional chain inserts, their input is the stream at their position.)
 
     // ── PITCH / MASK — per-instance automatable banks (×8) ───────────────────
     // Each pooled insert instance owns a state-pool slot 0..7 (modulePoolSlots_,
@@ -1271,11 +1222,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         true, kHiddenBool));
 
     // ── Video: live performance params ────────────────────────────────────────
-    // Source = which synth engine's input image we visualize. We follow the
-    // engine's own source routing (Sampler/Live/Mix/LuxPitch/LuxMask) so the
-    // waterfall always matches what the audio engine actually sees.
-    //   0 = LuxStral          (follows luxstral_source_type)
-    //   1 = LuxSynth/LuxWave  (follows luxsynth_source_type — LuxWave shares it)
+    // Source = which synth engine's input image we visualize — the engine
+    // taps published by the chain executors (AUDIO_IMAGE_ENGINE_TAP_*), so
+    // the waterfall always matches what the audio engine actually sees.
+    //   0 = LuxStral          (engine tap A)
+    //   1 = LuxSynth/LuxWave  (Path-B tap — LuxWave shares it)
     //   2 = AllSynth          (50/50 blend of the two streams above)
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"videoScrollSource", 1}, "Video Scroll Source",
@@ -1491,22 +1442,14 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("luxstralNumOctaves", this);
     apvts.addParameterListener("luxstralAttackMs", this);
     apvts.addParameterListener("luxstralReleaseMs", this);
-    apvts.addParameterListener("luxstralInvertIntensity", this);
-    apvts.addParameterListener("luxstralGammaEnable", this);
-    apvts.addParameterListener("luxstralGammaValue", this);
-    apvts.addParameterListener("luxstralContrastMin", this);
     apvts.addParameterListener("luxstralStereoEnable", this);
     apvts.addParameterListener("luxstralStereoTempAmp", this);
-    apvts.addParameterListener("luxstralVolumeWeightingExp", this);
-    apvts.addParameterListener("luxstralSummationResponseExp", this);
     apvts.addParameterListener("luxstralNoiseGateThreshold", this);
     apvts.addParameterListener("luxstralNumWorkers", this);
     apvts.addParameterListener("luxstralPhysiologicalFilter", this);
     apvts.addParameterListener("luxstralPhysiologicalDepth", this);
     apvts.addParameterListener("luxstralSoftLimitThreshold", this);
     apvts.addParameterListener("luxstralSoftLimitKnee", this);
-    // Inverse-dB decode range (historical param ID)
-    apvts.addParameterListener("luxstralFidelityRangeDb", this);
     // M4 — core-side LuxSynth engine feed (lx_fft_* config mirror)
     apvts.addParameterListener("lxFftBins", this);
     apvts.addParameterListener("lxFftSmoothing", this);
@@ -1543,15 +1486,6 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("spctrBlobMergeGap",   this);
     apvts.addParameterListener("spctrBlobColorSplit", this);
 
-    // Per-path pipeline routing (source selector, inversion, AC removal)
-    apvts.addParameterListener("luxstralSource",       this);
-    apvts.addParameterListener("luxstralInversion",    this);
-    apvts.addParameterListener("luxstralAcRemoval",    this);
-    apvts.addParameterListener("luxsynthSource",       this);
-    apvts.addParameterListener("luxsynthInversion",    this);
-    apvts.addParameterListener("luxsynthAcRemoval",    this);
-    apvts.addParameterListener("luxsynthGammaValue",   this);
-
     // Image pipeline parameters (live transport + opacity + fade-in)
     apvts.addParameterListener("imageFreezeMode",      this);
     apvts.addParameterListener("imageLiveOpacity",     this);
@@ -1585,10 +1519,6 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
                 apvts.addParameterListener(bank.paramId(s, bank.suffixes[i]),
                                            this);
     }
-    // Global (non-banked) source routing selectors.
-    apvts.addParameterListener("luxpitchSource",           this);
-    apvts.addParameterListener("luxmaskSource",            this);
-
     // Create the sampler engines: A (slot 0) + B (slot 1). Per-engine enable is
     // driven by module presence in deriveChainRouting(); both share the single
     // modulated playback channel (one plays at a time — see the arbiter).
@@ -3520,22 +3450,6 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
         // Just update g_sp3ctra_config silently (no restart)
         applyConfigurationToCore(false);
 
-        // 🔧 SOURCE SWITCH: Reset preprocessed data so stale data from the
-        // previous source doesn't persist.  The correct thread (UDP or
-        // FramePlayerThread) will write fresh data for the new source.
-        if (parameterID == "luxstralSource") {
-            if (sharedCore && sharedCore->getCore()) {
-                auto* db = sharedCore->getCore()->getDoubleBuffer();
-                if (db) {
-                    pthread_mutex_lock(&db->mutex);
-                    db->dataReady = 0;
-                    db->preprocessed_data.timestamp_us = 0;
-                    pthread_mutex_unlock(&db->mutex);
-                    log_info("VST", "Source changed — preprocessed data reset");
-                }
-            }
-        }
-
         // 🔧 HOT-RELOAD: Musical parameters (tuning, root note, octaves) change frequency range
         // This triggers fade-out → regenerate → fade-in for smooth transition
         if (parameterID == "luxstralTuning" || 
@@ -5159,37 +5073,19 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     g_sp3ctra_config.tau_up_base_ms = apvts.getRawParameterValue("luxstralAttackMs")->load();
     g_sp3ctra_config.tau_down_base_ms = apvts.getRawParameterValue("luxstralReleaseMs")->load();
     
-    // Image Processing - LuxStral pipeline: RGB → Grayscale → Inversion → Gamma → Averaging → Contrast
-    g_sp3ctra_config.invert_intensity = 
-        (int)apvts.getRawParameterValue("luxstralInvertIntensity")->load();
-    g_sp3ctra_config.additive_enable_non_linear_mapping = 
-        (int)apvts.getRawParameterValue("luxstralGammaEnable")->load();
-    g_sp3ctra_config.additive_gamma_value = 
-        apvts.getRawParameterValue("luxstralGammaValue")->load();
-    g_sp3ctra_config.additive_contrast_min = 
-        apvts.getRawParameterValue("luxstralContrastMin")->load();
-    
     // Stereo Processing
     g_sp3ctra_config.stereo_mode_enabled = 
         (int)apvts.getRawParameterValue("luxstralStereoEnable")->load();
     g_sp3ctra_config.stereo_temperature_amplification = 
         apvts.getRawParameterValue("luxstralStereoTempAmp")->load();
     
-    // Dynamics Processing (summation_normalization)
-    g_sp3ctra_config.volume_weighting_exponent =
-        apvts.getRawParameterValue("luxstralVolumeWeightingExp")->load();
-    g_sp3ctra_config.summation_response_exponent =
-        apvts.getRawParameterValue("luxstralSummationResponseExp")->load();
+    // Dynamics Processing
     g_sp3ctra_config.noise_gate_threshold =
         apvts.getRawParameterValue("luxstralNoiseGateThreshold")->load();
     g_sp3ctra_config.soft_limit_threshold =
         apvts.getRawParameterValue("luxstralSoftLimitThreshold")->load();
     g_sp3ctra_config.soft_limit_knee =
         apvts.getRawParameterValue("luxstralSoftLimitKnee")->load();
-
-    // Inverse-dB decode range — shared by engines A and B (historical param ID)
-    g_sp3ctra_config.luxstral_db_decode_range_db =
-        apvts.getRawParameterValue("luxstralFidelityRangeDb")->load();
 
     // Phase management (mode + sensitivity + position + drift)
     g_sp3ctra_config.luxstral_phase_mode =
@@ -5267,17 +5163,9 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     // Mapping table: choice → enum
     // ========================================================================
     {
-        // ── Source follows CHAIN PLACEMENT (chains are fixed for now) ─────────
-        // The per-engine "Source" dropdown is retired: an engine reads the
-        // signal of the chain it sits on, and is gated by that chain's transport.
-        //   • Chain 1 (Source ► Pitch ► Mask ► Sampler ► LuxStral)
-        //         → LuxStral reads the modulated frame      (IMAGE_SOURCE_MODULATED = 0)
-        //   • Chain 2 (Source ► LuxSynth ► LuxWave)
-        //         → LuxSynth + LuxWave read the raw live CIS (IMAGE_SOURCE_LIVE = 1)
-        // The luxstralSource / luxsynthSource params are kept (plumbing) for the
-        // future modular-chain routing, but their value no longer drives audio.
-        // (M8: the legacy per-path routing/conditioning globals are gone —
-        // the ChainPlan routes, the per-OUT banks condition.)
+        // Routing: the ChainPlan is the single authority (M7/M8) — an engine
+        // is fed by the OUT modules placed in chains; the per-OUT banks below
+        // are the only conditioning.
 
         // M4 — core-side LuxSynth engine feed (luxsynth_feed_tick): FFT bins
         // choice + temporal smoothing, mirrored from the APVTS params the UI
@@ -5288,8 +5176,7 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
             apvts.getRawParameterValue("lxFftSmoothing")->load();
 
         // ── Synth-split P1 — per-OUT conditioning banks → g_sp3ctra_config ──
-        // The pipeline reads THESE (not the legacy globals above, kept for
-        // state compat only). contrast_min / range_db are LuxStral-only.
+        // contrast_min / range_db are LuxStral-only.
         for (int s = 0; s < LUX_OUT_MAX_SLOTS; ++s)
         {
             auto rawf = [this](const juce::String& id) {
@@ -5319,24 +5206,6 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
             lw->gamma       = rawf(lwOutParam(s, "gamma"));
             lw->intensity   = rawf(lwOutParam(s, "intensity"));
             lw->enabled     = (int)rawf(lwOutParam(s, "enabled"));
-        }
-
-        // ── LuxPitch source routing (S/M/L — no P option for its own source) ──
-        {
-            static const int kLpChoiceToSrc[3] = { 0, 2, 1 }; // S→SAMPLER, M→MIX, L→LIVE
-            int lpSrcChoice = static_cast<int>(
-                apvts.getRawParameterValue("luxpitchSource")->load());
-            if (lpSrcChoice < 0 || lpSrcChoice > 2) lpSrcChoice = 1;
-            g_sp3ctra_config.luxpitch_source_type = kLpChoiceToSrc[lpSrcChoice];
-        }
-
-        // ── LuxMask source routing (S/M/L — no K option for its own source) ──
-        {
-            static const int kLmChoiceToSrc[3] = { 0, 2, 1 }; // S→SAMPLER, M→MIX, L→LIVE
-            int lmSrcChoice = static_cast<int>(
-                apvts.getRawParameterValue("luxmaskSource")->load());
-            if (lmSrcChoice < 0 || lmSrcChoice > 2) lmSrcChoice = 1;
-            g_sp3ctra_config.luxmask_source_type = kLmChoiceToSrc[lmSrcChoice];
         }
 
         // ── Insert chain order (M1 — modular pipeline core) ──

@@ -1961,10 +1961,10 @@ void CisVisualizerComponent::mouseExit(const juce::MouseEvent&)
 
 //==============================================================================
 // FFT — computeFftMagnitudes
-// Computes a Hann-windowed real FFT using KissFFT.
-// IMPORTANT: reads RGB data INDEPENDENTLY from the source selected in the
-// LUXSYNTH tab dropdown (luxsynth_source_type), NOT from the visualizer's
-// localDataGray.  This decouples what the user sees from what LuxSynth hears.
+// Computes a Hann-windowed real FFT using KissFFT — DISPLAY ONLY: the engine
+// feed is core-side (processing/luxsynth_feed.c, M4). Reads the Path-B engine
+// tap, NOT the visualizer's localDataGray, so the bars match what LuxSynth
+// actually hears regardless of the selected view.
 // Results are stored in fftMagnitudesSmoothed_ with exponential smoothing.
 // The KissFFT config is cached in fftCfg_ and reallocated only when
 // cisPixelsCount changes.  All work is O(N log N) on the UI thread at 30 fps.
@@ -2262,7 +2262,6 @@ void CisVisualizerComponent::computeFftMagnitudes()
         cfg.filter_env_depth     = apvts.getRawParameterValue("luxsynthFilterEnvDepth")->load();
         cfg.lfo_rate_hz          = apvts.getRawParameterValue("luxsynthLfoRate")->load();
         cfg.lfo_depth_semitones  = apvts.getRawParameterValue("luxsynthLfoDepth")->load();
-        cfg.gamma                = apvts.getRawParameterValue("luxsynthGammaValue")->load();
         cfg.num_oscillators      = static_cast<int>(
             apvts.getRawParameterValue("luxsynthNumOscillators")->load());
         cfg.master_volume        = 0.20f; // legacy default — attenuate additive sum before hard clip

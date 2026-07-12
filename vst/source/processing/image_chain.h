@@ -4,10 +4,10 @@
  * Image insert chain — ordered execution of the Modulated-channel inserts
  * (LuxPitch, LuxMask) with a configurable order and per-insert visual taps.
  *
- * This is the M1 core of the modular pipeline (see docs/PLAN_DEVELOPPEMENT.md):
- * the hardcoded Pitch ► Mask invocation becomes a loop over an ordered
- * descriptor, so M6 can later extend the slot list with new effect blocks
- * (Tone, EQ, Mixer…) without touching the executor call sites.
+ * M1 core of the modular pipeline: the hardcoded Pitch ► Mask invocation
+ * becomes a loop over an ordered descriptor (the slot list has since grown
+ * FX blocks — Reverb/Echo/EQ — without touching the executor call sites).
+ * Current roadmap: docs/PLAN_P3_CHAIN_SETTINGS.md.
  *
  * Threading model:
  *   - image_chain_process_inserts() runs on the synthesis thread only.

@@ -41,13 +41,6 @@ public:
     {
         auto& apvts = p.getAPVTS();
 
-        // ── Source selector — RETIRED (source follows chain placement) ──────
-        // The combo + attachment are kept (not made visible) so the param
-        // plumbing survives for the future modular-chain routing.
-        sourceCombo.addItem("Chain 1", 1);
-        sourceCombo.addItem("Chain 2", 2);
-        sourceAttach.reset(new CmbAttach(apvts, "luxsynthSource", sourceCombo));
-
         // ── Master Volume (top of left column) ────────────────────────────
         initLabel(volumeLabel, "Volume");
         initSlider(volumeSlider);
@@ -419,7 +412,6 @@ private:
 
     // ── Controls ────────────────────────────────────────────────────────────
     juce::Slider       volumeSlider;                               // master (left top)
-    juce::ComboBox     sourceCombo;                                // retired (plumbing only)
     juce::Label        volumeLabel, contrastMinLabel;
     juce::Slider       contrastMinSlider;
 
@@ -443,7 +435,7 @@ private:
     using BtnAttach = juce::AudioProcessorValueTreeState::ButtonAttachment;
     using CmbAttach = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
 
-    std::unique_ptr<CmbAttach> sourceAttach, fftBinsAttach;
+    std::unique_ptr<CmbAttach> fftBinsAttach;
     std::unique_ptr<SldAttach> volumeAttach, contrastMinAttach,
                                numOscAttach,
                                blobThreshAttach, blobMinWidthAttach,

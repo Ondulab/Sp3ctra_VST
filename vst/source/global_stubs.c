@@ -64,24 +64,15 @@ sp3ctra_config_t g_sp3ctra_config = {
     .decay_freq_ref_hz = 440.0f,
     .decay_freq_beta   = 0.0f,
     
-    // 🔧 CRITICAL: Image processing parameters (from sp3ctra.ini [image_processing_luxstral])
-    .invert_intensity = 1,                       // Dark pixels louder
-    .additive_enable_non_linear_mapping = 1,     // Gamma enabled
-    .additive_gamma_value = 4.8f,                // Gamma exponent
-    .additive_contrast_min = 0.21f,              // Min volume for blurred images
+    // 🔧 CRITICAL: Image processing (conditioning lives in the per-OUT banks)
     .additive_contrast_adjustment_power = 0.5f,  // Contrast curve exponent
-    
-    // 🔧 CRITICAL: Volume and dynamics (from sp3ctra.ini [summation_normalization])
-    .volume_weighting_exponent = 0.1f,           // Strong oscillator domination
-    .summation_response_exponent = 2.0f,         // Compression exponent
+
+    // 🔧 CRITICAL: Volume and dynamics
     .noise_gate_threshold = 0.005f,              // Noise suppression
-    
+
     // 🔧 CRITICAL: Soft limiter (prevents hard clipping)
     .soft_limit_threshold = 0.8f,                // Start soft limit at 80%
     .soft_limit_knee = 0.2f,                     // Smooth transition
-
-    // Inverse-dB decode law (always on) — encoder dB window
-    .luxstral_db_decode_range_db = 50.0f,  // = SCORE_DEFAULT_DYNAMIC_RANGE_DB
 
     // M4 — core-side LuxSynth engine feed (mirrors lxFftBins/lxFftSmoothing)
     .lx_fft_bins_choice = 2,               // 128 harmonics (param default)
