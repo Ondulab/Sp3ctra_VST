@@ -40,6 +40,7 @@ extern "C" {
  */
 class Sp3ctraAudioProcessor  : public juce::AudioProcessor,
                                 public juce::AudioProcessorValueTreeState::Listener,
+                                public IVirtualMidiSink,
                                 private juce::Timer
 {
 public:
@@ -227,17 +228,35 @@ public:
     void setSamplerSelectedSlot(int s) noexcept { samplerSelectedSlot.store(s, std::memory_order_relaxed); }
     int  getSamplerSelectedSlot() const noexcept { return samplerSelectedSlot.load(std::memory_order_relaxed); }
 
-    // REC / PLAY bindings now follow a momentary (press-and-hold) semantic:
-    //   pressed  : key down  / CC value crossed >= 64  → start action
-    //   released : key up    / CC value crossed <  64  → stop  action
-    // SAVE keeps a single trigger-on-press semantic.
-    // `engine` selects the sampler instance (0 = A, 1 = B) — bindings are
-    // per-engine so a controller button drives ONE instance, not both.
-    bool consumeSamplerRecPressed  (int engine) noexcept { return samplerRecPressed  [engine & 1].exchange(false, std::memory_order_acquire); }
-    bool consumeSamplerRecReleased (int engine) noexcept { return samplerRecReleased [engine & 1].exchange(false, std::memory_order_acquire); }
-    bool consumeSamplerPlayPressed (int engine) noexcept { return samplerPlayPressed [engine & 1].exchange(false, std::memory_order_acquire); }
-    bool consumeSamplerPlayReleased(int engine) noexcept { return samplerPlayReleased[engine & 1].exchange(false, std::memory_order_acquire); }
-    bool consumeSamplerSaveTrigger (int engine) noexcept { return samplerSaveTriggered[engine & 1].exchange(false, std::memory_order_acquire); }
+    // REC / PLAY / SAVE are now triggered through the unified MIDI-mapping engine
+    // (right-click MIDI-Learn on the buttons — see IVirtualMidiSink below). The
+    // audio thread only latches per-(engine, slot) pulses here; the open
+    // SlotEditor drains them on the message thread and runs the actual action.
+    //   REC / PLAY : momentary — press/release pulses.
+    //   SAVE       : one-shot  — trigger pulse.
+    // "Fixed slot per button": each mapping targets ONE slot, so pulses are
+    // addressed by (engine, slot), not by the editor's current selection.
+    bool consumeSmpRecPressed  (int e, int s) noexcept { return smpRecPressed  [e & 1][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
+    bool consumeSmpRecReleased (int e, int s) noexcept { return smpRecReleased [e & 1][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
+    bool consumeSmpPlayPressed (int e, int s) noexcept { return smpPlayPressed [e & 1][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
+    bool consumeSmpPlayReleased(int e, int s) noexcept { return smpPlayReleased[e & 1][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
+    bool consumeSmpSaveTrigger (int e, int s) noexcept { return smpSaveTrigger [e & 1][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
+
+    /** MIDI-touch signal for VALUE targets: monotonic generation + last-touched
+     *  location (engine<<8|slot). The open SlotEditor refreshes its sliders when
+     *  a mapped controller moved a value on the slot it is showing. */
+    uint32_t smpValueTouchGen()   const noexcept { return smpValueTouchGen_.load(std::memory_order_acquire); }
+    int      smpValueTouchWhere() const noexcept { return smpValueTouchWhere_.load(std::memory_order_relaxed); }
+
+    //==========================================================================
+    // IVirtualMidiSink — NON-APVTS mapping targets for the sampler play params /
+    // action buttons (implemented in PluginProcessor.cpp via SamplerMidiTargets).
+    //==========================================================================
+    int   virtualResolve(const juce::String& paramId) const override;
+    int   virtualSteps  (int targetId) const noexcept override;
+    float virtualRead   (int targetId) const noexcept override;
+    void  virtualApply  (int targetId, float norm01) noexcept override;
+    void  virtualRelease(int targetId) noexcept override;
 
     /** All Notes Off (panic): ask the audio thread to release every held/stuck
      *  note next block. Safe to call from the UI (message) thread. */
@@ -355,20 +374,6 @@ public:
      *  reload the session over live (unsaved) in-RAM edits. */
     bool consumeSamplerAutoLoadPending() noexcept
     { return samplerAutoLoadPending_.exchange(false, std::memory_order_acq_rel); }
-
-    void startSamplerMidiLearn(int target) noexcept
-    {
-        samplerMidiLearnResult.store(-1, std::memory_order_relaxed);
-        samplerMidiLearnTarget.store(target, std::memory_order_release);
-    }
-    void cancelSamplerMidiLearn() noexcept
-    {
-        samplerMidiLearnTarget.store(-1, std::memory_order_release);
-        samplerMidiLearnResult.store(-1, std::memory_order_relaxed);
-    }
-    int  getSamplerMidiLearnTarget() const noexcept { return samplerMidiLearnTarget.load(std::memory_order_acquire); }
-    int  getSamplerMidiLearnResult() const noexcept { return samplerMidiLearnResult.load(std::memory_order_acquire); }
-    void clearSamplerMidiLearnResult() noexcept { samplerMidiLearnResult.store(-1, std::memory_order_relaxed); }
 
 private:
 
@@ -513,13 +518,10 @@ private:
     // apvts.getRawParameterValue("literal") builds a juce::String (malloc)
     // on every call, so the RT path reads through these pointers instead.
     // Index = sampler engine (0 = A "luxSampler*", 1 = B "luxSamplerB*").
+    // MIDI channel drives note-routing (which channel triggers slot playback) and
+    // engine-B's channel filter — kept; the old REC/PLAY/SAVE bind params were
+    // removed with the bespoke settings MIDI system (now unified MIDI-Learn).
     std::atomic<float>* luxSamplerMidiChannelParam [2] = {};
-    std::atomic<float>* luxSamplerRecBindTypeParam [2] = {};
-    std::atomic<float>* luxSamplerRecBindNumParam  [2] = {};
-    std::atomic<float>* luxSamplerPlayBindTypeParam[2] = {};
-    std::atomic<float>* luxSamplerPlayBindNumParam [2] = {};
-    std::atomic<float>* luxSamplerSaveBindTypeParam[2] = {};
-    std::atomic<float>* luxSamplerSaveBindNumParam [2] = {};
     // Per-instance banks (index = pool slot): each Pitch/Mask instance filters
     // MIDI on ITS OWN channel/octave params.
     std::atomic<float>* luxpitchMidiChannelParam [ChainModel::kMaxChains] = {};
@@ -672,28 +674,26 @@ private:
     std::atomic<uint32_t> videoScrollClearGen{0};
 
     // -------------------------------------------------------------------------
-    // Sampler action button MIDI bindings — RT-safe trigger pulses
-    // Set by processBlock (audio thread), consumed by message thread.
+    // Sampler action triggers (REC / PLAY / SAVE) — RT-safe pulses fired by the
+    // MIDI-mapping engine (virtualApply/virtualRelease) and drained by the open
+    // SlotEditor. Addressed by [engine][slot] because each mapping targets ONE
+    // fixed slot. REC/PLAY are momentary (held → press/release edges); SAVE is
+    // one-shot.
     // -------------------------------------------------------------------------
-    std::atomic<int>  samplerSelectedSlot   { 0 };
-    // Momentary state flags: track current "held" state of REC / PLAY bindings
-    // (used by processBlock to detect press/release edges on each MIDI event).
-    // Index = sampler engine (0 = A, 1 = B) — each engine owns its bindings.
-    std::atomic<bool> samplerRecHeld    [2] { false, false };
-    std::atomic<bool> samplerPlayHeld   [2] { false, false };
-    // Edge pulses consumed by the UI timer thread (SlotEditorComponent).
-    std::atomic<bool> samplerRecPressed  [2] { false, false };
-    std::atomic<bool> samplerRecReleased [2] { false, false };
-    std::atomic<bool> samplerPlayPressed [2] { false, false };
-    std::atomic<bool> samplerPlayReleased[2] { false, false };
-    // SAVE retains the one-shot trigger semantic (no momentary behaviour).
-    std::atomic<bool> samplerSaveTriggered[2] { false, false };
+    static constexpr int kSmpSlots = LuxSamplerConstants::NUM_SLOTS;
+    std::atomic<int>  samplerSelectedSlot { 0 };   // mirror of the editor selection
+    std::atomic<bool> smpRecHeld     [2][kSmpSlots] {};
+    std::atomic<bool> smpPlayHeld    [2][kSmpSlots] {};
+    std::atomic<bool> smpRecPressed  [2][kSmpSlots] {};
+    std::atomic<bool> smpRecReleased [2][kSmpSlots] {};
+    std::atomic<bool> smpPlayPressed [2][kSmpSlots] {};
+    std::atomic<bool> smpPlayReleased[2][kSmpSlots] {};
+    std::atomic<bool> smpSaveTrigger [2][kSmpSlots] {};
 
-    // MIDI Learn: target = -1 idle, otherwise engine * 3 + action
-    // (action: 0 REC / 1 PLAY / 2 SAVE — engine 0 = A, 1 = B).
-    // Result encoding: -1 = none, else (type << 8) | number  (type: 1=Note, 2=CC).
-    std::atomic<int>  samplerMidiLearnTarget{ -1 };
-    std::atomic<int>  samplerMidiLearnResult{ -1 };
+    // MIDI-touch signal for VALUE targets (see smpValueTouchGen/Where above):
+    // bumped by virtualApply so the open SlotEditor can refresh its sliders.
+    std::atomic<uint32_t> smpValueTouchGen_   { 0 };
+    std::atomic<int>      smpValueTouchWhere_ { -1 };
 
 
     /** Full path of the last .sp3s session saved or loaded.

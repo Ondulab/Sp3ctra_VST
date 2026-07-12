@@ -35,7 +35,6 @@ extern "C" {
 #endif
 
 /* One-time init (idempotent) — zeroes every slot. */
-void synth_staging_init(void);
 
 /* Producer (single writer per chain slot): stage one conditioned send frame.
  * Copies additive.notes (num_notes), stereo gains when stereo_valid, and the

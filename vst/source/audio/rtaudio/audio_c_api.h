@@ -36,38 +36,10 @@ extern AudioDataBuffers buffers_R[2];
 extern volatile int current_buffer_index;
 extern pthread_mutex_t buffer_index_mutex;
 
-// C functions for compatibility
-void resetAudioDataBufferOffset(void);
-void initAudioData(AudioData *audioData, UInt32 numChannels, UInt32 bufferSize);
-void audio_Init(void);
-void cleanupAudioData(AudioData *audioData);
-void audio_Cleanup(void);
-int startAudioUnit(void);
-void stopAudioUnit(void);
-void printAudioDevices(void);
-int setAudioDevice(unsigned int deviceId);
-void setRequestedAudioDevice(int deviceId);
-void setRequestedAudioDeviceName(const char* deviceName);
-
-// Control minimal callback mode for debugging audio dropouts
-void setMinimalCallbackMode(int enabled);
-void setMinimalTestVolume(float volume);
-
-// Control synth mix levels (thread-safe)
-void setSynthLuxStralMixLevel(float level);  // 0.0 - 1.0
-void setSynthLuxSynthMixLevel(float level); // 0.0 - 1.0
-void setSynthLuxWaveMixLevel(float level);  // 0.0 - 1.0
-float getSynthLuxStralMixLevel(void);
-float getSynthLuxSynthMixLevel(void);
-float getSynthLuxWaveMixLevel(void);
-
-// Control reverb send levels (thread-safe)
-void setReverbSendLuxStral(float level);     // 0.0 - 1.0
-void setReverbSendLuxSynth(float level);   // 0.0 - 1.0
-void setReverbSendLuxWave(float level);    // 0.0 - 1.0
-float getReverbSendLuxStral(void);
-float getReverbSendLuxSynth(void);
-float getReverbSendLuxWave(void);
+// (Purge 2026-07-12: the legacy RtAudio C API declarations — audio_Init/
+// startAudioUnit/device & mix/reverb-level setters — had NO definitions in
+// the plugin; JUCE owns the audio device. Only the shared buffer types and
+// externs above are alive.)
 
 #ifdef __cplusplus
 }
