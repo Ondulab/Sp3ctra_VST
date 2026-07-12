@@ -96,10 +96,6 @@ typedef struct AudioImageBuffers {
   uint8_t *engine_tap_R[AUDIO_IMAGE_NUM_ENGINE_TAPS];
   uint8_t *engine_tap_G[AUDIO_IMAGE_NUM_ENGINE_TAPS];
   uint8_t *engine_tap_B[AUDIO_IMAGE_NUM_ENGINE_TAPS];
-  // Generation counter per tap, bumped once per publish (same single-producer
-  // / atomic-reader pattern as lines_modulated).
-  uint64_t engine_tap_seq[AUDIO_IMAGE_NUM_ENGINE_TAPS];
-
   // Statistics and monitoring
   uint64_t lines_received;
   uint64_t lines_processed;
@@ -275,11 +271,5 @@ int audio_image_buffers_get_engine_input_pointers(const AudioImageBuffers *buffe
                                                   uint8_t **out_R,
                                                   uint8_t **out_G,
                                                   uint8_t **out_B);
-
-// Generation counter of an engine tap (bumped once per publish) — lets
-// pollers (video waterfall) detect fresh frames whichever thread produced
-// them. Returns 0 on invalid engine / uninitialized buffers.
-uint64_t audio_image_buffers_engine_input_seq(const AudioImageBuffers *buffers,
-                                              int engine);
 
 #endif /* AUDIO_IMAGE_BUFFERS_H */

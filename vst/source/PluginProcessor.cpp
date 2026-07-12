@@ -4,6 +4,7 @@
 #include <iterator>                                  // std::size (insert bank tables)
 #include "sources/MediaSourceEngines.h"              // M9 — IMAGE/VIDEO/CAMERA engines
 #include "sources/MediaSourceService.h"              // M9 — source service thread
+#include "sampler/SamplerMidiTargets.h"              // MIDI-Learn virtual targets (sampler play params)
 
 // C headers still used directly by this file
 extern "C" {
@@ -533,10 +534,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"luxsynthFilterReleaseCurve", 1}, "LS Flt Release Curve",
         juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
 
-    // Spectral
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"luxsynthGamma", 1}, "LS Gamma",
-        juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f, 0.30f), 1.0f));
+    // Spectral (per-OUT bank gamma is the only gamma — the engine-side
+    // "luxsynthGamma" param was never read and is gone, purge 2026-07-12)
     params.push_back(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID{"luxsynthNumOscillators", 1}, "LS Oscillators",
         1, 128, 64));
@@ -968,79 +967,30 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"luxSamplerMaxDuration", 1}, "LuxSampler Max Duration",
         juce::NormalisableRange<float>(1.0f, 60.0f, 0.1f), 10.0f, kHiddenFloat));
 
-    // ── LuxSampler action button MIDI bindings (REC / PLAY / SAVE) ───────────
-    // Type: 0 = Off (disabled), 1 = Note, 2 = CC
-    // Number: 0..127 MIDI note number or CC controller index.
-    // Triggering rule:
-    //   - Note: triggers on NoteOn (velocity > 0).
-    //   - CC:   triggers on CC value >= 64 (rising edge).
+    // ── LuxSampler engine B — its own play-param bank ("Part B") ─────────────
+    // Same suffixes as A's legacy ids so the UI rebinds mechanically
+    // (fsEngineParam). MIDI channel defaults to 2, preserving the value that
+    // used to be hard-coded in the constructor sync; sessions saved before this
+    // bank pick up the defaults (B used to mirror A anyway). REC/PLAY/SAVE are
+    // now mapped through the unified MIDI-Learn engine (right-click the buttons),
+    // so the old bespoke REC/PLAY/SAVE bind params were removed for both engines.
     {
-        juce::StringArray bindTypeNames { "Off", "Note", "CC" };
+        juce::StringArray bMidiChNames;
+        for (int i = 1; i <= 16; ++i)
+            bMidiChNames.add("Channel " + juce::String(i));
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            juce::ParameterID{"luxSamplerRecBindType", 1},
-            "LuxSampler REC Bind Type", bindTypeNames, 0, kHiddenChoice));
-        params.push_back(std::make_unique<juce::AudioParameterInt>(
-            juce::ParameterID{"luxSamplerRecBindNum",  1},
-            "LuxSampler REC Bind Number", 0, 127, 0, kHiddenInt));
+            juce::ParameterID{"luxSamplerBMidiChannel", 1},
+            "LuxSampler B MIDI Channel", bMidiChNames, 1, kHiddenChoice));
 
+        juce::StringArray bOctaveNames { "-2", "-1", " 0", "+1", "+2" };
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            juce::ParameterID{"luxSamplerPlayBindType", 1},
-            "LuxSampler PLAY Bind Type", bindTypeNames, 0, kHiddenChoice));
-        params.push_back(std::make_unique<juce::AudioParameterInt>(
-            juce::ParameterID{"luxSamplerPlayBindNum",  1},
-            "LuxSampler PLAY Bind Number", 0, 127, 0, kHiddenInt));
+            juce::ParameterID{"luxSamplerBOctaveOffset", 1},
+            "LuxSampler B Octave Offset", bOctaveNames, 2, kHiddenChoice));
 
-        params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            juce::ParameterID{"luxSamplerSaveBindType", 1},
-            "LuxSampler SAVE Bind Type", bindTypeNames, 0, kHiddenChoice));
-        params.push_back(std::make_unique<juce::AudioParameterInt>(
-            juce::ParameterID{"luxSamplerSaveBindNum",  1},
-            "LuxSampler SAVE Bind Number", 0, 127, 0, kHiddenInt));
-
-        // ── LuxSampler engine B — its own play-param bank ("Part B") ─────────
-        // Same suffixes as A's legacy ids so the UI rebinds mechanically
-        // (fsEngineParam). MIDI channel defaults to 2, preserving the value
-        // that used to be hard-coded in the constructor sync; sessions saved
-        // before this bank pick up the defaults (B used to mirror A anyway).
-        {
-            juce::StringArray bMidiChNames;
-            for (int i = 1; i <= 16; ++i)
-                bMidiChNames.add("Channel " + juce::String(i));
-            params.push_back(std::make_unique<juce::AudioParameterChoice>(
-                juce::ParameterID{"luxSamplerBMidiChannel", 1},
-                "LuxSampler B MIDI Channel", bMidiChNames, 1, kHiddenChoice));
-
-            juce::StringArray bOctaveNames { "-2", "-1", " 0", "+1", "+2" };
-            params.push_back(std::make_unique<juce::AudioParameterChoice>(
-                juce::ParameterID{"luxSamplerBOctaveOffset", 1},
-                "LuxSampler B Octave Offset", bOctaveNames, 2, kHiddenChoice));
-
-            params.push_back(std::make_unique<juce::AudioParameterFloat>(
-                juce::ParameterID{"luxSamplerBMaxDuration", 1},
-                "LuxSampler B Max Duration",
-                juce::NormalisableRange<float>(1.0f, 60.0f, 0.1f), 10.0f, kHiddenFloat));
-
-            params.push_back(std::make_unique<juce::AudioParameterChoice>(
-                juce::ParameterID{"luxSamplerBRecBindType", 1},
-                "LuxSampler B REC Bind Type", bindTypeNames, 0, kHiddenChoice));
-            params.push_back(std::make_unique<juce::AudioParameterInt>(
-                juce::ParameterID{"luxSamplerBRecBindNum",  1},
-                "LuxSampler B REC Bind Number", 0, 127, 0, kHiddenInt));
-
-            params.push_back(std::make_unique<juce::AudioParameterChoice>(
-                juce::ParameterID{"luxSamplerBPlayBindType", 1},
-                "LuxSampler B PLAY Bind Type", bindTypeNames, 0, kHiddenChoice));
-            params.push_back(std::make_unique<juce::AudioParameterInt>(
-                juce::ParameterID{"luxSamplerBPlayBindNum",  1},
-                "LuxSampler B PLAY Bind Number", 0, 127, 0, kHiddenInt));
-
-            params.push_back(std::make_unique<juce::AudioParameterChoice>(
-                juce::ParameterID{"luxSamplerBSaveBindType", 1},
-                "LuxSampler B SAVE Bind Type", bindTypeNames, 0, kHiddenChoice));
-            params.push_back(std::make_unique<juce::AudioParameterInt>(
-                juce::ParameterID{"luxSamplerBSaveBindNum",  1},
-                "LuxSampler B SAVE Bind Number", 0, 127, 0, kHiddenInt));
-        }
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{"luxSamplerBMaxDuration", 1},
+            "LuxSampler B Max Duration",
+            juce::NormalisableRange<float>(1.0f, 60.0f, 0.1f), 10.0f, kHiddenFloat));
     }
 
     // Image export on Save Session: bool toggle + format choice (PNG / JPEG)
@@ -1140,11 +1090,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"camSrcLine", 1}, "Camera Src Line",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.0001f), 0.5f));
 
-    // ── Video Scroll — master toggle + live controls ───────────────────────────
-    // Hidden from DAW automation (configuration/display parameters).
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"videoScrollEnabled", 1}, "Video Scroll Enabled",
-        false, kHiddenBool));
+    // ── Video Scroll — live controls (hidden from DAW automation) ─────────────
+    // (Purge 2026-07-12: the dead global singletons videoScrollEnabled/
+    // Direction/Exposure/BlendMode/Bpm/MidiSync are gone — the per-instance
+    // videoScroll{N}_* banks carry the module params.)
 
     // Transport: when true the waterfall is frozen in place (Play/Pause); the
     // renderer drains its capture ring but performs no scroll/stamp.  "Stop"
@@ -1231,27 +1180,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"videoScrollSource", 1}, "Video Scroll Source",
         juce::StringArray{"LuxStral", "LuxSynth/LuxWave", "AllSynth"}, 0));
-
-    params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID{"videoScrollDirection", 1}, "Video Scroll Direction",
-        juce::StringArray{"Forward", "Reverse"}, 0));
-
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"videoScrollExposure", 1}, "Video Exposure",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
-
-    params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID{"videoScrollBlendMode", 1}, "Video Blend Mode",
-        juce::StringArray{"Mix", "Add", "Screen", "Mask"}, 0));
-
-    // ── Video: configuration (Settings tab) ───────────────────────────────────
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"videoScrollBpm", 1}, "Video Scroll BPM",
-        juce::NormalisableRange<float>(40.0f, 240.0f, 0.1f), 120.0f, kHiddenFloat));
-
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"videoScrollMidiSync", 1}, "Video MIDI Sync",
-        false, kHiddenBool));
 
     // Non-linear temporal compression: applied at display time in paint() as a
     // progressive vertical squish with distance from the birth line — content
@@ -1374,18 +1302,19 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     visualizerModeParam = apvts.getRawParameterValue(PARAM_VISUALIZER_MODE);
     masterVolumeParam   = apvts.getRawParameterValue("masterVolume");
 
+    // Route the MIDI-mapping engine's NON-APVTS targets (sampler play params /
+    // action buttons) back to this processor. Set before any state restore so
+    // restored virtual mappings resolve.
+    midiMap_.setVirtualSink(this);
+    // Warm up the sampler-target skewed ranges here (message thread) so their
+    // first use never triggers a lazy static init on the audio thread.
+    (void) SamplerMidiTargets::speedRange();
+    (void) SamplerMidiTargets::powerRange();
+
     // Cache raw-parameter pointers read by processBlock (audio thread) —
     // getRawParameterValue("literal") allocates a juce::String per call.
     for (int e = 0; e < 2; ++e)   // sampler engines A (0) and B (1)
-    {
-        luxSamplerMidiChannelParam [e] = apvts.getRawParameterValue(fsEngineParam(e, "MidiChannel"));
-        luxSamplerRecBindTypeParam [e] = apvts.getRawParameterValue(fsEngineParam(e, "RecBindType"));
-        luxSamplerRecBindNumParam  [e] = apvts.getRawParameterValue(fsEngineParam(e, "RecBindNum"));
-        luxSamplerPlayBindTypeParam[e] = apvts.getRawParameterValue(fsEngineParam(e, "PlayBindType"));
-        luxSamplerPlayBindNumParam [e] = apvts.getRawParameterValue(fsEngineParam(e, "PlayBindNum"));
-        luxSamplerSaveBindTypeParam[e] = apvts.getRawParameterValue(fsEngineParam(e, "SaveBindType"));
-        luxSamplerSaveBindNumParam [e] = apvts.getRawParameterValue(fsEngineParam(e, "SaveBindNum"));
-    }
+        luxSamplerMidiChannelParam[e] = apvts.getRawParameterValue(fsEngineParam(e, "MidiChannel"));
     for (int s = 0; s < ChainModel::kMaxChains; ++s)
     {
         luxpitchMidiChannelParam [s] = apvts.getRawParameterValue(lpParam(s, "MidiChannel"));
@@ -2140,128 +2069,11 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
            != static_cast<int>(luxSamplerMidiChannelParam[0]->load()))
         luxSamplerB->processMidi(midiMessages);
 
-    // ── LuxSampler action button MIDI bindings (REC / PLAY / SAVE) ─────────
-    // RT-safe: only atomic reads/writes, no allocation, no logging.
-    // Per-engine: each engine matches on ITS channel with ITS bind params and
-    // pulses ITS trigger slots, so a controller button drives one instance.
-    // Triggers are consumed by SlotEditorComponent::timerCallback() (UI thread).
-    for (int eng = 0; eng < 2; ++eng)
-    {
-        if (luxSamplerMidiChannelParam[eng] == nullptr)
-            continue;
-
-        const int samplerCh =
-            static_cast<int>(luxSamplerMidiChannelParam[eng]->load()) + 1;
-
-        const int recType  = static_cast<int>(luxSamplerRecBindTypeParam [eng]->load());
-        const int recNum   = static_cast<int>(luxSamplerRecBindNumParam  [eng]->load());
-        const int playType = static_cast<int>(luxSamplerPlayBindTypeParam[eng]->load());
-        const int playNum  = static_cast<int>(luxSamplerPlayBindNumParam [eng]->load());
-        const int saveType = static_cast<int>(luxSamplerSaveBindTypeParam[eng]->load());
-        const int saveNum  = static_cast<int>(luxSamplerSaveBindNumParam [eng]->load());
-
-        // target = engine * 3 + action; only the engine being learned captures
-        // (the capture then naturally filters on THAT engine's channel).
-        const int learnTarget = samplerMidiLearnTarget.load(std::memory_order_acquire);
-        const bool learnHere  = (learnTarget >= 0 && learnTarget / 3 == eng);
-
-        for (const auto metadata : midiMessages)
-        {
-            const auto msg = metadata.getMessage();
-            if (msg.getChannel() != samplerCh) continue;
-
-            // MIDI Learn: capture first matching event then exit learn mode.
-            // Only captured when learn mode is active AND no result has been
-            // captured yet (-1).
-            if (learnHere
-                && samplerMidiLearnResult.load(std::memory_order_relaxed) == -1)
-            {
-                int captured = -1;
-                if (msg.isNoteOn())
-                    captured = (1 << 8) | (msg.getNoteNumber() & 0x7F);
-                else if (msg.isController())
-                    captured = (2 << 8) | (msg.getControllerNumber() & 0x7F);
-
-                if (captured >= 0)
-                {
-                    samplerMidiLearnResult.store(captured, std::memory_order_release);
-                    // Stop learning — UI thread will apply the result.
-                    samplerMidiLearnTarget.store(-1, std::memory_order_release);
-                    continue; // do not also trigger an action on the learning event
-                }
-            }
-
-            // Momentary (press-and-hold) binding detection.
-            // Returns:
-            //   +1  if this MIDI event represents a "press"   for (type, number)
-            //   -1  if this MIDI event represents a "release" for (type, number)
-            //    0  otherwise (event not relevant for this binding)
-            //
-            // Press / release semantics:
-            //   - Note bindings : NoteOn (vel > 0) → press, NoteOff (or NoteOn vel 0) → release
-            //   - CC   bindings : value >= 64       → press, value <  64               → release
-            //
-            // NOTE: this lambda is called once per binding per MIDI event so the
-            //       same event can update REC and PLAY independently.
-            auto matchesBindingEdge = [&](int type, int number) -> int
-            {
-                if (type == 1) // Note
-                {
-                    if (msg.getNoteNumber() != number) return 0;
-                    if (msg.isNoteOn() && msg.getVelocity() > 0) return +1;
-                    if (msg.isNoteOff() || (msg.isNoteOn() && msg.getVelocity() == 0)) return -1;
-                    return 0;
-                }
-                if (type == 2) // CC
-                {
-                    if (!msg.isController()) return 0;
-                    if (msg.getControllerNumber() != number) return 0;
-                    return (msg.getControllerValue() >= 64) ? +1 : -1;
-                }
-                return 0;
-            };
-
-            // REC binding — momentary
-            {
-                const int edge = matchesBindingEdge(recType, recNum);
-                if (edge > 0)
-                {
-                    // Press: only emit "pressed" pulse on rising edge (not held → held).
-                    if (!samplerRecHeld[eng].exchange(true, std::memory_order_acq_rel))
-                        samplerRecPressed[eng].store(true, std::memory_order_release);
-                }
-                else if (edge < 0)
-                {
-                    // Release: only emit "released" pulse on falling edge.
-                    if (samplerRecHeld[eng].exchange(false, std::memory_order_acq_rel))
-                        samplerRecReleased[eng].store(true, std::memory_order_release);
-                }
-            }
-
-            // PLAY binding — momentary
-            {
-                const int edge = matchesBindingEdge(playType, playNum);
-                if (edge > 0)
-                {
-                    if (!samplerPlayHeld[eng].exchange(true, std::memory_order_acq_rel))
-                        samplerPlayPressed[eng].store(true, std::memory_order_release);
-                }
-                else if (edge < 0)
-                {
-                    if (samplerPlayHeld[eng].exchange(false, std::memory_order_acq_rel))
-                        samplerPlayReleased[eng].store(true, std::memory_order_release);
-                }
-            }
-
-            // SAVE binding — one-shot trigger on press (release ignored)
-            if (matchesBindingEdge(saveType, saveNum) > 0)
-                samplerSaveTriggered[eng].store(true, std::memory_order_release);
-        }
-    }
-
     // ── Generic MIDI mappings: CC/Note → any mapped play parameter ─────────
-    // RT-safe (lock-free slot table, no alloc); values land through the same
-    // setValueNotifyingHost path the host's automation uses.
+    // RT-safe (lock-free slot table, no alloc). APVTS params land through the
+    // same setValueNotifyingHost path the host's automation uses; NON-APVTS
+    // sampler targets (play params + REC/PLAY/SAVE action pulses) route through
+    // this processor's IVirtualMidiSink implementation.
     midiMap_.processMidi(midiMessages);
 
 
@@ -3922,6 +3734,87 @@ Sp3ctraAudioProcessor::navTargetForParam(const juce::String& id) const
 
     t.valid = ! t.instanceId.isNull();
     return t;
+}
+
+//==============================================================================
+// IVirtualMidiSink — NON-APVTS mapping targets: the LuxSampler per-slot play
+// params (Speed/Loop/EQ floor/fades…) and the REC/PLAY/SAVE action buttons.
+// virtualResolve runs on the message thread; the rest run on the audio thread
+// and only touch atomics (LuxSampler setters + the per-slot action pulses).
+//==============================================================================
+int Sp3ctraAudioProcessor::virtualResolve(const juce::String& paramId) const
+{
+    return SamplerMidiTargets::resolve(paramId);
+}
+
+int Sp3ctraAudioProcessor::virtualSteps(int targetId) const noexcept
+{
+    return SamplerMidiTargets::steps(SamplerMidiTargets::tKind(targetId));
+}
+
+float Sp3ctraAudioProcessor::virtualRead(int targetId) const noexcept
+{
+    const int  e = SamplerMidiTargets::tEngine(targetId);
+    LuxSampler* fs = (e == 1) ? luxSamplerB.get() : luxSampler.get();
+    if (fs == nullptr) return 0.0f;
+    return SamplerMidiTargets::read(*fs, SamplerMidiTargets::tSlot(targetId),
+                                    SamplerMidiTargets::tKind(targetId));
+}
+
+void Sp3ctraAudioProcessor::virtualApply(int targetId, float norm01) noexcept
+{
+    const auto kind = SamplerMidiTargets::tKind(targetId);
+    const int  e    = SamplerMidiTargets::tEngine(targetId) & 1;
+    const int  s    = SamplerMidiTargets::tSlot(targetId) % kSmpSlots;
+
+    if (SamplerMidiTargets::isAction(kind))
+    {
+        // Action "press" — latch a pulse for the open SlotEditor to run on the
+        // message thread (uiToggleRecord / uiPlaySlot / save are non-RT).
+        switch (kind)
+        {
+            case SamplerMidiTargets::Kind::Rec:
+                if (! smpRecHeld[e][s].exchange(true, std::memory_order_acq_rel))
+                    smpRecPressed[e][s].store(true, std::memory_order_release);
+                break;
+            case SamplerMidiTargets::Kind::Play:
+                if (! smpPlayHeld[e][s].exchange(true, std::memory_order_acq_rel))
+                    smpPlayPressed[e][s].store(true, std::memory_order_release);
+                break;
+            case SamplerMidiTargets::Kind::Save:
+                smpSaveTrigger[e][s].store(true, std::memory_order_release);
+                break;
+            default: break;
+        }
+        return;
+    }
+
+    // Value target — apply straight to the engine (atomic store), then flag the
+    // touch so the open SlotEditor refreshes its sliders if it shows this slot.
+    LuxSampler* fs = (e == 1) ? luxSamplerB.get() : luxSampler.get();
+    if (fs == nullptr) return;
+    SamplerMidiTargets::apply(*fs, s, kind, norm01);
+    smpValueTouchWhere_.store((e << 8) | s, std::memory_order_relaxed);
+    smpValueTouchGen_  .fetch_add(1u, std::memory_order_release);
+}
+
+void Sp3ctraAudioProcessor::virtualRelease(int targetId) noexcept
+{
+    const auto kind = SamplerMidiTargets::tKind(targetId);
+    const int  e    = SamplerMidiTargets::tEngine(targetId) & 1;
+    const int  s    = SamplerMidiTargets::tSlot(targetId) % kSmpSlots;
+
+    // Momentary action "release" — mirror the press latch.
+    if (kind == SamplerMidiTargets::Kind::Rec)
+    {
+        if (smpRecHeld[e][s].exchange(false, std::memory_order_acq_rel))
+            smpRecReleased[e][s].store(true, std::memory_order_release);
+    }
+    else if (kind == SamplerMidiTargets::Kind::Play)
+    {
+        if (smpPlayHeld[e][s].exchange(false, std::memory_order_acq_rel))
+            smpPlayReleased[e][s].store(true, std::memory_order_release);
+    }
 }
 
 //==============================================================================

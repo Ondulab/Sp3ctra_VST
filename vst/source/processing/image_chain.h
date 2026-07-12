@@ -69,14 +69,12 @@ struct AudioImageBuffers;
 /* ── Configuration (UI / message thread → synthesis thread) ───────────────── */
 
 void image_chain_set_order(int order);
-int  image_chain_get_order(void);
 
 /* Visual tap demand: a consumer (visualizer) declares interest in the output
  * of one insert.  When no demand is set the chain skips the tap snapshot
  * memcpy entirely (zero overhead).  Demands also force the modulated chain
  * to run even when no synth engine consumes it. */
 void image_chain_set_tap_demand(int insert_id, int on);
-int  image_chain_tap_demand(int insert_id);
 int  image_chain_any_tap_demand(void);
 
 /* ── Execution (synthesis thread) ─────────────────────────────────────────── */

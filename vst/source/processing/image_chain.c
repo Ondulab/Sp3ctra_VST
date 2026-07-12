@@ -31,22 +31,11 @@ void image_chain_set_order(int order)
     atomic_store_explicit(&s_chain_order, order, memory_order_relaxed);
 }
 
-int image_chain_get_order(void)
-{
-    return atomic_load_explicit(&s_chain_order, memory_order_relaxed);
-}
-
 void image_chain_set_tap_demand(int insert_id, int on)
 {
     if (insert_id < 0 || insert_id >= IMAGE_CHAIN_NUM_INSERTS) return;
     atomic_store_explicit(&s_tap_demand[insert_id], on ? 1 : 0,
                           memory_order_relaxed);
-}
-
-int image_chain_tap_demand(int insert_id)
-{
-    if (insert_id < 0 || insert_id >= IMAGE_CHAIN_NUM_INSERTS) return 0;
-    return atomic_load_explicit(&s_tap_demand[insert_id], memory_order_relaxed);
 }
 
 int image_chain_any_tap_demand(void)

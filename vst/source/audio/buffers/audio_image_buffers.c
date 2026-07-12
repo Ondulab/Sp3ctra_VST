@@ -163,7 +163,6 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
     memset(buffers->engine_tap_R[i], 255, nb_pixels);
     memset(buffers->engine_tap_G[i], 255, nb_pixels);
     memset(buffers->engine_tap_B[i], 255, nb_pixels);
-    buffers->engine_tap_seq[i] = 0;
   }
 
 
@@ -788,9 +787,6 @@ void audio_image_buffers_publish_engine_input(AudioImageBuffers *buffers,
     memset(buffers->engine_tap_B[engine], 255, (size_t)count);
   }
 
-  __atomic_store_n(&buffers->engine_tap_seq[engine],
-                   buffers->engine_tap_seq[engine] + 1u,
-                   __ATOMIC_RELEASE);
 }
 
 int audio_image_buffers_get_engine_input_pointers(const AudioImageBuffers *buffers,
@@ -806,13 +802,5 @@ int audio_image_buffers_get_engine_input_pointers(const AudioImageBuffers *buffe
   *out_G = buffers->engine_tap_G[engine];
   *out_B = buffers->engine_tap_B[engine];
   return 0;
-}
-
-uint64_t audio_image_buffers_engine_input_seq(const AudioImageBuffers *buffers,
-                                              int engine) {
-  if (!buffers || !buffers->initialized || engine < 0 ||
-      engine >= AUDIO_IMAGE_NUM_ENGINE_TAPS)
-    return 0;
-  return __atomic_load_n(&buffers->engine_tap_seq[engine], __ATOMIC_ACQUIRE);
 }
 

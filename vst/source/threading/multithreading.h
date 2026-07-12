@@ -164,8 +164,6 @@ struct PACKED_STRUCT cisRgbBuffers
 int initDoubleBuffer(DoubleBuffer *db);   // 0 = ok, -1 = init/alloc failure
 void swapBuffers(DoubleBuffer *db);
 void *udpThread(void *arg);
-void *imageProcessingThread(void *arg);
-void *dmxSendingThread(void *arg);
 void *audioProcessingThread(void *arg);
 
 /* M9 — one feeder tick: drives the per-synth chains from the IMAGE/VIDEO/

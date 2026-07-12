@@ -224,10 +224,10 @@ private:
     std::vector<SynthBlob> spctrBlobs_;
 
     // ── Dedicated LuxSynth FFT data (independent of visualizer source) ───────
-    // These buffers are populated in computeFftMagnitudes() from the source
-    // selected in the LUXSYNTH tab dropdown (luxsynthSource), NOT from the
-    // active visualizer view.  This decouples what the user sees from what
-    // the LuxSynth engine hears.
+    // These buffers are populated in computeFftMagnitudes() from the Path-B
+    // ENGINE TAP, NOT from the active visualizer view — the bars match what
+    // the LuxSynth engine actually hears (display only; the engine feed is
+    // core-side, processing/luxsynth_feed.c).
     std::vector<uint8_t> lxFftR_, lxFftG_, lxFftB_, lxFftGray_;
 
     // ── FFT state (UI thread only, owned by computeFftMagnitudes) ────────────

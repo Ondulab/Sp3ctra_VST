@@ -28,11 +28,6 @@ static LsSendStaging s_ls_staging[CHAIN_MAX_CHAINS];
 /* Mixer-side scratch for one slot snapshot (audio thread only). */
 static LsSendStaging s_mix_snap;
 
-void synth_staging_init(void)
-{
-    memset((void*) s_ls_staging, 0, sizeof(s_ls_staging));
-}
-
 void synth_staging_stage_luxstral(int chain_idx, int bank_slot,
                                   const PreprocessedImageData* pp,
                                   int num_notes, int stereo_valid)

@@ -48,10 +48,6 @@ typedef struct {
     int sampling_frequency;              // Sampling frequency in Hz (22050, 44100, 48000, 96000)
     int audio_buffer_size;               // Audio buffer size in frames
     
-    // Anti-vibrations acoustiques (runtime configurable)
-    float vibration_protection_factor;   // Threshold hardening factor when audio loud (1.0-5.0, default 3.0)
-    float contrast_change_threshold;     // Minimum contrast change to validate activity (0.01-0.5, default 0.05)
-    
     // Synthesis parameters (user-configurable)
     float low_frequency;          // Starting frequency in Hz
     float high_frequency;         // Ending frequency in Hz
@@ -98,41 +94,11 @@ typedef struct {
     // Noise gate parameters
     float noise_gate_threshold;                // Noise gate threshold (0.0-0.1, fraction of max volume)
     
-    // LuxSynth synthesis parameters
-    int poly_num_voices;                       // Number of polyphonic voices (1-32)
-    int poly_max_oscillators;                  // Max oscillators per voice (1-256)
-    
-    // LuxSynth ADSR Volume parameters
-    float poly_volume_adsr_attack_s;           // Volume ADSR attack time (seconds)
-    float poly_volume_adsr_decay_s;            // Volume ADSR decay time (seconds)
-    float poly_volume_adsr_sustain_level;      // Volume ADSR sustain level (0.0-1.0)
-    float poly_volume_adsr_release_s;          // Volume ADSR release time (seconds)
-    
-    // LuxSynth ADSR Filter parameters
-    float poly_filter_adsr_attack_s;           // Filter ADSR attack time (seconds)
-    float poly_filter_adsr_decay_s;            // Filter ADSR decay time (seconds)
-    float poly_filter_adsr_sustain_level;      // Filter ADSR sustain level (0.0-1.0)
-    float poly_filter_adsr_release_s;          // Filter ADSR release time (seconds)
-    
-    // LuxSynth LFO parameters
-    float poly_lfo_rate_hz;                    // LFO rate in Hz
-    float poly_lfo_depth_semitones;            // LFO depth in semitones
-    
-    // LuxSynth spectral filter parameters
-    float poly_filter_cutoff_hz;               // Base filter cutoff frequency (Hz)
-    float poly_filter_env_depth_hz;            // Filter envelope depth (Hz)
-    
-    // LuxSynth performance parameters
-    float poly_master_volume;                  // Master volume (0.0-1.0)
-    float poly_amplitude_gamma;                // Amplitude gamma curve (0.1-5.0)
-    float poly_min_audible_amplitude;          // Minimum audible amplitude threshold
-    float poly_high_freq_harmonic_limit_hz;    // High frequency harmonic limit (Hz)
-    
-    // LuxSynth advanced parameters
-    float poly_amplitude_smoothing_alpha;      // Amplitude smoothing factor (0.0-1.0)
-    float poly_norm_factor_bin0;               // Normalization factor for fundamental
-    float poly_norm_factor_harmonics;          // Normalization factor for harmonics
-    
+    // (Purge 2026-07-12: the legacy poly_* engine-config block is gone — the
+    // LuxSynth engine has its own LuxSynthConfig synced from the luxsynth*
+    // APVTS params. Only the harmonicity pair below is consumed by the
+    // pipeline, in image_preprocessor.c.)
+
     // LuxSynth harmonicity parameters (color-based timbre control)
     float poly_detune_max_cents;               // Maximum detune for semi-harmonic sounds (cents)
     float poly_harmonicity_curve_exponent;     // Exponent for harmonicity response curve (0.5-2.0)
