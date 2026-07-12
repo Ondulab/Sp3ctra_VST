@@ -159,9 +159,8 @@ namespace module_param_manifest_detail
     };
     inline const char* const kSampler[] = {
         "MidiChannel", "OctaveOffset", "MaxDuration",
-        "RecBindType", "RecBindNum",
-        "PlayBindType", "PlayBindNum",
-        "SaveBindType", "SaveBindNum",
+        // REC/PLAY/SAVE bind params removed — those actions are now mapped through
+        // the unified MIDI-Learn engine (right-click the buttons in the editor).
     };
 
     inline juce::String lpId(int s, const char* x) { return lpParam(s, x); }

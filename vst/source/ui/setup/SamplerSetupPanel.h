@@ -9,8 +9,8 @@
  *   - MIDI Channel (1-16)                (luxSampler[B]MidiChannel)
  *   - Octave Offset (-2..+2)             (luxSampler[B]OctaveOffset)
  *   - Max Duration (1..60 s)             (luxSampler[B]MaxDuration)
- *   - REC / PLAY / SAVE MIDI bindings with MIDI-learn
- *       (luxSampler[B]Rec|Play|SaveBindType / ...BindNum)
+ * (REC / PLAY / SAVE triggering moved to the unified right-click MIDI-Learn on
+ *  the editor's transport buttons — no bespoke bindings here anymore.)
  * Shared (session-level, not per-engine):
  *   - Image export toggle + format       (luxSamplerExportImages/-Format)
  *   - Output directory browse / clear    (processor get/setSamplerOutputDir)
@@ -29,9 +29,10 @@ public:
     SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour);
     ~SamplerSetupPanel() override;
 
-    /** Natural content height (header + 9 control rows + 12-slot grid).
-     *  (Enable row removed — power lives in the rack LED + zone-3 header.) */
-    static constexpr int kPreferredH = 658;
+    /** Natural content height (header + 6 control rows + 12-slot grid).
+     *  (Enable row + REC/PLAY/SAVE bind rows removed — power lives in the rack
+     *  LED + zone-3 header; action triggers moved to unified MIDI-Learn.) */
+    static constexpr int kPreferredH = 562;
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -91,46 +92,9 @@ private:
     juce::Label slotDurLabel   [NUM_SLOTS];
     juce::TextButton slotClearBtn[NUM_SLOTS];
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Action button MIDI bindings (REC / PLAY / SAVE).
-    //
-    // Each row binds one transport button to an incoming MIDI event so the user
-    // can trigger the corresponding action from a keyboard or controller. The
-    // selected slot follows the SlotEditorComponent selection (mirrored on the
-    // processor side via setSamplerSelectedSlot).
-    //
-    // Row layout:  [LABEL] [Type ▼ Off|Note|CC] [Number ◀▶ 0..127] [LEARN]
-    //
-    // The LEARN button puts the audio thread into capture mode (atomic int on
-    // the processor). On the next incoming MIDI Note/CC matching the configured
-    // channel, the captured (type, number) pair is applied to the APVTS params.
-    // ─────────────────────────────────────────────────────────────────────────
-    struct ActionBindingRow
-    {
-        juce::Label       title;
-        juce::Label       typeLabel;
-        juce::ComboBox    typeBox;
-        juce::Label       numberLabel;
-        juce::Slider      numberSlider;
-        juce::TextButton  learnBtn { "Learn" };
-
-        std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> typeAtt;
-        std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   numberAtt;
-    };
-
-    ActionBindingRow recBinding;
-    ActionBindingRow playBinding;
-    ActionBindingRow saveBinding;
-
-    void initBindingRow(ActionBindingRow& row,
-                        const juce::String& title,
-                        int actionId);   // 0 = REC, 1 = PLAY, 2 = SAVE
-
     /** (Re)create every engine-scoped attachment against the bank of
-     *  samplerIndex_ (fsEngineParam) and cancel any pending MIDI-learn. */
+     *  samplerIndex_ (fsEngineParam). */
     void rebindEngineParams();
-
-    int  pendingLearnTarget = -1; // engine * 3 + action, mirrors the processor
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SamplerSetupPanel)
 };

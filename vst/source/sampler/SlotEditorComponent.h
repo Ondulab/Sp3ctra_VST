@@ -1,9 +1,11 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <vector>
 #include "../luxsampler/LuxSampler.h"
 #include "SlotSpectralEditorComponent.h"
 #include "../image/ScoreEqComponent.h"
+#include "../midi/MidiLearnAttachment.h"   // right-click MIDI-Learn on play controls
 
 class Sp3ctraAudioProcessor;
 
@@ -235,6 +237,20 @@ private:
     /** Apply LoopMode m to the selected slot and refresh button highlights. */
     void applyLoopMode(LoopMode m);
 
+    /** (Re)create every right-click MIDI-Learn attachment so each play control /
+     *  action button targets the CURRENT (engine, selected-slot) — "fixed slot
+     *  per button". Called from setSelectedSlot / setSamplerIndex, like the
+     *  SliderAttachments elsewhere. */
+    void rebindMidiLearn();
+
+    /** Run the SAVE action for one specific slot (timestamped .fslot + optional
+     *  image). Shared by the SAVE button and the MIDI-mapped SAVE trigger. */
+    void saveSlotToDisk(int slot);
+
+    /** Drain per-slot REC/PLAY/SAVE MIDI action pulses for the bound engine and
+     *  run them (message thread). Called from timerCallback. */
+    void drainMidiActionPulses();
+
     Sp3ctraAudioProcessor& processor;
     int  selectedSlot  = 0;
     int  samplerIndex_ = 0;   // 0 = engine A, 1 = engine B
@@ -303,6 +319,12 @@ private:
 
     /** Populate a fade curve-type ComboBox with LIN/EXP/LOG/S. */
     static void fillCurveBox(juce::ComboBox& box);
+
+    // ── Unified MIDI-Learn (right-click any play control / action button) ──────
+    // Recreated on every slot / engine rebind so the synthetic target ids track
+    // the shown (engine, slot). See SamplerMidiTargets for the id scheme.
+    std::vector<std::unique_ptr<MidiLearnAttachment>> midiLearn_;
+    uint32_t lastValueTouchGen_ = 0;   // MIDI value-touch edge tracking (UI refresh)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SlotEditorComponent)
 };

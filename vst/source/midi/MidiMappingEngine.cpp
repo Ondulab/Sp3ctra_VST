@@ -6,9 +6,10 @@
 
 int MidiMappingEngine::slotIndexFor(const juce::String& paramId) const
 {
+    // A slot is occupied iff its paramId mirror is non-empty (holds for both
+    // APVTS and virtual targets); freed slots clear it.
     for (int i = 0; i < kMaxMappings; ++i)
-        if (slots_[i].param.load(std::memory_order_relaxed) != nullptr
-            && slots_[i].paramId == paramId)
+        if (! slots_[i].paramId.isEmpty() && slots_[i].paramId == paramId)
             return i;
     return -1;
 }
@@ -16,27 +17,39 @@ int MidiMappingEngine::slotIndexFor(const juce::String& paramId) const
 bool MidiMappingEngine::addMapping(int type, int channel, int number,
                                    const juce::String& paramId)
 {
+    // Resolve the target: an APVTS parameter, or (failing that) a virtual
+    // sampler target via the sink. Unknown ids (stale session entries) drop.
     auto* param = apvts.getParameter(paramId);
+    int   vtarget = -1;
     if (param == nullptr)
-        return false;   // unknown id (e.g. stale session entry) — dropped
+    {
+        if (sink_ != nullptr)
+            vtarget = sink_->virtualResolve(paramId);
+        if (vtarget < 0)
+            return false;
+    }
 
     // Replace an existing mapping of the same parameter in place: deactivate
     // first so the audio thread never matches a half-updated slot.
     int idx = slotIndexFor(paramId);
     if (idx < 0)
         for (int i = 0; i < kMaxMappings && idx < 0; ++i)
-            if (slots_[i].param.load(std::memory_order_relaxed) == nullptr)
+            if (slots_[i].paramId.isEmpty())   // free slot (either kind)
                 idx = i;
     if (idx < 0)
         return false;   // table full
 
     auto& s = slots_[idx];
-    s.param.store(nullptr, std::memory_order_release);
+    s.param  .store(nullptr, std::memory_order_release);   // deactivate both
+    s.vtarget.store(-1,      std::memory_order_release);
     s.type   .store(type,    std::memory_order_relaxed);
     s.channel.store(channel, std::memory_order_relaxed);
     s.number .store(number,  std::memory_order_relaxed);
     s.paramId = paramId;
-    s.param.store(param, std::memory_order_release);   // publish
+    // Publish exactly ONE active field last (release) — the audio thread reads
+    // both and acts on whichever is live.
+    if (param != nullptr) s.param  .store(param,   std::memory_order_release);
+    else                  s.vtarget.store(vtarget, std::memory_order_release);
 
     notifyChanged();
     return true;
@@ -47,7 +60,8 @@ void MidiMappingEngine::removeMappingFor(const juce::String& paramId)
     const int idx = slotIndexFor(paramId);
     if (idx < 0)
         return;
-    slots_[idx].param.store(nullptr, std::memory_order_release);
+    slots_[idx].param  .store(nullptr, std::memory_order_release);
+    slots_[idx].vtarget.store(-1,      std::memory_order_release);
     slots_[idx].paramId.clear();
     notifyChanged();
 }
@@ -111,7 +125,7 @@ juce::ValueTree MidiMappingEngine::toValueTree() const
     juce::ValueTree root("MIDI_MAPPINGS");
     for (const auto& s : slots_)
     {
-        if (s.param.load(std::memory_order_relaxed) == nullptr)
+        if (s.paramId.isEmpty())   // free slot (APVTS or virtual)
             continue;
         juce::ValueTree map("MAP");
         map.setProperty("type",  s.type   .load(std::memory_order_relaxed), nullptr);
@@ -128,7 +142,8 @@ void MidiMappingEngine::restoreFromValueTree(const juce::ValueTree& tree)
     // Clear the current table first — the restored session is authoritative.
     for (auto& s : slots_)
     {
-        s.param.store(nullptr, std::memory_order_release);
+        s.param  .store(nullptr, std::memory_order_release);
+        s.vtarget.store(-1,      std::memory_order_release);
         s.paramId.clear();
     }
 

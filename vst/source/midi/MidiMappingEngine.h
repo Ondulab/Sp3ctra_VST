@@ -45,6 +45,40 @@
 #include <atomic>
 #include <cmath>
 
+//==============================================================================
+/** Sink for NON-APVTS "virtual" mapping targets — parameters/actions that live
+ *  outside the APVTS (e.g. the LuxSampler per-slot play params, which are stored
+ *  directly in the engine, not as host parameters).
+ *
+ *  A virtual target is addressed by an opaque integer @c targetId that the sink
+ *  owner encodes/decodes (the engine never interprets it). @c virtualResolve maps
+ *  a synthetic paramId string (e.g. "smp:e0:s3:speed") to a targetId on the
+ *  message thread; every other call runs on the AUDIO thread and MUST be RT-safe
+ *  (atomic reads/writes only — no allocation, no locking, no I/O).
+ *
+ *  @c virtualSteps encodes the target's kind, mirroring RangedAudioParameter's
+ *  getNumSteps() for value targets and adding two negative codes for actions:
+ *      >= 1 : value target (1/0 = continuous, 2 = 2-state, 3..32 = discrete list)
+ *      -1   : momentary action (press on NoteOn / CC>=64, release on NoteOff/CC<64)
+ *      -2   : one-shot action  (fires on press only)
+ */
+struct IVirtualMidiSink
+{
+    virtual ~IVirtualMidiSink() = default;
+
+    /** Message thread: synthetic paramId → targetId (>= 0), or -1 if not ours. */
+    virtual int   virtualResolve(const juce::String& paramId) const = 0;
+
+    /** Audio thread: step/kind code for @p targetId (see class doc). */
+    virtual int   virtualSteps  (int targetId) const noexcept = 0;
+    /** Audio thread: current value normalised to 0..1 (for toggle / cycle). */
+    virtual float virtualRead   (int targetId) const noexcept = 0;
+    /** Audio thread: apply a normalised value, or trigger an action "press". */
+    virtual void  virtualApply  (int targetId, float norm01) noexcept = 0;
+    /** Audio thread: action "release" (momentary targets only). */
+    virtual void  virtualRelease(int targetId) noexcept = 0;
+};
+
 class MidiMappingEngine : public juce::ChangeBroadcaster,
                           private juce::Timer
 {
@@ -56,6 +90,11 @@ public:
 
     ~MidiMappingEngine() override { stopTimer(); }
 
+    /** Register the sink for NON-APVTS "virtual" targets (sampler play params /
+     *  action buttons). Call once at construction, before any restore. The sink
+     *  must outlive the engine. */
+    void setVirtualSink(IVirtualMidiSink* sink) noexcept { sink_ = sink; }
+
     //==========================================================================
     // Audio thread
     //==========================================================================
@@ -66,12 +105,17 @@ public:
             const auto msg = metadata.getMessage();
 
             int type = 0, number = 0;   // type: 1 = Note, 2 = CC
+            bool isNoteOff = false;     // routed to momentary VIRTUAL action targets
             if (msg.isController())                          { type = 2; number = msg.getControllerNumber(); }
             else if (msg.isNoteOn() && msg.getVelocity() > 0){ type = 1; number = msg.getNoteNumber(); }
-            else continue;   // note-offs / other messages never match (v1)
+            else if (msg.isNoteOff() || (msg.isNoteOn() && msg.getVelocity() == 0))
+                                                             { type = 1; number = msg.getNoteNumber(); isNoteOff = true; }
+            else continue;   // other messages never match
 
-            // MIDI Learn capture — first matching event on ANY channel wins.
-            if (learnArmed_.load(std::memory_order_acquire)
+            // MIDI Learn capture — first matching PRESS event on ANY channel wins.
+            // Note-offs never arm a mapping (toggle-on-press semantics).
+            if (! isNoteOff
+                && learnArmed_.load(std::memory_order_acquire)
                 && learnResult_.load(std::memory_order_relaxed) == kNoResult)
             {
                 learnResult_.store(encodeEvent(type, msg.getChannel(), number),
@@ -82,13 +126,23 @@ public:
 
             for (auto& s : slots_)
             {
-                auto* p = s.param.load(std::memory_order_acquire);
-                if (p == nullptr)                                       continue;
+                auto* p        = s.param  .load(std::memory_order_acquire);
+                const int vt   = s.vtarget.load(std::memory_order_acquire);
+                if (p == nullptr && vt < 0)                             continue;
                 if (s.type   .load(std::memory_order_relaxed) != type)  continue;
                 if (s.number .load(std::memory_order_relaxed) != number)continue;
                 if (s.channel.load(std::memory_order_relaxed) != msg.getChannel())
                     continue;
-                applyEvent(*p, msg);
+
+                if (p != nullptr)
+                {
+                    if (isNoteOff) continue;   // APVTS params ignore note-offs (v1)
+                    applyEvent(*p, msg);
+                }
+                else
+                {
+                    applyVirtual(vt, msg, isNoteOff);
+                }
                 // Publish which slot a controller just moved so the editor can
                 // auto-navigate to the owning module (MIDI-follow). Lock-free:
                 // slot index + a monotonic generation; the paramId is read on
@@ -216,16 +270,73 @@ private:
         }
     }
 
+    /** Apply one MIDI event to a VIRTUAL target through the sink. Mirrors
+     *  applyEvent's value semantics (CC absolute / Note toggle-or-cycle) and
+     *  adds press/release handling for action targets (steps < 0). RT-safe. */
+    void applyVirtual(int targetId, const juce::MidiMessage& msg, bool isNoteOff) noexcept
+    {
+        if (sink_ == nullptr) return;
+        const int steps = sink_->virtualSteps(targetId);
+
+        if (steps < 0)   // action: -1 = momentary (press/release), -2 = one-shot
+        {
+            if (msg.isController())
+            {
+                if (msg.getControllerValue() >= 64) sink_->virtualApply(targetId, 1.0f);
+                else if (steps == -1)               sink_->virtualRelease(targetId);
+            }
+            else if (isNoteOff)
+            {
+                if (steps == -1) sink_->virtualRelease(targetId);
+            }
+            else
+                sink_->virtualApply(targetId, 1.0f);   // NoteOn press
+            return;
+        }
+
+        if (isNoteOff) return;   // value targets ignore note-offs
+
+        const bool boolLike     = (steps == 2);
+        const bool discreteLike = (steps > 2 && steps <= 32);   // ComboBox-sized
+
+        if (msg.isController())
+        {
+            const int v = msg.getControllerValue();
+            sink_->virtualApply(targetId, boolLike ? (v >= 64 ? 1.0f : 0.0f)
+                                                   : (float) v / 127.0f);
+        }
+        else // NoteOn (velocity > 0 — filtered by the caller)
+        {
+            if (boolLike)
+            {
+                const float cur = sink_->virtualRead(targetId);
+                sink_->virtualApply(targetId, cur >= 0.5f ? 0.0f : 1.0f);
+            }
+            else if (discreteLike)
+            {
+                const int cur  = (int) std::lround(sink_->virtualRead(targetId) * (float) (steps - 1));
+                const int next = (cur + 1) % steps;
+                sink_->virtualApply(targetId, (float) next / (float) (steps - 1));
+            }
+            else
+                sink_->virtualApply(targetId, (float) msg.getVelocity() / 127.0f);
+        }
+    }
+
     void timerCallback() override;   // finishes a pending learn
 
     struct Slot
     {
         // Audio-thread-visible fields (see slot lifecycle in the header doc).
-        std::atomic<juce::RangedAudioParameter*> param { nullptr };
+        // Exactly one of {param, vtarget} is active at a time: param for APVTS
+        // targets, vtarget (>= 0) for virtual (sampler play-param) targets.
+        std::atomic<juce::RangedAudioParameter*> param   { nullptr };
+        std::atomic<int>                         vtarget { -1 };
         std::atomic<int> type    { 0 };
         std::atomic<int> channel { 0 };
         std::atomic<int> number  { 0 };
-        // Message-thread-only mirror used for lookups/persistence.
+        // Message-thread-only mirror used for lookups/persistence. Non-empty
+        // iff the slot is occupied (either kind).
         juce::String paramId;
     };
 
@@ -233,6 +344,7 @@ private:
     void notifyChanged() { sendChangeMessage(); }
 
     juce::AudioProcessorValueTreeState& apvts;
+    IVirtualMidiSink* sink_ = nullptr;   // NON-APVTS targets (set once at ctor)
     Slot slots_[kMaxMappings];
 
     // MIDI learn state — armed/result cross threads, paramId message-only.
