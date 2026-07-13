@@ -385,42 +385,20 @@ void LuxSampler::processMidi(const juce::MidiBuffer& midiBuffer)
 }
 
 // RT NoteOn handler — atomics only
+//
+// Note-triggered RECORDING (the former C0..B0 REC notes + the ARMED→record
+// bridge) was removed: incoming notes only PLAY slots now. Recording is driven
+// by the UI buttons and the unified MIDI-Learn REC action. Only the PLAY range
+// (C1..B1) is handled here.
 void LuxSampler::handleNoteOn(int note, int velocity) noexcept
 {
     juce::ignoreUnused(velocity);
     using namespace LuxSamplerConstants;
 
-    if (note >= MIDI_REC_NOTE_BASE && note < MIDI_REC_NOTE_BASE + NUM_SLOTS)
-    {
-        // ── REC note (C0..B0) ─────────────────────────────────────────────
-        const int i   = note - MIDI_REC_NOTE_BASE;
-        const auto cur = static_cast<SlotState>(
-            atomicState.slotState[i].load(std::memory_order_relaxed));
-
-        if (cur == SlotState::IDLE || cur == SlotState::ARMED)
-        {
-            // → ARMED
-            atomicState.slotState[i].store(static_cast<int>(SlotState::ARMED),
-                                            std::memory_order_release);
-        }
-        else if (cur == SlotState::PLAYING)
-        {
-            // Punch-in: stop playback, restart recording from beginning (FS-107 simplified)
-            atomicState.stopPlayCmd.store(true, std::memory_order_release);
-            atomicState.activePlaySlot.store(-1, std::memory_order_release);
-            atomicState.passthroughEnabled.store(true, std::memory_order_release);
-            atomicState.slotState[i].store(static_cast<int>(SlotState::RECORDING),
-                                            std::memory_order_release);
-            atomicState.startRecCmd[i].store(true, std::memory_order_release);
-        }
-        // RECORDING → ignore (already recording)
-    }
-    else if (note >= MIDI_PLAY_NOTE_BASE && note < MIDI_PLAY_NOTE_BASE + NUM_SLOTS)
+    if (note >= MIDI_PLAY_NOTE_BASE && note < MIDI_PLAY_NOTE_BASE + NUM_SLOTS)
     {
         // ── PLAY note (C1..B1) ────────────────────────────────────────────
-        const int i   = note - MIDI_PLAY_NOTE_BASE;
-        const auto cur = static_cast<SlotState>(
-            atomicState.slotState[i].load(std::memory_order_relaxed));
+        const int i = note - MIDI_PLAY_NOTE_BASE;
 
         // Priority rule: highest slot index (highest note) wins
         const int curPlay = atomicState.activePlaySlot.load(std::memory_order_relaxed);
@@ -435,73 +413,36 @@ void LuxSampler::handleNoteOn(int note, int velocity) noexcept
                                                   std::memory_order_release);
         }
 
-        if (cur == SlotState::ARMED)
-        {
-            // ARMED + NoteOn PLAY → RECORDING (passthrough stays on during rec)
-            atomicState.slotState[i].store(static_cast<int>(SlotState::RECORDING),
-                                            std::memory_order_release);
-            atomicState.startRecCmd[i].store(true, std::memory_order_release);
-        }
-        else
-        {
-            // IDLE (or other) + NoteOn PLAY → PLAYING (MIDI/UI-driven, not sequencer).
-            // FramePlayerThread checks has_content; reverts to IDLE if empty.
-            // Clear seqControlledPlay so the player thread is allowed to
-            // restore live passthrough when playback ends.
-            stopOtherEnginesPlayback(engineIndex_);  // single modulated channel
-            atomicState.seqControlledPlay.store(false, std::memory_order_release);
-            atomicState.slotState[i].store(static_cast<int>(SlotState::PLAYING),
-                                            std::memory_order_release);
-            atomicState.activePlaySlot.store(i, std::memory_order_release);
-            // Clear a stale stop left by stopPlayerThread() (see uiPlaySlot) —
-            // atomic store, RT-safe.
-            atomicState.stopPlayCmd.store(false, std::memory_order_release);
-            atomicState.startPlayCmd.store(i, std::memory_order_release);
-            atomicState.passthroughEnabled.store(false, std::memory_order_release);
-        }
+        // → PLAYING (MIDI/UI-driven, not sequencer). FramePlayerThread checks
+        // has_content; reverts to IDLE if empty. Clear seqControlledPlay so the
+        // player thread may restore live passthrough when playback ends.
+        stopOtherEnginesPlayback(engineIndex_);  // single modulated channel
+        atomicState.seqControlledPlay.store(false, std::memory_order_release);
+        atomicState.slotState[i].store(static_cast<int>(SlotState::PLAYING),
+                                        std::memory_order_release);
+        atomicState.activePlaySlot.store(i, std::memory_order_release);
+        // Clear a stale stop left by stopPlayerThread() (see uiPlaySlot) —
+        // atomic store, RT-safe.
+        atomicState.stopPlayCmd.store(false, std::memory_order_release);
+        atomicState.startPlayCmd.store(i, std::memory_order_release);
+        atomicState.passthroughEnabled.store(false, std::memory_order_release);
     }
 }
 
-// RT NoteOff handler — atomics only
+// RT NoteOff handler — atomics only. Only PLAY notes (C1..B1) matter now:
+// note-triggered recording was removed (see handleNoteOn).
 void LuxSampler::handleNoteOff(int note) noexcept
 {
     using namespace LuxSamplerConstants;
 
-    if (note >= MIDI_REC_NOTE_BASE && note < MIDI_REC_NOTE_BASE + NUM_SLOTS)
-    {
-        // ── REC note off ──────────────────────────────────────────────────
-        const int i   = note - MIDI_REC_NOTE_BASE;
-        const auto cur = static_cast<SlotState>(
-            atomicState.slotState[i].load(std::memory_order_relaxed));
-
-        if (cur == SlotState::ARMED)
-        {
-            atomicState.slotState[i].store(static_cast<int>(SlotState::IDLE),
-                                            std::memory_order_release);
-        }
-        else if (cur == SlotState::RECORDING)
-        {
-            // Stop recording
-            atomicState.stopRecCmd[i].store(true, std::memory_order_release);
-            atomicState.slotState[i].store(static_cast<int>(SlotState::IDLE),
-                                            std::memory_order_release);
-        }
-    }
-    else if (note >= MIDI_PLAY_NOTE_BASE && note < MIDI_PLAY_NOTE_BASE + NUM_SLOTS)
+    if (note >= MIDI_PLAY_NOTE_BASE && note < MIDI_PLAY_NOTE_BASE + NUM_SLOTS)
     {
         // ── PLAY note off ─────────────────────────────────────────────────
         const int i   = note - MIDI_PLAY_NOTE_BASE;
         const auto cur = static_cast<SlotState>(
             atomicState.slotState[i].load(std::memory_order_relaxed));
 
-        if (cur == SlotState::RECORDING)
-        {
-            // NoteOff PLAY while recording → stop recording
-            atomicState.stopRecCmd[i].store(true, std::memory_order_release);
-            atomicState.slotState[i].store(static_cast<int>(SlotState::IDLE),
-                                            std::memory_order_release);
-        }
-        else if (cur == SlotState::PLAYING)
+        if (cur == SlotState::PLAYING)
         {
             // Stop playback, restore passthrough
             atomicState.stopPlayCmd.store(true, std::memory_order_release);
@@ -863,7 +804,7 @@ void LuxSampler::uiToggleRecord(int slotIndex) noexcept
                                                   std::memory_order_release);
     }
 
-    // Start recording immediately (bypass ARMED state — UI one-click record)
+    // Start recording immediately (UI one-click record)
     atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::RECORDING),
                                             std::memory_order_release);
     atomicState.startRecCmd[slotIndex].store(true, std::memory_order_release);
@@ -892,7 +833,7 @@ void LuxSampler::uiPlaySlot(int slotIndex) noexcept
         return;
     }
 
-    if (st == SlotState::RECORDING || st == SlotState::ARMED) return; // busy
+    if (st == SlotState::RECORDING) return; // busy
 
     if (!slots[slotIndex].has_content) return; // nothing recorded yet
 
@@ -1267,7 +1208,7 @@ void LuxSampler::uiClearSlot(int slotIndex) noexcept
     const auto st = static_cast<SlotState>(
         atomicState.slotState[slotIndex].load(std::memory_order_relaxed));
 
-    if (st == SlotState::RECORDING || st == SlotState::ARMED)
+    if (st == SlotState::RECORDING)
     {
         atomicState.stopRecCmd[slotIndex].store(true, std::memory_order_release);
     }
@@ -1502,7 +1443,7 @@ void LuxSampler::cropSlotToBounds(int slotIndex)
     // so no UDP-thread write races with the memmove below.
     const auto st = static_cast<SlotState>(
         atomicState.slotState[slotIndex].load(std::memory_order_relaxed));
-    if (st == SlotState::RECORDING || st == SlotState::ARMED)
+    if (st == SlotState::RECORDING)
     {
         atomicState.stopRecCmd[slotIndex].store(true, std::memory_order_release);
         if (activeRecSlot.load(std::memory_order_relaxed) == slotIndex)
@@ -1657,6 +1598,39 @@ void LuxSampler::setSlotEq(int i, const juce::String& encoded) noexcept
     if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return;
     eqState_[i] = encoded;
     rebuildFreqLut(i);
+}
+
+float LuxSampler::getSlotEqBandGain(int slot, int band) const noexcept
+{
+    if (slot < 0 || slot >= LuxSamplerConstants::NUM_SLOTS) return 0.0f;
+    if (band < 0 || band >= kEqBands) return 0.0f;
+    float g[LuxSamplerConstants::MAX_EQ_NODES];
+    const int n = parseEqGains(eqState_[slot], g, LuxSamplerConstants::MAX_EQ_NODES);
+    return (band < n) ? g[band] : 0.0f;
+}
+
+void LuxSampler::setSlotEqBandGain(int slot, int band, float gainDb) noexcept
+{
+    if (slot < 0 || slot >= LuxSamplerConstants::NUM_SLOTS) return;
+    if (band < 0 || band >= kEqBands) return;
+
+    // Start from the current gains (missing/empty → flat), overwrite one band,
+    // and re-encode the fixed 9-node grid in ScoreEqComponent's string format.
+    float g[kEqBands] = { 0.0f };
+    float parsed[LuxSamplerConstants::MAX_EQ_NODES];
+    const int n = parseEqGains(eqState_[slot], parsed, LuxSamplerConstants::MAX_EQ_NODES);
+    for (int i = 0; i < kEqBands; ++i)
+        g[i] = (i < n) ? parsed[i] : 0.0f;
+    g[band] = juce::jlimit(-24.0f, 24.0f, gainDb);
+
+    juce::String enc;
+    enc << juce::String(kEqMinHz, 3) << '|' << juce::String(kEqMaxHz, 3) << '|';
+    for (int i = 0; i < kEqBands; ++i)
+    {
+        if (i) enc << ';';
+        enc << juce::String(g[i], 2);
+    }
+    setSlotEq(slot, enc);   // stores + rebuildFreqLut()
 }
 
 juce::String LuxSampler::getSlotEq(int i) const

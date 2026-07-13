@@ -28,6 +28,10 @@
 
 namespace SamplerMidiTargets
 {
+    // The slot EQ is a 9-node octave grid over the fixed 65.41–16744 Hz span
+    // (see ScoreEqComponent / LuxSampler::kEqBands).
+    constexpr int kEqBands = 9;
+
     // Scoped so the enumerators never collide with LuxSampler's LoopMode /
     // FadeCurveType types used in the read/apply casts below.
     enum class Kind
@@ -35,7 +39,8 @@ namespace SamplerMidiTargets
         Speed = 0, LoopMode, LoopXf, Img, Floor, Resume,
         FadeInType, FadeInPow, FadeOutType, FadeOutPow,
         Overdub,                     // engine-wide (slot ignored)
-        Rec, Play, Save,             // action targets (slot-addressed)
+        Rec, Play, Save, Clear,      // action targets (slot-addressed)
+        EqBand,                      // per-slot EQ band gain (band in id bits 24+)
         KindCount
     };
 
@@ -58,13 +63,15 @@ namespace SamplerMidiTargets
             case Kind::Rec:         return "rec";
             case Kind::Play:        return "play";
             case Kind::Save:        return "save";
+            case Kind::Clear:       return "clear";
+            case Kind::EqBand:      return "eq";   // real id is "eq{band}" (makeEqBandId)
             default:                return "";
         }
     }
 
     inline bool isEngineWide(Kind k) noexcept { return k == Kind::Overdub; }
     inline bool isAction    (Kind k) noexcept
-    { return k == Kind::Rec || k == Kind::Play || k == Kind::Save; }
+    { return k == Kind::Rec || k == Kind::Play || k == Kind::Save || k == Kind::Clear; }
 
     // ── Synthetic paramId ↔ targetId ─────────────────────────────────────────
     inline juce::String makeId(int engine, int slot, Kind k)
@@ -79,6 +86,14 @@ namespace SamplerMidiTargets
     inline int  tEngine(int t) noexcept { return (t >> 16) & 0xFF; }
     inline int  tSlot  (int t) noexcept { return (t >> 8)  & 0xFF; }
     inline Kind tKind  (int t) noexcept { return static_cast<Kind>(t & 0xFF); }
+
+    // EQ band targets carry the band index in the high byte (0..8).
+    inline juce::String makeEqBandId(int engine, int slot, int band)
+    { return "smp:e" + juce::String(engine) + ":s" + juce::String(slot)
+           + ":eq" + juce::String(band); }
+    inline int encodeEq(int engine, int slot, int band) noexcept
+    { return (band << 24) | (engine << 16) | ((slot & 0xFF) << 8) | (int) Kind::EqBand; }
+    inline int tBand(int t) noexcept { return (t >> 24) & 0xFF; }
 
     /** Resolve a synthetic id → targetId (>= 0), or -1 if not ours / malformed.
      *  Message thread (uses String tokenisation). */
@@ -104,9 +119,20 @@ namespace SamplerMidiTargets
         else
             tok = parts[2];
 
+        // EQ band: "eq{band}" (per-slot only).
+        if (perSlot && tok.startsWith("eq") && tok.length() > 2)
+        {
+            const juce::String bs = tok.substring(2);
+            if (! bs.containsOnly("0123456789")) return -1;
+            const int band = bs.getIntValue();
+            if (band < 0 || band >= kEqBands) return -1;
+            return encodeEq(engine, slot, band);
+        }
+
         for (int k = 0; k < (int) Kind::KindCount; ++k)
         {
             const Kind kind = static_cast<Kind>(k);
+            if (kind == Kind::EqBand) continue;   // handled above (needs a band)
             if (tok == token(kind))
             {
                 // Per-slot form must match a per-slot kind and vice-versa.
@@ -124,12 +150,13 @@ namespace SamplerMidiTargets
         switch (k)
         {
             case Kind::Speed: case Kind::LoopXf: case Kind::Img: case Kind::Floor:
-            case Kind::FadeInPow: case Kind::FadeOutPow:   return 0;    // continuous
+            case Kind::FadeInPow: case Kind::FadeOutPow:
+            case Kind::EqBand:                             return 0;    // continuous
             case Kind::Resume: case Kind::Overdub:         return 2;    // 2-state
             case Kind::LoopMode:                           return 4;    // NONE/LOOP/INV/PING
             case Kind::FadeInType: case Kind::FadeOutType: return 4;    // LIN/EXP/LOG/S
             case Kind::Rec: case Kind::Play:               return -1;   // momentary action
-            case Kind::Save:                               return -2;   // one-shot action
+            case Kind::Save: case Kind::Clear:             return -2;   // one-shot action
             default:                                       return 0;
         }
     }

@@ -68,10 +68,6 @@ void SlotGridComponent::paint(juce::Graphics& g)
                 bgCol   = blinkOn ? juce::Colour(0xffcc2222) : juce::Colour(0xff7a1010);
                 textCol = juce::Colours::white;
                 break;
-            case SlotState::ARMED:
-                bgCol   = blinkOn ? juce::Colour(0xffcc6600) : juce::Colour(0xff7a3300);
-                textCol = juce::Colour(0xffffcc66);
-                break;
             case SlotState::PLAYING:
                 bgCol   = juce::Colour(0xff1a6a1a);
                 textCol = juce::Colour(0xff88ff88);
@@ -98,7 +94,6 @@ void SlotGridComponent::paint(juce::Graphics& g)
         switch (st)
         {
             case SlotState::RECORDING: stateStr = "REC";  break;
-            case SlotState::ARMED:     stateStr = "ARM";  break;
             case SlotState::PLAYING:   stateStr = "PLAY"; break;
             default:
                 if (hasContent && fs != nullptr)

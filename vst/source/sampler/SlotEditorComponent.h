@@ -194,6 +194,53 @@ private:
 };
 
 /**
+ * @brief REC / PLAY transport button with a selectable momentary (hold) mode.
+ *
+ * In TOGGLE mode (@c momentary == false) it is a plain TextButton: a click fires
+ * onClick (which flips record / play on↔off). In MOMENTARY mode a LEFT press
+ * fires @c onPress and its matching release fires @c onRelease (press-to-start /
+ * release-to-stop), and onClick is suppressed. A RIGHT press is always passed to
+ * the base class so the right-click MIDI-Learn popup keeps working in both modes.
+ * The mode itself is driven by the per-engine APVTS param (see samplerRecMode /
+ * samplerPlayMode) and refreshed each timer tick.
+ */
+class TransportButton : public juce::TextButton
+{
+public:
+    using juce::TextButton::TextButton;
+
+    std::function<void()> onPress;    // momentary: left-press edge
+    std::function<void()> onRelease;  // momentary: matching release edge
+    bool momentary = false;
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        if (momentary && e.mods.isLeftButtonDown())
+        {
+            held_ = true;
+            if (onPress) onPress();
+            return;   // swallow — onClick must not also fire in momentary mode
+        }
+        juce::TextButton::mouseDown(e);
+    }
+
+    void mouseUp(const juce::MouseEvent& e) override
+    {
+        if (held_)   // only release what WE pressed (mode may have flipped since)
+        {
+            held_ = false;
+            if (onRelease) onRelease();
+            return;
+        }
+        juce::TextButton::mouseUp(e);
+    }
+
+private:
+    bool held_ = false;
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportButton)
+};
+
+/**
  * @brief Edit panel for the currently selected LuxSampler slot.
  *
  * Layout — parameters in TWO columns on top, one merged editor below:
@@ -267,8 +314,10 @@ private:
     void refreshFreqCurve();
 
     // ── Action buttons ────────────────────────────────────────────────────────
-    juce::TextButton recBtn   { "REC" };
-    juce::TextButton playBtn  { "PLAY" };
+    // REC / PLAY support Toggle (click) OR Momentary (hold) via TransportButton;
+    // the mode is refreshed each timer tick from the per-engine APVTS param.
+    TransportButton  recBtn   { "REC" };
+    TransportButton  playBtn  { "PLAY" };
     juce::TextButton clearBtn { "CLEAR" };
     juce::TextButton cropBtn  { "CROP" };   // destructive trim to [start,end]
     juce::TextButton saveBtn  { "SAVE" };

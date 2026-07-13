@@ -14,7 +14,7 @@ class Sp3ctraAudioProcessor;
  * - White bar drawn below the cell whose bank is currently active in the
  *   sequencer or playing back (getActivePlaySlot()).
  * - Cell colour encodes slot state:
- *     IDLE(empty)=dark grey  IDLE(content)=dark green  ARMED=orange blink
+ *     IDLE(empty)=dark grey  IDLE(content)=dark green
  *     RECORDING=red blink    PLAYING=bright green       SELECTED=white border
  *
  * RT safety: reads only atomic state via LuxSampler public API.

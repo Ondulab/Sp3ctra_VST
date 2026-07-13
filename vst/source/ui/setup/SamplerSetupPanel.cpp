@@ -14,7 +14,6 @@ static juce::Colour stateColour(SlotState s)
 {
     switch (s)
     {
-        case SlotState::ARMED:     return juce::Colours::yellow;
         case SlotState::RECORDING: return juce::Colours::red;
         case SlotState::PLAYING:   return juce::Colours::limegreen;
         default:                   return juce::Colours::grey;
@@ -25,7 +24,6 @@ static const char* stateText(SlotState s)
 {
     switch (s)
     {
-        case SlotState::ARMED:     return "ARMED";
         case SlotState::RECORDING: return "REC *";
         case SlotState::PLAYING:   return "PLAY >";
         default:                   return "idle";
@@ -78,6 +76,32 @@ SamplerSetupPanel::SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Col
                                        Sp3ctraTheme::kTbXNarrow, Sp3ctraTheme::kTextBoxH);
     maxDurationSlider.setTextValueSuffix(" s");
     addAndMakeVisible(maxDurationSlider);   // attachment: rebindEngineParams()
+
+    // ── REC button mode (Toggle vs Momentary) ────────────────────────────
+    recModeLabel.setText("REC Mode:", juce::dontSendNotification);
+    recModeLabel.setJustificationType(juce::Justification::centredRight);
+    recModeLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+    addAndMakeVisible(recModeLabel);
+
+    recModeCombo.addItem("Toggle",    1);
+    recModeCombo.addItem("Momentary", 2);
+    recModeCombo.setTooltip(
+        "REC button behaviour: Toggle = click to start, click again to stop. "
+        "Momentary = record only while the button (or a mapped MIDI key) is held.");
+    addAndMakeVisible(recModeCombo);   // attachment: rebindEngineParams()
+
+    // ── PLAY button mode (Toggle vs Momentary) ───────────────────────────
+    playModeLabel.setText("PLAY Mode:", juce::dontSendNotification);
+    playModeLabel.setJustificationType(juce::Justification::centredRight);
+    playModeLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+    addAndMakeVisible(playModeLabel);
+
+    playModeCombo.addItem("Toggle",    1);
+    playModeCombo.addItem("Momentary", 2);
+    playModeCombo.setTooltip(
+        "PLAY button behaviour: Toggle = click to start, click again to stop. "
+        "Momentary = play only while the button (or a mapped MIDI key) is held.");
+    addAndMakeVisible(playModeCombo);   // attachment: rebindEngineParams()
 
     // ── Image export on Save Session ──────────────────────────────────────
     exportImagesLabel.setText("Export Images:", juce::dontSendNotification);
@@ -179,9 +203,9 @@ SamplerSetupPanel::SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Col
     // ── Slot rows ─────────────────────────────────────────────────────────
     for (int i = 0; i < NUM_SLOTS; ++i)
     {
-        // Index label: "C0 / C1"
-        juce::String idxText = juce::String(kNoteNames[i]) + "0 / "
-                             + juce::String(kNoteNames[i]) + "1";
+        // Index label: the PLAY note that triggers this slot (C1..B1).
+        // (REC notes removed — recording is UI-/MIDI-Learn-driven now.)
+        juce::String idxText = juce::String(kNoteNames[i]) + "1";
         slotIndexLabel[i].setText(idxText, juce::dontSendNotification);
         slotIndexLabel[i].setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
         slotIndexLabel[i].setJustificationType(juce::Justification::centredLeft);
@@ -241,12 +265,18 @@ void SamplerSetupPanel::rebindEngineParams()
     midiChannelAttachment .reset();
     octaveOffsetAttachment.reset();
     maxDurationAttachment .reset();
+    recModeAttachment     .reset();
+    playModeAttachment    .reset();
     midiChannelAttachment = std::make_unique<CA>(
         apvts, fsEngineParam(samplerIndex_, "MidiChannel"),  midiChannelCombo);
     octaveOffsetAttachment = std::make_unique<CA>(
         apvts, fsEngineParam(samplerIndex_, "OctaveOffset"), octaveOffsetCombo);
     maxDurationAttachment = std::make_unique<SA>(
         apvts, fsEngineParam(samplerIndex_, "MaxDuration"),  maxDurationSlider);
+    recModeAttachment = std::make_unique<CA>(
+        apvts, fsEngineParam(samplerIndex_, "RecMode"),  recModeCombo);
+    playModeAttachment = std::make_unique<CA>(
+        apvts, fsEngineParam(samplerIndex_, "PlayMode"), playModeCombo);
 }
 
 void SamplerSetupPanel::timerCallback()
@@ -300,12 +330,12 @@ void SamplerSetupPanel::paint(juce::Graphics& g)
     SetupUI::paintHeader(g, *this, "SAMPLER -- SETUP", accent);
 
     // Column headers for slot grid — position must match resized() exactly:
-    //   headerH(30) + 6 control rows (MIDI, Octave, MaxDur, ExportToggle,
-    //   ExportFormat, OutputDir) * kRowStep + kHPad.
+    //   headerH(30) + 8 control rows (MIDI, Octave, MaxDur, RecMode, PlayMode,
+    //   ExportToggle, ExportFormat, OutputDir) * kRowStep + kHPad.
     //   (Enable row removed — power lives in the rack LED + zone-3 header;
     //    REC/PLAY/SAVE bind rows removed — unified MIDI-Learn on the buttons.)
     const int titleH  = SetupUI::kHeaderH + Sp3ctraTheme::kSectionGap;
-    const int headerY = titleH + 6 * Sp3ctraTheme::kRowStep + Sp3ctraTheme::kHPad;
+    const int headerY = titleH + 8 * Sp3ctraTheme::kRowStep + Sp3ctraTheme::kHPad;
     const int headerH = 20;
 
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
@@ -313,7 +343,7 @@ void SamplerSetupPanel::paint(juce::Graphics& g)
 
     auto headerBounds = juce::Rectangle<int>(10, headerY, getWidth() - 20, headerH);
     const int colW    = (getWidth() - 20) / 4;
-    g.drawText("Note (REC/PLAY)",  headerBounds.removeFromLeft(colW), juce::Justification::centredLeft, true);
+    g.drawText("Note (PLAY)",       headerBounds.removeFromLeft(colW), juce::Justification::centredLeft, true);
     g.drawText("State",             headerBounds.removeFromLeft(colW), juce::Justification::centred, true);
     g.drawText("Duration",          headerBounds.removeFromLeft(colW), juce::Justification::centred, true);
     g.drawText("",                  headerBounds,                      juce::Justification::centred, true);
@@ -352,6 +382,8 @@ void SamplerSetupPanel::resized()
     row(midiChannelLabel, midiChannelCombo);
     row(octaveOffsetLabel,octaveOffsetCombo);
     row(maxDurationLabel, maxDurationSlider);
+    row(recModeLabel,     recModeCombo);
+    row(playModeLabel,    playModeCombo);
     row(exportImagesLabel, exportImagesToggle);
     row(exportFormatLabel, exportFormatCombo);
 
