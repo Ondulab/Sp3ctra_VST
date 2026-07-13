@@ -82,13 +82,15 @@ void lux_sampler_on_modulated_frame_ready(int            owner_engine,
 
 /**
  * @brief Per-chain sampler capture — record ONE chain's stream into ITS
- *        engine's armed recording slot (idle only; during playback the
- *        resampling path lux_samplers_record_modulated() owns recording).
+ *        engine's armed recording slot. A DRIVING engine (its own playback
+ *        owns the channel) is skipped: it self-records inside its
+ *        FramePlayerThread (multi-chain split, 2026-07-13).
  *
  * Called by the chain executor (udpThread / feeder, Non-RT) at a SAMPLER
  * position marker executed positionally — the stream at that position is
  * the chain's OWN flux (its source + its upstream processors), never the
- * shared modulated bus.
+ * shared modulated bus. Also used by the playback capture for SAME-chain
+ * engines (their chain's output stream IS the playback frame).
  */
 void lux_sampler_record_chain_frame(int engine_slot,
                                     const uint8_t* R,
@@ -97,22 +99,16 @@ void lux_sampler_record_chain_frame(int engine_slot,
                                     uint16_t       pixel_count);
 
 /**
- * @brief Resampling capture — record the FINAL modulated channel into every
- *        sampler engine that has an armed recording slot.
+ * @brief Per-engine driving query — is THIS engine's playback (or score)
+ *        currently driving its stream?
  *
- * Called by udpThread() on the PLAYING path (a slot is playing into the
- * modulated channel) so a downstream sampler records the combination
- * (e.g. sampler B records sampler A's playback). Unlike
- * lux_sampler_on_modulated_frame_ready(), it performs NO sampler-snapshot
- * mirror — the engine that is playing owns the snapshot.
+ * Multi-chain split (2026-07-13): the chain executors gate player-ownership
+ * PER CHAIN by matching the chain's own SAMPLER marker against this — two
+ * engines on two chains may both be driving simultaneously.
  *
- * Thread: UDP receiver thread (Non-RT).
+ * Thread: any Non-RT producer. Atomic reads only.
  */
-void lux_samplers_record_modulated(const uint8_t* R,
-                                   const uint8_t* G,
-                                   const uint8_t* B,
-                                   uint16_t       pixel_count,
-                                   uint32_t       line_id);
+int lux_sampler_engine_is_driving(int engine);
 
 /**
  * @brief Returns non-zero if any LuxSampler slot is currently in PLAYING state.

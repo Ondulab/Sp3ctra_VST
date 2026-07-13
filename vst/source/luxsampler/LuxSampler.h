@@ -1139,19 +1139,32 @@ public:
     void waitForPlayerRelease(int slotIndex, int timeoutMs = 100) const noexcept;
 
     // Resampling capture: write the (already chain-modulated) frame into THIS
-    // engine's active recording slot. Non-RT (UDP thread). No snapshot side
-    // effect — the engine that is playing owns the shared sampler snapshot.
+    // engine's active recording slot. Non-RT (UDP thread / FramePlayerThread).
+    // No snapshot side effect — the display owner owns the shared snapshot.
     void recordModulatedFrame(const uint8_t* R, const uint8_t* G, const uint8_t* B,
                               uint16_t pixel_count, uint32_t line_id) noexcept;
+    // Monotonic line id for the player thread's self-resampling capture.
+    uint32_t nextSelfRecLineId() noexcept
+    { return selfRecLineId_.fetch_add(1, std::memory_order_relaxed); }
     // Mirror a frame into the shared sampler snapshot (idle display). Non-RT.
     void mirrorSamplerSnapshot(const uint8_t* R, const uint8_t* G, const uint8_t* B,
                                uint16_t pixel_count) noexcept;
     // True if THIS engine is currently the one driving the modulated channel
     // (aggregated across engines by lux_sampler_is_playing()).
     bool isDrivingChannel() const noexcept;
-    // Playback arbiter: stop playback on every OTHER engine — a single modulated
-    // channel means one engine plays at a time. RT-safe (atomic stores only).
+    // Playback arbiter — SCOPED to shared-chain topologies (multi-chain split,
+    // 2026-07-13): when engines A and B live on DIFFERENT chains each owns its
+    // own stream and both may play simultaneously — the arbiter is a no-op.
+    // Only when both engines share ONE chain (same stream, e.g. A→B resampling
+    // rack) does starting one still evict the other. RT-safe (atomic stores).
     static void stopOtherEnginesPlayback(int exceptIndex) noexcept;
+    // Published by the processor on every chain-plan derive: do sampler A and
+    // B currently sit on the SAME chain? Gates the arbiter + the SCORE relay's
+    // cross-engine displacement (both only make sense on a shared stream).
+    static void setEnginesShareChain(bool share) noexcept
+    { s_enginesShareChain.store(share, std::memory_order_release); }
+    static bool enginesShareSameChain() noexcept
+    { return s_enginesShareChain.load(std::memory_order_acquire); }
 
 private:
     // -------------------------------------------------------------------------
@@ -1161,7 +1174,8 @@ private:
     bool                    registered_  = false; // this instance owns s_engines[engineIndex_]
     static std::atomic<LuxSampler*> s_engines[kMaxEngines];
     static std::atomic<int>         s_engineBusy[kMaxEngines]; // in-flight hook calls per slot
-    static std::atomic<int> s_playbackOwner;   // engine index driving the channel, -1 = none
+    static std::atomic<bool> s_enginesShareChain;  // A and B hosted on ONE chain (plan-derived)
+    std::atomic<uint32_t> selfRecLineId_{ 0 };     // player-thread self-resampling line ids
 
     // -------------------------------------------------------------------------
     // RT state (atomics only)

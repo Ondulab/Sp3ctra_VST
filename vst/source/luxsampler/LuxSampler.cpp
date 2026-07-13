@@ -32,7 +32,7 @@ static int s_playerSendCount = 0;
 // ============================================================================
 std::atomic<LuxSampler*> LuxSampler::s_engines[LuxSampler::kMaxEngines] = { nullptr, nullptr };
 std::atomic<int>         LuxSampler::s_engineBusy[LuxSampler::kMaxEngines] = { 0, 0 };
-std::atomic<int> LuxSampler::s_playbackOwner{ -1 };
+std::atomic<bool> LuxSampler::s_enginesShareChain{ false };
 
 // ============================================================================
 // C-linkage hook functions — called from udpThread() in multithreading.c.
@@ -126,22 +126,29 @@ extern "C"
         const uint32_t line_id =
             s_chainLineId[engine_slot].fetch_add(1, std::memory_order_relaxed);
         if (auto* e = LuxSampler::pinEngine(engine_slot))
-            e->recordModulatedFrame(R, G, B, pixel_count, line_id);
+        {
+            // A DRIVING engine (its own playback / score owns the channel)
+            // self-records the modulated output via lux_samplers_record_modulated
+            // — skip the positional capture so it never double-records itself.
+            // A NON-driving engine on another chain records ITS OWN stream here
+            // even while a different engine plays (multi-chain: no cross-bleed).
+            if (! e->isDrivingChannel())
+                e->recordModulatedFrame(R, G, B, pixel_count, line_id);
+        }
         LuxSampler::unpinEngine(engine_slot);
     }
 
-    void lux_samplers_record_modulated(const uint8_t* R,
-                                       const uint8_t* G,
-                                       const uint8_t* B,
-                                       uint16_t       pixel_count,
-                                       uint32_t       line_id)
+    int lux_sampler_engine_is_driving(int engine)
     {
-        for (int i = 0; i < LuxSampler::kMaxEngines; ++i)
-        {
-            if (auto* e = LuxSampler::pinEngine(i))
-                e->recordModulatedFrame(R, G, B, pixel_count, line_id);
-            LuxSampler::unpinEngine(i);
-        }
+        // Per-engine driving query (multi-chain split): lets the chain executor
+        // gate player-ownership per chain instead of collapsing both engines
+        // into the single "first playing engine" (which starved the second
+        // simultaneously-playing chain's gates).
+        int driving = 0;
+        if (auto* e = LuxSampler::pinEngine(engine))
+            driving = e->isDrivingChannel() ? 1 : 0;
+        LuxSampler::unpinEngine(engine);
+        return driving;
     }
 
     int lux_sampler_is_playing(void)
@@ -244,11 +251,15 @@ bool LuxSampler::isDrivingChannel() const noexcept
 }
 
 // ============================================================================
-// Playback arbiter — a single modulated channel ⇒ one engine plays at a time.
-// Stop playback on every OTHER engine. RT-safe (atomic stores only).
+// Playback arbiter — SCOPED to shared-chain topologies (multi-chain split).
+// Engines on DIFFERENT chains own independent streams: both may play at once,
+// so the arbiter is a no-op. Only when A and B sit on ONE chain (same stream)
+// does starting one still evict the other. RT-safe (atomic stores only).
 // ============================================================================
 void LuxSampler::stopOtherEnginesPlayback(int exceptIndex) noexcept
 {
+    if (! s_enginesShareChain.load(std::memory_order_acquire))
+        return;   // cross-chain independence: nothing to evict
     for (int i = 0; i < kMaxEngines; ++i)
     {
         if (i == exceptIndex) continue;
@@ -275,7 +286,6 @@ void LuxSampler::stopOtherEnginesPlayback(int exceptIndex) noexcept
                 as.passthroughEnabled.store(true, std::memory_order_release);
         }
     }
-    s_playbackOwner.store(exceptIndex, std::memory_order_release);
 }
 
 // ============================================================================
@@ -353,8 +363,6 @@ LuxSampler::~LuxSampler()
              ++tries)
             juce::Thread::sleep(1);
     }
-    int expectedOwner = engineIndex_;
-    s_playbackOwner.compare_exchange_strong(expectedOwner, -1);  // release if we owned it
     log_info("FS", "LuxSampler[%c] destroyed", (char) ('A' + engineIndex_));
 }
 
@@ -1051,24 +1059,29 @@ void LuxSampler::uiPlayScore() noexcept
     }
     else
     {
-        for (int i = 0; i < kMaxEngines; ++i)
-        {
-            if (i == engineIndex_) continue;
-            LuxSampler* e = s_engines[i].load(std::memory_order_acquire);
-            if (e == nullptr) continue;
-            const int cp = e->atomicState.activePlaySlot.load(std::memory_order_relaxed);
-            if (cp >= 0 && cp < LuxSamplerConstants::NUM_SLOTS)
+        // Cross-engine displacement only exists on a SHARED chain (one
+        // stream). On split chains the other engine keeps playing — the
+        // arbiter below is a no-op there and arming a relay for it would
+        // wrongly re-trigger its (still playing) slot when SCORE stops.
+        if (enginesShareSameChain())
+            for (int i = 0; i < kMaxEngines; ++i)
             {
-                scoreRelaySlot_.store(i * LuxSamplerConstants::NUM_SLOTS + cp,
-                                      std::memory_order_relaxed);
-                break;   // single playback channel → at most one owner
+                if (i == engineIndex_) continue;
+                LuxSampler* e = s_engines[i].load(std::memory_order_acquire);
+                if (e == nullptr) continue;
+                const int cp = e->atomicState.activePlaySlot.load(std::memory_order_relaxed);
+                if (cp >= 0 && cp < LuxSamplerConstants::NUM_SLOTS)
+                {
+                    scoreRelaySlot_.store(i * LuxSamplerConstants::NUM_SLOTS + cp,
+                                          std::memory_order_relaxed);
+                    break;   // single playback channel → at most one owner
+                }
             }
-        }
     }
 
     // Score is UI-driven (never sequencer-controlled): FramePlayerThread is
     // free to restore live passthrough when one-shot playback ends.
-    stopOtherEnginesPlayback(engineIndex_);  // single modulated channel
+    stopOtherEnginesPlayback(engineIndex_);  // shared-chain eviction only
     atomicState.seqControlledPlay.store(false, std::memory_order_release);
     // A real PLAY always advances — clear any leftover scrub-hold flag.
     atomicState.scoreScrubbing.store(false, std::memory_order_release);
@@ -1155,7 +1168,8 @@ bool LuxSampler::uiBeginScoreScrub() noexcept
             LuxSampler* e = s_engines[i].load(std::memory_order_acquire);
             if (e == nullptr) continue;
             const int cp = e->atomicState.activePlaySlot.load(std::memory_order_relaxed);
-            if (cp >= 0 && cp < LuxSamplerConstants::NUM_SLOTS)
+            if (cp >= 0 && cp < LuxSamplerConstants::NUM_SLOTS
+                && enginesShareSameChain())   // cross-engine relay: shared chain only
             {
                 scoreRelaySlot_.store(i * LuxSamplerConstants::NUM_SLOTS + cp,
                                       std::memory_order_relaxed);
@@ -1168,7 +1182,7 @@ bool LuxSampler::uiBeginScoreScrub() noexcept
     // at the (uiSeekScore-armed) play head every tick but never auto-advances.
     // Note: scorePlaying stays FALSE so the PLAY/STOP button + head-line keep
     // their stopped appearance — this is a transient audition, not playback.
-    stopOtherEnginesPlayback(engineIndex_);  // single modulated channel
+    stopOtherEnginesPlayback(engineIndex_);  // shared-chain eviction only
     atomicState.seqControlledPlay.store(false, std::memory_order_release);
     atomicState.scoreScrubbing.store(true, std::memory_order_release);
     atomicState.activePlaySlot.store(LuxSamplerConstants::SCORE_SLOT, std::memory_order_release);
@@ -3245,7 +3259,31 @@ void FramePlayerThread::run()
 
             // ── Snapshot pure sampler frame BEFORE live blend ─────────────────
             // So the visualizer can show the sampler output in isolation.
-            audio_image_buffers_snapshot_sampler(audioBuffers, workR, workG, workB, nb);
+            // Multi-chain split: the shared sampler snapshot is a SINGLE display
+            // bus — with two engines playing simultaneously only the display
+            // owner writes it (score owns it outright; otherwise the first
+            // driving engine). The other engine's playback still reaches the
+            // synths through its own per-chain staging.
+            {
+                const bool displayOwner =
+                    lux_sampler_is_score_playing()
+                        ? isScore
+                        : (lux_sampler_playing_engine()
+                           == sampler.getEngineIndex());
+                if (displayOwner)
+                    audio_image_buffers_snapshot_sampler(audioBuffers,
+                                                         workR, workG, workB, nb);
+            }
+
+            // ── SELF-RESAMPLING (multi-chain split, 2026-07-13) ──────────────
+            // Record THIS engine's own playback frame into ITS armed rec slot
+            // (overdub / bounce onto another slot while playing). Replaces the
+            // old shared-bus fan-out (udpThread's lux_samplers_record_modulated),
+            // which force-fed the single modulated frame to EVERY armed engine
+            // — the cross-chain record bleed. recordModulatedFrame no-ops when
+            // no slot is armed. 1:1 with produced frames (player-rate capture).
+            sampler.recordModulatedFrame(workR, workG, workB, (uint16_t) nb,
+                                         sampler.nextSelfRecLineId());
 
             // ── Live darken-blend: min(sample, live) weighted by blendAmount ─────
             // blendAmount=0 → pure playback; blendAmount=1 → full darken blend.
@@ -3431,11 +3469,22 @@ void FramePlayerThread::run()
                         isScore ? 1 : 0, sampler.getEngineIndex(),
                         audioBuffers, workR, workG, workB, nb);
 
-                    // 3. Write mixed frame to AudioImageBuffers (the visual mix bus)
+                    // 3. Write mixed frame to AudioImageBuffers (the visual mix
+                    //    bus). Single display bus — with two engines playing
+                    //    simultaneously only the display owner writes it (the
+                    //    other playback stays audio-only; per-engine viz is a
+                    //    follow-up). Same owner rule as the sampler snapshot.
+                    const bool mixBusOwner =
+                        lux_sampler_is_score_playing()
+                            ? isScore
+                            : (lux_sampler_playing_engine()
+                               == sampler.getEngineIndex());
                     uint8_t* wR = nullptr;
                     uint8_t* wG = nullptr;
                     uint8_t* wB = nullptr;
-                    if (audio_image_buffers_start_write(audioBuffers, &wR, &wG, &wB) == 0)
+                    if (mixBusOwner
+                        && audio_image_buffers_start_write(audioBuffers,
+                                                           &wR, &wG, &wB) == 0)
                     {
                         std::memcpy(wR, workR, static_cast<size_t>(nb));
                         std::memcpy(wG, workG, static_cast<size_t>(nb));
