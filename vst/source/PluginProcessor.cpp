@@ -4350,6 +4350,29 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
             poolResetArmedMs_ = juce::Time::getMillisecondCounter();
     }
 
+    // Multi-chain split (2026-07-13): tell the sampler layer whether engines
+    // A and B currently sit on the SAME chain. Gates the playback arbiter and
+    // the SCORE relay's cross-engine displacement — on split chains both
+    // engines play independently; on a shared chain (one stream) starting one
+    // still evicts the other.
+    {
+        bool share = false;
+        for (int c = 0; c < plan.num_chains && !share; ++c)
+        {
+            const SynthChainPlan& sp = plan.chain[c];
+            if (!sp.present || !sp.has_sampler) continue;
+            bool hasA = false, hasB = false;
+            for (int i = 0; i < sp.num_inserts; ++i)
+                if (sp.insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER)
+                {
+                    if (sp.insert_state_idx[i] == 0) hasA = true;
+                    if (sp.insert_state_idx[i] == 1) hasB = true;
+                }
+            share = hasA && hasB;
+        }
+        LuxSampler::setEnginesShareChain(share);
+    }
+
     chain_plan_publish(&plan);
 }
 

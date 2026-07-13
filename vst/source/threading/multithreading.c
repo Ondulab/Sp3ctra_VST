@@ -69,6 +69,27 @@ static int chain_hosts_sampler_engine(const SynthChainPlan *sp, int engine)
     return 0;
 }
 
+/* Multi-chain split (2026-07-13): does this chain host ANY driving engine?
+ * Per-chain player-ownership gate — with the arbiter scoped to shared-chain
+ * topologies, TWO engines on TWO chains may drive simultaneously; matching
+ * only the "first playing engine" starved the second chain's gates.
+ * (Outside VST_MODE no engine ever drives → never player-owned.) */
+static int chain_hosts_driving_engine(const SynthChainPlan *sp)
+{
+#ifdef VST_MODE
+    if (!sp->has_sampler)
+        return 0;
+    for (int i = 0; i < sp->num_inserts; i++)
+        if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER
+            && lux_sampler_engine_is_driving(sp->insert_state_idx[i]))
+            return 1;
+    return 0;
+#else
+    (void)sp;
+    return 0;
+#endif
+}
+
 #ifdef VST_MODE
 /* One predicate for every player-ownership gate: SCORE relay matches
  * has_score (channel-wide, never engine-matched); sampler playback matches
@@ -78,6 +99,34 @@ static int chain_player_owned(const SynthChainPlan *sp, int is_score,
 {
     return is_score ? sp->has_score
                     : chain_hosts_sampler_engine(sp, engine_slot);
+}
+
+/* SAME-CHAIN resampling (multi-chain record fix, 2026-07-13): while a player
+ * (sampler engine or SCORE relay) owns a chain's stream, the playback frame
+ * IS that chain's output — record it into every OTHER armed engine hosted on
+ * THAT chain (e.g. B, placed on A's chain, captures A's playback). Engines on
+ * other chains record their own stream positionally instead; the driving
+ * engine self-records via lux_samplers_record_modulated (the hook's internal
+ * isDrivingChannel guard also skips it here — no double capture). */
+static void chain_record_same_chain_engines(const SynthChainPlan *sp,
+                                            int playing_engine,
+                                            int score_playing,
+                                            const uint8_t *R,
+                                            const uint8_t *G,
+                                            const uint8_t *B,
+                                            int nb_pixels)
+{
+    if (!sp || !sp->present || !sp->has_sampler)
+        return;
+    const int owned =
+        (playing_engine >= 0 && chain_hosts_sampler_engine(sp, playing_engine))
+        || (sp->has_score && score_playing);
+    if (!owned)
+        return;
+    for (int i = 0; i < sp->num_inserts; i++)
+        if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER)
+            lux_sampler_record_chain_frame(sp->insert_state_idx[i], R, G, B,
+                                           (uint16_t)nb_pixels);
 }
 
 /* Player-side execution of the inserts placed AFTER a SCORE/SAMPLER marker —
@@ -1442,15 +1491,22 @@ void *udpThread(void *arg) {
                                                            mod_R, mod_G, mod_B,
                                                            nb_pixels);
 
-                    /* RESAMPLING: a slot is playing INTO the modulated channel.
-                     * Feed the final modulated frame to every sampler engine
-                     * with an armed rec slot so a downstream sampler records the
-                     * combination (e.g. sampler B records sampler A's playback).
-                     * No snapshot mirror — the playing engine owns the snapshot. */
+                    /* Playback capture routing (multi-chain split): the
+                     * DRIVING engine self-records inside its own player
+                     * thread (1:1 with produced frames). Here only the armed
+                     * engines hosted on the SAME chain as the display owner
+                     * capture this frame (their chain's output stream IS the
+                     * playback). Engines on OTHER chains record their own
+                     * stream positionally — never this frame (that global
+                     * fan-out was the cross-chain record bug). */
 #ifdef VST_MODE
-                    lux_samplers_record_modulated(mod_R, mod_G, mod_B,
-                                                  (uint16_t)nb_pixels,
-                                                  packet.line_id);
+                    {
+                        const int score_now = lux_sampler_is_score_playing();
+                        for (int c = 0; c < frame_plan.num_chains; c++)
+                            chain_record_same_chain_engines(
+                                &frame_plan.chain[c], playing_engine_now,
+                                score_now, mod_R, mod_G, mod_B, nb_pixels);
+                    }
 #endif
                 }
             }
@@ -1618,12 +1674,13 @@ void *udpThread(void *arg) {
                     has_lw = 1;
             }
 
-            /* Per-chain playback: this chain is player-owned only when ITS
-             * OWN engine is the one playing (or the SCORE relay for a score
-             * chain) — a chain hosting the idle engine keeps its positional
-             * run on its own stream. */
+            /* Per-chain playback: this chain is player-owned when ITS OWN
+             * engine is driving (or the SCORE relay for a score chain) — a
+             * chain hosting an idle engine keeps its positional run on its
+             * own stream. Per-engine query: BOTH chains may be player-owned
+             * simultaneously (multi-chain split). */
             const int stream_player_owned =
-                chain_hosts_sampler_engine(sp, playing_engine_now)
+                chain_hosts_driving_engine(sp)
                 || (sp->has_score && score_playing_now);
 
             if (ls_bank >= 0 && stream_player_owned)
@@ -1709,8 +1766,14 @@ void *udpThread(void *arg) {
                 chain_execute_positional(sp, c, audioBuffers, sbR, sbG, sbB,
                                          nb_pixels, &s_ls_send_pp, lx_line,
                                          /*player_fed*/ 0, pb_here,
-                                         /*allow_sampler_record*/
-                                         !player_running_now, &ex);
+                                         /* allow_sampler_record: per-chain — a
+                                          * chain NOT owned by an active player
+                                          * records ITS OWN stream even while
+                                          * another engine plays (multi-chain
+                                          * fix: the old !playing gate was
+                                          * global). Player/score-owned chains
+                                          * record via the playback capture. */
+                                         !stream_player_owned, &ex);
             }
 
             if (c == pb_chain && ex.pb_found)
@@ -1972,16 +2035,19 @@ void internal_sources_process_tick(void *arg)
 
       if (sampler_playing)
       {
-          /* PLAYING (sampler or score relay): resampling capture — the frame
-           * player owns the modulated channel; feed its output to every other
-           * engine with an armed rec slot (records the combination). */
+          /* PLAYING (sampler or score relay): the DRIVING engine self-records
+           * inside its own player thread. Here only the armed engines hosted
+           * on the SAME chain as the display owner capture the playback frame
+           * (their chain's output stream). Engines on other chains record
+           * their own stream positionally (no cross-bleed). */
           uint8_t *plR, *plG, *plB;
           audio_image_buffers_get_sampler_pointers(audioBuffers,
                                                    &plR, &plG, &plB);
           if (plR && plG && plB)
-              lux_samplers_record_modulated(plR, plG, plB,
-                                            (uint16_t)nb_pixels,
-                                            ++s_feeder_line_id);
+              for (int c = 0; c < frame_plan.num_chains; c++)
+                  chain_record_same_chain_engines(
+                      &frame_plan.chain[c], playing_engine, score_playing,
+                      plR, plG, plB, nb_pixels);
       }
       else if (sbSig > 0)
       {
@@ -2063,10 +2129,11 @@ void internal_sources_process_tick(void *arg)
         has_lw = 1;
     }
 
-    /* Per-chain playback: owned only when ITS OWN engine plays (or the
-     * SCORE relay for a score chain) — mirror of udpThread's gate. */
+    /* Per-chain playback: owned when ITS OWN engine is driving (or the
+     * SCORE relay for a score chain) — mirror of udpThread's per-engine
+     * gate; both chains may be player-owned simultaneously. */
     const int stream_player_owned =
-        chain_hosts_sampler_engine(sp, playing_engine)
+        chain_hosts_driving_engine(sp)
         || (sp->has_score && score_playing);
     if (ls_bank >= 0 && stream_player_owned)
       continue;   /* staged + post-marker probes by FramePlayerThread */
@@ -2143,7 +2210,11 @@ void internal_sources_process_tick(void *arg)
       chain_execute_positional(sp, c, audioBuffers, sbR, sbG, sbB,
                                nb_pixels, &s_ls_send_pp_feeder, lx_line,
                                /*player_fed*/ 0, pb_here,
-                               /*allow_sampler_record*/ !sampler_playing, &ex);
+                               /* allow_sampler_record: per-chain (see the
+                                * udpThread mirror) — non-owned chains keep
+                                * recording their own stream during playback;
+                                * owned chains record via the playback capture. */
+                               !stream_player_owned, &ex);
     }
 
     if (c == pb_chain && ex.pb_found)
