@@ -197,7 +197,6 @@ int synth_init_thread_pool(LuxStralEngine *eng) {
       
       // Precomputed volume and pan data (per note, independent of buffer size)
       worker->precomputed_volume = (float*)calloc(notes_this, sizeof(float));
-      worker->precomputed_pan_position = (float*)calloc(notes_this, sizeof(float));
       worker->precomputed_left_gain = (float*)calloc(notes_this, sizeof(float));
       worker->precomputed_right_gain = (float*)calloc(notes_this, sizeof(float));
       
@@ -219,7 +218,7 @@ int synth_init_thread_pool(LuxStralEngine *eng) {
           !worker->thread_luxstralBuffer_L || !worker->thread_luxstralBuffer_R || !worker->waveBuffer || !worker->volumeBuffer ||
           !worker->imageBuffer_q31 || !worker->imageBuffer_f32 ||
           !worker->precomputed_wave_data || !worker->precomputed_volume ||
-          !worker->precomputed_pan_position || !worker->precomputed_left_gain || !worker->precomputed_right_gain ||
+          !worker->precomputed_left_gain || !worker->precomputed_right_gain ||
           !worker->last_left_gain || !worker->last_right_gain ||
           !worker->temp_waveBuffer_L || !worker->temp_waveBuffer_R) {
         log_error("SYNTH", "Error allocating worker buffers for thread %d", i);
@@ -639,11 +638,10 @@ void synth_precompute_wave_data(LuxStralEngine *eng, float *imageData, DoubleBuf
            &db->preprocessed_data.additive.notes[worker->start_note],
            notes_this_worker * sizeof(float));
 
-    // Batch copy stereo data if enabled
+    // Batch copy stereo data if enabled. (pan_positions are NOT copied: the
+    // render only reads the precomputed left/right gains — P4-M1 D3 purge of
+    // the dead per-worker pan copy; the N-send mixer never wrote them.)
     if (eng_stereo_enabled) {
-      memcpy(worker->precomputed_pan_position,
-             &db->preprocessed_data.stereo.pan_positions[worker->start_note],
-             notes_this_worker * sizeof(float));
       memcpy(worker->precomputed_left_gain,
              &db->preprocessed_data.stereo.left_gains[worker->start_note],
              notes_this_worker * sizeof(float));
@@ -856,7 +854,6 @@ static void synth_shutdown_thread_pool_impl(LuxStralEngine *eng) {
     free(eng->thread_pool[i].imageBuffer_f32);          eng->thread_pool[i].imageBuffer_f32 = NULL;
     free(eng->thread_pool[i].precomputed_wave_data);    eng->thread_pool[i].precomputed_wave_data = NULL;
     free(eng->thread_pool[i].precomputed_volume);       eng->thread_pool[i].precomputed_volume = NULL;
-    free(eng->thread_pool[i].precomputed_pan_position); eng->thread_pool[i].precomputed_pan_position = NULL;
     free(eng->thread_pool[i].precomputed_left_gain);    eng->thread_pool[i].precomputed_left_gain = NULL;
     free(eng->thread_pool[i].precomputed_right_gain);   eng->thread_pool[i].precomputed_right_gain = NULL;
     free(eng->thread_pool[i].last_left_gain);           eng->thread_pool[i].last_left_gain = NULL;

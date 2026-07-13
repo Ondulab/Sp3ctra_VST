@@ -509,6 +509,19 @@ static void chain_resolve_insert_states(const SynthChainPlan *sp,
     }
 }
 
+/* Shared blank-paper line — the empty-chain contract is WHITE, never black. */
+static const uint8_t *chain_white_line(void)
+{
+    static uint8_t s_white[INTERNAL_SRC_MAX_PIXELS];
+    static volatile int s_init = 0;
+    if (!s_init)
+    {
+        memset((void *) s_white, 0xFF, sizeof(s_white));
+        s_init = 1;   /* benign race: every writer stores the same bytes */
+    }
+    return s_white;
+}
+
 /* ── M9: per-synth base frame — the chain's SOURCE module output ─────────────
  * LIVE (or sampler/score-fed) → the shared live frame (db->activeBuffer).
  * IMAGE / VIDEO / CAMERA → the latest line published by that source's engine,
@@ -520,10 +533,10 @@ static void chain_resolve_insert_states(const SynthChainPlan *sp,
  *    0 = live frame (out_* point into db->activeBuffer)
  *   -1 = NO SIGNAL — no source module in the chain (CHAIN_SRC_NONE) or an
  *        internal source module that is inactive / has published nothing.
- *        out_* still fall back to the live frame so legacy pointer users stay
- *        valid, but ROUTING callers must treat -1 as silence: a chain must
- *        never leak the live device feed by default (only an explicit SP3CTRA
- *        source, or a sampler/score upstream, may carry signal).
+ *        out_* point at the shared WHITE line (P4-M1): a caller that forgets
+ *        to test the code walks blank paper — a chain can never leak the live
+ *        device feed (only an explicit SP3CTRA source, or a sampler/score
+ *        player actually running, may carry signal).
  *
  * The scratch is written by whichever thread currently drives the per-synth
  * processing (udpThread while the device streams, the feeder tick otherwise —
@@ -557,21 +570,42 @@ static int synth_source_base(const SynthChainPlan *sp, int synth_slot,
             return 1;
         }
     }
+    /* Internal module placed but empty/inactive, or no source module at all →
+     * the chain has no signal of its own: blank-paper pointers, NEVER the
+     * live device feed (P4-M1 — the old live fallback was the trap behind
+     * the 2026-07-13 idle-score leak). */
+    if (kind >= 0 || sp->source_kind == CHAIN_SRC_NONE)
+    {
+        const uint8_t *w = chain_white_line();
+        *out_r = w; *out_g = w; *out_b = w;
+        return -1;
+    }
     *out_r = db->activeBuffer_R;
     *out_g = db->activeBuffer_G;
     *out_b = db->activeBuffer_B;
-    /* Internal module placed but empty/inactive, or no source module at all →
-     * the chain has no signal of its own. */
-    if (kind >= 0 || sp->source_kind == CHAIN_SRC_NONE)
-        return -1;
     return 0;
 }
 
-/* True when a synth chain carries NO signal: its base source resolved to
- * "no signal" AND nothing upstream (sampler/score player) substitutes one. */
-static int synth_chain_has_no_signal(const SynthChainPlan *sp, int base_sig)
+/* True when a synth chain carries NO signal THIS LINE: its base source
+ * resolved to "no signal" AND no player is ACTUALLY substituting a stream
+ * right now. The substitution test must be dynamic: the score player feeds
+ * every has_score chain only while it RUNS, a sampler feeds a chain only
+ * while that chain's own engine is DRIVING. The old static exclusion (the
+ * has_sampler/has_score plan flags) declared a SCORE/sampler chain "fed"
+ * even with its player idle — the executor then ran the chain on
+ * synth_source_base's live fallback pointers, leaking the SP3CTRA device
+ * feed into a chain with no input of its own (audible on its OUT sends,
+ * visible in its probes). */
+static int synth_chain_has_no_signal(const SynthChainPlan *sp, int base_sig,
+                                     int score_playing)
 {
-    return sp->present && base_sig < 0 && !sp->has_sampler && !sp->has_score;
+    if (!sp->present || base_sig >= 0)
+        return 0;
+    if (sp->has_score && score_playing)
+        return 0;
+    if (chain_hosts_driving_engine(sp))
+        return 0;
+    return 1;
 }
 
 /* ── Chain "no signal" publication ───────────────────────────────────────────
@@ -592,13 +626,7 @@ static void chain_publish_no_signal(const SynthChainPlan *sp, int chain_idx,
                                     int nb_pixels,
                                     int is_first_send_chain, int is_pb_chain)
 {
-    static uint8_t s_white_line[INTERNAL_SRC_MAX_PIXELS];
-    static volatile int s_white_init = 0;
-    if (!s_white_init)
-    {
-        memset((void *) s_white_line, 0xFF, sizeof(s_white_line));
-        s_white_init = 1;   /* benign race: every writer stores the same bytes */
-    }
+    const uint8_t *s_white_line = chain_white_line();
 
     int ls_bank = -1, has_lx = 0, has_lw = 0;
     for (int i = 0; i < sp->num_inserts; i++)
@@ -1693,8 +1721,9 @@ void *udpThread(void *arg) {
                     const int smSig = synth_source_base(
                         spSmp, CHAIN_SYNTH_COUNT + mod_owner_chain, db,
                         nb_pixels, &smbR, &smbG, &smbB);
-                    smp_no_signal = synth_chain_has_no_signal(spSmp, smSig)
-                                    || smSig < 0;
+                    /* STRICT: any unresolved base (-1) blocks the modulated
+                     * build — never build it from the live fallback. */
+                    smp_no_signal = (smSig < 0);
                 }
 
                 SynthChainPlan pre;          /* pre-marker processor sub-plan */
@@ -1761,10 +1790,12 @@ void *udpThread(void *arg) {
          * audio-thread mixer owns db's additive sections — this base frame
          * only keeps pipeline_process_frame ticking for the legacy commit
          * paths (no-LuxStral topologies + Path-B products). */
+        int legacy_src_sig;
         {
             const SynthChainPlan *spA = &frame_plan.synth[CHAIN_SYNTH_LUXSTRAL];
-            (void) synth_source_base(spA, CHAIN_SYNTH_LUXSTRAL, db, nb_pixels,
-                                     &src_R, &src_G, &src_B);
+            legacy_src_sig = synth_source_base(spA, CHAIN_SYNTH_LUXSTRAL, db,
+                                               nb_pixels,
+                                               &src_R, &src_G, &src_B);
         }
 #ifdef VST_MODE
         const int player_running_now = lux_sampler_is_playing();
@@ -1835,7 +1866,7 @@ void *udpThread(void *arg) {
                     const int pmSig = synth_source_base(
                         sp, CHAIN_SYNTH_COUNT + c, db, nb_pixels,
                         &pmR, &pmG, &pmB);
-                    if (pmSig >= 0 && !synth_chain_has_no_signal(sp, pmSig))
+                    if (pmSig >= 0)   /* a -1 base never runs the segment */
                         chain_run_premarker_segment(sp, audioBuffers,
                                                     pmR, pmG, pmB, nb_pixels);
                 }
@@ -1846,7 +1877,7 @@ void *udpThread(void *arg) {
             const uint8_t *sbR, *sbG, *sbB;
             const int sig = synth_source_base(sp, CHAIN_SYNTH_COUNT + c, db,
                                               nb_pixels, &sbR, &sbG, &sbB);
-            if (synth_chain_has_no_signal(sp, sig))
+            if (synth_chain_has_no_signal(sp, sig, score_playing_now))
             {
                 /* Path-B tap: published by the pb_no_signal block after the
                  * loop (is_pb_chain = 0 here — no double publish). */
@@ -1857,6 +1888,9 @@ void *udpThread(void *arg) {
                     pb_no_signal = 1;
                 continue;   /* no stream at any position of this chain */
             }
+            /* sig < 0 with a player substituting: sbR/G/B already point at
+             * the white line (synth_source_base P4-M1 contract) — pre-marker
+             * positions observe blank paper, never the device feed. */
 
             ChainExecOut ex;
             const int pb_here = (c == pb_chain) ? pb_marker : -1;
@@ -1949,11 +1983,14 @@ void *udpThread(void *arg) {
          * skipped compute can never be committed (no TOCTOU on the sampler
          * playing state between here and the commit). */
 #ifdef VST_MODE
+        /* legacy_src_sig >= 0: never compute (nor commit) the legacy pipeline
+         * from a no-signal base — src_* are the white line then (P4-M1). */
         s_udp_frame_live_pp =
-            (frame_plan.num_ls_sends == 0 &&
+            (legacy_src_sig >= 0 && frame_plan.num_ls_sends == 0 &&
              !lux_sampler_is_playing() && lux_sampler_is_passthrough());
 #else
         s_udp_frame_live_pp = 1;   /* legacy standalone: unconditional commit */
+        (void) legacy_src_sig;
 #endif
         if (s_udp_frame_live_pp) {
           if (pipeline_process_frame(src_R, src_G, src_B, &live_cfg, &preprocessed_temp) != 0) {
@@ -2291,7 +2328,7 @@ void internal_sources_process_tick(void *arg)
       const uint8_t *pmR, *pmG, *pmB;
       const int pmSig = synth_source_base(sp, CHAIN_SYNTH_COUNT + c, db,
                                           nb_pixels, &pmR, &pmG, &pmB);
-      if (pmSig >= 0 && !synth_chain_has_no_signal(sp, pmSig))
+      if (pmSig >= 0)   /* a -1 base never runs the segment */
           chain_run_premarker_segment(sp, audioBuffers, pmR, pmG, pmB,
                                       nb_pixels);
       continue;
@@ -2300,11 +2337,12 @@ void internal_sources_process_tick(void *arg)
     const uint8_t *sbR, *sbG, *sbB;
     const int sig = synth_source_base(sp, CHAIN_SYNTH_COUNT + c, db,
                                       nb_pixels, &sbR, &sbG, &sbB);
-    if (synth_chain_has_no_signal(sp, sig) || sig <= 0)
+    const int no_sig = synth_chain_has_no_signal(sp, sig, score_playing);
+    if (no_sig || sig <= 0)
     {
       /* sig==0 → the live path owns this chain's frames (device streaming
        * edge) — leave everything as-is; a true no-signal chain goes silent. */
-      if (synth_chain_has_no_signal(sp, sig))
+      if (no_sig)
         chain_publish_no_signal(sp, c, audioBuffers, nb_pixels,
                                 c == first_send_chain, c == pb_chain);
       continue;
