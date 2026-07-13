@@ -74,8 +74,7 @@ typedef struct synth_thread_worker_s {
   float *precomputed_wave_data; // size: (notes_per_thread * g_sp3ctra_config.audio_buffer_size)
   float *precomputed_volume;    // Dynamically allocated based on notes_per_thread
   
-  // Pre-computed pan positions and gains for each note (dynamically allocated)
-  float *precomputed_pan_position;
+  // Pre-computed stereo gains for each note (dynamically allocated)
   float *precomputed_left_gain;
   float *precomputed_right_gain;
 
