@@ -327,7 +327,7 @@ private:
     };
 
     /** Advance one voice by one 1 ms tick and render its processed frame
-     *  (trim/loop/crossfade/attack/decay/floor/EQ) into outR/G/B (zero-filled
+     *  (trim/loop/attack/decay/floor/EQ) into outR/G/B (zero-filled
      *  beyond outNb). Returns false when the voice ended this tick
      *  (LoopMode::NONE reached its boundary). */
     bool tickVoice(VoiceCtx& v, FrameSlot& slot, bool isScore,
@@ -357,13 +357,8 @@ private:
      *  every PLAYING slot is a voice, composited per-bank (level + mix mode). */
     void runSamplerSession();
 
-    // ── Transport fade-in state ────────────────────────────────────────────────
-    // Tracks transitions of sampler_freeze_mode so that pressing PLAY after
-    // HOLD (1) or STOP (2) produces a linear fade-in over sampler_fade_in_ms ms.
-    // Members are written/read exclusively on the FramePlayerThread → no sync needed.
-    int      transportPrevFreeze_  = 2;    // previous sampler_freeze_mode value
-    uint64_t transportFadeStartUs_ = 0;    // µs timestamp when last PLAY was pressed
-    float    transportFadeRamp_    = 1.0f; // current ramp multiplier [0..1]
+    // Transport fade-in on Play REMOVED (2026-07-13): sampler starts at full
+    // opacity immediately, so no cross-iteration fade-ramp state is needed.
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FramePlayerThread)
 };
@@ -677,15 +672,6 @@ public:
             slotParams[i].decayCurvePower.store(juce::jlimit(0.1f, 10.0f, v),
                                                 std::memory_order_relaxed);
     }
-    /** Loop crossfade / overlap length [0..0.5] of the loop zone.
-     *  Smooths the wrap in LOOP / INVERSE by fading the tail into the head. */
-    void setSlotLoopOverlap(int i, float v) noexcept
-    {
-        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
-            slotParams[i].loopOverlap.store(juce::jlimit(0.0f, 0.5f, v),
-                                            std::memory_order_relaxed);
-    }
-
     float    getSlotStartFrac(int i) const noexcept
     {
         if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0.0f;
@@ -791,12 +777,6 @@ public:
         if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0.0f;
         return slotParams[i].eqFloor.load(std::memory_order_relaxed);
     }
-    float    getSlotLoopOverlap(int i) const noexcept
-    {
-        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0.0f;
-        return slotParams[i].loopOverlap.load(std::memory_order_relaxed);
-    }
-
     // ── Image EQ (SCORE-style ±dB, boost + cut) — message thread writes, RT reads LUT ──
     // Stored as an encoded string in ScoreEqComponent::encodeState() format
     // ("minF|maxF|g0;g1;…"); rebuildFreqLut() turns it into a per-position dB LUT.
@@ -1096,7 +1076,7 @@ public:
     // Per-slot play-parameter XML — Non-RT only
     //
     // Single source of truth for serialising one slot's play parameters
-    // (trim, speed, loop, resume, fades, loop crossfade, frequency curves,
+    // (trim, speed, loop, resume, fades, frequency curves,
     // label). Shared by the .fslot format, the .sp3s session file and the
     // DAW state blob so no consumer can drift out of sync with the others.
     // =========================================================================
@@ -1328,7 +1308,6 @@ private:
         std::atomic<float> endFrac   { 1.0f }; // Normalised playback end   [0..1]
         std::atomic<float> speed     { 1.0f }; // Playback speed multiplier [0.1..8]
         std::atomic<int>   loopMode  { static_cast<int>(LoopMode::LOOP) };
-        std::atomic<float> loopOverlap { 0.0f };  // Loop crossfade length [0..0.5] of zone
         std::atomic<bool>  resumeMode  { false }; // Resume from last stop position
         std::atomic<float> blendAmount { 0.0f };  // Live darken-blend [0=sample, 1=full]
         std::atomic<float> attackLen      { 0.0f };  // Attack fade-in  [0=none, 1=full region]

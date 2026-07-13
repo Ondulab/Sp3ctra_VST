@@ -37,7 +37,8 @@ enum class ModuleType
     Reverb, Echo,                  // FX (appended to keep table indices stable)
     Timbre,                        // UTILS (appended to keep table indices stable)
     Equalizer,                     // FX (appended to keep table indices stable)
-    MidiScore                      // UTILS (appended to keep table indices stable)
+    MidiScore,                     // UTILS (appended to keep table indices stable)
+    Voice                          // UTILS (appended to keep table indices stable)
 };
 
 /** Behavioural role — drives the placement constraints. */
@@ -61,9 +62,9 @@ struct ModuleDesc
 //==============================================================================
 /** The whole catalogue. Table order MUST match the enum order (descFor indexes
  *  by ordinal); the catalogue panel buckets rows by category for display. */
-inline const std::array<ModuleDesc, 18>& moduleTable()
+inline const std::array<ModuleDesc, 19>& moduleTable()
 {
-    static const std::array<ModuleDesc, 18> table = {{
+    static const std::array<ModuleDesc, 19> table = {{
         // type                  category          role                  name                       colour       enableParam          id
         { ModuleType::Sp3ctra,     ModuleCat::SRC,   ModuleRole::Source,   "SP3CTRA",                 0xff68788f,  "",                  "Sp3ctra"  },
         // Media sources are engine singletons (V1 decision C): one global
@@ -91,6 +92,7 @@ inline const std::array<ModuleDesc, 18>& moduleTable()
         { ModuleType::Timbre,      ModuleCat::UTILS, ModuleRole::Util,     "TIMBRE",                  0xffd97b52,  "",                  "Timbre"   },
         { ModuleType::Equalizer,   ModuleCat::FX,    ModuleRole::Processor,"EQ",                      0xffe0847a,  "",                  "Equalizer" },
         { ModuleType::MidiScore,   ModuleCat::UTILS, ModuleRole::Util,     "MIDI SCORE",              0xffc9a13e,  "",                  "MidiScore" },
+        { ModuleType::Voice,       ModuleCat::UTILS, ModuleRole::Util,     "VOICE",                   0xffd06a9e,  "",                  "Voice"    },
     }};
     return table;
 }

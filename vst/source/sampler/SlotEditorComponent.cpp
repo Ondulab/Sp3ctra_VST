@@ -156,7 +156,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     addAndMakeVisible(loadBtn);
 
     // ── Labels ────────────────────────────────────────────────────────────────
-    for (auto* lbl : { &speedLabel, &loopLabel, &loopXfLabel })
+    for (auto* lbl : { &speedLabel, &loopLabel })
     {
         lbl->setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
         lbl->setColour(juce::Label::textColourId, juce::Colour(0xffb0b0c0));
@@ -223,23 +223,6 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
         addAndMakeVisible(loopBtns[k]);
     }
     refreshLoopButtons();
-
-    // ── Loop crossfade (overlap) slider — 0..50 % of the loop zone ────────────
-    loopXfSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    loopXfSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                 Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
-    loopXfSlider.setRange(0.0, 50.0, 1.0);
-    loopXfSlider.setTextValueSuffix("%");
-    loopXfSlider.setValue(0.0, juce::dontSendNotification);
-    loopXfSlider.setTooltip("Loop crossfade: fades tail into head at the wrap "
-                            "(LOOP / INVERSE)");
-    loopXfSlider.onValueChange = [this]
-    {
-        if (auto* fs = processor.getSampler(samplerIndex_))
-            fs->setSlotLoopOverlap(selectedSlot,
-                static_cast<float>(loopXfSlider.getValue()) * 0.01f);
-    };
-    addAndMakeVisible(loopXfSlider);
 
     // ── Image EQ (SCORE-style ±24 dB) — separate panel below the image ────────
     eqEditor.onChange = [this]
@@ -429,9 +412,6 @@ void SlotEditorComponent::refreshSliderValues()
     fadeOutPowerSlider.setValue(
         static_cast<double>(fs->getSlotDecayCurvePower(selectedSlot)),
         juce::dontSendNotification);
-    loopXfSlider.setValue(
-        static_cast<double>(fs->getSlotLoopOverlap(selectedSlot)) * 100.0,
-        juce::dontSendNotification);
     refreshFreqCurve();
 }
 
@@ -502,7 +482,6 @@ void SlotEditorComponent::rebindMidiLearn()
 
     // Value play params. (K::Img now learns on the grid's bank level fader.)
     add(speedSlider,        K::Speed);
-    add(loopXfSlider,       K::LoopXf);
     add(floorSlider,        K::Floor);
     add(resumeToggle,       K::Resume);
     add(overdubToggle,      K::Overdub);          // engine-wide (slot ignored)
@@ -737,7 +716,7 @@ void SlotEditorComponent::paint(juce::Graphics& g)
 // resized
 //
 // Two parameter columns below the title badge, then the merged editor:
-//   Left column  : [REC][PLAY][CLEAR] · Speed · Loop · Loop XF · Floor
+//   Left column  : [REC][PLAY][CLEAR] · Speed · Loop · Floor
 //   Right column : [CROP][SAVE][LOAD] · Resume · Overdub · Curve · Power
 //   Bottom       : SlotSpectralEditorComponent (fills the remaining height)
 // (IMG removed — the bank level lives in the grid's per-bank mixer.)
@@ -786,10 +765,6 @@ void SlotEditorComponent::resized()
             for (int k = 0; k < 4; ++k)
                 loopBtns[k].setBounds(ctrlX + k * (bW + bGap), ry, bW, rowH);
         }
-        ry += step;
-
-        loopXfLabel .setBounds(leftX, ry, lW, rowH);
-        loopXfSlider.setBounds(ctrlX, ry, ctrlW, rowH);
         ry += step;
 
         floorLabel .setBounds(leftX, ry, lW, rowH);

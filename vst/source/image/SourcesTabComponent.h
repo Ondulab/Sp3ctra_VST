@@ -3,9 +3,9 @@
  * @brief ZONE 3 (PLAY face) — SOURCE CIS transport, contextual to its chain.
  *
  * Each SOURCE CIS block is bound to the chain it sits on.  Selecting it shows
- * ONLY that chain's transport (play / hold / stop + fade-in):
- *   • Chain 1  → sampler transport  (samplerFreezeMode / samplerFadeInMs)
- *   • Chain 2  → live frame transport (imageFreezeMode  / imageFadeInMs)
+ * ONLY that chain's transport (play / hold / stop):
+ *   • Chain 1  → sampler transport  (samplerFreezeMode)
+ *   • Chain 2  → live frame transport (imageFreezeMode)
  *
  * The RAW upstream UDP gate is the instrument's own signal and is no longer
  * surfaced here — chains are migrating toward modular slots, so the source
@@ -41,12 +41,6 @@ public:
         addAndMakeVisible(playBtn);
         addAndMakeVisible(holdBtn);
         addAndMakeVisible(stopBtn);
-
-        fadeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        fadeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, kTextBoxW, kCtrlH);
-        fadeSlider.setTextValueSuffix(" ms");
-        fadeSlider.setNumDecimalPlacesToDisplay(0);
-        addAndMakeVisible(fadeSlider);
 
         // ── Acquisition speed (frame-advance brake) — GLOBAL source control ──
         // "Vitesse d'acquisition": brakes how often the live CIS line advances
@@ -97,17 +91,12 @@ public:
     {
         activeChain_ = (chain == 2) ? 2 : 1;
 
-        auto& apvts = processor.getAPVTS();
-        fadeAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, fadeParamId(), fadeSlider));
-
         // Right-click MIDI Learn — follows the selected chain's params. The
         // three transport buttons share the freeze-mode param (one CC spans
         // 0=play / mid=hold / 1=stop), so each carries the same mapping badge;
         // the acquisition rate is global (bound once semantics, rebound cheap).
         learnAtts_.clear();
         auto& mm = processor.getMidiMap();
-        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, fadeSlider,    fadeParamId()));
         learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, playBtn,       freezeParamId()));
         learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, holdBtn,       freezeParamId()));
         learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, stopBtn,       freezeParamId()));
@@ -131,17 +120,13 @@ public:
         g.drawText(activeChain_ == 1 ? "CHAIN 1" : "CHAIN 2",
                    0, 4, w, 14, juce::Justification::centred);
 
-        // All row labels share one right-justified column (Fade In + Acquisition)
+        // All row labels share one right-justified column (Acquisition group)
         // so every control lines up on the same left edge.
         auto rowLabel = [&] (const char* t, int rowY)
         {
             g.drawText(t, formX(), rowY, labelColW() - 8, kCtrlH,
                        juce::Justification::centredRight);
         };
-
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-        g.setColour(juce::Colour(0xffd2d8e8));
-        rowLabel("Fade In", fadeRowY());
 
         // ── Acquisition speed section header ────────────────────────────────────
         g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
@@ -173,7 +158,6 @@ public:
         // Unified form grid — every control fills the same column [ctrlX, +ctrlW].
         const int cx = ctrlX();
         const int cw = ctrlW();
-        fadeSlider     .setBounds(cx, fadeRowY(), cw, kCtrlH);
         acqModeCombo   .setBounds(cx, acqRowY(0), cw, kCtrlH);
         acqRateSlider  .setBounds(cx, acqRowY(1), cw, kCtrlH);
         acqDivCombo    .setBounds(cx, acqRowY(2), cw, kCtrlH);
@@ -185,8 +169,6 @@ private:
     int activeChain_ { 1 };
 
     IconTextButton playBtn, holdBtn, stopBtn;
-    juce::Slider   fadeSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> fadeAttach;
     std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
 
     // ── Acquisition speed (global frame-advance brake) ──────────────────────────
@@ -201,10 +183,6 @@ private:
     const char* freezeParamId() const noexcept
     {
         return activeChain_ == 1 ? "samplerFreezeMode" : "imageFreezeMode";
-    }
-    const char* fadeParamId() const noexcept
-    {
-        return activeChain_ == 1 ? "samplerFadeInMs" : "imageFadeInMs";
     }
 
     void setFreezeMode(float v)
@@ -232,8 +210,7 @@ private:
     int ctrlW()    const { return formW() - kLabelColW - kColGap; }
 
     int transportY() const { return 24; }
-    int fadeRowY()   const { return transportY() + Sp3ctraTheme::kIconBtnSize + 14; }
-    int acqHeaderY() const { return fadeRowY() + kRowPitch + 6; }   // section header line
+    int acqHeaderY() const { return transportY() + Sp3ctraTheme::kIconBtnSize + 20; } // section header line
     int acqRowY(int i) const { return acqHeaderY() + 22 + i * kRowPitch; }
 
     // Grey out controls that don't apply to the current gate mode.

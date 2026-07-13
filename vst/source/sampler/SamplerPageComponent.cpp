@@ -316,7 +316,7 @@ void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
     root.setAttribute("version", 2);
 
     // Per-slot play parameters, one block per engine (shared serialisation —
-    // same fields as .fslot / DAW state, incl. loop crossfade, fade curves
+    // same fields as .fslot / DAW state, incl. fade curves
     // and frequency curves that v1 silently dropped).
     for (int e = 0; e < 2; ++e)
     {
@@ -562,7 +562,7 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile, bool isA
     // ── Apply per-slot parameters ─────────────────────────────────────────────
     // v2: one <SlotParams engine="e"> block per engine. v1: a single block,
     // no engine attribute → engine A. Shared slotParamsFromXml handles every
-    // field (incl. loop crossfade, fade curves and frequency curves).
+    // field (incl. fade curves and frequency curves).
     if (! skipSlotParams)
     {
         for (auto* slotsXml : xmlDoc->getChildWithTagNameIterator("SlotParams"))

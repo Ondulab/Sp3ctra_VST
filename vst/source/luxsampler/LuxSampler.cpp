@@ -1308,7 +1308,6 @@ void LuxSampler::resetSlotPlayParams(int i) noexcept
     setSlotMixMode       (i, SlotMixMode::DARKEN);
     setSlotTrebleCut     (i, 0.0f);
     setSlotBassCut       (i, 0.0f);
-    setSlotLoopOverlap   (i, 0.0f);
     setSlotFadeCurveType (i, FadeCurveType::LINEAR); // writes attack+decay too
     setSlotFadeCurvePower(i, 1.0f);
     setSlotLabel         (i, "");
@@ -1384,7 +1383,6 @@ void LuxSampler::copySlotTo(int srcIdx, int dstIdx)
     setSlotAttackCurvePower(dstIdx, getSlotAttackCurvePower(srcIdx));
     setSlotDecayCurveType  (dstIdx, getSlotDecayCurveType  (srcIdx));
     setSlotDecayCurvePower (dstIdx, getSlotDecayCurvePower (srcIdx));
-    setSlotLoopOverlap   (dstIdx, getSlotLoopOverlap   (srcIdx));
     setSlotEq            (dstIdx, getSlotEq            (srcIdx));
     setSlotEqFloor       (dstIdx, getSlotEqFloor       (srcIdx));
 
@@ -2172,7 +2170,6 @@ void LuxSampler::slotParamsToXml(int slotIndex, juce::XmlElement& xml) const
     xml.setAttribute("mixMode",        static_cast<int>(getSlotMixMode(slotIndex)));
     xml.setAttribute("trebleCut",      static_cast<double>(getSlotTrebleCut(slotIndex)));
     xml.setAttribute("bassCut",        static_cast<double>(getSlotBassCut(slotIndex)));
-    xml.setAttribute("loopOverlap",    static_cast<double>(getSlotLoopOverlap(slotIndex)));
     // Image EQ (SCORE-style ±dB) → encoded "minF|maxF|g0;g1;…" + pre-EQ floor.
     xml.setAttribute("imageEq",  getSlotEq(slotIndex));
     xml.setAttribute("eqFloor",  static_cast<double>(getSlotEqFloor(slotIndex)));
@@ -2218,7 +2215,7 @@ void LuxSampler::slotParamsFromXml(int slotIndex, const juce::XmlElement& xml)
         setSlotDecayCurveType(slotIndex, static_cast<FadeCurveType>(xml.getIntAttribute("decayCurveType", 0)));
     if (xml.hasAttribute("decayCurvePower"))
         setSlotDecayCurvePower(slotIndex, static_cast<float>(xml.getDoubleAttribute("decayCurvePower", 1.0)));
-    setSlotLoopOverlap   (slotIndex, static_cast<float>(xml.getDoubleAttribute("loopOverlap",   0.0)));
+    // Legacy "loopOverlap" (Loop XF, feature removed) is intentionally ignored.
     // Image EQ (SCORE-style ±dB). Legacy freqCurveLF/HF / trebleCut / bassCut are
     // no longer restored (the EQ was redesigned); a flat EQ is the safe default.
     setSlotEq(slotIndex, xml.getStringAttribute("imageEq", ""));
@@ -2730,8 +2727,8 @@ bool FramePlayerThread::resumeScoreRelaySlot()
 
 // ── tickVoice ────────────────────────────────────────────────────────────────
 // Advance ONE voice by one 1 ms tick and render its processed frame into
-// outR/G/B: on-the-fly param re-read, loop/direction/range handling, loop
-// crossfade, attack/decay fades, pre-EQ floor and image EQ. The bank mixer
+// outR/G/B: on-the-fly param re-read, loop/direction/range handling,
+// attack/decay fades, pre-EQ floor and image EQ. The bank mixer
 // (level + mix mode) is NOT applied here — the caller composites.
 // Returns false when the voice ended this tick (LoopMode::NONE reached its
 // boundary); the overshot play head is left unclamped so a Resume-mode restart
@@ -2886,68 +2883,9 @@ bool FramePlayerThread::tickVoice(VoiceCtx& v, FrameSlot& slot, bool isScore,
     std::memset(outG, 0, LuxSamplerConstants::MAX_PIXELS);
     std::memset(outB, 0, LuxSamplerConstants::MAX_PIXELS);
 
-    // ── Loop crossfade (overlap): fade the tail into the head so the wrap
-    //    is seamless in LOOP / INVERSE. Blend two source frames HERE, before
-    //    the effect chain, so effects run once. xfW ramps 0→1 over the last
-    //    Lf frames toward the active boundary; the "other" frame is the
-    //    matching head frame at the same offset from the opposite bound. ──────
-    const float p_overlap = sampler.getSlotLoopOverlap(slotIdx);
-    int   xfOther = -1;
-    float xfW     = 0.0f;
-    if (p_overlap > 0.001f && zoneLen > 2
-        && (p_loop == LoopMode::LOOP || p_loop == LoopMode::INVERSE))
-    {
-        const int Lf = juce::jlimit(1, zoneLen / 2,
-                                    static_cast<int>(p_overlap * static_cast<float>(zoneLen)));
-        if (v.direction > 0)   // LOOP forward: approaching endFrame
-        {
-            const int distToEnd = (endFrame - 1) - slot.play_head;
-            if (distToEnd < Lf)
-            {
-                xfW     = static_cast<float>(Lf - distToEnd) / static_cast<float>(Lf);
-                xfOther = startFrame + (Lf - 1 - distToEnd);
-            }
-        }
-        else                 // INVERSE backward: approaching startFrame
-        {
-            const int distToStart = slot.play_head - startFrame;
-            if (distToStart < Lf)
-            {
-                xfW     = static_cast<float>(Lf - distToStart) / static_cast<float>(Lf);
-                xfOther = (endFrame - 1) - (Lf - 1 - distToStart);
-            }
-        }
-        xfOther = juce::jlimit(0, slot.frame_count - 1, xfOther);
-    }
-
-    if (xfOther >= 0 && xfW > 0.0001f)
-    {
-        const CapturedFrame& fb = slot.frames[xfOther];
-        const int nb2    = std::min(static_cast<int>(fb.pixel_count),
-                                    LuxSamplerConstants::MAX_PIXELS);
-        const int nblend = std::min(nb, nb2);
-        for (int px = 0; px < nblend; ++px)
-        {
-            outR[px] = static_cast<uint8_t>((float) frame.R[px]
-                + xfW * ((float) fb.R[px] - (float) frame.R[px]));
-            outG[px] = static_cast<uint8_t>((float) frame.G[px]
-                + xfW * ((float) fb.G[px] - (float) frame.G[px]));
-            outB[px] = static_cast<uint8_t>((float) frame.B[px]
-                + xfW * ((float) fb.B[px] - (float) frame.B[px]));
-        }
-        for (int px = nblend; px < nb; ++px)  // uncovered tail → primary frame
-        {
-            outR[px] = frame.R[px];
-            outG[px] = frame.G[px];
-            outB[px] = frame.B[px];
-        }
-    }
-    else
-    {
-        std::memcpy(outR, frame.R, static_cast<size_t>(nb));
-        std::memcpy(outG, frame.G, static_cast<size_t>(nb));
-        std::memcpy(outB, frame.B, static_cast<size_t>(nb));
-    }
+    std::memcpy(outR, frame.R, static_cast<size_t>(nb));
+    std::memcpy(outG, frame.G, static_cast<size_t>(nb));
+    std::memcpy(outB, frame.B, static_cast<size_t>(nb));
 
     // ── Read per-fade curve params once per frame ────────────────────────────
     const auto   p_atkCurveType  = sampler.getSlotAttackCurveType(slotIdx);
@@ -3246,58 +3184,17 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
         const int   liveFreeze = g_sp3ctra_config.image_freeze_mode;
         const float liveOp     = g_sp3ctra_config.image_live_opacity;
         const float smpOp      = g_sp3ctra_config.image_sampler_opacity;
-        const int   fadeInMs   = g_sp3ctra_config.sampler_fade_in_ms;
+        // ── Transport fade-in on Play: REMOVED (2026-07-13) ───────────────
+        // The sampler now starts at full opacity immediately on PLAY — there
+        // is no HOLD/STOP → PLAY volume/brightness ramp. The `sampler_fade_in_ms`
+        // parameter is inert for the sampler chain.
 
-        // ── Transport fade-in: HOLD/STOP → PLAY ───────────────────────────
-        // Linear ramp [0→1] over sampler_fade_in_ms ms.
-        // Uses FramePlayerThread member state for cross-iteration tracking.
-        {
-            const uint64_t nowUs = currentTimeUs();
-            if (seqDriven || isScore)
-            {
-                // Sequencer-driven: always full gain, no UI transport fade management.
-                // The sequencer step advance is the only gating authority; the
-                // sampler Transport UI must not attenuate the injected frames.
-                transportFadeRamp_   = 1.0f;
-                transportPrevFreeze_ = 0; /* record as PLAY for next iteration */
-            }
-            else if (smpFreeze == 0)  // PLAY
-            {
-                if (transportPrevFreeze_ != 0 && fadeInMs > 0)
-                {
-                    // Transition detected (HOLD/STOP → PLAY): reset to silence.
-                    transportFadeStartUs_ = nowUs;
-                    transportFadeRamp_    = 0.0f;
-                }
-                if (fadeInMs > 0 && transportFadeRamp_ < 1.0f)
-                {
-                    const float elapsedMs = static_cast<float>(
-                        nowUs - transportFadeStartUs_) / 1000.0f;
-                    transportFadeRamp_ = juce::jlimit(
-                        0.0f, 1.0f,
-                        elapsedMs / static_cast<float>(fadeInMs));
-                }
-                else if (fadeInMs == 0)
-                {
-                    transportFadeRamp_ = 1.0f; // no fade configured
-                }
-            }
-            else
-            {
-                // HOLD (1) or STOP (2): reset ramp so the next PLAY triggers fade.
-                transportFadeRamp_ = 0.0f;
-            }
-            transportPrevFreeze_ = smpFreeze;
-        }
-
-        // Effective sampler opacity = user opacity × fade ramp.
-        // At ramp=0 → effectiveSmpOp=0 → frame=white (silence).
-        // At ramp=1 → effectiveSmpOp=smpOp → normal brightness.
+        // Effective sampler opacity = user crossfader opacity (no fade ramp).
+        // At effectiveSmpOp=0 → frame=white (silence); =smpOp → normal brightness.
         //
-        // Plan-aware (M7): when the additive path is sampler-relayed,
-        // bypass the MIX crossfader opacity — only the transport fade
-        // ramp applies. The crossfader balance (smpOp) is only
-        // meaningful for the legacy MIX blending.
+        // Plan-aware (M7): when the additive path is sampler-relayed, bypass the
+        // MIX crossfader opacity (relay/Score always full opacity). The crossfader
+        // balance (smpOp) is only meaningful for the legacy MIX blending.
         const bool addRelayed = chain_additive_player_candidate(
             0, sampler.getEngineIndex()) != 0;
         // ── Module bypass ───────────────────────────────────────────────
@@ -3313,12 +3210,12 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
         const float effectiveSmpOp = moduleIgnored
             ? 0.0f
             : (addRelayed || isScore)
-                ? transportFadeRamp_           // relay/Score: full opacity, fade only
-                : smpOp * transportFadeRamp_;  // legacy MIX: crossfader × fade
+                ? 1.0f      // relay/Score: full opacity
+                : smpOp;    // legacy MIX: crossfader balance
 
         if (smpFreeze != 2) // Do not inject when sampler transport is STOP
         {
-            // 1. Apply sampler opacity + transport fade-in ramp
+            // 1. Apply sampler opacity (crossfader balance)
             if (effectiveSmpOp < 0.999f)
             {
                 const float inv = 1.0f - effectiveSmpOp;

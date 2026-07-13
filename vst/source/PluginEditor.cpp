@@ -135,6 +135,8 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     // MIDI SCORE — MIDI-file → printable score generator (no SETUP face)
     midiScorePage = std::make_unique<MidiScoreGenTabComponent>(audioProcessor);
     zone3Content.addChildComponent(midiScorePage.get());
+    voicePage = std::make_unique<VoiceGenTabComponent>(audioProcessor);
+    zone3Content.addChildComponent(voicePage.get());
 
     videoScrollPage = std::make_unique<VideoScrollPage>(audioProcessor);
     zone3Content.addChildComponent(videoScrollPage.get());
@@ -343,6 +345,7 @@ bool Sp3ctraAudioProcessorEditor::blockHasSetup(ChainBlockId id) noexcept
         && id != ChainBlockId::Reverb    && id != ChainBlockId::Echo
         && id != ChainBlockId::Equalizer
         && id != ChainBlockId::Timbre    && id != ChainBlockId::MidiScore
+        && id != ChainBlockId::Voice
         && id != ChainBlockId::None
         && id != ChainBlockId::ImageSrc  && id != ChainBlockId::VideoSrc
         && id != ChainBlockId::CameraSrc;
@@ -380,6 +383,7 @@ void Sp3ctraAudioProcessorEditor::applyZone3Visibility()
     if (scorePage)       scorePage      ->setVisible(play && id == ChainBlockId::Score);
     if (timbrePage)      timbrePage     ->setVisible(play && id == ChainBlockId::Timbre);
     if (midiScorePage)   midiScorePage  ->setVisible(play && id == ChainBlockId::MidiScore);
+    if (voicePage)       voicePage      ->setVisible(play && id == ChainBlockId::Voice);
     if (reverbPage)      reverbPage     ->setVisible(play && id == ChainBlockId::Reverb);
     if (echoPage)        echoPage       ->setVisible(play && id == ChainBlockId::Echo);
     if (eqPage)          eqPage         ->setVisible(play && id == ChainBlockId::Equalizer);
@@ -598,6 +602,10 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
             break;
         // MIDI SCORE is an offline generator too — same neutral view.
         case ChainBlockId::MidiScore:
+            sources = { VisualizerMode::MODULATED };
+            break;
+        // VOICE (TTS → vocal spectrum) is an offline generator too — same view.
+        case ChainBlockId::Voice:
             sources = { VisualizerMode::MODULATED };
             break;
         // SEQUENCER drives the sampler engines — neutral Modulated view in zone 1.
@@ -1079,6 +1087,7 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
             case ChainBlockId::Equalizer:
             case ChainBlockId::Timbre:
             case ChainBlockId::MidiScore:
+            case ChainBlockId::Voice:
             case ChainBlockId::None:
                 break;   // no SETUP face (blockHasSetup == false)
         }
@@ -1118,6 +1127,8 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
                 top = timbrePage.get();      topMinH = TimbreGenTabComponent::kPreferredH; break;
             case ChainBlockId::MidiScore:
                 top = midiScorePage.get();   topMinH = MidiScoreGenTabComponent::kPreferredH; break;
+            case ChainBlockId::Voice:
+                top = voicePage.get();       topMinH = VoiceGenTabComponent::kPreferredH; break;
             case ChainBlockId::VideoScroll:
                 top = videoScrollPage.get(); topMinH = VideoScrollPage::kPreferredH; break;
             case ChainBlockId::Reverb:
