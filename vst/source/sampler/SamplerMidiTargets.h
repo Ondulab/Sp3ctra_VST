@@ -36,7 +36,7 @@ namespace SamplerMidiTargets
     // FadeCurveType types used in the read/apply casts below.
     enum class Kind
     {
-        Speed = 0, LoopMode, LoopXf, Img, Floor, Resume,
+        Speed = 0, LoopMode, Img, Floor, Resume,
         FadeInType, FadeInPow, FadeOutType, FadeOutPow,
         Overdub,                     // engine-wide (slot ignored)
         Rec, Play, Save, Clear,      // action targets (slot-addressed)
@@ -52,7 +52,6 @@ namespace SamplerMidiTargets
         {
             case Kind::Speed:       return "speed";
             case Kind::LoopMode:    return "loopmode";
-            case Kind::LoopXf:      return "loopxf";
             case Kind::Img:         return "img";
             case Kind::Floor:       return "floor";
             case Kind::Resume:      return "resume";
@@ -151,7 +150,7 @@ namespace SamplerMidiTargets
     {
         switch (k)
         {
-            case Kind::Speed: case Kind::LoopXf: case Kind::Img: case Kind::Floor:
+            case Kind::Speed: case Kind::Img: case Kind::Floor:
             case Kind::FadeInPow: case Kind::FadeOutPow:
             case Kind::EqBand:                             return 0;    // continuous
             case Kind::Resume: case Kind::Overdub:         return 2;    // 2-state
@@ -185,7 +184,6 @@ namespace SamplerMidiTargets
         switch (k)
         {
             case Kind::Speed:       return speedRange().convertTo0to1(fs.getSlotSpeed(slot));
-            case Kind::LoopXf:      return juce::jlimit(0.0f, 1.0f, fs.getSlotLoopOverlap(slot) * 2.0f);
             case Kind::Img:         return juce::jlimit(0.0f, 1.0f, 1.0f - fs.getSlotBrightnessLift(slot));
             case Kind::Floor:       return fs.getSlotEqFloor(slot);
             case Kind::FadeInPow:   return powerRange().convertTo0to1(fs.getSlotAttackCurvePower(slot));
@@ -208,7 +206,6 @@ namespace SamplerMidiTargets
         switch (k)
         {
             case Kind::Speed:       fs.setSlotSpeed(slot, speedRange().convertFrom0to1(n));            break;
-            case Kind::LoopXf:      fs.setSlotLoopOverlap(slot, n * 0.5f);                              break;
             case Kind::Img:         fs.setSlotBrightnessLift(slot, 1.0f - n);                           break;
             case Kind::Floor:       fs.setSlotEqFloor(slot, n);                                         break;
             case Kind::FadeInPow:   fs.setSlotAttackCurvePower(slot, powerRange().convertFrom0to1(n));  break;

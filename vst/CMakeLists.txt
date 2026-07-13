@@ -33,6 +33,34 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(JUCE)
 
+# ---------------------------------------------------------------------------
+# VOICE module — offline TTS engine (sherpa-onnx running Piper VITS voices).
+# Statically linked from the prebuilt arm64 archive: no dylibs, no rpath, no
+# codesign changes. OFF compiles PiperTts.cpp as a stub (module shows a
+# "TTS engine not available" banner). espeak-ng inside the archive is GPLv3 —
+# a distributed binary with TTS enabled is a GPL-encumbered combined work.
+# ---------------------------------------------------------------------------
+option(SP3CTRA_ENABLE_TTS "Enable the VOICE module TTS engine (sherpa-onnx, static)" ON)
+
+if(APPLE AND SP3CTRA_ENABLE_TTS)
+    set(SP3CTRA_SHERPA_VER 1.13.4)
+    FetchContent_Declare(sherpa_onnx_libs
+        URL https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SP3CTRA_SHERPA_VER}/sherpa-onnx-v${SP3CTRA_SHERPA_VER}-osx-arm64-static-lib.tar.bz2
+        URL_HASH SHA256=57801db2bbb786a5d343f515a38ff210b401842338bdc804fa075312d1cd2404
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_MakeAvailable(sherpa_onnx_libs)
+
+    # The -static-lib archive ships no headers; fetch the single self-contained
+    # C header at the same pinned tag.
+    set(SP3CTRA_SHERPA_INCLUDE ${CMAKE_BINARY_DIR}/sherpa-onnx-include)
+    file(DOWNLOAD
+        https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v${SP3CTRA_SHERPA_VER}/sherpa-onnx/c-api/c-api.h
+        ${SP3CTRA_SHERPA_INCLUDE}/sherpa-onnx/c-api/c-api.h
+        EXPECTED_HASH SHA256=587e1039cc4ee242169494f3c0ba5baecc22482341168d88d57db965e1e77fa9
+    )
+endif()
+
 # Define the plugin with sources directly
 juce_add_plugin(Sp3ctraVST
     COMPANY_NAME "Ondulab"
@@ -135,6 +163,15 @@ target_sources(Sp3ctraVST
         source/sources/ui/MediaSourcePage.h
         source/sources/ui/MediaSourceSetupPanel.cpp
         source/sources/ui/MediaSourceSetupPanel.h
+
+        # VOICE module — offline TTS (Piper voices via sherpa-onnx) + AUTO
+        # language detection (NLLanguageRecognizer) + generation job + page
+        source/tts/PiperTts.cpp
+        source/tts/PiperTts.h
+        source/tts/LanguageDetector.h
+        source/tts/LanguageDetector.mm
+        source/tts/VoiceGenJob.h
+        source/image/VoiceGenTabComponent.h
 
         # MIDI mapping (CC/Note → any play parameter, MIDI learn)
         source/midi/MidiMappingEngine.cpp
@@ -386,7 +423,34 @@ if(APPLE)
         "-framework CoreMedia"
         "-framework CoreVideo"
         "-framework QuartzCore"
+        "-framework NaturalLanguage"   # VOICE — AUTO language detection
     )
+endif()
+
+# VOICE module — sherpa-onnx static libs (link order from the official .pc;
+# libkissfft-float members only load for symbols the in-tree KissFFT doesn't
+# define — same float ABI, so either resolution is correct).
+if(APPLE AND SP3CTRA_ENABLE_TTS)
+    target_include_directories(Sp3ctraVST PRIVATE ${SP3CTRA_SHERPA_INCLUDE})
+    # Absolute paths: plain -l names don't propagate their -L dir from the
+    # shared-code static lib to the Standalone/VST3/AU link steps.
+    set(SP3CTRA_SHERPA_LIBDIR ${sherpa_onnx_libs_SOURCE_DIR}/lib)
+    target_link_libraries(Sp3ctraVST PRIVATE
+        ${SP3CTRA_SHERPA_LIBDIR}/libsherpa-onnx-c-api.a
+        ${SP3CTRA_SHERPA_LIBDIR}/libsherpa-onnx-core.a
+        ${SP3CTRA_SHERPA_LIBDIR}/libkaldi-decoder-core.a
+        ${SP3CTRA_SHERPA_LIBDIR}/libsherpa-onnx-kaldifst-core.a
+        ${SP3CTRA_SHERPA_LIBDIR}/libsherpa-onnx-fstfar.a
+        ${SP3CTRA_SHERPA_LIBDIR}/libsherpa-onnx-fst.a
+        ${SP3CTRA_SHERPA_LIBDIR}/libkaldi-native-fbank-core.a
+        ${SP3CTRA_SHERPA_LIBDIR}/libkissfft-float.a
+        ${SP3CTRA_SHERPA_LIBDIR}/libpiper_phonemize.a
+        ${SP3CTRA_SHERPA_LIBDIR}/libespeak-ng.a
+        ${SP3CTRA_SHERPA_LIBDIR}/libucd.a
+        ${SP3CTRA_SHERPA_LIBDIR}/libonnxruntime.a
+        ${SP3CTRA_SHERPA_LIBDIR}/libssentencepiece_core.a
+    )
+    target_compile_definitions(Sp3ctraVST PRIVATE SP3CTRA_HAS_TTS=1)
 endif()
 
 # Standard settings

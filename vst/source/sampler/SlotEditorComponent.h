@@ -244,7 +244,7 @@ private:
  * @brief Edit panel for the currently selected LuxSampler slot.
  *
  * Layout — parameters in TWO columns on top, one merged editor below:
- *   Left column  : [REC][PLAY][CLEAR] · Speed · Loop · Loop XF · Floor
+ *   Left column  : [REC][PLAY][CLEAR] · Speed · Loop · Floor
  *   Right column : [CROP][SAVE][LOAD] · Resume · Overdub · Curve · Power
  * (IMG removed — the bank level now lives in the grid's per-bank mixer.)
  *   Bottom       : SlotSpectralEditorComponent — the authentic captured image
@@ -346,10 +346,6 @@ private:
 
     // ── Loop mode (4 radio-style icon buttons: NONE / LOOP / INVERSE / PINGPONG) ──
     LoopModeButton loopBtns[4];
-
-    // ── Loop crossfade (overlap) ──────────────────────────────────────────────
-    juce::Label  loopXfLabel { {}, "Loop XF" };
-    juce::Slider loopXfSlider; // 0–50 % of the loop zone
 
     // ── Resume mode toggle ────────────────────────────────────────────────────
     juce::ToggleButton resumeToggle { "Resume from last position" };

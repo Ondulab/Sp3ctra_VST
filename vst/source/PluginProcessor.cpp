@@ -5,6 +5,7 @@
 #include "sources/MediaSourceEngines.h"              // M9 — IMAGE/VIDEO/CAMERA engines
 #include "sources/MediaSourceService.h"              // M9 — source service thread
 #include "sampler/SamplerMidiTargets.h"              // MIDI-Learn virtual targets (sampler play params)
+#include "tts/PiperTts.h"                            // VOICE — offline TTS (startup smoke test)
 
 // C headers still used directly by this file
 extern "C" {
@@ -1333,7 +1334,11 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     log_info("VST", "Sp3ctraAudioProcessor: Constructor - Initializing VST plugin");
     log_info("VST", "  Using APVTS (AudioProcessorValueTreeState) for parameters");
     log_info("VST", "=============================================================");
-    
+
+    // VOICE module TTS diagnostic — no-op unless SP3CTRA_TTS_SMOKE is set.
+    PiperTts::runSmokeTestIfRequested();
+
+
     // Cache parameter pointers for fast access
     udpPortParam = apvts.getRawParameterValue(PARAM_UDP_PORT);
     udpByte1Param = apvts.getRawParameterValue(PARAM_UDP_BYTE1);
@@ -4794,14 +4799,14 @@ void Sp3ctraAudioProcessor::teardownAbsentModules(const std::set<ModuleType>& no
     auto removed = [&](ModuleType t)
     { return chainActiveTypes_.count(t) > 0 && now.count(t) == 0; };
 
-    // SCORE / TIMBRE / MIDI SCORE share the score-player channel: free the
-    // frame buffer only when the LAST of the three leaves (removing SCORE must
-    // not cut a playing TIMBRE or MIDI SCORE page, and vice versa). SCORE's
-    // settings reset stays SCORE-only.
+    // SCORE / TIMBRE / MIDI SCORE / VOICE share the score-player channel: free
+    // the frame buffer only when the LAST of the four leaves (removing SCORE
+    // must not cut a playing TIMBRE, MIDI SCORE or VOICE page, and vice
+    // versa). SCORE's settings reset stays SCORE-only.
     if ((removed(ModuleType::Score) || removed(ModuleType::Timbre)
-         || removed(ModuleType::MidiScore))
+         || removed(ModuleType::MidiScore) || removed(ModuleType::Voice))
         && now.count(ModuleType::Score) == 0 && now.count(ModuleType::Timbre) == 0
-        && now.count(ModuleType::MidiScore) == 0)
+        && now.count(ModuleType::MidiScore) == 0 && now.count(ModuleType::Voice) == 0)
     {
         if (auto* ls = getLuxSampler())
             ls->uiDiscardScore();

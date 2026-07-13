@@ -49,6 +49,7 @@ ModuleType chainBlockToModuleType(ChainBlockId id) noexcept
         case ChainBlockId::Score:    return ModuleType::Score;
         case ChainBlockId::Timbre:   return ModuleType::Timbre;
         case ChainBlockId::MidiScore:return ModuleType::MidiScore;
+        case ChainBlockId::Voice:    return ModuleType::Voice;
         case ChainBlockId::Sequencer:return ModuleType::Sequencer;
         case ChainBlockId::LuxStral: return ModuleType::LuxStral;
         case ChainBlockId::LuxSynth: return ModuleType::LuxSynth;
@@ -424,6 +425,7 @@ ChainBlockId ChainRackComponent::instanceToBlockId(ModuleType type, int chainIdx
         case ModuleType::Score:    return ChainBlockId::Score;
         case ModuleType::Timbre:   return ChainBlockId::Timbre;
         case ModuleType::MidiScore:return ChainBlockId::MidiScore;
+        case ModuleType::Voice:    return ChainBlockId::Voice;
         case ModuleType::Sequencer:return ChainBlockId::Sequencer;
         case ModuleType::LuxStral: return ChainBlockId::LuxStral;
         case ModuleType::LuxSynth: return ChainBlockId::LuxSynth;
@@ -1135,12 +1137,13 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const j
                                            : juce::String("luxwaveEnabled"))
                        ? LedState::Active : LedState::Off;
 
-        // SCORE, TIMBRE and MIDI SCORE all drive the SHARED score-player
+        // SCORE, TIMBRE, MIDI SCORE and VOICE all drive the SHARED score-player
         // channel, so their block LED reflects that channel's transport
         // identically: ● playing / ◐ a page is loaded / ○ empty.
         case ModuleType::Score:
         case ModuleType::Timbre:
         case ModuleType::MidiScore:
+        case ModuleType::Voice:
             if (auto* fs = processor.getLuxSampler())
                 return fs->isScorePlaying()  ? LedState::Active
                      : fs->scoreHasContent() ? LedState::Idle

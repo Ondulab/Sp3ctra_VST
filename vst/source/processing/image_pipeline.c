@@ -91,7 +91,6 @@ static void pipeline_apply_envelope(
     int            nb_pixels)
 {
     EnvelopeState *env;
-    uint64_t       now_us;
     int            i, note;
     int            gn;
 
@@ -99,28 +98,12 @@ static void pipeline_apply_envelope(
         return;
 
     env    = &g_envelope[envelope_id];
-    now_us = pipeline_get_timestamp_us();
     gn     = (nb_pixels < PREPROCESS_MAX_NOTES) ? nb_pixels : PREPROCESS_MAX_NOTES;
 
-    /* ── Detect mode transition ──────────────────────────────────────── */
-    if (freeze_mode != env->prev_freeze && env->prev_freeze >= 0)
-    {
-        if (env->prev_freeze == 0 && freeze_mode == 2)
-        {
-            /* PLAY → STOP/WHITE: fade-out to silence */
-            if (fade_ms > 0) { env->fade_ts_us = now_us; env->fade_dir = -1; }
-        }
-        else if (freeze_mode == 0)
-        {
-            /* HOLD/STOP → PLAY: fade-in */
-            if (fade_ms > 0) { env->fade_ts_us = now_us; env->fade_dir = 1; }
-        }
-        else
-        {
-            /* PLAY → HOLD, or STOP ↔ HOLD: cancel any in-progress fade */
-            env->fade_dir = 0;
-        }
-    }
+    /* Fade-in/out on transport change REMOVED (2026-07-13): every chain now
+     * starts and stops instantly, with no volume/brightness ramp. `fade_ms`
+     * is ignored — the *FadeInMs parameters are inert on all chains. */
+    (void)fade_ms;
     if (env->prev_freeze < 0) env->prev_freeze = freeze_mode; /* first call */
 
     /* ── Apply freeze / hold / play ──────────────────────────────────── */
@@ -166,38 +149,6 @@ static void pipeline_apply_envelope(
             notes[note] = 0.0f;
         for (i = 0; i < gn; i++)
             grayscale[i] = 0.0f;
-    }
-
-    /* ── Apply fade envelope ─────────────────────────────────────────── */
-    if (env->fade_dir != 0 && fade_ms > 0)
-    {
-        float t = (float)(now_us - env->fade_ts_us) / ((float)fade_ms * 1000.0f);
-        if (t >= 1.0f)
-        {
-            env->fade_dir = 0; /* ramp complete */
-        }
-        else
-        {
-            if (env->fade_dir == -1 && freeze_mode == 2 && env->held_notes_count > 0)
-            {
-                /* STOP fade-out: decay from held values */
-                float ramp = 1.0f - t;
-                int n = (num_notes < env->held_notes_count) ? num_notes : env->held_notes_count;
-                for (note = 0; note < n; note++)
-                    notes[note] = env->held_notes[note] * ramp;
-                int g = (gn < env->held_gray_count) ? gn : env->held_gray_count;
-                for (i = 0; i < g; i++)
-                    grayscale[i] = env->held_gray[i] * ramp;
-            }
-            else
-            {
-                float ramp = (env->fade_dir > 0) ? t : (1.0f - t);
-                for (note = 0; note < num_notes; note++)
-                    notes[note] *= ramp;
-                for (i = 0; i < gn; i++)
-                    grayscale[i] *= ramp;
-            }
-        }
     }
 
     env->prev_freeze = freeze_mode;
