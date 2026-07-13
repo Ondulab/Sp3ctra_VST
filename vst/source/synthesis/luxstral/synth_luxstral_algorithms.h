@@ -60,15 +60,6 @@ struct wave;
 void update_gap_limiter_coefficients_for(volatile struct wave *w,
                                          float tau_up_ms, float tau_down_ms);
 
-/**
- * @brief Generate waveform samples using precomputed data
- * @param note Note index
- * @param waveBuffer Output waveform buffer
- * @param precomputed_wave_data Precomputed waveform data
- * @retval None
- */
-void generate_waveform_samples(int note, float *waveBuffer, const float *precomputed_wave_data);
-
 #ifdef __cplusplus
 }
 #endif

@@ -3,31 +3,37 @@
 #include "../UITheme.h"
 
 // ─── Helper ──────────────────────────────────────────────────────────────────
+// Cycle a step through: EMPTY → every NON-EMPTY bank of every sampler engine
+// (all chains, in A1.., B1.. order) → LIVE. Empty banks are skipped so the
+// user only ever lands on real recorded samples. Content is the ONLY filter —
+// no isEnabled() gate: the engine enable (module presence × rack LED) is
+// restored as-saved and can lag the visible rack state, which silently hid
+// every recorded bank from this cycle.
 static void cycleStep(FrameSequencer* seq, int stepIdx, int delta)
 {
     if (!seq) return;
     if (stepIdx >= seq->getNumSteps()) return;
 
-    // All slots across every wired sampler engine: A1..A12, B1..B12, …
-    const int nSamplers  = juce::jmax(1, seq->getNumSamplers());
-    const int kN         = nSamplers * LuxSamplerConstants::NUM_SLOTS;
-    const int kCycleSize = kN + 2; // empty + N banks + LIVE
+    juce::Array<int> options;
+    options.add(FrameSequencer::STEP_EMPTY);
+    for (int s = 0; s < seq->getNumSamplers(); ++s)
+    {
+        LuxSampler* fs = seq->getSampler(s);
+        if (fs == nullptr) continue;
+        for (int slot = 0; slot < LuxSamplerConstants::NUM_SLOTS; ++slot)
+            if (fs->slotHasContent(slot))
+                options.add(FrameSequencer::encodeStep(s, slot));
+    }
+    options.add(FrameSequencer::STEP_LIVE);
 
-    const int cur = seq->getStep(stepIdx);
+    // A step may hold a value no longer offered (bank cleared / module removed
+    // from its chain since assignment) — restart the cycle from EMPTY.
+    const int n   = options.size();
+    int       pos = options.indexOf(seq->getStep(stepIdx));
+    if (pos < 0) pos = 0;
 
-    int pos;
-    if (cur == FrameSequencer::STEP_LIVE)        pos = kCycleSize - 1;
-    else if (cur == FrameSequencer::STEP_EMPTY)  pos = 0;
-    else                                         pos = cur + 1;
-
-    pos = ((pos + delta) % kCycleSize + kCycleSize) % kCycleSize;
-
-    int newStep;
-    if (pos == 0)                   newStep = FrameSequencer::STEP_EMPTY;
-    else if (pos == kCycleSize - 1) newStep = FrameSequencer::STEP_LIVE;
-    else                            newStep = pos - 1;
-
-    seq->setStep(stepIdx, newStep);
+    pos = ((pos + delta) % n + n) % n;
+    seq->setStep(stepIdx, options[pos]);
 }
 
 // =============================================================================

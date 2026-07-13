@@ -22,8 +22,6 @@
 int audio_image_buffers_init(AudioImageBuffers *buffers) {
   int nb_pixels;
   int i;
-  float phase;
-  uint8_t test_value;
 
   if (!buffers) {
     fprintf(stderr, "ERROR: AudioImageBuffers pointer is NULL\n");
@@ -114,21 +112,16 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
     }
   }
 
-  // Initialize buffers with test pattern to ensure audio synthesis works
-  // This provides immediate audio feedback even without scanner data
-  for (i = 0; i < nb_pixels; i++) {
-    // Create a simple test pattern: sine wave for audio testing
-    phase = (float)i / nb_pixels * 2.0f * M_PI * 4.0f; // 4 cycles
-    test_value = (uint8_t)(127.0f + 127.0f * sin(phase));
-
-    buffers->buffer0_R[i] = test_value;
-    buffers->buffer0_G[i] = test_value / 2; // Different pattern for G
-    buffers->buffer0_B[i] = test_value / 4; // Different pattern for B
-
-    buffers->buffer1_R[i] = test_value;
-    buffers->buffer1_G[i] = test_value / 2;
-    buffers->buffer1_B[i] = test_value / 4;
-  }
+  // Initialize the dual buffers with WHITE (blank paper): before the first
+  // real line arrives, every consumer must see an empty — silent — stream.
+  // (The historical sine "test pattern for immediate audio feedback" made
+  // the default chain content non-blank and audible.)
+  memset(buffers->buffer0_R, 255, nb_pixels);
+  memset(buffers->buffer0_G, 255, nb_pixels);
+  memset(buffers->buffer0_B, 255, nb_pixels);
+  memset(buffers->buffer1_R, 255, nb_pixels);
+  memset(buffers->buffer1_G, 255, nb_pixels);
+  memset(buffers->buffer1_B, 255, nb_pixels);
 
   // Initialize raw snapshot with white (no UDP data yet)
   memset(buffers->raw_R, 255, nb_pixels);
@@ -166,7 +159,7 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
   }
 
 
-  log_info("BUFFERS", "Audio image buffers initialized with test pattern for immediate audio feedback");
+  log_info("BUFFERS", "Audio image buffers initialized WHITE (blank paper — empty-chain contract)");
 
   // Initialize atomic indices
   // Buffer 0 starts as read buffer, Buffer 1 starts as write buffer

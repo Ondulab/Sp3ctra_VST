@@ -83,6 +83,9 @@ private:
     juce::TextButton clearButton { "CLEAR" };
     juce::ComboBox   deviceCombo;                 // CAMERA only
     juce::TextButton refreshButton { "REFRESH" };
+    // ACTIVE — source on/off (all kinds): off feeds NOTHING into the chain
+    // (blank paper); media/params are kept, on resumes instantly.
+    juce::TextButton activeButton { "ACTIVE" };
     std::unique_ptr<juce::FileChooser> chooser_;
 
     // Transport row (kind-dependent subset)
@@ -93,6 +96,7 @@ private:
     juce::Label      speedLabel, loopLabel, positionLabel, statusLabel;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   playAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   activeAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> loopAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   speedAttach;
     std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;

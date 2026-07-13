@@ -137,20 +137,6 @@ void img_stage_grayscale_luxsynth(
 );
 
 /* ============================================================================
- * Direct RGB copy for LuxWave (photowave) synthesis.
- * Copies raw RGB channels without any transformation.
- * ============================================================================ */
-void img_stage_copy_rgb_raw(
-    const uint8_t *rgb_r,
-    const uint8_t *rgb_g,
-    const uint8_t *rgb_b,
-    int            pixel_count,
-    uint8_t       *r_out,
-    uint8_t       *g_out,
-    uint8_t       *b_out
-);
-
-/* ============================================================================
  * StrokeForge blob detection wrapper.
  * Delegates to strokeforge_analyze_frame() from the existing module.
  * ============================================================================ */

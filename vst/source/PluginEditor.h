@@ -15,6 +15,7 @@
 #include "image/LuxSynthTabComponent.h"
 #include "image/ScoreGenTabComponent.h"
 #include "image/TimbreGenTabComponent.h"
+#include "image/MidiScoreGenTabComponent.h"
 #include "image/VisualizerMode.h"
 #include "video/VideoScrollPage.h"
 #include "sampler/SamplerPageComponent.h"
@@ -541,6 +542,7 @@ private:
     std::unique_ptr<SequencerPageComponent> sequencerPage;
     std::unique_ptr<ScoreGenTabComponent> scorePage;
     std::unique_ptr<TimbreGenTabComponent> timbrePage;      // UTILS > TIMBRE
+    std::unique_ptr<MidiScoreGenTabComponent> midiScorePage; // UTILS > MIDI SCORE
     std::unique_ptr<LuxReverbTabComponent> reverbPage;       // FX > REVERB
     std::unique_ptr<LuxEchoTabComponent>   echoPage;         // FX > ECHO
     std::unique_ptr<LuxEqTabComponent>     eqPage;           // FX > EQ

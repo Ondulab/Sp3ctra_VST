@@ -43,6 +43,7 @@ enum class ChainBlockId
     Reverb, Echo,                      // FX — image-line effect inserts
     Timbre,                            // UTILS — parametric timbre-spectrum generator
     Equalizer,                         // FX — graphic EQ insert (appended: ordinals persist)
+    MidiScore,                         // UTILS — MIDI-file score generator (appended: ordinals persist)
     None                               // empty rack — no module selected
 };
 

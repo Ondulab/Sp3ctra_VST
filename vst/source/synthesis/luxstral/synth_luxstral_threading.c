@@ -464,19 +464,30 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
       const float inc   = worker->engine->waves[note].phase_inc *
                           (1.0f + worker->engine->waves[note].detune_offset);
       const float fsize = (float)SINE_TABLE_SIZE;
-      for (int s = 0; s < audio_buffer_size; s++) {
-        phase += inc;
-        if (phase >= fsize) phase -= fsize;
-        const int   i0   = (int)phase;
-        const float frac = phase - (float)i0;
-        const int   i1   = (i0 + 1) & SINE_TABLE_MASK;
-        /* Waveform morph: lerp between sine and square at the same phase position.
-         * morph=0 → pure sine  |  morph=1 → pure square (bandlimited, WAVETABLE_HARMONICS odd harmonics)
-         * Linear interpolation inside each table preserves sub-sample accuracy. */
-        {
-            float sine_s   = g_sine_table[i0]   + frac * (g_sine_table[i1]   - g_sine_table[i0]);
-            float square_s = g_square_table[i0] + frac * (g_square_table[i1] - g_square_table[i0]);
-            pre_wave_w[s]  = sine_s + morph * (square_s - sine_s);
+      /* Waveform morph: lerp between sine and square at the same phase position.
+       * morph=0 → pure sine  |  morph=1 → pure square (bandlimited, WAVETABLE_HARMONICS odd harmonics)
+       * Linear interpolation inside each table preserves sub-sample accuracy.
+       * morph == 0 (the default) skips the square-table gather + morph lerp —
+       * half the table reads and one lerp saved per sample per oscillator. */
+      if (morph == 0.0f) {
+        for (int s = 0; s < audio_buffer_size; s++) {
+          phase += inc;
+          if (phase >= fsize) phase -= fsize;
+          const int   i0   = (int)phase;
+          const float frac = phase - (float)i0;
+          const int   i1   = (i0 + 1) & SINE_TABLE_MASK;
+          pre_wave_w[s] = g_sine_table[i0] + frac * (g_sine_table[i1] - g_sine_table[i0]);
+        }
+      } else {
+        for (int s = 0; s < audio_buffer_size; s++) {
+          phase += inc;
+          if (phase >= fsize) phase -= fsize;
+          const int   i0   = (int)phase;
+          const float frac = phase - (float)i0;
+          const int   i1   = (i0 + 1) & SINE_TABLE_MASK;
+          float sine_s   = g_sine_table[i0]   + frac * (g_sine_table[i1]   - g_sine_table[i0]);
+          float square_s = g_square_table[i0] + frac * (g_square_table[i1] - g_square_table[i0]);
+          pre_wave_w[s]  = sine_s + morph * (square_s - sine_s);
         }
       }
       worker->engine->waves[note].phase_acc = phase;  /* per-engine + disjoint per-worker ranges */
@@ -506,9 +517,6 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
     const float* pre_wave = worker->precomputed_wave_data + (size_t)local_note_idx * audio_buffer_size;
     float* wave_buf = worker->waveBuffer;
     float* vol_buf = worker->volumeBuffer;
-    
-    // Generate waveform samples
-    generate_waveform_samples(note, wave_buf, pre_wave);
 
     // Apply GAP_LIMITER envelope
     apply_gap_limiter_ramp(worker->engine->waves, note, target_volume, pre_wave, vol_buf);
@@ -525,8 +533,11 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
       }
     }
 
-    // Apply volume scaling to the current note waveform
-    mult_float(wave_buf, vol_buf, wave_buf, audio_buffer_size);
+    // Apply volume scaling to the precomputed waveform.  WAVE_AMP_RESOLUTION
+    // is 1.0 (tables hold ±1.0 directly), so the old generate_waveform_samples
+    // normalization pass was an identity copy — multiply straight from the
+    // precomputed data instead (one full buffer pass per note saved).
+    mult_float(pre_wave, vol_buf, wave_buf, audio_buffer_size);
 
     // ✅ OPTIMIZATION: Update max volume buffer inline (better cache locality)
     for (buff_idx = audio_buffer_size; --buff_idx >= 0;) {
@@ -560,17 +571,14 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
       add_float(worker->temp_waveBuffer_R, worker->thread_luxstralBuffer_R,
                 worker->thread_luxstralBuffer_R, audio_buffer_size);
     } else {
-      // Mono mode: Duplicate mono signal to both L/R channels (center panning)
-      add_float(wave_buf, worker->thread_luxstralBuffer_L,
-                worker->thread_luxstralBuffer_L, audio_buffer_size);
-      add_float(wave_buf, worker->thread_luxstralBuffer_R,
-                worker->thread_luxstralBuffer_R, audio_buffer_size);
+      // Mono mode: single mono sum — the output stage duplicates it to L/R
+      // (thread_luxstralBuffer_L/R are only combined in stereo mode, and the
+      // mono sum is only combined in mono mode; accumulating the unused side
+      // was 2 (mono) / 1 (stereo) dead full-buffer passes per note).
+      add_float(wave_buf, worker->thread_luxstralBuffer,
+                worker->thread_luxstralBuffer, audio_buffer_size);
     }
 
-    // LuxStral summation for mono or combined processing
-    add_float(wave_buf, worker->thread_luxstralBuffer,
-              worker->thread_luxstralBuffer, audio_buffer_size);
-    
     // Intelligent volume weighting: strong oscillators dominate over weak background noise
     // ✅ OPTIMIZATION: Use hoisted constant for weighting exponent
     apply_volume_weighting(worker->thread_sumVolumeBuffer, vol_buf,

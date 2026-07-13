@@ -131,19 +131,7 @@ void apply_gap_limiter_ramp(volatile struct wave *waves, int note, float target_
     waves[note].current_volume = final_volume;
 }
 
-/**
- * @brief Generate waveform samples using precomputed data
- * @param note Note index
- * @param waveBuffer Output waveform buffer
- * @param precomputed_wave_data Precomputed waveform data
- * @retval None
- */
-void generate_waveform_samples(int note, float *waveBuffer, 
-                              const float *precomputed_wave_data) {
-    (void)note; // Mark as unused to suppress warning
-    // CRITICAL FIX: Normalize waveform data from integer range to float [-1.0, +1.0]
-    const float normalization_factor = 1.0f / (float)WAVE_AMP_RESOLUTION;
-    for (int buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
-        waveBuffer[buff_idx] = precomputed_wave_data[buff_idx] * normalization_factor;
-    }
-}
+/* generate_waveform_samples removed: WAVE_AMP_RESOLUTION is 1.0 so the
+ * "normalization" pass was an identity copy of precomputed_wave_data — the
+ * worker loop now multiplies the envelope straight from the precomputed
+ * buffer (see synth_process_worker_range). */

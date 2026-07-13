@@ -183,6 +183,38 @@ static float adsr_process(AdsrEnvelope *env)
  * INTERNAL: LFO helper
  * ========================================================================== */
 
+/* ============================================================================
+ * Sine lookup table — replaces per-oscillator sinf() in the RT hot path.
+ * 4096 entries + linear interpolation ⇒ max error ~2e-7 (≈ -134 dB), far
+ * below audibility; the additive engine (LuxStral) uses the same technique.
+ * Worst case before: LUXSYNTH_MAX_OSCILLATORS × MAX_VOICES sinf per SAMPLE.
+ * ========================================================================== */
+#define LUXSYNTH_SINE_LUT_SIZE 4096
+static float s_sine_lut[LUXSYNTH_SINE_LUT_SIZE + 1]; /* +1: lerp wrap guard */
+static int   s_sine_lut_ready = 0;
+
+static void sine_lut_init(void)
+{
+    if (s_sine_lut_ready)
+        return;
+    for (int i = 0; i < LUXSYNTH_SINE_LUT_SIZE; i++)
+        s_sine_lut[i] = (float)sin(TWO_PI * (double)i / (double)LUXSYNTH_SINE_LUT_SIZE);
+    s_sine_lut[LUXSYNTH_SINE_LUT_SIZE] = s_sine_lut[0];
+    s_sine_lut_ready = 1;
+}
+
+/* phase in [0, 2π) — callers keep it wrapped.  The mask makes the index
+ * bulletproof against float rounding right at the 2π edge (4096 → 0, and
+ * sin(2π) == sin(0), so the wrap is exact); size is a power of two. */
+static inline float sine_lut(float phase)
+{
+    const float scale = (float)(LUXSYNTH_SINE_LUT_SIZE / TWO_PI);
+    const float idx_f = phase * scale;
+    const int   i0    = (int)idx_f & (LUXSYNTH_SINE_LUT_SIZE - 1);
+    const float frac  = idx_f - (float)(int)idx_f;
+    return s_sine_lut[i0] + frac * (s_sine_lut[i0 + 1] - s_sine_lut[i0]);
+}
+
 static void lfo_init(LfoState *lfo, float rate_hz, float depth_semitones, float sample_rate)
 {
     lfo->phase = 0.0f;
@@ -202,33 +234,6 @@ static float lfo_process(LfoState *lfo)
 }
 
 /* ============================================================================
- * INTERNAL: Voice manager callbacks (for voice_manager.h compatibility)
- * ========================================================================== */
-
-static VoiceMetadata luxsynth_get_voice_metadata(void *voices, int idx)
-{
-    LuxSynthVoice *v = &((LuxSynthVoice *)voices)[idx];
-    VoiceMetadata meta;
-    meta.midi_note = v->midi_note;
-    meta.trigger_order = v->trigger_order;
-    meta.adsr_state = v->volume_env.state;
-    meta.adsr_output = v->volume_env.current_output;
-    return meta;
-}
-
-static void luxsynth_set_voice_note(void *voices, int idx, int note)
-{
-    LuxSynthVoice *v = &((LuxSynthVoice *)voices)[idx];
-    v->midi_note = note;
-}
-
-static AdsrState luxsynth_get_voice_state(void *voices, int idx)
-{
-    LuxSynthVoice *v = &((LuxSynthVoice *)voices)[idx];
-    return v->volume_env.state;
-}
-
-/* ============================================================================
  * PUBLIC: Initialization
  * ========================================================================== */
 
@@ -241,6 +246,8 @@ int luxsynth_engine_init(LuxSynthEngine *engine, float sample_rate, int buffer_s
         buffer_size = LUXSYNTH_MAX_BUFFER_SIZE;
 
     memset(engine, 0, sizeof(LuxSynthEngine));
+
+    sine_lut_init();
 
     engine->sample_rate = sample_rate;
     engine->inv_sample_rate = 1.0f / sample_rate;
@@ -529,12 +536,26 @@ void luxsynth_engine_process(LuxSynthEngine *engine, int num_samples,
     const float master_vol = engine->config.master_volume;
     const int num_bins = engine->spectral.num_bins;
 
+    /* Safety: table is built in luxsynth_engine_init; this only fires if
+     * process were ever reached first (one-time ~4096 sin, non-recurring). */
+    if (!s_sine_lut_ready)
+        sine_lut_init();
+
+    /* LFO pitch: 2^(lfo·depth/12).  depth == 0 (LFO off / flat) is the common
+     * case — no per-sample transcendental at all; otherwise exp2f beats
+     * powf(2, ·) by skipping the generic-base machinery. */
+    const float lfo_depth_over_12 = engine->global_lfo.depth_semitones * (1.0f / 12.0f);
+    const int   lfo_pitch_active  = (lfo_depth_over_12 != 0.0f);
+    const float two_pi_inv_sr     = (float)(TWO_PI) * engine->inv_sample_rate;
+
     /* Process each sample */
     for (int s = 0; s < num_samples; s++)
     {
         /* Update global LFO (once per sample) */
         float lfo_val = lfo_process(&engine->global_lfo);
-        float lfo_pitch_mult = powf(2.0f, lfo_val * engine->global_lfo.depth_semitones / 12.0f);
+        float lfo_pitch_mult = lfo_pitch_active
+                                   ? exp2f(lfo_val * lfo_depth_over_12)
+                                   : 1.0f;
 
         float sample_left = 0.0f;
         float sample_right = 0.0f;
@@ -575,13 +596,35 @@ void luxsynth_engine_process(LuxSynthEngine *engine, int num_samples,
             int max_osc = v->num_oscillators;
             if (max_osc > num_bins) max_osc = num_bins;
 
+            /* Per-voice hoists: fundamental with LFO applied once, not per
+             * harmonic (harmonic_freq = freq_base × (osc+1)). */
+            const float freq_base = v->frequency * lfo_pitch_mult;
+
             for (int osc = 0; osc < max_osc; osc++)
             {
                 /* Harmonic frequency with LFO modulation */
-                float harmonic_freq = v->frequency * (float)(osc + 1) * lfo_pitch_mult;
+                float harmonic_freq = freq_base * (float)(osc + 1);
 
                 /* Nyquist check */
                 if (harmonic_freq >= nyquist) break;
+
+                /* FFT magnitude — gamma lives in the per-OUT conditioning
+                 * bank (pixel domain, luxsynth_condition_line), never here:
+                 * a second spectral gamma would double-apply it. */
+                float mag = engine->spectral.magnitudes[osc];
+
+                /* Advance phase with LFO-modulated increment (always, so a
+                 * bin fading back in resumes with a continuous phase). */
+                float phase = v->oscillators[osc].phase;
+                v->oscillators[osc].phase =
+                    (phase + harmonic_freq * two_pi_inv_sr >= (float)TWO_PI)
+                        ? phase + harmonic_freq * two_pi_inv_sr - (float)TWO_PI
+                        : phase + harmonic_freq * two_pi_inv_sr;
+
+                /* Dark bin (≈ -120 dB): nothing audible to add — skip the
+                 * table lookup, filter and pan work. */
+                if (mag < 1.0e-6f)
+                    continue;
 
                 /* Spectral filter: attenuate harmonics above cutoff */
                 float filter_atten = 1.0f;
@@ -591,18 +634,8 @@ void luxsynth_engine_process(LuxSynthEngine *engine, int num_samples,
                     filter_atten = ratio * ratio; /* 2nd order rolloff */
                 }
 
-                /* FFT magnitude — gamma lives in the per-OUT conditioning
-                 * bank (pixel domain, luxsynth_condition_line), never here:
-                 * a second spectral gamma would double-apply it. */
-                float mag = engine->spectral.magnitudes[osc];
-
-                /* Generate sine sample */
-                float osc_sample = sinf(v->oscillators[osc].phase);
-
-                /* Advance phase with LFO-modulated increment */
-                v->oscillators[osc].phase += (float)(TWO_PI * harmonic_freq * engine->inv_sample_rate);
-                if (v->oscillators[osc].phase >= (float)TWO_PI)
-                    v->oscillators[osc].phase -= (float)TWO_PI;
+                /* Generate sine sample (LUT + lerp — was sinf per osc/sample) */
+                float osc_sample = sine_lut(phase);
 
                 /* Apply magnitude, filter, and pan */
                 float weighted = osc_sample * mag * filter_atten;

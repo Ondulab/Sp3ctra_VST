@@ -575,12 +575,9 @@ void lux_mask_process_frame(
     /* ── Fast path: no active voice → fill the frame with the background. ── */
     if (num_active_voices == 0)
     {
-        for (i = 0; i < pixel_count; i++)
-        {
-            state->out_r[i] = bg;
-            state->out_g[i] = bg;
-            state->out_b[i] = bg;
-        }
+        memset(state->out_r, bg, (size_t)pixel_count);
+        memset(state->out_g, bg, (size_t)pixel_count);
+        memset(state->out_b, bg, (size_t)pixel_count);
         if (out_r) *out_r = state->out_r;
         if (out_g) *out_g = state->out_g;
         if (out_b) *out_b = state->out_b;

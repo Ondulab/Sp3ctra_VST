@@ -22,25 +22,33 @@ namespace
         double attackMs, decaySec, hfDamp;
         bool   bellMode;
         int    bellTable;
+        double vibCents, vibRateHz, vibOnsetSec, vibLife;
     };
 
     // Slope/odd values follow the Fourier series of the ideal waveforms
     // (square = odd 1/n → −6 dB/oct odd-only; triangle = odd 1/n² → −12 dB/oct);
     // the acoustic instruments are pragmatic starting points meant to be tweaked.
+    // Vibrato defaults belong to the sustained acoustic instruments; the rate/
+    // onset/life values stay musical even at depth 0 so raising the depth on
+    // any preset sounds alive immediately. New presets are APPENDED — the
+    // preset index is persisted (timbreGenState / midiScoreGenState).
     const PresetDef kPresets[] =
     {
-        //  name              nPart slope  odd   inharm  comb  pos   atk    dec   hf    bell  table
-        { "Sine",                1,  0.0, 0.0, 0.0,     0.0, 0.28,   5.0,  0.0, 0.0,  false, 0 },
-        { "Square",             40, -6.0, 1.0, 0.0,     0.0, 0.28,   3.0,  0.0, 0.0,  false, 0 },
-        { "Triangle",           24, -12.0,1.0, 0.0,     0.0, 0.28,   3.0,  0.0, 0.0,  false, 0 },
-        { "Sawtooth",           40, -6.0, 0.0, 0.0,     0.0, 0.28,   3.0,  0.0, 0.0,  false, 0 },
-        { "Organ",               8, -2.5, 0.0, 0.0,     0.0, 0.28,  10.0,  0.0, 0.0,  false, 0 },
-        { "Clarinet",           20, -8.0, 0.8, 0.0,     0.0, 0.28,  30.0,  0.0, 0.1,  false, 0 },
-        { "Brass",              30, -3.5, 0.0, 0.0,     0.0, 0.28,  60.0,  0.0, 0.1,  false, 0 },
-        { "E. Guitar (pluck)",  32, -5.0, 0.0, 3.0e-4,  0.8, 0.13,   2.0,  2.5, 0.7,  false, 0 },
-        { "E. Piano",           16, -9.0, 0.0, 1.0e-4,  0.3, 0.10,   2.0,  3.5, 0.8,  false, 0 },
-        { "Bell (church)",      12,  0.0, 0.0, 0.0,     0.0, 0.28,   1.0,  6.0, 0.4,  true,  0 },
-        { "Bell (glocken)",      4,  0.0, 0.0, 0.0,     0.0, 0.28,   1.0,  3.0, 0.5,  true,  1 },
+        //  name              nPart slope  odd   inharm  comb  pos   atk    dec   hf    bell  table  vibC rate  onset life
+        { "Sine",                1,  0.0, 0.0, 0.0,     0.0, 0.28,   5.0,  0.0, 0.0,  false, 0,   0.0, 5.5, 0.40, 0.50 },
+        { "Square",             40, -6.0, 1.0, 0.0,     0.0, 0.28,   3.0,  0.0, 0.0,  false, 0,   0.0, 5.5, 0.40, 0.50 },
+        { "Triangle",           24, -12.0,1.0, 0.0,     0.0, 0.28,   3.0,  0.0, 0.0,  false, 0,   0.0, 5.5, 0.40, 0.50 },
+        { "Sawtooth",           40, -6.0, 0.0, 0.0,     0.0, 0.28,   3.0,  0.0, 0.0,  false, 0,   0.0, 5.5, 0.40, 0.50 },
+        { "Organ",               8, -2.5, 0.0, 0.0,     0.0, 0.28,  10.0,  0.0, 0.0,  false, 0,   0.0, 5.5, 0.40, 0.50 },
+        { "Clarinet",           20, -8.0, 0.8, 0.0,     0.0, 0.28,  30.0,  0.0, 0.1,  false, 0,   8.0, 5.0, 0.60, 0.50 },
+        { "Brass",              30, -3.5, 0.0, 0.0,     0.0, 0.28,  60.0,  0.0, 0.1,  false, 0,  12.0, 4.8, 0.70, 0.55 },
+        { "E. Guitar (pluck)",  32, -5.0, 0.0, 3.0e-4,  0.8, 0.13,   2.0,  2.5, 0.7,  false, 0,   0.0, 5.5, 0.40, 0.50 },
+        { "E. Piano",           16, -9.0, 0.0, 1.0e-4,  0.3, 0.10,   2.0,  3.5, 0.8,  false, 0,   0.0, 5.5, 0.40, 0.50 },
+        { "Bell (church)",      12,  0.0, 0.0, 0.0,     0.0, 0.28,   1.0,  6.0, 0.4,  true,  0,   0.0, 5.5, 0.40, 0.50 },
+        { "Bell (glocken)",      4,  0.0, 0.0, 0.0,     0.0, 0.28,   1.0,  3.0, 0.5,  true,  1,   0.0, 5.5, 0.40, 0.50 },
+        // Bowed string: harmonic series, bow-position comb (Helmholtz dips),
+        // slow bow start, sustained — and the reference singing vibrato.
+        { "Violin",             32, -4.5, 0.0, 0.0,     0.35,0.11,  90.0,  0.0, 0.0,  false, 0,  30.0, 5.5, 0.50, 0.65 },
     };
 
     // Inharmonic partial tables. decayMul > 1 = dies faster than the prime.
@@ -89,6 +97,10 @@ void applyPreset(TimbreSlotParams& p, int preset)
     p.hfDamp        = d.hfDamp;
     p.bellMode      = d.bellMode;
     p.bellTable     = d.bellTable;
+    p.vibCents      = d.vibCents;
+    p.vibRateHz     = d.vibRateHz;
+    p.vibOnsetSec   = d.vibOnsetSec;
+    p.vibLife       = d.vibLife;
 }
 
 //==============================================================================

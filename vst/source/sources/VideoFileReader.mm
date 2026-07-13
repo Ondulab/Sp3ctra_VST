@@ -66,10 +66,23 @@ bool VideoFileReader::open(const juce::File& file, juce::String& error)
 
         impl->asset = [[AVURLAsset alloc] initWithURL:url options:nil];
 
-        // Local files: synchronous track inspection is fast and keeps the
-        // open() contract simple (a network asset would need the async path).
-        NSArray<AVAssetTrack*>* tracks =
-            [impl->asset tracksWithMediaType:AVMediaTypeVideo];
+        // Keep open()'s synchronous contract by blocking on the modern async
+        // loader (loadTracksWithMediaType: replaces the deprecated synchronous
+        // tracksWithMediaType:). The completion is delivered on an internal
+        // AVFoundation queue, never the caller's thread, so the semaphore wait
+        // can't deadlock — local files resolve near-instantly.
+        __block NSArray<AVAssetTrack*>* tracks = nil;
+        dispatch_semaphore_t loaded = dispatch_semaphore_create(0);
+        [impl->asset loadTracksWithMediaType:AVMediaTypeVideo
+                           completionHandler:^(NSArray<AVAssetTrack*>* result,
+                                               NSError* err)
+        {
+            (void) err;
+            tracks = [result retain];   // MRR: survive past the completion scope
+            dispatch_semaphore_signal(loaded);
+        }];
+        dispatch_semaphore_wait(loaded, DISPATCH_TIME_FOREVER);
+        [tracks autorelease];
         if (tracks.count == 0)
         {
             error = "No video track in " + file.getFileName();

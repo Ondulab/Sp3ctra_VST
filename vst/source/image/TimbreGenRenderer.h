@@ -50,6 +50,15 @@ struct TimbreSlotParams
     double levelDb       = 0.0;    ///< slot gain (−24..+6)
     bool   bellMode      = false;  ///< use an inharmonic partial TABLE instead of harmonics
     int    bellTable     = 0;      ///< 0 = church bell, 1 = struck bar (glockenspiel)
+
+    // Vibrato — rendered by MIDI SCORE as a pitch wave of the whole partial
+    // stack (on the log axis, ±cents = a constant vertical offset). Inert on
+    // the static TIMBRE page strips.
+    double vibCents      = 0.0;    ///< peak depth in cents (0 = off)
+    double vibRateHz     = 5.5;    ///< nominal oscillation rate
+    double vibOnsetSec   = 0.4;    ///< time for the vibrato to develop after note start
+    double vibLife       = 0.5;    ///< 0..1 — humanisation: waving depth, drifting rate,
+                                   ///<        per-note randomisation (0 = mechanical)
 };
 
 //==============================================================================

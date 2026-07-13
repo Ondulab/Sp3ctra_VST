@@ -153,6 +153,25 @@ int lux_sampler_playing_engine(void);
 int lux_sampler_is_recording(void);
 
 /**
+ * @brief Capture one INPUT frame into an engine's armed recording slot.
+ *
+ * REC records the module INPUT (2026-07-13): the chain stream arriving AT the
+ * sampler's marker (chain source → pre-marker processors) — never the
+ * engine's own playback mix. Called by chain_run_premarker_segment (udpThread
+ * / feeder tick) while the chain is player-owned; the idle capture path goes
+ * through lux_sampler_on_modulated_frame_ready as before. Unlike
+ * lux_sampler_record_chain_frame this does NOT skip a driving engine.
+ * No-op unless a slot is armed.
+ *
+ * Thread: udpThread / MediaSourceService (Non-RT).
+ */
+void lux_sampler_record_input_frame(int engine,
+                                    const uint8_t *R,
+                                    const uint8_t *G,
+                                    const uint8_t *B,
+                                    uint16_t pixel_count);
+
+/**
  * @brief Returns non-zero if the LuxSampler passthrough flag is active.
  *
  * Passthrough is enabled during STEP_LIVE sequencer steps and after rtStop().

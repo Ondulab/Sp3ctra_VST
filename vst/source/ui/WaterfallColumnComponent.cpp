@@ -455,7 +455,7 @@ void WaterfallColumnComponent::paint(juce::Graphics& g)
         const int zoneW = juce::jmax(0, zoneR - zoneX);
 
         const juce::Font font = juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened();
-        const float textW = font.getStringWidthFloat("VIDEO SCROLL");
+        const float textW = juce::GlyphArrangement::getStringWidth(font, "VIDEO SCROLL");
         const float dotD  = 8.f;
         const float gap   = 6.f;
         const float total = dotD + gap + textW;

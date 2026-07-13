@@ -64,10 +64,14 @@ namespace LuxSamplerConstants
     constexpr int     MAX_EQ_NODES        = 16;    // ≥ (octaves+1) of the widest range
     constexpr float   EQ_DYN_RANGE_DB     = 24.0f; // dB span that maps to full darkness
 
-    // MIDI note base for slot PLAYBACK (C1 = MIDI 24 — Ableton/GM convention).
-    // (The former C0..B0 REC-note range was removed: notes only play slots now;
-    //  recording is UI-/MIDI-Learn-driven.)
-    constexpr int MIDI_PLAY_NOTE_BASE = 24; // C1..B1 → slots 0..11
+    // (The former C1..B1 PLAY-note range was removed with the multi-bank mixer:
+    //  banks are no longer note-addressed. Playback is UI-driven and MIDI-
+    //  mappable per bank through the unified MIDI-Learn PLAY targets.)
+
+    // Max banks exposed in the UI (SETUP "Banks" 1..6, default 4). The engine
+    // keeps NUM_SLOTS internal slots for file/session compatibility; only the
+    // first 1..MAX_UI_BANKS are reachable from the bank grid.
+    constexpr int MAX_UI_BANKS = 6;
 
     // .fsmp binary file format
     constexpr uint32_t FSMP_MAGIC      = 0x46534D50u; // "FSMP"
@@ -150,6 +154,20 @@ enum class LoopMode : int
     LOOP     = 1, // Loop forward: wrap play_head back to startFrame on overflow
     INVERSE  = 2, // Loop backward: play in reverse, wrap back to endFrame
     PINGPONG = 3  // Alternate forward / backward each time a boundary is reached
+};
+
+// ============================================================================
+// SlotMixMode — how one bank's playback frame is composited into the master
+// frame when several banks play simultaneously (multi-bank mixer, mirrors the
+// VIDEO MIX per-output blend). All maths run in the darkness domain
+// (255 = white = silence); the per-bank level (1 − brightnessLift) pre-fades
+// the voice toward white for ADD/DARKEN and acts as the opacity for MIX.
+// ============================================================================
+enum class SlotMixMode : int
+{
+    MIX    = 0, // Normal blend: master = lerp(master, voice, level)
+    ADD    = 1, // Energy add (linear burn): darkness_master += level·darkness_voice
+    DARKEN = 2  // Material union: master = min(master, prefaded voice) — default
 };
 
 // ============================================================================
@@ -292,6 +310,53 @@ private:
      *  Prevents the last played frame from freezing in the synthesis pipeline. */
     void injectWhiteFrame() noexcept;
 
+    // ── Multi-voice playback (multi-bank simultaneous play, 2026-07-13) ───────
+    // One VoiceCtx per simultaneously-playing sampler slot; a SCORE session
+    // keeps exactly one voice. All members are touched exclusively on the
+    // FramePlayerThread.
+    struct VoiceCtx
+    {
+        int      slot           = -1;    // slot index (SCORE_SLOT for the score)
+        int      direction      = 1;     // +1 forward / -1 backward
+        float    frameAcc       = 0.0f;  // sub-frame speed accumulator
+        int      prevStartFrame = -1;
+        int      prevEndFrame   = -1;
+        bool     firstRangeInit = true;
+        LoopMode prevLoopMode   = LoopMode::LOOP;
+        bool     active         = false;
+    };
+
+    /** Advance one voice by one 1 ms tick and render its processed frame
+     *  (trim/loop/crossfade/attack/decay/floor/EQ) into outR/G/B (zero-filled
+     *  beyond outNb). Returns false when the voice ended this tick
+     *  (LoopMode::NONE reached its boundary). */
+    bool tickVoice(VoiceCtx& v, FrameSlot& slot, bool isScore,
+                   uint8_t* outR, uint8_t* outG, uint8_t* outB, int& outNb);
+
+    /** Composite one voice frame into the master frame (darkness domain,
+     *  255 = white = identity). level ∈ [0..1] fades the voice toward white
+     *  (ADD/DARKEN) or acts as the blend opacity (MIX). */
+    static void compositeVoice(uint8_t* mR, uint8_t* mG, uint8_t* mB,
+                               const uint8_t* vR, const uint8_t* vG,
+                               const uint8_t* vB, int vNb,
+                               float level, SlotMixMode mode) noexcept;
+
+    /** Shared injection tail for the composited frame: sampler snapshot,
+     *  self-resampling record, live darken-blend, transport fade, sends
+     *  staging, chain inserts, visual mix bus + preprocessed commit. */
+    void outputFrame(uint8_t* workR, uint8_t* workG, uint8_t* workB, int nb,
+                     bool isScore, float liveBlendAmount);
+
+    /** SCORE relay: when SCORE relinquishes the shared channel, hand it back to
+     *  the sampler slot it overrode. Returns true when a slot was re-armed. */
+    bool resumeScoreRelaySlot();
+
+    /** One SCORE playback session (single voice on the dedicated score slot). */
+    void runScoreSession();
+    /** One sampler playback session — the voice set follows slotState[]:
+     *  every PLAYING slot is a voice, composited per-bank (level + mix mode). */
+    void runSamplerSession();
+
     // ── Transport fade-in state ────────────────────────────────────────────────
     // Tracks transitions of sampler_freeze_mode so that pressing PLAY after
     // HOLD (1) or STOP (2) produces a linear fade-in over sampler_fade_in_ms ms.
@@ -313,10 +378,8 @@ public:
     explicit LuxSampler(int engineIndex = 0);
     ~LuxSampler();
 
-    // =========================================================================
-    // RT path — processBlock  (atomics ONLY — no alloc, no lock, no I/O)
-    // =========================================================================
-    void processMidi(const juce::MidiBuffer& midiBuffer);
+    // (processMidi removed 2026-07-13: banks are no longer note-addressed —
+    //  per-bank PLAY/REC live in the unified MIDI-Learn targets instead.)
 
     // =========================================================================
     // Non-RT path — called by udpThread hook after complete line assembled
@@ -525,12 +588,28 @@ public:
                                          std::memory_order_relaxed);
     }
     /** Global brightness lift [0..1]: 0=normal, 1=fully white (silent).
-     *  Applied uniformly to every pixel of the playback frame. */
+     *  Since the multi-bank mixer this IS the bank's mix level, inverted
+     *  (fader = 1 − lift): it pre-fades the voice toward white before it is
+     *  composited into the master frame (see SlotMixMode). */
     void setSlotBrightnessLift(int i, float v) noexcept
     {
         if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
             slotParams[i].brightnessLift.store(juce::jlimit(0.0f, 1.0f, v),
                                                std::memory_order_relaxed);
+    }
+    /** Per-bank mix mode — how this bank composites into the master frame
+     *  when several banks play simultaneously (see SlotMixMode). */
+    void setSlotMixMode(int i, SlotMixMode m) noexcept
+    {
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
+            slotParams[i].mixMode.store(static_cast<int>(m),
+                                        std::memory_order_relaxed);
+    }
+    SlotMixMode getSlotMixMode(int i) const noexcept
+    {
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return SlotMixMode::DARKEN;
+        return static_cast<SlotMixMode>(
+            slotParams[i].mixMode.load(std::memory_order_relaxed));
     }
     /** Treble (right-half pixels) fade to white [0..1].
      *  0=no change, 1=all right-half pixels → white (silence). */
@@ -973,6 +1052,12 @@ public:
      *  Stops any ongoing recording or playback on that slot first. */
     void uiClearSlot(int slotIndex) noexcept;
 
+    /** Reset every play parameter of a slot to factory defaults — trim, speed,
+     *  loop, resume, fades, mixer (level + mix mode), EQ, floor, label.
+     *  Settings follow content: applied to banks restored EMPTY at startup
+     *  (state overlay) and by the NEW SESSION reset. Non-RT (message thread). */
+    void resetSlotPlayParams(int slotIndex) noexcept;
+
     // =========================================================================
     // Slot management (Non-RT)
     // =========================================================================
@@ -1119,16 +1204,24 @@ public:
 
     // =========================================================================
     // Player-release handshake (message thread ⇄ FramePlayerThread).
-    // playerBusySlot_ mirrors the slot the player is CURRENTLY dereferencing
-    // (frames of slots[i] or scoreSlot via SCORE_SLOT); -1 when idle. Every
-    // message-thread path that frees/replaces a slot's frame buffer must stop
-    // playback and then waitForPlayerRelease() before touching the buffer —
-    // stop commands are asynchronous and the player reads frames WITHOUT
-    // slotsMutex_.
+    // playerBusyMask_ mirrors the slots the player is CURRENTLY dereferencing
+    // (bit i for slots[i], bit SCORE_SLOT for the score — multi-voice playback
+    // holds several at once); 0 when idle. Every message-thread path that
+    // frees/replaces a slot's frame buffer must stop playback and then
+    // waitForPlayerRelease() before touching the buffer — stop commands are
+    // asynchronous and the player reads frames WITHOUT slotsMutex_.
     // =========================================================================
-    void setPlayerBusySlot(int slot) noexcept
+    void addPlayerBusySlot(int slot) noexcept
     {
-        playerBusySlot_.store(slot, std::memory_order_release);
+        playerBusyMask_.fetch_or(1u << slot, std::memory_order_acq_rel);
+    }
+    void removePlayerBusySlot(int slot) noexcept
+    {
+        playerBusyMask_.fetch_and(~(1u << slot), std::memory_order_acq_rel);
+    }
+    void clearPlayerBusyMask() noexcept
+    {
+        playerBusyMask_.store(0, std::memory_order_release);
     }
     bool isPlaybackSuspended() const noexcept
     {
@@ -1143,9 +1236,6 @@ public:
     // No snapshot side effect — the display owner owns the shared snapshot.
     void recordModulatedFrame(const uint8_t* R, const uint8_t* G, const uint8_t* B,
                               uint16_t pixel_count, uint32_t line_id) noexcept;
-    // Monotonic line id for the player thread's self-resampling capture.
-    uint32_t nextSelfRecLineId() noexcept
-    { return selfRecLineId_.fetch_add(1, std::memory_order_relaxed); }
     // Mirror a frame into the shared sampler snapshot (idle display). Non-RT.
     void mirrorSamplerSnapshot(const uint8_t* R, const uint8_t* G, const uint8_t* B,
                                uint16_t pixel_count) noexcept;
@@ -1175,7 +1265,6 @@ private:
     static std::atomic<LuxSampler*> s_engines[kMaxEngines];
     static std::atomic<int>         s_engineBusy[kMaxEngines]; // in-flight hook calls per slot
     static std::atomic<bool> s_enginesShareChain;  // A and B hosted on ONE chain (plan-derived)
-    std::atomic<uint32_t> selfRecLineId_{ 0 };     // player-thread self-resampling line ids
 
     // -------------------------------------------------------------------------
     // RT state (atomics only)
@@ -1216,9 +1305,10 @@ private:
     AudioImageBuffers* audioBuffers_ = nullptr; // stored by startPlayerThread()
     DoubleBuffer*      doubleBuffer_ = nullptr; // stored by startPlayerThread()
 
-    // Slot the player is currently dereferencing (SCORE_SLOT for the score),
-    // -1 when idle — see waitForPlayerRelease().
-    std::atomic<int>  playerBusySlot_    { -1 };
+    // Bitmask of the slots the player is currently dereferencing (bit i for
+    // slots[i], bit SCORE_SLOT for the score) — multi-voice playback can hold
+    // several slots at once. 0 when idle — see waitForPlayerRelease().
+    std::atomic<uint32_t> playerBusyMask_ { 0 };
     // True while saveToFile/saveSlotToFile copy frames chunk by chunk: the
     // UDP-thread rec-command drain is frozen meanwhile (a non-overdub START
     // rewrites frames[0..] and would corrupt the interleaved chunk copies).
@@ -1243,7 +1333,8 @@ private:
         std::atomic<float> blendAmount { 0.0f };  // Live darken-blend [0=sample, 1=full]
         std::atomic<float> attackLen      { 0.0f };  // Attack fade-in  [0=none, 1=full region]
         std::atomic<float> decayLen       { 0.0f };  // Decay fade-out  [0=none, 1=full region]
-        std::atomic<float> brightnessLift { 0.0f };  // Global brightness lift [0=normal, 1=white]
+        std::atomic<float> brightnessLift { 0.0f };  // Bank mix level, inverted [0=full, 1=white]
+        std::atomic<int>   mixMode { static_cast<int>(SlotMixMode::DARKEN) }; // composite rule
         std::atomic<float> trebleCut      { 0.0f };  // High-freq fade [0=none, 1=full treble silence]
         std::atomic<float> bassCut        { 0.0f };  // Low-freq  fade [0=none, 1=full bass  silence]
         std::atomic<int>   fadeCurveType  { static_cast<int>(FadeCurveType::LINEAR) };
@@ -1358,10 +1449,6 @@ private:
     // Helpers
     // -------------------------------------------------------------------------
     static uint64_t currentTimeUs() noexcept;
-
-    // RT handlers — atomics only
-    void handleNoteOn (int note, int velocity) noexcept;
-    void handleNoteOff(int note)               noexcept;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxSampler)
 };

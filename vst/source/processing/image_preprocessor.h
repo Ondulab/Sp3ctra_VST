@@ -52,13 +52,10 @@ typedef struct {
         int valid;                              /* 1 if FFT data is valid, 0 otherwise */
     } polyphonic;
     
-    /* LUXWAVE SYNTHESIS - Native RGB for waveform sampling */
-    struct {
-        uint8_t r[CIS_MAX_PIXELS_NB];          /* Red channel [0-255] */
-        uint8_t g[CIS_MAX_PIXELS_NB];          /* Green channel [0-255] */
-        uint8_t b[CIS_MAX_PIXELS_NB];          /* Blue channel [0-255] */
-    } photowave;
-    
+    /* (photowave RGB mirror removed: written every line but never read — the
+     * real LuxWave feed is the staged "→ LUXWAVE" sends via
+     * pipeline_luxwave_feed_tick, not this struct.) */
+
     /* Stereo panning data (shared, only used if stereo mode enabled) */
     struct {
         float pan_positions[PREPROCESS_MAX_NOTES];  /* -1.0 (left) to +1.0 (right) */

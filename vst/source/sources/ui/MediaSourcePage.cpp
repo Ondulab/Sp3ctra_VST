@@ -117,6 +117,23 @@ MediaSourcePage::MediaSourcePage(Sp3ctraAudioProcessor& p, Kind k)
         addAndMakeVisible(clearButton);
     }
 
+    // ── ACTIVE toggle (all kinds) — the source's on/off ──────────────────────
+    // Off: the source feeds NOTHING (its chain streams blank paper). Media,
+    // transport and params are kept; switching back on resumes instantly.
+    {
+        activeButton.setClickingTogglesState(true);
+        activeButton.setColour(juce::TextButton::buttonOnColourId,
+                               juce::Colour(0xff3c8f4a));
+        addAndMakeVisible(activeButton);
+        const char* enabledId = kind == Kind::Image ? "imgSrcEnabled"
+                              : kind == Kind::Video ? "vidSrcEnabled"
+                                                    : "camSrcEnabled";
+        activeAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, enabledId, activeButton);
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
+            processor.getMidiMap(), activeButton, enabledId));
+    }
+
     statusLabel.setJustificationType(juce::Justification::centredLeft);
     statusLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.55f));
     statusLabel.setFont(juce::Font(juce::FontOptions(12.0f)));
@@ -384,9 +401,12 @@ void MediaSourcePage::resized()
 {
     auto b = getLocalBounds().reduced(kPad);
 
-    // Source picker row at the top (LOAD/CLEAR — or device combo for CAMERA)
+    // Source picker row at the top (LOAD/CLEAR — or device combo for CAMERA),
+    // with the ACTIVE toggle pinned at the right edge.
     {
         auto row = b.removeFromTop(kCtrlH);
+        activeButton.setBounds(row.removeFromRight(74));
+        row.removeFromRight(kRowGap);
         if (kind == Kind::Camera)
         {
             deviceCombo.setBounds(row.removeFromLeft(juce::jmax(180, row.getWidth() - 190)));

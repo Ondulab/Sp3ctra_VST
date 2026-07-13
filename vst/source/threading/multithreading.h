@@ -213,4 +213,22 @@ void lx_send_stage_player_frame(const uint8_t *r, const uint8_t *g,
 int chain_additive_player_candidate(int is_score, int engine_slot);
 int chain_pathb_player_candidate(int is_score, int engine_slot);
 
+/* Player stop → staging silence: deactivate the LuxStral/LuxSynth/LuxWave
+ * stagings of every chain relayed by THIS player (own sampler chains + score
+ * relay). The stagings have no timeout — without this, a stopped player on a
+ * sourceless chain leaves its last column ringing forever. Called by
+ * FramePlayerThread::injectWhiteFrame() (Non-RT). */
+void chain_player_stagings_set_inactive(int engine_slot);
+
+/* Module contract (2026-07-13) — FramePlayerThread: while THIS player owns a
+ * chain's stream, the playback frame is the INPUT of every sampler marker
+ * placed BELOW the owning marker (this engine's SAMPLER marker, or the SCORE
+ * marker for a score session). Record it into their armed slots, 1:1 with
+ * produced frames. The playing engine never records its own playback; markers
+ * ABOVE the owning position record the chain input instead
+ * (chain_run_premarker_segment, udpThread/feeder). */
+void chain_player_record_downstream(int is_score, int engine_slot,
+                                    const uint8_t *r, const uint8_t *g,
+                                    const uint8_t *b, int nb_pixels);
+
 #endif

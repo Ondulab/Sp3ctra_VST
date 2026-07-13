@@ -8,8 +8,16 @@
  *                             measured frame interval (-60 dB over decay_s).
  *   2. tail = blur3(tail)   — diffusion: neighbour mixing, rate scaled by dt so
  *                             the spread speed is frame-rate independent.
- *   3. tail = max(tail, in) — the incoming material re-excites the tail.
- *   4. out  = max(in, tail * mix).
+ *      (+ flush-to-zero: a fully decayed tail dies instead of lingering as
+ *       float dust for tens of seconds.)
+ *   3. tail = max(tail, in) — material re-excites the tail, GATED: only pixels
+ *                             clearly above the background noise floor enter.
+ *                             Ungated, the max() peak-held every sensor /
+ *                             compression fleck for decay_s seconds — on any
+ *                             real stream that summed to a sustained noise
+ *                             carpet through the always-on dB decode law.
+ *   4. out  = max(in, tail * mix), rounded to nearest (truncation kept a
+ *      1-LSB background pedestal alive ~5 s after the tail became invisible).
  *
  * RT-safety: Pure C, allocation-free, bounded O(N).
  *
@@ -133,6 +141,19 @@ static int lux_reverb_resolve_bg(LuxReverbState *state,
 
 /* ── Frame processing ──────────────────────────────────────────────────────── */
 
+/* Re-excitation gate (energy LSB, 0..255): material must rise this far above
+ * the background pole to enter the tail. Sensor noise, paper texture and
+ * compression artefacts live in the first few LSB; the DRY path is never
+ * gated, so they still pass through for exactly one line, as in the source —
+ * the gate only stops the tail from sustaining them. Faint material below the
+ * gate simply gets no reverb. */
+#define LUX_REVERB_EXCITE_FLOOR 8.0f
+
+/* Tail flush threshold (energy LSB): 10× below the 0.5-LSB rounding
+ * visibility limit — the tail dies shortly after it stops contributing,
+ * instead of decaying through float dust for tens of seconds. */
+#define LUX_REVERB_TAIL_EPS 0.05f
+
 /* Decay + diffuse + inject + mix for one channel. `d` is the per-frame
  * neighbour-mixing amount (0..0.45, stable 3-tap kernel that sums to 1). */
 static void lux_reverb_channel(
@@ -151,17 +172,19 @@ static void lux_reverb_channel(
         const float right = (i + 1 < px) ? tail[i + 1] * k : 0.0f;
         float t = cur * (1.0f - d) + (prev + right) * (0.5f * d);
         prev = cur;
+        if (t < LUX_REVERB_TAIL_EPS) t = 0.0f;
 
-        /* 3. re-excite. */
-        if (e_in > t) t = e_in;
+        /* 3. re-excite (gated — see LUX_REVERB_EXCITE_FLOOR). */
+        if (e_in > t && e_in > LUX_REVERB_EXCITE_FLOOR) t = e_in;
         tail[i] = t;
 
-        /* 4. dry/wet blend (max keeps uint8 semantics saturation-free). */
+        /* 4. dry/wet blend (max keeps uint8 semantics saturation-free),
+         * rounded to nearest so a sub-half-LSB tail is truly invisible. */
         float e_out = t * mix;
         if (e_in > e_out) e_out = e_in;
         if (e_out > 255.0f) e_out = 255.0f;
 
-        out[i] = bg_white ? (uint8_t)(255.0f - e_out) : (uint8_t)e_out;
+        out[i] = bg_white ? (uint8_t)(255.5f - e_out) : (uint8_t)(e_out + 0.5f);
     }
 }
 

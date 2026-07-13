@@ -17,9 +17,7 @@ static const char* kLoopTips[4] = {
     "Inverse (loop backward)",
     "Ping-pong (bounce forward / backward)"
 };
-static const char* kNoteNamesEd[LuxSamplerConstants::NUM_SLOTS] = {
-    "C1","C#1","D1","D#1","E1","F1","F#1","G1","G#1","A1","A#1","B1"
-};
+// (Note names removed — banks are numbered, no more note addressing.)
 
 SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     : processor(proc),
@@ -169,28 +167,8 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     // NOTE: MIX (blend) slider removed. Live/sampler opacity is now managed from
     // the IMAGE tab's opacity controls (darken-blend, see ImagePageComponent).
 
-    // ── Brightness lift slider ───────────────────────────────────────────────
-    // 0% = normal, 100% = fully white (all pixels → 255, silence).
-    brightnessLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
-    brightnessLabel.setColour(juce::Label::textColourId, juce::Colour(0xffb0b0c0));
-    brightnessLabel.setJustificationType(juce::Justification::centredRight);
-    addAndMakeVisible(brightnessLabel);
-
-    brightnessSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    brightnessSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                      Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
-    brightnessSlider.setRange(0.0, 100.0, 1.0);
-    brightnessSlider.setTextValueSuffix("%");
-    brightnessSlider.setValue(100.0, juce::dontSendNotification); // 100 = full image
-    brightnessSlider.onValueChange = [this]
-    {
-        // Slider 100% = full image (lift=0), 0% = white silence (lift=1)
-        if (auto* fs = processor.getSampler(samplerIndex_))
-            fs->setSlotBrightnessLift(selectedSlot,
-                1.0f - static_cast<float>(brightnessSlider.getValue()) * 0.01f);
-        spectralEditor.markDirty();
-    };
-    addAndMakeVisible(brightnessSlider);
+    // (IMG brightness-lift slider removed — the bank level fader in the grid's
+    //  per-bank mixer drives the same engine param, inverted.)
 
     // ── Pre-EQ material floor slider (0% = off … 100% = total white mask) ─────
     floorLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
@@ -429,10 +407,7 @@ void SlotEditorComponent::refreshSliderValues()
         static_cast<double>(fs->getSlotSpeed(selectedSlot)),
         juce::dontSendNotification);
     // Blend (MIX) removed — opacity managed from IMAGE tab.
-    // Invert: slider shows image intensity (100=full, 0=white)
-    brightnessSlider.setValue(
-        (1.0 - static_cast<double>(fs->getSlotBrightnessLift(selectedSlot))) * 100.0,
-        juce::dontSendNotification);
+    // (IMG removed — the bank level lives in the grid's per-bank mixer.)
     floorSlider.setValue(
         static_cast<double>(fs->getSlotEqFloor(selectedSlot)) * 100.0,
         juce::dontSendNotification);
@@ -525,10 +500,9 @@ void SlotEditorComponent::rebindMidiLearn()
             mm, c, SamplerMidiTargets::makeId(e, s, kind)));
     };
 
-    // Value play params.
+    // Value play params. (K::Img now learns on the grid's bank level fader.)
     add(speedSlider,        K::Speed);
     add(loopXfSlider,       K::LoopXf);
-    add(brightnessSlider,   K::Img);
     add(floorSlider,        K::Floor);
     add(resumeToggle,       K::Resume);
     add(overdubToggle,      K::Overdub);          // engine-wide (slot ignored)
@@ -701,7 +675,7 @@ static constexpr int kEdGap      = 6;
 static constexpr int kEdColGap   = 8;
 static constexpr int kEdTitleH   = 22;
 static constexpr int kEdParamTop = 30;   // first param row Y
-static constexpr int kEdRows     = 6;    // rows per column (incl. button row)
+static constexpr int kEdRows     = 5;    // rows per column (incl. button row)
 
 static int edStep()        { return Sp3ctraTheme::kControlH + 4; }
 static int edParamBottom() { return kEdParamTop + kEdRows * edStep(); }
@@ -724,7 +698,7 @@ void SlotEditorComponent::paint(juce::Graphics& g)
 
     g.setColour(juce::Colour(0xffcc88ff));
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
-    g.drawText(juce::String("SLOT > ") + kNoteNamesEd[selectedSlot],
+    g.drawText("BANK " + juce::String(selectedSlot + 1),
                juce::Rectangle<int>(8, 4, W - 16, kEdTitleH),
                juce::Justification::centredLeft, false);
 
@@ -763,9 +737,10 @@ void SlotEditorComponent::paint(juce::Graphics& g)
 // resized
 //
 // Two parameter columns below the title badge, then the merged editor:
-//   Left column  : [REC][PLAY][CLEAR] · Speed · Loop · Loop XF · IMG
+//   Left column  : [REC][PLAY][CLEAR] · Speed · Loop · Loop XF · Floor
 //   Right column : [CROP][SAVE][LOAD] · Resume · Overdub · Curve · Power
 //   Bottom       : SlotSpectralEditorComponent (fills the remaining height)
+// (IMG removed — the bank level lives in the grid's per-bank mixer.)
 // ─────────────────────────────────────────────────────────────────────────────
 void SlotEditorComponent::resized()
 {
@@ -815,10 +790,6 @@ void SlotEditorComponent::resized()
 
         loopXfLabel .setBounds(leftX, ry, lW, rowH);
         loopXfSlider.setBounds(ctrlX, ry, ctrlW, rowH);
-        ry += step;
-
-        brightnessLabel .setBounds(leftX, ry, lW, rowH);
-        brightnessSlider.setBounds(ctrlX, ry, ctrlW, rowH);
         ry += step;
 
         floorLabel .setBounds(leftX, ry, lW, rowH);

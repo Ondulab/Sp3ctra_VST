@@ -87,8 +87,9 @@ void VideoScrollRenderCore::allocateScrollBuffer(int w, int h)
         // SoftwareImageType → guaranteed packed RGB (pixelStride 3) so the raw
         // BitmapData pointer maths in scrollStep()/buildWarp() is correct
         // (the native macOS backend would store RGB as 4-byte ARGB).
+        // White = blank paper: an empty chain streams white, never black.
         juce::Image next(juce::Image::RGB, bufW_, newBufH, true, juce::SoftwareImageType());
-        next.clear(next.getBounds(), juce::Colours::black);
+        next.clear(next.getBounds(), juce::Colours::white);
         if (history_.isValid() && buffersInit_)
         {
             juce::Graphics g(next);
@@ -113,7 +114,7 @@ void VideoScrollRenderCore::setDisplaySize(int w, int h)
 void VideoScrollRenderCore::clear()
 {
     if (history_.isValid())
-        history_.clear(history_.getBounds(), juce::Colours::black);
+        history_.clear(history_.getBounds(), juce::Colours::white);   // blank paper
     scrollAccumulator_ = 0.f;
     heldPx_            = 0;      // a cleared waterfall must not resurrect old lines
     warpDirty_         = true;   // history blanked → force a warp rebuild.
@@ -325,11 +326,11 @@ bool VideoScrollRenderCore::scrollStep(double nowMs, double dtMs)
                 // The vacated 2×scroll band around the birth line is covered by
                 // the stamp below (bandH >= 2*scroll). If this tick has nothing
                 // to stamp (source stopped past the hold window) blank it — the
-                // honest "no stream" black, exactly like the original.
+                // honest "no stream" WHITE (blank paper, never black).
                 if (!haveLine)
                     for (int y = juce::jmax(0, birthY - scroll);
                          y < juce::jmin(bufH_, birthY + scroll); ++y)
-                        std::memset(rowPtr(y), 0, rowBytes);
+                        std::memset(rowPtr(y), 0xFF, rowBytes);
             }
             else
             {
@@ -340,11 +341,11 @@ bool VideoScrollRenderCore::scrollStep(double nowMs, double dtMs)
                 for (int y = birthY - 1; y >= scroll; --y)
                     std::memcpy(rowPtr(y), rowPtr(y - scroll), rowBytes);
                 for (int y = 0; y < juce::jmin(scroll, birthY); ++y)
-                    std::memset(rowPtr(y), 0, rowBytes);
+                    std::memset(rowPtr(y), 0xFF, rowBytes);   // vacated edge → white
                 for (int y = birthY; y < bufH_ - scroll; ++y)
                     std::memcpy(rowPtr(y), rowPtr(y + scroll), rowBytes);
                 for (int y = juce::jmax(birthY, bufH_ - scroll); y < bufH_; ++y)
-                    std::memset(rowPtr(y), 0, rowBytes);
+                    std::memset(rowPtr(y), 0xFF, rowBytes);   // vacated edge → white
             }
         }
 
@@ -416,7 +417,7 @@ bool VideoScrollRenderCore::buildLineImage(juce::Image& out, int coreH, int band
     if (used == 0)
     {
         for (int r = 0; r < bandH; ++r)
-            std::memset(bmp.getLinePointer(r), 0, rowBytes);   // no width match → black
+            std::memset(bmp.getLinePointer(r), 0xFF, rowBytes);   // no width match → white
         return true;
     }
 
@@ -734,7 +735,7 @@ bool VideoScrollRenderCore::buildWarp()
 //==============================================================================
 void VideoScrollRenderCore::drawWarp(juce::Graphics& g, int destW, int destH)
 {
-    g.fillAll(juce::Colours::black);
+    g.fillAll(juce::Colours::white);   // no warp yet / zoom borders → blank paper
     if (!warpReady_ || !warpBuf_.isValid() || bufW_ <= 0 || compH_ <= 0)
         return;
 

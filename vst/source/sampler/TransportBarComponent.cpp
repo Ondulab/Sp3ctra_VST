@@ -72,31 +72,16 @@ TransportBarComponent::TransportBarComponent(Sp3ctraAudioProcessor& proc)
     addAndMakeVisible(bpmLabel);
 
     // ── Steps ─────────────────────────────────────────────────────────────────
-    // Max 16 steps — matches the 8×2 display grid in SequencerComponent.
-    stepsCombo.addItemList({"4","8","12","16"}, 1);
-    {
-        static const int choices[] = { 4, 8, 12, 16 };
-        const int cur = juce::jmin(16, static_cast<int>(
-            apvts.getRawParameterValue("seqNumSteps")->load()));
-        for (int k = 0; k < 4; ++k)
-            if (choices[k] == cur) { stepsCombo.setSelectedId(k+1, juce::dontSendNotification); break; }
-    }
-    stepsCombo.onChange = [this]
-    {
-        static const int choices[] = { 4, 8, 12, 16 };
-        const int id = stepsCombo.getSelectedId();
-        if (id >= 1 && id <= 4)
-        {
-            const int n = choices[id-1];
-            if (auto* p = processor.getAPVTS().getParameter("seqNumSteps"))
-                p->setValueNotifyingHost(p->convertTo0to1(static_cast<float>(n)));
-            if (auto* seq = processor.getFrameSequencer())
-                seq->setNumSteps(n);
-        }
-    };
+    // Draggable value bar over the FULL seqNumSteps range (2..16) — max 16
+    // matches the 8×2 display grid in SequencerComponent. The attachment sets
+    // range/interval from the int param and relays edits; the processor's
+    // parameter listener forwards them to FrameSequencer::setNumSteps.
+    stepsSlider.setSliderStyle(juce::Slider::LinearBar);
+    addAndMakeVisible(stepsSlider);
+    stepsAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "seqNumSteps", stepsSlider);
     stepsLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
     stepsLabel.setJustificationType(juce::Justification::centredRight);
-    addAndMakeVisible(stepsCombo);
     addAndMakeVisible(stepsLabel);
 
     // ── Loop / DAW sync ───────────────────────────────────────────────────────
@@ -121,7 +106,7 @@ TransportBarComponent::TransportBarComponent(Sp3ctraAudioProcessor& proc)
         learn(seqHoldBtn,    "seqTransport");
         learn(seqStopBtn,    "seqTransport");
         learn(bpmSlider,     "seqBpm");
-        learn(stepsCombo,    "seqNumSteps");
+        learn(stepsSlider,   "seqNumSteps");
         learn(loopToggle,    "seqLoop");
         learn(dawSyncToggle, "seqDawSync");
     }
@@ -165,7 +150,7 @@ void TransportBarComponent::paint(juce::Graphics& g)
 // ─────────────────────────────────────────────────────────────────────────────
 // resized — all interactive controls share ctrlH for visual consistency.
 //
-//  [▶] [⏸] [■]   BPM [── slider ─── 000.0 BPM]   Steps [combo]  [Loop]  [DAW Sync]
+//  [▶] [⏸] [■]   BPM [── slider ─── 000.0 BPM]   Steps [drag-bar]  [Loop]  [DAW Sync]
 // ─────────────────────────────────────────────────────────────────────────────
 void TransportBarComponent::resized()
 {
@@ -223,7 +208,7 @@ void TransportBarComponent::resized()
     stepsLabel.setBounds(cx, (h - 20) / 2, stepsLW, 20);
     cx += stepsLW + gap;
 
-    place(stepsCombo, stepsComW); cx += gap;
+    place(stepsSlider, stepsComW); cx += gap;
     place(loopToggle, loopW);
     place(dawSyncToggle, dawW);
 }

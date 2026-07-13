@@ -4,11 +4,6 @@
 #include "../../UITheme.h"
 #include "../../luxsampler/LuxSampler.h"
 
-// Note names for slot index labels (C0..B0 for REC, C1..B1 for PLAY)
-static const char* const kNoteNames[] = {
-    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
-};
-
 // ── Colour helpers ────────────────────────────────────────────────────────────
 static juce::Colour stateColour(SlotState s)
 {
@@ -41,29 +36,18 @@ SamplerSetupPanel::SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Col
 {
     // ── Enable toggle ── moved to the rack LED + zone-3 header power switch
 
-    // ── MIDI Channel ──────────────────────────────────────────────────────
-    midiChannelLabel.setText("MIDI Channel:", juce::dontSendNotification);
-    midiChannelLabel.setJustificationType(juce::Justification::centredRight);
-    midiChannelLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-    addAndMakeVisible(midiChannelLabel);
+    // ── Number of banks (1..8) ────────────────────────────────────────────
+    banksLabel.setText("Banks:", juce::dontSendNotification);
+    banksLabel.setJustificationType(juce::Justification::centredRight);
+    banksLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+    addAndMakeVisible(banksLabel);
 
-    for (int i = 1; i <= 16; ++i)
-        midiChannelCombo.addItem("Channel " + juce::String(i), i);
-    addAndMakeVisible(midiChannelCombo);
-    // Attachment created by rebindEngineParams() — the bank is per-engine.
-
-    // ── Octave Offset ─────────────────────────────────────────────────────
-    octaveOffsetLabel.setText("Octave Offset:", juce::dontSendNotification);
-    octaveOffsetLabel.setJustificationType(juce::Justification::centredRight);
-    octaveOffsetLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-    addAndMakeVisible(octaveOffsetLabel);
-
-    octaveOffsetCombo.addItem("-2", 1);
-    octaveOffsetCombo.addItem("-1", 2);
-    octaveOffsetCombo.addItem(" 0", 3);
-    octaveOffsetCombo.addItem("+1", 4);
-    octaveOffsetCombo.addItem("+2", 5);
-    addAndMakeVisible(octaveOffsetCombo);   // attachment: rebindEngineParams()
+    for (int i = 1; i <= LuxSamplerConstants::MAX_UI_BANKS; ++i)
+        banksCombo.addItem(juce::String(i), i);
+    banksCombo.setTooltip("Number of banks shown in the SAMPLER page (1-6). "
+                          "Several banks can play simultaneously; each has its "
+                          "own mixer fader and mix mode under its tile.");
+    addAndMakeVisible(banksCombo);   // attachment: rebindEngineParams()
 
     // ── Max Duration ──────────────────────────────────────────────────────
     maxDurationLabel.setText("Max Duration:", juce::dontSendNotification);
@@ -203,10 +187,9 @@ SamplerSetupPanel::SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Col
     // ── Slot rows ─────────────────────────────────────────────────────────
     for (int i = 0; i < NUM_SLOTS; ++i)
     {
-        // Index label: the PLAY note that triggers this slot (C1..B1).
-        // (REC notes removed — recording is UI-/MIDI-Learn-driven now.)
-        juce::String idxText = juce::String(kNoteNames[i]) + "1";
-        slotIndexLabel[i].setText(idxText, juce::dontSendNotification);
+        // Index label: banks are numbered — no more note addressing.
+        slotIndexLabel[i].setText("Bank " + juce::String(i + 1),
+                                  juce::dontSendNotification);
         slotIndexLabel[i].setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
         slotIndexLabel[i].setJustificationType(juce::Justification::centredLeft);
         addAndMakeVisible(slotIndexLabel[i]);
@@ -262,15 +245,12 @@ void SamplerSetupPanel::rebindEngineParams()
     using CA = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
     using SA = juce::AudioProcessorValueTreeState::SliderAttachment;
 
-    midiChannelAttachment .reset();
-    octaveOffsetAttachment.reset();
+    banksAttachment       .reset();
     maxDurationAttachment .reset();
     recModeAttachment     .reset();
     playModeAttachment    .reset();
-    midiChannelAttachment = std::make_unique<CA>(
-        apvts, fsEngineParam(samplerIndex_, "MidiChannel"),  midiChannelCombo);
-    octaveOffsetAttachment = std::make_unique<CA>(
-        apvts, fsEngineParam(samplerIndex_, "OctaveOffset"), octaveOffsetCombo);
+    banksAttachment = std::make_unique<CA>(
+        apvts, fsEngineParam(samplerIndex_, "NumBanks"),     banksCombo);
     maxDurationAttachment = std::make_unique<SA>(
         apvts, fsEngineParam(samplerIndex_, "MaxDuration"),  maxDurationSlider);
     recModeAttachment = std::make_unique<CA>(
@@ -289,8 +269,23 @@ void SamplerSetupPanel::updateSlotDisplays()
     auto* fs = audioProcessor.getSampler(samplerIndex_);
     if (fs == nullptr) return;
 
+    // Only the first N banks (SETUP "Banks" choice: index 0..7 → 1..8) are
+    // reachable from the bank grid — hide the rows beyond.
+    int numBanks = LuxSamplerConstants::MAX_UI_BANKS;
+    if (auto* p = apvts.getRawParameterValue(
+            fsEngineParam(samplerIndex_, "NumBanks")))
+        numBanks = juce::jlimit(1, LuxSamplerConstants::MAX_UI_BANKS,
+                                static_cast<int>(p->load()) + 1);
+
     for (int i = 0; i < NUM_SLOTS; ++i)
     {
+        const bool visible = (i < numBanks);
+        slotIndexLabel[i].setVisible(visible);
+        slotStateLabel[i].setVisible(visible);
+        slotDurLabel[i]  .setVisible(visible);
+        slotClearBtn[i]  .setVisible(visible);
+        if (! visible) continue;
+
         const SlotState state = fs->getSlotState(i);
         const uint64_t  dur   = fs->getSlotDurationUs(i);
 
@@ -330,12 +325,10 @@ void SamplerSetupPanel::paint(juce::Graphics& g)
     SetupUI::paintHeader(g, *this, "SAMPLER -- SETUP", accent);
 
     // Column headers for slot grid — position must match resized() exactly:
-    //   headerH(30) + 8 control rows (MIDI, Octave, MaxDur, RecMode, PlayMode,
+    //   headerH(30) + 7 control rows (Banks, MaxDur, RecMode, PlayMode,
     //   ExportToggle, ExportFormat, OutputDir) * kRowStep + kHPad.
-    //   (Enable row removed — power lives in the rack LED + zone-3 header;
-    //    REC/PLAY/SAVE bind rows removed — unified MIDI-Learn on the buttons.)
     const int titleH  = SetupUI::kHeaderH + Sp3ctraTheme::kSectionGap;
-    const int headerY = titleH + 8 * Sp3ctraTheme::kRowStep + Sp3ctraTheme::kHPad;
+    const int headerY = titleH + 7 * Sp3ctraTheme::kRowStep + Sp3ctraTheme::kHPad;
     const int headerH = 20;
 
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
@@ -343,7 +336,7 @@ void SamplerSetupPanel::paint(juce::Graphics& g)
 
     auto headerBounds = juce::Rectangle<int>(10, headerY, getWidth() - 20, headerH);
     const int colW    = (getWidth() - 20) / 4;
-    g.drawText("Note (PLAY)",       headerBounds.removeFromLeft(colW), juce::Justification::centredLeft, true);
+    g.drawText("Bank",              headerBounds.removeFromLeft(colW), juce::Justification::centredLeft, true);
     g.drawText("State",             headerBounds.removeFromLeft(colW), juce::Justification::centred, true);
     g.drawText("Duration",          headerBounds.removeFromLeft(colW), juce::Justification::centred, true);
     g.drawText("",                  headerBounds,                      juce::Justification::centred, true);
@@ -379,8 +372,7 @@ void SamplerSetupPanel::resized()
         y += rowH;
     };
 
-    row(midiChannelLabel, midiChannelCombo);
-    row(octaveOffsetLabel,octaveOffsetCombo);
+    row(banksLabel,       banksCombo);
     row(maxDurationLabel, maxDurationSlider);
     row(recModeLabel,     recModeCombo);
     row(playModeLabel,    playModeCombo);

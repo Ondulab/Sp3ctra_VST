@@ -188,11 +188,11 @@ static float lowpass_process(LuxWaveLowpass *lp, float input,
     if (cutoff_hz <= 0.0f)
         return input;
 
-    /* Simple one-pole: alpha = dt / (RC + dt) */
-    float dt = inv_sr;
-    float rc = 1.0f / (6.2831853f * cutoff_hz);
-    float alpha = dt / (rc + dt);
-    if (alpha > 1.0f) alpha = 1.0f;
+    /* Simple one-pole: alpha = dt/(RC+dt) = ω·dt/(1+ω·dt) — same math as the
+     * old rc = 1/ω form but ONE division per sample instead of two, and the
+     * ratio is < 1 by construction (no clamp needed). */
+    float wdt = 6.2831853f * cutoff_hz * inv_sr;
+    float alpha = wdt / (1.0f + wdt);
 
     lp->prev_output += alpha * (input - lp->prev_output);
     return lp->prev_output;

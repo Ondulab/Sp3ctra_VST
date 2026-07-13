@@ -49,13 +49,8 @@ RTProfiler g_vst_rt_profiler = {};
 namespace
 {
     // (J1: the per-type suffix tables and InsertBankDesc moved to the single
-    // manifest — ui/ModuleParamManifest.h. This alias keeps the call sites
-    // readable.)
-    inline const ModuleParamManifest* insertBankDescFor(ModuleType t)
-    {
-        return moduleParamManifest(t);
-    }
-
+    // manifest — ui/ModuleParamManifest.h. Call sites use moduleParamManifest()
+    // directly.)
     bool isPooledInsertType(ModuleType t)
     {
         return t == ModuleType::Pitch  || t == ModuleType::Mask
@@ -981,6 +976,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             modeNames, 0, kHiddenChoice));
     }
 
+    // Number of banks shown in the SAMPLER page (1..6). A choice param (index
+    // 0..5 → 1..6 banks) so the SETUP combo binds mechanically; the engine
+    // keeps its NUM_SLOTS internal slots for session compatibility.
+    {
+        juce::StringArray bankCounts { "1", "2", "3", "4", "5", "6" };
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxSamplerNumBanks", 1}, "LuxSampler Banks",
+            bankCounts, 3, kHiddenChoice));  // default = 4 banks
+    }
+
     // ── LuxSampler engine B — its own play-param bank ("Part B") ─────────────
     // Same suffixes as A's legacy ids so the UI rebinds mechanically
     // (fsEngineParam). MIDI channel defaults to 2, preserving the value that
@@ -1014,6 +1019,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             juce::ParameterID{"luxSamplerBPlayMode", 1},
             "LuxSampler B PLAY Mode", bModeNames, 0, kHiddenChoice));
+
+        // Number of banks (engine B) — mirrors luxSamplerNumBanks.
+        juce::StringArray bBankCounts { "1", "2", "3", "4", "5", "6" };
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxSamplerBNumBanks", 1}, "LuxSampler B Banks",
+            bBankCounts, 3, kHiddenChoice));  // default = 4 banks
     }
 
     // Image export on Save Session: bool toggle + format choice (PNG / JPEG)
@@ -1037,8 +1048,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"seqBpm",      1}, "Seq BPM",
         juce::NormalisableRange<float>(40.0f, 240.0f, 0.5f), 120.0f));
+    // 2..16: the sequencer grid displays at most 16 cells (8×2) and a single
+    // step is not a sequence — the whole span is MIDI/automation-addressable.
     params.push_back(std::make_unique<juce::AudioParameterInt>(
-        juce::ParameterID{"seqNumSteps", 1}, "Seq Steps", 1, 32, 16));
+        juce::ParameterID{"seqNumSteps", 1}, "Seq Steps", 2, 16, 16));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"seqLoop",     1}, "Seq Loop",    true));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
@@ -1092,6 +1105,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::StringArray{"Once", "Loop", "Reverse", "Ping-Pong"}, 1));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"imgSrcPlay", 1}, "Image Src Play", false));
+    // ACTIVE: off = the source feeds NOTHING (its chain streams blank paper);
+    // media/params are kept, on resumes instantly. Automatable/MIDI-learnable.
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"imgSrcEnabled", 1}, "Image Src Active", true));
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"vidSrcLine", 1}, "Video Src Line",
@@ -1108,10 +1125,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::StringArray{"Once", "Loop", "Reverse", "Ping-Pong"}, 1));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"vidSrcPlay", 1}, "Video Src Play", false));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"vidSrcEnabled", 1}, "Video Src Active", true));
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"camSrcLine", 1}, "Camera Src Line",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.0001f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"camSrcEnabled", 1}, "Camera Src Active", true));
 
     // ── Video Scroll — live controls (hidden from DAW automation) ─────────────
     // (Purge 2026-07-12: the dead global singletons videoScrollEnabled/
@@ -1516,10 +1537,13 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     imageSource_->setPosition (apvts.getRawParameterValue(PARAM_IMGSRC_POS)->load());
     imageSource_->setDurationS(apvts.getRawParameterValue(PARAM_IMGSRC_DUR)->load());
     imageSource_->setLoopMode ((int) apvts.getRawParameterValue(PARAM_IMGSRC_LOOP)->load());
+    imageSource_->setEnabled  (apvts.getRawParameterValue(PARAM_IMGSRC_ENABLED)->load() > 0.5f);
     videoSource_->setLineFrac (apvts.getRawParameterValue(PARAM_VIDSRC_LINE)->load());
     videoSource_->setSpeed    (apvts.getRawParameterValue(PARAM_VIDSRC_SPEED)->load());
     videoSource_->setLoopMode ((int) apvts.getRawParameterValue(PARAM_VIDSRC_LOOP)->load());
+    videoSource_->setEnabled  (apvts.getRawParameterValue(PARAM_VIDSRC_ENABLED)->load() > 0.5f);
     cameraSource_->setLineFrac(apvts.getRawParameterValue(PARAM_CAMSRC_LINE)->load());
+    cameraSource_->setEnabled (apvts.getRawParameterValue(PARAM_CAMSRC_ENABLED)->load() > 0.5f);
 
     // Register LuxSampler parameter listeners
     apvts.addParameterListener(PARAM_FS_ENABLED,    this);
@@ -1546,15 +1570,18 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener(PARAM_SCORE_SPEED,   this);
 
     // M9 — IMAGE / VIDEO / CAMERA source params → engines
-    apvts.addParameterListener(PARAM_IMGSRC_POS,   this);
-    apvts.addParameterListener(PARAM_IMGSRC_DUR,   this);
-    apvts.addParameterListener(PARAM_IMGSRC_LOOP,  this);
-    apvts.addParameterListener(PARAM_IMGSRC_PLAY,  this);
-    apvts.addParameterListener(PARAM_VIDSRC_LINE,  this);
-    apvts.addParameterListener(PARAM_VIDSRC_SPEED, this);
-    apvts.addParameterListener(PARAM_VIDSRC_LOOP,  this);
-    apvts.addParameterListener(PARAM_VIDSRC_PLAY,  this);
-    apvts.addParameterListener(PARAM_CAMSRC_LINE,  this);
+    apvts.addParameterListener(PARAM_IMGSRC_POS,     this);
+    apvts.addParameterListener(PARAM_IMGSRC_DUR,     this);
+    apvts.addParameterListener(PARAM_IMGSRC_LOOP,    this);
+    apvts.addParameterListener(PARAM_IMGSRC_PLAY,    this);
+    apvts.addParameterListener(PARAM_IMGSRC_ENABLED, this);
+    apvts.addParameterListener(PARAM_VIDSRC_LINE,    this);
+    apvts.addParameterListener(PARAM_VIDSRC_SPEED,   this);
+    apvts.addParameterListener(PARAM_VIDSRC_LOOP,    this);
+    apvts.addParameterListener(PARAM_VIDSRC_PLAY,    this);
+    apvts.addParameterListener(PARAM_VIDSRC_ENABLED, this);
+    apvts.addParameterListener(PARAM_CAMSRC_LINE,    this);
+    apvts.addParameterListener(PARAM_CAMSRC_ENABLED, this);
 
     // Sync LuxSampler config with initial APVTS values
     luxSampler->setEnabled(*apvts.getRawParameterValue(PARAM_FS_ENABLED) > 0.5f);
@@ -2083,20 +2110,9 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // Clear output buffer first
     buffer.clear();
 
-    // ── LuxSampler MIDI (RT-safe: atomics only, no alloc, no lock, no I/O) ──
-    if (luxSampler != nullptr)
-        luxSampler->processMidi(midiMessages);
-    // Engine B listens on ITS OWN MIDI channel (luxSamplerBMidiChannel;
-    // processMidi filters by channel). Skip it when the user sets both engines
-    // on the SAME channel: both would otherwise act on the same notes and the
-    // one-plays arbiter would stop A's slot right after it started (silence /
-    // wrong bank).
-    if (luxSamplerB != nullptr
-        && luxSamplerMidiChannelParam[0] != nullptr
-        && luxSamplerMidiChannelParam[1] != nullptr
-        && static_cast<int>(luxSamplerMidiChannelParam[1]->load())
-           != static_cast<int>(luxSamplerMidiChannelParam[0]->load()))
-        luxSamplerB->processMidi(midiMessages);
+    // (The LuxSampler note-triggered play path was removed 2026-07-13 — banks
+    //  are no longer note-addressed. Per-bank PLAY/REC lives in the unified
+    //  MIDI-Learn targets handled by midiMap_ below.)
 
     // ── Generic MIDI mappings: CC/Note → any mapped play parameter ─────────
     // RT-safe (lock-free slot table, no alloc). APVTS params land through the
@@ -2931,15 +2947,20 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
                 imageSource_->setPosition (apvts.getRawParameterValue(PARAM_IMGSRC_POS)->load());
                 imageSource_->setDurationS(apvts.getRawParameterValue(PARAM_IMGSRC_DUR)->load());
                 imageSource_->setLoopMode ((int) apvts.getRawParameterValue(PARAM_IMGSRC_LOOP)->load());
+                imageSource_->setEnabled  (apvts.getRawParameterValue(PARAM_IMGSRC_ENABLED)->load() > 0.5f);
             }
             if (videoSource_)
             {
                 videoSource_->setLineFrac (apvts.getRawParameterValue(PARAM_VIDSRC_LINE)->load());
                 videoSource_->setSpeed    (apvts.getRawParameterValue(PARAM_VIDSRC_SPEED)->load());
                 videoSource_->setLoopMode ((int) apvts.getRawParameterValue(PARAM_VIDSRC_LOOP)->load());
+                videoSource_->setEnabled  (apvts.getRawParameterValue(PARAM_VIDSRC_ENABLED)->load() > 0.5f);
             }
             if (cameraSource_)
+            {
                 cameraSource_->setLineFrac(apvts.getRawParameterValue(PARAM_CAMSRC_LINE)->load());
+                cameraSource_->setEnabled (apvts.getRawParameterValue(PARAM_CAMSRC_ENABLED)->load() > 0.5f);
+            }
 
             // Pool-slot bindings + per-chain settings memory FIRST: the derive
             // inside loadChainModelFromState() must reuse the saved bindings
@@ -3214,6 +3235,23 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
     if (parameterID == PARAM_CAMSRC_LINE)
     {
         if (cameraSource_) cameraSource_->setLineFrac(newValue);
+        return;
+    }
+    // ACTIVE toggles: off deactivates the source in the internal pool (its
+    // chain streams blank paper), on republishes the current line instantly.
+    if (parameterID == PARAM_IMGSRC_ENABLED)
+    {
+        if (imageSource_) imageSource_->setEnabled(newValue > 0.5f);
+        return;
+    }
+    if (parameterID == PARAM_VIDSRC_ENABLED)
+    {
+        if (videoSource_) videoSource_->setEnabled(newValue > 0.5f);
+        return;
+    }
+    if (parameterID == PARAM_CAMSRC_ENABLED)
+    {
+        if (cameraSource_) cameraSource_->setEnabled(newValue > 0.5f);
         return;
     }
 
@@ -4215,12 +4253,14 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
                     sp.num_inserts++;
                 }
             }
-            else if (t == ModuleType::Score || t == ModuleType::Timbre)
+            else if (t == ModuleType::Score || t == ModuleType::Timbre
+                     || t == ModuleType::MidiScore)
             {
-                // TIMBRE auditions through the same shared score-player channel
-                // as SCORE (LuxSampler::loadScoreFramesFromImage), so both types
-                // raise the same plan flag. Guarded: with both modules in one
-                // chain only the FIRST position becomes the marker.
+                // TIMBRE and MIDI SCORE audition through the same shared
+                // score-player channel as SCORE (loadScoreFramesFromImage), so
+                // all three types raise the same plan flag. Guarded: with
+                // several of them in one chain only the FIRST position becomes
+                // the marker.
                 if (! sp.has_score)
                 {
                     sp.has_score = 1;
@@ -4317,7 +4357,7 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
                 && m.slot >= 0 && m.slot < CHAIN_MAX_CHAINS)
                 hasProbe = true;
             if (m.type == ModuleType::Sampler || m.type == ModuleType::Score
-                || m.type == ModuleType::Timbre)
+                || m.type == ModuleType::Timbre || m.type == ModuleType::MidiScore)
                 hasPlayer = true;   // mod-bus owner candidate (REC/relay hooks)
             if (m.id == vizTapModuleId_)
                 hasVizTarget = true;   // selection tap lives in this chain
@@ -4588,7 +4628,17 @@ void Sp3ctraAudioProcessor::applySamplerParamsFromState()
             if (auto slotXml = slot.createXml())
             {
                 const int i = slotXml->getIntAttribute("idx", -1);
-                engines[e]->slotParamsFromXml(i, *slotXml);
+                // Settings follow content: a bank that is EMPTY right now
+                // starts from clean defaults instead of resurrecting the
+                // previous session's knobs. At restore time recordings are
+                // not loaded yet (they live in the .sp3s, not the DAW blob) —
+                // the auto-load refills the banks and re-runs this overlay,
+                // so content-bearing banks do get their saved settings back.
+                if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS
+                    && ! engines[e]->slotHasContent(i))
+                    engines[e]->resetSlotPlayParams(i);
+                else
+                    engines[e]->slotParamsFromXml(i, *slotXml);
             }
         }
     }
@@ -4744,11 +4794,14 @@ void Sp3ctraAudioProcessor::teardownAbsentModules(const std::set<ModuleType>& no
     auto removed = [&](ModuleType t)
     { return chainActiveTypes_.count(t) > 0 && now.count(t) == 0; };
 
-    // SCORE / TIMBRE share the score-player channel: free the frame buffer only
-    // when the LAST of the two leaves (removing SCORE must not cut a playing
-    // TIMBRE page, and vice versa). SCORE's settings reset stays SCORE-only.
-    if ((removed(ModuleType::Score) || removed(ModuleType::Timbre))
-        && now.count(ModuleType::Score) == 0 && now.count(ModuleType::Timbre) == 0)
+    // SCORE / TIMBRE / MIDI SCORE share the score-player channel: free the
+    // frame buffer only when the LAST of the three leaves (removing SCORE must
+    // not cut a playing TIMBRE or MIDI SCORE page, and vice versa). SCORE's
+    // settings reset stays SCORE-only.
+    if ((removed(ModuleType::Score) || removed(ModuleType::Timbre)
+         || removed(ModuleType::MidiScore))
+        && now.count(ModuleType::Score) == 0 && now.count(ModuleType::Timbre) == 0
+        && now.count(ModuleType::MidiScore) == 0)
     {
         if (auto* ls = getLuxSampler())
             ls->uiDiscardScore();

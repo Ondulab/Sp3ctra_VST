@@ -46,6 +46,12 @@ juce_add_plugin(Sp3ctraVST
     PLUGIN_CODE "Sp3c"
     FORMATS VST3 AU Standalone
     PRODUCT_NAME "Sp3ctra"
+    # App/bundle icon (dock + Finder). JUCE's juceaide builds the .icns from
+    # this PNG and sets CFBundleIconFile on the Standalone .app. Source: the
+    # in-app 5-bar logo picto rendered on a dark rounded square (see
+    # resources/Sp3ctra_icon.png / Icons::drawSp3ctraLogoPicto in IconPaths.h).
+    ICON_BIG   "${CMAKE_CURRENT_SOURCE_DIR}/resources/Sp3ctra_icon.png"
+    ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/resources/Sp3ctra_icon.png"
     # M9 — CAMERA source module (juce::CameraDevice / AVFoundation capture)
     CAMERA_PERMISSION_ENABLED TRUE
     CAMERA_PERMISSION_TEXT "Sp3ctra uses the camera as a scan-line source (CAMERA module)."
@@ -223,6 +229,11 @@ target_sources(Sp3ctraVST
         source/image/TimbreGenTabComponent.h
         source/image/TimbreGenRenderer.h
         source/image/TimbreGenRenderer.cpp
+
+        # MIDI SCORE — MIDI-file → printable score generator (per-voice timbres)
+        source/image/MidiScoreGenTabComponent.h
+        source/image/MidiScoreGenRenderer.h
+        source/image/MidiScoreGenRenderer.cpp
 
         # Video scroll system
         source/video/VideoScrollMode.h
