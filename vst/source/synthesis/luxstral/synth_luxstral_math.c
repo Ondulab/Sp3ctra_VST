@@ -73,11 +73,22 @@ void fill_int32(int32_t value, int32_t *array, size_t length) {
 #if !(defined(SP3CTRA_USE_NEON_MATH) && defined(__ARM_NEON))
 // Standard C implementation (used on non-Linux platforms or when NEON is not available)
 // On Linux with NEON, the optimized version from synth_luxstral_math_neon.c is used instead
-void apply_volume_weighting(float *sum_buffer, const float *volume_buffer, 
+void apply_volume_weighting(float *sum_buffer, const float *volume_buffer,
                            float exponent, size_t length) {
   // Import pow_unit_fast for power calculation
   extern float pow_unit_fast(float x, float expo);
-  
+
+  // Exponent 2 (the only value the engine passes — Σa² energy sum for the RMS
+  // ceiling): a plain multiply, auto-vectorizable. powf here cost one libm
+  // call per sample per oscillator (~1.6e8/s at 3456 notes).
+  if (exponent == 2.0f) {
+    for (size_t i = 0; i < length; ++i) {
+      const float v = volume_buffer[i];
+      sum_buffer[i] += v * v;
+    }
+    return;
+  }
+
   // REFACTORED: Volumes are already normalized to [0, 1] with VOLUME_AMP_RESOLUTION = 1.0
   // No need to divide/multiply - just apply the power function directly
   for (size_t i = 0; i < length; ++i) {

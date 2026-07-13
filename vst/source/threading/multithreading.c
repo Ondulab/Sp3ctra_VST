@@ -52,6 +52,12 @@ static int s_udp_frame_ls_sends = 0;   /* udpThread-only: plan.num_ls_sends of
                                         * the current line (commit-scope read) */
 static int s_udp_frame_pb_ran = 0;     /* udpThread-only: Path-B products of
                                         * preprocessed_temp valid this line */
+static int s_udp_frame_live_pp = 0;    /* udpThread-only: pipeline_process_frame
+                                        * ran on the live path this line — the
+                                        * whole-struct commit must gate on THIS
+                                        * (not re-evaluate its condition) so an
+                                        * uncomputed preprocessed_temp is never
+                                        * committed */
 
 /* ── Per-chain playback (2026-07-12) ─────────────────────────────────────────
  * Does this chain host `engine`'s SAMPLER? (marker slot = engine A=0/B=1).
@@ -101,32 +107,53 @@ static int chain_player_owned(const SynthChainPlan *sp, int is_score,
                     : chain_hosts_sampler_engine(sp, engine_slot);
 }
 
-/* SAME-CHAIN resampling (multi-chain record fix, 2026-07-13): while a player
- * (sampler engine or SCORE relay) owns a chain's stream, the playback frame
- * IS that chain's output — record it into every OTHER armed engine hosted on
- * THAT chain (e.g. B, placed on A's chain, captures A's playback). Engines on
- * other chains record their own stream positionally instead; the driving
- * engine self-records via lux_samplers_record_modulated (the hook's internal
- * isDrivingChannel guard also skips it here — no double capture). */
-static void chain_record_same_chain_engines(const SynthChainPlan *sp,
-                                            int playing_engine,
-                                            int score_playing,
-                                            const uint8_t *R,
-                                            const uint8_t *G,
-                                            const uint8_t *B,
-                                            int nb_pixels)
+/* ── Downstream playback capture (module contract, 2026-07-13) ───────────────
+ * While a player owns a chain's stream, the playback frame is the INPUT of
+ * every sampler marker placed BELOW the owning marker (REC records what
+ * arrives from above): SCORE → sampler bounce, sampler A → sampler B
+ * resampling. Called by FramePlayerThread with each produced frame (1:1 —
+ * the per-line producers tick far too slowly for this, down to 20 Hz on the
+ * idle feeder poll). Markers ABOVE the owning position record the chain input
+ * instead (chain_run_premarker_segment); the playing engine itself never
+ * records its own playback. Chains not owned by THIS player are untouched —
+ * several samplers on several chains stay fully independent. */
+void chain_player_record_downstream(int is_score, int engine_slot,
+                                    const uint8_t *r, const uint8_t *g,
+                                    const uint8_t *b, int nb_pixels)
 {
-    if (!sp || !sp->present || !sp->has_sampler)
-        return;
-    const int owned =
-        (playing_engine >= 0 && chain_hosts_sampler_engine(sp, playing_engine))
-        || (sp->has_score && score_playing);
-    if (!owned)
-        return;
-    for (int i = 0; i < sp->num_inserts; i++)
-        if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER)
-            lux_sampler_record_chain_frame(sp->insert_state_idx[i], R, G, B,
-                                           (uint16_t)nb_pixels);
+#ifdef VST_MODE
+    ChainPlan plan;
+    chain_plan_get(&plan);
+    for (int c = 0; c < plan.num_chains; c++)
+    {
+        const SynthChainPlan *sp = &plan.chain[c];
+        if (!sp->present || !sp->has_sampler)
+            continue;
+
+        /* Owning marker: this engine's SAMPLER marker (sampler session) or
+         * the SCORE marker (score session). */
+        int own_pos = -1;
+        for (int i = 0; i < sp->num_inserts && own_pos < 0; i++)
+        {
+            if (is_score && sp->insert_id[i] == IMAGE_CHAIN_INSERT_SCORE)
+                own_pos = i;
+            else if (!is_score
+                     && sp->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER
+                     && sp->insert_state_idx[i] == engine_slot)
+                own_pos = i;
+        }
+        if (own_pos < 0)
+            continue;   /* this player does not own this chain's stream */
+
+        for (int i = own_pos + 1; i < sp->num_inserts; i++)
+            if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER
+                && (is_score || sp->insert_state_idx[i] != engine_slot))
+                lux_sampler_record_input_frame(sp->insert_state_idx[i],
+                                               r, g, b, (uint16_t)nb_pixels);
+    }
+#else
+    (void)is_score; (void)engine_slot; (void)r; (void)g; (void)b; (void)nb_pixels;
+#endif
 }
 
 /* Player-side execution of the inserts placed AFTER a SCORE/SAMPLER marker —
@@ -287,10 +314,17 @@ int initDoubleBuffer(DoubleBuffer *db) {
     return -1;
   }
 
-  // Initialize persistent image with black (zero)
-  memset(db->lastValidImage_R, 0, nb_pixels);
-  memset(db->lastValidImage_G, 0, nb_pixels);
-  memset(db->lastValidImage_B, 0, nb_pixels);
+  // Initialize every image buffer with WHITE (blank paper = the empty-chain
+  // contract). active/processing were previously left as malloc garbage.
+  memset(db->activeBuffer_R, 0xFF, nb_pixels);
+  memset(db->activeBuffer_G, 0xFF, nb_pixels);
+  memset(db->activeBuffer_B, 0xFF, nb_pixels);
+  memset(db->processingBuffer_R, 0xFF, nb_pixels);
+  memset(db->processingBuffer_G, 0xFF, nb_pixels);
+  memset(db->processingBuffer_B, 0xFF, nb_pixels);
+  memset(db->lastValidImage_R, 0xFF, nb_pixels);
+  memset(db->lastValidImage_G, 0xFF, nb_pixels);
+  memset(db->lastValidImage_B, 0xFF, nb_pixels);
 
   db->dataReady = 0;
   db->lastValidImageExists = 0;
@@ -313,10 +347,7 @@ int initDoubleBuffer(DoubleBuffer *db) {
   db->preprocessed_data.polyphonic.valid = 0;
 #endif
   
-  /* Initialize photowave synthesis data */
-  memset(db->preprocessed_data.photowave.r, 0, sizeof(db->preprocessed_data.photowave.r));
-  memset(db->preprocessed_data.photowave.g, 0, sizeof(db->preprocessed_data.photowave.g));
-  memset(db->preprocessed_data.photowave.b, 0, sizeof(db->preprocessed_data.photowave.b));
+  /* (photowave init removed with the dead struct section) */
   
   /* Initialize stereo with center panning (equal-power law) */
   for (int i = 0; i < PREPROCESS_MAX_NOTES; i++) {
@@ -418,11 +449,11 @@ void getLastValidImageForAudio(DoubleBuffer *db, uint8_t *out_R, uint8_t *out_G,
     memcpy(out_B, db->lastValidImage_B, nb_pixels);
     db->audio_frames_processed++;
   } else {
-    // If no valid image exists, use black (silence)
-    memset(out_R, 0, nb_pixels);
-    memset(out_G, 0, nb_pixels);
-    memset(out_B, 0, nb_pixels);
-    // Debug log removed for production use
+    // No valid image yet → WHITE (blank paper — silence under the permanent
+    // inverse-dB law, matching the unfed-chain contract).
+    memset(out_R, 0xFF, nb_pixels);
+    memset(out_G, 0xFF, nb_pixels);
+    memset(out_B, 0xFF, nb_pixels);
   }
 
   pthread_mutex_unlock(&db->mutex);
@@ -541,6 +572,68 @@ static int synth_source_base(const SynthChainPlan *sp, int synth_slot,
 static int synth_chain_has_no_signal(const SynthChainPlan *sp, int base_sig)
 {
     return sp->present && base_sig < 0 && !sp->has_sampler && !sp->has_score;
+}
+
+/* ── Chain "no signal" publication ───────────────────────────────────────────
+ * A chain lost its feed (source module removed / deactivated / emptied): make
+ * the silence OBSERVABLE everywhere the chain is. Idempotent and cheap (a few
+ * memsets + seqlocked flag stores) — safe to call every line/tick while the
+ * chain stays silent. WHITE, never black, is the empty-chain contract: an
+ * unfed chain streams blank paper.
+ *   • staging slots → inactive (the audio-thread mixers commit silence),
+ *   • LUXSTRAL-A engine tap → white when this chain owns it (blank paper);
+ *     the Path-B tap stays at the call sites (udpThread batches it after the
+ *     loop, the feeder publishes it in-loop via `is_pb_chain`),
+ *   • zone-1 selection tap → white when the selected module lives here,
+ *   • VideoScroll probes → capture a WHITE line so the waterfall scrolls to
+ *     blank instead of freezing on the removed source's last frames. */
+static void chain_publish_no_signal(const SynthChainPlan *sp, int chain_idx,
+                                    AudioImageBuffers *audioBuffers,
+                                    int nb_pixels,
+                                    int is_first_send_chain, int is_pb_chain)
+{
+    static uint8_t s_white_line[INTERNAL_SRC_MAX_PIXELS];
+    static volatile int s_white_init = 0;
+    if (!s_white_init)
+    {
+        memset((void *) s_white_line, 0xFF, sizeof(s_white_line));
+        s_white_init = 1;   /* benign race: every writer stores the same bytes */
+    }
+
+    int ls_bank = -1, has_lx = 0, has_lw = 0;
+    for (int i = 0; i < sp->num_inserts; i++)
+    {
+        const int id = sp->insert_id[i];
+        if (id == IMAGE_CHAIN_INSERT_OUT_LUXSTRAL && ls_bank < 0)
+            ls_bank = sp->insert_state_idx[i];
+        else if (id == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
+            has_lx = 1;
+        else if (id == IMAGE_CHAIN_INSERT_OUT_LUXWAVE)
+            has_lw = 1;
+        else if (id == IMAGE_CHAIN_INSERT_VIDEOSCROLL)
+            video_scroll_capture_line(
+                video_scroll_instance(sp->insert_state_idx[i]),
+                s_white_line, s_white_line, s_white_line, nb_pixels);
+    }
+
+    if (ls_bank >= 0)
+    {
+        synth_staging_set_inactive(chain_idx);
+        if (is_first_send_chain && audioBuffers != NULL)
+            audio_image_buffers_publish_engine_input(
+                audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                NULL, NULL, NULL, nb_pixels);
+    }
+    if (has_lx)
+        synth_staging_luxsynth_set_inactive(chain_idx);
+    if (has_lw)
+        synth_staging_luxwave_set_inactive(chain_idx);
+    if (is_pb_chain && audioBuffers != NULL)
+        audio_image_buffers_publish_engine_input(
+            audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
+            NULL, NULL, NULL, nb_pixels);
+    if (sp->viz_tap_insert >= 0 && audioBuffers != NULL)
+        audio_image_buffers_clear_selection_tap(audioBuffers);
 }
 
 /* ── Contextual visualizer (zone 1) — selection tap ──────────────────────────
@@ -776,6 +869,71 @@ static void chain_shortcut_walk(const SynthChainPlan *sp, int chain_idx,
     out->lsR = modR; out->lsG = modG; out->lsB = modB;
 }
 
+/* ── Player-owned chain: PRE-MARKER segment (module contract, 2026-07-13) ────
+ * REC records what arrives from ABOVE; PLAY delivers BELOW; a stopped or
+ * disabled module passes the upstream flow through. So while the player owns
+ * the stream BELOW the first SAMPLER/SCORE marker, the segment ABOVE it must
+ * keep running every line: the chain's source feeds the upstream probes
+ * (VIDEO SCROLL keeps showing the IMAGE line during playback) and the marker
+ * records its INPUT into the armed engine — never the playback mix.
+ * Walks probes + processors up to the FIRST marker and stops there; OUT
+ * markers above the sampler stay player-staged (unchanged). The zone-1
+ * selection tap publishes at its exact position when it falls inside the
+ * segment (the player publishes the post-marker taps). */
+static void chain_run_premarker_segment(const SynthChainPlan *sp,
+                                        AudioImageBuffers *viz_bus,
+                                        const uint8_t *inR, const uint8_t *inG,
+                                        const uint8_t *inB, int nb_pixels)
+{
+    void *states[CHAIN_PLAN_MAX_INSERTS];
+    chain_resolve_insert_states(sp, states);
+
+    const int tap = (sp->viz_tap_insert <= sp->num_inserts)
+                        ? sp->viz_tap_insert : sp->num_inserts;
+    const uint8_t *cr = inR, *cg = inG, *cb = inB;
+    for (int i = 0; i < sp->num_inserts; i++)
+    {
+        if (viz_bus != NULL && tap == i)
+            audio_image_buffers_publish_selection_tap(viz_bus, cr, cg, cb,
+                                                      nb_pixels);
+        const int id = sp->insert_id[i];
+        if (id == IMAGE_CHAIN_INSERT_SAMPLER)
+        {
+#ifdef VST_MODE
+            /* Marker INPUT capture — a no-op unless a slot is armed. Unlike
+             * lux_sampler_record_chain_frame this never skips a driving
+             * engine: recording its own playback is exactly what the user
+             * rule forbids. */
+            lux_sampler_record_input_frame(sp->insert_state_idx[i],
+                                           cr, cg, cb, (uint16_t) nb_pixels);
+#endif
+            return;   /* the player owns everything below the marker */
+        }
+        if (id == IMAGE_CHAIN_INSERT_SCORE)
+            return;   /* score marker — player-owned below as well */
+
+        if (id == IMAGE_CHAIN_INSERT_VIDEOSCROLL)
+        {
+            video_scroll_capture_line(
+                video_scroll_instance(sp->insert_state_idx[i]),
+                cr, cg, cb, nb_pixels);
+        }
+        else if (id == IMAGE_CHAIN_INSERT_LUXPITCH  ||
+                 id == IMAGE_CHAIN_INSERT_LUXMASK   ||
+                 id == IMAGE_CHAIN_INSERT_LUXREVERB ||
+                 id == IMAGE_CHAIN_INSERT_LUXECHO   ||
+                 id == IMAGE_CHAIN_INSERT_LUXEQ)
+        {
+            const uint8_t *nr, *ng, *nbv;
+            image_chain_run(cr, cg, cb, nb_pixels, g_sp3ctra_config.num_octaves,
+                            sp->insert_id + i, (void *const *)(states + i), 1,
+                            &nr, &ng, &nbv);
+            cr = nr; cg = ng; cb = nbv;
+        }
+        /* OUT markers above the marker: staged by the player (unchanged). */
+    }
+}
+
 /* ── M7 — plan-driven ownership queries (replace the *_source_type gates) ────
  * Used by FramePlayerThread/LuxSampler: which db sections may the player own?
  * Per-chain playback: the sampler case matches the chain's SAMPLER marker
@@ -910,6 +1068,45 @@ void chain_player_apply_synth_a_inserts(int is_score, int engine_slot,
                                     viz_bus, r, g, b, nb_pixels);
 }
 
+/* ── Player stop → staging silence (scrub/stop contract, 2026-07-13) ─────────
+ * The synth-split stagings have NO freshness timeout: the audio-thread mixer
+ * keeps blending the LAST staged column until someone re-stages or deactivates
+ * it. On a sourceless player chain (e.g. MIDI SCORE with no source module) the
+ * per-line producers skip the chain entirely (sig <= 0), so when the player
+ * stops feeding, the last column would ring FOREVER. Called from
+ * injectWhiteFrame(): deactivate the stagings of every chain THIS player
+ * relayed (its own engine's sampler chains + any score chain). Live/internal
+ * chains keep their own producers. Same cross-engine imprecision as the
+ * addOwned/pbOwned gates there: if the OTHER engine still plays one of these
+ * chains, its next 1 ms tick re-stages — a self-healing one-tick dropout. */
+void chain_player_stagings_set_inactive(int engine_slot)
+{
+    ChainPlan plan;
+    chain_plan_get(&plan);
+    for (int k = 0; k < plan.num_ls_sends && k < CHAIN_MAX_CHAINS; k++)
+    {
+        const LsSendPlan *snd = &plan.ls_send[k];
+        if (chain_player_owned(&snd->recipe, 0, engine_slot)
+            || chain_player_owned(&snd->recipe, 1, engine_slot))
+            synth_staging_set_inactive(snd->chain_idx);
+    }
+    for (int c = 0; c < plan.num_chains && c < CHAIN_MAX_CHAINS; c++)
+    {
+        const SynthChainPlan *sp = &plan.chain[c];
+        if (!sp->present) continue;
+        if (!chain_player_owned(sp, 0, engine_slot)
+            && !chain_player_owned(sp, 1, engine_slot))
+            continue;
+        for (int i = 0; i < sp->num_inserts; i++)
+        {
+            if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
+                synth_staging_luxsynth_set_inactive(c);
+            else if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXWAVE)
+                synth_staging_luxwave_set_inactive(c);
+        }
+    }
+}
+
 /* Selection tap for the SAMPLER/SCORE SHORT-CIRCUIT branches (no
  * image_chain_run): approximate the selected module's position as "before or
  * after the player marker" — the chain source frame before, the modulated
@@ -1015,10 +1212,14 @@ void *udpThread(void *arg) {
   uint32_t currentLineId;
   int *receivedFragments;
   uint32_t fragmentCount;
-  uint8_t *audio_write_R;
-  uint8_t *audio_write_G;
-  uint8_t *audio_write_B;
-  int audio_write_started;
+  /* NOTE(write bus): the line is assembled fragment-by-fragment in
+   * db->activeBuffer only; the AudioImageBuffers write bus is filled in ONE
+   * shot at line completion.  The old scheme held write_mutex from fragment 1
+   * to fragment 12 (start_write at new-line, complete_write at completion) —
+   * across up to 11 blocking recvfrom calls.  A stream stall mid-line then
+   * kept the mutex held indefinitely, freezing every other start_write caller
+   * (FramePlayerThread injection, feeder tick).  Same bytes copied in total;
+   * lock hold is now ~µs. */
   /* Acquisition-gate hold buffers: the last GRANTED line, repeated downstream
    * while the gate holds so audio + video freeze together (no dropped lines). */
   uint8_t *held_R;
@@ -1036,10 +1237,6 @@ void *udpThread(void *arg) {
   nb_pixels = get_cis_pixels_nb();
   currentLineId = 0;
   fragmentCount = 0;
-  audio_write_R = NULL;
-  audio_write_G = NULL;
-  audio_write_B = NULL;
-  audio_write_started = 0;
   held_R = NULL;
   held_G = NULL;
   held_B = NULL;
@@ -1089,13 +1286,8 @@ void *udpThread(void *arg) {
     // This check ensures the thread can exit promptly when requested.
     if (!ctx->running) {
       log_info("THREAD", "ctx->running=0 detected, exiting main loop");
-      // 🔧 BUGFIX: Release write_mutex if held (prevents deadlock on restart)
-      if (audio_write_started) {
-        audio_image_buffers_complete_write(audioBuffers);
-        audio_image_buffers_snapshot_raw(audioBuffers);
-        audio_write_started = 0;
-        log_info("THREAD", "Released write_mutex before exit (incomplete line)");
-      }
+      /* (No write_mutex to release: the write bus is only touched — lock,
+       * memcpy, swap, unlock — at line completion now.) */
       break;
     }
 
@@ -1185,51 +1377,17 @@ void *udpThread(void *arg) {
         log_debug("UDP", "INCOMPLETE LINE DISCARDED: line_id=%u had %u/%d fragments",
                   currentLineId, fragmentCount, UDP_MAX_NB_PACKET_PER_LINE);
 #endif
-
-        // Complete the incomplete audio buffer write if it was started
-        if (audio_write_started) {
-          /* Snapshot raw BEFORE complete_write to avoid sampler contamination */
-          audio_image_buffers_snapshot_raw_before_swap(audioBuffers);
-          audio_image_buffers_complete_write(audioBuffers);
-          audio_write_started = 0;
-#ifdef DEBUG_UDP
-          log_debug("UDP", "Completed partial audio buffer write for incomplete line");
-#endif
-        }
+        /* Incomplete lines are simply never published to the write bus now
+         * (the old scheme had to complete_write a PARTIAL line just to
+         * release the mutex — readers then saw a torn line; they now keep
+         * the last complete one). */
       }
 
-      // New line started - prepare for writing
+      // New line started - prepare for assembly (db->activeBuffer only; the
+      // audio write bus is filled in one locked shot at line completion).
       currentLineId = packet.line_id;
       memset(receivedFragments, 0, UDP_MAX_NB_PACKET_PER_LINE * sizeof(int));
       fragmentCount = 0;
-
-      // Start writing to audio buffers for new line.
-      // During LuxSampler playback, bypass live feed: FramePlayerThread is
-      // the sole writer. Skipping start_write here prevents overwriting
-      // injected playback frames.
-#ifdef VST_MODE
-      if (!lux_sampler_is_playing())
-      {
-#endif
-        if (audio_image_buffers_start_write(audioBuffers, &audio_write_R,
-                                            &audio_write_G,
-                                            &audio_write_B) == 0) {
-          audio_write_started = 1;
-#ifdef DEBUG_UDP
-          log_debug("UDP", "Started audio buffer write for line_id=%u", packet.line_id);
-#endif
-        } else {
-          audio_write_started = 0;
-          log_warning("THREAD", "Failed to start audio buffer write");
-        }
-#ifdef VST_MODE
-      }
-      else
-      {
-        /* Playback active: live write skipped for this line */
-        audio_write_started = 0;
-      }
-#endif
     }
 
     // Validate fragment_id to prevent buffer overflow
@@ -1244,23 +1402,14 @@ void *udpThread(void *arg) {
       receivedFragments[packet.fragment_id] = 1;
       fragmentCount++;
 
-      // Write to legacy double buffer (for display)
+      // Assemble the line in the double buffer (display + single source for
+      // the one-shot audio-bus publish at completion below).
       memcpy(&db->activeBuffer_R[offset], packet.imageData_R,
              packet.fragment_size);
       memcpy(&db->activeBuffer_G[offset], packet.imageData_G,
              packet.fragment_size);
       memcpy(&db->activeBuffer_B[offset], packet.imageData_B,
              packet.fragment_size);
-
-      // Write to new audio buffers (for continuous audio)
-      if (audio_write_started) {
-        memcpy(&audio_write_R[offset], packet.imageData_R,
-               packet.fragment_size);
-        memcpy(&audio_write_G[offset], packet.imageData_G,
-               packet.fragment_size);
-        memcpy(&audio_write_B[offset], packet.imageData_B,
-               packet.fragment_size);
-      }
     }
 
 #ifdef DEBUG_UDP
@@ -1273,13 +1422,7 @@ void *udpThread(void *arg) {
       // 🔧 CRITICAL FIX: Abort heavy processing if stop requested
       if (!ctx->running) {
         log_info("THREAD", "ctx->running=0 detected before heavy processing, exiting");
-        // 🔧 BUGFIX: Release write_mutex if held (prevents deadlock on restart)
-        if (audio_write_started) {
-          audio_image_buffers_complete_write(audioBuffers);
-        audio_image_buffers_snapshot_raw(audioBuffers);
-          audio_write_started = 0;
-          log_info("THREAD", "Released write_mutex before exit (incomplete line)");
-        }
+        /* (No write_mutex held here anymore — nothing to release.) */
         break;
       }
 
@@ -1305,15 +1448,12 @@ void *udpThread(void *arg) {
         } else {
           /* HOLD: replace the incoming line with the latched frame so every
            * downstream path (audio preprocessing, LuxSynth/LuxWave, video
-           * waterfall, display, AudioImageBuffers) sees the same held data. */
+           * waterfall, display, AudioImageBuffers) sees the same held data —
+           * the audio-bus publish below copies FROM activeBuffer, so it sees
+           * the held frame too. */
           memcpy(db->activeBuffer_R, held_R, nb_pixels);
           memcpy(db->activeBuffer_G, held_G, nb_pixels);
           memcpy(db->activeBuffer_B, held_B, nb_pixels);
-          if (audio_write_started) {
-            memcpy(audio_write_R, held_R, nb_pixels);
-            memcpy(audio_write_G, held_G, nb_pixels);
-            memcpy(audio_write_B, held_B, nb_pixels);
-          }
         }
       }
 
@@ -1327,25 +1467,43 @@ void *udpThread(void *arg) {
        * SourceFeederThread stays out of the way. */
       internal_source_note_live_line();
 
-      /* Complete audio buffer write and swap.
+      /* Publish the complete line to the audio write bus — ONE locked shot
+       * (start_write → 3 memcpy → complete_write ≈ µs), copying from the
+       * just-assembled (and possibly gate-held) activeBuffer.  The lock is
+       * no longer held across packet reception (see the note at the top of
+       * this function).  During LuxSampler playback the live publish is
+       * skipped: FramePlayerThread is the sole writer (same ownership rule
+       * as before, now decided at completion instead of at line start).
        * FIX(routing): Snapshot raw BEFORE complete_write so that raw_R/G/B
-       * always contains pure UDP data.  If snapshot_raw() were called AFTER
-       * complete_write(), FramePlayerThread could race and swap the buffer
-       * between the two calls, causing sampler data to contaminate raw_R/G/B
-       * (and therefore the LIVE visualizer / Source=L pipeline path). */
-      if (audio_write_started) {
-        audio_image_buffers_snapshot_raw_before_swap(audioBuffers);
-        audio_image_buffers_complete_write(audioBuffers);
-        audio_write_started = 0;
-      }
-      else {
-        /* FIX(raw): Write bus was not started (sampler is playing and owns
-         * AudioImageBuffers), but the RAW snapshot must still reflect the
-         * live UDP data so the RAW visualizer and Source=L pipeline path
-         * stay live during sampler playback. */
-        audio_image_buffers_snapshot_raw_external(audioBuffers,
-            db->activeBuffer_R, db->activeBuffer_G, db->activeBuffer_B,
-            nb_pixels);
+       * always contains pure UDP data (post-swap, FramePlayerThread could
+       * race the two calls and contaminate raw_R/G/B with sampler data). */
+      {
+        int published = 0;
+#ifdef VST_MODE
+        if (!lux_sampler_is_playing())
+#endif
+        {
+          uint8_t *wR = NULL, *wG = NULL, *wB = NULL;
+          if (audio_image_buffers_start_write(audioBuffers, &wR, &wG, &wB) == 0) {
+            memcpy(wR, db->activeBuffer_R, nb_pixels);
+            memcpy(wG, db->activeBuffer_G, nb_pixels);
+            memcpy(wB, db->activeBuffer_B, nb_pixels);
+            audio_image_buffers_snapshot_raw_before_swap(audioBuffers);
+            audio_image_buffers_complete_write(audioBuffers);
+            published = 1;
+          } else {
+            log_warning("THREAD", "Failed to start audio buffer write");
+          }
+        }
+        if (!published) {
+          /* FIX(raw): Write bus not published (sampler is playing and owns
+           * AudioImageBuffers), but the RAW snapshot must still reflect the
+           * live UDP data so the RAW visualizer and Source=L pipeline path
+           * stay live during sampler playback. */
+          audio_image_buffers_snapshot_raw_external(audioBuffers,
+              db->activeBuffer_R, db->activeBuffer_G, db->activeBuffer_B,
+              nb_pixels);
+        }
       }
 
       /* LuxSampler hook (phase 1 — live frame assembled).
@@ -1490,25 +1648,13 @@ void *udpThread(void *arg) {
                     audio_image_buffers_snapshot_modulated(audioBuffers,
                                                            mod_R, mod_G, mod_B,
                                                            nb_pixels);
-
-                    /* Playback capture routing (multi-chain split): the
-                     * DRIVING engine self-records inside its own player
-                     * thread (1:1 with produced frames). Here only the armed
-                     * engines hosted on the SAME chain as the display owner
-                     * capture this frame (their chain's output stream IS the
-                     * playback). Engines on OTHER chains record their own
-                     * stream positionally — never this frame (that global
-                     * fan-out was the cross-chain record bug). */
-#ifdef VST_MODE
-                    {
-                        const int score_now = lux_sampler_is_score_playing();
-                        for (int c = 0; c < frame_plan.num_chains; c++)
-                            chain_record_same_chain_engines(
-                                &frame_plan.chain[c], playing_engine_now,
-                                score_now, mod_R, mod_G, mod_B, nb_pixels);
-                    }
-#endif
                 }
+
+                /* (Recording during playback is position-driven now — module
+                 *  contract 2026-07-13: markers ABOVE the owning marker record
+                 *  the chain input via chain_run_premarker_segment (per-chain
+                 *  loop below); markers BELOW it receive the playback from the
+                 *  player itself (chain_player_record_downstream, 1:1 rate). */
             }
             else
 #endif
@@ -1660,19 +1806,13 @@ void *udpThread(void *arg) {
             const SynthChainPlan *sp = &frame_plan.chain[c];
             if (!sp->present) continue;
 
-            /* This chain's LuxStral OUT bank + LuxSynth/LuxWave OUT presence
-             * (V1: at most one OUT per type per chain). */
-            int ls_bank = -1, has_lx = 0, has_lw = 0;
+            /* This chain's LuxStral OUT bank (V1: at most one OUT per type
+             * per chain). LuxSynth/LuxWave presence is rescanned by
+             * chain_publish_no_signal() on the silent branch. */
+            int ls_bank = -1;
             for (int i = 0; i < sp->num_inserts; i++)
-            {
-                if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSTRAL
-                    && ls_bank < 0)
-                    ls_bank = sp->insert_state_idx[i];
-                else if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
-                    has_lx = 1;
-                else if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXWAVE)
-                    has_lw = 1;
-            }
+                if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSTRAL)
+                { ls_bank = sp->insert_state_idx[i]; break; }
 
             /* Per-chain playback: this chain is player-owned when ITS OWN
              * engine is driving (or the SCORE relay for a score chain) — a
@@ -1686,7 +1826,19 @@ void *udpThread(void *arg) {
             if (ls_bank >= 0 && stream_player_owned)
             {
                 /* FramePlayerThread stages this send and runs its post-marker
-                 * inserts/probes/taps on the playback frames. */
+                 * inserts/probes/taps on the playback frames. The segment
+                 * ABOVE the marker keeps running here (module contract): the
+                 * chain source feeds the upstream probes and the marker
+                 * records its INPUT into the armed engine. */
+                {
+                    const uint8_t *pmR, *pmG, *pmB;
+                    const int pmSig = synth_source_base(
+                        sp, CHAIN_SYNTH_COUNT + c, db, nb_pixels,
+                        &pmR, &pmG, &pmB);
+                    if (pmSig >= 0 && !synth_chain_has_no_signal(sp, pmSig))
+                        chain_run_premarker_segment(sp, audioBuffers,
+                                                    pmR, pmG, pmB, nb_pixels);
+                }
                 if (c == pb_chain) pb_player_owned = 1;
                 continue;
             }
@@ -1696,12 +1848,11 @@ void *udpThread(void *arg) {
                                               nb_pixels, &sbR, &sbG, &sbB);
             if (synth_chain_has_no_signal(sp, sig))
             {
-                if (ls_bank >= 0)
-                    synth_staging_set_inactive(c);
-                if (has_lx)
-                    synth_staging_luxsynth_set_inactive(c);
-                if (has_lw)
-                    synth_staging_luxwave_set_inactive(c);
+                /* Path-B tap: published by the pb_no_signal block after the
+                 * loop (is_pb_chain = 0 here — no double publish). */
+                chain_publish_no_signal(sp, c, audioBuffers, nb_pixels,
+                                        c == first_send_chain,
+                                        /*is_pb_chain*/ 0);
                 if (c == pb_chain)
                     pb_no_signal = 1;
                 continue;   /* no stream at any position of this chain */
@@ -1787,8 +1938,27 @@ void *udpThread(void *arg) {
                     ex.lsR, ex.lsG, ex.lsB, nb_pixels);
         }
 
-        if (pipeline_process_frame(src_R, src_G, src_B, &live_cfg, &preprocessed_temp) != 0) {
-          log_error("THREAD", "Pipeline processing failed");
+        /* Live-path full preprocess — ONLY when its result is actually
+         * committed (the whole-struct commit below: no "→ LUXSTRAL" send,
+         * sampler idle passthrough — display topologies). With sends staged
+         * the audio-thread mixer owns the additive sections, and Path-B is
+         * recomputed at its OUT marker (or zeroed / player-owned): everything
+         * this call computes is discarded. It was the single largest per-line
+         * CPU block on this thread (grayscale+contrast+gamma+dB+notes + FFT).
+         * The commit gates on s_udp_frame_live_pp — the SAME decision — so a
+         * skipped compute can never be committed (no TOCTOU on the sampler
+         * playing state between here and the commit). */
+#ifdef VST_MODE
+        s_udp_frame_live_pp =
+            (frame_plan.num_ls_sends == 0 &&
+             !lux_sampler_is_playing() && lux_sampler_is_passthrough());
+#else
+        s_udp_frame_live_pp = 1;   /* legacy standalone: unconditional commit */
+#endif
+        if (s_udp_frame_live_pp) {
+          if (pipeline_process_frame(src_R, src_G, src_B, &live_cfg, &preprocessed_temp) != 0) {
+            log_error("THREAD", "Pipeline processing failed");
+          }
         }
 
         /* Per-engine input tap A — no-LuxStral topologies only (with sends,
@@ -1817,8 +1987,6 @@ void *udpThread(void *arg) {
                  * under held MIDI notes.) */
                 memset(&preprocessed_temp.polyphonic, 0,
                        sizeof(preprocessed_temp.polyphonic));
-                memset(&preprocessed_temp.photowave,  0,
-                       sizeof(preprocessed_temp.photowave));
                 audio_image_buffers_publish_engine_input(
                     audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
                     NULL, NULL, NULL, nb_pixels);
@@ -1857,19 +2025,17 @@ void *udpThread(void *arg) {
       /* ── M7 — plan-driven commits (no legacy source-type routing) ───────── */
 #ifdef VST_MODE
       {
-        if (s_udp_frame_ls_sends > 0)
-        {
-          /* Synth-split P3 — the audio-thread MIXER owns the additive/stereo/
-           * strokeforge sections of db->preprocessed_data (N-send blend).
-           * Only Path-B products are committed from here (polyphonic has its
-           * own dedicated block below; photowave rides along). */
-          db->preprocessed_data.photowave = preprocessed_temp.photowave;
-        }
-        else if (!lux_sampler_is_playing() && lux_sampler_is_passthrough())
+        /* Synth-split P3 — when "→ LUXSTRAL" sends exist the audio-thread
+         * MIXER owns the additive/stereo/strokeforge sections of
+         * db->preprocessed_data (N-send blend) and polyphonic has its own
+         * dedicated block below — nothing to commit from here. */
+        if (s_udp_frame_live_pp)
         {
           /* No "→ LUXSTRAL" send anywhere: the raw tick is the additive
            * writer (engine disabled by the enable bridge — display paths
-           * only). While a player runs, FramePlayerThread owns the commit. */
+           * only). While a player runs, FramePlayerThread owns the commit.
+           * Gate == "pipeline_process_frame ran this line" (same decision,
+           * decided once at compute time). */
           db->preprocessed_data = preprocessed_temp;
           db->dataReady = 1;
         }
@@ -1904,7 +2070,9 @@ void *udpThread(void *arg) {
       memcpy(luxstral_engine_displayable_B(), db->processingBuffer_B, nb_pixels);
       luxstral_engine_displayable_unlock();
 
-      pthread_cond_signal(&db->cond);
+      /* (cond_signal removed: nothing ever waits on db->cond — consumers poll
+       * dataReady/atomics; the signal was a futex syscall per line under the
+       * commit mutex.) */
       pthread_mutex_unlock(&db->mutex);
 
       /* Capture raw scanner data only when new UDP data arrives
@@ -1920,25 +2088,12 @@ void *udpThread(void *arg) {
     // Check again before next recvfrom() to exit promptly
     if (!ctx->running) {
       log_info("THREAD", "ctx->running=0 detected at end of iteration, exiting");
-      // 🔧 BUGFIX: Release write_mutex if held (prevents deadlock on restart)
-      if (audio_write_started) {
-        audio_image_buffers_complete_write(audioBuffers);
-        audio_image_buffers_snapshot_raw(audioBuffers);
-        audio_write_started = 0;
-        log_info("THREAD", "Released write_mutex before exit (incomplete line)");
-      }
       break;
     }
   }
 
-  // 🔧 FINAL SAFETY: Release write_mutex if still held after normal loop exit
-  // This handles the case where the while(ctx->running) condition fails
-  if (audio_write_started) {
-    audio_image_buffers_complete_write(audioBuffers);
-        audio_image_buffers_snapshot_raw(audioBuffers);
-    audio_write_started = 0;
-    log_info("THREAD", "Released write_mutex at thread exit (safety cleanup)");
-  }
+  /* (No write_mutex safety-release needed anymore: the lock is only ever
+   * held inside the one-shot publish block at line completion.) */
 
   log_info("THREAD", "UDP thread terminating");
 
@@ -1992,12 +2147,9 @@ void internal_sources_process_tick(void *arg)
 #ifdef VST_MODE
   const int sampler_playing = lux_sampler_is_playing();
   const int score_playing   = lux_sampler_is_score_playing();
-  /* Per-chain playback: the engine driving the channel (-1 = idle/score). */
-  const int playing_engine  = lux_sampler_playing_engine();
 #else
   const int sampler_playing = 0;
   const int score_playing   = 0;
-  const int playing_engine  = -1;
 #endif
 
 #ifdef VST_MODE
@@ -2035,19 +2187,12 @@ void internal_sources_process_tick(void *arg)
 
       if (sampler_playing)
       {
-          /* PLAYING (sampler or score relay): the DRIVING engine self-records
-           * inside its own player thread. Here only the armed engines hosted
-           * on the SAME chain as the display owner capture the playback frame
-           * (their chain's output stream). Engines on other chains record
-           * their own stream positionally (no cross-bleed). */
-          uint8_t *plR, *plG, *plB;
-          audio_image_buffers_get_sampler_pointers(audioBuffers,
-                                                   &plR, &plG, &plB);
-          if (plR && plG && plB)
-              for (int c = 0; c < frame_plan.num_chains; c++)
-                  chain_record_same_chain_engines(
-                      &frame_plan.chain[c], playing_engine, score_playing,
-                      plR, plG, plB, nb_pixels);
+          /* PLAYING (sampler or score relay): recording is position-driven
+           * (module contract 2026-07-13) — markers ABOVE the owning marker
+           * record the chain input via chain_run_premarker_segment (per-chain
+           * loop below); markers BELOW it receive the playback from the
+           * player itself (chain_player_record_downstream, 1:1 rate — this
+           * feeder tick can drop to 20 Hz, far too slow for a capture). */
       }
       else if (sbSig > 0)
       {
@@ -2080,8 +2225,14 @@ void internal_sources_process_tick(void *arg)
   }
 #endif
 
-  if (!internal_source_any_active())
-    return;
+  /* NO early-out on !internal_source_any_active() here. The loop below is
+   * ALSO the silence sweep: when the last internal source deactivates
+   * (module removed / media unloaded / source disabled), every chain takes
+   * the cheap no-signal branch — staging goes inactive (the drone stops),
+   * the taps whiten, the waterfalls scroll to blank. The old early-out
+   * skipped all of that, freezing the removed source's last frame in the
+   * engines and the visualizers. Idle cost: a few flag stores + memsets at
+   * the service's 20 Hz idle rate. */
 
   /* ── M3: uniform per-chain loop (internal-source ticks) ───────────────────
    * Mirror of udpThread's chain loop — every internally-fed chain runs once
@@ -2118,16 +2269,12 @@ void internal_sources_process_tick(void *arg)
     const SynthChainPlan *sp = &frame_plan.chain[c];
     if (!sp->present) continue;
 
-    int ls_bank = -1, has_lx = 0, has_lw = 0;
+    /* LuxSynth/LuxWave OUT presence is rescanned by chain_publish_no_signal()
+     * on the silent branch — only the LuxStral bank is needed here. */
+    int ls_bank = -1;
     for (int i = 0; i < sp->num_inserts; i++)
-    {
-      if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSTRAL && ls_bank < 0)
-        ls_bank = sp->insert_state_idx[i];
-      else if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
-        has_lx = 1;
-      else if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXWAVE)
-        has_lw = 1;
-    }
+      if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSTRAL)
+      { ls_bank = sp->insert_state_idx[i]; break; }
 
     /* Per-chain playback: owned when ITS OWN engine is driving (or the
      * SCORE relay for a score chain) — mirror of udpThread's per-engine
@@ -2136,7 +2283,19 @@ void internal_sources_process_tick(void *arg)
         chain_hosts_driving_engine(sp)
         || (sp->has_score && score_playing);
     if (ls_bank >= 0 && stream_player_owned)
-      continue;   /* staged + post-marker probes by FramePlayerThread */
+    {
+      /* Staged + post-marker probes by FramePlayerThread. The segment ABOVE
+       * the marker keeps running here (module contract): the chain source
+       * (IMAGE/VIDEO/CAMERA line) feeds the upstream probes and the marker
+       * records its INPUT into the armed engine. */
+      const uint8_t *pmR, *pmG, *pmB;
+      const int pmSig = synth_source_base(sp, CHAIN_SYNTH_COUNT + c, db,
+                                          nb_pixels, &pmR, &pmG, &pmB);
+      if (pmSig >= 0 && !synth_chain_has_no_signal(sp, pmSig))
+          chain_run_premarker_segment(sp, audioBuffers, pmR, pmG, pmB,
+                                      nb_pixels);
+      continue;
+    }
 
     const uint8_t *sbR, *sbG, *sbB;
     const int sig = synth_source_base(sp, CHAIN_SYNTH_COUNT + c, db,
@@ -2146,24 +2305,8 @@ void internal_sources_process_tick(void *arg)
       /* sig==0 → the live path owns this chain's frames (device streaming
        * edge) — leave everything as-is; a true no-signal chain goes silent. */
       if (synth_chain_has_no_signal(sp, sig))
-      {
-        if (ls_bank >= 0)
-        {
-          synth_staging_set_inactive(c);
-          if (c == first_send_chain)
-            audio_image_buffers_publish_engine_input(
-                audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
-                NULL, NULL, NULL, nb_pixels);
-        }
-        if (has_lx)
-          synth_staging_luxsynth_set_inactive(c);
-        if (has_lw)
-          synth_staging_luxwave_set_inactive(c);
-        if (c == pb_chain)
-          audio_image_buffers_publish_engine_input(
-              audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
-              NULL, NULL, NULL, nb_pixels);
-      }
+        chain_publish_no_signal(sp, c, audioBuffers, nb_pixels,
+                                c == first_send_chain, c == pb_chain);
       continue;
     }
     if (c == pb_chain)
@@ -2304,7 +2447,7 @@ void internal_sources_process_tick(void *arg)
   if (db->dataReady == 0)
     db->dataReady = 1;
 
-  pthread_cond_signal(&db->cond);
+  /* (cond_signal removed: no waiter on db->cond exists — see udpThread commit) */
   pthread_mutex_unlock(&db->mutex);
 
   /* LuxStral waterfall display mirror (same as udpThread's Step 3 tail). */

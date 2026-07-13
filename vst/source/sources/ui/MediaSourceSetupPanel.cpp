@@ -20,16 +20,16 @@ MediaSourceSetupPanel::MediaSourceSetupPanel(Sp3ctraAudioProcessor& p, Kind k,
                      : kind == Kind::Video  ? "VIDEO SOURCE"
                                             : "CAMERA SOURCE",
                        juce::dontSendNotification);
-    titleLabel.setFont(juce::Font(13.0f, juce::Font::bold));
+    titleLabel.setFont(juce::Font(juce::FontOptions(13.0f)).boldened());
     titleLabel.setColour(juce::Label::textColourId, accent);
     addAndMakeVisible(titleLabel);
 
-    pathLabel.setFont(juce::Font(12.0f));
+    pathLabel.setFont(juce::Font(juce::FontOptions(12.0f)));
     pathLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.8f));
     pathLabel.setMinimumHorizontalScale(0.6f);
     addAndMakeVisible(pathLabel);
 
-    infoLabel.setFont(juce::Font(12.0f));
+    infoLabel.setFont(juce::Font(juce::FontOptions(12.0f)));
     infoLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.55f));
     infoLabel.setJustificationType(juce::Justification::topLeft);
     addAndMakeVisible(infoLabel);

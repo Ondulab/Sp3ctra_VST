@@ -45,6 +45,18 @@ void internal_source_set_active(int kind, int active)
         return;
     pthread_mutex_lock(&s_sources[kind].mutex);
     s_sources[kind].active = active ? 1 : 0;
+    if (!active)
+    {
+        /* Deactivation ERASES the published content (module removed from its
+         * chain, media unloaded, source disabled): nothing may resurrect the
+         * old line on re-activation — the producer must publish a fresh one.
+         * White fill = the blank-paper contract (defensive; pixel_count == 0
+         * already blocks reads). */
+        s_sources[kind].pixel_count = 0;
+        memset(s_sources[kind].r, 0xFF, sizeof(s_sources[kind].r));
+        memset(s_sources[kind].g, 0xFF, sizeof(s_sources[kind].g));
+        memset(s_sources[kind].b, 0xFF, sizeof(s_sources[kind].b));
+    }
     pthread_mutex_unlock(&s_sources[kind].mutex);
 }
 

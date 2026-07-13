@@ -41,6 +41,7 @@ namespace SamplerMidiTargets
         Overdub,                     // engine-wide (slot ignored)
         Rec, Play, Save, Clear,      // action targets (slot-addressed)
         EqBand,                      // per-slot EQ band gain (band in id bits 24+)
+        MixMode,                     // per-bank composite rule (Mix/Add/Darken)
         KindCount
     };
 
@@ -65,6 +66,7 @@ namespace SamplerMidiTargets
             case Kind::Save:        return "save";
             case Kind::Clear:       return "clear";
             case Kind::EqBand:      return "eq";   // real id is "eq{band}" (makeEqBandId)
+            case Kind::MixMode:     return "mixmode";
             default:                return "";
         }
     }
@@ -154,6 +156,7 @@ namespace SamplerMidiTargets
             case Kind::EqBand:                             return 0;    // continuous
             case Kind::Resume: case Kind::Overdub:         return 2;    // 2-state
             case Kind::LoopMode:                           return 4;    // NONE/LOOP/INV/PING
+            case Kind::MixMode:                            return 3;    // MIX/ADD/DARKEN
             case Kind::FadeInType: case Kind::FadeOutType: return 4;    // LIN/EXP/LOG/S
             case Kind::Rec: case Kind::Play:               return -1;   // momentary action
             case Kind::Save: case Kind::Clear:             return -2;   // one-shot action
@@ -190,6 +193,7 @@ namespace SamplerMidiTargets
             case Kind::Resume:      return fs.getSlotResumeMode(slot) ? 1.0f : 0.0f;
             case Kind::Overdub:     return fs.getOverdubMode()        ? 1.0f : 0.0f;
             case Kind::LoopMode:    return (float) (int) fs.getSlotLoopMode(slot)        / 3.0f;
+            case Kind::MixMode:     return (float) (int) fs.getSlotMixMode(slot)         / 2.0f;
             case Kind::FadeInType:  return (float) (int) fs.getSlotAttackCurveType(slot) / 3.0f;
             case Kind::FadeOutType: return (float) (int) fs.getSlotDecayCurveType(slot)  / 3.0f;
             default:                return 0.0f;
@@ -212,6 +216,7 @@ namespace SamplerMidiTargets
             case Kind::Resume:      fs.setSlotResumeMode(slot, n >= 0.5f);                              break;
             case Kind::Overdub:     fs.setOverdubMode(n >= 0.5f);                                       break;
             case Kind::LoopMode:    fs.setSlotLoopMode(slot, (LoopMode) (int) std::lround(n * 3.0f));   break;
+            case Kind::MixMode:     fs.setSlotMixMode(slot, (SlotMixMode) (int) std::lround(n * 2.0f)); break;
             case Kind::FadeInType:  fs.setSlotAttackCurveType(slot, (FadeCurveType) (int) std::lround(n * 3.0f)); break;
             case Kind::FadeOutType: fs.setSlotDecayCurveType(slot,  (FadeCurveType) (int) std::lround(n * 3.0f)); break;
             default: break;

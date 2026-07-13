@@ -589,10 +589,6 @@ void pipeline_path_luxsynth_luxwave(
          * only keeps the Chain-2 envelope above for the polyphonic views.) */
     }
 
-    /* LuxWave path: direct RGB copy (kept for future photowave use) */
-    img_stage_copy_rgb_raw(
-        raw_r, raw_g, raw_b, nb_pixels,
-        out->photowave.r, out->photowave.g, out->photowave.b);
 }
 
 /* ============================================================================

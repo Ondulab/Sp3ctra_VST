@@ -132,6 +132,10 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     timbrePage = std::make_unique<TimbreGenTabComponent>(audioProcessor);
     zone3Content.addChildComponent(timbrePage.get());
 
+    // MIDI SCORE — MIDI-file → printable score generator (no SETUP face)
+    midiScorePage = std::make_unique<MidiScoreGenTabComponent>(audioProcessor);
+    zone3Content.addChildComponent(midiScorePage.get());
+
     videoScrollPage = std::make_unique<VideoScrollPage>(audioProcessor);
     zone3Content.addChildComponent(videoScrollPage.get());
 
@@ -338,7 +342,7 @@ bool Sp3ctraAudioProcessorEditor::blockHasSetup(ChainBlockId id) noexcept
     return id != ChainBlockId::Sequencer && id != ChainBlockId::VideoScroll
         && id != ChainBlockId::Reverb    && id != ChainBlockId::Echo
         && id != ChainBlockId::Equalizer
-        && id != ChainBlockId::Timbre
+        && id != ChainBlockId::Timbre    && id != ChainBlockId::MidiScore
         && id != ChainBlockId::None
         && id != ChainBlockId::ImageSrc  && id != ChainBlockId::VideoSrc
         && id != ChainBlockId::CameraSrc;
@@ -375,6 +379,7 @@ void Sp3ctraAudioProcessorEditor::applyZone3Visibility()
     if (synthOutPage)    synthOutPage   ->setVisible(play && !engineView_ && isSynthBlock(id));
     if (scorePage)       scorePage      ->setVisible(play && id == ChainBlockId::Score);
     if (timbrePage)      timbrePage     ->setVisible(play && id == ChainBlockId::Timbre);
+    if (midiScorePage)   midiScorePage  ->setVisible(play && id == ChainBlockId::MidiScore);
     if (reverbPage)      reverbPage     ->setVisible(play && id == ChainBlockId::Reverb);
     if (echoPage)        echoPage       ->setVisible(play && id == ChainBlockId::Echo);
     if (eqPage)          eqPage         ->setVisible(play && id == ChainBlockId::Equalizer);
@@ -589,6 +594,10 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
             break;
         // TIMBRE is an offline generator too — same neutral view.
         case ChainBlockId::Timbre:
+            sources = { VisualizerMode::MODULATED };
+            break;
+        // MIDI SCORE is an offline generator too — same neutral view.
+        case ChainBlockId::MidiScore:
             sources = { VisualizerMode::MODULATED };
             break;
         // SEQUENCER drives the sampler engines — neutral Modulated view in zone 1.
@@ -1069,6 +1078,7 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
             case ChainBlockId::Echo:
             case ChainBlockId::Equalizer:
             case ChainBlockId::Timbre:
+            case ChainBlockId::MidiScore:
             case ChainBlockId::None:
                 break;   // no SETUP face (blockHasSetup == false)
         }
@@ -1106,6 +1116,8 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
                 top = scorePage.get();       topMinH = 360; break;  // actions + transport only
             case ChainBlockId::Timbre:
                 top = timbrePage.get();      topMinH = TimbreGenTabComponent::kPreferredH; break;
+            case ChainBlockId::MidiScore:
+                top = midiScorePage.get();   topMinH = MidiScoreGenTabComponent::kPreferredH; break;
             case ChainBlockId::VideoScroll:
                 top = videoScrollPage.get(); topMinH = VideoScrollPage::kPreferredH; break;
             case ChainBlockId::Reverb:

@@ -140,8 +140,11 @@ void img_stage_apply_db_decode(float *pixels, int count, float range_db)
         return;
 
     if (range_db < 1.0f)  range_db = 1.0f;
-    const float k = range_db / 20.0f;          /* dB → log10 amplitude factor */
-    const float silence_floor = 0.5f / 255.0f; /* half a grey quantum         */
+    /* 10^y == 2^(y·log2 10): exp2f skips powf's generic-base machinery — this
+     * runs once per pixel per LuxStral send (N powf/frame was the single
+     * largest per-pixel transcendental cost of the image pipeline). */
+    const float k2 = (range_db / 20.0f) * 3.3219281f; /* dB → log2 amplitude */
+    const float silence_floor = 0.5f / 255.0f;        /* half a grey quantum */
 
     for (i = 0; i < count; i++)
     {
@@ -154,7 +157,7 @@ void img_stage_apply_db_decode(float *pixels, int count, float range_db)
         }
         if (x > 1.0f) x = 1.0f;
 
-        pixels[i] = powf(10.0f, (x - 1.0f) * k);
+        pixels[i] = exp2f((x - 1.0f) * k2);
     }
 }
 
@@ -383,27 +386,7 @@ void img_stage_grayscale_luxsynth(
     }
 }
 
-/* ============================================================================
- * img_stage_copy_rgb_raw — Direct RGB copy for LuxWave
- * ============================================================================ */
-void img_stage_copy_rgb_raw(
-    const uint8_t *rgb_r,
-    const uint8_t *rgb_g,
-    const uint8_t *rgb_b,
-    int            pixel_count,
-    uint8_t       *r_out,
-    uint8_t       *g_out,
-    uint8_t       *b_out)
-{
-    if (rgb_r == NULL || rgb_g == NULL || rgb_b == NULL ||
-        r_out == NULL || g_out == NULL || b_out == NULL ||
-        pixel_count <= 0)
-        return;
-
-    memcpy(r_out, rgb_r, (size_t)pixel_count);
-    memcpy(g_out, rgb_g, (size_t)pixel_count);
-    memcpy(b_out, rgb_b, (size_t)pixel_count);
-}
+/* (img_stage_copy_rgb_raw removed with the dead photowave struct section) */
 
 /* ============================================================================
  * img_stage_blob_detect — StrokeForge blob detection wrapper

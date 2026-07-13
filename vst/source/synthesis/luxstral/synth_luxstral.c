@@ -439,10 +439,15 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
 
     // Thread buffers combination completed
 
-    // Float32 version: combine float buffers directly
+    // Float32 version: combine float buffers directly.
+    // The mono sum (thread_luxstralBuffer → additiveBuffer → tmp_audioData) is
+    // only consumed by the mono output path; in stereo mode the workers no
+    // longer accumulate it and the whole mono chain (combine, safety scale,
+    // RMS gain pass, soft limiter) is skipped below.
+    const int stereo_output = g_sp3ctra_config.stereo_mode_enabled;
     for (int i = 0; i < eng->num_workers; i++) {
       synth_thread_worker_t *w = &eng->thread_pool[i];
-      if (w->thread_luxstralBuffer) {
+      if (!stereo_output && w->thread_luxstralBuffer) {
         add_float(w->thread_luxstralBuffer, eng->additiveBuffer,
                   eng->additiveBuffer, g_sp3ctra_config.audio_buffer_size);
       }
@@ -465,8 +470,10 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
 
     // SATURATION PREVENTION: Apply pre-scaling to keep headroom before normalization
     // (shared define — the RMS ceiling predictor accounts for this scale)
-    const float safety_scale = LUXSTRAL_SUM_SAFETY_SCALE;
-    scale_float(eng->additiveBuffer, safety_scale, g_sp3ctra_config.audio_buffer_size);
+    if (!stereo_output) {
+      const float safety_scale = LUXSTRAL_SUM_SAFETY_SCALE;
+      scale_float(eng->additiveBuffer, safety_scale, g_sp3ctra_config.audio_buffer_size);
+    }
 
     // CORRECTION: Conditional normalization by platform
 #ifdef __linux__
@@ -509,17 +516,20 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
     const float soft_limit_knee      = g_sp3ctra_config.soft_limit_knee;
     const int   stereo_enabled       = g_sp3ctra_config.stereo_mode_enabled;
 
-    for (buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
+    // Mono pre-mix (tmp_audioData) is only read by the mono output path below —
+    // in stereo mode the L/R loop computes its own RMS gain, so skip both passes.
+    if (!stereo_enabled) {
+      for (buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
         // ONE gain implementation for mono AND stereo: linear below the RMS
         // ceiling, constant-RMS above (sumVolumeBuffer holds Σa²).
         const float gain = base_gain
             * rms_ceiling_gain(eng->sumVolumeBuffer[buff_idx], chain_gain);
         eng->tmp_audioData[buff_idx] =
             eng->additiveBuffer[buff_idx] * gain * fade_in_factor; // anti-tac fade-in
-    }
+      }
 
-    // SOFT LIMITER: Prevent hard clipping while preserving dynamics (applied AFTER normalization)
-    for (buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
+      // SOFT LIMITER: Prevent hard clipping while preserving dynamics (applied AFTER normalization)
+      for (buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
         float abs_signal = fabsf(eng->tmp_audioData[buff_idx]);
         if (abs_signal > soft_limit_threshold) {
           // Soft compression using tanh for smooth saturation
@@ -527,6 +537,7 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
           float compressed = tanhf(excess / soft_limit_knee) * soft_limit_knee;
           eng->tmp_audioData[buff_idx] = copysignf(soft_limit_threshold + compressed, eng->tmp_audioData[buff_idx]);
         }
+      }
     }
 
   // The contrast factor is now passed as parameter from synth_AudioProcess

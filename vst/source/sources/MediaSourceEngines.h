@@ -68,8 +68,12 @@ public:
     int getRowCount() const;
 
     // ── module presence / params (message thread, atomics) ──────────────────
-    void setModulePresent(bool p)  { present_.store(p);  updateActive(); }
+    // Re-activation (module re-added / source re-enabled) forces a fresh
+    // publish (seekPending): deactivation ERASED the pool line.
+    void setModulePresent(bool p)  { present_.store(p);  if (p) seekPending_.store(true); updateActive(); }
     bool isModulePresent() const   { return present_.load(); }
+    void setEnabled(bool e)        { enabled_.store(e);  if (e) seekPending_.store(true); updateActive(); }
+    bool isEnabled() const         { return enabled_.load(); }
     void setPosition(float frac);              ///< manual / automated line seek
     void setDurationS(float s)     { durS_.store(juce::jlimit(0.05f, 600.f, s)); }
     void setLoopMode(int m)        { loopMode_.store(juce::jlimit(0, 3, m)); }
@@ -95,6 +99,7 @@ private:
     juce::Image            preview_;
 
     std::atomic<bool>  present_  { false };
+    std::atomic<bool>  enabled_  { true };
     std::atomic<bool>  loaded_   { false };
     std::atomic<float> targetPos_{ 0.5f };
     std::atomic<bool>  seekPending_{ true };
@@ -131,8 +136,11 @@ public:
     bool   canPlayReverse() const;
 
     // ── module presence / params (message thread, atomics) ──────────────────
-    void setModulePresent(bool p)  { present_.store(p);  updateActive(); }
+    // Re-activation republishes the current line (deactivation erased it).
+    void setModulePresent(bool p)  { present_.store(p);  if (p) lineDirty_.store(true); updateActive(); }
     bool isModulePresent() const   { return present_.load(); }
+    void setEnabled(bool e)        { enabled_.store(e);  if (e) lineDirty_.store(true); updateActive(); }
+    bool isEnabled() const         { return enabled_.load(); }
     void setLineFrac(float f)      { lineFrac_.store(juce::jlimit(0.f, 1.f, f)); lineDirty_.store(true); }
     float getLineFrac() const      { return lineFrac_.load(); }
     void setSpeed(float s)         { speed_.store(juce::jlimit(0.05f, 8.f, s)); rateDirty_.store(true); }
@@ -159,6 +167,7 @@ private:
     juce::Image         preview_;
 
     std::atomic<bool>  present_  { false };
+    std::atomic<bool>  enabled_  { true };
     std::atomic<bool>  loaded_   { false };
     std::atomic<float> lineFrac_ { 0.5f };
     std::atomic<float> speed_    { 1.0f };
@@ -198,8 +207,11 @@ public:
     juce::Image  getPreviewImage() const;
 
     // ── module presence / params ─────────────────────────────────────────────
-    void setModulePresent(bool p)  { present_.store(p);  updateActive(); }
+    // Re-activation republishes the current line (deactivation erased it).
+    void setModulePresent(bool p)  { present_.store(p);  if (p) lineDirty_.store(true); updateActive(); }
     bool isModulePresent() const   { return present_.load(); }
+    void setEnabled(bool e)        { enabled_.store(e);  if (e) lineDirty_.store(true); updateActive(); }
+    bool isEnabled() const         { return enabled_.load(); }
     void setLineFrac(float f)      { lineFrac_.store(juce::jlimit(0.f, 1.f, f)); lineDirty_.store(true); }
     float getLineFrac() const      { return lineFrac_.load(); }
 
@@ -219,6 +231,7 @@ private:
     juce::Image        preview_;
 
     std::atomic<bool>  present_    { false };
+    std::atomic<bool>  enabled_    { true };
     std::atomic<bool>  open_       { false };
     std::atomic<int>   deviceIndex_{ -1 };
     std::atomic<float> lineFrac_   { 0.5f };

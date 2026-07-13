@@ -48,6 +48,7 @@ ModuleType chainBlockToModuleType(ChainBlockId id) noexcept
         case ChainBlockId::Sampler:  return ModuleType::Sampler;
         case ChainBlockId::Score:    return ModuleType::Score;
         case ChainBlockId::Timbre:   return ModuleType::Timbre;
+        case ChainBlockId::MidiScore:return ModuleType::MidiScore;
         case ChainBlockId::Sequencer:return ModuleType::Sequencer;
         case ChainBlockId::LuxStral: return ModuleType::LuxStral;
         case ChainBlockId::LuxSynth: return ModuleType::LuxSynth;
@@ -422,6 +423,7 @@ ChainBlockId ChainRackComponent::instanceToBlockId(ModuleType type, int chainIdx
         case ModuleType::Sampler:  return ChainBlockId::Sampler;
         case ModuleType::Score:    return ChainBlockId::Score;
         case ModuleType::Timbre:   return ChainBlockId::Timbre;
+        case ModuleType::MidiScore:return ChainBlockId::MidiScore;
         case ModuleType::Sequencer:return ChainBlockId::Sequencer;
         case ModuleType::LuxStral: return ChainBlockId::LuxStral;
         case ModuleType::LuxSynth: return ChainBlockId::LuxSynth;
@@ -1064,19 +1066,21 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const j
             return sourceLed;
 
         // M9 — media sources: ● transport running / ◐ media ready / ○ nothing
+        // or DISABLED (the LED click toggles the source's ACTIVE param).
         case ModuleType::Image:
             if (auto* e = processor.getImageSource())
-                return ! e->isLoaded() ? LedState::Off
+                return ! e->isLoaded() || ! e->isEnabled() ? LedState::Off
                      : (e->isPlaying() ? LedState::Active : LedState::Idle);
             return LedState::Off;
         case ModuleType::Video:
             if (auto* e = processor.getVideoSource())
-                return ! e->isLoaded() ? LedState::Off
+                return ! e->isLoaded() || ! e->isEnabled() ? LedState::Off
                      : (e->isPlaying() ? LedState::Active : LedState::Idle);
             return LedState::Off;
         case ModuleType::Camera:
             if (auto* e = processor.getCameraSource())
-                return e->isOpen() ? LedState::Active : LedState::Off;
+                return e->isOpen() && e->isEnabled() ? LedState::Active
+                                                     : LedState::Off;
             return LedState::Off;
 
         case ModuleType::Pitch:
@@ -1131,11 +1135,12 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const j
                                            : juce::String("luxwaveEnabled"))
                        ? LedState::Active : LedState::Off;
 
-        // SCORE and TIMBRE both drive the SHARED score-player channel, so their
-        // block LED reflects that channel's transport identically:
-        //   ● playing / ◐ a page is loaded / ○ empty.
+        // SCORE, TIMBRE and MIDI SCORE all drive the SHARED score-player
+        // channel, so their block LED reflects that channel's transport
+        // identically: ● playing / ◐ a page is loaded / ○ empty.
         case ModuleType::Score:
         case ModuleType::Timbre:
+        case ModuleType::MidiScore:
             if (auto* fs = processor.getLuxSampler())
                 return fs->isScorePlaying()  ? LedState::Active
                      : fs->scoreHasContent() ? LedState::Idle

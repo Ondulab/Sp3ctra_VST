@@ -40,7 +40,10 @@ extern "C" {
 /* Producer side (engine threads / message thread) ─────────────────────────── */
 
 /* Mark the source as usable: a media/device is loaded AND a module of that
- * kind is placed in a chain. Inactive sources fall back to the live feed. */
+ * kind is placed in a chain AND the source is enabled. Deactivating ERASES
+ * the published line (white fill, pixel_count 0) — removing/disabling a
+ * source must never leave its old content behind; producers republish a
+ * fresh line on re-activation. */
 void internal_source_set_active(int kind, int active);
 int  internal_source_is_active(int kind);
 int  internal_source_any_active(void);

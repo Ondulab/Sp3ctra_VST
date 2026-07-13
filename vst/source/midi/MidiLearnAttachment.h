@@ -46,8 +46,13 @@ namespace MidiLearnPopup
         if (mapped.isNotEmpty())
             menu.addItem(3, "Remove MIDI mapping (" + mapped + ")");
 
+        // withMousePosition() AFTER withTargetComponent() so the popup opens at
+        // the cursor. Canvas editors (EQ, envelope) pass the whole component as
+        // target; without this the menu would anchor to the component's top-left
+        // corner instead of where the user right-clicked.
         menu.showMenuAsync(
-            juce::PopupMenu::Options().withTargetComponent(target),
+            juce::PopupMenu::Options().withTargetComponent(target)
+                                      .withMousePosition(),
             [&engine, paramId](int choice)
             {
                 switch (choice)

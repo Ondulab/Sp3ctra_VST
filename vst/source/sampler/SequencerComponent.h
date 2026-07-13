@@ -15,9 +15,13 @@ class Sp3ctraAudioProcessor;
  * identify which sample is where at a glance.
  *
  * Interaction model:
- *   Left click   → increment bank (+1)
- *   Right click  → decrement bank (−1)
+ *   Left click   → next assignable value (+1)
+ *   Right click  → previous assignable value (−1)
  *   Drag up/down → increment / decrement continuously
+ *
+ * Assignable values cycle EMPTY → every non-empty bank of every sampler
+ * engine across all chains (A1.., B1..) → LIVE; empty banks are skipped,
+ * content is the only filter (see cycleStep in the .cpp).
  */
 class SequencerComponent : public juce::Component,
                            private juce::Timer

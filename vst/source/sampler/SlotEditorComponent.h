@@ -244,8 +244,9 @@ private:
  * @brief Edit panel for the currently selected LuxSampler slot.
  *
  * Layout — parameters in TWO columns on top, one merged editor below:
- *   Left column  : [REC][PLAY][CLEAR] · Speed · Loop · Loop XF · IMG
+ *   Left column  : [REC][PLAY][CLEAR] · Speed · Loop · Loop XF · Floor
  *   Right column : [CROP][SAVE][LOAD] · Resume · Overdub · Curve · Power
+ * (IMG removed — the bank level now lives in the grid's per-bank mixer.)
  *   Bottom       : SlotSpectralEditorComponent — the authentic captured image
  *                  with the time handles (Start/End/fades/playhead) AND the
  *                  frequency EQ curve overlaid on one surface.
@@ -332,8 +333,8 @@ private:
     juce::File resolveSaveDirectory() const;
 
     // ── Labels ────────────────────────────────────────────────────────────────
-    juce::Label  brightnessLabel { {}, "IMG" };
-    juce::Slider brightnessSlider;
+    // (IMG brightness slider removed — the bank level fader in the grid's
+    //  per-bank mixer drives the same engine param, inverted.)
     // Pre-EQ material floor (0 % = off … 100 % = total white mask).
     juce::Label  floorLabel { {}, "Floor" };
     juce::Slider floorSlider;

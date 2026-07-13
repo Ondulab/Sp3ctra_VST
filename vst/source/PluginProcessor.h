@@ -512,15 +512,18 @@ private:
     static constexpr const char* PARAM_SCORE_SPEED   = "scoreSpeed";
 
     // M9 — IMAGE / VIDEO / CAMERA source parameter IDs (relayed to the engines)
-    static constexpr const char* PARAM_IMGSRC_POS   = "imgSrcPos";
-    static constexpr const char* PARAM_IMGSRC_DUR   = "imgSrcDuration";
-    static constexpr const char* PARAM_IMGSRC_LOOP  = "imgSrcLoop";
-    static constexpr const char* PARAM_IMGSRC_PLAY  = "imgSrcPlay";
-    static constexpr const char* PARAM_VIDSRC_LINE  = "vidSrcLine";
-    static constexpr const char* PARAM_VIDSRC_SPEED = "vidSrcSpeed";
-    static constexpr const char* PARAM_VIDSRC_LOOP  = "vidSrcLoop";
-    static constexpr const char* PARAM_VIDSRC_PLAY  = "vidSrcPlay";
-    static constexpr const char* PARAM_CAMSRC_LINE  = "camSrcLine";
+    static constexpr const char* PARAM_IMGSRC_POS     = "imgSrcPos";
+    static constexpr const char* PARAM_IMGSRC_DUR     = "imgSrcDuration";
+    static constexpr const char* PARAM_IMGSRC_LOOP    = "imgSrcLoop";
+    static constexpr const char* PARAM_IMGSRC_PLAY    = "imgSrcPlay";
+    static constexpr const char* PARAM_IMGSRC_ENABLED = "imgSrcEnabled";
+    static constexpr const char* PARAM_VIDSRC_LINE    = "vidSrcLine";
+    static constexpr const char* PARAM_VIDSRC_SPEED   = "vidSrcSpeed";
+    static constexpr const char* PARAM_VIDSRC_LOOP    = "vidSrcLoop";
+    static constexpr const char* PARAM_VIDSRC_PLAY    = "vidSrcPlay";
+    static constexpr const char* PARAM_VIDSRC_ENABLED = "vidSrcEnabled";
+    static constexpr const char* PARAM_CAMSRC_LINE    = "camSrcLine";
+    static constexpr const char* PARAM_CAMSRC_ENABLED = "camSrcEnabled";
 
     // Quick access to parameters (cached, no atomic overhead)
     std::atomic<float>* udpPortParam = nullptr;

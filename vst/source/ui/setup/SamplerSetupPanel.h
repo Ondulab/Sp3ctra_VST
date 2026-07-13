@@ -6,15 +6,16 @@
  * re-parented. Play params are PER-ENGINE (fsEngineParam: engine A keeps the
  * legacy "luxSampler*" ids, engine B owns "luxSamplerB*"); setSamplerIndex()
  * rebinds every engine-scoped attachment:
- *   - MIDI Channel (1-16)                (luxSampler[B]MidiChannel)
- *   - Octave Offset (-2..+2)             (luxSampler[B]OctaveOffset)
+ *   - Banks (1-6, default 4)             (luxSampler[B]NumBanks)
  *   - Max Duration (1..60 s)             (luxSampler[B]MaxDuration)
- * (REC / PLAY / SAVE triggering moved to the unified right-click MIDI-Learn on
- *  the editor's transport buttons — no bespoke bindings here anymore.)
+ * (MIDI Channel / Octave Offset removed 2026-07-13 with the note-triggered
+ *  play path — banks are no longer note-addressed. REC / PLAY / SAVE
+ *  triggering lives in the unified right-click MIDI-Learn.)
  * Shared (session-level, not per-engine):
  *   - Image export toggle + format       (luxSamplerExportImages/-Format)
  *   - Output directory browse / clear    (processor get/setSamplerOutputDir)
- *   - 12-slot status grid (state, duration, clear), refreshed at 10 Hz
+ *   - Bank status grid (state, duration, clear) — shows the first N banks,
+ *     refreshed at 10 Hz
  */
 #pragma once
 
@@ -29,11 +30,10 @@ public:
     SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour);
     ~SamplerSetupPanel() override;
 
-    /** Natural content height (header + 8 control rows + 12-slot grid).
-     *  (Enable row + REC/PLAY/SAVE bind rows removed — power lives in the rack
-     *  LED + zone-3 header; action triggers moved to unified MIDI-Learn. The two
-     *  REC/PLAY-mode rows add 2 × kRowStep over the previous 6-row layout.) */
-    static constexpr int kPreferredH = 626;
+    /** Natural content height (header + 7 control rows + 12-slot grid).
+     *  (MIDI Channel + Octave Offset rows replaced by the single Banks row —
+     *  one kRowStep less than the previous 8-row layout.) */
+    static constexpr int kPreferredH = 594;
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -54,15 +54,10 @@ private:
     juce::Colour                        accent;
     int                                 samplerIndex_ = 0;  // 0 = engine A, 1 = engine B
 
-    // MIDI Channel
-    juce::Label    midiChannelLabel;
-    juce::ComboBox midiChannelCombo;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> midiChannelAttachment;
-
-    // Octave Offset
-    juce::Label    octaveOffsetLabel;
-    juce::ComboBox octaveOffsetCombo;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> octaveOffsetAttachment;
+    // Number of banks shown in the SAMPLER page (1..8)
+    juce::Label    banksLabel;
+    juce::ComboBox banksCombo;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> banksAttachment;
 
     // Max Duration
     juce::Label  maxDurationLabel;

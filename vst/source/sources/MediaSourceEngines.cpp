@@ -161,7 +161,8 @@ void ImageSourceEngine::setPlaying(bool p)
 void ImageSourceEngine::updateActive()
 {
     internal_source_set_active(INTERNAL_SRC_IMAGE,
-                               present_.load() && loaded_.load() ? 1 : 0);
+                               present_.load() && loaded_.load()
+                                   && enabled_.load() ? 1 : 0);
 }
 
 void ImageSourceEngine::publishRow(double frac)
@@ -178,7 +179,7 @@ void ImageSourceEngine::publishRow(double frac)
 
 void ImageSourceEngine::tick(double nowMs)
 {
-    if (! present_.load() || ! loaded_.load())
+    if (! present_.load() || ! loaded_.load() || ! enabled_.load())
     {
         lastMs_ = nowMs;
         return;
@@ -262,7 +263,7 @@ bool VideoSourceEngine::loadFile(const juce::File& f, juce::String& error)
 
     if (! reader_->open(f, error))
     {
-        internal_source_set_active(INTERNAL_SRC_VIDEO, 0);
+        updateActive();   // loaded_ is false → deactivates (and erases the line)
         return false;
     }
 
@@ -273,7 +274,7 @@ bool VideoSourceEngine::loadFile(const juce::File& f, juce::String& error)
     loaded_.store(true, std::memory_order_release);
     lineDirty_.store(true);
     rateDirty_.store(true);
-    internal_source_set_active(INTERNAL_SRC_VIDEO, present_.load() ? 1 : 0);
+    updateActive();
     return true;
 }
 
@@ -286,7 +287,7 @@ void VideoSourceEngine::unload()
     file_ = juce::File();
     frame_ = {};
     preview_ = {};
-    internal_source_set_active(INTERNAL_SRC_VIDEO, 0);
+    updateActive();   // deactivates → the published line is erased with it
 }
 
 juce::File VideoSourceEngine::getFile() const
@@ -334,7 +335,8 @@ double VideoSourceEngine::getPositionFrac() const
 void VideoSourceEngine::updateActive()
 {
     internal_source_set_active(INTERNAL_SRC_VIDEO,
-                               present_.load() && loaded_.load() ? 1 : 0);
+                               present_.load() && loaded_.load()
+                                   && enabled_.load() ? 1 : 0);
 }
 
 void VideoSourceEngine::applyRate()
@@ -363,7 +365,7 @@ void VideoSourceEngine::publishLine()
 
 void VideoSourceEngine::tick(double nowMs)
 {
-    if (! present_.load() || ! loaded_.load())
+    if (! present_.load() || ! loaded_.load() || ! enabled_.load())
         return;
 
     std::lock_guard<std::mutex> lk(mediaMutex_);
@@ -561,12 +563,13 @@ juce::Image CameraSourceEngine::getPreviewImage() const
 void CameraSourceEngine::updateActive()
 {
     internal_source_set_active(INTERNAL_SRC_CAMERA,
-                               present_.load() && open_.load() ? 1 : 0);
+                               present_.load() && open_.load()
+                                   && enabled_.load() ? 1 : 0);
 }
 
 void CameraSourceEngine::tick(double nowMs)
 {
-    if (! present_.load() || ! open_.load())
+    if (! present_.load() || ! open_.load() || ! enabled_.load())
         return;
 
     const bool fresh = newFrame_.exchange(false);

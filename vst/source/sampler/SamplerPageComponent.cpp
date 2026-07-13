@@ -91,20 +91,7 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
                     if (fs == nullptr) continue;
                     fs->clearAllSlots();
                     for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
-                    {
-                        fs->setSlotStartFrac   (i, 0.0f);
-                        fs->setSlotEndFrac     (i, 1.0f);
-                        fs->setSlotSpeed       (i, 1.0f);
-                        fs->setSlotLoopMode    (i, LoopMode::LOOP);
-                        fs->setSlotResumeMode  (i, false);
-                        fs->setSlotBlendAmount (i, 0.0f);
-                        fs->setSlotAttackLen   (i, 0.0f);
-                        fs->setSlotDecayLen    (i, 0.0f);
-                        fs->setSlotBrightnessLift(i, 0.0f);
-                        fs->setSlotTrebleCut   (i, 0.0f);
-                        fs->setSlotBassCut     (i, 0.0f);
-                        fs->setSlotLabel       (i, "");
-                    }
+                        fs->resetSlotPlayParams(i);
                 }
 
                 // Also stop transport in APVTS (visual feedback)
@@ -652,20 +639,7 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile, bool isA
     {
         engines[1]->clearAllSlots();
         for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
-        {
-            engines[1]->setSlotStartFrac   (i, 0.0f);
-            engines[1]->setSlotEndFrac     (i, 1.0f);
-            engines[1]->setSlotSpeed       (i, 1.0f);
-            engines[1]->setSlotLoopMode    (i, LoopMode::LOOP);
-            engines[1]->setSlotResumeMode  (i, false);
-            engines[1]->setSlotBlendAmount (i, 0.0f);
-            engines[1]->setSlotAttackLen   (i, 0.0f);
-            engines[1]->setSlotDecayLen    (i, 0.0f);
-            engines[1]->setSlotBrightnessLift(i, 0.0f);
-            engines[1]->setSlotTrebleCut   (i, 0.0f);
-            engines[1]->setSlotBassCut     (i, 0.0f);
-            engines[1]->setSlotLabel       (i, "");
-        }
+            engines[1]->resetSlotPlayParams(i);
         engines[1]->setOverdubMode(false);
     }
 

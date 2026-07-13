@@ -29,7 +29,7 @@ public:
     void resized() override;
 
     // ── Layout constants (single source of truth for resized() + kPreferredH) ──
-    static constexpr int kGridH = 66;   // sample-bank row
+    static constexpr int kGridH = SlotGridComponent::kPreferredH; // bank tiles + per-bank mixer
     static constexpr int kEditH = 500;  // slot editor: 2 param cols + image + EQ
 
     // Natural height — must match the layout in resized(): pad + grid + gap +

@@ -190,7 +190,7 @@ bool ChainModel::insert(int chainIdx, ModuleType type, int dropIdx)
     jassert(! hasSlot(type) || slot >= 0);   // canInsert already gated pool-full
     auto& mods = chains[(size_t) chainIdx].modules;
     dropIdx = juce::jlimit(0, (int) mods.size(), dropIdx);
-    mods.insert(mods.begin() + dropIdx, ModuleInstance{ type, juce::Uuid(), slot });
+    mods.insert(mods.begin() + dropIdx, ModuleInstance{ type, juce::Uuid(), slot, {} });
     return true;
 }
 
@@ -250,7 +250,7 @@ int ChainModel::addChain()
 {
     if (! canAddChain())
         return -1;   // at kMaxChains — a 9th chain would have no RT pool slot
-    chains.push_back(Chain{ juce::Uuid(), {} });
+    chains.push_back(Chain{ juce::Uuid(), {}, {} });
     return (int) chains.size() - 1;
 }
 
@@ -394,7 +394,7 @@ void ChainModel::fromValueTree(const juce::ValueTree& root)
             const int slot = hasSlot(type)
                                ? (int) mt.getProperty(kSlotProp, juce::var(-1)) : -1;
             ModuleInstance mi{
-                type, muuid.isNotEmpty() ? juce::Uuid(muuid) : juce::Uuid(), slot };
+                type, muuid.isNotEmpty() ? juce::Uuid(muuid) : juce::Uuid(), slot, {} };
             const auto values = mt.getChildWithName(kValuesTag);
             if (values.isValid())
                 mi.values = values.createCopy();   // J2 — settings at rest
@@ -414,7 +414,7 @@ int ChainModel::duplicateChain(int chainIdx)
     const Chain& src = chains[(size_t) chainIdx];
     for (const auto& m : src.modules)
     {
-        ModuleInstance mi{ m.type, juce::Uuid(), -1 };   // fresh identity + slot
+        ModuleInstance mi{ m.type, juce::Uuid(), -1, {} };   // fresh identity + slot
         if (m.values.isValid())
             mi.values = m.values.createCopy();           // settings travel along
         copy.modules.push_back(std::move(mi));
@@ -521,7 +521,7 @@ void ChainModel::validateAndRepair()
     }
 
     if (chains.empty())
-        chains.push_back(Chain{ juce::Uuid(), {} });   // always keep ≥1 chain
+        chains.push_back(Chain{ juce::Uuid(), {}, {} });   // always keep ≥1 chain
 
     // Heal slots: PRESERVE valid unique slots (automation-lane stability); only
     // reassign -1 / out-of-range / colliding ones. Two INDEPENDENT pools:
@@ -593,7 +593,7 @@ ChainModel ChainModel::makeDefault()
         Chain ch;
         ch.id = juce::Uuid();
         for (auto t : types)
-            ch.modules.push_back(ModuleInstance{ t, juce::Uuid() });
+            ch.modules.push_back(ModuleInstance{ t, juce::Uuid(), -1, {} });
         return ch;
     };
 

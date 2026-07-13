@@ -36,7 +36,8 @@ enum class ModuleType
     Camera,                        // SRC (appended to keep table indices stable)
     Reverb, Echo,                  // FX (appended to keep table indices stable)
     Timbre,                        // UTILS (appended to keep table indices stable)
-    Equalizer                      // FX (appended to keep table indices stable)
+    Equalizer,                     // FX (appended to keep table indices stable)
+    MidiScore                      // UTILS (appended to keep table indices stable)
 };
 
 /** Behavioural role — drives the placement constraints. */
@@ -60,13 +61,15 @@ struct ModuleDesc
 //==============================================================================
 /** The whole catalogue. Table order MUST match the enum order (descFor indexes
  *  by ordinal); the catalogue panel buckets rows by category for display. */
-inline const std::array<ModuleDesc, 17>& moduleTable()
+inline const std::array<ModuleDesc, 18>& moduleTable()
 {
-    static const std::array<ModuleDesc, 17> table = {{
+    static const std::array<ModuleDesc, 18> table = {{
         // type                  category          role                  name                       colour       enableParam          id
         { ModuleType::Sp3ctra,     ModuleCat::SRC,   ModuleRole::Source,   "SP3CTRA",                 0xff68788f,  "",                  "Sp3ctra"  },
-        { ModuleType::Image,       ModuleCat::SRC,   ModuleRole::Source,   "IMAGE",                   0xff68788f,  "",                  "Image"    },
-        { ModuleType::Video,       ModuleCat::SRC,   ModuleRole::Source,   "VIDEO",                   0xff68788f,  "",                  "Video"    },
+        // Media sources are engine singletons (V1 decision C): one global
+        // ACTIVE param each — the rack LED and the PLAY-face toggle share it.
+        { ModuleType::Image,       ModuleCat::SRC,   ModuleRole::Source,   "IMAGE",                   0xff68788f,  "imgSrcEnabled",     "Image"    },
+        { ModuleType::Video,       ModuleCat::SRC,   ModuleRole::Source,   "VIDEO",                   0xff68788f,  "vidSrcEnabled",     "Video"    },
         // Pitch/Mask/Reverb/Echo/EQ enable lives in the PER-INSTANCE bank
         // (luxpitch{slot}_Enabled…): the rack block and the zone-3 power switch
         // resolve it from the selected instance's pool slot, not from here.
@@ -82,11 +85,12 @@ inline const std::array<ModuleDesc, 17>& moduleTable()
         { ModuleType::LuxSynth,    ModuleCat::OUT,   ModuleRole::Synth,    "\xE2\x86\x92 LUXSYNTH",   0xffb07af0,  "luxsynthEnabled",   "LuxSynth" },
         { ModuleType::LuxWave,     ModuleCat::OUT,   ModuleRole::Synth,    "\xE2\x86\x92 LUXWAVE",    0xff8fd05a,  "luxwaveEnabled",    "LuxWave"  },
         { ModuleType::VideoScroll, ModuleCat::OUT,   ModuleRole::Processor,"VIDEO SCROLL",            0xff5ad0c8,  "",                  "VideoScroll" },
-        { ModuleType::Camera,      ModuleCat::SRC,   ModuleRole::Source,   "CAMERA",                  0xff68788f,  "",                  "Camera"   },
+        { ModuleType::Camera,      ModuleCat::SRC,   ModuleRole::Source,   "CAMERA",                  0xff68788f,  "camSrcEnabled",     "Camera"   },
         { ModuleType::Reverb,      ModuleCat::FX,    ModuleRole::Processor,"REVERB",                  0xff9d8ce0,  "",                  "Reverb"   },
         { ModuleType::Echo,        ModuleCat::FX,    ModuleRole::Processor,"ECHO",                    0xffe0c95a,  "",                  "Echo"     },
         { ModuleType::Timbre,      ModuleCat::UTILS, ModuleRole::Util,     "TIMBRE",                  0xffd97b52,  "",                  "Timbre"   },
         { ModuleType::Equalizer,   ModuleCat::FX,    ModuleRole::Processor,"EQ",                      0xffe0847a,  "",                  "Equalizer" },
+        { ModuleType::MidiScore,   ModuleCat::UTILS, ModuleRole::Util,     "MIDI SCORE",              0xffc9a13e,  "",                  "MidiScore" },
     }};
     return table;
 }

@@ -306,9 +306,7 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
     if (! target.isValid())
         return false;   // every pool buffer is momentarily referenced — retry next pass
 
-    target.clear(target.getBounds(), juce::Colours::black);
-
-    // Enabled outputs only (a disabled output is dropped → black contribution).
+    // Enabled outputs only (a disabled output is dropped from the composite).
     int numEnabled = 0;
     Layer* single = nullptr;
     for (auto& l : layers_)
@@ -317,6 +315,12 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
             ++numEnabled;
             single = &l;
         }
+
+    // Empty master (nothing enabled) = blank paper → WHITE. With layers the
+    // compositing base stays black: Add/Screen accumulate light, so their
+    // neutral element is black (a white base would saturate them).
+    target.clear(target.getBounds(),
+                 numEnabled == 0 ? juce::Colours::white : juce::Colours::black);
 
     if (numEnabled == 1 && rawOf(vsMixParam(single->slot, "level"), 1.0f) >= 0.999f)
     {
@@ -451,7 +455,7 @@ void VideoMixerComponent::layoutStrip()
 void VideoMixerComponent::renderMaster(juce::Graphics& g, juce::Rectangle<int> dest)
 {
     if (dest.isEmpty()) return;
-    g.setColour(juce::Colours::black);
+    g.setColour(juce::Colours::white);   // no frame yet → blank paper, not black
     g.fillRect(dest);
 
     const juce::Image frame = renderer_->frontImage();
@@ -503,7 +507,8 @@ void VideoMixerComponent::paint(juce::Graphics& g)
 
     if (voices_.empty())
     {
-        g.setColour(juce::Colour(Sp3ctraTheme::kColText).withAlpha(0.55f));
+        // Dark text: the empty master area is now WHITE (blank paper).
+        g.setColour(juce::Colour(0xff5a6070));
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
         g.drawText("Patch a VIDEO SCROLL output into a chain",
                    masterArea_, juce::Justification::centred, true);

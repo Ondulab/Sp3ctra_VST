@@ -66,14 +66,24 @@ static _Atomic int g_freq_reinit_state = FREQ_REINIT_IDLE;
 static float g_global_fade_current = 1.0f;
 static float g_global_fade_target  = 1.0f;
 
-/* Exponential fade alpha — computed dynamically from actual sample rate (50 ms tau) */
+/* Exponential fade alpha — computed dynamically from actual sample rate (50 ms tau).
+ * Cached: the expf only reruns when the sample rate changes, not per sample
+ * (this is called once per output sample by the fade update). Caller is the
+ * single audio-generation thread, so the plain statics are race-free. */
 static float get_global_fade_alpha(void)
 {
+    static float cached_fs    = 0.0f;
+    static float cached_alpha = 0.0f;
+
     float Fs = (float)g_sp3ctra_config.sampling_frequency;
     if (Fs < 8000.0f)
         Fs = 48000.0f;
-    const float tau_s = 0.05f;
-    return 1.0f - expf(-1.0f / (tau_s * Fs));
+    if (Fs != cached_fs) {
+        const float tau_s = 0.05f;
+        cached_alpha = 1.0f - expf(-1.0f / (tau_s * Fs));
+        cached_fs    = Fs;
+    }
+    return cached_alpha;
 }
 #define GLOBAL_FADE_ALPHA get_global_fade_alpha()
 

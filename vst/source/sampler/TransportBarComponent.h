@@ -31,9 +31,10 @@ private:
 // TransportBarComponent
 //
 // Full-width bar at the bottom of the sampler page.
-// APVTS-bound: seqBpm, seqLoop, seqDawSync.
+// APVTS-bound: seqBpm, seqNumSteps, seqLoop, seqDawSync.
 // Play/hold/stop drive the seqTransport param (DAW-automatable/MIDI-mappable);
-// the processor relays it to FrameSequencer. Steps combo writes seqNumSteps.
+// the processor relays it to FrameSequencer. Steps is a draggable value bar
+// covering the full 2..16 param range (was a fixed 4/8/12/16 combo).
 // 200 ms Timer disables BPM slider when DAW sync is active.
 // ─────────────────────────────────────────────────────────────────────────────
 class TransportBarComponent : public juce::Component,
@@ -64,13 +65,14 @@ private:
 
     // ── Steps ─────────────────────────────────────────────────────────────────
     juce::Label        stepsLabel       { {}, "Steps" };
-    juce::ComboBox     stepsCombo;
+    juce::Slider       stepsSlider;
 
     // ── Loop / DAW sync ───────────────────────────────────────────────────────
     juce::ToggleButton loopToggle       { "Loop" };
     juce::ToggleButton dawSyncToggle    { "DAW Sync" };
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> bpmAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> stepsAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> loopAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> dawSyncAttach;
     std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
