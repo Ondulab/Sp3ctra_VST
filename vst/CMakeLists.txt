@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.15)
 
-# Base version lives in vst/VERSION (bump it manually for releases).
-# A per-build counter (vst/BUILD_NUMBER) is auto-incremented on every build
-# and injected through the generated header Sp3ctraVersion.h — see the
+# The full version (x.y.z) lives in vst/VERSION. The patch digit z is
+# auto-incremented on every build (bump x/y manually for releases) and
+# injected through the generated header Sp3ctraVersion.h — see the
 # "Auto-incremented build version" section below.
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" SP3CTRA_BASE_VERSION)
 string(STRIP "${SP3CTRA_BASE_VERSION}" SP3CTRA_BASE_VERSION)
@@ -298,8 +298,9 @@ target_sources(Sp3ctraVST
 
 # ---------------------------------------------------------------------------
 # Auto-incremented build version
-# vst/BUILD_NUMBER is bumped on every `cmake --build` and baked into the
-# generated header Sp3ctraVersion.h (used by PluginEditor's header bar).
+# The patch digit of vst/VERSION is bumped on every `cmake --build` and baked
+# into the generated header Sp3ctraVersion.h (used by PluginEditor's header
+# bar).
 # ---------------------------------------------------------------------------
 set(SP3CTRA_VERSION_HEADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(SP3CTRA_VERSION_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_version_header.cmake")
@@ -307,7 +308,6 @@ set(SP3CTRA_VERSION_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_version_h
 # Configure-time generation (no increment) so the header always exists.
 execute_process(COMMAND ${CMAKE_COMMAND}
     -DVERSION_FILE=${CMAKE_CURRENT_SOURCE_DIR}/VERSION
-    -DBUILD_NUMBER_FILE=${CMAKE_CURRENT_SOURCE_DIR}/BUILD_NUMBER
     -DOUTPUT_HEADER=${SP3CTRA_VERSION_HEADER_DIR}/Sp3ctraVersion.h
     -DINCREMENT=OFF
     -P ${SP3CTRA_VERSION_SCRIPT})
@@ -315,11 +315,10 @@ execute_process(COMMAND ${CMAKE_COMMAND}
 add_custom_target(Sp3ctraVersionHeader
     COMMAND ${CMAKE_COMMAND}
         -DVERSION_FILE=${CMAKE_CURRENT_SOURCE_DIR}/VERSION
-        -DBUILD_NUMBER_FILE=${CMAKE_CURRENT_SOURCE_DIR}/BUILD_NUMBER
         -DOUTPUT_HEADER=${SP3CTRA_VERSION_HEADER_DIR}/Sp3ctraVersion.h
         -DINCREMENT=ON
         -P ${SP3CTRA_VERSION_SCRIPT}
-    COMMENT "Bumping Sp3ctra build number"
+    COMMENT "Bumping Sp3ctra patch version"
     VERBATIM)
 add_dependencies(Sp3ctraVST Sp3ctraVersionHeader)
 

@@ -1,45 +1,45 @@
-# Generates Sp3ctraVersion.h from vst/VERSION + vst/BUILD_NUMBER.
+# Generates Sp3ctraVersion.h from vst/VERSION (full x.y.z).
 #
 # Invoked two ways from CMakeLists.txt:
 #   - at configure time with INCREMENT=OFF (header exists for IDE indexing)
-#   - at build time  with INCREMENT=ON  (bumps BUILD_NUMBER on every build)
+#   - at build time  with INCREMENT=ON  (bumps the patch digit z on every build,
+#     written back into vst/VERSION)
 #
 # Required -D arguments:
-#   VERSION_FILE       path to the base-version file (e.g. "0.1.5")
-#   BUILD_NUMBER_FILE  path to the build counter file (auto-incremented)
-#   OUTPUT_HEADER      path of the header to generate
-#   INCREMENT          ON to bump the counter, OFF to just regenerate
+#   VERSION_FILE   path to the version file (e.g. "1.1.0")
+#   OUTPUT_HEADER  path of the header to generate
+#   INCREMENT      ON to bump the patch number, OFF to just regenerate
 
-file(READ "${VERSION_FILE}" SP3CTRA_BASE_VERSION)
-string(STRIP "${SP3CTRA_BASE_VERSION}" SP3CTRA_BASE_VERSION)
+file(READ "${VERSION_FILE}" SP3CTRA_VERSION)
+string(STRIP "${SP3CTRA_VERSION}" SP3CTRA_VERSION)
 
-set(SP3CTRA_BUILD_NUMBER 0)
-if(EXISTS "${BUILD_NUMBER_FILE}")
-    file(READ "${BUILD_NUMBER_FILE}" SP3CTRA_BUILD_NUMBER)
-    string(STRIP "${SP3CTRA_BUILD_NUMBER}" SP3CTRA_BUILD_NUMBER)
-    if(NOT SP3CTRA_BUILD_NUMBER MATCHES "^[0-9]+$")
-        set(SP3CTRA_BUILD_NUMBER 0)
-    endif()
+if(NOT SP3CTRA_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
+    message(FATAL_ERROR "vst/VERSION must contain x.y.z, got '${SP3CTRA_VERSION}'")
 endif()
+set(SP3CTRA_VERSION_MAJOR ${CMAKE_MATCH_1})
+set(SP3CTRA_VERSION_MINOR ${CMAKE_MATCH_2})
+set(SP3CTRA_VERSION_PATCH ${CMAKE_MATCH_3})
 
 if(INCREMENT)
-    math(EXPR SP3CTRA_BUILD_NUMBER "${SP3CTRA_BUILD_NUMBER} + 1")
-    file(WRITE "${BUILD_NUMBER_FILE}" "${SP3CTRA_BUILD_NUMBER}\n")
+    math(EXPR SP3CTRA_VERSION_PATCH "${SP3CTRA_VERSION_PATCH} + 1")
+    set(SP3CTRA_VERSION "${SP3CTRA_VERSION_MAJOR}.${SP3CTRA_VERSION_MINOR}.${SP3CTRA_VERSION_PATCH}")
+    file(WRITE "${VERSION_FILE}" "${SP3CTRA_VERSION}\n")
 endif()
 
 string(TIMESTAMP SP3CTRA_BUILD_DATE "%Y-%m-%d %H:%M")
 
 file(WRITE "${OUTPUT_HEADER}"
 "// Auto-generated at build time by cmake/generate_version_header.cmake — do not edit.
-// Base version comes from vst/VERSION; build number from vst/BUILD_NUMBER.
+// Version comes from vst/VERSION; the patch digit auto-increments on every build.
 #pragma once
 
-#define SP3CTRA_VERSION_BASE   \"${SP3CTRA_BASE_VERSION}\"
-#define SP3CTRA_BUILD_NUMBER   ${SP3CTRA_BUILD_NUMBER}
+#define SP3CTRA_VERSION_MAJOR  ${SP3CTRA_VERSION_MAJOR}
+#define SP3CTRA_VERSION_MINOR  ${SP3CTRA_VERSION_MINOR}
+#define SP3CTRA_VERSION_PATCH  ${SP3CTRA_VERSION_PATCH}
 #define SP3CTRA_BUILD_DATE     \"${SP3CTRA_BUILD_DATE}\"
-#define SP3CTRA_VERSION_STRING \"${SP3CTRA_BASE_VERSION} (b${SP3CTRA_BUILD_NUMBER})\"
+#define SP3CTRA_VERSION_STRING \"${SP3CTRA_VERSION}\"
 ")
 
 if(INCREMENT)
-    message(STATUS "Sp3ctra version: ${SP3CTRA_BASE_VERSION} build ${SP3CTRA_BUILD_NUMBER}")
+    message(STATUS "Sp3ctra version: ${SP3CTRA_VERSION}")
 endif()
