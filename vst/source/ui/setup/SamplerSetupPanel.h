@@ -29,10 +29,11 @@ public:
     SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour);
     ~SamplerSetupPanel() override;
 
-    /** Natural content height (header + 6 control rows + 12-slot grid).
+    /** Natural content height (header + 8 control rows + 12-slot grid).
      *  (Enable row + REC/PLAY/SAVE bind rows removed — power lives in the rack
-     *  LED + zone-3 header; action triggers moved to unified MIDI-Learn.) */
-    static constexpr int kPreferredH = 562;
+     *  LED + zone-3 header; action triggers moved to unified MIDI-Learn. The two
+     *  REC/PLAY-mode rows add 2 × kRowStep over the previous 6-row layout.) */
+    static constexpr int kPreferredH = 626;
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -67,6 +68,16 @@ private:
     juce::Label  maxDurationLabel;
     juce::Slider maxDurationSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> maxDurationAttachment;
+
+    // REC button mode (Toggle / Momentary) — per engine
+    juce::Label    recModeLabel;
+    juce::ComboBox recModeCombo;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> recModeAttachment;
+
+    // PLAY button mode (Toggle / Momentary) — per engine
+    juce::Label    playModeLabel;
+    juce::ComboBox playModeCombo;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> playModeAttachment;
 
     // Image export on Save Session
     juce::Label        exportImagesLabel;

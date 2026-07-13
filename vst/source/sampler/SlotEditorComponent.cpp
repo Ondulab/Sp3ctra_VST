@@ -39,6 +39,26 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
             spectralEditor.markDirty(); // image may have changed after record
         }
     };
+    // Momentary mode: press starts recording, release stops it. uiToggleRecord
+    // flips state, so gate on the current state (mirrors the MIDI drain).
+    recBtn.onPress = [this]
+    {
+        if (auto* fs = processor.getSampler(samplerIndex_))
+            if (fs->getSlotState(selectedSlot) != SlotState::RECORDING)
+            {
+                fs->uiToggleRecord(selectedSlot);
+                spectralEditor.markDirty();
+            }
+    };
+    recBtn.onRelease = [this]
+    {
+        if (auto* fs = processor.getSampler(samplerIndex_))
+            if (fs->getSlotState(selectedSlot) == SlotState::RECORDING)
+            {
+                fs->uiToggleRecord(selectedSlot);
+                spectralEditor.markDirty();
+            }
+    };
     addAndMakeVisible(recBtn);
 
     playBtn.onClick = [this]
@@ -52,6 +72,23 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
             if (auto* p = processor.getAPVTS().getParameter("samplerFreezeMode"))
                 p->setValueNotifyingHost(0.0f); // 0 = PLAY
         }
+    };
+    // Momentary mode: press starts playback (+ arms the transport), release stops.
+    playBtn.onPress = [this]
+    {
+        if (auto* fs = processor.getSampler(samplerIndex_))
+            if (fs->getSlotState(selectedSlot) != SlotState::PLAYING)
+            {
+                fs->uiPlaySlot(selectedSlot);
+                if (auto* p = processor.getAPVTS().getParameter("samplerFreezeMode"))
+                    p->setValueNotifyingHost(0.0f); // 0 = PLAY
+            }
+    };
+    playBtn.onRelease = [this]
+    {
+        if (auto* fs = processor.getSampler(samplerIndex_))
+            if (fs->getSlotState(selectedSlot) == SlotState::PLAYING)
+                fs->uiPlaySlot(selectedSlot);
     };
     addAndMakeVisible(playBtn);
 
@@ -504,10 +541,15 @@ void SlotEditorComponent::rebindMidiLearn()
     for (int k = 0; k < 4; ++k)
         add(loopBtns[k], K::LoopMode);
 
-    // Action buttons — momentary REC / PLAY, one-shot SAVE.
-    add(recBtn,  K::Rec);
-    add(playBtn, K::Play);
-    add(saveBtn, K::Save);
+    // Action buttons — momentary REC / PLAY, one-shot SAVE / CLEAR.
+    add(recBtn,   K::Rec);
+    add(playBtn,  K::Play);
+    add(saveBtn,  K::Save);
+    add(clearBtn, K::Clear);
+
+    // Slot EQ: right-click the nearest band node → MIDI Learn (9 bands, this slot).
+    eqEditor.setBandMidiLearn(&mm, [e, s](int band)
+    { return SamplerMidiTargets::makeEqBandId(e, s, band); });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -562,6 +604,11 @@ void SlotEditorComponent::drainMidiActionPulses()
     auto* fs = processor.getSampler(samplerIndex_);
     if (fs == nullptr) return;
 
+    // Momentary → act on both press and release edges; Toggle → act on the press
+    // edge only (flip on/off) and ignore the release. Same rule as the buttons.
+    const bool recMom  = processor.samplerRecMomentary (samplerIndex_);
+    const bool playMom = processor.samplerPlayMomentary(samplerIndex_);
+
     for (int s = 0; s < LuxSamplerConstants::NUM_SLOTS; ++s)
     {
         const bool recP  = processor.consumeSmpRecPressed  (samplerIndex_, s);
@@ -570,32 +617,77 @@ void SlotEditorComponent::drainMidiActionPulses()
         const bool playR = processor.consumeSmpPlayReleased(samplerIndex_, s);
         const bool saveT = processor.consumeSmpSaveTrigger (samplerIndex_, s);
 
-        // REC press → start if not recording; release → stop if recording.
-        // Sequential ifs: a quick tap can land press+release in the same tick.
-        if (recP && fs->getSlotState(s) != SlotState::RECORDING)
+        // REC — Momentary: press starts if idle, release stops if recording
+        // (sequential ifs: a quick tap can land press+release in one tick).
+        // Toggle: press flips record on↔off, release ignored.
+        if (recMom)
         {
-            fs->uiToggleRecord(s);
-            if (s == selectedSlot) spectralEditor.markDirty();
+            if (recP && fs->getSlotState(s) != SlotState::RECORDING)
+            {
+                fs->uiToggleRecord(s);
+                if (s == selectedSlot) spectralEditor.markDirty();
+            }
+            if (recR && fs->getSlotState(s) == SlotState::RECORDING)
+            {
+                fs->uiToggleRecord(s);
+                if (s == selectedSlot) spectralEditor.markDirty();
+            }
         }
-        if (recR && fs->getSlotState(s) == SlotState::RECORDING)
+        else if (recP)
         {
             fs->uiToggleRecord(s);
             if (s == selectedSlot) spectralEditor.markDirty();
         }
 
-        // PLAY press → start if not playing (and arm the sampler transport, like
-        // the PLAY button does); release → stop if playing.
-        if (playP && fs->getSlotState(s) != SlotState::PLAYING)
+        // PLAY — Momentary: press starts if idle (and arms the sampler transport,
+        // like the PLAY button), release stops if playing. Toggle: press flips
+        // play↔stop (arm only when it actually starts), release ignored.
+        auto armTransport = [this]
         {
-            fs->uiPlaySlot(s);
             if (auto* p = processor.getAPVTS().getParameter("samplerFreezeMode"))
                 p->setValueNotifyingHost(0.0f); // 0 = PLAY
+        };
+        if (playMom)
+        {
+            if (playP && fs->getSlotState(s) != SlotState::PLAYING)
+            {
+                fs->uiPlaySlot(s);
+                armTransport();
+            }
+            if (playR && fs->getSlotState(s) == SlotState::PLAYING)
+                fs->uiPlaySlot(s);
         }
-        if (playR && fs->getSlotState(s) == SlotState::PLAYING)
+        else if (playP)
+        {
+            const bool wasPlaying = (fs->getSlotState(s) == SlotState::PLAYING);
             fs->uiPlaySlot(s);
+            if (! wasPlaying) armTransport();
+        }
 
         if (saveT)
             saveSlotToDisk(s);
+
+        // CLEAR (one-shot) → wipe the slot; refresh the view if it is shown.
+        if (processor.consumeSmpClearTrigger(samplerIndex_, s))
+        {
+            fs->uiClearSlot(s);
+            if (s == selectedSlot) { refreshSliderValues(); spectralEditor.markDirty(); }
+        }
+
+        // EQ bands (continuous) → apply latched gains (non-RT), reload the curve
+        // if this slot's editor is on screen.
+        bool eqTouched = false;
+        for (int b = 0; b < LuxSampler::kEqBands; ++b)
+        {
+            const float v = processor.consumeSmpEqPending(samplerIndex_, s, b);
+            if (v >= 0.0f)
+            {
+                fs->setSlotEqBandGain(s, b, v * 48.0f - 24.0f);   // 0..1 → ±24 dB
+                eqTouched = true;
+            }
+        }
+        if (eqTouched && s == selectedSlot)
+            refreshFreqCurve();
     }
 }
 
@@ -647,10 +739,6 @@ void SlotEditorComponent::paint(juce::Graphics& g)
         case SlotState::RECORDING:
             stateStr = "* REC";
             stateCol = juce::Colour(0xffff4444);
-            break;
-        case SlotState::ARMED:
-            stateStr = "ARM";
-            stateCol = juce::Colour(0xffffcc00);
             break;
         case SlotState::PLAYING:
             stateStr = "PLAY";
@@ -782,6 +870,11 @@ void SlotEditorComponent::timerCallback()
 {
     blinkOn = !blinkOn;
 
+    // Keep the REC / PLAY buttons' interaction mode in step with the per-engine
+    // Toggle / Momentary preference (set in SamplerSetupPanel).
+    recBtn .momentary = processor.samplerRecMomentary (samplerIndex_);
+    playBtn.momentary = processor.samplerPlayMomentary(samplerIndex_);
+
     // ── Run MIDI-triggered REC / PLAY / SAVE action pulses (fixed slot each) ──
     drainMidiActionPulses();
 
@@ -835,13 +928,6 @@ void SlotEditorComponent::timerCallback()
                              juce::Colour(0xffcc2222));
             recBtn.setColour(juce::TextButton::textColourOffId,
                              juce::Colours::white);
-            break;
-        case SlotState::ARMED:
-            recBtn.setButtonText("ARM");
-            recBtn.setColour(juce::TextButton::buttonColourId,
-                             juce::Colour(0xff7a3300));
-            recBtn.setColour(juce::TextButton::textColourOffId,
-                             juce::Colour(0xffffcc66));
             break;
         default:
             recBtn.setButtonText("REC");

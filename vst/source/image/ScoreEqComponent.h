@@ -18,6 +18,7 @@
 #include <cmath>
 #include <functional>
 #include "../UITheme.h"
+#include "../midi/MidiLearnAttachment.h"   // optional right-click MIDI-Learn per band
 
 class ScoreEqComponent : public juce::Component
 {
@@ -32,6 +33,15 @@ public:
 
     /** Called whenever the curve changes (drag / reset). */
     std::function<void()> onChange;
+
+    /** Enable right-click "MIDI Learn" on the nearest band node. @p idFn maps a
+     *  band index (0-based, left→right) to the paramId to learn. Pass a null
+     *  engine to disable (default) — right-click then keeps its drag behaviour. */
+    void setBandMidiLearn(MidiMappingEngine* mm, std::function<juce::String(int)> idFn)
+    { eqLearnMap_ = mm; eqLearnIdFn_ = std::move(idFn); }
+
+    /** Number of band nodes (9 over the default octave span). */
+    int numBands() const noexcept { return (int) gains.size(); }
 
     /** Rebuild the octave node grid for a new frequency span (resets gains).
      *  No-op when the span is unchanged, so regenerating with the same musical
@@ -223,6 +233,14 @@ public:
     }
     void mouseDown(const juce::MouseEvent& e) override
     {
+        // Right-click: MIDI Learn menu for the nearest band (when configured).
+        if (e.mods.isPopupMenu() && eqLearnMap_ != nullptr && eqLearnIdFn_)
+        {
+            const int n = nearestNodeByX(e.position);
+            if (n >= 0) MidiLearnPopup::show(*eqLearnMap_, eqLearnIdFn_(n), this);
+            return;
+        }
+
         dragging = nearestNodeByX(e.position);
         if (e.getNumberOfClicks() >= 2 && dragging >= 0)
         {
@@ -293,6 +311,10 @@ private:
     std::vector<double> freqs;
     std::vector<float>  gains;
     int hovered = -1, dragging = -1;
+
+    // Optional per-band right-click MIDI-Learn (null → disabled; SCORE leaves it off).
+    MidiMappingEngine*                eqLearnMap_ = nullptr;
+    std::function<juce::String(int)>  eqLearnIdFn_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ScoreEqComponent)
 };

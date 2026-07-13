@@ -241,6 +241,26 @@ public:
     bool consumeSmpPlayPressed (int e, int s) noexcept { return smpPlayPressed [e & 1][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
     bool consumeSmpPlayReleased(int e, int s) noexcept { return smpPlayReleased[e & 1][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
     bool consumeSmpSaveTrigger (int e, int s) noexcept { return smpSaveTrigger [e & 1][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
+    bool consumeSmpClearTrigger(int e, int s) noexcept { return smpClearTrigger[e & 1][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
+
+    /** REC / PLAY transport-button mode for a sampler engine (0 = A, 1 = B):
+     *  true = Momentary (press-to-start / release-to-stop), false = Toggle
+     *  (bistable click). Read by the SlotEditor for both the UI buttons and the
+     *  MIDI action-pulse drain so the two paths agree. Message thread. */
+    bool samplerRecMomentary (int engine) const noexcept;
+    bool samplerPlayMomentary(int engine) const noexcept;
+
+    /** Pending MIDI EQ-band value for (engine, slot, band): a normalised 0..1
+     *  gain latched by the audio thread, or -1 when nothing is pending. Drained
+     *  by the open SlotEditor (message thread) which applies it via
+     *  LuxSampler::setSlotEqBandGain (non-RT). */
+    float consumeSmpEqPending(int e, int s, int band) noexcept
+    {
+        auto& a = smpEqPending[e & 1][s % LuxSamplerConstants::NUM_SLOTS]
+                              [band % LuxSampler::kEqBands];
+        if (a.load(std::memory_order_relaxed) < 0.0f) return -1.0f;
+        return a.exchange(-1.0f, std::memory_order_acq_rel);
+    }
 
     /** MIDI-touch signal for VALUE targets: monotonic generation + last-touched
      *  location (engine<<8|slot). The open SlotEditor refreshes its sliders when
@@ -689,6 +709,10 @@ private:
     std::atomic<bool> smpPlayPressed [2][kSmpSlots] {};
     std::atomic<bool> smpPlayReleased[2][kSmpSlots] {};
     std::atomic<bool> smpSaveTrigger [2][kSmpSlots] {};
+    std::atomic<bool> smpClearTrigger[2][kSmpSlots] {};
+    // Pending MIDI EQ-band values (normalised 0..1; -1 = none). Applied on the
+    // message thread (setSlotEqBandGain is non-RT). Seeded to -1 in the ctor.
+    std::atomic<float> smpEqPending[2][kSmpSlots][LuxSampler::kEqBands];
 
     // MIDI-touch signal for VALUE targets (see smpValueTouchGen/Where above):
     // bumped by virtualApply so the open SlotEditor can refresh its sliders.

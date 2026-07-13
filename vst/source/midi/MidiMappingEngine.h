@@ -214,7 +214,12 @@ public:
         const int idx = touchedSlot_.load(std::memory_order_relaxed);
         if (idx < 0 || idx >= kMaxMappings)
             return false;
-        if (slots_[idx].param.load(std::memory_order_relaxed) == nullptr)
+        // A live slot has exactly one active field: an APVTS param, OR a virtual
+        // sampler target (vtarget >= 0). Removal clears both — so reject only when
+        // neither is set. Virtual sampler targets (REC/PLAY/value params) then
+        // navigate to the sampler page like any mapped parameter.
+        if (slots_[idx].param  .load(std::memory_order_relaxed) == nullptr
+            && slots_[idx].vtarget.load(std::memory_order_relaxed) < 0)
             return false;   // the slot was removed since the event
         outParamId = slots_[idx].paramId;   // message-thread-only mirror — safe here
         return outParamId.isNotEmpty();

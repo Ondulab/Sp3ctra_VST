@@ -967,6 +967,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"luxSamplerMaxDuration", 1}, "LuxSampler Max Duration",
         juce::NormalisableRange<float>(1.0f, 60.0f, 0.1f), 10.0f, kHiddenFloat));
 
+    // REC / PLAY transport-button mode (engine A). Toggle = bistable click
+    // (press flips record / play on↔off). Momentary = press-and-hold (start on
+    // press, stop on release) — applies to BOTH the UI buttons and MIDI-mapped
+    // keys. Default Toggle preserves the historical click behaviour.
+    {
+        juce::StringArray modeNames { "Toggle", "Momentary" };
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxSamplerRecMode", 1}, "LuxSampler REC Mode",
+            modeNames, 0, kHiddenChoice));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxSamplerPlayMode", 1}, "LuxSampler PLAY Mode",
+            modeNames, 0, kHiddenChoice));
+    }
+
     // ── LuxSampler engine B — its own play-param bank ("Part B") ─────────────
     // Same suffixes as A's legacy ids so the UI rebinds mechanically
     // (fsEngineParam). MIDI channel defaults to 2, preserving the value that
@@ -991,6 +1005,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             juce::ParameterID{"luxSamplerBMaxDuration", 1},
             "LuxSampler B Max Duration",
             juce::NormalisableRange<float>(1.0f, 60.0f, 0.1f), 10.0f, kHiddenFloat));
+
+        // REC / PLAY transport-button mode (engine B) — mirrors engine A.
+        juce::StringArray bModeNames { "Toggle", "Momentary" };
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxSamplerBRecMode", 1},
+            "LuxSampler B REC Mode", bModeNames, 0, kHiddenChoice));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"luxSamplerBPlayMode", 1},
+            "LuxSampler B PLAY Mode", bModeNames, 0, kHiddenChoice));
     }
 
     // Image export on Save Session: bool toggle + format choice (PNG / JPEG)
@@ -1310,6 +1333,12 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     // first use never triggers a lazy static init on the audio thread.
     (void) SamplerMidiTargets::speedRange();
     (void) SamplerMidiTargets::powerRange();
+    // Seed the MIDI EQ-band pending latches to the "no pending" sentinel (-1);
+    // atomic<float> default-inits to 0.0f which is a valid gain value.
+    for (auto& engine : smpEqPending)
+        for (auto& slot : engine)
+            for (auto& band : slot)
+                band.store(-1.0f, std::memory_order_relaxed);
 
     // Cache raw-parameter pointers read by processBlock (audio thread) —
     // getRawParameterValue("literal") allocates a juce::String per call.
@@ -3721,6 +3750,12 @@ Sp3ctraAudioProcessor::navTargetForParam(const juce::String& id) const
     else if (banked("luxwaveOut",  slot)) { t.type = ModuleType::LuxWave;  t.instanceId = chainInstance(t.type, -1); }
     else if (id.startsWith("luxSamplerB")) { t.type = ModuleType::Sampler; t.instanceId = chainInstance(t.type, 1); }
     else if (id.startsWith("luxSampler"))  { t.type = ModuleType::Sampler; t.instanceId = chainInstance(t.type, 0); }
+    // Virtual (non-APVTS) sampler targets — REC/PLAY actions and per-slot value
+    // params. Their synthetic id encodes the engine as "smp:e{E}:…" (E = 0/1),
+    // and the model stores that engine index in the module's slot. So a mapped
+    // key that records/plays a slot follows to that sampler's page.
+    else if (id.startsWith("smp:e1"))      { t.type = ModuleType::Sampler; t.instanceId = chainInstance(t.type, 1); }
+    else if (id.startsWith("smp:e0"))      { t.type = ModuleType::Sampler; t.instanceId = chainInstance(t.type, 0); }
     // Synth ENGINE params (own page). StrokeForge (sf*) / blob (spctr*) belong
     // to LuxStral.
     else if (id.startsWith("luxstral") || id.startsWith("sf") || id.startsWith("spctr"))
@@ -3784,8 +3819,23 @@ void Sp3ctraAudioProcessor::virtualApply(int targetId, float norm01) noexcept
             case SamplerMidiTargets::Kind::Save:
                 smpSaveTrigger[e][s].store(true, std::memory_order_release);
                 break;
+            case SamplerMidiTargets::Kind::Clear:
+                smpClearTrigger[e][s].store(true, std::memory_order_release);
+                break;
             default: break;
         }
+        return;
+    }
+
+    // EQ band — non-RT to apply (parse + LUT rebuild), so latch the normalised
+    // value; the open SlotEditor drains it on the message thread.
+    if (kind == SamplerMidiTargets::Kind::EqBand)
+    {
+        const int band = SamplerMidiTargets::tBand(targetId) % LuxSampler::kEqBands;
+        smpEqPending[e][s][band].store(juce::jlimit(0.0f, 1.0f, norm01),
+                                       std::memory_order_release);
+        smpValueTouchWhere_.store((e << 8) | s, std::memory_order_relaxed);
+        smpValueTouchGen_  .fetch_add(1u, std::memory_order_release);
         return;
     }
 
@@ -3815,6 +3865,23 @@ void Sp3ctraAudioProcessor::virtualRelease(int targetId) noexcept
         if (smpPlayHeld[e][s].exchange(false, std::memory_order_acq_rel))
             smpPlayReleased[e][s].store(true, std::memory_order_release);
     }
+}
+
+//==============================================================================
+// REC / PLAY transport-button mode (per engine). Choice index 1 = "Momentary".
+//==============================================================================
+bool Sp3ctraAudioProcessor::samplerRecMomentary(int engine) const noexcept
+{
+    if (auto* v = apvts.getRawParameterValue(fsEngineParam(engine & 1, "RecMode")))
+        return v->load() > 0.5f;
+    return false;
+}
+
+bool Sp3ctraAudioProcessor::samplerPlayMomentary(int engine) const noexcept
+{
+    if (auto* v = apvts.getRawParameterValue(fsEngineParam(engine & 1, "PlayMode")))
+        return v->load() > 0.5f;
+    return false;
 }
 
 //==============================================================================

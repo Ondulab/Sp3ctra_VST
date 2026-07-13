@@ -145,7 +145,7 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
                 pas.slotState[rtPrevActiveBank].store(static_cast<int>(SlotState::IDLE),
                                                        std::memory_order_release);
             }
-            // ARMED / IDLE → no action required
+            // IDLE → no action required
         }
     }
 
@@ -199,10 +199,10 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
     const auto curSt = static_cast<SlotState>(
         as.slotState[bankIdx].load(std::memory_order_relaxed));
 
-    if (curSt == SlotState::ARMED || curSt == SlotState::RECORDING)
+    if (curSt == SlotState::RECORDING)
     {
         // ── Sequencer-triggered recording ─────────────────────────────────────
-        // Bank was armed (user pressed REC) → start capturing frames now.
+        // Bank is being recorded (UI / MIDI REC) → keep capturing frames now.
         as.slotState[bankIdx].store(static_cast<int>(SlotState::RECORDING),
                                      std::memory_order_release);
         as.startRecCmd[bankIdx].store(true, std::memory_order_release);

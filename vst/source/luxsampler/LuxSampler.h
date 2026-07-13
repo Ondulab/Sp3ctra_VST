@@ -64,8 +64,9 @@ namespace LuxSamplerConstants
     constexpr int     MAX_EQ_NODES        = 16;    // ≥ (octaves+1) of the widest range
     constexpr float   EQ_DYN_RANGE_DB     = 24.0f; // dB span that maps to full darkness
 
-    // MIDI note bases (C0 = MIDI 12 — Ableton/GM convention)
-    constexpr int MIDI_REC_NOTE_BASE  = 12; // C0..B0 → slots 0..11
+    // MIDI note base for slot PLAYBACK (C1 = MIDI 24 — Ableton/GM convention).
+    // (The former C0..B0 REC-note range was removed: notes only play slots now;
+    //  recording is UI-/MIDI-Learn-driven.)
     constexpr int MIDI_PLAY_NOTE_BASE = 24; // C1..B1 → slots 0..11
 
     // .fsmp binary file format
@@ -134,7 +135,8 @@ struct CapturedFrame
 enum class SlotState : int
 {
     IDLE      = 0,
-    ARMED     = 1,
+    // (1 = former ARMED — removed with note-triggered recording; value left as a
+    //  gap so RECORDING / PLAYING keep their persisted numeric values)
     RECORDING = 2,
     PLAYING   = 3
 };
@@ -723,6 +725,18 @@ public:
     void setSlotEq(int i, const juce::String& encoded) noexcept;
     /** Return slot i's encoded EQ string ("" when flat). Non-RT. */
     juce::String getSlotEq(int i) const;
+
+    // Per-band EQ gain access (message thread) — the slot EQ is a fixed 9-node
+    // octave grid over kEqMinHz..kEqMaxHz (see ScoreEqComponent). Lets the MIDI
+    // mapping tweak one band without the curve editor. Non-RT (parse/re-encode).
+    static constexpr int    kEqBands = 9;
+    static constexpr double kEqMinHz = 65.41;
+    static constexpr double kEqMaxHz = 16744.04;
+    /** Gain (dB, ±24) of EQ band @p band [0..8] on slot @p slot; 0 when flat. */
+    float getSlotEqBandGain(int slot, int band) const noexcept;
+    /** Set EQ band @p band [0..8] of slot @p slot to @p gainDb (clamped ±24),
+     *  preserving the other bands; republishes the LUT. Non-RT. */
+    void  setSlotEqBandGain(int slot, int band, float gainDb) noexcept;
     /** RT: true when the curve is not flat (worth applying). */
     bool isFreqCurveActive(int i) const noexcept
     {
@@ -758,7 +772,7 @@ public:
     // =========================================================================
     /** Toggle record for slotIndex from the UI.
      *  - If slot is RECORDING   → stop recording.
-     *  - If slot is IDLE/ARMED  → start recording immediately (bypass ARMED).
+     *  - If slot is IDLE        → start recording immediately.
      *  - If slot is PLAYING     → punch-in (stop playback, start recording).
      *  Any ongoing recording on another slot is stopped first (only one at a time). */
     void uiToggleRecord(int slotIndex) noexcept;
