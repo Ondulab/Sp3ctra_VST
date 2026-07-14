@@ -116,14 +116,14 @@ private:
     // Counters from AudioImageBuffers — detect new frames without mutex.
     // - lastLinesReceived_  : tracks raw UDP frames (incremented on every
     //                         complete_write() from the UDP thread)
-    // - lastLinesModulated_ : tracks modulated frames (incremented on every
-    //                         snapshot_modulated() from the synthesis thread).
+    // - lastFrameSeq_ : tracks modulated frames (incremented on every
+    //                         every engine-input tap publish, P4-M3).
     //                         Required because the UDP write bus is suppressed
     //                         while the LuxSampler is playing, freezing
     //                         lines_received even though the modulated stream
     //                         keeps advancing.
     std::atomic<uint64_t>   lastLinesReceived_  { 0 };
-    std::atomic<uint64_t>   lastLinesModulated_ { 0 };
+    std::atomic<uint64_t>   lastFrameSeq_ { 0 };
 
     // ── Bidirectional history buffers (ping-pong, legacy birth-line model) ────
     // Two RGB images of size (bufW_ × bufH_).  Each scroll step blits the source

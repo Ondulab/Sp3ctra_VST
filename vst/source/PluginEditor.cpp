@@ -558,15 +558,13 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
     std::vector<VisualizerMode> sources;
     switch (id)
     {
-        // Each SOURCE CIS is contextual to the chain it sits on: it shows ONLY
-        // that chain's output (Chain 1 = Modulated, Chain 2 = Live).  The RAW
-        // upstream feed is the instrument's own signal and no longer surfaces
-        // here — the migration treats chains as modular slots.
+        // (P4-M3, D2) Every module selection is CONTEXTUAL: zone 1 shows the
+        // stream AT the selected module's position in ITS chain (selection
+        // tap, badge "MODULE - CHAIN n"). The legacy global views (RAW/LIVE/
+        // MODULATED buses) are gone — a SOURCE CIS shows its chain's base.
         case ChainBlockId::Chain1Source:
-            sources = { VisualizerMode::MODULATED };   // Chain 1
-            break;
         case ChainBlockId::Chain2Source:
-            sources = { VisualizerMode::LIVE };         // Chain 2
+            sources = { VisualizerMode::SELECTED_TAP };
             break;
         // Mid-chain inserts are CONTEXTUAL: zone 1 shows the stream at the
         // selected module's output IN ITS OWN CHAIN (selection tap) — the old
@@ -575,10 +573,11 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
         case ChainBlockId::Mask:
             sources = { VisualizerMode::SELECTED_TAP };
             break;
-        // No dedicated SAMPLER view exists any more (deprecated alias) — the
-        // sampler lives inside the Modulated channel, so show MODULATED.
+        // The SAMPLER module is contextual too: its output at its position
+        // in its own chain (input pass-through in idle, playback when it
+        // drives — published by the walker/player at the exact position).
         case ChainBlockId::Sampler:
-            sources = { VisualizerMode::MODULATED };
+            sources = { VisualizerMode::SELECTED_TAP };
             break;
         case ChainBlockId::LuxStral:
             sources = luxStralVisualizerSources();
@@ -592,25 +591,15 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
         case ChainBlockId::LuxWave:
             sources = { VisualizerMode::SYNTH_GRAY };
             break;
-        // SCORE is an offline export tool — keep a neutral live view in zone 1.
+        // Score family + SEQUENCER: contextual like every other module —
+        // the stream at their position in their chain (playback included,
+        // published by the player's walk).
         case ChainBlockId::Score:
-            sources = { VisualizerMode::MODULATED };
-            break;
-        // TIMBRE is an offline generator too — same neutral view.
         case ChainBlockId::Timbre:
-            sources = { VisualizerMode::MODULATED };
-            break;
-        // MIDI SCORE is an offline generator too — same neutral view.
         case ChainBlockId::MidiScore:
-            sources = { VisualizerMode::MODULATED };
-            break;
-        // VOICE (TTS → vocal spectrum) is an offline generator too — same view.
         case ChainBlockId::Voice:
-            sources = { VisualizerMode::MODULATED };
-            break;
-        // SEQUENCER drives the sampler engines — neutral Modulated view in zone 1.
         case ChainBlockId::Sequencer:
-            sources = { VisualizerMode::MODULATED };
+            sources = { VisualizerMode::SELECTED_TAP };
             break;
         // VIDEO SCROLL probe — zone 1 shows the stream AT the probe's position
         // in its chain (what the probe captures), not the global Modulated bus.

@@ -8,7 +8,7 @@
  *
  * RT safety contract (enforced throughout):
  *   - processMidi() runs on the audio thread → atomics ONLY, no alloc, no lock, no I/O
- *   - onFrameAssembled() runs on udpThread (Non-RT) → alloc allowed on first use
+ *   - the producer hooks run on udpThread (Non-RT) → alloc allowed on first use
  *   - FramePlayerThread runs Non-RT → alloc/lock/I/O allowed
  *
  */
@@ -391,25 +391,12 @@ public:
     //
     //   2. <udpThread runs LuxPitch then LuxMask on the live frame>
     //
-    //   3. onModulatedFrameReady(mR,mG,mB,n,line_id)
-    //      – mirrors the post-mask frame into the sampler snapshot
-    //        (so the Modulated channel stays alive in idle / REC / STEP_LIVE)
-    //      – writes the post-mask frame into the active recording slot,
-    //        so the recorded sample includes LuxPitch + LuxMask effects
-    //
-    // The legacy single-call onFrameAssembled() is kept as a backward
-    // compatible alias and now simply forwards to the two-phase API.
+    //   3. (P4-M3) capture is POSITIONAL: the chain executor records at each
+    //      SAMPLER marker (lux_sampler_record_chain_frame / _record_input_frame)
+    //      — the old global modulated-bus phase is gone.
     // =========================================================================
     bool onLiveFrameAssembled(const uint8_t* R, const uint8_t* G, const uint8_t* B,
                               uint16_t pixel_count);
-    bool onModulatedFrameReady(const uint8_t* R, const uint8_t* G, const uint8_t* B,
-                               uint16_t pixel_count, uint32_t line_id);
-
-    // Legacy entry point — performs both phases in a row using the live frame
-    // as if Pitch/Mask were bypassed.  Kept so existing callers keep building
-    // while the refactor lands; udpThread now uses the two-phase API directly.
-    bool onFrameAssembled(const uint8_t* R, const uint8_t* G, const uint8_t* B,
-                          uint16_t pixel_count, uint32_t line_id);
 
     // =========================================================================
     // Thread lifecycle (Non-RT, called from PluginProcessor)
@@ -1216,9 +1203,6 @@ public:
     // No snapshot side effect — the display owner owns the shared snapshot.
     void recordModulatedFrame(const uint8_t* R, const uint8_t* G, const uint8_t* B,
                               uint16_t pixel_count, uint32_t line_id) noexcept;
-    // Mirror a frame into the shared sampler snapshot (idle display). Non-RT.
-    void mirrorSamplerSnapshot(const uint8_t* R, const uint8_t* G, const uint8_t* B,
-                               uint16_t pixel_count) noexcept;
     // True if THIS engine is currently the one driving the modulated channel
     // (aggregated across engines by lux_sampler_is_playing()).
     bool isDrivingChannel() const noexcept;

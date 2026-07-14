@@ -44,34 +44,17 @@ extern "C"
      * that ~LuxSampler can unregister and then wait for in-flight hook calls to
      * drain — the hooks run on the UDP thread, which outlives any single plugin
      * instance (shared core). See LuxSampler::pinEngine(). */
-    void lux_sampler_on_frame_assembled(const uint8_t* R,
-                                           const uint8_t* G,
-                                           const uint8_t* B,
-                                           uint16_t       pixel_count,
-                                           uint32_t       line_id)
-    {
-        for (int i = 0; i < LuxSampler::kMaxEngines; ++i)
-        {
-            if (auto* e = LuxSampler::pinEngine(i))
-                e->onFrameAssembled(R, G, B, pixel_count, line_id);
-            LuxSampler::unpinEngine(i);
-        }
-    }
-
-    /* Two-phase hooks (image-chain refactor) — fanned out to every engine.
+    /* Producer hooks (P4-M3 — positional capture):
      *
-     *   1. lux_sampler_on_live_frame_assembled() — line assembled, before the
-     *      modulation chain. Each engine drains its rec commands + caches live.
+     *   1. lux_sampler_on_live_frame_assembled() — line assembled. Each
+     *      engine drains its rec commands + caches the live frame (darken-
+     *      blend). Never captures.
      *
-     *   2. lux_sampler_on_modulated_frame_ready() — IDLE path (no slot playing):
-     *      mirror the shared sampler snapshot once + let every engine with an
-     *      armed rec slot capture the post-mask frame (Pitch+Mask printed).
-     *
-     *   3. lux_samplers_record_modulated() — PLAYING path (resampling): a slot is
-     *      playing INTO the modulated channel; feed the final modulated frame to
-     *      every engine with an armed rec slot so it records the combination
-     *      (e.g. sampler B records sampler A's playback). No snapshot mirror —
-     *      the playing engine's FramePlayerThread owns the snapshot.
+     *   2. lux_sampler_record_chain_frame() / lux_sampler_record_input_frame()
+     *      — called BY THE CHAIN EXECUTOR at each SAMPLER marker's position
+     *      (idle walk / playback spans): REC captures the chain's own stream
+     *      exactly where the module sits. The old global modulated-bus hook
+     *      (on_modulated_frame_ready) is gone.
      */
     void lux_sampler_on_live_frame_assembled(const uint8_t* R,
                                               const uint8_t* G,
@@ -84,31 +67,6 @@ extern "C"
                 e->onLiveFrameAssembled(R, G, B, pixel_count);
             LuxSampler::unpinEngine(i);
         }
-    }
-
-    void lux_sampler_on_modulated_frame_ready(int            owner_engine,
-                                              const uint8_t* R,
-                                              const uint8_t* G,
-                                              const uint8_t* B,
-                                              uint16_t       pixel_count,
-                                              uint32_t       line_id)
-    {
-        // Per-chain sampler feed (2026-07-11): the modulated bus carries the
-        // OWNER CHAIN's stream only — mirror the shared snapshot and record
-        // into the OWNER's engine alone. Every other sampler engine records
-        // its own chain's stream at its marker (lux_sampler_record_chain_
-        // frame, chain executor).
-        if (owner_engine < 0 || owner_engine >= LuxSampler::kMaxEngines)
-            owner_engine = 0;
-        if (!lux_sampler_is_playing())
-        {
-            if (auto* e = LuxSampler::pinEngine(owner_engine))
-                e->mirrorSamplerSnapshot(R, G, B, pixel_count);
-            LuxSampler::unpinEngine(owner_engine);
-        }
-        if (auto* e = LuxSampler::pinEngine(owner_engine))
-            e->recordModulatedFrame(R, G, B, pixel_count, line_id);
-        LuxSampler::unpinEngine(owner_engine);
     }
 
     void lux_sampler_record_chain_frame(int engine_slot,
@@ -502,50 +460,6 @@ bool LuxSampler::onLiveFrameAssembled(const uint8_t* R, const uint8_t* G,
 }
 
 // ============================================================================
-// Non-RT path — onModulatedFrameReady (phase 2)
-//
-// Called by udpThread() AFTER LuxPitch + LuxMask have produced the post-mask
-// frame.  This is the "input" of the LuxSampler insert in the new chain
-// (Live → LuxPitch → LuxMask → LuxSampler).
-//
-// Responsibilities:
-//   • Mirror the post-mask frame into AudioImageBuffers' sampler snapshot
-//     when no slot is playing → keeps the Modulated channel alive in idle,
-//     REC and STEP_LIVE states.  When a slot IS playing, FramePlayerThread
-//     owns that snapshot.
-//   • Write the post-mask frame into the active recording slot (if any).
-//     Recorded samples therefore include LuxPitch + LuxMask processing.
-// ============================================================================
-
-bool LuxSampler::onModulatedFrameReady(const uint8_t* R, const uint8_t* G,
-                                        const uint8_t* B, uint16_t pixel_count,
-                                        uint32_t line_id)
-{
-    if (!enabled.load(std::memory_order_relaxed)) return false;
-    // Idle display: keep the sampler snapshot alive while this engine isn't
-    // playing (FramePlayerThread owns it during playback).
-    if (!isAnySlotPlaying())
-        mirrorSamplerSnapshot(R, G, B, pixel_count);
-    // Capture into the active recording slot (Pitch+Mask already printed).
-    recordModulatedFrame(R, G, B, pixel_count, line_id);
-    return true;
-}
-
-// ============================================================================
-// mirrorSamplerSnapshot — copy a frame into the shared sampler snapshot.
-// Non-RT. Keeps the Modulated channel visualizer/audio alive in idle.
-// ============================================================================
-void LuxSampler::mirrorSamplerSnapshot(const uint8_t* R, const uint8_t* G,
-                                        const uint8_t* B, uint16_t pixel_count) noexcept
-{
-    if (audioBuffers_ == nullptr) return;
-    const int bytes = std::min(static_cast<int>(pixel_count),
-                               LuxSamplerConstants::MAX_PIXELS);
-    if (bytes > 0)
-        audio_image_buffers_snapshot_sampler(audioBuffers_, R, G, B, bytes);
-}
-
-// ============================================================================
 // recordModulatedFrame — write the (chain-modulated) frame into THIS engine's
 // active recording slot. Non-RT (UDP thread). This is the resampling capture:
 // when ANOTHER engine is playing into the modulated channel, the frame passed
@@ -599,22 +513,6 @@ void LuxSampler::recordModulatedFrame(const uint8_t* R, const uint8_t* G,
     std::memcpy(frame.G, G, static_cast<size_t>(bytes));
     std::memcpy(frame.B, B, static_cast<size_t>(bytes));
     ++slot.frame_count;
-}
-
-// ============================================================================
-// Legacy single-call onFrameAssembled — forwards to the two-phase API.
-// Kept so callers that have not yet been migrated keep working; behaviour is
-// equivalent to "Pitch and Mask are bypassed", i.e. the live frame is recorded
-// directly and used as the Modulated snapshot.
-// ============================================================================
-
-bool LuxSampler::onFrameAssembled(const uint8_t* R, const uint8_t* G,
-                                     const uint8_t* B, uint16_t pixel_count,
-                                     uint32_t line_id)
-{
-    const bool ok1 = onLiveFrameAssembled(R, G, B, pixel_count);
-    const bool ok2 = onModulatedFrameReady(R, G, B, pixel_count, line_id);
-    return ok1 || ok2;
 }
 
 // ============================================================================
@@ -3109,16 +3007,12 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
                    == sampler.getEngineIndex());
         if (displayOwner)
         {
+            // (P4-M3) The zone-1 view is the SELECTION TAP, published by the
+            // player's own chain walk at the exact position — no more global
+            // modulated publish. The sampler snapshot write remains (its
+            // readers died with the bus; purge slated for M5).
             audio_image_buffers_snapshot_sampler(audioBuffers,
                                                  workR, workG, workB, nb);
-            // Zone-1 contextual view: selecting the SAMPLER (or SCORE) module
-            // shows the MODULATED channel — publish the mixed player output
-            // on that bus OURSELVES, at player rate. The udpThread's
-            // snapshot→modulated copy only runs while the device streams a
-            // line: without it the band froze on the last live frame during
-            // playback and never matched the composited bank mix.
-            audio_image_buffers_snapshot_modulated(audioBuffers,
-                                                   workR, workG, workB, nb);
         }
     }
 

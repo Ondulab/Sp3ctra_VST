@@ -54,18 +54,6 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
   buffers->sampler_G = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
   buffers->sampler_B = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
 
-  // Allocate modulated snapshot buffers (post-Sampler/Pitch/Mask chain)
-  buffers->modulated_R = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
-  buffers->modulated_G = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
-  buffers->modulated_B = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
-
-  // Allocate per-insert visual tap buffers
-  for (i = 0; i < AUDIO_IMAGE_NUM_INSERT_TAPS; i++) {
-    buffers->insert_tap_R[i] = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
-    buffers->insert_tap_G[i] = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
-    buffers->insert_tap_B[i] = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
-  }
-
   // Allocate selection-tap buffers (contextual visualizer)
   buffers->selection_tap_R = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
   buffers->selection_tap_G = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
@@ -82,20 +70,11 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
   if (!buffers->buffer0_R   || !buffers->buffer0_G   || !buffers->buffer0_B   ||
       !buffers->buffer1_R   || !buffers->buffer1_G   || !buffers->buffer1_B   ||
       !buffers->raw_R       || !buffers->raw_G       || !buffers->raw_B       ||
-      !buffers->sampler_R   || !buffers->sampler_G   || !buffers->sampler_B   ||
-      !buffers->modulated_R || !buffers->modulated_G || !buffers->modulated_B) {
+      !buffers->sampler_R   || !buffers->sampler_G   || !buffers->sampler_B) {
 
     fprintf(stderr, "ERROR: Failed to allocate audio image buffers\n");
     audio_image_buffers_cleanup(buffers);
     return -1;
-  }
-  for (i = 0; i < AUDIO_IMAGE_NUM_INSERT_TAPS; i++) {
-    if (!buffers->insert_tap_R[i] || !buffers->insert_tap_G[i] ||
-        !buffers->insert_tap_B[i]) {
-      fprintf(stderr, "ERROR: Failed to allocate insert tap buffers\n");
-      audio_image_buffers_cleanup(buffers);
-      return -1;
-    }
   }
   if (!buffers->selection_tap_R || !buffers->selection_tap_G ||
       !buffers->selection_tap_B) {
@@ -132,18 +111,6 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
   memset(buffers->sampler_R, 255, nb_pixels);
   memset(buffers->sampler_G, 255, nb_pixels);
   memset(buffers->sampler_B, 255, nb_pixels);
-
-  // Initialize modulated snapshot with white (no synthesis cycle yet)
-  memset(buffers->modulated_R, 255, nb_pixels);
-  memset(buffers->modulated_G, 255, nb_pixels);
-  memset(buffers->modulated_B, 255, nb_pixels);
-
-  // Initialize insert taps with white (no chain run yet)
-  for (i = 0; i < AUDIO_IMAGE_NUM_INSERT_TAPS; i++) {
-    memset(buffers->insert_tap_R[i], 255, nb_pixels);
-    memset(buffers->insert_tap_G[i], 255, nb_pixels);
-    memset(buffers->insert_tap_B[i], 255, nb_pixels);
-  }
 
   // Initialize the selection tap with white (nothing selected/published yet)
   memset(buffers->selection_tap_R, 255, nb_pixels);
@@ -248,28 +215,6 @@ void audio_image_buffers_cleanup(AudioImageBuffers *buffers) {
     free(buffers->sampler_B);
     buffers->sampler_B = NULL;
   }
-  if (buffers->modulated_R) {
-    free(buffers->modulated_R);
-    buffers->modulated_R = NULL;
-  }
-  if (buffers->modulated_G) {
-    free(buffers->modulated_G);
-    buffers->modulated_G = NULL;
-  }
-  if (buffers->modulated_B) {
-    free(buffers->modulated_B);
-    buffers->modulated_B = NULL;
-  }
-
-  {
-    int t;
-    for (t = 0; t < AUDIO_IMAGE_NUM_INSERT_TAPS; t++) {
-      if (buffers->insert_tap_R[t]) { free(buffers->insert_tap_R[t]); buffers->insert_tap_R[t] = NULL; }
-      if (buffers->insert_tap_G[t]) { free(buffers->insert_tap_G[t]); buffers->insert_tap_G[t] = NULL; }
-      if (buffers->insert_tap_B[t]) { free(buffers->insert_tap_B[t]); buffers->insert_tap_B[t] = NULL; }
-    }
-  }
-
   if (buffers->selection_tap_R) { free(buffers->selection_tap_R); buffers->selection_tap_R = NULL; }
   if (buffers->selection_tap_G) { free(buffers->selection_tap_G); buffers->selection_tap_G = NULL; }
   if (buffers->selection_tap_B) { free(buffers->selection_tap_B); buffers->selection_tap_B = NULL; }
@@ -606,100 +551,6 @@ void audio_image_buffers_get_sampler_pointers(const AudioImageBuffers *buffers,
 }
 
 /**
- * @brief Capture a snapshot of the post-insert modulated frame.
- *
- * Single-producer (synthesis thread).  Called once per synthesis cycle, AFTER
- * the LuxSampler ► LuxPitch ► LuxMask chain has run, with the resulting RGB
- * pointers.  Multi-reader: video waterfall, visualizers, etc.
- *
- * @param buffers   Pointer to AudioImageBuffers structure
- * @param srcR      Source R channel (modulated frame)
- * @param srcG      Source G channel (modulated frame)
- * @param srcB      Source B channel (modulated frame)
- * @param nb_pixels Number of pixels to copy
- */
-void audio_image_buffers_snapshot_modulated(AudioImageBuffers *buffers,
-                                            const uint8_t *srcR,
-                                            const uint8_t *srcG,
-                                            const uint8_t *srcB,
-                                            int nb_pixels) {
-  if (!buffers || !buffers->initialized || !srcR || !srcG || !srcB || nb_pixels <= 0)
-    return;
-
-  memcpy(buffers->modulated_R, srcR, nb_pixels);
-  memcpy(buffers->modulated_G, srcG, nb_pixels);
-  memcpy(buffers->modulated_B, srcB, nb_pixels);
-
-  // Publish a new generation tag so consumers polling `lines_modulated` can
-  // detect a fresh modulated frame even while the UDP write bus is idle (e.g.
-  // during LuxSampler playback where `lines_received` stays frozen).
-  __atomic_store_n(&buffers->lines_modulated,
-                   buffers->lines_modulated + 1u,
-                   __ATOMIC_RELEASE);
-}
-
-/**
- * @brief Get pointers to the last modulated frame (lock-free, read-only).
- *
- * @param buffers Pointer to AudioImageBuffers structure (const)
- * @param out_R   Receives pointer to modulated R channel
- * @param out_G   Receives pointer to modulated G channel
- * @param out_B   Receives pointer to modulated B channel
- */
-void audio_image_buffers_get_modulated_pointers(const AudioImageBuffers *buffers,
-                                                uint8_t **out_R,
-                                                uint8_t **out_G,
-                                                uint8_t **out_B) {
-  if (!buffers || !buffers->initialized || !out_R || !out_G || !out_B)
-    return;
-
-  *out_R = buffers->modulated_R;
-  *out_G = buffers->modulated_G;
-  *out_B = buffers->modulated_B;
-}
-
-/**
- * @brief Snapshot the output frame of one insert (synthesis thread only).
- *
- * Called by the image chain executor when a visual consumer declared demand
- * for this tap (image_chain_set_tap_demand).  Single producer / multi reader.
- */
-void audio_image_buffers_snapshot_insert_tap(AudioImageBuffers *buffers,
-                                             int tap,
-                                             const uint8_t *srcR,
-                                             const uint8_t *srcG,
-                                             const uint8_t *srcB,
-                                             int nb_pixels) {
-  if (!buffers || !buffers->initialized || tap < 0 ||
-      tap >= AUDIO_IMAGE_NUM_INSERT_TAPS || !srcR || !srcG || !srcB ||
-      nb_pixels <= 0)
-    return;
-
-  memcpy(buffers->insert_tap_R[tap], srcR, nb_pixels);
-  memcpy(buffers->insert_tap_G[tap], srcG, nb_pixels);
-  memcpy(buffers->insert_tap_B[tap], srcB, nb_pixels);
-}
-
-/**
- * @brief Get pointers to the last published tap frame (lock-free, read-only).
- * @return 0 on success, -1 on invalid tap / uninitialized buffers.
- */
-int audio_image_buffers_get_insert_tap_pointers(const AudioImageBuffers *buffers,
-                                                int tap,
-                                                uint8_t **out_R,
-                                                uint8_t **out_G,
-                                                uint8_t **out_B) {
-  if (!buffers || !buffers->initialized || tap < 0 ||
-      tap >= AUDIO_IMAGE_NUM_INSERT_TAPS || !out_R || !out_G || !out_B)
-    return -1;
-
-  *out_R = buffers->insert_tap_R[tap];
-  *out_G = buffers->insert_tap_G[tap];
-  *out_B = buffers->insert_tap_B[tap];
-  return 0;
-}
-
-/**
  * @brief Publish the selection-tap frame (contextual visualizer)
  *
  * Single producer (whichever chain executor hosts the selected module —
@@ -780,6 +631,11 @@ void audio_image_buffers_publish_engine_input(AudioImageBuffers *buffers,
     memset(buffers->engine_tap_B[engine], 255, (size_t)count);
   }
 
+  /* Freshness tick (P4-M3): the engine taps ARE the rendered frames — any
+   * publish, from any producer thread (udp/feeder/player), means "new frame
+   * available". fetch_add: multiple concurrent producers, unlike the old
+   * single-producer modulated counter. */
+  __atomic_fetch_add(&buffers->frame_seq, 1u, __ATOMIC_RELEASE);
 }
 
 int audio_image_buffers_get_engine_input_pointers(const AudioImageBuffers *buffers,

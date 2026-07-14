@@ -201,7 +201,34 @@ Validation : parité bit-exact en idle (chaîne simple, multi-OUT, probe après 
 lecture sampler A+B cross-chaîne (2026-07-13) intacte ; REC pendant play = resampling ;
 score relay ; CPU udpThread ≤ actuel (rt_profiler).
 
-## M3 — Le bus « modulated » redevient un TAP display (M)
+## M3 — Mort du bus « modulated » + bascule D2 — ✅ FAIT (2026-07-14)
+
+Statut : implémenté, build vert, revue 2 angles (cross-file : zéro référence
+restante ; comportements supprimés : 5/6 invariants recouvrés, 1 gel visuel
+pré-existant corrigé — le span pré-marqueur publie le tap A quand il stage un
+OUT au-dessus du marqueur). Réalisation effective — AU-DELÀ du plan initial
+(D2 validée « bascule immédiate ») :
+- Bus MODULATED SUPPRIMÉ intégralement (pas juste rétrogradé) : champs +
+  snapshot/get + compteur retirés d'AudioImageBuffers ; builds dédiés udp
+  (idle + PLAYING re-copy) et feeder supprimés ; TOUTE chaîne s'exécute par la
+  marche uniforme (le marqueur SAMPLER enregistre à sa position,
+  lux_sampler_record_chain_frame). Morts : chain_shortcut_walk,
+  publish_viz_tap_sampler_shortcut, chain_build_sampler_premarker_plan,
+  chain_run_inserts_with_viz_tap, lux_sampler_on_modulated_frame_ready,
+  onModulatedFrameReady, mirrorSamplerSnapshot, onFrameAssembled (+ hook
+  legacy), image_chain_process_inserts + tap-demand + ordre GLOBAL
+  (image_chain_set_order — l'ordre par chaîne vient de la recette),
+  insert-taps d'AudioImageBuffers.
+- D2 : zone-1 contextuelle PARTOUT — sources/SAMPLER/famille score/SEQUENCER
+  → SELECTED_TAP (badge « MODULE - CHAIN n ») ; les vues RAW/LIVE/MODULATED ne
+  sont plus atteignables (enum conservé pour la persistence, purge + migration
+  → M5).
+- Fraîcheur waterfall : `frame_seq` (fetch_add multi-producteurs) bumpe à
+  chaque publish de tap moteur — remplace lines_modulated.
+- Restes pour M5 : snapshot sampler (écrit, plus aucun lecteur), enum
+  VisualizerMode legacy, param chainInsertOrder (projection inerte).
+
+### Plan initial (référence)
 
 Le bus cesse d'être un canal de ROUTAGE ; il devient une publication d'affichage émise
 par le marcheur au marqueur SAMPLER de la chaîne owner (idle) — le player la publie déjà

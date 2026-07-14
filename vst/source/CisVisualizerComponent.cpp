@@ -612,18 +612,6 @@ void CisVisualizerComponent::updateCisData()
     for (size_t i = 0; i < panels_.size(); ++i)
         fillSourceBuffers(panels_[i], i == 0);
 
-    // ── Insert-tap demand (single-simulation model, M2) ───────────────────────
-    // Declare interest if ANY displayed panel needs that insert's tap; the
-    // synthesis-thread chain executor snapshots them (and runs even when no
-    // engine consumes the Modulated channel).
-    bool wantPitchTap = false, wantMaskTap = false;
-    for (const auto& p : panels_)
-    {
-        if (p.mode == VisualizerMode::LUXPITCH_OUTPUT) wantPitchTap = true;
-        if (p.mode == VisualizerMode::LUXMASK_OUTPUT)  wantMaskTap  = true;
-    }
-    image_chain_set_tap_demand(IMAGE_CHAIN_INSERT_LUXPITCH, wantPitchTap ? 1 : 0);
-    image_chain_set_tap_demand(IMAGE_CHAIN_INSERT_LUXMASK,  wantMaskTap  ? 1 : 0);
 }
 
 //==============================================================================
@@ -845,34 +833,12 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
     {
         audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
     }
-    else if (vizSource == VisualizerMode::MODULATED)  // == legacy SAMPLER / MIX aliases
-    {
-        // CHAIN 1 — the post-insert-chain frame the engines actually consume
-        // (Live ► LuxSampler ► LuxPitch ► LuxMask), published once per chain run.
-        // NB: VisualizerMode::SAMPLER and ::MIX are deprecated aliases sharing
-        // MODULATED's enum value, so this single branch covers all three.  The
-        // old code read the SAMPLER buffer here, which left CHAIN 1 blank
-        // whenever no slot was playing — even though the audio (which reads
-        // MODULATED) was working fine.
-        audio_image_buffers_get_modulated_pointers(buffers, &pR, &pG, &pB);
-    }
-    else if (vizSource == VisualizerMode::LUXPITCH_OUTPUT)
-    {
-        // Single-simulation model (M2): read the tap published by the
-        // synthesis-thread chain executor — the view shows EXACTLY what the
-        // engines consume (no UI-side re-simulation, audio == visual).
-        if (audio_image_buffers_get_insert_tap_pointers(
-                buffers, IMAGE_CHAIN_INSERT_LUXPITCH, &pR, &pG, &pB) != 0)
-            audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
-    }
-    else if (vizSource == VisualizerMode::LUXMASK_OUTPUT)
-    {
-        if (audio_image_buffers_get_insert_tap_pointers(
-                buffers, IMAGE_CHAIN_INSERT_LUXMASK, &pR, &pG, &pB) != 0)
-            audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
-    }
     else
     {
+        // (P4-M3) The MODULATED / LUXPITCH_OUTPUT / LUXMASK_OUTPUT modes are
+        // dead: every module selection is contextual (SELECTED_TAP) and the
+        // global modulated bus + insert taps are gone. Legacy persisted modes
+        // fall through here harmlessly (engine-tap read).
         // Downstream views — PER-CHAIN display (2026-07-10): read the ENGINE
         // INPUT TAP, the exact RGB frame the engine's pipeline consumed on its
         // last committed cycle, published by whichever thread owned that
