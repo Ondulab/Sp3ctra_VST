@@ -919,19 +919,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID{"samplerFreezeMode", 1}, "Sampler Freeze Mode",
         0, 2, 0));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"samplerFadeInMs", 1}, "Sampler Fade-In",
-        juce::NormalisableRange<float>(0.0f, 2000.0f, 10.0f), 0.0f,
-        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    // (P4 2026-07-14: samplerFadeInMs + rawFadeInMs deleted — the sampler
+    // transport is instant and the RAW gate carries no fade; the only
+    // transport fade is imageFadeInMs, on the SP3CTRA source transport.)
 
     // rawFreezeMode: 0=PLAY, 1=HOLD (freeze last raw frame), 2=STOP (white)
     params.push_back(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID{"rawFreezeMode", 1}, "RAW Freeze Mode",
         0, 2, 0));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"rawFadeInMs", 1}, "RAW Fade-In",
-        juce::NormalisableRange<float>(0.0f, 2000.0f, 10.0f), 0.0f,
-        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
 
     // ── LuxSampler ──────────────────────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterBool>(
@@ -1475,9 +1470,7 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("samplerGamma",         this);
     apvts.addParameterListener("samplerContrastMin",   this);
     apvts.addParameterListener("samplerFreezeMode",    this);
-    apvts.addParameterListener("samplerFadeInMs",      this);
     apvts.addParameterListener("rawFreezeMode",        this);
-    apvts.addParameterListener("rawFadeInMs",          this);
 
     // Pitch/Mask/Reverb/Echo/EQ per-instance banks + per-OUT conditioning
     // banks (J1: iterate the SINGLE manifest): every bank param of every slot
@@ -5156,12 +5149,8 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         apvts.getRawParameterValue("samplerContrastMin")->load();
     g_sp3ctra_config.sampler_freeze_mode  =
         static_cast<int>(apvts.getRawParameterValue("samplerFreezeMode")->load());
-    g_sp3ctra_config.sampler_fade_in_ms   =
-        static_cast<int>(apvts.getRawParameterValue("samplerFadeInMs")->load());
     g_sp3ctra_config.raw_freeze_mode      =
         static_cast<int>(apvts.getRawParameterValue("rawFreezeMode")->load());
-    g_sp3ctra_config.raw_fade_in_ms       =
-        static_cast<int>(apvts.getRawParameterValue("rawFadeInMs")->load());
 
     // ========================================================================
     // Per-path pipeline routing — source selection, inversion, AC removal

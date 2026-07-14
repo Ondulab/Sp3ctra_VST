@@ -310,6 +310,23 @@ Purge livrée (build vert) :
   luxstral + zéro-init) — le rendu ne lit que les gains L/R (D3 clos).
 - Commentaires périmés balayés (Channel A/B, FIX(raw), docs onglets).
 
+### Passe transport (2026-07-14, post premier test device)
+Finding #1 (chaîne IMAGE muette) généralisé à TOUS les modules :
+- **`chain_send_transport()` = L'UNIQUE autorité** (exportée via chain_plan.h) :
+  sampler/score → transport sampler instantané ; SP3CTRA/live → transport live
+  + gate RAW + fade imageFadeInMs ; source interne → aucun transport global.
+- Consommateurs alignés : sends LuxStral (freeze/fade résolus par l'exécuteur,
+  stage-7 n'applique plus que la config), sends LuxSynth/LuxWave (gating par
+  send au staging avec rampe de fade par chaîne — HOLD = arrêt du re-staging,
+  STOP = rampe vers silence/table plate), gates d'affichage CisVisualizer
+  (panels + FFT) sur la même fonction.
+- Gates moteur GLOBAUX supprimés : luxsynth_feed_tick (Chain-2), enveloppe
+  ENVELOPE_CHAIN2 des vues polyphoniques, ENVELOPE_LUXWAVE du feed wavetable.
+- Morts : params samplerFadeInMs + rawFadeInMs (+ champs config),
+  lux_sampler_is_passthrough, ids d'enveloppe renumérotés (LS_SEND_BASE=2).
+- Autorités restantes légitimes : builder sampler (player + force-PLAY
+  séquenceur/score), comportements du module sampler (injection, darken-blend).
+
 Reste : **la matrice de validation MANUELLE sur device réel** (user) : live UDP ;
 IMAGE/VIDEO/CAMERA ; sampler idle/REC/PLAY/STEP, A+B cross-chaîne ; REC pendant
 lecture (resampling désormais capturé post-mix à la position du marqueur) ;

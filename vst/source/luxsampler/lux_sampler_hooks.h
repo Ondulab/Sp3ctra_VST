@@ -131,25 +131,12 @@ void lux_sampler_record_input_frame(int engine,
                                     const uint8_t *B,
                                     uint16_t pixel_count);
 
-/**
- * @brief Returns non-zero if the LuxSampler passthrough flag is active.
- *
- * Passthrough is enabled during STEP_LIVE sequencer steps and after rtStop().
- * When active, the live CIS stream should flow through all synthesis paths
- * (including Source=S) because no sampler slot is providing content.
- *
- * Thread: UDP receiver thread (Non-RT). Must be fast (atomic read only).
- *
- * @return 1 if passthrough enabled, 0 otherwise
- */
-int lux_sampler_is_passthrough(void);
 
 /**
  * @brief Returns non-zero ONLY when the sequencer is running and the current
  *        step is STEP_LIVE.
  *
- * Unlike lux_sampler_is_passthrough() (which is also true during normal
- * idle/stop), this flag is set exclusively by triggerStep(STEP_LIVE) and
+ * Unlike a plain idle test, this flag is set exclusively by triggerStep(STEP_LIVE) and
  * cleared by triggerStep(anything_else) and rtStop().
  *
  * Used by udpThread() to route live CIS data through the Source=S path

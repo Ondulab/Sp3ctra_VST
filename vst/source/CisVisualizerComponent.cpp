@@ -622,17 +622,6 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
     ensureSized(out.r); ensureSized(out.g); ensureSized(out.b); ensureSized(out.gray);
     localDataR = out.r; localDataG = out.g; localDataB = out.b; localDataGray = out.gray;
 
-    // ── Read transport states ─────────────────────────────────────────────────
-    const int rawLiveFreeze = static_cast<int>(
-        processor.getAPVTS().getRawParameterValue("imageFreezeMode")->load());
-
-    // ── RAW upstream gate (mirror image_preprocessor.c logic) ─────────────────
-    // RAW freeze overrides downstream streams when it is more restrictive.
-    const int rawFreezeMode = g_sp3ctra_config.raw_freeze_mode;
-    const int liveFreezeMode = (rawFreezeMode > rawLiveFreeze) ? rawFreezeMode : rawLiveFreeze;
-
-    const int  rawSmpFreeze  = g_sp3ctra_config.sampler_freeze_mode;
-
     // ── publish helper: only the primary panel feeds synthesis/BlobVisualizer ─
     auto publishGray = [this, isPrimary]
     {
@@ -701,13 +690,19 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
             if (spGate == nullptr) spGate = lw;
         }
 
-        if (spGate != nullptr && spGate->has_sampler)
+        if (spGate != nullptr)
         {
-            // Sampler-fed chain: honour sampler freeze, bypass during recording.
-            const bool isRecording = (lux_sampler_is_recording() != 0);
-            if (!isRecording)
+            // ONE transport authority (chain_send_transport): the chain that
+            // feeds the viewed engine decides. Sampler-record bypass: while
+            // recording, the incoming stream IS what is captured — never
+            // blank/freeze the display.
+            const bool recBypass = spGate->has_sampler
+                                && (lux_sampler_is_recording() != 0);
+            int gateFreeze = 0, gateFade = 0;
+            chain_send_transport(spGate, &gateFreeze, &gateFade);
+            if (!recBypass)
             {
-                if (rawSmpFreeze == 2)
+                if (gateFreeze == 2)
                 {
                     std::fill(localDataR.begin(),    localDataR.end(),    uint8_t{255});
                     std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
@@ -716,27 +711,10 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
                     publishGray();
                     goto done;
                 }
-                if (rawSmpFreeze == 1) goto done;
+                if (gateFreeze == 1) goto done;
             }
         }
-        else if (spGate != nullptr
-                 && (spGate->source_kind == CHAIN_SRC_LIVE
-                     || spGate->source_kind == CHAIN_SRC_NONE))
-        {
-            // Device-fed chain (or absent engine → legacy live fallback):
-            // honour the device transport, ignore sampler state entirely.
-            if (liveFreezeMode == 2)
-            {
-                std::fill(localDataR.begin(),    localDataR.end(),    uint8_t{255});
-                std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
-                std::fill(localDataB.begin(),    localDataB.end(),    uint8_t{255});
-                std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-                publishGray();
-                goto done;
-            }
-            if (liveFreezeMode == 1) goto done;
-        }
-        // else: internal-source chain without sampler → no transport gate.
+        // spGate == nullptr: no OUT feeds this engine → tap is white already.
     }
 
     // ── Read from appropriate buffer ─────────────────────────────────────────
@@ -2001,15 +1979,37 @@ void CisVisualizerComponent::computeFftMagnitudes()
     inBuf.resize(static_cast<size_t>(N));
     outBuf.resize(static_cast<size_t>(nBins));
 
-    // ── Chain 2 transport gate (image_freeze_mode) ───────────────────────────
-    // LuxSynth sits on Chain 2, so its spectrum follows the Chain 2 SOURCE CIS
-    // transport — exactly like LuxWave and (for Chain 1) LuxStral.
-    //   PLAY → recompute the spectrum from the live CIS feed
-    //   HOLD → keep the last PLAY spectrum (frozen timbre)
-    //   STOP → silence (zero magnitudes)
-    const int kChain2Freeze = juce::jmax(
-        static_cast<int>(g_sp3ctra_config.image_freeze_mode),
-        static_cast<int>(g_sp3ctra_config.raw_freeze_mode));
+    // ── Per-chain transport gate (P4 — ONE authority) ────────────────────────
+    // The display spectrum follows the transport of the chain that FEEDS
+    // LuxSynth (first "→ LUXSYNTH" OUT, else "→ LUXWAVE") — the same
+    // chain_send_transport rule that gates the engine feed at staging time.
+    //   PLAY → recompute, HOLD → keep last spectrum, STOP → silence.
+    int kChain2Freeze = 0;
+    {
+        ChainPlan fftPlan;
+        chain_plan_get(&fftPlan);
+        const SynthChainPlan* fg = nullptr;
+        const SynthChainPlan* lw = nullptr;
+        for (int c = 0; c < fftPlan.num_chains && fg == nullptr; ++c)
+        {
+            const SynthChainPlan& sp = fftPlan.chain[c];
+            if (! sp.present) continue;
+            for (int i = 0; i < sp.num_inserts; ++i)
+            {
+                if (sp.insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
+                { fg = &sp; break; }
+                if (sp.insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXWAVE
+                    && lw == nullptr)
+                    lw = &sp;
+            }
+        }
+        if (fg == nullptr) fg = lw;
+        if (fg != nullptr)
+        {
+            int fade = 0;
+            chain_send_transport(fg, &kChain2Freeze, &fade);
+        }
+    }
 
     if (kChain2Freeze == 0)   // PLAY
     {

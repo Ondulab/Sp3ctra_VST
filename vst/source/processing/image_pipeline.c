@@ -38,22 +38,18 @@ static uint64_t pipeline_get_timestamp_us(void)
 
 /* Per-chain freeze envelopes — one held-frame state each.
  *
- * The two image chains are gated by their OWN transport, independent of which
- * worker thread (live UDP / sampler player) drives the pipeline:
- *   • Chain 1 (Source ► Pitch ► Mask ► Sampler ► LuxStral) → sampler_freeze_mode
- *   • Chain 2 (Source ► LuxSynth ► LuxWave)                → image_freeze_mode
- *
- * LuxStral (Path A, Chain 1) keeps separate live/sampler held states so the
- * live thread never corrupts the sampler hold during playback.  LuxSynth +
- * LuxWave (Path B, Chain 2) read the raw live feed only, so a single state. */
-#define ENVELOPE_LIVE       0   /* Chain 1 — additive, live thread   */
-#define ENVELOPE_SAMPLER    1   /* Chain 1 — additive, sampler thread */
-#define ENVELOPE_CHAIN2     2   /* Chain 2 — polyphonic (LuxSynth) */
-#define ENVELOPE_LUXWAVE    3   /* LuxWave OUT — autonomous wavetable line (synth-split P1) */
+ * Each send is gated by ITS chain's transport (chain_send_transport — the
+ * executor resolved freeze/fade into the config before the pipeline runs;
+ * the player's builder carries the sampler-transport authority). Separate
+ * live/sampler held states so the live thread never corrupts the sampler
+ * hold during playback. (P4 2026-07-14: ENVELOPE_CHAIN2 + ENVELOPE_LUXWAVE
+ * deleted — the engine-level "Chain 2" gates are gone.) */
+#define ENVELOPE_LIVE       0   /* additive, live thread (legacy standalone) */
+#define ENVELOPE_SAMPLER    1   /* additive, sampler/player thread */
 /* Synth-split P3 — one held-frame state PER LuxStral SEND (chain-indexed):
  * N chains feed the engine mix concurrently, each send freezes/fades on its
  * own. BASE + chain_idx, CHAIN_MAX_CHAINS (8) states. */
-#define ENVELOPE_LS_SEND_BASE 4
+#define ENVELOPE_LS_SEND_BASE 2
 #define ENVELOPE_COUNT      (ENVELOPE_LS_SEND_BASE + 8)
 
 typedef struct {
@@ -340,7 +336,7 @@ PipelineConfig pipeline_build_config_sampler(void)
 
     /* Freeze / Fade (sampler stream parameters) */
     cfg.freeze_mode    = g_sp3ctra_config.sampler_freeze_mode;
-    cfg.fade_in_ms     = g_sp3ctra_config.sampler_fade_in_ms;
+    cfg.fade_in_ms     = 0;   /* sampler transport is instant (2026-07-14) */
     /* M8 — the player stream IS a sampler relay: RAW gate skipped, the
      * crossfader-driven opacity applies (legacy MIX-mode parity). */
     cfg.sampler_relayed = 1;
@@ -439,21 +435,18 @@ void pipeline_path_luxstral(
      *     all — the executor neutralizes freeze/live_regate (the media module
      *     owns its transport; pause = frozen line in the stream itself). */
     {
+        /* config->freeze_mode / fade_in_ms are AUTHORITATIVE: the executor
+         * resolved the chain's transport before the pipeline
+         * (chain_send_transport), and the player's builder carries the
+         * sampler-transport authority (+ sequencer/score force-PLAY). The
+         * live_regate branch only survives for the legacy non-VST standalone
+         * (raw live frame: live + RAW transports merged here). */
         int effective_freeze = config->freeze_mode;
-        int fade_ms          = 0;
-
-        if (config->sampler_relayed)
+        if (config->live_regate)
         {
-            if (config->live_regate)
-                effective_freeze = g_sp3ctra_config.sampler_freeze_mode;
-        }
-        else if (config->live_regate)
-        {
-            /* Device-fed stream: RAW acquisition gate + transport fade. */
             int raw_freeze = g_sp3ctra_config.raw_freeze_mode;
             if (raw_freeze > effective_freeze)
                 effective_freeze = raw_freeze;
-            fade_ms = config->fade_in_ms;
         }
 
         /* Use caller-provided envelope_id — NOT derived from source routing.
@@ -465,7 +458,7 @@ void pipeline_path_luxstral(
             envelope_id,
             effective_freeze,
             config->stream_opacity,
-            fade_ms,
+            config->fade_in_ms,
             out->additive.notes, num_notes,
             out->additive.grayscale, nb_pixels);
     }
@@ -526,8 +519,6 @@ void pipeline_path_luxsynth_luxwave(
     const PipelineConfig *config,
     PreprocessedImageData *out)
 {
-    int nb_pixels = get_cis_pixels_nb();
-
     if (raw_r == NULL || raw_g == NULL || raw_b == NULL ||
         config == NULL || out == NULL)
         return;
@@ -537,45 +528,11 @@ void pipeline_path_luxsynth_luxwave(
     preprocess_luxsynth(raw_r, raw_g, raw_b, out);
 #endif
 
-    /* CHAIN 2 side-effects (LuxSynth + LuxWave) — LIVE worker only.
-     *
-     * Chain 2 is the raw-live CIS path: it is gated by the Chain 2 transport
-     * (image_freeze_mode) ALONE, and its wavetable feed must come from the live
-     * frame.  The sampler worker also drives this function (to fill the additive
-     * sibling path), but with envelope_id == ENVELOPE_SAMPLER — in that case we
-     * skip the Chain 2 envelope AND the LuxWave feed so the sampler frame never
-     * gates Chain 2 nor clobbers LuxWave's wavetable.  preprocess_luxsynth()
-     * above still runs in both workers (harmless; its output is only published
-     * for Chain 2 from the live worker).
-     *
-     * Envelope operates on the grayscale only (num_notes = 0 ⇒
-     * pipeline_apply_envelope never touches the notes array). */
-    if (config->envelope_id == ENVELOPE_LIVE)
-    {
-        int effective_freeze = g_sp3ctra_config.image_freeze_mode;
-        int effective_fade   = g_sp3ctra_config.image_fade_in_ms;
-
-        /* RAW upstream gate (more-restrictive wins) — Chain 2 always reads live */
-        int raw_freeze = g_sp3ctra_config.raw_freeze_mode;
-        if (raw_freeze > effective_freeze)
-        {
-            effective_freeze = raw_freeze;
-            effective_fade   = g_sp3ctra_config.raw_fade_in_ms;
-        }
-
-        pipeline_apply_envelope(
-            ENVELOPE_CHAIN2,
-            effective_freeze,
-            1.0f,                 /* opacity already baked into preprocess_luxsynth */
-            effective_fade,
-            NULL, 0,              /* no notes array on this path */
-            out->polyphonic.grayscale, nb_pixels);
-
-        /* (M5: the LuxWave wavetable feed moved to pipeline_luxwave_feed_tick
-         * — the audio thread mixes the staged "→ LUXWAVE" sends. This path
-         * only keeps the Chain-2 envelope above for the polyphonic views.) */
-    }
-
+    /* (P4 — 2026-07-14: the global "Chain 2" view envelope is GONE. The
+     * polyphonic views mirror the pb chain's stream as captured; the display
+     * whitening/hold follows the chain's own transport in CisVisualizer, and
+     * the ENGINE feeds are gated per send at staging time. One transport
+     * authority — chain_send_transport.) */
 }
 
 /* ============================================================================
@@ -617,21 +574,9 @@ void pipeline_luxwave_feed_tick(const ChainPlan *plan)
         return;   /* no "→ LUXWAVE" send → the wavetable keeps its last
                    * content (it only sounds under held MIDI notes) */
 
-    /* Chain-2 transport gate — LuxWave's OWN envelope state (held frames are
-     * never shared with LuxSynth's), same live/raw gating as before. The
-     * envelope fade is timestamp-driven, so the audio-thread cadence (~86 Hz
-     * vs the historical line rate) changes nothing. */
-    int effective_freeze = g_sp3ctra_config.image_freeze_mode;
-    int effective_fade   = g_sp3ctra_config.image_fade_in_ms;
-    if (g_sp3ctra_config.raw_freeze_mode > effective_freeze)
-    {
-        effective_freeze = g_sp3ctra_config.raw_freeze_mode;
-        effective_fade   = g_sp3ctra_config.raw_fade_in_ms;
-    }
-    pipeline_apply_envelope(ENVELOPE_LUXWAVE,
-                            effective_freeze, 1.0f, effective_fade,
-                            NULL, 0, s_mixed_line, nb);
-
+    /* (P4 — 2026-07-14: the global Chain-2 gate is GONE — each "→ LUXWAVE"
+     * send is gated at staging time by ITS chain's transport, with the fade
+     * ramped into the staged line. The mix is already transport-correct.) */
     luxwave_engine_set_image_line(&g_luxwave_engine, s_mixed_line, nb);
 }
 

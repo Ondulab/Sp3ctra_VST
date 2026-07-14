@@ -162,16 +162,12 @@ typedef struct {
     float sampler_contrast_min;
     /* sampler_freeze_mode : 0=PLAY, 1=PAUSE (freeze sampler last frame)        */
     int sampler_freeze_mode;
-    /* sampler_fade_in_ms : fade-in on sampler (re)start (0-2000 ms)            */
-    int sampler_fade_in_ms;
 
     /* raw_freeze_mode : upstream gate — controls data flow from UDP/conversion */
     /*   0 = PLAY  — data flows to Sampler and Live                            */
     /*   1 = HOLD  — freeze last raw frame (both S and L freeze)               */
     /*   2 = STOP  — force silence on all downstream paths                     */
     int raw_freeze_mode;
-    /* raw_fade_in_ms : fade-in/out when RAW transport changes (0-2000 ms)     */
-    int raw_fade_in_ms;
 
     /* (M8/purge 2026-07-12: the legacy per-path source-routing globals are
      * gone — the ChainPlan routes, inserts read the stream at their position.) */

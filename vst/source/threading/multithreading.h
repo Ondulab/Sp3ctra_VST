@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include "config.h"
 #include "doublebuffer.h"
+#include "../processing/chain_plan.h"
 
 #ifdef _WIN32
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
