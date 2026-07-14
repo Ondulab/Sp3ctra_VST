@@ -77,6 +77,20 @@ inline juce::String imgSrcParam(int slot, const char* suffix)
                           + "_" + suffix;
 }
 
+inline juce::String vidSrcParam(int slot, const char* suffix)
+{
+    return slot <= 0 ? "vidSrc" + juce::String(suffix)
+                     : "vidSrc" + juce::String(juce::jlimit(1, 7, slot))
+                          + "_" + suffix;
+}
+
+inline juce::String camSrcParam(int slot, const char* suffix)
+{
+    return slot <= 0 ? "camSrc" + juce::String(suffix)
+                     : "camSrc" + juce::String(juce::jlimit(1, 7, slot))
+                          + "_" + suffix;
+}
+
 // Engine-send (OUT) conditioning banks — one per send instance (M6 pools).
 inline juce::String lsOutParam(int slot, const char* suffix)
 { return "luxstralOut" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
@@ -171,6 +185,12 @@ namespace module_param_manifest_detail
     inline const char* const kImage[] = {
         "Pos", "Duration", "Loop", "Play", "Enabled",
     };
+    inline const char* const kVideo[] = {
+        "Line", "Speed", "Loop", "Play", "Enabled",
+    };
+    inline const char* const kCamera[] = {
+        "Line", "Enabled",
+    };
     inline const char* const kSampler[] = {
         "MidiChannel", "OctaveOffset", "MaxDuration",
         // REC/PLAY/SAVE bind params removed — those actions are now mapped through
@@ -187,6 +207,8 @@ namespace module_param_manifest_detail
     inline juce::String lwId(int s, const char* x) { return lwOutParam(s, x); }
     inline juce::String fsId(int s, const char* x) { return fsEngineParam(s, x); }
     inline juce::String imgId(int s, const char* x) { return imgSrcParam(s, x); }
+    inline juce::String vidId(int s, const char* x) { return vidSrcParam(s, x); }
+    inline juce::String camId(int s, const char* x) { return camSrcParam(s, x); }
     inline juce::String vsId(int s, const char* x)
     {
         if (std::strcmp(x, "MixLevel") == 0) return vsMixParam(s, "level");
@@ -236,15 +258,23 @@ inline const ModuleParamManifest kModuleParamManifest[] = {
       module_param_manifest_detail::kSampler,
       (int) std::size(module_param_manifest_detail::kSampler),
       &module_param_manifest_detail::fsId },
-    // P5-M3 — IMAGE source instances (slot 0 = legacy ids).
+    // P5-M3 — media source instances (slot 0 = legacy ids).
     { ModuleType::Image,       "imgSrc",      8,
       module_param_manifest_detail::kImage,
       (int) std::size(module_param_manifest_detail::kImage),
       &module_param_manifest_detail::imgId },
+    { ModuleType::Video,       "vidSrc",      8,
+      module_param_manifest_detail::kVideo,
+      (int) std::size(module_param_manifest_detail::kVideo),
+      &module_param_manifest_detail::vidId },
+    { ModuleType::Camera,      "camSrc",      8,
+      module_param_manifest_detail::kCamera,
+      (int) std::size(module_param_manifest_detail::kCamera),
+      &module_param_manifest_detail::camId },
 };
 
 /** Manifest entry for a module type, or nullptr when the type carries no
- *  per-instance bank (SP3CTRA/VIDEO/CAMERA sources, Score/Sequencer/Timbre). */
+ *  per-instance bank (the SP3CTRA source, Score/Sequencer/Timbre). */
 inline const ModuleParamManifest* moduleParamManifest(ModuleType t)
 {
     for (const auto& m : kModuleParamManifest)

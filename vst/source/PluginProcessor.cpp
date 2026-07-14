@@ -1141,11 +1141,43 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"vidSrcEnabled", 1}, "Video Src Active", true));
 
+    // P5-M3 — VIDEO instance banks, slots 1..7 (slot 0 = legacy ids above).
+    for (int s = 1; s < 8; ++s)
+    {
+        const juce::String nm = "Video Src " + juce::String(s + 1) + " ";
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{vidSrcParam(s, "Line"), 1}, nm + "Line",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.0001f), 0.5f));
+        juce::NormalisableRange<float> spd(0.1f, 4.0f, 0.01f);
+        spd.setSkewForCentre(1.0f);
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{vidSrcParam(s, "Speed"), 1}, nm + "Speed",
+            spd, 1.0f, juce::AudioParameterFloatAttributes{}.withLabel("x")));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{vidSrcParam(s, "Loop"), 1}, nm + "Loop",
+            juce::StringArray{"Once", "Loop", "Reverse", "Ping-Pong"}, 1));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{vidSrcParam(s, "Play"), 1}, nm + "Play", false));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{vidSrcParam(s, "Enabled"), 1}, nm + "Active", true));
+    }
+
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"camSrcLine", 1}, "Camera Src Line",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.0001f), 0.5f));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"camSrcEnabled", 1}, "Camera Src Active", true));
+
+    // P5-M3 — CAMERA instance banks, slots 1..7 (slot 0 = legacy ids above).
+    for (int s = 1; s < 8; ++s)
+    {
+        const juce::String nm = "Camera Src " + juce::String(s + 1) + " ";
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{camSrcParam(s, "Line"), 1}, nm + "Line",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.0001f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{camSrcParam(s, "Enabled"), 1}, nm + "Active", true));
+    }
 
     // ── Video Scroll — live controls (hidden from DAW automation) ─────────────
     // (Purge 2026-07-12: the dead global singletons videoScrollEnabled/
@@ -1548,22 +1580,30 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
         eng->setLoopMode ((int) apvts.getRawParameterValue(imgSrcParam(s, "Loop"))->load());
         eng->setEnabled  (apvts.getRawParameterValue(imgSrcParam(s, "Enabled"))->load() > 0.5f);
     }
-    videoSource_  = std::make_unique<VideoSourceEngine>();
-    cameraSource_ = std::make_unique<CameraSourceEngine>();
-    mediaService_ = std::make_unique<MediaSourceService>(imageSources_,
-                                                         *videoSource_,
-                                                         *cameraSource_);
-    videoSource_->onPlaybackFinished = [this]
+    for (int s = 0; s < 8; ++s)
     {
-        if (auto* p = apvts.getParameter(PARAM_VIDSRC_PLAY))
-            p->setValueNotifyingHost(0.0f);
-    };
-    videoSource_->setLineFrac (apvts.getRawParameterValue(PARAM_VIDSRC_LINE)->load());
-    videoSource_->setSpeed    (apvts.getRawParameterValue(PARAM_VIDSRC_SPEED)->load());
-    videoSource_->setLoopMode ((int) apvts.getRawParameterValue(PARAM_VIDSRC_LOOP)->load());
-    videoSource_->setEnabled  (apvts.getRawParameterValue(PARAM_VIDSRC_ENABLED)->load() > 0.5f);
-    cameraSource_->setLineFrac(apvts.getRawParameterValue(PARAM_CAMSRC_LINE)->load());
-    cameraSource_->setEnabled (apvts.getRawParameterValue(PARAM_CAMSRC_ENABLED)->load() > 0.5f);
+        videoSources_[(size_t) s] = std::make_unique<VideoSourceEngine>();
+        auto* v = videoSources_[(size_t) s].get();
+        v->setSlot(s);
+        v->onPlaybackFinished = [this, s]
+        {
+            if (auto* p = apvts.getParameter(vidSrcParam(s, "Play")))
+                p->setValueNotifyingHost(0.0f);
+        };
+        v->setLineFrac (apvts.getRawParameterValue(vidSrcParam(s, "Line"))->load());
+        v->setSpeed    (apvts.getRawParameterValue(vidSrcParam(s, "Speed"))->load());
+        v->setLoopMode ((int) apvts.getRawParameterValue(vidSrcParam(s, "Loop"))->load());
+        v->setEnabled  (apvts.getRawParameterValue(vidSrcParam(s, "Enabled"))->load() > 0.5f);
+
+        cameraSources_[(size_t) s] = std::make_unique<CameraSourceEngine>();
+        auto* c = cameraSources_[(size_t) s].get();
+        c->setSlot(s);
+        c->setLineFrac(apvts.getRawParameterValue(camSrcParam(s, "Line"))->load());
+        c->setEnabled (apvts.getRawParameterValue(camSrcParam(s, "Enabled"))->load() > 0.5f);
+    }
+    mediaService_ = std::make_unique<MediaSourceService>(imageSources_,
+                                                         videoSources_,
+                                                         cameraSources_);
 
     // Register LuxSampler parameter listeners
     apvts.addParameterListener(PARAM_FS_ENABLED,    this);
@@ -1592,13 +1632,8 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     // M9 — IMAGE / VIDEO / CAMERA source params → engines
     // (P5-M3: the imgSrc* listeners — slot 0 legacy ids included — are
     // registered by the manifest loop above; individual adds would double.)
-    apvts.addParameterListener(PARAM_VIDSRC_LINE,    this);
-    apvts.addParameterListener(PARAM_VIDSRC_SPEED,   this);
-    apvts.addParameterListener(PARAM_VIDSRC_LOOP,    this);
-    apvts.addParameterListener(PARAM_VIDSRC_PLAY,    this);
-    apvts.addParameterListener(PARAM_VIDSRC_ENABLED, this);
-    apvts.addParameterListener(PARAM_CAMSRC_LINE,    this);
-    apvts.addParameterListener(PARAM_CAMSRC_ENABLED, this);
+    // (P5-M3: the vidSrc*/camSrc* listeners — slot 0 legacy ids included —
+    // are registered by the manifest loop above.)
 
     // Sync LuxSampler config with initial APVTS values
     luxSampler->setEnabled(*apvts.getRawParameterValue(PARAM_FS_ENABLED) > 0.5f);
@@ -1731,10 +1766,11 @@ Sp3ctraAudioProcessor::~Sp3ctraAudioProcessor()
         mediaService_->stopThread(2000);
         mediaService_.reset();
     }
-    if (cameraSource_) cameraSource_->closeDevice();   // release the capture device
+    for (auto& c : cameraSources_)
+        if (c) c->closeDevice();   // release the capture devices
     for (auto& eng : imageSources_) eng.reset();
-    videoSource_.reset();
-    cameraSource_.reset();
+    for (auto& v : videoSources_)  v.reset();
+    for (auto& c : cameraSources_) c.reset();
 
     // ── LuxSampler (uses AudioImageBuffers / DoubleBuffer owned by sharedCore) ──
     // Must stop before releasing sharedCore to avoid use-after-free.
@@ -2760,8 +2796,10 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
             forceRestoredParam(PARAM_SEQ_TRANSPORT, 0.0);       // Stop
             forceRestoredParam(PARAM_SCORE_PLAYING, 0.0);
             for (int s = 0; s < 8; ++s)                          // M9 sources
+            {
                 forceRestoredParam(imgSrcParam(s, "Play"), 0.0); // (P5-M3 ×8)
-            forceRestoredParam(PARAM_VIDSRC_PLAY,   0.0);
+                forceRestoredParam(vidSrcParam(s, "Play"), 0.0);
+            }
 
             // Migration — sessions saved before the per-instance insert banks
             // carry single per-type values ("luxpitchAttackMs"). All instances
@@ -2927,8 +2965,10 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
                 forceTo(PARAM_SEQ_TRANSPORT, 0.0f);
                 forceTo(PARAM_SCORE_PLAYING, 0.0f);
                 for (int s = 0; s < 8; ++s)
+                {
                     forceTo(imgSrcParam(s, "Play"), 0.0f);
-                forceTo(PARAM_VIDSRC_PLAY,   0.0f);
+                    forceTo(vidSrcParam(s, "Play"), 0.0f);
+                }
             }
             // Push the restored SCORE speed/loop into the engine (the listener
             // does not fire for values equal to the pre-restore state).
@@ -2969,17 +3009,20 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
                     eng->setLoopMode ((int) apvts.getRawParameterValue(imgSrcParam(s, "Loop"))->load());
                     eng->setEnabled  (apvts.getRawParameterValue(imgSrcParam(s, "Enabled"))->load() > 0.5f);
                 }
-            if (videoSource_)
+            for (int s = 0; s < 8; ++s)
             {
-                videoSource_->setLineFrac (apvts.getRawParameterValue(PARAM_VIDSRC_LINE)->load());
-                videoSource_->setSpeed    (apvts.getRawParameterValue(PARAM_VIDSRC_SPEED)->load());
-                videoSource_->setLoopMode ((int) apvts.getRawParameterValue(PARAM_VIDSRC_LOOP)->load());
-                videoSource_->setEnabled  (apvts.getRawParameterValue(PARAM_VIDSRC_ENABLED)->load() > 0.5f);
-            }
-            if (cameraSource_)
-            {
-                cameraSource_->setLineFrac(apvts.getRawParameterValue(PARAM_CAMSRC_LINE)->load());
-                cameraSource_->setEnabled (apvts.getRawParameterValue(PARAM_CAMSRC_ENABLED)->load() > 0.5f);
+                if (auto* v = videoSources_[(size_t) s].get())
+                {
+                    v->setLineFrac (apvts.getRawParameterValue(vidSrcParam(s, "Line"))->load());
+                    v->setSpeed    (apvts.getRawParameterValue(vidSrcParam(s, "Speed"))->load());
+                    v->setLoopMode ((int) apvts.getRawParameterValue(vidSrcParam(s, "Loop"))->load());
+                    v->setEnabled  (apvts.getRawParameterValue(vidSrcParam(s, "Enabled"))->load() > 0.5f);
+                }
+                if (auto* c = cameraSources_[(size_t) s].get())
+                {
+                    c->setLineFrac(apvts.getRawParameterValue(camSrcParam(s, "Line"))->load());
+                    c->setEnabled (apvts.getRawParameterValue(camSrcParam(s, "Enabled"))->load() > 0.5f);
+                }
             }
 
             // Pool-slot bindings + per-chain settings memory FIRST: the derive
@@ -3231,42 +3274,36 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
         }
         return;
     }
-    if (parameterID == PARAM_VIDSRC_LINE)
+    if (parameterID.startsWith("vidSrc"))
     {
-        if (videoSource_) videoSource_->setLineFrac(newValue);
+        for (int s = 0; s < 8; ++s)
+        {
+            auto* v = videoSources_[(size_t) s].get();
+            if (v == nullptr) continue;
+            if (parameterID == vidSrcParam(s, "Line"))
+            { v->setLineFrac(newValue); return; }
+            if (parameterID == vidSrcParam(s, "Speed"))
+            { v->setSpeed(newValue); return; }
+            if (parameterID == vidSrcParam(s, "Loop"))
+            { v->setLoopMode((int) (newValue + 0.5f)); return; }
+            if (parameterID == vidSrcParam(s, "Play"))
+            { v->setPlaying(newValue > 0.5f); return; }
+            if (parameterID == vidSrcParam(s, "Enabled"))
+            { v->setEnabled(newValue > 0.5f); return; }
+        }
         return;
     }
-    if (parameterID == PARAM_VIDSRC_SPEED)
+    if (parameterID.startsWith("camSrc"))
     {
-        if (videoSource_) videoSource_->setSpeed(newValue);
-        return;
-    }
-    if (parameterID == PARAM_VIDSRC_LOOP)
-    {
-        if (videoSource_) videoSource_->setLoopMode((int) (newValue + 0.5f));
-        return;
-    }
-    if (parameterID == PARAM_VIDSRC_PLAY)
-    {
-        if (videoSource_) videoSource_->setPlaying(newValue > 0.5f);
-        return;
-    }
-    if (parameterID == PARAM_CAMSRC_LINE)
-    {
-        if (cameraSource_) cameraSource_->setLineFrac(newValue);
-        return;
-    }
-    // ACTIVE toggles: off deactivates the source in the internal pool (its
-    // chain streams blank paper), on republishes the current line instantly.
-    // (IMAGE ×8: handled by the imgSrc prefix block above.)
-    if (parameterID == PARAM_VIDSRC_ENABLED)
-    {
-        if (videoSource_) videoSource_->setEnabled(newValue > 0.5f);
-        return;
-    }
-    if (parameterID == PARAM_CAMSRC_ENABLED)
-    {
-        if (cameraSource_) cameraSource_->setEnabled(newValue > 0.5f);
+        for (int s = 0; s < 8; ++s)
+        {
+            auto* c = cameraSources_[(size_t) s].get();
+            if (c == nullptr) continue;
+            if (parameterID == camSrcParam(s, "Line"))
+            { c->setLineFrac(newValue); return; }
+            if (parameterID == camSrcParam(s, "Enabled"))
+            { c->setEnabled(newValue > 0.5f); return; }
+        }
         return;
     }
 
@@ -4648,52 +4685,61 @@ void Sp3ctraAudioProcessor::applySamplerParamsFromState()
 //==============================================================================
 void Sp3ctraAudioProcessor::updateMediaSourcePresence()
 {
-    bool imgSlot[8] = { false };
-    bool vid = false, cam = false;
+    bool imgSlot[8] = { false }, vidSlot[8] = { false }, camSlot[8] = { false };
     for (const auto& ch : chainModel_.chains)
         for (const auto& m : ch.modules)
         {
-            if (m.type == ModuleType::Image
-                && m.slot >= 0 && m.slot < 8)     imgSlot[m.slot] = true;
-            if (m.type == ModuleType::Video)  vid = true;
-            if (m.type == ModuleType::Camera) cam = true;
+            if (m.slot < 0 || m.slot >= 8) continue;
+            if (m.type == ModuleType::Image)  imgSlot[m.slot] = true;
+            if (m.type == ModuleType::Video)  vidSlot[m.slot] = true;
+            if (m.type == ModuleType::Camera) camSlot[m.slot] = true;
         }
     for (int s = 0; s < 8; ++s)
+    {
         if (auto* eng = imageSources_[(size_t) s].get())
             eng->setModulePresent(imgSlot[s]);
-    if (videoSource_)  videoSource_ ->setModulePresent(vid);
-    if (cameraSource_) cameraSource_->setModulePresent(cam);
+        if (auto* v = videoSources_[(size_t) s].get())
+            v->setModulePresent(vidSlot[s]);
+        auto* c = cameraSources_[(size_t) s].get();
+        if (c == nullptr) continue;
+        c->setModulePresent(camSlot[s]);
 
-    // A CAMERA module placed with a persisted device choice and no open device
-    // (fresh session restore, or module re-added) → reopen it. Message thread.
-    if (cam && cameraSource_ && ! cameraSource_->isOpen()
-        && cameraDeviceName_.isNotEmpty())
-    {
-        const auto names = CameraSourceEngine::getDeviceNames();
-        const int  idx   = names.indexOf(cameraDeviceName_);
-        if (idx >= 0)
+        // A CAMERA instance placed with a persisted device choice and no open
+        // device (fresh restore, module re-added) → reopen it. Message thread.
+        if (camSlot[s] && ! c->isOpen()
+            && cameraDeviceNames_[(size_t) s].isNotEmpty())
         {
-            juce::String err;
-            if (! cameraSource_->openDevice(idx, err))
-                log_warning("VST", "Camera reopen failed: %s", err.toRawUTF8());
+            const auto names = CameraSourceEngine::getDeviceNames();
+            const int  idx   = names.indexOf(cameraDeviceNames_[(size_t) s]);
+            if (idx >= 0)
+            {
+                juce::String err;
+                if (! c->openDevice(idx, err))
+                    log_warning("VST", "Camera %d reopen failed: %s",
+                                s, err.toRawUTF8());
+            }
         }
+        // Instance removed → release its device (camera light off).
+        if (! camSlot[s] && c->isOpen())
+            c->closeDevice();
     }
-    // Module removed → release the device (turns the camera light off).
-    if (! cam && cameraSource_ && cameraSource_->isOpen())
-        cameraSource_->closeDevice();
 }
 
 juce::ValueTree Sp3ctraAudioProcessor::mediaSourcesStateToTree() const
 {
     juce::ValueTree t("MEDIA_SOURCES");
     for (int s = 0; s < 8; ++s)
+    {
+        const juce::String sfx = s == 0 ? juce::String() : juce::String(s);
         if (auto* eng = imageSources_[(size_t) s].get())
-            t.setProperty(s == 0 ? juce::Identifier("imagePath")
-                                 : juce::Identifier("imagePath" + juce::String(s)),
+            t.setProperty(juce::Identifier("imagePath" + sfx),
                           eng->getFile().getFullPathName(), nullptr);
-    if (videoSource_)
-        t.setProperty("videoPath", videoSource_->getFile().getFullPathName(), nullptr);
-    t.setProperty("cameraDevice", cameraDeviceName_, nullptr);
+        if (auto* v = videoSources_[(size_t) s].get())
+            t.setProperty(juce::Identifier("videoPath" + sfx),
+                          v->getFile().getFullPathName(), nullptr);
+        t.setProperty(juce::Identifier("cameraDevice" + sfx),
+                      cameraDeviceNames_[(size_t) s], nullptr);
+    }
     return t;
 }
 
@@ -4704,30 +4750,30 @@ void Sp3ctraAudioProcessor::restoreMediaSourcesFromTree(const juce::ValueTree& t
 
     for (int s = 0; s < 8; ++s)
     {
-        const juce::String key = s == 0 ? "imagePath"
-                                        : "imagePath" + juce::String(s);
-        const juce::String imgPath = t.getProperty(key, "").toString();
-        auto* eng = imageSources_[(size_t) s].get();
-        if (eng != nullptr && imgPath.isNotEmpty())
+        const juce::String sfx = s == 0 ? juce::String() : juce::String(s);
+        const juce::String imgPath =
+            t.getProperty(juce::Identifier("imagePath" + sfx), "").toString();
+        if (auto* eng = imageSources_[(size_t) s].get(); eng && imgPath.isNotEmpty())
         {
             juce::String err;
             if (! eng->loadFile(juce::File(imgPath), err))
                 log_warning("VST", "Image source %d restore failed: %s",
                             s, err.toRawUTF8());
         }
+        const juce::String vidPath =
+            t.getProperty(juce::Identifier("videoPath" + sfx), "").toString();
+        if (auto* v = videoSources_[(size_t) s].get(); v && vidPath.isNotEmpty())
+        {
+            juce::String err;
+            if (! v->loadFile(juce::File(vidPath), err))
+                log_warning("VST", "Video source %d restore failed: %s",
+                            s, err.toRawUTF8());
+        }
+        cameraDeviceNames_[(size_t) s] =
+            t.getProperty(juce::Identifier("cameraDevice" + sfx), "").toString();
     }
-
-    const juce::String vidPath = t.getProperty("videoPath", "").toString();
-    if (videoSource_ && vidPath.isNotEmpty())
-    {
-        juce::String err;
-        if (! videoSource_->loadFile(juce::File(vidPath), err))
-            log_warning("VST", "Video source restore failed: %s", err.toRawUTF8());
-    }
-
-    cameraDeviceName_ = t.getProperty("cameraDevice", "").toString();
-    // The device itself is (re)opened by updateMediaSourcePresence() once the
-    // chain model restore confirms a CAMERA module is actually placed.
+    // The devices are (re)opened by updateMediaSourcePresence() once the
+    // chain model restore confirms CAMERA instances are actually placed.
 }
 
 void Sp3ctraAudioProcessor::applyChainEnableBridge()

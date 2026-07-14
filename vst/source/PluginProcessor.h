@@ -156,12 +156,20 @@ public:
     {
         return imageSources_[(size_t) juce::jlimit(0, 7, slot)].get();
     }
-    VideoSourceEngine*  getVideoSource()  { return videoSource_.get();  }
-    CameraSourceEngine* getCameraSource() { return cameraSource_.get(); }
+    VideoSourceEngine*  getVideoSource(int slot = 0)
+    {
+        return videoSources_[(size_t) juce::jlimit(0, 7, slot)].get();
+    }
+    CameraSourceEngine* getCameraSource(int slot = 0)
+    {
+        return cameraSources_[(size_t) juce::jlimit(0, 7, slot)].get();
+    }
 
     /** Persisted camera device name (restored/reopened on session load). */
-    void         setCameraDeviceName(const juce::String& n) { cameraDeviceName_ = n; }
-    juce::String getCameraDeviceName() const                { return cameraDeviceName_; }
+    void setCameraDeviceName(int slot, const juce::String& n)
+    { cameraDeviceNames_[(size_t) juce::jlimit(0, 7, slot)] = n; }
+    juce::String getCameraDeviceName(int slot) const
+    { return cameraDeviceNames_[(size_t) juce::jlimit(0, 7, slot)]; }
 
     // -------------------------------------------------------------------------
     // SCORE module — shared generation settings (offline, message-thread only).
@@ -441,11 +449,11 @@ private:
 
     // M9 — IMAGE / VIDEO / CAMERA source engines + the single service thread
     // that ticks them and pumps the chains when the device is not streaming.
-    std::array<std::unique_ptr<ImageSourceEngine>, 8> imageSources_;   // P5-M3
-    std::unique_ptr<VideoSourceEngine>  videoSource_;
-    std::unique_ptr<CameraSourceEngine> cameraSource_;
+    std::array<std::unique_ptr<ImageSourceEngine>, 8>  imageSources_;   // P5-M3
+    std::array<std::unique_ptr<VideoSourceEngine>, 8>  videoSources_;   // P5-M3
+    std::array<std::unique_ptr<CameraSourceEngine>, 8> cameraSources_;  // P5-M3
     std::unique_ptr<MediaSourceService> mediaService_;
-    juce::String cameraDeviceName_;   // persisted device choice (by name)
+    std::array<juce::String, 8> cameraDeviceNames_;   // persisted devices (by name, per slot)
 
     /** Push module presence (Image/Video/Camera placed in some chain) onto the
      *  engines so they publish lines only while their module exists. Called
