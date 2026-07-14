@@ -1,17 +1,17 @@
 /**
  * @file SourcesTabComponent.h
- * @brief ZONE 3 (PLAY face) — SOURCE CIS transport, contextual to its chain.
+ * @brief ZONE 3 (PLAY face) — SP3CTRA source MODULE transport.
  *
- * Each SOURCE CIS block is bound to the chain it sits on.  Selecting it shows
- * ONLY that chain's transport (play / hold / stop):
- *   • Chain 1  → sampler transport  (samplerFreezeMode) — no transport fade
- *   • Chain 2  → live frame transport (imageFreezeMode / imageFadeInMs)
+ * This is the SP3CTRA (live CIS) SOURCE MODULE's own transport — play / hold /
+ * stop + Fade-In — and it is a property of the MODULE, not of the chain it
+ * sits in. Both source blocks (chain 1 / chain 2) drive the SAME global
+ * SP3CTRA transport (imageFreezeMode) and the SAME Fade-In (imageFadeInMs), so
+ * the fade on play/pause/stop is chain-independent. The chain index only tints
+ * the header so you can tell which block you selected.
  *
- * The RAW upstream UDP gate is the instrument's own signal and is no longer
- * surfaced here — chains are migrating toward modular slots, so the source
- * view only exposes the transport of the chain it is dropped into.
- *
- * The active chain is set by the editor via setChain() on block selection.
+ * The RAW upstream UDP gate is the instrument's own signal and is not surfaced
+ * here. The sampler has its own transport elsewhere (samplerFreezeMode) — this
+ * SOURCE view never touches it.
  */
 #pragma once
 
@@ -94,35 +94,27 @@ public:
 
     ~SourcesTabComponent() override { stopTimer(); }
 
-    /** Bind the transport to chain 1 (Modulated) or chain 2 (Live). */
+    /** Select which SP3CTRA source block (chain 1 / 2) is shown. Both drive the
+     *  SAME global SP3CTRA transport + Fade-In; the chain only tints the header. */
     void setChain(int chain)
     {
         activeChain_ = (chain == 2) ? 2 : 1;
 
         auto& apvts = processor.getAPVTS();
 
-        // Fade-In slider binds to the SP3CTRA input source (Chain 2) only.
-        // Chain 1 (sampler) has no transport fade → hide it.
-        if (activeChain_ == 2)
-        {
-            fadeAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-                apvts, "imageFadeInMs", fadeSlider));
-            fadeSlider.setVisible(true);
-        }
-        else
-        {
-            fadeAttach.reset();
-            fadeSlider.setVisible(false);
-        }
+        // Fade-In belongs to the SP3CTRA source MODULE (imageFadeInMs), so it is
+        // bound and shown for every source block — the fade on play/pause/stop
+        // is a module feature, independent of the chain.
+        fadeAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+            apvts, "imageFadeInMs", fadeSlider));
+        fadeSlider.setVisible(true);
 
-        // Right-click MIDI Learn — follows the selected chain's params. The
-        // three transport buttons share the freeze-mode param (one CC spans
-        // 0=play / mid=hold / 1=stop), so each carries the same mapping badge;
-        // the acquisition rate is global (bound once semantics, rebound cheap).
+        // Right-click MIDI Learn — the transport buttons share the SP3CTRA
+        // freeze-mode param (one CC spans 0=play / mid=hold / 1=stop); the
+        // Fade-In and acquisition rate are global (bound once, rebound cheap).
         learnAtts_.clear();
         auto& mm = processor.getMidiMap();
-        if (activeChain_ == 2)
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, fadeSlider, "imageFadeInMs"));
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, fadeSlider, "imageFadeInMs"));
         learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, playBtn,       freezeParamId()));
         learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, holdBtn,       freezeParamId()));
         learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, stopBtn,       freezeParamId()));
@@ -140,14 +132,15 @@ public:
     {
         const int w = getWidth();
 
-        // Chain header — centred, identity colour matching the rack.
+        // SP3CTRA source header — centred; the chain colour only tells you which
+        // source block you selected (the transport itself is the same module).
         g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
         g.setColour(activeChain_ == 1 ? juce::Colour(0xffe0b84a)
                                       : juce::Colour(0xff4ae0a0));
-        g.drawText(activeChain_ == 1 ? "CHAIN 1" : "CHAIN 2",
+        g.drawText("SP3CTRA",
                    0, 4, w, 14, juce::Justification::centred);
 
-        // All row labels share one right-justified column (Acquisition group)
+        // All row labels share one right-justified column (Fade In + Acquisition)
         // so every control lines up on the same left edge.
         auto rowLabel = [&] (const char* t, int rowY)
         {
@@ -155,13 +148,10 @@ public:
                        juce::Justification::centredRight);
         };
 
-        // Fade In label — SP3CTRA input source (Chain 2) only.
-        if (activeChain_ == 2)
-        {
-            g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-            g.setColour(juce::Colour(0xffd2d8e8));
-            rowLabel("Fade In", fadeRowY());
-        }
+        // Fade In label — always shown (SP3CTRA module transport fade).
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+        g.setColour(juce::Colour(0xffd2d8e8));
+        rowLabel("Fade In", fadeRowY());
 
         // ── Acquisition speed section header ────────────────────────────────────
         g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
@@ -217,10 +207,10 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> acqMultDivAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   acqRateAttach;
 
-    // ── Per-chain APVTS parameter ids ───────────────────────────────────────────
+    // ── SP3CTRA source module transport param (global, chain-independent) ───────
     const char* freezeParamId() const noexcept
     {
-        return activeChain_ == 1 ? "samplerFreezeMode" : "imageFreezeMode";
+        return "imageFreezeMode";
     }
 
     void setFreezeMode(float v)
@@ -249,10 +239,9 @@ private:
 
     int transportY() const { return 24; }
     int fadeRowY()   const { return transportY() + Sp3ctraTheme::kIconBtnSize + 14; }
-    // Chain 2 shows the Fade In row above the Acquisition group; Chain 1
-    // (sampler, no transport fade) pulls the group up under the transport.
-    int acqHeaderY() const { return activeChain_ == 2 ? (fadeRowY() + kRowPitch + 6)
-                                                      : (transportY() + Sp3ctraTheme::kIconBtnSize + 20); }
+    // The Fade In row is always present (SP3CTRA module transport fade), with
+    // the Acquisition group below it.
+    int acqHeaderY() const { return fadeRowY() + kRowPitch + 6; }
     int acqRowY(int i) const { return acqHeaderY() + 22 + i * kRowPitch; }
 
     // Grey out controls that don't apply to the current gate mode.
