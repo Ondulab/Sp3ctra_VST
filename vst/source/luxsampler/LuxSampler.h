@@ -397,6 +397,10 @@ public:
     // =========================================================================
     bool onLiveFrameAssembled(const uint8_t* R, const uint8_t* G, const uint8_t* B,
                               uint16_t pixel_count);
+    // MIX/darken-blend reference = the module's INPUT at its SAMPLER marker
+    // (fed per engine by the chain executor — P4 doctrine).
+    void cacheInputFrame(const uint8_t* R, const uint8_t* G, const uint8_t* B,
+                         uint16_t pixel_count) noexcept;
 
     // =========================================================================
     // Thread lifecycle (Non-RT, called from PluginProcessor)
