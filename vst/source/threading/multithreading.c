@@ -620,6 +620,15 @@ static void chain_execute_span(const SynthChainPlan *sp, int chain_idx,
                 scfg.sampler_relayed = 1;
                 scfg.stream_opacity  = g_sp3ctra_config.image_live_opacity;
             }
+            else if (internal_source_kind_for_chain_src(sp->source_kind) >= 0)
+            {
+                /* Internal-source chain (IMAGE/VIDEO/CAMERA): the media
+                 * module owns its transport — pause/disable are already IN
+                 * the stream (frozen line / white). No global transport, no
+                 * RAW gate, no fade (P4 doctrine, fix 2026-07-14). */
+                scfg.freeze_mode = 0;
+                scfg.live_regate = 0;
+            }
             if (cx->force_play)
                 scfg.freeze_mode = 0; /* PLAY — sequencer/score drives transport */
             pipeline_path_luxstral(cr, cg, cb, &scfg, cx->pp_scratch);
