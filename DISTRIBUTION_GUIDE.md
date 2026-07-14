@@ -237,10 +237,14 @@ Checklist par release binaire :
    sont un jour distribués hors dépôt).
 3. **Pas de restrictions supplémentaires** : ne pas ajouter d'EULA/conditions
    qui contrediraient la GPLv3 sur le binaire distribué.
-4. **Voix Piper** : ne pas embarquer de modèles de voix dans les archives sans
-   avoir vérifié la licence du `MODEL_CARD` de chaque voix (elles sont
-   normalement téléchargées par l'utilisateur via
-   `scripts/install_piper_voices.sh`).
+4. **Voix Piper embarquées** : les voix listées dans l'option CMake
+   `SP3CTRA_EMBED_VOICES` sont copiées dans `Contents/Resources/piper_voices/`
+   de chaque format et donc REDISTRIBUÉES (~79 MB par voix et par format —
+   surveiller la taille des zips `prebuilt/`). N'y mettre que des voix à
+   licence claire (défauts : siwis CC-BY 4.0, ljspeech domaine public — voir
+   THIRD-PARTY-NOTICES.md ; jamais lessac/Blizzard). Les autres voix restent
+   externes via `scripts/install_piper_voices.sh` + le dossier configurable de
+   la page VOICE.
 5. **macOS Gatekeeper** (indépendant de la licence) : pour une distribution
    sans avertissement de quarantaine, signer Developer ID + notariser les
    trois formats.
