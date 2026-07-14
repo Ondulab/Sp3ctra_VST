@@ -748,15 +748,37 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
                                 || vizSource == VisualizerMode::SPCTR_BLOB);
         ChainPlan gatePlan;
         chain_plan_get(&gatePlan);
-        const SynthChainPlan* spGate;
+        /* (P4-M4) plan.synth[] is gone — the gate follows the chain that
+         * actually FEEDS the viewed engine: SPCTR = the first "→ LUXSTRAL"
+         * send's chain (the head tap's source), SYNTH = the Path-B chain
+         * (first "→ LUXSYNTH" OUT, else "→ LUXWAVE"). No OUT anywhere →
+         * unfed engine: the tap is already white, nothing to gate. */
+        const SynthChainPlan* spGate = nullptr;
         if (isSpctrLocal)
-            spGate = &gatePlan.synth[CHAIN_SYNTH_LUXSTRAL];
+        {
+            if (gatePlan.num_ls_sends > 0)
+                spGate = &gatePlan.ls_send[0].recipe;
+        }
         else
-            spGate = gatePlan.synth[CHAIN_SYNTH_LUXSYNTH].present
-                   ? &gatePlan.synth[CHAIN_SYNTH_LUXSYNTH]
-                   : &gatePlan.synth[CHAIN_SYNTH_LUXWAVE];
+        {
+            const SynthChainPlan* lw = nullptr;
+            for (int c = 0; c < gatePlan.num_chains && spGate == nullptr; ++c)
+            {
+                const SynthChainPlan& sp = gatePlan.chain[c];
+                if (! sp.present) continue;
+                for (int i = 0; i < sp.num_inserts; ++i)
+                {
+                    if (sp.insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
+                    { spGate = &sp; break; }
+                    if (sp.insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXWAVE
+                        && lw == nullptr)
+                        lw = &sp;
+                }
+            }
+            if (spGate == nullptr) spGate = lw;
+        }
 
-        if (spGate->present && spGate->has_sampler)
+        if (spGate != nullptr && spGate->has_sampler)
         {
             // Sampler-fed chain: honour sampler freeze, bypass during recording.
             const bool isRecording = (lux_sampler_is_recording() != 0);
@@ -774,9 +796,9 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
                 if (rawSmpFreeze == 1) goto done;
             }
         }
-        else if (!spGate->present
-                 || spGate->source_kind == CHAIN_SRC_LIVE
-                 || spGate->source_kind == CHAIN_SRC_NONE)
+        else if (spGate != nullptr
+                 && (spGate->source_kind == CHAIN_SRC_LIVE
+                     || spGate->source_kind == CHAIN_SRC_NONE))
         {
             // Device-fed chain (or absent engine → legacy live fallback):
             // honour the device transport, ignore sampler state entirely.

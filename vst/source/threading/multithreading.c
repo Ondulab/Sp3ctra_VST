@@ -48,16 +48,8 @@ static PreprocessedImageData s_ls_send_pp_feeder;  /* feeder tick */
 /* M4 — per-thread scratch for ONE LuxSynth send's conditioned line. */
 static float s_lx_line[CIS_MAX_PIXELS_NB];         /* udpThread */
 static float s_lx_line_feeder[CIS_MAX_PIXELS_NB];  /* feeder tick */
-static int s_udp_frame_ls_sends = 0;   /* udpThread-only: plan.num_ls_sends of
-                                        * the current line (commit-scope read) */
 static int s_udp_frame_pb_ran = 0;     /* udpThread-only: Path-B products of
                                         * preprocessed_temp valid this line */
-static int s_udp_frame_live_pp = 0;    /* udpThread-only: pipeline_process_frame
-                                        * ran on the live path this line — the
-                                        * whole-struct commit must gate on THIS
-                                        * (not re-evaluate its condition) so an
-                                        * uncomputed preprocessed_temp is never
-                                        * committed */
 
 /* ── Per-chain playback (2026-07-12) ─────────────────────────────────────────
  * Does this chain host `engine`'s SAMPLER? (marker slot = engine A=0/B=1).
@@ -419,12 +411,11 @@ static const uint8_t *chain_white_line(void)
  * The scratch is written by whichever thread currently drives the per-synth
  * processing (udpThread while the device streams, the feeder tick otherwise —
  * see internal_source_live_streaming()). The 250 ms hand-over hysteresis makes
- * concurrent writes to the same synth slot practically impossible; a glitched
- * frame at the boundary is acceptable.
+ * concurrent writes to the same slot practically impossible; a glitched frame
+ * at the boundary is acceptable.
  *
- * Slots: [0..3] synth engines (legacy recipes), [4..11] the M3 uniform chain
- * recipes (CHAIN_SYNTH_COUNT + chain_idx). */
-static uint8_t s_synth_src_scratch[CHAIN_SYNTH_COUNT + CHAIN_MAX_CHAINS][3][INTERNAL_SRC_MAX_PIXELS];
+ * One slot per MODEL CHAIN (P4-M4 — the legacy synth[] recipes are gone). */
+static uint8_t s_synth_src_scratch[CHAIN_MAX_CHAINS][3][INTERNAL_SRC_MAX_PIXELS];
 
 static int synth_source_base(const SynthChainPlan *sp, int synth_slot,
                              DoubleBuffer *db, int nb_pixels,
@@ -436,8 +427,7 @@ static int synth_source_base(const SynthChainPlan *sp, int synth_slot,
     {
         /* Defensive clamp — every caller passes a slot < the scratch dim
          * (engines 0..3, uniform chains 4..11). */
-        if (synth_slot < 0
-            || synth_slot >= CHAIN_SYNTH_COUNT + CHAIN_MAX_CHAINS)
+        if (synth_slot < 0 || synth_slot >= CHAIN_MAX_CHAINS)
             synth_slot = 0;
         uint8_t *r = s_synth_src_scratch[synth_slot][0];
         uint8_t *g = s_synth_src_scratch[synth_slot][1];
@@ -849,11 +839,8 @@ int chain_additive_player_candidate(int is_score, int engine_slot)
     if (plan.num_ls_sends > 0)
         return chain_player_owned(&plan.ls_send[0].recipe, is_score,
                                   engine_slot);
-    /* no send → legacy additive tick; the first sampler chain owns it */
-    for (int c = 0; c < plan.num_chains; c++)
-        if (plan.chain[c].present
-            && chain_player_owned(&plan.chain[c], is_score, engine_slot))
-            return 1;
+    /* (P4-M4) 0 sends → the mixer commits SILENCE (D1); the additive
+     * sections are never player-owned. */
     return 0;
 }
 
@@ -1270,8 +1257,6 @@ void *udpThread(void *arg) {
          * rack edit is published mid-frame. */
         ChainPlan frame_plan;
         chain_plan_get(&frame_plan);
-        s_udp_frame_ls_sends = frame_plan.num_ls_sends;   /* P3 — read by the
-                                     * commit block after this scope closes */
 
         /* (P4-M3) The global MODULATED bus is DEAD as a routing channel: every
          * sampler chain — owner included — executes through the uniform
@@ -1280,19 +1265,14 @@ void *udpThread(void *arg) {
          * frame), and the zone-1 view follows the selection tap (D2). No
          * dedicated modulated build, no shortcut walk, no PLAYING re-copy. */
 
-        /* ── Legacy full-pipeline tick input ──────────────────────────────────
-         * With LuxStral sends present (any "→ LUXSTRAL" placed), the M3 chain
-         * loop below owns every chain (inserts, probes, taps, staging) and the
-         * audio-thread mixer owns db's additive sections — this base frame
-         * only keeps pipeline_process_frame ticking for the legacy commit
-         * paths (no-LuxStral topologies + Path-B products). */
-        int legacy_src_sig;
-        {
-            const SynthChainPlan *spA = &frame_plan.synth[CHAIN_SYNTH_LUXSTRAL];
-            legacy_src_sig = synth_source_base(spA, CHAIN_SYNTH_LUXSTRAL, db,
-                                               nb_pixels,
-                                               &src_R, &src_G, &src_B);
-        }
+        /* (P4-M4) The legacy no-send live tick is DEAD in VST: the audio
+         * mixer is the additive writer in EVERY topology (0 sends → silence,
+         * D1 — no "→ LUXSTRAL" module = unfed engine). The full pipeline
+         * only survives for the non-VST standalone, fed by the raw live
+         * frame. */
+        src_R = db->activeBuffer_R;
+        src_G = db->activeBuffer_G;
+        src_B = db->activeBuffer_B;
 #ifdef VST_MODE
         const int player_running_now = lux_sampler_is_playing();
         const int score_playing_now  = lux_sampler_is_score_playing();
@@ -1364,7 +1344,7 @@ void *udpThread(void *arg) {
                 {
                     const uint8_t *pmR, *pmG, *pmB;
                     const int pmSig = synth_source_base(
-                        sp, CHAIN_SYNTH_COUNT + c, db, nb_pixels,
+                        sp, c, db, nb_pixels,
                         &pmR, &pmG, &pmB);
                     const int own_mk = chain_owning_marker_pos(
                         sp, score_playing_now && sp->has_score, -1);
@@ -1408,7 +1388,7 @@ void *udpThread(void *arg) {
             }
 
             const uint8_t *sbR, *sbG, *sbB;
-            const int sig = synth_source_base(sp, CHAIN_SYNTH_COUNT + c, db,
+            const int sig = synth_source_base(sp, c, db,
                                               nb_pixels, &sbR, &sbG, &sbB);
             if (synth_chain_has_no_signal(sp, sig, score_playing_now))
             {
@@ -1457,39 +1437,21 @@ void *udpThread(void *arg) {
                     ex.lsR, ex.lsG, ex.lsB, nb_pixels);
         }
 
-        /* Live-path full preprocess — ONLY when its result is actually
-         * committed (the whole-struct commit below: no "→ LUXSTRAL" send,
-         * sampler idle passthrough — display topologies). With sends staged
-         * the audio-thread mixer owns the additive sections, and Path-B is
-         * recomputed at its OUT marker (or zeroed / player-owned): everything
-         * this call computes is discarded. It was the single largest per-line
-         * CPU block on this thread (grayscale+contrast+gamma+dB+notes + FFT).
-         * The commit gates on s_udp_frame_live_pp — the SAME decision — so a
-         * skipped compute can never be committed (no TOCTOU on the sampler
-         * playing state between here and the commit). */
-#ifdef VST_MODE
-        /* legacy_src_sig >= 0: never compute (nor commit) the legacy pipeline
-         * from a no-signal base — src_* are the white line then (P4-M1). */
-        s_udp_frame_live_pp =
-            (legacy_src_sig >= 0 && frame_plan.num_ls_sends == 0 &&
-             !lux_sampler_is_playing() && lux_sampler_is_passthrough());
-#else
-        s_udp_frame_live_pp = 1;   /* legacy standalone: unconditional commit */
-        (void) legacy_src_sig;
-#endif
-        if (s_udp_frame_live_pp) {
-          if (pipeline_process_frame(src_R, src_G, src_B, &live_cfg, &preprocessed_temp) != 0) {
-            log_error("THREAD", "Pipeline processing failed");
-          }
+#ifndef VST_MODE
+        /* Legacy standalone full preprocess — unconditional commit below. */
+        if (pipeline_process_frame(src_R, src_G, src_B, &live_cfg, &preprocessed_temp) != 0) {
+          log_error("THREAD", "Pipeline processing failed");
         }
-
-        /* Per-engine input tap A — no-LuxStral topologies only (with sends,
-         * the chain loop above published it from the first send). While a
-         * player runs, FramePlayerThread owns the tap. */
+#else
+        (void) src_R; (void) src_G; (void) src_B;
+        /* No "→ LUXSTRAL" module anywhere → the engine is UNFED (D1): white
+         * tap. With sends, the chain loop above published it from the first
+         * send; while a player runs, its walk owns the tap. */
         if (frame_plan.num_ls_sends == 0 && !player_running_now)
             audio_image_buffers_publish_engine_input(
                 audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
-                src_R, src_G, src_B, nb_pixels);
+                NULL, NULL, NULL, nb_pixels);
+#endif
 
         /* ── Path B (LuxSynth + LuxWave) — fed at its OUT marker position ────
          * The chain loop above captured the stream AT the "→ LUXSYNTH" OUT
@@ -1544,25 +1506,12 @@ void *udpThread(void *arg) {
       swapBuffers(db);
       updateLastValidImage(db);
 
-      /* ── M7 — plan-driven commits (no legacy source-type routing) ───────── */
-#ifdef VST_MODE
-      {
-        /* Synth-split P3 — when "→ LUXSTRAL" sends exist the audio-thread
-         * MIXER owns the additive/stereo/strokeforge sections of
-         * db->preprocessed_data (N-send blend) and polyphonic has its own
-         * dedicated block below — nothing to commit from here. */
-        if (s_udp_frame_live_pp)
-        {
-          /* No "→ LUXSTRAL" send anywhere: the raw tick is the additive
-           * writer (engine disabled by the enable bridge — display paths
-           * only). While a player runs, FramePlayerThread owns the commit.
-           * Gate == "pipeline_process_frame ran this line" (same decision,
-           * decided once at compute time). */
-          db->preprocessed_data = preprocessed_temp;
-          db->dataReady = 1;
-        }
-      }
-#else
+      /* ── Plan-driven commits (P4-M4) ──────────────────────────────────────
+       * VST: the audio-thread MIXER owns the additive/stereo/strokeforge
+       * sections of db->preprocessed_data in EVERY topology (0 sends →
+       * silence, D1); polyphonic has its dedicated block below. Nothing to
+       * commit from here. Standalone keeps the legacy whole-struct commit. */
+#ifndef VST_MODE
         db->preprocessed_data = preprocessed_temp;
         db->dataReady = 1;
 #endif
@@ -1698,7 +1647,7 @@ void internal_sources_process_tick(void *arg)
   if (spSmp)
   {
       const uint8_t *sbR, *sbG, *sbB;
-      (void) synth_source_base(spSmp, CHAIN_SYNTH_COUNT + smp_owner_chain,
+      (void) synth_source_base(spSmp, smp_owner_chain,
                                db, nb_pixels, &sbR, &sbG, &sbB);
       lux_sampler_on_live_frame_assembled(sbR, sbG, sbB, (uint16_t)nb_pixels);
   }
@@ -1766,7 +1715,7 @@ void internal_sources_process_tick(void *arg)
        * feeds the upstream probes/OUTs and every SAMPLER marker records its
        * INPUT into its armed engine. */
       const uint8_t *pmR, *pmG, *pmB;
-      const int pmSig = synth_source_base(sp, CHAIN_SYNTH_COUNT + c, db,
+      const int pmSig = synth_source_base(sp, c, db,
                                           nb_pixels, &pmR, &pmG, &pmB);
       const int own_mk = chain_owning_marker_pos(
           sp, score_playing && sp->has_score, -1);
@@ -1798,7 +1747,7 @@ void internal_sources_process_tick(void *arg)
     }
 
     const uint8_t *sbR, *sbG, *sbB;
-    const int sig = synth_source_base(sp, CHAIN_SYNTH_COUNT + c, db,
+    const int sig = synth_source_base(sp, c, db,
                                       nb_pixels, &sbR, &sbG, &sbB);
     const int no_sig = synth_chain_has_no_signal(sp, sig, score_playing);
     if (no_sig || sig <= 0)
@@ -2065,13 +2014,15 @@ void *audioProcessingThread(void *arg) {
        * sends + Chain-2 transport envelope. */
       pipeline_luxwave_feed_tick(&planB_render);
 
-      if (planB_render.num_ls_sends > 0)
       {
-        /* ── Synth-split P3: PULL MIX ─────────────────────────────────────
+        /* ── PULL MIX — THE additive writer (P4-M4, D1) ───────────────────
          * Blend every active LuxStral send (intensity-weighted) into the
          * single engine feed. The mixer is db->preprocessed_data's SOLE
-         * writer for the additive/stereo/strokeforge sections while sends
-         * exist (producers stage; udp/feeder commit Path-B products only).
+         * writer for the additive/stereo/strokeforge sections — always
+         * (producers stage; udp/feeder commit Path-B products only). With
+         * ZERO "→ LUXSTRAL" modules placed, mixed == 0 → TRUE silence is
+         * committed: no module OUT = the engine is unfed, doctrine D1 (the
+         * legacy no-send live tick is gone).
          * StrokeForge analyses the MIXED notes — single-send parity intact. */
         DoubleBuffer *mdb = context->doubleBuffer;
         static PreprocessedImageData s_mixed_pp;   /* audio-thread scratch */
@@ -2135,10 +2086,6 @@ void *audioProcessingThread(void *arg) {
 
         synth_AudioProcess(audio_read_R, audio_read_G, audio_read_B,
                            context->doubleBuffer);
-      }
-      else
-      {
-        synth_AudioProcess(audio_read_R, audio_read_G, audio_read_B, context->doubleBuffer);
       }
     }
 #else

@@ -251,7 +251,30 @@ Validation : vue « CHAIN 1 » vivante en idle/REC/PLAY/score ; waterfall sans f
 play/stop ; REC idle depuis IMAGE (feeder) et device (udp) ; badge zone-1 exact sur
 module aval pendant lecture.
 
-## M4 — Purge legacy : le mixer est LE SEUL écrivain (M)
+## M4 — Purge legacy : le mixer est LE SEUL écrivain — ✅ FAIT (2026-07-14)
+
+Statut : implémenté, build vert. Réalisation effective :
+- **Mixer inconditionnel (D1)** : le pull-mix audio tourne dans TOUTE topologie ;
+  0 send → `mixed == 0` → commit silence (additive/stereo/strokeforge zérotés).
+  Sans module → LUXSTRAL, LuxStral est muet ET son tap est BLANC (publié par
+  udpThread). Le moteur était déjà désactivé par l'enable bridge — D1 devient
+  une garantie structurelle, plus un effet de bord UI.
+- **Chemin legacy VST MORT** : plus de `pipeline_process_frame` ni de commit
+  struct-entière côté VST (réservés au standalone non-VST, nourri du frame brut) ;
+  `s_udp_frame_live_pp`/`s_udp_frame_ls_sends`/`lux_sampler_is_passthrough`-gate
+  supprimés.
+- **Le player ne commit plus JAMAIS l'additif** : needPathA/`s_playerSendCount`
+  supprimés (sa contribution passe par les sends stagés de sa marche) ; le
+  fallback « no-send → première chaîne sampler » de
+  `chain_additive_player_candidate` fermé (course player/mixeur impossible).
+  Le player ne commit plus que le polyphonic (vues) quand il relaie la chaîne pb.
+- **`plan.synth[]` SUPPRIMÉ** (struct + CHAIN_SYNTH_* + fill()) ; gate freeze de
+  CisVisualizer → recettes réelles (1er send LuxStral / chaîne Path-B) ; scratch
+  source re-keyé sur les seuls index de chaîne (8 slots au lieu de 12).
+Deltas assumés : topologie sans OUT → vues SPCTR blanches (unfed, doctrine) ;
+absence d'OUT ne « gate » plus les panels sur le transport device.
+
+### Plan initial (référence)
 
 1. Le bloc mixer audio (multithreading.c:2649-2724) tourne INCONDITIONNELLEMENT en
    VST : `num_ls_sends == 0` → commit silence (sections additive/stereo/strokeforge à

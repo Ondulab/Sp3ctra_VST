@@ -4284,32 +4284,8 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
         }
     };
 
-    // engineSlot >= 0 additionally matches ModuleInstance.slot — used to tell the
-    // two LuxStral engines apart (A = slot 0, B = slot 1); -1 = match by type only.
-    auto fill = [&](ModuleType synth, int slot, int engineSlot = -1)
-    {
-        int ci = -1, idx = -1;
-        for (int c = 0; c < chainModel_.numChains() && ci < 0; ++c)
-        {
-            const auto& mods = chainModel_.chains[(size_t) c].modules;
-            for (int i = 0; i < (int) mods.size(); ++i)
-                if (mods[(size_t) i].type == synth
-                    && (engineSlot < 0 || mods[(size_t) i].slot == engineSlot))
-                { ci = c; idx = i; break; }
-        }
-        SynthChainPlan& sp = plan.synth[slot];
-        if (ci < 0) { sp.present = 0; return; }
-        fillFromChain(sp, ci, idx);
-        // Selecting the SYNTH module itself taps its INPUT — the chain stream
-        // after every upstream insert (drives the engine-B COLOR view + keeps
-        // zone 1 contextual for synth selections).
-        if (chainModel_.chains[(size_t) ci].modules[(size_t) idx].id == vizTapModuleId_)
-            sp.viz_tap_insert = sp.num_inserts;
-    };
-
-    fill(ModuleType::LuxStral, CHAIN_SYNTH_LUXSTRAL,   0);  // slot 0 (viz compat)
-    fill(ModuleType::LuxSynth, CHAIN_SYNTH_LUXSYNTH);
-    fill(ModuleType::LuxWave,  CHAIN_SYNTH_LUXWAVE);
+    // (P4-M4) plan.synth[] is gone — chain[] and ls_send[] are the only
+    // recipes; every consumer (executors, players, gates) is plan-driven.
 
     // Synth-split P3 — LuxStral SENDS: every "→ LUXSTRAL" OUT across all
     // chains becomes one ls_send entry (recipe compiled up to the OUT's
