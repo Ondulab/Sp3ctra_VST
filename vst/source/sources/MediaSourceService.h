@@ -27,9 +27,9 @@ class MediaSourceService : public juce::Thread
 {
 public:
     MediaSourceService(std::array<std::unique_ptr<ImageSourceEngine>, 8>& imgs,
-                       VideoSourceEngine& vid,
-                       CameraSourceEngine& cam)
-        : Thread("Sp3ctraMediaSrc"), imgs_(imgs), vid_(vid), cam_(cam) {}
+                       std::array<std::unique_ptr<VideoSourceEngine>, 8>& vids,
+                       std::array<std::unique_ptr<CameraSourceEngine>, 8>& cams)
+        : Thread("Sp3ctraMediaSrc"), imgs_(imgs), vids_(vids), cams_(cams) {}
 
     ~MediaSourceService() override { stopThread(2000); }
 
@@ -44,8 +44,12 @@ public:
             for (auto& eng : imgs_)
                 if (eng != nullptr)
                     eng->tick(now);
-            vid_.tick(now);
-            cam_.tick(now);
+            for (auto& v : vids_)
+                if (v != nullptr)
+                    v->tick(now);
+            for (auto& c : cams_)
+                if (c != nullptr)
+                    c->tick(now);
 
             if (auto* ctx = ctx_.load(std::memory_order_acquire))
                 internal_sources_process_tick(ctx);
@@ -62,9 +66,9 @@ public:
     }
 
 private:
-    std::array<std::unique_ptr<ImageSourceEngine>, 8>& imgs_;
-    VideoSourceEngine&  vid_;
-    CameraSourceEngine& cam_;
+    std::array<std::unique_ptr<ImageSourceEngine>, 8>&  imgs_;
+    std::array<std::unique_ptr<VideoSourceEngine>, 8>&  vids_;
+    std::array<std::unique_ptr<CameraSourceEngine>, 8>& cams_;
     std::atomic<Context*> ctx_ { nullptr };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MediaSourceService)

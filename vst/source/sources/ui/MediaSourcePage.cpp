@@ -197,7 +197,7 @@ MediaSourcePage::MediaSourcePage(Sp3ctraAudioProcessor& p, Kind k)
         positionSlider.onValueChange = [this]
         {
             if (scrubbing_)
-                if (auto* v = processor.getVideoSource())
+                if (auto* v = processor.getVideoSource(slot_))
                     v->seekFrac(positionSlider.getValue());
         };
         addAndMakeVisible(positionSlider);
@@ -238,7 +238,7 @@ void MediaSourcePage::chooseMedia()
             }
             else
             {
-                if (auto* e = safe->processor.getVideoSource())
+                if (auto* e = safe->processor.getVideoSource(safe->slot_))
                     ok = e->loadFile(file, err);
             }
             if (! ok && err.isNotEmpty())
@@ -255,11 +255,11 @@ void MediaSourcePage::clearMedia()
             if (auto* e = processor.getImageSource(slot_)) e->unload();
             break;
         case Kind::Video:
-            if (auto* e = processor.getVideoSource()) e->unload();
+            if (auto* e = processor.getVideoSource(slot_)) e->unload();
             break;
         case Kind::Camera:
-            if (auto* e = processor.getCameraSource()) e->closeDevice();
-            processor.setCameraDeviceName({});
+            if (auto* e = processor.getCameraSource(slot_)) e->closeDevice();
+            processor.setCameraDeviceName(slot_, {});
             deviceCombo.setSelectedId(0, juce::dontSendNotification);
             break;
     }
@@ -268,8 +268,8 @@ void MediaSourcePage::clearMedia()
 void MediaSourcePage::refreshDevices()
 {
     const auto names   = CameraSourceEngine::getDeviceNames();
-    const auto current = processor.getCameraSource() != nullptr
-                       ? processor.getCameraSource()->getOpenDeviceName()
+    const auto current = processor.getCameraSource(slot_) != nullptr
+                       ? processor.getCameraSource(slot_)->getOpenDeviceName()
                        : juce::String();
 
     deviceCombo.clear(juce::dontSendNotification);
@@ -286,14 +286,14 @@ void MediaSourcePage::openSelectedDevice()
     const int idx = deviceCombo.getSelectedId() - 1;
     if (idx < 0)
         return;
-    if (auto* e = processor.getCameraSource())
+    if (auto* e = processor.getCameraSource(slot_))
     {
         // Already open on this device → nothing to do.
         if (e->isOpen() && e->getOpenDeviceIndex() == idx)
             return;
         juce::String err;
         if (e->openDevice(idx, err))
-            processor.setCameraDeviceName(deviceCombo.getText());
+            processor.setCameraDeviceName(slot_, deviceCombo.getText());
         else
             juce::AlertWindow::showMessageBoxAsync(
                 juce::MessageBoxIconType::WarningIcon, "Camera", err);
@@ -305,8 +305,8 @@ juce::String MediaSourcePage::lineParamId() const
     switch (kind)
     {
         case Kind::Image:  return imgSrcParam(slot_, "Pos");
-        case Kind::Video:  return "vidSrcLine";
-        case Kind::Camera: return "camSrcLine";
+        case Kind::Video:  return vidSrcParam(slot_, "Line");
+        case Kind::Camera: return camSrcParam(slot_, "Line");
     }
     return "imgSrcPos";
 }
@@ -360,7 +360,7 @@ void MediaSourcePage::timerCallback()
     }
     else if (kind == Kind::Video)
     {
-        if (auto* e = processor.getVideoSource())
+        if (auto* e = processor.getVideoSource(slot_))
         {
             img = e->getPreviewImage();
             if (e->isLoaded())
@@ -377,7 +377,7 @@ void MediaSourcePage::timerCallback()
     }
     else
     {
-        if (auto* e = processor.getCameraSource())
+        if (auto* e = processor.getCameraSource(slot_))
         {
             img = e->getPreviewImage();
             if (e->isOpen())
@@ -459,7 +459,7 @@ void MediaSourcePage::resized()
 void MediaSourcePage::setSlot(int slot)
 {
     slot = juce::jlimit(0, 7, slot);
-    if (kind != Kind::Image || slot == slot_)
+    if (slot == slot_)
         return;
     slot_ = slot;
 
@@ -472,23 +472,37 @@ void MediaSourcePage::setSlot(int slot)
     speedAttach.reset();
     learnAtts_.clear();
 
+    const auto enabledId = kind == Kind::Image ? imgSrcParam(slot_, "Enabled")
+                         : kind == Kind::Video ? vidSrcParam(slot_, "Enabled")
+                                               : camSrcParam(slot_, "Enabled");
     activeAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        apvts, imgSrcParam(slot_, "Enabled"), activeButton);
-    playAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        apvts, imgSrcParam(slot_, "Play"), playButton);
-    loopAttach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-        apvts, imgSrcParam(slot_, "Loop"), loopCombo);
-    speedAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, imgSrcParam(slot_, "Duration"), speedSlider);
+        apvts, enabledId, activeButton);
+    learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
+        mm, activeButton, enabledId));
 
-    learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
-        mm, activeButton, imgSrcParam(slot_, "Enabled")));
-    learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
-        mm, playButton,  imgSrcParam(slot_, "Play")));
-    learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
-        mm, speedSlider, imgSrcParam(slot_, "Duration")));
-    learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
-        mm, loopCombo,   imgSrcParam(slot_, "Loop")));
+    if (kind != Kind::Camera)
+    {
+        const auto playId  = kind == Kind::Image ? imgSrcParam(slot_, "Play")
+                                                 : vidSrcParam(slot_, "Play");
+        const auto loopId  = kind == Kind::Image ? imgSrcParam(slot_, "Loop")
+                                                 : vidSrcParam(slot_, "Loop");
+        const auto speedId = kind == Kind::Image ? imgSrcParam(slot_, "Duration")
+                                                 : vidSrcParam(slot_, "Speed");
+        playAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, playId, playButton);
+        loopAttach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, loopId, loopCombo);
+        speedAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+            apvts, speedId, speedSlider);
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
+            mm, playButton,  playId));
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
+            mm, speedSlider, speedId));
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
+            mm, loopCombo,   loopId));
+    }
+    else
+        refreshDevices();   // combo mirrors THIS instance's open device
 
     repaint();
 }

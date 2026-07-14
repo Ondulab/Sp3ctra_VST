@@ -120,7 +120,7 @@ void MediaSourceSetupPanel::clearMedia()
             break;
         case Kind::Camera:
             if (auto* e = processor.getCameraSource()) e->closeDevice();
-            processor.setCameraDeviceName({});
+            processor.setCameraDeviceName(0, {});
             deviceCombo.setSelectedId(0, juce::dontSendNotification);
             break;
     }
@@ -155,7 +155,7 @@ void MediaSourceSetupPanel::openSelectedDevice()
             return;
         juce::String err;
         if (e->openDevice(idx, err))
-            processor.setCameraDeviceName(deviceCombo.getText());
+            processor.setCameraDeviceName(0, deviceCombo.getText());
         else
             juce::AlertWindow::showMessageBoxAsync(
                 juce::MessageBoxIconType::WarningIcon, "Camera", err);

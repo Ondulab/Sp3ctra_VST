@@ -136,8 +136,12 @@ sync/présence/never-auto-run par slot), persistence imagePath{N} (clé legacy
 slot 0), MediaSourceService tick ×8, MediaSourcePage.setSlot (rebind
 attachments reset-first + MIDI-learn + moteur + curseur ligne par slot,
 poussé par l'éditeur à la sélection).
-RESTE M3b/M3c : VIDEO puis CAMERA — même recette exacte (broadcast slot -1
-en attendant : contenus partagés documentés).
+M3b VIDEO + M3c CAMERA ✅ FAITS (2026-07-15) — recette identique : entrées
+manifest (slot 0 = ids legacy vidSrc*/camSrc*), banques ×8, 8 moteurs par
+type (slot → pool), présence/réouverture caméra PAR SLOT (device persisté
+cameraDevice{N}, videoPath{N}), MediaSourcePage.setSlot généralisé aux 3
+kinds (attachments par kind, combo device par instance), éditeur pousse le
+slot des 3 pages. M3 COMPLET — plus aucun broadcast dans le pool média.
 
 ### P5-M4 — ScoreSlotPool + lecture par slot (L — cœur de B)
 Pool de slots score (frames sortis de LuxSampler) ; ScorePlayerService

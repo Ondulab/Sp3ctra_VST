@@ -140,6 +140,10 @@ public:
     double getDurationS() const;
     bool   canPlayReverse() const;
 
+    // ── pool slot (P5-M3): which (VIDEO, slot) line this engine publishes ───
+    void setSlot(int s) noexcept   { slot_ = s; }
+    int  getSlot() const noexcept  { return slot_; }
+
     // ── module presence / params (message thread, atomics) ──────────────────
     // Re-activation republishes the current line (deactivation erased it).
     void setModulePresent(bool p)  { present_.store(p);  if (p) lineDirty_.store(true); updateActive(); }
@@ -165,6 +169,7 @@ private:
     void applyRate();
     void publishLine();
 
+    int                slot_ { 0 };   // P5-M3 — (VIDEO, slot) pool line
     std::unique_ptr<VideoFileReader> reader_;
     mutable std::mutex  mediaMutex_;      // reader open/close + preview
     juce::File          file_;
@@ -211,6 +216,10 @@ public:
     juce::String getOpenDeviceName() const;
     juce::Image  getPreviewImage() const;
 
+    // ── pool slot (P5-M3): which (CAMERA, slot) line this engine publishes ──
+    void setSlot(int s) noexcept   { slot_ = s; }
+    int  getSlot() const noexcept  { return slot_; }
+
     // ── module presence / params ─────────────────────────────────────────────
     // Re-activation republishes the current line (deactivation erased it).
     void setModulePresent(bool p)  { present_.store(p);  if (p) lineDirty_.store(true); updateActive(); }
@@ -226,6 +235,7 @@ public:
 private:
     void updateActive();
 
+    int                slot_ { 0 };   // P5-M3 — (CAMERA, slot) pool line
     struct FrameListener;
     std::unique_ptr<juce::CameraDevice> device_;
     std::unique_ptr<FrameListener>      listener_;
