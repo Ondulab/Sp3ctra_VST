@@ -160,7 +160,7 @@ void ImageSourceEngine::setPlaying(bool p)
 
 void ImageSourceEngine::updateActive()
 {
-    internal_source_set_active(INTERNAL_SRC_IMAGE,
+    internal_source_set_active(INTERNAL_SRC_IMAGE, /*slot broadcast*/ -1,
                                present_.load() && loaded_.load()
                                    && enabled_.load() ? 1 : 0);
 }
@@ -172,7 +172,7 @@ void ImageSourceEngine::publishRow(double frac)
         return;
     const int    row = juce::jlimit(0, rows_ - 1, (int) std::lround(frac * (rows_ - 1)));
     const size_t o   = (size_t) row * (size_t) width_;
-    internal_source_publish(INTERNAL_SRC_IMAGE,
+    internal_source_publish(INTERNAL_SRC_IMAGE, /*slot broadcast*/ -1,
                             stripR_.data() + o, stripG_.data() + o, stripB_.data() + o,
                             width_);
 }
@@ -334,7 +334,7 @@ double VideoSourceEngine::getPositionFrac() const
 
 void VideoSourceEngine::updateActive()
 {
-    internal_source_set_active(INTERNAL_SRC_VIDEO,
+    internal_source_set_active(INTERNAL_SRC_VIDEO, /*slot broadcast*/ -1,
                                present_.load() && loaded_.load()
                                    && enabled_.load() ? 1 : 0);
 }
@@ -360,7 +360,7 @@ void VideoSourceEngine::publishLine()
 
     uint8_t r[INTERNAL_SRC_MAX_PIXELS], g[INTERNAL_SRC_MAX_PIXELS], b[INTERNAL_SRC_MAX_PIXELS];
     MediaSrc::extractLineFromImage(frame_, lineFrac_.load(), r, g, b, INTERNAL_SRC_MAX_PIXELS);
-    internal_source_publish(INTERNAL_SRC_VIDEO, r, g, b, INTERNAL_SRC_MAX_PIXELS);
+    internal_source_publish(INTERNAL_SRC_VIDEO, /*slot broadcast*/ -1, r, g, b, INTERNAL_SRC_MAX_PIXELS);
 }
 
 void VideoSourceEngine::tick(double nowMs)
@@ -562,7 +562,7 @@ juce::Image CameraSourceEngine::getPreviewImage() const
 
 void CameraSourceEngine::updateActive()
 {
-    internal_source_set_active(INTERNAL_SRC_CAMERA,
+    internal_source_set_active(INTERNAL_SRC_CAMERA, /*slot broadcast*/ -1,
                                present_.load() && open_.load()
                                    && enabled_.load() ? 1 : 0);
 }
@@ -586,7 +586,7 @@ void CameraSourceEngine::tick(double nowMs)
 
     uint8_t r[INTERNAL_SRC_MAX_PIXELS], g[INTERNAL_SRC_MAX_PIXELS], b[INTERNAL_SRC_MAX_PIXELS];
     MediaSrc::extractLineFromImage(frame, lineFrac_.load(), r, g, b, INTERNAL_SRC_MAX_PIXELS);
-    internal_source_publish(INTERNAL_SRC_CAMERA, r, g, b, INTERNAL_SRC_MAX_PIXELS);
+    internal_source_publish(INTERNAL_SRC_CAMERA, /*slot broadcast*/ -1, r, g, b, INTERNAL_SRC_MAX_PIXELS);
 
     if (fresh && (nowMs - lastPreviewMs_) > 100.0)
     {

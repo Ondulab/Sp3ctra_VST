@@ -544,8 +544,13 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
         juce::String tapLabel;
         int sc = -1, si = -1;
         if (const auto* m = audioProcessor.getChainModel().find(selUid, sc, si))
+        {
             tapLabel = moduleDisplayName(m->type).toUpperCase()
                      + " - CHAIN " + juce::String(sc + 1);
+            // P5-M2 — SRC_* views read the SELECTED instance's own pool slot.
+            if (ChainModel::isMediaSource(m->type))
+                cisVisualizer->setSelectedSourceSlot(m->slot >= 0 ? m->slot : 0);
+        }
         cisVisualizer->setSelectedTapLabel(tapLabel);
     }
 

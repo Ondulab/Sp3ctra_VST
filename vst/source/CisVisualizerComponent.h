@@ -77,6 +77,9 @@ public:
     /** Badge text for the SELECTED_TAP panel ("MASK - CHAIN 2"), pushed by the
      *  editor on every selection change. Message thread only. */
     void setSelectedTapLabel(const juce::String& label) { selectedTapLabel_ = label; }
+    /** P5-M2 — media slot of the SELECTED source instance: the SRC_* views
+     *  read that instance's own line from the (kind, slot) pool. */
+    void setSelectedSourceSlot(int slot) { selectedSourceSlot_ = juce::jlimit(0, 7, slot); }
 
 private:
     // ── Per-panel frame buffers ────────────────────────────────────────────────
@@ -283,6 +286,7 @@ private:
 
     // Badge for the SELECTED_TAP panel — module + chain of the selection.
     juce::String selectedTapLabel_;
+    int selectedSourceSlot_ { 0 };   // P5-M2 — media slot of the selected source
 
     // ── Blob overlay ──────────────────────────────────────────────────────────
     bool blobOverlayVisible = false;

@@ -431,7 +431,7 @@ static int synth_source_base(const SynthChainPlan *sp, int synth_slot,
         uint8_t *r = s_synth_src_scratch[synth_slot][0];
         uint8_t *g = s_synth_src_scratch[synth_slot][1];
         uint8_t *b = s_synth_src_scratch[synth_slot][2];
-        if (internal_source_copy(kind, r, g, b, nb_pixels) > 0)
+        if (internal_source_copy(kind, sp->source_slot, r, g, b, nb_pixels) > 0)
         {
             *out_r = r; *out_g = g; *out_b = b;
             return 1;
