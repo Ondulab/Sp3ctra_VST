@@ -56,6 +56,10 @@ typedef enum {
 typedef struct {
     int present;        /* 1 if this synth is placed in a chain */
     int source_kind;    /* ChainSourceKind */
+    int source_slot;    /* P5-M1 — the source MODULE INSTANCE's slot (media
+                         * pools, 0..7); 0 for SP3CTRA/none. M1: the runtime
+                         * still reads kind-wide state (internal_source_copy
+                         * ignores it) — consumed from P5-M2 on. */
     int has_sampler;    /* a Sampler module sits upstream in the chain */
     int has_score;      /* a Score module sits upstream in the chain */
     int num_inserts;    /* ordered Pitch/Mask inserts before the synth */

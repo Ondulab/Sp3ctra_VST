@@ -107,6 +107,37 @@ int ChainModel::firstFreeEngineSendSlot(ModuleType type,
     return -1;
 }
 
+int ChainModel::firstFreeMediaSlot(ModuleType type,
+                                   const juce::Uuid* movingId) const
+{
+    bool used[kMaxMediaSlots] = { false };
+    for (const auto& ch : chains)
+        for (const auto& m : ch.modules)
+        {
+            if (m.type != type) continue;
+            if (movingId != nullptr && m.id == *movingId) continue;
+            if (m.slot >= 0 && m.slot < kMaxMediaSlots) used[m.slot] = true;
+        }
+    for (int s = 0; s < kMaxMediaSlots; ++s)
+        if (! used[s]) return s;
+    return -1;
+}
+
+int ChainModel::firstFreeScorePlayerSlot(const juce::Uuid* movingId) const
+{
+    bool used[kMaxScorePlayers] = { false };
+    for (const auto& ch : chains)
+        for (const auto& m : ch.modules)
+        {
+            if (! isScoreFamily(m.type)) continue;
+            if (movingId != nullptr && m.id == *movingId) continue;
+            if (m.slot >= 0 && m.slot < kMaxScorePlayers) used[m.slot] = true;
+        }
+    for (int s = 0; s < kMaxScorePlayers; ++s)
+        if (! used[s]) return s;
+    return -1;
+}
+
 // Global (model-wide) placement limits — the per-chain rules live in canInsert.
 bool ChainModel::canInsertIntoNewChain(ModuleType type, const juce::Uuid* movingId) const
 {
@@ -126,19 +157,20 @@ bool ChainModel::canInsertIntoNewChain(ModuleType type, const juce::Uuid* moving
     if (isEngineSend(type) && firstFreeEngineSendSlot(type, movingId) < 0)
         return false;   // this type's 8 send slots are all placed
 
-    // Engine-backed UTIL modules (Score/Sequencer/Timbre) are singletons: at
-    // most one across the whole model. Pitch/Mask (processors), the SP3CTRA
-    // source, the Sampler and the engine sends (their own pools above) stay
-    // multi-instance.
-    // M9: the internal media sources (IMAGE/VIDEO/CAMERA) are engine singletons
-    // too — each engine holds ONE media/transport, so at most one instance each.
+    // P5-M1 — media sources and the score family are POOLED multi-instance
+    // (like the sampler): bounded by their slot pools, not singletons.
+    if (isMediaSource(type) && firstFreeMediaSlot(type, movingId) < 0)
+        return false;   // this media type's 8 slots are all placed
+    if (isScoreFamily(type) && firstFreeScorePlayerSlot(movingId) < 0)
+        return false;   // the family's 8 score-player slots are all placed
+
+    // Remaining singleton: SEQUENCER (engine-backed util driving the sampler
+    // engines — one instance model-wide). Synth-role types are the sends
+    // (their pools above).
     const ModuleRole role = moduleRole(type);
-    const bool mediaSource = (type == ModuleType::Image
-                           || type == ModuleType::Video
-                           || type == ModuleType::Camera);
-    if (mediaSource
-        || ((role == ModuleRole::Synth || role == ModuleRole::Util)
-            && ! isSamplerEngine(type) && ! isEngineSend(type)))
+    if ((role == ModuleRole::Synth || role == ModuleRole::Util)
+        && ! isSamplerEngine(type) && ! isEngineSend(type)
+        && ! isScoreFamily(type))
     {
         for (const auto& ch : chains)
             for (const auto& m : ch.modules)
@@ -186,6 +218,8 @@ bool ChainModel::insert(int chainIdx, ModuleType type, int dropIdx)
     const int slot = isSlottedType(type)   ? firstFreeVideoSlot()
                    : isSamplerEngine(type) ? firstFreeSamplerSlot()
                    : isEngineSend(type)    ? firstFreeEngineSendSlot(type)
+                   : isMediaSource(type)   ? firstFreeMediaSlot(type)
+                   : isScoreFamily(type)   ? firstFreeScorePlayerSlot()
                    : -1;
     jassert(! hasSlot(type) || slot >= 0);   // canInsert already gated pool-full
     auto& mods = chains[(size_t) chainIdx].modules;
@@ -447,6 +481,12 @@ void ChainModel::validateAndRepair()
         return t == ModuleType::LuxStral ? 0 : t == ModuleType::LuxSynth ? 1 : 2;
     };
     int sendBudget[3] = { kMaxEngineSends, kMaxEngineSends, kMaxEngineSends };
+    // P5-M1 — media pools (per kind) + score-player pool (per FAMILY).
+    auto mediaIdx = [](ModuleType t) noexcept {
+        return t == ModuleType::Image ? 0 : t == ModuleType::Video ? 1 : 2;
+    };
+    int mediaBudget[3] = { kMaxMediaSlots, kMaxMediaSlots, kMaxMediaSlots };
+    int scoreBudget    = kMaxScorePlayers;
 
     for (auto& ch : chains)
     {
@@ -484,6 +524,29 @@ void ChainModel::validateAndRepair()
                 kept.push_back(m);
                 continue;
             }
+            if (isMediaSource(m.type)) // ≤8 per kind; Source role: ≤1 source/chain
+            {
+                if (mediaBudget[mediaIdx(m.type)] <= 0)
+                    continue;            // 9th+ instance of this kind → drop
+                if (sawSource || seenTypes.count(m.type))
+                    continue;            // second source in this chain → drop
+                --mediaBudget[mediaIdx(m.type)];
+                sawSource = true;
+                seenTypes.insert(m.type);
+                kept.push_back(m);
+                continue;
+            }
+            if (isScoreFamily(m.type)) // ≤8 lecteurs pour la FAMILLE ; 1/type/chaîne
+            {
+                if (scoreBudget <= 0)
+                    continue;            // 9th+ score-family instance → drop
+                if (seenTypes.count(m.type))
+                    continue;            // duplicate type in this chain → drop
+                --scoreBudget;
+                seenTypes.insert(m.type);
+                kept.push_back(m);
+                continue;
+            }
             if (seenTypes.count(m.type))
                 continue;   // duplicate type → drop
             const ModuleRole role = moduleRole(m.type);
@@ -515,6 +578,8 @@ void ChainModel::validateAndRepair()
     bool usedVid[kMaxVideoSlots]     = { false };
     bool usedSmp[kMaxSamplerEngines] = { false };
     bool usedSend[3][kMaxEngineSends] = {{ false }};
+    bool usedMedia[3][kMaxMediaSlots] = {{ false }};
+    bool usedScore[kMaxScorePlayers]  = { false };
     for (auto& ch : chains)
         for (auto& m : ch.modules)
         {
@@ -537,6 +602,21 @@ void ChainModel::validateAndRepair()
                 bool* used = usedSend[sendIdx(m.type)];
                 if (m.slot >= 0 && m.slot < kMaxEngineSends && ! used[m.slot])
                     used[m.slot] = true;
+                else
+                    m.slot = -1;
+            }
+            else if (isMediaSource(m.type))
+            {
+                bool* used = usedMedia[mediaIdx(m.type)];
+                if (m.slot >= 0 && m.slot < kMaxMediaSlots && ! used[m.slot])
+                    used[m.slot] = true;
+                else
+                    m.slot = -1;
+            }
+            else if (isScoreFamily(m.type))
+            {
+                if (m.slot >= 0 && m.slot < kMaxScorePlayers && ! usedScore[m.slot])
+                    usedScore[m.slot] = true;
                 else
                     m.slot = -1;
             }
@@ -564,6 +644,19 @@ void ChainModel::validateAndRepair()
                 for (int s = 0; s < kMaxEngineSends; ++s)
                     if (! used[s]) { m.slot = s; used[s] = true; break; }
                 jassert(m.slot >= 0);   // guaranteed by the sendBudget cap above
+            }
+            else if (isMediaSource(m.type) && m.slot < 0)
+            {
+                bool* used = usedMedia[mediaIdx(m.type)];
+                for (int s = 0; s < kMaxMediaSlots; ++s)
+                    if (! used[s]) { m.slot = s; used[s] = true; break; }
+                jassert(m.slot >= 0);   // guaranteed by the mediaBudget cap above
+            }
+            else if (isScoreFamily(m.type) && m.slot < 0)
+            {
+                for (int s = 0; s < kMaxScorePlayers; ++s)
+                    if (! usedScore[s]) { m.slot = s; usedScore[s] = true; break; }
+                jassert(m.slot >= 0);   // guaranteed by the scoreBudget cap above
             }
         }
 }
