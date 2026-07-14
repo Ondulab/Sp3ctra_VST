@@ -1,30 +1,36 @@
 /**
  * @file VoiceGenTabComponent.h
  * @brief PLAY page for the VOICE block — type a text, synthesize it offline
- *        with a Piper neural voice (language auto-detected or picked) and
- *        encode the speech into a playable vocal spectrum.
+ *        with a Piper neural voice (language auto-detected or picked), then
+ *        generate / export / play its printable vocal spectrum.
  *
- * Fourth sibling of ScoreGenTabComponent / TimbreGenTabComponent /
- * MidiScoreGenTabComponent: same band geometry (CIS height, log-frequency
- * axis, PhonoPaper dB profile via scoregen::renderScore) and the same
- * audition path — the rendered page is loaded into the shared SCORE player
- * channel (LuxSampler::loadScoreFramesFromImage + uiPlayScore), driven by the
- * shared transport params (scoreLoop / scoreReverse / scoreSpeed /
- * scorePlaying). All state persists as JSON in apvts.state ("voiceGenState");
- * the synthesized WAV is cached in Application Support/Sp3ctra/voice_renders
- * so a restored session can replay without re-synthesizing.
+ * Exact functional clone of the SCORE page (ScoreGenTabComponent) where the
+ * source WAV comes from the embedded TTS instead of a file picker:
+ *   TTS block (voice + text + Rate/Expression/Silence)
+ *   → synthesized WAV (cached in Application Support/Sp3ctra/voice_renders)
+ *   → same top waveform strip with page-window picker + source audition
+ *   → same Writing Speed / Page / DPI / Multi-res generation controls
+ *   → GENERATE (worker thread) → page preview + IMAGE EQ + PNG/JPEG export
+ *   → same shared score-player transport (scoreLoop/scoreReverse/scoreSpeed/
+ *     scorePlaying params, LuxSampler::loadScoreFramesFromImage + uiPlayScore).
  *
- * The whole take is rendered with writingSpeed = 0 (stretched to one page):
- * text is NEVER cut, whatever its length; the log prints the Speed-knob value
- * that restores the natural speech tempo.
+ * GENERATE re-runs the TTS only when the text / voice / TTS options changed;
+ * otherwise it re-encodes the SAME take (the waveform window stays meaningful
+ * — VITS synthesis is stochastic, a new take would change the audio under the
+ * selection). Page state persists as JSON in apvts.state ("voiceGenState");
+ * the EQ curve rides in "voiceEqCurve" (same pattern as scoreEqCurve).
  */
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <vector>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
-#include "../IconPaths.h"
 #include "../midi/MidiLearnAttachment.h"
+#include "../IconPaths.h"
+#include "ScoreGenRenderer.h"
+#include "ScoreEqComponent.h"
+#include "WaveformSelectorComponent.h"
 #include "../tts/PiperTts.h"
 #include "../tts/VoiceGenJob.h"
 #include "../tts/LanguageDetector.h"
@@ -34,31 +40,17 @@ class VoiceGenTabComponent : public juce::Component,
 {
 public:
     static constexpr uint32_t kAccentARGB = 0xffd06a9e;   // rose (VOICE identity)
-    static constexpr int      kPreferredH = 520;
+    static constexpr int      kPreferredH = 780;
 
     explicit VoiceGenTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p)
     {
-        voices = PiperTts::listVoices();
-        restoreState();
+        score_settings_defaults(&settings_);
+        settings_.writingSpeed = 2.5;          // match the SCORE page default
+        restoreState();                        // may override externalVoicesDir
+        voices = PiperTts::listVoices(externalVoicesDir);
 
-        // ── Worker callbacks (fire on the worker → marshal to message thread) ─
-        job.onProgress = [this](float pr)
-        {
-            juce::MessageManager::callAsync(
-                [sp = juce::Component::SafePointer<VoiceGenTabComponent>(this), pr]
-                { if (sp != nullptr) sp->progressValue = pr; });
-        };
-        job.onDone = [this](VoiceGenJob::Result r)
-        {
-            juce::MessageManager::callAsync(
-                [sp = juce::Component::SafePointer<VoiceGenTabComponent>(this),
-                 res = std::move(r)]() mutable
-                { if (sp != nullptr) sp->onRenderFinished(std::move(res)); });
-        };
-
-        // ── Voice row ────────────────────────────────────────────────────────
-        initLabel(voiceLabel, "Voice");
+        // ── TTS block: voice picker row ─────────────────────────────────────
         rebuildVoiceCombo();
         voiceCombo.onChange = [this]
         {
@@ -73,39 +65,55 @@ public:
                 if (v.lang.isNotEmpty())
                     langPref.set(v.lang, v.id);   // explicit pick = AUTO preference
             }
+            ttsDirty = true;
             markDirty();
         };
         addAndMakeVisible(voiceCombo);
 
         rescanButton.setButtonText("Rescan");
-        rescanButton.setTooltip("Rescan the installed voice bundles");
+        rescanButton.setTooltip("Rescan the built-in and external voice bundles");
         rescanButton.onClick = [this]
         {
-            voices = PiperTts::listVoices();
+            voices = PiperTts::listVoices(externalVoicesDir);
             rebuildVoiceCombo();
-            logLabel.setText(juce::String(voices.size()) + " voice(s) installed",
-                             juce::dontSendNotification);
-            repaint();
+            synthStatus.setText(juce::String(voices.size()) + " voice(s) available",
+                                juce::dontSendNotification);
         };
         addAndMakeVisible(rescanButton);
 
         folderButton.setButtonText("Voices...");
-        folderButton.setTooltip("Open the voices folder "
-                                "(fill it with scripts/install_piper_voices.sh)");
-        folderButton.onClick = []
+        folderButton.setTooltip("Choose the EXTERNAL voices folder — extra voices "
+                                "besides the built-in ones (one extracted "
+                                "vits-piper-* bundle per sub-folder; see "
+                                "scripts/install_piper_voices.sh)");
+        folderButton.onClick = [this]
         {
-            auto dir = PiperTts::voicesDirectory();
-            dir.createDirectory();
-            dir.revealToUser();
+            externalVoicesDir.createDirectory();
+            fileChooser = std::make_unique<juce::FileChooser>(
+                "Select the external voices folder", externalVoicesDir);
+            fileChooser->launchAsync(
+                juce::FileBrowserComponent::openMode
+                    | juce::FileBrowserComponent::canSelectDirectories,
+                [safe = juce::Component::SafePointer<VoiceGenTabComponent>(this)]
+                (const juce::FileChooser& fc)
+                {
+                    auto* self = safe.getComponent();
+                    if (self == nullptr) return;
+                    const auto dir = fc.getResult();
+                    if (! dir.isDirectory()) return;
+                    self->externalVoicesDir = dir;
+                    self->voices = PiperTts::listVoices(dir);
+                    self->rebuildVoiceCombo();
+                    self->synthStatus.setText(
+                        juce::String(self->voices.size()) + " voice(s) available ("
+                            + dir.getFileName() + ")",
+                        juce::dontSendNotification);
+                    self->markDirty();
+                });
         };
         addAndMakeVisible(folderButton);
 
-        langBadge.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
-        langBadge.setColour(juce::Label::textColourId, juce::Colour(kAccentARGB));
-        langBadge.setJustificationType(juce::Justification::centredRight);
-        addAndMakeVisible(langBadge);
-
-        // ── Text ─────────────────────────────────────────────────────────────
+        // ── TTS block: text ─────────────────────────────────────────────────
         textEditor.setMultiLine(true, true);
         textEditor.setReturnKeyStartsNewLine(true);
         textEditor.setFont(juce::FontOptions(15.0f));
@@ -117,70 +125,93 @@ public:
         textEditor.setTextToShowWhenEmpty("Type the text to speak...",
                                           juce::Colour(0xff55606f));
         textEditor.setText(text, juce::dontSendNotification);
-        textEditor.onTextChange = [this] { text = textEditor.getText(); markDirty(); };
+        textEditor.onTextChange = [this]
+        {
+            text = textEditor.getText();
+            ttsDirty = true;
+            markDirty();
+        };
         addAndMakeVisible(textEditor);
 
-        // ── Synthesis options ────────────────────────────────────────────────
-        auto initRotary = [this](juce::Slider& s, juce::Label& l, const char* name,
-                                 double lo, double hi, double def, const char* suffix)
+        // ── TTS block: synthesis options ────────────────────────────────────
+        auto ttsKnob = [this](juce::Slider& s, juce::Label& l, const char* name,
+                              double lo, double hi, double def, const char* suffix)
         {
-            initLabel(l, name);
-            s.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-            s.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 52, 14);
-            s.setColour(juce::Slider::textBoxOutlineColourId,    juce::Colours::transparentBlack);
-            s.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
-            s.setColour(juce::Slider::textBoxTextColourId,       juce::Colour(0xffa0c4e8));
-            s.setRange(lo, hi, 0.01);
-            s.setValue(def, juce::dontSendNotification);
-            if (suffix != nullptr) s.setTextValueSuffix(suffix);
-            s.onValueChange = [this] { markDirty(); };
-            addAndMakeVisible(s);
+            l.setText(name, juce::dontSendNotification);
+            l.setJustificationType(juce::Justification::centred);
+            l.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
+            l.setColour(juce::Label::textColourId, juce::Colour(0xff8890a0));
+            addAndMakeVisible(l);
+            initKnob(s, lo, hi, 0.01, def, suffix);
         };
-        initRotary(rateSlider,    rateLabel,    "Rate",       0.5, 2.0,  rate,    "x");
+        ttsKnob(rateSlider,    rateLabel,    "Rate",       0.5,  2.0, rate,    "x");
         rateSlider.setSkewFactorFromMidPoint(1.0);
         rateSlider.setTooltip("Speech rate (1x = the voice's natural pace)");
-        initRotary(exprSlider,    exprLabel,    "Expression", 0.0, 1.5,  expr,    nullptr);
-        exprSlider.setTooltip("VITS noise scale — 0 = flat/robotic, higher = livelier "
-                              "(reloads the voice on next GENERATE)");
-        initRotary(silenceSlider, silenceLabel, "Silence",    0.25, 3.0, silence, "x");
+        ttsKnob(exprSlider,    exprLabel,    "Expression", 0.0,  1.5, expr,    nullptr);
+        exprSlider.setTooltip("VITS noise scale - 0 = flat/robotic, higher = livelier");
+        ttsKnob(silenceSlider, silenceLabel, "Silence",    0.25, 3.0, silence, "x");
         silenceSlider.setTooltip("Scales the silence between sentences");
-        rateSlider.onValueChange    = [this] { rate    = rateSlider.getValue();    markDirty(); };
-        exprSlider.onValueChange    = [this] { expr    = exprSlider.getValue();    markDirty(); };
-        silenceSlider.onValueChange = [this] { silence = silenceSlider.getValue(); markDirty(); };
+        rateSlider.onValueChange    = [this] { rate    = rateSlider.getValue();    ttsDirty = true; markDirty(); };
+        exprSlider.onValueChange    = [this] { expr    = exprSlider.getValue();    ttsDirty = true; markDirty(); };
+        silenceSlider.onValueChange = [this] { silence = silenceSlider.getValue(); ttsDirty = true; markDirty(); };
 
-        // ── Generate ─────────────────────────────────────────────────────────
+        // Last-synthesis status ("fr → siwis — 3.2s, 22050 Hz") — the VOICE
+        // equivalent of SCORE's loaded-file label.
+        synthStatus.setText("No take synthesized yet", juce::dontSendNotification);
+        synthStatus.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
+        synthStatus.setColour(juce::Label::textColourId, juce::Colour(0xffb8c0d0));
+        addAndMakeVisible(synthStatus);
+
+        // ── Writing Speed (essential — maps audio duration to page width) ────
+        initLabel(wsLabel, "Writing Speed (cm/s)");
+        initSlider(wsSlider, 0.5, 10.0, 0.1, settings_.writingSpeed);
+        wsSlider.onValueChange = [this]
+        {
+            settings_.writingSpeed = wsSlider.getValue();
+            updateExportWindow();   // window width depends on writing speed
+            markDirty();
+        };
+
+        // ── Generate + progress ────────────────────────────────────────────
         generateButton.setButtonText("GENERATE");
         generateButton.onClick = [this] { startGenerate(); };
         addAndMakeVisible(generateButton);
 
-        progressBar = std::make_unique<juce::ProgressBar>(progressValue);
-        addChildComponent(*progressBar);
+        progressBar.setPercentageDisplay(true);
+        addChildComponent(progressBar);
 
-        // ── Audition transport (shared SCORE player channel) ─────────────────
-        playStopButton.setTooltip("Play / stop the voice through the score player");
+        // ── Export ─────────────────────────────────────────────────────────
+        exportPngButton.setButtonText("Export PNG");
+        exportPngButton.onClick = [this] { chooseExport(true); };
+        exportPngButton.setEnabled(false);
+        addAndMakeVisible(exportPngButton);
+
+        exportJpgButton.setButtonText("Export JPEG");
+        exportJpgButton.onClick = [this] { chooseExport(false); };
+        exportJpgButton.setEnabled(false);
+        addAndMakeVisible(exportJpgButton);
+
+        // ── Playback transport (shared SCORE player channel) ────────────────
+        playStopButton.setEnabled(false);
+        playStopButton.setTooltip("Play / stop the generated vocal spectrum");
         playStopButton.onClick = [this] { togglePlay(); };
         addAndMakeVisible(playStopButton);
 
+        loopBtn.setEnabled(false);
         loopBtn.setTooltip("Loop playback");
         addAndMakeVisible(loopBtn);
         loopAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             processor.getAPVTS(), "scoreLoop", loopBtn);
 
+        reverseBtn.setEnabled(false);
         reverseBtn.setTooltip("Reverse (play the take backward)");
         addAndMakeVisible(reverseBtn);
         reverseAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             processor.getAPVTS(), "scoreReverse", reverseBtn);
 
         initLabel(speedLabel, "Speed");
-        speedSlider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-        speedSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 52, 14);
-        speedSlider.setColour(juce::Slider::textBoxOutlineColourId,    juce::Colours::transparentBlack);
-        speedSlider.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
-        speedSlider.setColour(juce::Slider::textBoxTextColourId,       juce::Colour(0xffa0c4e8));
-        speedSlider.setRange(0.1, 6.0, 0.01);
-        speedSlider.setTextValueSuffix("x");
+        initKnob(speedSlider, 0.1, 6.0, 0.01, 1.0, "x");
         speedSlider.setSkewFactorFromMidPoint(1.0);
-        addAndMakeVisible(speedSlider);
         speedAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
             processor.getAPVTS(), "scoreSpeed", speedSlider);
 
@@ -193,14 +224,93 @@ public:
             learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, speedSlider,    "scoreSpeed"));
         }
 
-        playHint.setText("PLAY loads the voice into the score player "
-                         "(set LuxStral source = Sampler to hear it).",
+        setTransportEnabled(false);
+
+        playHint.setText("Set LuxStral source = Sampler to hear the voice.",
                          juce::dontSendNotification);
         playHint.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
         playHint.setColour(juce::Label::textColourId, juce::Colour(0xff8890a0));
         addAndMakeVisible(playHint);
 
-        // ── Log ──────────────────────────────────────────────────────────────
+        // ── Format options (same as SCORE; VOICE takes are mono → no Stereo) ─
+        initLabel(pageLabel, "Page");
+        pageCombo.addItem("A4 Portrait", 1);
+        pageCombo.addItem("A3 Landscape", 2);
+        pageCombo.setSelectedId(settings_.pageFormat == 1 ? 2 : 1,
+                                juce::dontSendNotification);
+        pageCombo.onChange = [this]
+        {
+            settings_.pageFormat = (pageCombo.getSelectedId() == 2) ? 1 : 0;
+            updateExportWindow();   // A4/A3 changes the page-window length
+            markDirty();
+        };
+        addAndMakeVisible(pageCombo);
+
+        initLabel(dpiLabel, "DPI");
+        for (int d : { 200, 300, 400, 600, 800 })
+            dpiCombo.addItem(juce::String(d), d);
+        dpiCombo.setSelectedId((int) settings_.printerDpi, juce::dontSendNotification);
+        dpiCombo.onChange = [this]
+        {
+            settings_.printerDpi = (double) juce::jmax(72, dpiCombo.getSelectedId());
+            markDirty();
+        };
+        addAndMakeVisible(dpiCombo);
+
+        multiResToggle.setButtonText("Multi-res transients");
+        multiResToggle.setToggleState(settings_.enableMultiRes != 0,
+                                      juce::dontSendNotification);
+        multiResToggle.onClick = [this]
+        {
+            settings_.enableMultiRes = multiResToggle.getToggleState() ? 1 : 0;
+            markDirty();
+        };
+        addAndMakeVisible(multiResToggle);
+
+        // ── Waveform region picker (which part of the take to extract) ───────
+        waveform.onStartChange = [this](double startSec)
+        {
+            settings_.startTimeSec = startSec;
+            markDirty();
+        };
+        addAndMakeVisible(waveform);
+
+        // ── Audition button: play/pause the SELECTED region of the take ─────
+        previewButton.setEnabled(false);
+        previewButton.onClick = [this] { togglePreview(); };
+        addAndMakeVisible(previewButton);
+        refreshPreviewButton();
+
+        // ── Image EQ (edits the generated image, never the take) ────────────
+        eqEditor.onChange = [this] { eqDirty = true; };
+        addAndMakeVisible(eqEditor);
+        {
+            const juce::String eq = processor.getAPVTS().state
+                .getProperty("voiceEqCurve", "").toString();
+            if (eq.isNotEmpty())
+                eqEditor.decodeState(eq);
+        }
+
+        // ── Restore the cached take (WAV survives sessions; frames don't) ────
+        {
+            const juce::File wav = cacheWavFile();
+            if (wav.existsAsFile())
+            {
+                const auto info = scoregen::probeWav(wav);
+                if (info.ok)
+                {
+                    ttsDirty = false;   // same take replayable without re-synthesis
+                    waveform.setFile(wav);
+                    waveform.setStartSeconds(settings_.startTimeSec);
+                    updateExportWindow();
+                    previewButton.setEnabled(true);
+                    setSynthStatus(info.durationSec, info.sampleRate);
+                    setTransportEnabled(true);   // PLAY re-encodes then plays
+                }
+            }
+        }
+
+        // ── Log ────────────────────────────────────────────────────────────
         logLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
         logLabel.setColour(juce::Label::textColourId, juce::Colour(0xff8890a0));
         logLabel.setJustificationType(juce::Justification::topLeft);
@@ -210,10 +320,30 @@ public:
             logLabel.setText("TTS engine not available in this build "
                              "(SP3CTRA_ENABLE_TTS=OFF)", juce::dontSendNotification);
         else if (voices.isEmpty())
-            logLabel.setText("No voices installed — run scripts/install_piper_voices.sh "
+            logLabel.setText("No voices installed - run scripts/install_piper_voices.sh "
                              "then Rescan", juce::dontSendNotification);
 
-        startTimerHz(20);
+        // Worker callbacks marshal back to the message thread.
+        job.onProgress = [safe = juce::Component::SafePointer<VoiceGenTabComponent>(this)]
+                         (float pr)
+        {
+            juce::MessageManager::callAsync([safe, pr]
+            {
+                if (auto* self = safe.getComponent())
+                    self->progress = (double) pr;
+            });
+        };
+        job.onDone = [safe = juce::Component::SafePointer<VoiceGenTabComponent>(this)]
+                     (VoiceGenJob::Result r)
+        {
+            juce::MessageManager::callAsync([safe, r = std::move(r)]() mutable
+            {
+                if (auto* self = safe.getComponent())
+                    self->onJobFinished(std::move(r));
+            });
+        };
+
+        startTimerHz(10);
     }
 
     ~VoiceGenTabComponent() override
@@ -221,8 +351,9 @@ public:
         stopTimer();
         if (stateDirty)
             persistState();
-        // Like SCORE/TIMBRE/MIDI SCORE: the page is a VIEW — closing it must
-        // not cut audio playing through the shared channel.
+        // The page is a VIEW — closing it must not cut the shared channel.
+        processor.stopScorePreview();
+        job.stopThread(4000);
     }
 
     //==========================================================================
@@ -242,7 +373,7 @@ public:
             g.setOpacity(1.0f);
             g.drawImage(previewImage, imgArea);
 
-            // Reading head — only while OUR frames sit in the player.
+            // Reading head — only while OUR frames sit in the shared player.
             auto* fs = processor.getLuxSampler();
             if (fs != nullptr && framesAreOurs)
             {
@@ -268,17 +399,31 @@ public:
             if (! PiperTts::isEngineAvailable())
                 hint = "TTS engine not available (build with SP3CTRA_ENABLE_TTS=ON)";
             else if (voices.isEmpty())
-                hint = "No voices installed — run scripts/install_piper_voices.sh";
+                hint = "No voices installed - run scripts/install_piper_voices.sh";
             else if (busy)
                 hint = "Generating...";
             else
-                hint = "Type a text and GENERATE its vocal spectrum";
+                hint = "Type a text and press GENERATE";
             g.drawText(hint, previewArea, juce::Justification::centred);
         }
     }
 
+    juce::Rectangle<float> previewImageBounds() const
+    {
+        if (! previewImage.isValid() || previewArea.isEmpty())
+            return {};
+        const juce::Rectangle<float> dest(
+            (float) previewArea.getX() + 2, (float) previewArea.getY() + 2,
+            (float) previewArea.getWidth() - 4, (float) previewArea.getHeight() - 4);
+        const juce::RectanglePlacement place(juce::RectanglePlacement::centred);
+        return place.appliedTo(
+            juce::Rectangle<float>(0.f, 0.f,
+                (float) previewImage.getWidth(), (float) previewImage.getHeight()),
+            dest);
+    }
+
     //==========================================================================
-    // Preview interactions: click = scrub (same behaviour as the siblings).
+    // Manual play-head scrub on the preview (same behaviour as SCORE).
     void mouseDown(const juce::MouseEvent& e) override
     {
         scrubbing = framesAreOurs && previewImage.isValid()
@@ -300,68 +445,140 @@ public:
         }
     }
 
+    void scrubTo(const juce::MouseEvent& e)
+    {
+        auto* fs = processor.getLuxSampler();
+        if (fs == nullptr || ! framesAreOurs) return;
+        const int n = fs->getScoreFrameCount();
+        if (n <= 0) return;
+        const auto area = previewImgArea.isEmpty() ? previewImageBounds() : previewImgArea;
+        if (area.getWidth() <= 0.f) return;
+        const float fx = juce::jlimit(0.f, 1.f,
+            ((float) e.position.x - area.getX()) / area.getWidth());
+        scrubHead = juce::jlimit(0, n - 1, (int) (fx * (float) n));
+        fs->uiSeekScore(scrubHead);
+        repaint(previewArea);
+    }
+
     void resized() override
     {
         const int pad = 8;
         const int ch  = Sp3ctraTheme::kControlH;
         const int gap = 6;
-        const int w   = getWidth();
 
-        // ── Voice row ────────────────────────────────────────────────────────
-        int y = pad;
-        voiceLabel.setBounds(pad, y, 40, ch);
-        voiceCombo.setBounds(pad + 40 + gap, y, 240, ch);
-        rescanButton.setBounds(pad + 40 + gap + 240 + gap, y, 64, ch);
-        folderButton.setBounds(pad + 40 + gap + 240 + gap + 64 + gap, y, 72, ch);
-        langBadge.setBounds(pad + 40 + gap + 240 + gap + 64 + gap + 72 + gap, y,
-                            juce::jmax(60, w - (pad * 2 + 40 + 240 + 64 + 72 + gap * 4)), ch);
-        y += ch + gap;
+        // ── Audition button + waveform region picker across the top ─────────
+        const int waveH = 74;
+        const int pbW   = 40;
+        previewButton.setBounds(pad, pad, pbW, waveH);
+        waveform.setBounds(pad + pbW + 4, pad, getWidth() - 2 * pad - pbW - 4, waveH);
+        const int contentTop = pad + waveH + gap;
 
-        // ── Text editor ──────────────────────────────────────────────────────
-        textEditor.setBounds(pad, y, w - pad * 2, 64);
-        y += 64 + gap;
+        // ── Control column (left) ───────────────────────────────────────────
+        const int colW = juce::jmin(330, getWidth() - 2 * pad);
+        int y = contentTop;
 
-        // ── Options + generate + transport, one row ──────────────────────────
-        const int knobW = 72, knobH = ch * 2 + 16;
-        int x = pad;
-        auto knob = [&](juce::Label& l, juce::Slider& s)
+        // TTS block: voice row → text → knobs → status.
         {
-            l.setBounds(x, y, knobW, 14);
-            s.setBounds(x, y + 14, knobW, knobH - 14);
-            x += knobW + gap;
-        };
-        knob(rateLabel,    rateSlider);
-        knob(exprLabel,    exprSlider);
-        knob(silenceLabel, silenceSlider);
+            const int btnW = 58;
+            voiceCombo.setBounds(pad, y, colW - 2 * (btnW + gap), ch);
+            rescanButton.setBounds(pad + colW - 2 * btnW - gap, y, btnW, ch);
+            folderButton.setBounds(pad + colW - btnW, y, btnW, ch);
+            y += ch + gap;
+        }
+        textEditor.setBounds(pad, y, colW, 56);
+        y += 56 + gap;
+        {
+            const int knobW    = (colW - 2 * gap) / 3;
+            const int knobDrwH = 42, knobValH = 14, lblH = 12;
+            int x = pad;
+            auto place = [&](juce::Label& l, juce::Slider& s)
+            {
+                l.setBounds(x, y, knobW, lblH);
+                s.setBounds(x, y + lblH, knobW, knobDrwH + knobValH);
+                x += knobW + gap;
+            };
+            place(rateLabel,    rateSlider);
+            place(exprLabel,    exprSlider);
+            place(silenceLabel, silenceSlider);
+            y += lblH + knobDrwH + knobValH + gap;
+        }
+        synthStatus.setBounds(pad, y, colW, ch);
+        y += ch + gap + 8;
 
-        x += gap;
-        generateButton.setBounds(x, y + 14, 110, ch + 6);
-        progressBar->setBounds(x, y + 14 + ch + 10, 110, 12);
-        x += 110 + gap * 3;
+        // SCORE-identical column from here on.
+        {
+            const int lblW = 150;
+            wsLabel.setBounds(pad, y, lblW, ch);
+            wsSlider.setBounds(pad + lblW + gap, y, colW - lblW - gap, ch);
+            y += ch + gap + 4;
+        }
+        {
+            const int half = (colW - gap) / 2;
+            pageLabel.setBounds(pad, y, 40, ch);
+            pageCombo.setBounds(pad + 40 + gap, y, half - 40 - gap, ch);
+            dpiLabel.setBounds(pad + half + gap, y, 34, ch);
+            dpiCombo.setBounds(pad + half + gap + 34 + gap, y, half - 34 - gap, ch);
+            y += ch + gap + 4;
+        }
+        multiResToggle.setBounds(pad, y, colW, ch);
+        y += ch + gap + 4;
 
-        const int tBtn = ch + 6;
-        playStopButton.setBounds(x, y + 14, tBtn, tBtn);          x += tBtn + gap;
-        loopBtn.setBounds(x, y + 14, tBtn, tBtn);                 x += tBtn + gap;
-        reverseBtn.setBounds(x, y + 14, tBtn, tBtn);              x += tBtn + gap;
-        speedLabel.setBounds(x, y, knobW, 14);
-        speedSlider.setBounds(x, y + 14, knobW, knobH - 14);      x += knobW + gap;
-        playHint.setBounds(x, y + 14, juce::jmax(60, w - pad - x), knobH - 14);
-        y += knobH + gap;
+        generateButton.setBounds(pad, y, colW, ch + 4); y += ch + 8;
+        progressBar.setBounds(pad, y, colW, ch);        y += ch + gap;
+        exportPngButton.setBounds(pad, y, (colW - gap) / 2, ch);
+        exportJpgButton.setBounds(pad + (colW - gap) / 2 + gap, y, (colW - gap) / 2, ch);
+        y += ch + gap + 6;
 
-        // ── Log + preview ────────────────────────────────────────────────────
-        logLabel.setBounds(pad, y, w - pad * 2, 28);
-        y += 28 + gap;
-        previewArea = juce::Rectangle<int>(pad, y, w - pad * 2,
-                                           juce::jmax(80, getHeight() - pad - y));
+        // ── Playback transport (identical bar to SCORE) ─────────────────────
+        {
+            const int knobW    = 56;
+            const int knobDrwH = 42;
+            const int knobValH = 14;
+            const int blockH   = knobDrwH + knobValH;
+            const int btn      = 40;
+            const int icon     = 34;
+
+            int x = pad;
+            playStopButton.setBounds(x, y + (blockH - btn) / 2, btn, btn);   x += btn + gap;
+            loopBtn.setBounds   (x, y + (blockH - icon) / 2, icon, icon);    x += icon + 4;
+            reverseBtn.setBounds(x, y + (blockH - icon) / 2, icon, icon);    x += icon + gap;
+
+            const int knobX = pad + colW - knobW;
+            speedSlider.setBounds(knobX, y, knobW, blockH);
+            speedLabel.setBounds(x, y + (knobDrwH - ch) / 2,
+                                 juce::jmax(0, knobX - gap - x), ch);
+            y += blockH + gap;
+        }
+        playHint.setBounds(pad, y, colW, ch); y += ch + gap + 4;
+        const int colBottom = y;
+
+        // ── Image EQ strip across the bottom (full width) ───────────────────
+        const int eqTop = juce::jmax(colBottom + gap,
+                                     getHeight() - pad - ScoreEqComponent::kPreferredH);
+        const int eqH   = juce::jmax(0, getHeight() - pad - eqTop);
+        eqEditor.setBounds(pad, eqTop, getWidth() - 2 * pad, eqH);
+        const int contentBottom = eqTop - gap;
+
+        // ── Log fills the gap above the EQ strip ────────────────────────────
+        const int logH = contentBottom - colBottom;
+        logLabel.setVisible(logH >= 14);
+        if (logH >= 14)
+            logLabel.setBounds(pad, colBottom, colW, logH);
+
+        // Preview occupies the area to the right of the control column.
+        const int previewX = pad + colW + 10;
+        previewArea = juce::Rectangle<int>(previewX, contentTop,
+                                           juce::jmax(80, getWidth() - previewX - pad),
+                                           juce::jmax(80, contentBottom - contentTop));
     }
 
 private:
     //==========================================================================
     /** Square play/stop transport button (same visual language as SCORE's). */
-    class VoicePlayButton : public juce::Button
+    class TransportPlayButton : public juce::Button
     {
     public:
-        VoicePlayButton() : juce::Button("voicePlayStop") {}
+        TransportPlayButton() : juce::Button("voicePlayStop") {}
 
         void setPlaying(bool p)
         {
@@ -390,7 +607,7 @@ private:
 
     private:
         bool playing = false;
-        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(VoicePlayButton)
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportPlayButton)
     };
 
     /** Compact loop/inverse pictogram toggle — same glyph as the SCORE page,
@@ -400,7 +617,7 @@ private:
     public:
         enum class Glyph { Loop, Inverse };
 
-        explicit VoiceIconToggle(Glyph g) : juce::Button("voiceIconToggle"), glyph(g)
+        explicit VoiceIconToggle(Glyph g) : juce::Button("voiceLoopToggle"), glyph(g)
         {
             setClickingTogglesState(true);
         }
@@ -430,7 +647,7 @@ private:
                                   juce::Colour col, bool reversed)
         {
             const float h  = r.getHeight();
-            const float th = juce::jmax(2.0f, h * 0.12f);   // stroke thickness
+            const float th = juce::jmax(2.0f, h * 0.12f);
 
             const float ringH  = h * 0.64f;
             const float L = r.getX() + th * 0.6f;
@@ -486,12 +703,35 @@ private:
     };
 
     //==========================================================================
-    void initLabel(juce::Label& l, const char* txt)
+    void initLabel(juce::Label& lbl, const juce::String& textIn)
     {
-        l.setText(txt, juce::dontSendNotification);
-        l.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
-        l.setColour(juce::Label::textColourId, juce::Colour(0xff8890a0));
-        addAndMakeVisible(l);
+        lbl.setText(textIn, juce::dontSendNotification);
+        lbl.setJustificationType(juce::Justification::centredRight);
+        lbl.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+        addAndMakeVisible(lbl);
+    }
+
+    void initSlider(juce::Slider& s, double lo, double hi, double step, double val)
+    {
+        s.setSliderStyle(juce::Slider::LinearHorizontal);
+        s.setTextBoxStyle(juce::Slider::TextBoxRight, false, 64, Sp3ctraTheme::kControlH);
+        s.setRange(lo, hi, step);
+        s.setValue(val, juce::dontSendNotification);
+        addAndMakeVisible(s);
+    }
+
+    void initKnob(juce::Slider& s, double lo, double hi, double step, double val,
+                  const char* suffix = nullptr)
+    {
+        s.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        s.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 52, 14);
+        s.setColour(juce::Slider::textBoxOutlineColourId,    juce::Colours::transparentBlack);
+        s.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
+        s.setColour(juce::Slider::textBoxTextColourId,       juce::Colour(0xffa0c4e8));
+        s.setRange(lo, hi, step);
+        s.setValue(val, juce::dontSendNotification);
+        if (suffix != nullptr) s.setTextValueSuffix(suffix);
+        addAndMakeVisible(s);
     }
 
     void markDirty()
@@ -531,20 +771,15 @@ private:
         autoMode = (select == 1);
     }
 
-    /** ScoreSettings for the vocal spectrum: PhonoPaper defaults, whole take on
-     *  one A3-landscape page (never cut), frequency span = the instrument's. */
-    ScoreSettings makeScoreSettings() const
+    void setSynthStatus(double durationSec, int sampleRate)
     {
-        ScoreSettings s;
-        score_settings_defaults(&s);
-        s.pageFormat    = 1;       // A3 landscape — widest band, best time detail
-        s.writingSpeed  = 0.0;     // whole take stretched to the page width
-        s.binsPerSecond = 300.0;   // 3.3 ms columns: consonants stay crisp
-        double lo = 0.0, hi = 0.0;
-        processor.getScoreFrequencyRange(lo, hi);
-        s.minFreq = lo;
-        s.maxFreq = hi;
-        return s;
+        const juce::String arrow = juce::String::fromUTF8(" \xe2\x86\x92 ");
+        juce::String s;
+        if (lastLang.isNotEmpty() && lastVoiceName.isNotEmpty())
+            s = lastLang + arrow + lastVoiceName + "  ";
+        s << "(" << juce::String(durationSec, 2) << "s, "
+          << juce::String(sampleRate) << " Hz, 1 ch)";
+        synthStatus.setText(s, juce::dontSendNotification);
     }
 
     /** AUTO mode: detected language → preferred (last picked) voice for it,
@@ -568,7 +803,6 @@ private:
 
         if (outLang.isEmpty())
         {
-            // Undecided (short text…): last explicit voice, else first installed.
             if (const auto* v = findById(selectedVoiceId)) { out = *v; outLang = v->lang; return true; }
             if (! voices.isEmpty()) { out = voices.getReference(0); outLang = out.lang; return true; }
             return false;
@@ -594,128 +828,170 @@ private:
         }
         if (best != nullptr) { out = *best; return true; }
 
-        // Detected a language with no installed voice — fall back like undecided.
         if (const auto* v = findById(selectedVoiceId)) { out = *v; return true; }
         if (! voices.isEmpty()) { out = voices.getReference(0); return true; }
         return false;
     }
 
+    /** Resize the export window (seconds-per-page) and sync the start offset. */
+    void updateExportWindow()
+    {
+        waveform.setWindowSeconds(scoregen::pageWindowSeconds(settings_));
+        settings_.startTimeSec = waveform.getStartSeconds();
+    }
+
     //==========================================================================
-    void startGenerate()
+    void startGenerate(bool autoPlayWhenDone = false)
     {
         if (busy) return;
-        if (! PiperTts::isEngineAvailable())
-        {
-            logLabel.setText("TTS engine not available in this build "
-                             "(SP3CTRA_ENABLE_TTS=OFF)", juce::dontSendNotification);
-            return;
-        }
-        const juce::String t = textEditor.getText().trim();
-        if (t.isEmpty())
-        {
-            logLabel.setText("Type some text first", juce::dontSendNotification);
-            return;
-        }
-        if (voices.isEmpty())
-        {
-            logLabel.setText("No voices installed — run scripts/install_piper_voices.sh "
-                             "then Rescan", juce::dontSendNotification);
-            return;
-        }
 
-        PiperVoiceInfo v;
-        juce::String lang;
-        const juce::String arrow = juce::String::fromUTF8(" \xe2\x86\x92 ");
-        if (autoMode)
+        const juce::String t = textEditor.getText().trim();
+        const bool needSynth = ttsDirty || ! cacheWavFile().existsAsFile();
+
+        VoiceGenJob::Request req;
+        if (needSynth)
         {
-            if (! resolveAutoVoice(t, v, lang))
+            if (! PiperTts::isEngineAvailable())
+            {
+                logLabel.setText("TTS engine not available in this build "
+                                 "(SP3CTRA_ENABLE_TTS=OFF)", juce::dontSendNotification);
                 return;
-            langBadge.setText(lang + arrow + v.name, juce::dontSendNotification);
+            }
+            if (t.isEmpty())
+            {
+                logLabel.setText("Type some text first", juce::dontSendNotification);
+                return;
+            }
+            if (voices.isEmpty())
+            {
+                logLabel.setText("No voices installed - run scripts/install_piper_voices.sh "
+                                 "then Rescan", juce::dontSendNotification);
+                return;
+            }
+
+            PiperVoiceInfo v;
+            juce::String lang;
+            if (autoMode)
+            {
+                if (! resolveAutoVoice(t, v, lang))
+                    return;
+            }
+            else
+            {
+                bool found = false;
+                for (const auto& vi : voices)
+                    if (vi.id == selectedVoiceId) { v = vi; found = true; break; }
+                if (! found) v = voices.getReference(0);
+                lang = v.lang;
+            }
+            lastLang      = lang;
+            lastVoiceName = v.name.isNotEmpty() ? v.name : v.id;
+
+            req.text  = t;
+            req.voice = v;
+            req.opts.lengthScale          = (float) (1.0 / juce::jlimit(0.25, 4.0, rate));
+            req.opts.noiseScale           = (float) expr;
+            req.opts.sentenceSilenceScale = (float) silence;
+            settings_.startTimeSec = 0.0;      // new take → window back to the start
         }
         else
         {
-            bool found = false;
-            for (const auto& vi : voices)
-                if (vi.id == selectedVoiceId) { v = vi; found = true; break; }
-            if (! found) v = voices.getReference(0);
-            langBadge.setText(v.lang + arrow + v.name, juce::dontSendNotification);
+            req.renderOnly = true;             // same take, new page settings/window
         }
 
-        VoiceGenJob::Request r;
-        r.text  = t;
-        r.voice = v;
-        r.opts.lengthScale          = (float) (1.0 / juce::jlimit(0.25, 4.0, rate));
-        r.opts.noiseScale           = (float) expr;
-        r.opts.sentenceSilenceScale = (float) silence;
-        r.score   = makeScoreSettings();
-        r.wavFile = cacheWavFile();
-        genMinFreq = r.score.minFreq;
-        genMaxFreq = r.score.maxFreq;
+        ScoreSettings s = settings_;
+        double lo = 0.0, hi = 0.0;
+        processor.getScoreFrequencyRange(lo, hi);
+        s.minFreq = lo;
+        s.maxFreq = hi;
+        s.enableStereoMode = 0;                // TTS takes are mono by construction
+        genMinFreq = lo;
+        genMaxFreq = hi;
+        genDpi     = s.printerDpi;
+        req.score   = s;
+        req.wavFile = cacheWavFile();
+        pendingAutoPlay = autoPlayWhenDone;
 
-        beginJobUi();
+        busy = true;
+        progress = 0.0;
+        generateButton.setEnabled(false);
+        exportPngButton.setEnabled(false);
+        exportJpgButton.setEnabled(false);
         if (auto* fs = processor.getLuxSampler())
             if (framesAreOurs)
                 fs->uiStopScore();
-        job.start(std::move(r));
+        processor.stopScorePreview();
+        refreshPreviewButton();
+        setTransportEnabled(false);
+        refreshPlayButton();
+        progressBar.setVisible(true);
+        previewImage = juce::Image();
+        logLabel.setText(needSynth ? "Synthesizing..." : "Generating...",
+                         juce::dontSendNotification);
+        repaint();
+        job.start(std::move(req));
     }
 
-    /** Session-restore replay: re-encode the cached WAV without re-synthesis. */
-    void startRenderOnly(bool autoPlayWhenDone)
-    {
-        if (busy) return;
-        VoiceGenJob::Request r;
-        r.renderOnly = true;
-        r.score      = makeScoreSettings();
-        r.wavFile    = cacheWavFile();
-        genMinFreq   = r.score.minFreq;
-        genMaxFreq   = r.score.maxFreq;
-        pendingAutoPlay = autoPlayWhenDone;
-
-        beginJobUi();
-        job.start(std::move(r));
-    }
-
-    void beginJobUi()
-    {
-        busy = true;
-        progressValue = 0.0;
-        generateButton.setEnabled(false);
-        progressBar->setVisible(true);
-        logLabel.setText("Generating...", juce::dontSendNotification);
-        repaint(previewArea);
-    }
-
-    void onRenderFinished(VoiceGenJob::Result r)
+    void onJobFinished(VoiceGenJob::Result r)
     {
         busy = false;
-        progressBar->setVisible(false);
+        progressBar.setVisible(false);
         generateButton.setEnabled(true);
 
         if (! r.ok())
         {
             pendingAutoPlay = false;
+            baseImage      = juce::Image();
+            generatedImage = juce::Image();
+            previewImage   = juce::Image();
+            scrubHead      = -1;
+            framesAreOurs  = false;
             const juce::String why = r.error.isNotEmpty() ? r.error : r.render.log;
             logLabel.setText("Failed: " + why, juce::dontSendNotification);
+            if (auto* fs = processor.getLuxSampler())
+                if (framesAreOurs)
+                    fs->uiStopScore();
+            setTransportEnabled(false);
+            refreshPlayButton();
             repaint();
             return;
         }
 
-        generatedImage = r.render.image;
-        spectroBand    = r.render.spectroBand;
-        audioSeconds   = r.audioSeconds;
-        buildPreview();
-        reloadPlayFrames();
+        // Fresh synthesis → refresh the waveform strip + take status.
+        if (! r.voiceId.isEmpty() || ttsDirty)
+        {
+            ttsDirty = false;
+            waveform.setFile(r.wavFile);
+            waveform.setStartSeconds(settings_.startTimeSec);
+            updateExportWindow();
+            previewButton.setEnabled(true);
+            previewFile = juce::File(); previewStart = -1.0; previewLen = -1.0;
+            const auto info = scoregen::probeWav(r.wavFile);
+            if (info.ok)
+                setSynthStatus(info.durationSec, info.sampleRate);
+        }
 
-        // Natural speech tempo: the player injects 1000 columns/s at Speed 1x,
-        // the band holds `frames` columns for `audioSeconds` of speech.
-        juce::String msg = juce::String(loadedFrameCount) + " frames from "
-                         + juce::String(audioSeconds, 2) + " s of speech";
-        if (audioSeconds > 0.0 && loadedFrameCount > 0)
-            msg += " - natural tempo at Speed "
-                 + juce::String((double) loadedFrameCount / (audioSeconds * 1000.0), 2) + "x";
-        if (r.voiceId.isNotEmpty())
-            msg += " - " + r.voiceId;
-        logLabel.setText(msg, juce::dontSendNotification);
+        baseImage     = r.render.image;
+        spectroBand   = r.render.spectroBand;
+        genDynRangeDB = settings_.dynamicRangeDB;
+
+        // Keep the EQ curve across regenerations; rebuild its band grid only
+        // when the frequency span actually changes.
+        if (genMinFreq != lastEqMinFreq || genMaxFreq != lastEqMaxFreq)
+        {
+            eqEditor.setRange(genMinFreq, genMaxFreq);
+            lastEqMinFreq = genMinFreq;
+            lastEqMaxFreq = genMaxFreq;
+        }
+
+        applyEqToImageAndReload();   // builds generatedImage (+EQ), preview, loads frames
+
+        exportPngButton.setEnabled(true);
+        exportJpgButton.setEnabled(true);
+        logLabel.setText(r.render.log + "\n" + previewStats, juce::dontSendNotification);
+        scrubHead = -1;
+        setTransportEnabled(true);
+        refreshPlayButton();
 
         if (pendingAutoPlay)
         {
@@ -725,7 +1001,74 @@ private:
                     p->setValueNotifyingHost(1.0f);
         }
 
-        persistState();   // WAV cache path / last take
+        persistState();
+        repaint();
+    }
+
+    // ── Image EQ: shape the GENERATED image (never the synthesized take) ─────
+    void applyEqToImage()
+    {
+        if (! baseImage.isValid()) { generatedImage = juce::Image(); return; }
+        if (eqEditor.isFlat() || genMinFreq <= 0.0 || genMaxFreq <= genMinFreq)
+        {
+            generatedImage = baseImage;
+            return;
+        }
+
+        generatedImage = baseImage.createCopy();
+
+        juce::Rectangle<int> band = spectroBand.getIntersection(generatedImage.getBounds());
+        if (band.isEmpty()) band = generatedImage.getBounds();
+
+        const double bandBottom = (double) band.getBottom();
+        const double bandH      = (double) juce::jmax(1, band.getHeight());
+        const double range      = juce::jmax(1.0, genDynRangeDB);
+        const double ratio      = genMaxFreq / genMinFreq;
+
+        juce::Image::BitmapData bmp(generatedImage, juce::Image::BitmapData::readWrite);
+        for (int yy = band.getY(); yy < band.getBottom(); ++yy)
+        {
+            const double pos  = juce::jlimit(0.0, 1.0, (bandBottom - (yy + 0.5)) / bandH);
+            const double freq = genMinFreq * std::pow(ratio, pos);
+            const double gdb  = eqEditor.gainDbAtFreq(freq);
+            if (std::abs(gdb) < 0.01) continue;
+            const double dShift = gdb / range;
+
+            juce::uint8 lut[256];
+            for (int v = 0; v < 256; ++v)
+            {
+                if (v >= 255 && dShift > 0.0) { lut[v] = 255; continue; }
+                const double dk = juce::jlimit(0.0, 1.0, (1.0 - v / 255.0) + dShift);
+                lut[v] = (juce::uint8) juce::jlimit(0, 255, (int) std::lround((1.0 - dk) * 255.0));
+            }
+            juce::uint8* line = bmp.getLinePointer(yy);
+            for (int xx = band.getX(); xx < band.getRight(); ++xx)
+            {
+                juce::uint8* px = line + xx * bmp.pixelStride;
+                const juce::uint8 nv = lut[px[0]];   // greyscale (mono take)
+                px[0] = px[1] = px[2] = nv;
+            }
+        }
+    }
+
+    void applyEqToImageAndReload()
+    {
+        applyEqToImage();
+        buildPreview();
+        if (auto* fs = processor.getLuxSampler())
+        {
+            const bool wasPlaying = fs->isScorePlaying() && framesAreOurs;
+            const int savedHead = wasPlaying ? fs->getScorePlayHead() : 0;
+            fs->loadScoreFramesFromImage(generatedImage, spectroBand,
+                                         genMinFreq, genMaxFreq, false);
+            framesAreOurs    = true;
+            loadedFrameCount = fs->getScoreFrameCount();
+            if (wasPlaying)
+            {
+                fs->setScoreResumeHead(savedHead);
+                fs->uiPlayScore();
+            }
+        }
         repaint();
     }
 
@@ -733,12 +1076,10 @@ private:
     {
         if (! generatedImage.isValid())
         {
-            previewImage = juce::Image();
+            previewImage = generatedImage;
             return;
         }
-        // Preview only the spectrogram band (what actually plays) — the white
-        // page margins would wash the thumbnail grey. Downscale once here so
-        // the 20 Hz head repaint stays cheap.
+        // Preview only the spectrogram band (what is actually played).
         juce::Rectangle<int> band =
             (spectroBand.getWidth() > 0 && spectroBand.getHeight() > 0)
                 ? spectroBand.getIntersection(generatedImage.getBounds())
@@ -746,45 +1087,113 @@ private:
         if (band.isEmpty())
             band = generatedImage.getBounds();
 
-        juce::Image cropped = generatedImage.getClippedImage(band);
-        constexpr int kMaxPreviewW = 2048;
-        if (cropped.getWidth() > kMaxPreviewW)
-            previewImage = cropped.rescaled(
-                kMaxPreviewW,
-                juce::jmax(1, cropped.getHeight() * kMaxPreviewW / cropped.getWidth()));
-        else
-            previewImage = cropped.createCopy();
+        constexpr int kPreviewMaxPx = 1800;
+        const double s = juce::jmin(1.0,
+            (double) kPreviewMaxPx / juce::jmax(band.getWidth(), band.getHeight()));
+        const int pw = juce::jmax(1, (int) (band.getWidth()  * s));
+        const int ph = juce::jmax(1, (int) (band.getHeight() * s));
+
+        juce::Image tmp = generatedImage.getClippedImage(band)
+                              .rescaled(pw, ph, juce::Graphics::highResamplingQuality);
+
+        // Display-only white-point lift (same rationale as the SCORE page: the
+        // dB floor reads grey once cropped to the band; playback/export untouched).
+        juce::Image::BitmapData bd(tmp, juce::Image::BitmapData::readWrite);
+        juce::int64 sum = 0;
+        int mn = 255, mx = 0;
+        const int total = pw * ph;
+        for (int yy = 0; yy < ph; ++yy)
+            for (int xx = 0; xx < pw; ++xx)
+            {
+                const int v = bd.getPixelPointer(xx, yy)[0];
+                sum += v; mn = juce::jmin(mn, v); mx = juce::jmax(mx, v);
+            }
+        const double meanN = total > 0 ? (double) sum / total / 255.0 : 1.0;
+        const double wp = juce::jlimit(0.45, 0.98, meanN);
+        for (int yy = 0; yy < ph; ++yy)
+            for (int xx = 0; xx < pw; ++xx)
+            {
+                double n = bd.getPixelPointer(xx, yy)[0] / 255.0;
+                n = juce::jlimit(0.0, 1.0, n / wp);
+                const auto v = (juce::uint8) (n * 255.0 + 0.5);
+                bd.setPixelColour(xx, yy, juce::Colour(v, v, v));
+            }
+        previewStats = "Band grey: min=" + juce::String(mn)
+                     + " mean=" + juce::String((int) (meanN * 255.0))
+                     + " max=" + juce::String(mx)
+                     + "  (preview white-point=" + juce::String(wp, 2) + ")";
+        previewImage = tmp;
     }
 
-    juce::Rectangle<float> previewImageBounds() const
+    void chooseExport(bool asPng)
     {
-        if (! previewImage.isValid() || previewArea.isEmpty())
-            return {};
-        const juce::Rectangle<float> dest(
-            (float) previewArea.getX() + 2, (float) previewArea.getY() + 2,
-            (float) previewArea.getWidth() - 4, (float) previewArea.getHeight() - 4);
-        const juce::RectanglePlacement place(juce::RectanglePlacement::centred);
-        return place.appliedTo(
-            juce::Rectangle<float>(0.f, 0.f,
-                (float) previewImage.getWidth(), (float) previewImage.getHeight()),
-            dest);
+        if (! generatedImage.isValid())
+            return;
+        const juce::String ext = asPng ? "png" : "jpg";
+        // Suggested name from the first words of the text ("voice" fallback).
+        juce::String slug = text.trim().replaceCharacters(" \t\n\r", "----")
+                                .retainCharacters("abcdefghijklmnopqrstuvwxyz"
+                                                  "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
+                                .substring(0, 32).trimCharactersAtEnd("-");
+        if (slug.isEmpty()) slug = "voice";
+        const juce::File suggested = startDir().getChildFile(slug + "_score." + ext);
+        fileChooser = std::make_unique<juce::FileChooser>(
+            "Export Vocal Score Image", suggested, "*." + ext);
+        fileChooser->launchAsync(
+            juce::FileBrowserComponent::saveMode
+                | juce::FileBrowserComponent::canSelectFiles
+                | juce::FileBrowserComponent::warnAboutOverwriting,
+            [safe = juce::Component::SafePointer<VoiceGenTabComponent>(this), asPng, ext]
+            (const juce::FileChooser& fc)
+            {
+                auto* self = safe.getComponent();
+                if (self == nullptr) return;
+                auto dest = fc.getResult();
+                if (dest.getFullPathName().isEmpty()) return;
+                dest = dest.withFileExtension(ext);
+                const bool ok = scoregen::exportImage(self->generatedImage, dest, asPng,
+                                                      self->genDpi);
+                self->logLabel.setText(ok ? ("Exported: " + dest.getFileName())
+                                          : "Export failed",
+                                       juce::dontSendNotification);
+            });
     }
 
     //==========================================================================
-    bool reloadPlayFrames()
-    {
-        auto* fs = processor.getLuxSampler();
-        if (fs == nullptr || ! generatedImage.isValid())
-            return false;
+    // Source-audio preview — play/pause the SELECTED region of the take.
+    static juce::String playGlyph()  { return juce::String(juce::CharPointer_UTF8("\xe2\x96\xb6")); } // ▶
+    static juce::String pauseGlyph() { return juce::String(juce::CharPointer_UTF8("\xe2\x8f\xb8")); } // ⏸
 
-        fs->loadScoreFramesFromImage(generatedImage, spectroBand,
-                                     genMinFreq, genMaxFreq, false);
-        framesAreOurs    = true;
-        loadedFrameCount = fs->getScoreFrameCount();
-        scrubHead        = -1;
-        return true;
+    void togglePreview()
+    {
+        const juce::File wav = cacheWavFile();
+        if (processor.isScorePreviewPlaying())
+        {
+            processor.pauseScorePreview();
+        }
+        else if (wav.existsAsFile())
+        {
+            const double len = scoregen::pageWindowSeconds(settings_);
+            const bool sameRegion = (wav == previewFile)
+                                  && std::abs(settings_.startTimeSec - previewStart) < 1e-6
+                                  && std::abs(len - previewLen) < 1e-6;
+            if (! (sameRegion && processor.resumeScorePreview()))
+            {
+                processor.startScorePreview(wav, settings_.startTimeSec, len);
+                previewFile  = wav;
+                previewStart = settings_.startTimeSec;
+                previewLen   = len;
+            }
+        }
+        refreshPreviewButton();
     }
 
+    void refreshPreviewButton()
+    {
+        previewButton.setButtonText(processor.isScorePreviewPlaying() ? pauseGlyph() : playGlyph());
+    }
+
+    //==========================================================================
     void togglePlay()
     {
         auto* fs = processor.getLuxSampler();
@@ -797,13 +1206,12 @@ private:
             if (generatedImage.isValid())
             {
                 // Another module took the shared channel — reclaim it.
-                if (! reloadPlayFrames())
-                    return;
+                applyEqToImageAndReload();
             }
             else if (cacheWavFile().existsAsFile())
             {
-                // Restored session: re-encode the cached WAV, then auto-play.
-                startRenderOnly(true);
+                // Restored session: re-encode the cached take, then auto-play.
+                startGenerate(/*autoPlayWhenDone*/ true);
                 return;
             }
             else
@@ -812,10 +1220,10 @@ private:
                 return;
             }
         }
-        scrubHead = -1;
+        if (! play)
+            scrubHead = -1;
 
-        // Route through the scorePlaying param so the DAW lane stays truthful
-        // (same path as the SCORE page — shared transport, shared channel).
+        // Route through the scorePlaying param so the DAW lane stays truthful.
         if (auto* p = processor.getAPVTS().getParameter("scorePlaying"))
         {
             const float norm = play ? 1.0f : 0.0f;
@@ -824,38 +1232,48 @@ private:
             else if (play) fs->uiPlayScore();
             else           fs->uiStopScore();
         }
-        playStopButton.setPlaying(play);
+        refreshPlayButton();
         repaint(previewArea);
     }
 
-    void scrubTo(const juce::MouseEvent& e)
+    void refreshPlayButton()
     {
         auto* fs = processor.getLuxSampler();
-        if (fs == nullptr || ! framesAreOurs) return;
-        const int n = fs->getScoreFrameCount();
-        if (n <= 0) return;
-        const auto area = previewImgArea.isEmpty() ? previewImageBounds() : previewImgArea;
-        if (area.getWidth() <= 0.f) return;
-        const float fx = juce::jlimit(0.f, 1.f,
-            ((float) e.position.x - area.getX()) / area.getWidth());
-        scrubHead = juce::jlimit(0, n - 1, (int) (fx * (float) n));
-        fs->uiSeekScore(scrubHead);
-        repaint(previewArea);
+        const bool playing = (fs != nullptr) && fs->isScorePlaying() && framesAreOurs;
+        playStopButton.setPlaying(playing);
+    }
+
+    void setTransportEnabled(bool on)
+    {
+        playStopButton.setEnabled(on);
+        loopBtn.setEnabled(on);
+        reverseBtn.setEnabled(on);
+        speedSlider.setEnabled(on);
+
+        const juce::Colour lblCol = on ? juce::Colour(0xffd6dbe4) : juce::Colour(0xff555a62);
+        speedLabel.setColour(juce::Label::textColourId, lblCol);
+        speedSlider.setColour(juce::Slider::textBoxTextColourId,
+                              on ? juce::Colour(0xffa0c4e8) : juce::Colour(0xff555a62));
+        speedLabel.repaint();
+        speedSlider.repaint();
     }
 
     void timerCallback() override
     {
-        // Debounced persistence (typing-friendly).
+        // Reapply the EQ once the user releases a node (deferred, like SCORE).
+        if (eqDirty && ! eqEditor.isDragging())
+        {
+            eqDirty = false;
+            processor.getAPVTS().state
+                .setProperty("voiceEqCurve", eqEditor.encodeState(), nullptr);
+            if (baseImage.isValid())
+                applyEqToImageAndReload();
+        }
+
+        // Debounced page-state persistence (typing-friendly).
         if (stateDirty
             && juce::Time::getMillisecondCounter() - lastEditMs > 800)
             persistState();
-
-        // Progress repaint while the worker runs.
-        if (busy)
-        {
-            progressBar->repaint();
-            return;
-        }
 
         auto* fs = processor.getLuxSampler();
         if (fs != nullptr && framesAreOurs)
@@ -868,28 +1286,39 @@ private:
                 scrubHead     = -1;
                 repaint(previewArea);
             }
-            else
-            {
-                playStopButton.setPlaying(fs->isScorePlaying());
-                if (fs->isScorePlaying())
-                    repaint(previewArea);
-            }
+            else if (fs->isScorePlaying())
+                repaint(previewArea);
         }
-        else
-            playStopButton.setPlaying(false);
+        refreshPlayButton();
 
-        // Voice-model RAM housekeeping: the module left the chain model →
-        // release the resident engine (~200 MB) once idle.
-        if (++idleTicks >= 100)   // every ~5 s at 20 Hz
+        // Source-audio preview: drive the waveform playhead + button state.
+        if (processor.isScorePreviewPlaying())
+            waveform.setPlayhead(previewStart + processor.getScorePreviewPositionSec());
+        else
+            waveform.setPlayhead(-1.0);
+        refreshPreviewButton();
+
+        // Voice-model RAM housekeeping: module left the chain model → release
+        // the resident engine (~200 MB) once idle.
+        if (++idleTicks >= 50)   // every ~5 s at 10 Hz
         {
             idleTicks = 0;
-            if (job.engineLoaded() && ! modelHasVoice())
+            if (! busy && job.engineLoaded() && ! modelHasVoice())
                 job.unloadEngine();
         }
     }
 
+    juce::File startDir() const
+    {
+        const auto out = processor.getSamplerOutputDir();
+        if (out.isNotEmpty() && juce::File(out).isDirectory())
+            return juce::File(out);
+        return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+    }
+
     //==========================================================================
-    // Persistence — one JSON blob in apvts.state (like midiScoreGenState).
+    // Persistence — one JSON blob in apvts.state (like midiScoreGenState);
+    // the EQ curve rides separately in "voiceEqCurve" (scoreEqCurve pattern).
     void persistState()
     {
         stateDirty = false;
@@ -899,6 +1328,14 @@ private:
         root->setProperty("rate",  rate);
         root->setProperty("expr",  expr);
         root->setProperty("sil",   silence);
+        root->setProperty("ws",    settings_.writingSpeed);
+        root->setProperty("page",  settings_.pageFormat);
+        root->setProperty("dpi",   settings_.printerDpi);
+        root->setProperty("mres",  settings_.enableMultiRes);
+        root->setProperty("start", settings_.startTimeSec);
+        root->setProperty("lang",  lastLang);
+        root->setProperty("vname", lastVoiceName);
+        root->setProperty("extdir", externalVoicesDir.getFullPathName());
         auto* prefs = new juce::DynamicObject();
         for (int i = 0; i < langPref.size(); ++i)
             prefs->setProperty(langPref.getName(i), langPref.getValueAt(i));
@@ -920,9 +1357,19 @@ private:
         const juce::String v = o->getProperty("voice").toString();
         autoMode        = (v.isEmpty() || v == "auto");
         selectedVoiceId = autoMode ? juce::String() : v;
-        if (o->hasProperty("rate")) rate    = (double) o->getProperty("rate");
-        if (o->hasProperty("expr")) expr    = (double) o->getProperty("expr");
-        if (o->hasProperty("sil"))  silence = (double) o->getProperty("sil");
+        if (o->hasProperty("rate"))  rate    = (double) o->getProperty("rate");
+        if (o->hasProperty("expr"))  expr    = (double) o->getProperty("expr");
+        if (o->hasProperty("sil"))   silence = (double) o->getProperty("sil");
+        if (o->hasProperty("ws"))    settings_.writingSpeed   = (double) o->getProperty("ws");
+        if (o->hasProperty("page"))  settings_.pageFormat     = (int)    o->getProperty("page");
+        if (o->hasProperty("dpi"))   settings_.printerDpi     = (double) o->getProperty("dpi");
+        if (o->hasProperty("mres"))  settings_.enableMultiRes = (int)    o->getProperty("mres");
+        if (o->hasProperty("start")) settings_.startTimeSec   = (double) o->getProperty("start");
+        lastLang      = o->getProperty("lang").toString();
+        lastVoiceName = o->getProperty("vname").toString();
+        const juce::String extdir = o->getProperty("extdir").toString();
+        if (extdir.isNotEmpty() && juce::File(extdir).isDirectory())
+            externalVoicesDir = juce::File(extdir);
         if (auto* prefs = o->getProperty("pref").getDynamicObject())
             langPref = prefs->getProperties();
     }
@@ -930,49 +1377,80 @@ private:
     //==========================================================================
     Sp3ctraAudioProcessor& processor;
 
+    // TTS block.
     juce::Array<PiperVoiceInfo> voices;
-    VoiceGenJob job;
-
-    // Persisted page state.
-    juce::String text;
-    bool         autoMode = true;
-    juce::String selectedVoiceId;
-    double       rate = 1.0, expr = 0.667, silence = 1.0;
-    juce::NamedValueSet langPref;          // lang → last explicitly picked voice
-
-    // Last generation.
-    juce::Image          generatedImage;
-    juce::Rectangle<int> spectroBand;
-    double genMinFreq = 0.0, genMaxFreq = 0.0;
-    double audioSeconds = 0.0;
-
-    juce::Label    voiceLabel, langBadge, rateLabel, exprLabel, silenceLabel,
-                   speedLabel, playHint, logLabel;
-    juce::ComboBox voiceCombo;
-    juce::TextButton rescanButton, folderButton, generateButton;
+    juce::File       externalVoicesDir { PiperTts::voicesDirectory() };
+    juce::ComboBox   voiceCombo;
+    juce::TextButton rescanButton, folderButton;
     juce::TextEditor textEditor;
-    juce::Slider   rateSlider, exprSlider, silenceSlider, speedSlider;
-    VoicePlayButton playStopButton;
-    VoiceIconToggle loopBtn    { VoiceIconToggle::Glyph::Loop };
-    VoiceIconToggle reverseBtn { VoiceIconToggle::Glyph::Inverse };
-    std::unique_ptr<juce::ProgressBar> progressBar;
-    double progressValue = 0.0;
+    juce::Label      rateLabel, exprLabel, silenceLabel, synthStatus;
+    juce::Slider     rateSlider, exprSlider, silenceSlider;
+    juce::String     text;
+    bool             autoMode = true;
+    juce::String     selectedVoiceId;
+    double           rate = 1.0, expr = 0.667, silence = 1.0;
+    juce::NamedValueSet langPref;      // lang → last explicitly picked voice
+    juce::String     lastLang, lastVoiceName;
+    bool             ttsDirty = true;  // text/voice/options changed → re-synthesize
+
+    // Generation controls (SCORE-identical).
+    juce::TextButton generateButton, exportPngButton, exportJpgButton;
+    juce::Label      logLabel;
+    juce::Label      wsLabel;
+    juce::Slider     wsSlider;
+    juce::Label      pageLabel, dpiLabel;
+    juce::ComboBox   pageCombo, dpiCombo;
+    juce::ToggleButton multiResToggle;
+    ScoreSettings    settings_ {};     // VOICE's own page settings (persisted in the blob)
+
+    // Playback transport (shared SCORE player channel).
+    TransportPlayButton playStopButton;
+    VoiceIconToggle     loopBtn    { VoiceIconToggle::Glyph::Loop };
+    VoiceIconToggle     reverseBtn { VoiceIconToggle::Glyph::Inverse };
+    juce::Slider        speedSlider;
+    juce::Label         speedLabel, playHint;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> loopAttach, reverseAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> speedAttach;
-    std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
-
-    juce::Rectangle<int>   previewArea;
+    int  scrubHead { -1 };
+    bool scrubbing { false };
+    bool scrubAuditioning { false };
     juce::Rectangle<float> previewImgArea;
-    juce::Image previewImage;
 
-    bool busy = false, pendingAutoPlay = false, stateDirty = false;
-    juce::uint32 lastEditMs = 0;
-    int idleTicks = 0;
+    // Waveform strip + source audition + image EQ.
+    ScoreEqComponent eqEditor { juce::Colour(kAccentARGB) };
+    WaveformSelectorComponent waveform { juce::Colour(kAccentARGB) };
+    juce::TextButton previewButton;
+    juce::File previewFile;
+    double     previewStart { -1.0 };
+    double     previewLen   { -1.0 };
 
-    bool framesAreOurs = false;
-    int  loadedFrameCount = 0;
-    int  scrubHead = -1;
-    bool scrubbing = false, scrubAuditioning = false;
+    double progress { 0.0 };
+    juce::ProgressBar progressBar { progress };
+
+    juce::Rectangle<int> previewArea;
+    juce::Rectangle<int> spectroBand;
+    double genMinFreq { 0.0 };
+    double genMaxFreq { 0.0 };
+    juce::String previewStats;
+    juce::Image generatedImage;   // full resolution (export source, EQ baked in)
+    juce::Image baseImage;        // raw render before EQ
+    juce::Image previewImage;     // downscaled band crop for painting
+    bool   eqDirty { false };
+    double genDynRangeDB { 50.0 };
+    double genDpi { 400.0 };
+    double lastEqMinFreq { 0.0 }, lastEqMaxFreq { 0.0 };
+    bool busy { false };
+    bool pendingAutoPlay { false };
+    bool framesAreOurs { false };
+    int  loadedFrameCount { 0 };
+    bool stateDirty { false };
+    juce::uint32 lastEditMs { 0 };
+    int idleTicks { 0 };
+
+    std::unique_ptr<juce::FileChooser> fileChooser;
+    VoiceGenJob job;
+
+    std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(VoiceGenTabComponent)
 };

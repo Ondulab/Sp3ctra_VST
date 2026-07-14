@@ -25,7 +25,8 @@
 #include <vector>
 
 /** One installed Piper voice: an extracted sherpa-onnx `vits-piper-*` bundle
- *  (<id>.onnx + tokens.txt + espeak-ng-data/) under voicesDirectory(). */
+ *  (<id>.onnx + tokens.txt + espeak-ng-data/) — either baked into the plugin
+ *  bundle's Resources (built-in) or found in the user's external folder. */
 struct PiperVoiceInfo
 {
     juce::String id;          ///< bundle directory name, e.g. "vits-piper-fr_FR-siwis-medium"
@@ -34,8 +35,9 @@ struct PiperVoiceInfo
     juce::String name;        ///< speaker name ("siwis", "lessac", …)
     juce::String quality;     ///< "low" (16 kHz) / "medium" / "high" (22.05 kHz)
     juce::File   modelOnnx, tokensTxt, espeakDataDir;
+    bool         builtIn = false;   ///< shipped inside the plugin bundle
 
-    /** "siwis (fr-FR, medium)" — for the voice combo. */
+    /** "siwis (fr-FR, medium)" — for the voice combo (+ built-in marker). */
     juce::String displayName() const;
 };
 
@@ -68,11 +70,18 @@ public:
     /** False when the project was built with SP3CTRA_ENABLE_TTS=OFF. */
     static bool isEngineAvailable();
 
-    /** ~/Library/Application Support/Sp3ctra/piper_voices (not created here). */
+    /** Default EXTERNAL voices folder:
+     *  ~/Library/Application Support/Sp3ctra/piper_voices (not created here). */
     static juce::File voicesDirectory();
 
-    /** Scans voicesDirectory() for valid voice bundles, sorted by lang then name. */
-    static juce::Array<PiperVoiceInfo> listVoices();
+    /** Voices baked into the plugin bundle at build time (SP3CTRA_EMBED_VOICES):
+     *  <bundle>/Contents/Resources/piper_voices. Works for the Standalone app
+     *  and for the VST3/AU loaded inside a host. */
+    static juce::File bundleVoicesDirectory();
+
+    /** Scans the embedded bundle voices plus @p externalDir, deduplicated by
+     *  bundle id (the external copy wins), sorted by lang then name. */
+    static juce::Array<PiperVoiceInfo> listVoices (const juce::File& externalDir);
 
     /** Writes a Result as a 16-bit mono WAV at its native rate. */
     static bool writeWavFile (const Result& r, const juce::File& outFile);

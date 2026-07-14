@@ -432,6 +432,58 @@ if(APPLE)
     )
 endif()
 
+# VOICE module — embedded voice bundles. Each listed Piper voice is fetched at
+# configure time and baked into Contents/Resources/piper_voices of EVERY plugin
+# format (~79 MB per voice per format!), so the VOICE module works with no
+# external folder. Extra voices can still be added at runtime via the page's
+# user-selectable external folder.
+# ⚠ Embedded voices are REDISTRIBUTED with the binary: check each bundle's
+#   MODEL_CARD license first (defaults: siwis = CC-BY 4.0, ljspeech = public
+#   domain — see THIRD-PARTY-NOTICES.md). e.g. lessac (Blizzard licence) must
+#   NOT be embedded.
+set(SP3CTRA_EMBED_VOICES
+    "vits-piper-fr_FR-siwis-medium;vits-piper-en_US-ljspeech-medium"
+    CACHE STRING
+    "Piper voices baked into the plugin bundles (semicolon list; empty = none)")
+
+# Pinned hashes for the default bundles (others fetch unpinned).
+set(SP3CTRA_VOICE_SHA_vits-piper-fr_FR-siwis-medium
+    375909aa30842b3a4efa10b1beb1d761af792960ae6873b4d53889f96c66195b)
+set(SP3CTRA_VOICE_SHA_vits-piper-en_US-ljspeech-medium
+    3dfb4b759d8be032a4903a9538d128b0fda2a06ab1de6cbc2d93a97e2dd83dba)
+
+if(APPLE AND SP3CTRA_ENABLE_TTS AND SP3CTRA_EMBED_VOICES)
+    set(SP3CTRA_EMBEDDED_VOICE_FILES "")
+    foreach(_voice IN LISTS SP3CTRA_EMBED_VOICES)
+        string(TOLOWER "${_voice}" _vname)
+        string(MAKE_C_IDENTIFIER "${_vname}" _vname)
+        set(_vargs URL "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/${_voice}.tar.bz2"
+                   DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        if(DEFINED SP3CTRA_VOICE_SHA_${_voice})
+            list(APPEND _vargs URL_HASH SHA256=${SP3CTRA_VOICE_SHA_${_voice}})
+        endif()
+        FetchContent_Declare(${_vname} ${_vargs})
+        FetchContent_MakeAvailable(${_vname})
+
+        # Preserve the bundle's tree under Resources/piper_voices/<bundle>/.
+        file(GLOB_RECURSE _vfiles "${${_vname}_SOURCE_DIR}/*")
+        foreach(_f IN LISTS _vfiles)
+            file(RELATIVE_PATH _rel "${${_vname}_SOURCE_DIR}" "${_f}")
+            get_filename_component(_reldir "${_rel}" DIRECTORY)
+            set_source_files_properties(${_f} PROPERTIES
+                MACOSX_PACKAGE_LOCATION "Resources/piper_voices/${_voice}/${_reldir}")
+            list(APPEND SP3CTRA_EMBEDDED_VOICE_FILES ${_f})
+        endforeach()
+    endforeach()
+
+    # Resources belong to the per-format BUNDLE targets, not the shared code lib.
+    foreach(_fmt Standalone VST3 AU)
+        if(TARGET Sp3ctraVST_${_fmt})
+            target_sources(Sp3ctraVST_${_fmt} PRIVATE ${SP3CTRA_EMBEDDED_VOICE_FILES})
+        endif()
+    endforeach()
+endif()
+
 # VOICE module — sherpa-onnx static libs (link order from the official .pc;
 # libkissfft-float members only load for symbols the in-tree KissFFT doesn't
 # define — same float ABI, so either resolution is correct).
