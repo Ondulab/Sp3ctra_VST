@@ -193,3 +193,8 @@ install_manifest.txt
 compile_commands.json
 CTestTestfile.cmake
 _deps/
+
+# Corpus TTS locaux (sorties edge-tts / voix Microsoft — ne PAS redistribuer :
+# conditions d'usage Microsoft ; le module VOICE génère en local via Piper)
+tts_voices*/
+tts_wav_*/
