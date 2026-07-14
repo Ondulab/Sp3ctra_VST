@@ -91,6 +91,7 @@ static void pipeline_apply_envelope(
     int            nb_pixels)
 {
     EnvelopeState *env;
+    uint64_t       now_us;
     int            i, note;
     int            gn;
 
@@ -98,12 +99,28 @@ static void pipeline_apply_envelope(
         return;
 
     env    = &g_envelope[envelope_id];
+    now_us = pipeline_get_timestamp_us();
     gn     = (nb_pixels < PREPROCESS_MAX_NOTES) ? nb_pixels : PREPROCESS_MAX_NOTES;
 
-    /* Fade-in/out on transport change REMOVED (2026-07-13): every chain now
-     * starts and stops instantly, with no volume/brightness ramp. `fade_ms`
-     * is ignored — the *FadeInMs parameters are inert on all chains. */
-    (void)fade_ms;
+    /* ── Detect mode transition ──────────────────────────────────────── */
+    if (freeze_mode != env->prev_freeze && env->prev_freeze >= 0)
+    {
+        if (env->prev_freeze == 0 && freeze_mode == 2)
+        {
+            /* PLAY → STOP/WHITE: fade-out to silence */
+            if (fade_ms > 0) { env->fade_ts_us = now_us; env->fade_dir = -1; }
+        }
+        else if (freeze_mode == 0)
+        {
+            /* HOLD/STOP → PLAY: fade-in */
+            if (fade_ms > 0) { env->fade_ts_us = now_us; env->fade_dir = 1; }
+        }
+        else
+        {
+            /* PLAY → HOLD, or STOP ↔ HOLD: cancel any in-progress fade */
+            env->fade_dir = 0;
+        }
+    }
     if (env->prev_freeze < 0) env->prev_freeze = freeze_mode; /* first call */
 
     /* ── Apply freeze / hold / play ──────────────────────────────────── */
@@ -149,6 +166,38 @@ static void pipeline_apply_envelope(
             notes[note] = 0.0f;
         for (i = 0; i < gn; i++)
             grayscale[i] = 0.0f;
+    }
+
+    /* ── Apply fade envelope ─────────────────────────────────────────── */
+    if (env->fade_dir != 0 && fade_ms > 0)
+    {
+        float t = (float)(now_us - env->fade_ts_us) / ((float)fade_ms * 1000.0f);
+        if (t >= 1.0f)
+        {
+            env->fade_dir = 0; /* ramp complete */
+        }
+        else
+        {
+            if (env->fade_dir == -1 && freeze_mode == 2 && env->held_notes_count > 0)
+            {
+                /* STOP fade-out: decay from held values */
+                float ramp = 1.0f - t;
+                int n = (num_notes < env->held_notes_count) ? num_notes : env->held_notes_count;
+                for (note = 0; note < n; note++)
+                    notes[note] = env->held_notes[note] * ramp;
+                int g = (gn < env->held_gray_count) ? gn : env->held_gray_count;
+                for (i = 0; i < g; i++)
+                    grayscale[i] = env->held_gray[i] * ramp;
+            }
+            else
+            {
+                float ramp = (env->fade_dir > 0) ? t : (1.0f - t);
+                for (note = 0; note < num_notes; note++)
+                    notes[note] *= ramp;
+                for (i = 0; i < gn; i++)
+                    grayscale[i] *= ramp;
+            }
+        }
     }
 
     env->prev_freeze = freeze_mode;
@@ -392,20 +441,13 @@ void pipeline_path_luxstral(
      */
     {
         int effective_freeze;
-        int effective_fade;
 
         /* live_regate covers ENVELOPE_LIVE and the live-fed P3 sends (their
          * per-send envelope ids share the live transport authority). */
         if (config->live_regate)
-        {
             effective_freeze = g_sp3ctra_config.sampler_freeze_mode;
-            effective_fade   = g_sp3ctra_config.sampler_fade_in_ms;
-        }
         else
-        {
             effective_freeze = config->freeze_mode;
-            effective_fade   = config->fade_in_ms;
-        }
 
         /* Apply RAW upstream gate only for non-relayed streams (a stopped RAW
          * input must not silence a playing sampler/sequencer). */
@@ -413,10 +455,7 @@ void pipeline_path_luxstral(
         {
             int raw_freeze = g_sp3ctra_config.raw_freeze_mode;
             if (raw_freeze > effective_freeze)
-            {
                 effective_freeze = raw_freeze;
-                effective_fade   = g_sp3ctra_config.raw_fade_in_ms;
-            }
         }
 
         /* Use caller-provided envelope_id — NOT derived from source routing.
@@ -424,11 +463,15 @@ void pipeline_path_luxstral(
          * when source=S routes through the live pipeline path. */
         envelope_id = config->envelope_id;
 
+        /* Path A = LuxStral (Chain 1, sampler transport): NO fade on
+         * play/pause/stop (2026-07-14, per user). The transport fade envelope
+         * is kept ONLY for the SP3CTRA input source (Chain 2 — see the
+         * ENVELOPE_CHAIN2 and ENVELOPE_LUXWAVE call sites below). */
         pipeline_apply_envelope(
             envelope_id,
             effective_freeze,
             config->stream_opacity,
-            effective_fade,
+            0,   /* fade_ms = 0 → instant, no ramp on the sampler chain */
             out->additive.notes, num_notes,
             out->additive.grayscale, nb_pixels);
     }

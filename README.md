@@ -89,3 +89,18 @@ configuration **HTTP REST** (`192.168.100.1`). Le plugin l'intègre via
 - Presets `.sp3chain` V1 : topologie + réglages des modules du manifest
   (les slots audio du sampler, l'image SCORE, les chemins media et le pattern
   du séquenceur ne sont pas embarqués).
+
+## Licence
+
+Sp3ctra est un logiciel libre distribué sous **GNU GPL v3 ou ultérieure**
+(voir [LICENSE](LICENSE)). Copyright (C) 2024-2026 Ondulab / Patrick Reybaud.
+
+Le binaire lie statiquement **espeak-ng** (GPLv3, phonémisation du module
+VOICE) — c'est le composant qui fixe la licence de l'œuvre combinée. JUCE est
+utilisé sous son option **AGPLv3**, le SDK VST3 sous son option **GPLv3**.
+L'inventaire complet des composants tiers et les obligations de mise à
+disposition des sources sont dans
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+Un build sans le moteur TTS (et donc sans code GPL tiers au-delà du SDK VST3)
+reste possible : `cmake -DSP3CTRA_ENABLE_TTS=OFF`.
