@@ -420,42 +420,40 @@ void pipeline_path_luxstral(
         out->additive.notes,
         &num_notes);
 
-    /* Stage 7: Freeze / Opacity / Fade envelope — Path A = CHAIN 1 (LuxStral).
-     *
-     * Chain 1 (Source ► Pitch ► Mask ► Sampler ► LuxStral) is gated by the
-     * Chain 1 transport (sampler_freeze_mode), NEVER by the Chain 2 / live
-     * transport — independent of the placement-vs-source distinction.
-     *
-     *   • Sampler worker thread (envelope_id == ENVELOPE_SAMPLER):
-     *       keep config->freeze_mode.  The builder set it from
-     *       sampler_freeze_mode, and FramePlayerThread overrides it to PLAY when
-     *       the sequencer drives playback — that authority must be preserved.
-     *   • Live/idle thread (envelope_id == ENVELOPE_LIVE):
-     *       the builder put image_freeze_mode here (the old Chain 2 value).
-     *       Re-gate to sampler_freeze_mode so pausing Chain 1 freezes LuxStral
-     *       while idle, and pausing Chain 2 no longer affects it.
-     *
-     * RAW upstream gate: raw_freeze_mode overrides when more restrictive, but
-     * ONLY for non-SAMPLER sources (applying it to a playing sampler/sequencer
-     * would silence it whenever the RAW input is stopped).
-     */
+    /* Stage 7: Freeze / Opacity / Fade envelope — PER-CHAIN transport
+     * authority (P4 doctrine, fix 2026-07-14: the old global re-gate silenced
+     * every producer-staged send with the sampler transport + RAW gate —
+     * an IMAGE-fed chain was mute until two unrelated transports were set
+     * to PLAY). The transport that gates a send is the one owning the
+     * CHAIN'S SOURCE:
+     *   • sampler/score-relayed chain (sampler_relayed):
+     *       – producer-staged (live_regate=1): the SAMPLER transport, instant
+     *         (no fade — 2026-07-14 per user);
+     *       – player-fed (live_regate=0): keep config->freeze_mode — the
+     *         sampler builder set it and FramePlayerThread overrides it to
+     *         PLAY when the sequencer/score drives (authority preserved).
+     *   • SP3CTRA/live-fed chain: the live transport (image_freeze_mode, set
+     *     by the live builder) with the transport fade (imageFadeInMs) and
+     *     the RAW upstream acquisition gate — the device's own signal.
+     *   • internal-source chain (IMAGE/VIDEO/CAMERA): NO global transport at
+     *     all — the executor neutralizes freeze/live_regate (the media module
+     *     owns its transport; pause = frozen line in the stream itself). */
     {
-        int effective_freeze;
+        int effective_freeze = config->freeze_mode;
+        int fade_ms          = 0;
 
-        /* live_regate covers ENVELOPE_LIVE and the live-fed P3 sends (their
-         * per-send envelope ids share the live transport authority). */
-        if (config->live_regate)
-            effective_freeze = g_sp3ctra_config.sampler_freeze_mode;
-        else
-            effective_freeze = config->freeze_mode;
-
-        /* Apply RAW upstream gate only for non-relayed streams (a stopped RAW
-         * input must not silence a playing sampler/sequencer). */
-        if (!config->sampler_relayed)
+        if (config->sampler_relayed)
         {
+            if (config->live_regate)
+                effective_freeze = g_sp3ctra_config.sampler_freeze_mode;
+        }
+        else if (config->live_regate)
+        {
+            /* Device-fed stream: RAW acquisition gate + transport fade. */
             int raw_freeze = g_sp3ctra_config.raw_freeze_mode;
             if (raw_freeze > effective_freeze)
                 effective_freeze = raw_freeze;
+            fade_ms = config->fade_in_ms;
         }
 
         /* Use caller-provided envelope_id — NOT derived from source routing.
@@ -463,15 +461,11 @@ void pipeline_path_luxstral(
          * when source=S routes through the live pipeline path. */
         envelope_id = config->envelope_id;
 
-        /* Path A = LuxStral (Chain 1, sampler transport): NO fade on
-         * play/pause/stop (2026-07-14, per user). The transport fade envelope
-         * is kept ONLY for the SP3CTRA input source (Chain 2 — see the
-         * ENVELOPE_CHAIN2 and ENVELOPE_LUXWAVE call sites below). */
         pipeline_apply_envelope(
             envelope_id,
             effective_freeze,
             config->stream_opacity,
-            0,   /* fade_ms = 0 → instant, no ramp on the sampler chain */
+            fade_ms,
             out->additive.notes, num_notes,
             out->additive.grayscale, nb_pixels);
     }
