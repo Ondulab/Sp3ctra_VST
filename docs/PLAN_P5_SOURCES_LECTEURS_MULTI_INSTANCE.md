@@ -95,7 +95,18 @@
 
 ## Jalons
 
-### P5-M1 — Modèle + plan : instancier sans changer le runtime (M)
+### P5-M1 — Modèle + plan : instancier sans changer le runtime (M) — ✅ FAIT (2026-07-14)
+
+Statut : implémenté, build vert. Pools `firstFreeMediaSlot(type)` (8/kind) +
+`firstFreeScorePlayerSlot()` (8 partagés par la FAMILLE via isScoreFamily) ;
+singletons levés (seul SEQUENCER reste singleton) ; budgets + healing
+validateAndRepair ; hasSlot étendu (persistence kSlotProp + pré-seed presets
+gratuits) ; plan : `SynthChainPlan.source_slot` + marqueur SCORE avec
+state_idx = slot d'instance (consommateurs matchent encore par id → parité).
+Vieilles sessions : slot -1 → heal slot 0. LIMITE M1 documentée : N instances
+posables mais runtime kind-wide (mêmes contenus) jusqu'à M2/M4.
+
+#### Plan initial (référence)
 - ChainModel : lever les singletons IMAGE/VIDEO/CAMERA/SCORE/TIMBRE/MIDI
   SCORE/VOICE → types poolés (slots 0..7 par famille : médias par kind, score
   par FAMILLE via kScoreFamily) ; validateAndRepair budgets + healing ;

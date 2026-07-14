@@ -4158,15 +4158,23 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
     // Only modules UPSTREAM of the synth count as its source: "order is
     // significant" (ChainModel.h) — a source dragged BELOW the synth used to
     // feed it anyway, contradicting how Pitch/Mask below the synth are ignored.
-    auto sourceKind = [](const Chain& ch, int limit) -> int
+    // P5-M1: kind + the source INSTANCE's slot (media pools). SP3CTRA/none → 0.
+    auto sourceKind = [](const Chain& ch, int limit, int* slot_out) -> int
     {
+        *slot_out = 0;
         for (int i = 0; i < limit && i < (int) ch.modules.size(); ++i)
         {
             const auto& m = ch.modules[(size_t) i];
             if (m.type == ModuleType::Sp3ctra) return CHAIN_SRC_LIVE;
-            if (m.type == ModuleType::Image)   return CHAIN_SRC_IMAGE;
-            if (m.type == ModuleType::Video)   return CHAIN_SRC_VIDEO;
-            if (m.type == ModuleType::Camera)  return CHAIN_SRC_CAMERA;
+            if (m.type == ModuleType::Image || m.type == ModuleType::Video
+                || m.type == ModuleType::Camera)
+            {
+                *slot_out = juce::jlimit(0, ChainModel::kMaxMediaSlots - 1,
+                                         m.slot >= 0 ? m.slot : 0);
+                return m.type == ModuleType::Image ? CHAIN_SRC_IMAGE
+                     : m.type == ModuleType::Video ? CHAIN_SRC_VIDEO
+                                                   : CHAIN_SRC_CAMERA;
+            }
         }
         return CHAIN_SRC_NONE;
     };
@@ -4178,7 +4186,7 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
     {
         const auto& ch = chainModel_.chains[(size_t) chainIdx];
         sp.present        = 1;
-        sp.source_kind    = sourceKind(ch, limitIdx);
+        sp.source_kind    = sourceKind(ch, limitIdx, &sp.source_slot);
         sp.viz_tap_insert = -1;   // set below when this chain hosts the selection
 
         for (int i = 0; i < limitIdx && i < (int) ch.modules.size(); ++i)
@@ -4255,10 +4263,16 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
                     // Record the score's POSITION (like the sampler marker) so the
                     // player thread can apply the inserts BELOW the score to the
                     // playback frames (REVERB/ECHO/probes after SCORE).
+                    // P5-M1: the marker carries the INSTANCE's score-player
+                    // slot (symmetry with the SAMPLER marker/engine) — the
+                    // runtime still plays the single shared channel until
+                    // P5-M4, so every consumer keeps matching by id only.
                     if (sp.num_inserts < CHAIN_PLAN_MAX_INSERTS)
                     {
                         sp.insert_id[sp.num_inserts]        = IMAGE_CHAIN_INSERT_SCORE;
-                        sp.insert_state_idx[sp.num_inserts] = 0;   // unused for the marker
+                        sp.insert_state_idx[sp.num_inserts] =
+                            juce::jlimit(0, ChainModel::kMaxScorePlayers - 1,
+                                         mi.slot >= 0 ? mi.slot : 0);
                         sp.num_inserts++;
                     }
                 }

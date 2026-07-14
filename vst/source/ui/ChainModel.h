@@ -118,10 +118,31 @@ public:
     int firstFreeEngineSendSlot(ModuleType type,
                                 const juce::Uuid* movingId = nullptr) const;
 
-    /** Types that carry a per-instance `slot` (VideoScroll bank, sampler engine
-     *  OR engine send). */
+    //── Media source slot pools (IMAGE / VIDEO / CAMERA) — P5-M1 ───────────────
+    // Each media type owns an independent 8-slot pool: an instance's `slot` is
+    // its future engine/bank index. Multi-chain (one instance per chain via the
+    // ≤1-source rule). M1 NOTE: the runtime still reads KIND-wide state — every
+    // instance of a kind shows the same media until P5-M2.
+    static constexpr int kMaxMediaSlots = 8;
+    static bool isMediaSource(ModuleType t) noexcept
+        { return t == ModuleType::Image || t == ModuleType::Video
+              || t == ModuleType::Camera; }
+    int firstFreeMediaSlot(ModuleType type,
+                           const juce::Uuid* movingId = nullptr) const;
+
+    //── Score-player slot pool — P5-M1 ──────────────────────────────────────────
+    // ONE pool SHARED by the whole score family (kScoreFamily: SCORE / TIMBRE /
+    // MIDI SCORE / VOICE): an instance's `slot` is its future ScoreSlotPool
+    // lecteur index (8 lecteurs indépendants). M1 NOTE: the runtime still plays
+    // the single shared score channel until P5-M4.
+    static constexpr int kMaxScorePlayers = 8;
+    int firstFreeScorePlayerSlot(const juce::Uuid* movingId = nullptr) const;
+
+    /** Types that carry a per-instance `slot` (VideoScroll bank, sampler engine,
+     *  engine send, media source or score player). */
     static bool hasSlot(ModuleType t) noexcept
-        { return isSlottedType(t) || isSamplerEngine(t) || isEngineSend(t); }
+        { return isSlottedType(t) || isSamplerEngine(t) || isEngineSend(t)
+              || isMediaSource(t) || isScoreFamily(t); }
 
     //── Mutations (return false when the rule check fails) ─────────────────────
     bool insert(int chainIdx, ModuleType type, int dropIdx);
