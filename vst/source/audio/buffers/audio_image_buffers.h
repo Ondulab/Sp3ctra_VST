@@ -51,27 +51,6 @@ typedef struct AudioImageBuffers {
   uint8_t *sampler_G;
   uint8_t *sampler_B;
 
-  // ── Modulated snapshot (written by the synthesis thread) ─────────────────
-  // Holds the last frame after the full insert chain.  Actual runtime order:
-  //     Live ► [LuxPitch ⇄ LuxMask, order = chainInsertOrder] ► LuxSampler
-  // (the sampler records the post-insert frame; during playback the sampler
-  // frame IS the modulated output — inserts are already "printed").
-  // This is the buffer consumed by the synth engines when their source is
-  // set to MODULATED, and the buffer mirrored by the video waterfall.
-  uint8_t *modulated_R;
-  uint8_t *modulated_G;
-  uint8_t *modulated_B;
-
-  // ── Per-insert visual taps (written by the synthesis thread) ─────────────
-  // tap[i] holds the last output frame of insert i (see IMAGE_CHAIN_INSERT_*
-  // in processing/image_chain.h).  Only snapshotted when a visual consumer
-  // declared demand (image_chain_set_tap_demand) — zero cost otherwise.
-  // Single producer (synthesis thread) / multi reader (UI visualizers).
-#define AUDIO_IMAGE_NUM_INSERT_TAPS 2
-  uint8_t *insert_tap_R[AUDIO_IMAGE_NUM_INSERT_TAPS];
-  uint8_t *insert_tap_G[AUDIO_IMAGE_NUM_INSERT_TAPS];
-  uint8_t *insert_tap_B[AUDIO_IMAGE_NUM_INSERT_TAPS];
-
   // ── Selection tap (contextual visualizer) ─────────────────────────────────
   // Holds the stream frame AT THE SELECTED MODULE'S POSITION in ITS chain,
   // published by whichever chain executor hosts the selection (plan-driven:
@@ -101,13 +80,12 @@ typedef struct AudioImageBuffers {
   uint64_t lines_processed;
   uint64_t buffer_swaps;
 
-  // Number of snapshots published to modulated_R/G/B by the synthesis thread.
-  // Incremented exactly once per audio_image_buffers_snapshot_modulated() call,
-  // letting downstream consumers (e.g. waterfall capture) detect a fresh
-  // modulated frame even when the UDP write bus is idle (sampler playback
-  // suppresses lines_received).
-  // Single producer (synthesis thread) → atomic load on the reader side.
-  uint64_t lines_modulated;
+  // Frame-freshness counter (P4-M3): bumped on EVERY engine-input tap
+  // publish (audio_image_buffers_publish_engine_input) — the taps are what
+  // the waterfall renders, so their publishes ARE the "new frame" signal,
+  // whichever thread produced them (udpThread / feeder / FramePlayerThread).
+  // Replaces the dead modulated-bus counter; consumers atomic-load it.
+  uint64_t frame_seq;
 
   // ── Acquisition gate (frame-advance brake / "vitesse d'acquisition") ───────
   // Throttles the LIVE UDP publish path: when enabled, a freshly assembled line
@@ -195,40 +173,6 @@ void audio_image_buffers_snapshot_sampler(AudioImageBuffers *buffers,
 void audio_image_buffers_get_sampler_pointers(const AudioImageBuffers *buffers,
                                               uint8_t **out_R, uint8_t **out_G,
                                               uint8_t **out_B);
-
-// ── Modulated snapshot (written by the synthesis thread) ──────────────────
-// Called once per synthesis cycle after the full insert chain runs
-// (Live ► LuxSampler ► LuxPitch ► LuxMask).  Single-producer / multi-reader.
-void audio_image_buffers_snapshot_modulated(AudioImageBuffers *buffers,
-                                            const uint8_t *srcR,
-                                            const uint8_t *srcG,
-                                            const uint8_t *srcB,
-                                            int nb_pixels);
-
-// Lock-free read of the last modulated frame.  Mirrors what the synth
-// engines consume when their source is set to MODULATED.
-void audio_image_buffers_get_modulated_pointers(const AudioImageBuffers *buffers,
-                                                uint8_t **out_R,
-                                                uint8_t **out_G,
-                                                uint8_t **out_B);
-
-// ── Per-insert visual taps (written by the synthesis thread) ──────────────
-// Snapshot the output of insert `tap` (IMAGE_CHAIN_INSERT_*).  Called by the
-// chain executor only when a visual consumer declared demand.
-void audio_image_buffers_snapshot_insert_tap(AudioImageBuffers *buffers,
-                                             int tap,
-                                             const uint8_t *srcR,
-                                             const uint8_t *srcG,
-                                             const uint8_t *srcB,
-                                             int nb_pixels);
-
-// Lock-free read of the last published tap frame.  Returns 0 on success,
-// -1 if the tap index is invalid or buffers are not initialized.
-int audio_image_buffers_get_insert_tap_pointers(const AudioImageBuffers *buffers,
-                                                int tap,
-                                                uint8_t **out_R,
-                                                uint8_t **out_G,
-                                                uint8_t **out_B);
 
 // ── Selection tap (contextual visualizer) ──────────────────────────────────
 // Publish the stream frame at the SELECTED module's chain position.  Called by

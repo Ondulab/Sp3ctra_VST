@@ -184,7 +184,7 @@ void lux_pitch_process_frame(
  * Single simulation (M2 refactor): the synthesis-thread instance is the only
  * authoritative state.  Visual consumers (CIS visualizer, video waterfall)
  * read the insert taps published by the chain executor
- * (audio_image_buffers_get_insert_tap_pointers) — they never re-simulate, so
+ * (the contextual selection tap) — they never re-simulate, so
  * what you SEE is exactly what the engines CONSUME.
  */
 extern LuxPitchState g_lux_pitch_proc;

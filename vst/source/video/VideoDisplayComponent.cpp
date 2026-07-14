@@ -69,22 +69,22 @@ void VideoDisplayComponent::captureCurrentFrame()
     //   • lines_received  — UDP thread, incremented on complete_write().
     //                       Frozen while the LuxSampler is playing (UDP
     //                       write bus is suppressed in that case).
-    //   • lines_modulated — synthesis thread, incremented on
-    //                       snapshot_modulated().  Keeps advancing even when
-    //                       the UDP bus is idle, as long as audio synthesis
-    //                       is running (sampler playback, LuxPitch, LuxMask).
+    //   • frame_seq       — bumped on EVERY engine-input tap publish
+    //                       (udpThread / feeder / FramePlayerThread), i.e.
+    //                       exactly when the frames this waterfall renders
+    //                       changed. Keeps advancing during playback while
+    //                       lines_received is frozen. (P4-M3 — the modulated
+    //                       bus and its counter are gone.)
     //
-    // We treat *any* counter advance as "new frame available" so the
-    // waterfall stays alive in MODULATED mode during sampler playback,
-    // and in LIVE mode while the UDP stream is the only producer.
+    // We treat *any* counter advance as "new frame available".
     const uint64_t received  = (uint64_t)aib->lines_received;
-    const uint64_t modulated = __atomic_load_n(&aib->lines_modulated,
+    const uint64_t seq       = __atomic_load_n(&aib->frame_seq,
                                                 __ATOMIC_ACQUIRE);
-    const uint64_t lastR = lastLinesReceived_ .load(std::memory_order_relaxed);
-    const uint64_t lastM = lastLinesModulated_.load(std::memory_order_relaxed);
-    if (received == lastR && modulated == lastM) return;
-    lastLinesReceived_ .store(received,  std::memory_order_relaxed);
-    lastLinesModulated_.store(modulated, std::memory_order_relaxed);
+    const uint64_t lastR = lastLinesReceived_.load(std::memory_order_relaxed);
+    const uint64_t lastS = lastFrameSeq_     .load(std::memory_order_relaxed);
+    if (received == lastR && seq == lastS) return;
+    lastLinesReceived_.store(received, std::memory_order_relaxed);
+    lastFrameSeq_     .store(seq,      std::memory_order_relaxed);
 
     const int count = get_cis_pixels_nb();
     if (count <= 0) return;

@@ -135,7 +135,7 @@ void FrameSequencer::triggerStep(int stepIdx) noexcept
 
             if (prevSt == SlotState::RECORDING)
             {
-                // Stop recording: onFrameAssembled() will finalise the slot.
+                // Stop recording: the next positional capture finalises the slot.
                 pas.stopRecCmd[rtPrevActiveBank].store(true, std::memory_order_release);
                 pas.slotState[rtPrevActiveBank].store(static_cast<int>(SlotState::IDLE),
                                                        std::memory_order_release);

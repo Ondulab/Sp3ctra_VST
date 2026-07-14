@@ -25,60 +25,19 @@ extern "C" {
 #endif
 
 /**
- * @brief Called by udpThread() after a complete CIS line has been assembled
- *        from all UDP fragments (pre-sequencer raw data).
- *
- * Implemented in LuxSampler.cpp — forwards to the active LuxSampler
- * instance for recording if a slot is in RECORDING state.
- *
- * Thread: UDP receiver thread (Non-RT). Allocation is allowed here.
- *
- * @param R           Red channel buffer (nb_pixels bytes valid)
- * @param G           Green channel buffer
- * @param B           Blue channel buffer
- * @param pixel_count Number of valid pixels (1728 @200DPI or 3456 @400DPI)
- * @param line_id     Original UDP line identifier (for debug/sync)
- */
-void lux_sampler_on_frame_assembled(const uint8_t* R,
-                                       const uint8_t* G,
-                                       const uint8_t* B,
-                                       uint16_t       pixel_count,
-                                       uint32_t       line_id);
-
-/**
  * @brief Phase 1 — live frame assembled (before LuxPitch/LuxMask).
  *
  * Image chain: Live ► LuxPitch ► LuxMask ► LuxSampler.
  * Called by udpThread() right after a scanline has been reassembled but
  * BEFORE LuxPitch and LuxMask run.  Drains pending start/stop record
  * commands and caches the live frame for FramePlayerThread's darken-blend.
- * Does NOT capture a frame into the recording slot — that happens later in
- * lux_sampler_on_modulated_frame_ready() so the recorded content includes
- * Pitch + Mask processing.
+ * Does NOT capture a frame into the recording slot — capture is positional
+ * (the chain executor records at each SAMPLER marker, P4-M3).
  */
 void lux_sampler_on_live_frame_assembled(const uint8_t* R,
                                           const uint8_t* G,
                                           const uint8_t* B,
                                           uint16_t       pixel_count);
-
-/**
- * @brief Phase 2 — modulated frame ready (after LuxPitch + LuxMask).
- *
- * Called by udpThread()/the feeder AFTER the mod-bus OWNER CHAIN's
- * pre-marker processors have produced the post-mask frame.
- * Responsibilities (OWNER ENGINE only — per-chain feed, 2026-07-11):
- *   • Mirror the post-mask frame into the sampler snapshot (so the
- *     Modulated channel stays alive in idle / REC / STEP_LIVE).
- *   • Write the post-mask frame into the OWNER engine's active recording
- *     slot, so recorded samples include LuxPitch + LuxMask processing.
- * `owner_engine` = the engine slot of the owner chain's SAMPLER marker.
- */
-void lux_sampler_on_modulated_frame_ready(int            owner_engine,
-                                          const uint8_t* R,
-                                          const uint8_t* G,
-                                          const uint8_t* B,
-                                          uint16_t       pixel_count,
-                                          uint32_t       line_id);
 
 /**
  * @brief Per-chain sampler capture — record ONE chain's stream into ITS
@@ -143,7 +102,7 @@ int lux_sampler_playing_engine(void);
  * @brief Returns non-zero if any LuxSampler slot is currently RECORDING.
  *
  * Used by udpThread() to allow preprocessed_data writes for Source=Sampler
- * during recording.  The sampler snapshot is updated by onFrameAssembled()
+ * during recording.  The sampler snapshot is updated by the display owner
  * so the pipeline can read from it even while recording.
  *
  * Thread: UDP receiver thread (Non-RT). Must be fast (atomic read only).
@@ -160,7 +119,7 @@ int lux_sampler_is_recording(void);
  * engine's own playback mix. Called by the chain executor's CHAIN_REC_INPUT
  * spans (udpThread/feeder pre-marker + FramePlayerThread post-marker walks);
  * the idle capture path goes
- * through lux_sampler_on_modulated_frame_ready as before. Unlike
+ * through the positional chain capture. Unlike
  * lux_sampler_record_chain_frame this does NOT skip a driving engine.
  * No-op unless a slot is armed.
  *

@@ -542,47 +542,6 @@ static void chain_publish_no_signal(const SynthChainPlan *sp, int chain_idx,
         audio_image_buffers_clear_selection_tap(audioBuffers);
 }
 
-/* ── Contextual visualizer (zone 1) — selection tap ──────────────────────────
- * Run a chain's ordered inserts and, when the plan carries the selection tap
- * (viz_tap_insert >= 0 — the SELECTED module lives in this chain), publish the
- * stream frame AT that position to the selection-tap bus. The run is split at
- * the tap point; the final output is identical to a plain image_chain_run. */
-static void chain_run_inserts_with_viz_tap(const SynthChainPlan *sp,
-                                           AudioImageBuffers *audioBuffers,
-                                           const uint8_t *inR, const uint8_t *inG,
-                                           const uint8_t *inB, int nb_pixels,
-                                           const uint8_t **outR, const uint8_t **outG,
-                                           const uint8_t **outB)
-{
-    void *states[CHAIN_PLAN_MAX_INSERTS];
-    chain_resolve_insert_states(sp, states);
-
-    int tap = sp->viz_tap_insert;
-    if (tap > sp->num_inserts)
-        tap = sp->num_inserts;
-
-    if (tap < 0 || audioBuffers == NULL)
-    {
-        image_chain_run(inR, inG, inB, nb_pixels, g_sp3ctra_config.num_octaves,
-                        sp->insert_id, states, sp->num_inserts, outR, outG, outB);
-        return;
-    }
-
-    const uint8_t *mr = inR, *mg = inG, *mb = inB;
-    if (tap > 0)
-        image_chain_run(inR, inG, inB, nb_pixels, g_sp3ctra_config.num_octaves,
-                        sp->insert_id, states, tap, &mr, &mg, &mb);
-    audio_image_buffers_publish_selection_tap(audioBuffers, mr, mg, mb, nb_pixels);
-    if (tap < sp->num_inserts)
-        image_chain_run(mr, mg, mb, nb_pixels, g_sp3ctra_config.num_octaves,
-                        sp->insert_id + tap, (void *const *)(states + tap),
-                        sp->num_inserts - tap, outR, outG, outB);
-    else
-    {
-        *outR = mr; *outG = mg; *outB = mb;
-    }
-}
-
 /* ── M3: uniform per-chain execution ─────────────────────────────────────────
  * One chain recipe (plan.chain[c]) runs ONCE per frame: source → ordered
  * inserts. Probes capture, the selection tap publishes, LuxStral OUT markers
@@ -877,74 +836,6 @@ int chain_player_execute_owned(int is_score, int engine_slot, int force_play,
 #endif /* VST_MODE */
 
 
-/* Sampler/score-relay chain SHORT-CIRCUIT walk (shared udpThread + feeder):
- * the modulated/player channel IS the stream below the marker — no
- * image_chain_run. Probes and the Path-B OUT observe base (above the marker)
- * or mod (below); post-marker probes are skipped while the player thread owns
- * them (it captures at the exact position). The LuxStral OUT stream is mod
- * (staged by the caller). The LuxSynth OUT is staged HERE (conditioned line,
- * M4) unless the player thread owns the stream (lx_line NULL to skip). */
-static void chain_shortcut_walk(const SynthChainPlan *sp, int chain_idx,
-                                int skip_post_marker_probes,
-                                int pb_marker_id, float *lx_line,
-                                const uint8_t *baseR, const uint8_t *baseG,
-                                const uint8_t *baseB,
-                                const uint8_t *modR, const uint8_t *modG,
-                                const uint8_t *modB, int nb_pixels,
-                                ChainExecOut *out)
-{
-    memset(out, 0, sizeof(*out));
-    int after_marker = 0;
-    for (int i = 0; i < sp->num_inserts; i++)
-    {
-        const int id = sp->insert_id[i];
-        if (id == IMAGE_CHAIN_INSERT_SAMPLER || id == IMAGE_CHAIN_INSERT_SCORE)
-        { after_marker = 1; continue; }
-        if (id == IMAGE_CHAIN_INSERT_VIDEOSCROLL)
-        {
-            if (after_marker && skip_post_marker_probes)
-                continue;   /* captured by the player thread */
-            video_scroll_capture_line(
-                video_scroll_instance(sp->insert_state_idx[i]),
-                after_marker ? modR : baseR,
-                after_marker ? modG : baseG,
-                after_marker ? modB : baseB, nb_pixels);
-        }
-        else if (id == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
-        {
-            const uint8_t *fr = after_marker ? modR : baseR;
-            const uint8_t *fg = after_marker ? modG : baseG;
-            const uint8_t *fb = after_marker ? modB : baseB;
-            if (lx_line != NULL)
-            {
-                const int bank = sp->insert_state_idx[i];
-                luxsynth_condition_line(fr, fg, fb, bank, lx_line, nb_pixels);
-                synth_staging_stage_luxsynth(chain_idx, bank, lx_line,
-                                             fr, fg, fb, nb_pixels);
-            }
-            if (pb_marker_id == id && !out->pb_found)
-            { out->pbR = fr; out->pbG = fg; out->pbB = fb; out->pb_found = 1; }
-        }
-        else if (id == IMAGE_CHAIN_INSERT_OUT_LUXWAVE)
-        {
-            const uint8_t *fr = after_marker ? modR : baseR;
-            const uint8_t *fg = after_marker ? modG : baseG;
-            const uint8_t *fb = after_marker ? modB : baseB;
-            if (lx_line != NULL)
-            {
-                const int bank = sp->insert_state_idx[i];
-                luxwave_condition_line(fr, fg, fb, bank, lx_line, nb_pixels);
-                synth_staging_stage_luxwave(chain_idx, bank, lx_line,
-                                            nb_pixels);
-            }
-            if (pb_marker_id == id && !out->pb_found)
-            { out->pbR = fr; out->pbG = fg; out->pbB = fb; out->pb_found = 1; }
-        }
-    }
-    /* LuxStral OUT stream = the modulated channel (staged by the caller). */
-    out->lsR = modR; out->lsG = modG; out->lsB = modB;
-}
-
 /* ── M7 — plan-driven ownership queries (replace the *_source_type gates) ────
  * Used by FramePlayerThread/LuxSampler: which db sections may the player own?
  * Per-chain playback: the sampler case matches the chain's SAMPLER marker
@@ -1018,98 +909,6 @@ void chain_player_stagings_set_inactive(int engine_slot)
                 synth_staging_luxwave_set_inactive(c);
         }
     }
-}
-
-/* Selection tap for the SAMPLER/SCORE SHORT-CIRCUIT branches (no
- * image_chain_run): approximate the selected module's position as "before or
- * after the player marker" — the chain source frame before, the modulated
- * channel after. While the player is RUNNING, the post-marker tap is published
- * by the player thread at the exact position (chain_apply_post_marker_inserts)
- * — skip it here to avoid a second, pre-FX publication. Same for the
- * PRE-marker span when the modulated build already ran the chain's upstream
- * processors and published the exact tap (premarker_tap_done). */
-static void publish_viz_tap_sampler_shortcut(const SynthChainPlan *sp,
-                                             AudioImageBuffers *audioBuffers,
-                                             int player_running,
-                                             int premarker_tap_done,
-                                             const uint8_t *baseR, const uint8_t *baseG,
-                                             const uint8_t *baseB,
-                                             const uint8_t *modR, const uint8_t *modG,
-                                             const uint8_t *modB, int nb_pixels)
-{
-    if (sp->viz_tap_insert < 0 || audioBuffers == NULL)
-        return;
-    int after_marker = 0;
-    for (int i = 0; i < sp->viz_tap_insert && i < sp->num_inserts; i++)
-        if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER
-            || sp->insert_id[i] == IMAGE_CHAIN_INSERT_SCORE)
-            after_marker = 1;
-    if (after_marker && player_running)
-        return;
-    if (!after_marker && premarker_tap_done)
-        return;   /* exact tap already published by the modulated build */
-    audio_image_buffers_publish_selection_tap(audioBuffers,
-                                              after_marker ? modR : baseR,
-                                              after_marker ? modG : baseG,
-                                              after_marker ? modB : baseB,
-                                              nb_pixels);
-}
-
-/* ── Sampler chain: PRE-MARKER processor sub-plan ────────────────────────────
- * Every processor insert (Pitch/Mask + FX) placed ABOVE the first SAMPLER
- * marker — probes and markers excluded (fed by the per-position loops). The
- * zone-1 selection tap is rebased onto the kept processors when it points
- * into the pre-marker span. Only num_inserts / insert_id / insert_state_idx /
- * viz_tap_insert of `pre` are filled (all chain_run_inserts_with_viz_tap
- * reads). Returns 1 when the sub-plan needs the chain-specific run (any FX,
- * or a Pitch/Mask bound to a pool slot other than 0) — udpThread keeps the
- * legacy image_chain_process_inserts path otherwise. */
-static int chain_build_sampler_premarker_plan(const SynthChainPlan *spSmp,
-                                              SynthChainPlan *pre)
-{
-    int chain_specific = 0;
-    pre->num_inserts    = 0;
-    pre->viz_tap_insert = -1;
-
-    int mk = spSmp->num_inserts;   /* first SAMPLER marker */
-    for (int i = 0; i < spSmp->num_inserts; i++)
-        if (spSmp->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER)
-        { mk = i; break; }
-    for (int i = 0; i < mk; i++)
-    {
-        const int id    = spSmp->insert_id[i];
-        const int is_pm = (id == IMAGE_CHAIN_INSERT_LUXPITCH ||
-                           id == IMAGE_CHAIN_INSERT_LUXMASK);
-        const int is_fx = (id == IMAGE_CHAIN_INSERT_LUXREVERB ||
-                           id == IMAGE_CHAIN_INSERT_LUXECHO ||
-                           id == IMAGE_CHAIN_INSERT_LUXEQ);
-        if (!is_pm && !is_fx)
-            continue;   /* probes/markers: fed elsewhere */
-        pre->insert_id[pre->num_inserts]        = id;
-        pre->insert_state_idx[pre->num_inserts] = spSmp->insert_state_idx[i];
-        pre->num_inserts++;
-        if (is_fx || spSmp->insert_state_idx[i] != 0)
-            chain_specific = 1;
-    }
-    /* Selection tap inside the pre-marker span → rebase it onto the kept
-     * processors (exact contextual tap, replaces the shortcut's raw-frame
-     * approximation). */
-    if (spSmp->viz_tap_insert >= 0 && spSmp->viz_tap_insert <= mk)
-    {
-        int t = 0;
-        for (int i = 0; i < spSmp->viz_tap_insert; i++)
-        {
-            const int id = spSmp->insert_id[i];
-            if (id == IMAGE_CHAIN_INSERT_LUXPITCH  ||
-                id == IMAGE_CHAIN_INSERT_LUXMASK   ||
-                id == IMAGE_CHAIN_INSERT_LUXREVERB ||
-                id == IMAGE_CHAIN_INSERT_LUXECHO   ||
-                id == IMAGE_CHAIN_INSERT_LUXEQ)
-                t++;
-        }
-        pre->viz_tap_insert = t;
-    }
-    return chain_specific;
 }
 
 void *udpThread(void *arg) {
@@ -1474,200 +1273,12 @@ void *udpThread(void *arg) {
         s_udp_frame_ls_sends = frame_plan.num_ls_sends;   /* P3 — read by the
                                      * commit block after this scope closes */
 
-        /* ── Build the MODULATED frame once — used by any path that selects it.
-         * The inserts run inside their own preallocated buffers (see lux_pitch.c
-         * / lux_mask.c, no allocation in this hot path).  When disabled or no
-         * voice is active the engines short-circuit and return the input
-         * pointers as-is, so the cost is O(1). */
-        const uint8_t *mod_R = NULL;
-        const uint8_t *mod_G = NULL;
-        const uint8_t *mod_B = NULL;
-        /* Set when the idle modulated build ran the sampler chain's pre-marker
-         * processors AND published the exact selection tap — the shortcut
-         * publishers below must then skip their raw-frame approximation. */
-        int premarker_tap_done = 0;
-        int            need_modulated =
-            image_chain_any_tap_demand();   /* a visualizer watches an insert tap */
-        /* Per-chain playback: WHICH engine's sampler playback drives the
-         * channel this line (-1 = idle or score relay). Chains gate their
-         * player-ownership on their OWN marker matching this engine. */
-#ifdef VST_MODE
-        const int playing_engine_now = lux_sampler_playing_engine();
-#else
-        const int playing_engine_now = -1;
-#endif
-        /* MOD-BUS OWNER: while an engine PLAYS, the chain hosting THAT
-         * engine (the modulated channel carries ITS playback); otherwise the
-         * FIRST chain (model order) hosting a sampler — the single modulated
-         * channel is built from ITS recipe and ITS OWN source (fix: a
-         * sampler chain fed by IMAGE/VIDEO must never build its passthrough/
-         * record stream from the live device frames). Other sampler chains
-         * run positionally on their own stream. Any sampler chain needs the
-         * modulated machinery (REC hooks). */
-        int mod_owner_chain = -1, first_sampler_chain = -1;
-        for (int c = 0; c < frame_plan.num_chains; c++)
-        {
-            const SynthChainPlan *spc = &frame_plan.chain[c];
-            if (!spc->present || !spc->has_sampler) continue;
-            if (first_sampler_chain < 0)
-            { first_sampler_chain = c; need_modulated = 1; }
-            if (playing_engine_now >= 0 && mod_owner_chain < 0
-                && chain_hosts_sampler_engine(spc, playing_engine_now))
-                mod_owner_chain = c;
-        }
-        if (mod_owner_chain < 0)
-            mod_owner_chain = first_sampler_chain;
-
-        if (need_modulated)
-        {
-            /* ── Chain: Live ► [LuxPitch ⇄ LuxMask] ► LuxSampler ──
-             *
-             * The insert order is configurable (chainInsertOrder param, see
-             * image_chain.h) and executed by image_chain_process_inserts().
-             *
-             * The Modulated channel is the FINAL stage of the image chain
-             * (= what the synth engines actually consume when source=MODULATED,
-             * and what the VideoScroll waterfall mirrors).  The sampler is
-             * the last stage, so two cases:
-             *
-             *   • PLAYING : modulated = sampler frame directly.
-             *               The recorded sample already contains the Pitch +
-             *               Mask processing that was active at record time
-             *               (see Phase 2 hook below) — re-applying Pitch/Mask
-             *               on top would double-apply them.  Therefore the
-             *               sampler output is the final modulated signal as-is.
-             *
-             *   • IDLE / REC / STEP_LIVE :
-             *               modulated = LuxMask(LuxPitch(live)).
-             *               LuxSampler::onModulatedFrameReady() then mirrors
-             *               this post-mask result back into the sampler
-             *               snapshot AND writes it into the active recording
-             *               slot, so anything captured already has Pitch+Mask
-             *               baked in.
-             */
-#ifdef VST_MODE
-            if (lux_sampler_is_playing())
-            {
-                /* PLAYING: sampler frame IS the modulated output.  No Pitch/Mask
-                 * re-application — recorded samples already contain them. */
-                uint8_t *smpR, *smpG, *smpB;
-                audio_image_buffers_get_sampler_pointers(audioBuffers, &smpR, &smpG, &smpB);
-                mod_R = smpR;
-                mod_G = smpG;
-                mod_B = smpB;
-
-                if (mod_R && mod_G && mod_B)
-                {
-                    audio_image_buffers_snapshot_modulated(audioBuffers,
-                                                           mod_R, mod_G, mod_B,
-                                                           nb_pixels);
-                }
-
-                /* (Recording during playback is position-driven now — module
-                 *  contract 2026-07-13: markers ABOVE the owning marker record
-                 *  the chain input via the pre-marker span (per-chain loop
-                 *  below); markers BELOW it receive the playback from the
-                 *  player's own walk (chain_player_execute_owned, 1:1). */
-            }
-            else
-#endif
-            {
-                /* IDLE / REC / STEP_LIVE: run the insert chain on the raw
-                 * live frame (configurable order, per-insert visual taps),
-                 * publish as modulated, then let the sampler hook mirror &
-                 * record it.
-                 *
-                 * The chain that HOLDS the sampler owns the modulated channel.
-                 * The sampler is a plain in→out module: its INPUT stream is
-                 * the chain processed up to its marker — so EVERY processor
-                 * insert placed ABOVE it (Pitch/Mask AND the FX: Reverb/Echo/
-                 * EQ) runs here, shaping both the idle pass-through and what
-                 * an armed slot records. Probes/markers are excluded (fed by
-                 * the per-position loops — double-capture otherwise).
-                 * image_chain_process_inserts() only knows the GLOBAL slot-0
-                 * Pitch/Mask pair, so any FX — or a Pitch/Mask bound to
-                 * another pool slot — forces the chain-specific run. Pool
-                 * slot 0 Pitch/Mask-only chains keep the legacy path
-                 * (identical behaviour + live per-insert visual taps). */
-                const SynthChainPlan *spSmp =
-                    (mod_owner_chain >= 0)
-                        ? &frame_plan.chain[mod_owner_chain] : NULL;
-
-                /* Base frame = the OWNER CHAIN's own source (IMAGE/VIDEO/
-                 * CAMERA line, or the live frame for a SP3CTRA/legacy chain).
-                 * A no-signal chain builds NO modulated frame this line —
-                 * never the live device fallback. */
-                const uint8_t *smbR = db->activeBuffer_R;
-                const uint8_t *smbG = db->activeBuffer_G;
-                const uint8_t *smbB = db->activeBuffer_B;
-                int smp_no_signal = 0;
-                if (spSmp)
-                {
-                    const int smSig = synth_source_base(
-                        spSmp, CHAIN_SYNTH_COUNT + mod_owner_chain, db,
-                        nb_pixels, &smbR, &smbG, &smbB);
-                    /* STRICT: any unresolved base (-1) blocks the modulated
-                     * build — never build it from the live fallback. */
-                    smp_no_signal = (smSig < 0);
-                }
-
-                SynthChainPlan pre;          /* pre-marker processor sub-plan */
-                pre.num_inserts    = 0;
-                pre.viz_tap_insert = -1;
-                int chain_specific = 0;
-                if (spSmp && !smp_no_signal)
-                    chain_specific = chain_build_sampler_premarker_plan(spSmp, &pre);
-
-                if (smp_no_signal)
-                {
-                    /* owner chain carries no stream → mod stays NULL */
-                }
-                else if (chain_specific)
-                {
-                    chain_run_inserts_with_viz_tap(&pre, audioBuffers,
-                                                   smbR, smbG, smbB,
-                                                   nb_pixels,
-                                                   &mod_R, &mod_G, &mod_B);
-                    premarker_tap_done = (pre.viz_tap_insert >= 0);
-                }
-                else
-                image_chain_process_inserts(smbR, smbG, smbB,
-                                            nb_pixels,
-                                            g_sp3ctra_config.num_octaves,
-                                            &mod_R, &mod_G, &mod_B,
-                                            audioBuffers);
-
-                if (mod_R && mod_G && mod_B)
-                {
-                    audio_image_buffers_snapshot_modulated(audioBuffers,
-                                                           mod_R, mod_G, mod_B,
-                                                           nb_pixels);
-
-                    /* LuxSampler hook (phase 2 — modulated frame ready).
-                     * Mirrors the post-mask frame into the sampler snapshot
-                     * (so the sampler visualiser stays alive in idle) and
-                     * writes it into the OWNER ENGINE's active recording
-                     * slot, so recorded samples are Pitch+Mask "printed".
-                     * Other sampler engines record their own chain's stream
-                     * at their marker (per-chain feed). */
-#ifdef VST_MODE
-                    {
-                        int owner_engine = 0;
-                        if (spSmp)
-                            for (int i = 0; i < spSmp->num_inserts; i++)
-                                if (spSmp->insert_id[i]
-                                    == IMAGE_CHAIN_INSERT_SAMPLER)
-                                { owner_engine = spSmp->insert_state_idx[i];
-                                  break; }
-                        lux_sampler_on_modulated_frame_ready(
-                            owner_engine, mod_R, mod_G, mod_B,
-                            (uint16_t)nb_pixels, packet.line_id);
-                    }
-#endif
-                }
-            }
-        }
-
+        /* (P4-M3) The global MODULATED bus is DEAD as a routing channel: every
+         * sampler chain — owner included — executes through the uniform
+         * per-chain loop below. Its SAMPLER marker records the chain stream
+         * at its exact position (CHAIN_REC_IDLE → lux_sampler_record_chain_
+         * frame), and the zone-1 view follows the selection tap (D2). No
+         * dedicated modulated build, no shortcut walk, no PLAYING re-copy. */
 
         /* ── Legacy full-pipeline tick input ──────────────────────────────────
          * With LuxStral sends present (any "→ LUXSTRAL" placed), the M3 chain
@@ -1773,9 +1384,16 @@ void *udpThread(void *arg) {
                             .rec_mode        = CHAIN_REC_INPUT,
                             .rec_skip_engine = -1,
                         };
-                        ChainExecOut pex;   /* side effects only */
+                        ChainExecOut pex;
                         chain_execute_span(sp, c, 0, own_mk + 1, &pcx,
                                            pmR, pmG, pmB, nb_pixels, &pex);
+                        /* Above-marker LS OUT staged here → keep the head
+                         * panel/waterfall live at line rate (the player's
+                         * walk only publishes tap A for BELOW-marker OUTs). */
+                        if (pex.ls_staged && c == first_send_chain)
+                            audio_image_buffers_publish_engine_input(
+                                audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                                pex.lsR, pex.lsG, pex.lsB, nb_pixels);
                     }
                     else if (own_mk >= 0 && audioBuffers != NULL
                              && sp->viz_tap_insert >= 0
@@ -1809,78 +1427,24 @@ void *udpThread(void *arg) {
 
             ChainExecOut ex;
             const int pb_here = (c == pb_chain) ? pb_marker : -1;
-            /* Player-owned chains continue'd above — every walk below runs on
-             * an un-owned chain (single LuxSynth staging writer preserved:
-             * the player's walk stages ITS chains, this one stages the rest). */
-            float *lx_line = s_lx_line;
-            /* The modulated frame is this chain's OWN stream only when its
-             * engine drives it (playback) or when it is the idle build from
-             * its own source. Score playback — and a playing engine hosted
-             * by no chain — belong to no sampler chain. */
-            const int mod_is_chain_stream =
-                playing_engine_now >= 0
-                    ? chain_hosts_sampler_engine(sp, playing_engine_now)
-                    : !score_playing_now;
-            if (mod_R && ((sp->has_sampler && c == mod_owner_chain
-                           && mod_is_chain_stream)
-                          || (sp->has_score && score_playing_now)))
-            {
-                /* MOD-BUS OWNER chain (or score relay): the modulated/player
-                 * channel IS the stream below the marker — probes/OUTs
-                 * observe base or mod by position; the exact pre-marker
-                 * processors already ran in the modulated build. Other
-                 * sampler chains run POSITIONALLY on their own stream (their
-                 * SAMPLER marker is pass-through) — a chain fed by IMAGE
-                 * must never display/send the live device flux. */
-                chain_shortcut_walk(sp, c,
-                                    /*skip_post_marker_probes: this branch is
-                                     * idle-only since P4-M2 (owned chains
-                                     * continue'd above) — the player never
-                                     * owns these probes. */ 0,
-                                    pb_here, lx_line,
-                                    sbR, sbG, sbB,
-                                    mod_R, mod_G, mod_B, nb_pixels, &ex);
-                publish_viz_tap_sampler_shortcut(sp, audioBuffers,
-                                                 /*player_running*/ 0,
-                                                 premarker_tap_done,
-                                                 sbR, sbG, sbB,
-                                                 mod_R, mod_G, mod_B, nb_pixels);
-                if (ls_bank >= 0)
-                {
-                    PipelineConfig scfg = pipeline_build_config_ls_send(
-                        ls_bank, c, /*player_fed*/ 0);
-                    /* M8 — sampler-relayed stream: RAW gate skipped, the
-                     * crossfader opacity applies (legacy parity). */
-                    scfg.sampler_relayed = 1;
-                    scfg.stream_opacity  = g_sp3ctra_config.image_live_opacity;
-                    pipeline_path_luxstral(ex.lsR, ex.lsG, ex.lsB, &scfg,
-                                           &s_ls_send_pp);
-                    int nnotes = nb_pixels / (scfg.pixels_per_note > 0
-                                              ? scfg.pixels_per_note : 1);
-                    if (nnotes > PREPROCESS_MAX_NOTES)
-                        nnotes = PREPROCESS_MAX_NOTES;
-                    synth_staging_stage_luxstral(c, ls_bank, &s_ls_send_pp,
-                                                 nnotes, scfg.stereo_enabled);
-                    ex.ls_staged = 1;
-                }
-            }
-            else
-            {
-                /* Full positional span [0, N]. rec IDLE: an un-owned chain
-                 * records ITS OWN stream even while another engine plays
-                 * (multi-chain fix — the old !playing gate was global);
-                 * owned chains record via the CHAIN_REC_INPUT spans. */
-                ChainExecCtx cxp = {
-                    .viz_bus            = audioBuffers,
-                    .pp_scratch         = &s_ls_send_pp,
-                    .lx_line            = lx_line,
-                    .pb_marker_id       = pb_here,
-                    .rec_mode           = CHAIN_REC_IDLE,
-                    .publish_tap_at_end = 1,
-                };
-                chain_execute_span(sp, c, 0, sp->num_inserts, &cxp,
-                                   sbR, sbG, sbB, nb_pixels, &ex);
-            }
+            /* (P4-M3) ONE path: the full positional span [0, N] — sampler
+             * chains included (their marker records the chain stream at its
+             * position, an idle sampler is a plain pass-through). Player-
+             * owned chains continue'd above (single staging writer: the
+             * player's walk stages ITS chains, this one stages the rest).
+             * rec IDLE: an un-owned chain records ITS OWN stream even while
+             * another engine plays (multi-chain — the old !playing gate was
+             * global); owned chains record via the CHAIN_REC_INPUT spans. */
+            ChainExecCtx cxp = {
+                .viz_bus            = audioBuffers,
+                .pp_scratch         = &s_ls_send_pp,
+                .lx_line            = s_lx_line,
+                .pb_marker_id       = pb_here,
+                .rec_mode           = CHAIN_REC_IDLE,
+                .publish_tap_at_end = 1,
+            };
+            chain_execute_span(sp, c, 0, sp->num_inserts, &cxp,
+                               sbR, sbG, sbB, nb_pixels, &ex);
 
             if (c == pb_chain && ex.pb_found)
             { pb_R = ex.pbR; pb_G = ex.pbG; pb_B = ex.pbB; pb_found = 1; }
@@ -2126,60 +1690,17 @@ void internal_sources_process_tick(void *arg)
       if (frame_plan.chain[c].present && frame_plan.chain[c].has_sampler)
       { spSmp = &frame_plan.chain[c]; smp_owner_chain = c; }
 
-  /* Set when the idle build below ran: the sampler chain's pre-marker stream
-   * (its modulated channel). The per-synth blocks further down consume it
-   * instead of re-running the chain (stateful FX tick once per line). */
-  const uint8_t *smpMod_R = NULL, *smpMod_G = NULL, *smpMod_B = NULL;
-  int smp_premarker_tap_done = 0;
+  /* (P4-M3) Phase 1 only — drain start/stop REC commands + cache the first
+   * sampler chain's source frame for the player's darken-blend. The idle
+   * capture and the zone-1 view are POSITIONAL now: the uniform loop below
+   * records at each SAMPLER marker (CHAIN_REC_IDLE) and publishes the
+   * selection tap; the global modulated build is gone. */
   if (spSmp)
   {
-      static uint32_t s_feeder_line_id = 0;   /* debug/sync id (no UDP line) */
       const uint8_t *sbR, *sbG, *sbB;
-      const int sbSig = synth_source_base(spSmp,
-                                          CHAIN_SYNTH_COUNT + smp_owner_chain,
-                                          db, nb_pixels, &sbR, &sbG, &sbB);
-
-      /* Phase 1 — drain start/stop REC commands + cache the chain's source
-       * frame for the player's darken-blend. */
+      (void) synth_source_base(spSmp, CHAIN_SYNTH_COUNT + smp_owner_chain,
+                               db, nb_pixels, &sbR, &sbG, &sbB);
       lux_sampler_on_live_frame_assembled(sbR, sbG, sbB, (uint16_t)nb_pixels);
-
-      if (sampler_playing)
-      {
-          /* PLAYING (sampler or score relay): recording is position-driven
-           * (module contract 2026-07-13) — markers ABOVE the owning marker
-           * record the chain input via the pre-marker span (per-chain loop
-           * below); markers BELOW it receive the playback from the player's
-           * own walk (chain_player_execute_owned, 1:1 — this feeder tick can
-           * drop to 20 Hz, far too slow for a capture). */
-      }
-      else if (sbSig > 0)
-      {
-          /* IDLE / REC: run the chain's pre-marker processors once → the
-           * modulated stream; publish it (the sampler chain OWNS the
-           * modulated bus, as on the device path), mirror the sampler
-           * snapshot and capture into the armed slot (phase 2). */
-          SynthChainPlan pre;
-          chain_build_sampler_premarker_plan(spSmp, &pre);
-          chain_run_inserts_with_viz_tap(&pre, audioBuffers, sbR, sbG, sbB,
-                                         nb_pixels,
-                                         &smpMod_R, &smpMod_G, &smpMod_B);
-          smp_premarker_tap_done = (pre.viz_tap_insert >= 0);
-          if (smpMod_R && smpMod_G && smpMod_B)
-          {
-              audio_image_buffers_snapshot_modulated(audioBuffers,
-                                                     smpMod_R, smpMod_G,
-                                                     smpMod_B, nb_pixels);
-              int owner_engine = 0;
-              for (int i = 0; i < spSmp->num_inserts; i++)
-                  if (spSmp->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER)
-                  { owner_engine = spSmp->insert_state_idx[i]; break; }
-              lux_sampler_on_modulated_frame_ready(owner_engine,
-                                                   smpMod_R, smpMod_G,
-                                                   smpMod_B,
-                                                   (uint16_t)nb_pixels,
-                                                   ++s_feeder_line_id);
-          }
-      }
   }
 #endif
 
@@ -2202,7 +1723,6 @@ void internal_sources_process_tick(void *arg)
   const uint8_t *pb_base_R = NULL, *pb_base_G = NULL, *pb_base_B = NULL;
   int pb_found = 0;
   int pb_chain = -1, pb_marker = -1;
-  int pb_has_score = 0;
   for (int c = 0; c < frame_plan.num_chains; c++)
   {
     const SynthChainPlan *sp = &frame_plan.chain[c];
@@ -2217,8 +1737,6 @@ void internal_sources_process_tick(void *arg)
       { pb_chain = c; pb_marker = IMAGE_CHAIN_INSERT_OUT_LUXWAVE; }
     }
   }
-  if (pb_chain >= 0)
-    pb_has_score = frame_plan.chain[pb_chain].has_score;
   const int first_send_chain =
       frame_plan.num_ls_sends > 0 ? frame_plan.ls_send[0].chain_idx : -1;
 
@@ -2263,9 +1781,14 @@ void internal_sources_process_tick(void *arg)
               .rec_mode        = CHAIN_REC_INPUT,
               .rec_skip_engine = -1,
           };
-          ChainExecOut pex;   /* side effects only */
+          ChainExecOut pex;
           chain_execute_span(sp, c, 0, own_mk + 1, &pcx,
                              pmR, pmG, pmB, nb_pixels, &pex);
+          /* Above-marker LS OUT staged here → keep tap A live (mirror). */
+          if (pex.ls_staged && c == first_send_chain)
+              audio_image_buffers_publish_engine_input(
+                  audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                  pex.lsR, pex.lsG, pex.lsB, nb_pixels);
       }
       else if (own_mk >= 0 && audioBuffers != NULL
                && sp->viz_tap_insert >= 0 && sp->viz_tap_insert <= own_mk)
@@ -2292,94 +1815,36 @@ void internal_sources_process_tick(void *arg)
 
     ChainExecOut ex;
     const int pb_here = (c == pb_chain) ? pb_marker : -1;
-    /* Player-owned chains continue'd above — un-owned walks only here. */
-    float *lx_line = s_lx_line_feeder;
-#ifdef VST_MODE
-    if (c == smp_owner_chain && smpMod_R)
-    {
-      /* MOD-BUS OWNER chain: consume the pre-marker stream built by the
-       * sampler block above (stateful FX tick once per line). Other sampler
-       * chains run positionally on their own stream. */
-      chain_shortcut_walk(sp, c, /*skip_post_marker_probes*/ 0, pb_here,
-                          lx_line,
-                          sbR, sbG, sbB,
-                          smpMod_R, smpMod_G, smpMod_B, nb_pixels, &ex);
-      publish_viz_tap_sampler_shortcut(sp, audioBuffers, /*player_running*/ 0,
-                                       smp_premarker_tap_done,
-                                       sbR, sbG, sbB,
-                                       smpMod_R, smpMod_G, smpMod_B, nb_pixels);
-      if (ls_bank >= 0)
-      {
-        PipelineConfig scfg =
-            pipeline_build_config_ls_send(ls_bank, c, /*player_fed*/ 0);
-        /* M8 — sampler-relayed stream (owner chain): RAW gate skipped, the
-         * crossfader opacity applies (legacy parity). */
-        scfg.sampler_relayed = 1;
-        scfg.stream_opacity  = g_sp3ctra_config.image_live_opacity;
-        pipeline_path_luxstral(ex.lsR, ex.lsG, ex.lsB, &scfg,
-                               &s_ls_send_pp_feeder);
-        int nnotes = nb_pixels / (scfg.pixels_per_note > 0
-                                  ? scfg.pixels_per_note : 1);
-        if (nnotes > PREPROCESS_MAX_NOTES) nnotes = PREPROCESS_MAX_NOTES;
-        synth_staging_stage_luxstral(c, ls_bank, &s_ls_send_pp_feeder,
-                                     nnotes, scfg.stereo_enabled);
-        ex.ls_staged = 1;
-      }
-    }
-    else
-#endif
-    {
-      /* Full positional span [0, N] — mirror of udpThread: un-owned chains
-       * keep recording their own stream during playback; owned chains record
-       * via the CHAIN_REC_INPUT spans. */
-      ChainExecCtx cxp = {
-          .viz_bus            = audioBuffers,
-          .pp_scratch         = &s_ls_send_pp_feeder,
-          .lx_line            = lx_line,
-          .pb_marker_id       = pb_here,
-          .rec_mode           = CHAIN_REC_IDLE,
-          .publish_tap_at_end = 1,
-      };
-      chain_execute_span(sp, c, 0, sp->num_inserts, &cxp,
-                         sbR, sbG, sbB, nb_pixels, &ex);
-    }
+    /* (P4-M3) ONE path — full positional span [0, N], sampler chains
+     * included (the feeder's dedicated owner-chain shortcut is gone; the
+     * SAMPLER marker records at its position, stateful FX still tick once
+     * per line since each chain runs exactly once). */
+    ChainExecCtx cxp = {
+        .viz_bus            = audioBuffers,
+        .pp_scratch         = &s_ls_send_pp_feeder,
+        .lx_line            = s_lx_line_feeder,
+        .pb_marker_id       = pb_here,
+        .rec_mode           = CHAIN_REC_IDLE,
+        .publish_tap_at_end = 1,
+    };
+    chain_execute_span(sp, c, 0, sp->num_inserts, &cxp,
+                       sbR, sbG, sbB, nb_pixels, &ex);
 
     if (c == pb_chain && ex.pb_found)
     { pb_R = ex.pbR; pb_G = ex.pbG; pb_B = ex.pbB; pb_found = 1; }
 
-    /* MODULATED display bus + engine tap A — from the first send (mirror of
-     * udpThread; the sampler chain owns the modulated bus when present). */
+    /* Engine tap A — from the first send (mirror of udpThread). */
     if (ex.ls_staged && c == first_send_chain
         && !(sp->has_score && score_playing))
-    {
-#ifdef VST_MODE
-      if (!smpMod_R)   /* sampler chain owns the bus — published above */
-#endif
-      audio_image_buffers_snapshot_modulated(audioBuffers,
-                                             ex.lsR, ex.lsG, ex.lsB,
-                                             nb_pixels);
       audio_image_buffers_publish_engine_input(
           audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
           ex.lsR, ex.lsG, ex.lsB, nb_pixels);
-    }
   }
 
   /* ── Path B (LuxSynth + LuxWave) — fed at its OUT marker position ────────── */
   int pb_done = 0;
   if (pb_chain >= 0 && pb_found)
   {
-    /* Same MODULATED publish for a Path-B-only session (legacy CHAIN-1
-     * panel): only when no LuxStral send exists — with sends, the loop above
-     * owns the (single, global) bus. */
-    if (frame_plan.num_ls_sends == 0 && !sampler_playing
-        && !(pb_has_score && score_playing)
-#ifdef VST_MODE
-        && !smpMod_R
-#endif
-       )
-      audio_image_buffers_snapshot_modulated(audioBuffers, pb_R, pb_G, pb_B,
-                                             nb_pixels);
-
     /* Per-engine input tap Path-B (per-chain display). A player-owned pb
      * chain never reaches here (skipped in the loop → pb_found stays 0) —
      * the plan is the routing authority (M7). */

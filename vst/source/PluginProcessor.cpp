@@ -1630,7 +1630,7 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     // Initialize the LuxPitch / LuxMask processing instances.
     // Since the single-snapshot refactor (M2) there is ONE simulation per
     // insert: the synthesis-thread instance.  Visualizers read the published
-    // insert taps (audio_image_buffers_get_insert_tap_pointers) instead of
+    // the contextual selection tap instead of
     // re-simulating.
     // M6 Phase 2 — init the whole per-chain instance pool (slot 0 == legacy).
     lux_pitch_init_all();
@@ -3598,15 +3598,11 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
     if (luxSampler)  luxSampler ->setEnabled(samplerAPresent && fsParamOn);
     if (luxSamplerB) luxSamplerB->setEnabled(samplerBPresent && fsParamOn);
 
-    // Insert order for the GLOBAL Modulated channel (image_chain_process_inserts),
+    // Insert order projection ("chainInsertOrder" host param) — display only,
     // which LuxStral consumes whenever a Sampler sits on its chain — the default
-    // topology. Applied here directly (RT-safe atomic store) because the
-    // "chainInsertOrder" APVTS param has no parameter listener, so a pure reorder
-    // would otherwise never refresh the global order until some unrelated param
-    // change triggered applyConfigurationToCore(). The setParam() in
-    // applyChainEnableBridge() still runs, for host display + persistence.
-    image_chain_set_order(chainModel_.isMaskBeforePitch()
-        ? IMAGE_CHAIN_ORDER_MASK_PITCH : IMAGE_CHAIN_ORDER_PITCH_MASK);
+    // topology. (P4-M3: the GLOBAL insert order died with the modulated
+    // build — per-chain order comes from each chain's own recipe; the
+    // "chainInsertOrder" param remains as a host-visible projection only.)
 
     // M9 — push IMAGE/VIDEO/CAMERA module presence onto their engines so they
     // publish lines only while placed in a chain.
@@ -5251,13 +5247,9 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         }
 
         // ── Insert chain order (M1 — modular pipeline core) ──
-        // Derived from the CHAIN MODEL, not the "chainInsertOrder" param: the
-        // model is the single source of truth for topology; the param is only
-        // its host-visible projection (kept in sync by applyChainEnableBridge).
-        // Reading the param here would let a host automation of it desync the
-        // global order from the per-chain plans derived from the model.
-        image_chain_set_order(chainModel_.isMaskBeforePitch()
-            ? IMAGE_CHAIN_ORDER_MASK_PITCH : IMAGE_CHAIN_ORDER_PITCH_MASK);
+        // (P4-M3) The GLOBAL insert order is gone — per-chain order comes
+        // from each chain's own recipe (the model), "chainInsertOrder" is a
+        // host-visible projection only.
 
         // ── Sync LuxPitch configs — one APVTS bank per pool instance ──
         // Slot i reads luxpitch{i}_* : two Pitch modules on two chains carry
