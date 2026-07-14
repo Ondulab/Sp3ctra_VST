@@ -22,11 +22,6 @@ extern "C" {
 #include <cmath>
 #include <vector>
 
-// Synth-split P3 — number of LuxStral sends staged for the current playback
-// frame (FramePlayerThread-only; read by the db-commit block below to leave
-// the additive sections to the audio-thread mixer when sends exist).
-static int s_playerSendCount = 0;
-
 // ============================================================================
 // Static instance (singleton for C hook access)
 // ============================================================================
@@ -3151,7 +3146,7 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
             //     (bounce/resampling) and publishes the exact selection tap.
             //     Writes the stream at the first owned LS OUT back into
             //     work* so the mix bus + audio commits below see post-FX.
-            s_playerSendCount = chain_player_execute_owned(
+            (void) chain_player_execute_owned(
                 isScore ? 1 : 0,
                 sampler.getEngineIndex(),
                 (state.seqControlledPlay.load(std::memory_order_relaxed)
@@ -3202,30 +3197,15 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
     // causing stale audio while the visual animated correctly.
     // ---------------------------------------------------------------
     {
-        // M7 — plan-driven ownership: the player writes the sections
-        // whose chains it actually relays (additive when a sampler
-        // sits on a "→ LUXSTRAL" chain; polyphonic when the
-        // "→ LUXSYNTH" chain is sampler/score-relayed).
-        const bool addOwned = chain_additive_player_candidate(
-            isScore ? 1 : 0, sampler.getEngineIndex()) != 0;
+        // (P4-M4) The audio-thread MIXER is the additive sections' SOLE
+        // writer in every topology — the player never commits Path A any
+        // more (its LuxStral contribution goes through the staged sends of
+        // its chain walk). Only the polyphonic (pb) views remain player-
+        // committed while the pb chain is relayed.
         const bool pbOwned  = chain_pathb_player_candidate(
             isScore ? 1 : 0, sampler.getEngineIndex()) != 0;
 
-        // Engine B feed happens ABOVE (step 2b), with the RAW player
-        // frame — before engine A's chain inserts are applied to work*.
-
-        // Path A is only consumed when the player owns additive AND no
-        // sends are staged (with sends, the audio-thread mixer owns the
-        // additive sections); Path B only when the pb chain is relayed.
-        // Run each path under ITS consumer's gate instead of the blanket
-        // pipeline_process_frame: Path B alone is two real 3456-pt FFTs
-        // + the colour-temperature build per injected frame (1 ms cadence)
-        // — computing it un-owned burned 10-20% of a core for nothing.
-        // Flags and s_playerSendCount are set in this same tick on this
-        // same thread, so compute and commit can never disagree.
-        const bool needPathA = addOwned && s_playerSendCount == 0;
-
-        if (doubleBuffer != nullptr && (needPathA || pbOwned))
+        if (doubleBuffer != nullptr && pbOwned)
         {
             // One instance per player thread (engines A/B each run their
             // own FramePlayerThread): the old stack `ppData {}` value-
@@ -3241,41 +3221,18 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
             if (state.seqControlledPlay.load(std::memory_order_relaxed) || isScore)
                 sampler_cfg.freeze_mode = 0; /* force PLAY — sequencer / score active */
 
-            if (needPathA)
-                pipeline_path_luxstral(workR, workG, workB,
-                                       &sampler_cfg, &ppData);
-            if (pbOwned)
-                pipeline_path_luxsynth_luxwave(workR, workG, workB,
-                                               &sampler_cfg, &ppData);
+            pipeline_path_luxsynth_luxwave(workR, workG, workB,
+                                           &sampler_cfg, &ppData);
             ppData.timestamp_us = static_cast<uint64_t>(currentTimeUs());
 
             pthread_mutex_lock(&doubleBuffer->mutex);
-            // Synth-split P3: with sends staged (s_playerSendCount
-            // > 0) the audio-thread MIXER owns the additive/stereo/
-            // strokeforge sections — commit only Path-B products.
-            if (needPathA)
-            {
-                doubleBuffer->preprocessed_data.additive    = ppData.additive;
-                doubleBuffer->preprocessed_data.stereo      = ppData.stereo;
-                doubleBuffer->preprocessed_data.strokeforge = ppData.strokeforge;
-                doubleBuffer->preprocessed_data.timestamp_us = ppData.timestamp_us;
-                doubleBuffer->dataReady = 1;
-            }
-            // Polyphonic only when the player relays the pb chain.
-            if (pbOwned)
-                doubleBuffer->preprocessed_data.polyphonic = ppData.polyphonic;
+            /* Polyphonic (views) only — the mixer owns everything else. */
+            doubleBuffer->preprocessed_data.polyphonic = ppData.polyphonic;
             pthread_mutex_unlock(&doubleBuffer->mutex);
 
-            // Per-engine input taps (per-chain display): publish
-            // the exact frame fed to the pipeline above, post-
-            // marker inserts included, so the head panels track
-            // the playback chain.
-            // (P3: tap A already published by the send loop.)
-            if (needPathA)
-                audio_image_buffers_publish_engine_input(
-                    audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
-                    workR, workG, workB, nb);
-            if (pbOwned)
+            // Per-engine input tap Path-B (per-chain display): the exact
+            // frame fed to the pipeline above. (Tap A is published by the
+            // chain walk at its first owned LS OUT.)
             {
                 audio_image_buffers_publish_engine_input(
                     audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,

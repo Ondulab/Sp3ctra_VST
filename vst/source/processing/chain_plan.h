@@ -52,15 +52,6 @@ typedef enum {
                            * of older sessions valid. */
 } ChainSourceKind;
 
-/* Synth slot indices in ChainPlan.synth[].
- * Slot 3 was the removed LuxStral engine B — kept as a hole until the M3
- * uniform-recipe rewrite so scratch-index maths (CHAIN_SYNTH_COUNT offsets)
- * stay untouched. Never filled: present == 0. */
-#define CHAIN_SYNTH_LUXSTRAL   0
-#define CHAIN_SYNTH_LUXSYNTH   1
-#define CHAIN_SYNTH_LUXWAVE    2
-#define CHAIN_SYNTH_COUNT      4
-
 /* Recipe to build one synth engine's input from its chain. */
 typedef struct {
     int present;        /* 1 if this synth is placed in a chain */
@@ -98,8 +89,6 @@ typedef struct {
 } LsSendPlan;
 
 typedef struct {
-    SynthChainPlan synth[CHAIN_SYNTH_COUNT];
-
     /* M3 — uniform per-chain recipes: chain[i] mirrors MODEL chain i (index-
      * stable across republishes while the model topology holds). A chain is
      * executed once per frame by its producer thread (udpThread / feeder):
@@ -111,12 +100,11 @@ typedef struct {
     int num_chains;
     SynthChainPlan chain[CHAIN_MAX_CHAINS];
 
-    /* Synth-split P3 — LuxStral sends (N-chain mix). When num_ls_sends > 0
-     * the audio thread's mixer owns db->preprocessed_data (additive/stereo/
-     * strokeforge sections) and synth[CHAIN_SYNTH_LUXSTRAL] is IGNORED by
-     * the audio path (kept filled for visualizer compatibility). The mixer
-     * reads the send list (chain_idx + bank weights) from here; the recipes
-     * are executed via chain[] above. */
+    /* Synth-split P3 / P4-M4 — LuxStral sends (N-chain mix). The audio
+     * thread's mixer owns db->preprocessed_data (additive/stereo/strokeforge
+     * sections) in EVERY topology (0 sends → silence, D1). The mixer reads
+     * the send list (chain_idx + bank weights) from here; the recipes are
+     * executed via chain[] above. */
     int num_ls_sends;
     LsSendPlan ls_send[CHAIN_MAX_CHAINS];
 } ChainPlan;
