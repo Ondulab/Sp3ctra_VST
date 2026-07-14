@@ -44,16 +44,6 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
   buffers->buffer1_G = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
   buffers->buffer1_B = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
 
-  // Allocate raw UDP snapshot buffers
-  buffers->raw_R = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
-  buffers->raw_G = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
-  buffers->raw_B = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
-
-  // Allocate sampler snapshot buffers
-  buffers->sampler_R = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
-  buffers->sampler_G = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
-  buffers->sampler_B = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
-
   // Allocate selection-tap buffers (contextual visualizer)
   buffers->selection_tap_R = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
   buffers->selection_tap_G = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
@@ -68,9 +58,7 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
 
   // Check all allocations
   if (!buffers->buffer0_R   || !buffers->buffer0_G   || !buffers->buffer0_B   ||
-      !buffers->buffer1_R   || !buffers->buffer1_G   || !buffers->buffer1_B   ||
-      !buffers->raw_R       || !buffers->raw_G       || !buffers->raw_B       ||
-      !buffers->sampler_R   || !buffers->sampler_G   || !buffers->sampler_B) {
+      !buffers->buffer1_R   || !buffers->buffer1_G   || !buffers->buffer1_B) {
 
     fprintf(stderr, "ERROR: Failed to allocate audio image buffers\n");
     audio_image_buffers_cleanup(buffers);
@@ -101,16 +89,6 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
   memset(buffers->buffer1_R, 255, nb_pixels);
   memset(buffers->buffer1_G, 255, nb_pixels);
   memset(buffers->buffer1_B, 255, nb_pixels);
-
-  // Initialize raw snapshot with white (no UDP data yet)
-  memset(buffers->raw_R, 255, nb_pixels);
-  memset(buffers->raw_G, 255, nb_pixels);
-  memset(buffers->raw_B, 255, nb_pixels);
-
-  // Initialize sampler snapshot with white (no sampler data yet)
-  memset(buffers->sampler_R, 255, nb_pixels);
-  memset(buffers->sampler_G, 255, nb_pixels);
-  memset(buffers->sampler_B, 255, nb_pixels);
 
   // Initialize the selection tap with white (nothing selected/published yet)
   memset(buffers->selection_tap_R, 255, nb_pixels);
@@ -190,30 +168,6 @@ void audio_image_buffers_cleanup(AudioImageBuffers *buffers) {
   if (buffers->buffer1_B) {
     free(buffers->buffer1_B);
     buffers->buffer1_B = NULL;
-  }
-  if (buffers->raw_R) {
-    free(buffers->raw_R);
-    buffers->raw_R = NULL;
-  }
-  if (buffers->raw_G) {
-    free(buffers->raw_G);
-    buffers->raw_G = NULL;
-  }
-  if (buffers->raw_B) {
-    free(buffers->raw_B);
-    buffers->raw_B = NULL;
-  }
-  if (buffers->sampler_R) {
-    free(buffers->sampler_R);
-    buffers->sampler_R = NULL;
-  }
-  if (buffers->sampler_G) {
-    free(buffers->sampler_G);
-    buffers->sampler_G = NULL;
-  }
-  if (buffers->sampler_B) {
-    free(buffers->sampler_B);
-    buffers->sampler_B = NULL;
   }
   if (buffers->selection_tap_R) { free(buffers->selection_tap_R); buffers->selection_tap_R = NULL; }
   if (buffers->selection_tap_G) { free(buffers->selection_tap_G); buffers->selection_tap_G = NULL; }
@@ -387,167 +341,6 @@ void audio_image_buffers_get_read_pointers(AudioImageBuffers *buffers,
 
   // Update statistics (note: this is not thread-safe but only for monitoring)
   buffers->lines_processed++;
-}
-
-/**
- * @brief Capture a snapshot of the current read buffer into the raw buffers.
- *
- * DEPRECATED: reads from the read buffer AFTER complete_write() which is
- * racy — FramePlayerThread may swap the buffer between complete_write() and
- * snapshot_raw(), corrupting raw_R/G/B with sampler data.
- * Use audio_image_buffers_snapshot_raw_before_swap() instead.
- *
- * @param buffers Pointer to AudioImageBuffers structure
- */
-void audio_image_buffers_snapshot_raw(AudioImageBuffers *buffers) {
-  if (!buffers || !buffers->initialized)
-    return;
-
-  int nb_pixels = get_cis_pixels_nb();
-
-  int read_idx = atomic_load(&buffers->read_buffer_index);
-  if (read_idx == 0) {
-    memcpy(buffers->raw_R, buffers->buffer0_R, nb_pixels);
-    memcpy(buffers->raw_G, buffers->buffer0_G, nb_pixels);
-    memcpy(buffers->raw_B, buffers->buffer0_B, nb_pixels);
-  } else {
-    memcpy(buffers->raw_R, buffers->buffer1_R, nb_pixels);
-    memcpy(buffers->raw_G, buffers->buffer1_G, nb_pixels);
-    memcpy(buffers->raw_B, buffers->buffer1_B, nb_pixels);
-  }
-}
-
-/**
- * @brief Snapshot raw UDP data from the WRITE buffer BEFORE complete_write().
- *
- * FIX(routing): The original snapshot_raw() read from the read buffer AFTER
- * the buffer swap.  Between complete_write() and snapshot_raw(), FramePlayerThread
- * could call its own complete_write(), making the read buffer point to sampler
- * data — corrupting raw_R/G/B.
- *
- * This variant reads from the WRITE buffer (which holds the freshly assembled
- * UDP frame) while write_mutex is still held, guaranteeing that raw_R/G/B
- * is always pure UDP data — never contaminated by the sampler.
- *
- * Must be called BETWEEN start_write() and complete_write() (write_mutex held).
- *
- * @param buffers Pointer to AudioImageBuffers structure
- */
-void audio_image_buffers_snapshot_raw_before_swap(AudioImageBuffers *buffers) {
-  if (!buffers || !buffers->initialized)
-    return;
-
-  int nb_pixels = get_cis_pixels_nb();
-
-  /* Read from the WRITE buffer — this is the buffer the UDP thread just filled.
-   * write_mutex is currently held by the caller so no other thread can swap
-   * or modify this buffer until complete_write() releases the mutex. */
-  int write_idx = atomic_load(&buffers->write_buffer_index);
-  if (write_idx == 0) {
-    memcpy(buffers->raw_R, buffers->buffer0_R, nb_pixels);
-    memcpy(buffers->raw_G, buffers->buffer0_G, nb_pixels);
-    memcpy(buffers->raw_B, buffers->buffer0_B, nb_pixels);
-  } else {
-    memcpy(buffers->raw_R, buffers->buffer1_R, nb_pixels);
-    memcpy(buffers->raw_G, buffers->buffer1_G, nb_pixels);
-    memcpy(buffers->raw_B, buffers->buffer1_B, nb_pixels);
-  }
-}
-
-/**
- * @brief Snapshot raw from external data (no write_mutex required).
- *
- * Used when the AudioImageBuffers write bus was not started (e.g. during
- * LuxSampler playback) but the UDP thread still needs to update raw_R/G/B
- * so the RAW visualizer and Source=L pipeline path stay live.
- *
- * @param buffers   Pointer to AudioImageBuffers structure
- * @param srcR      Source R channel (pure UDP frame)
- * @param srcG      Source G channel (pure UDP frame)
- * @param srcB      Source B channel (pure UDP frame)
- * @param nb_pixels Number of pixels to copy
- */
-void audio_image_buffers_snapshot_raw_external(AudioImageBuffers *buffers,
-                                               const uint8_t *srcR,
-                                               const uint8_t *srcG,
-                                               const uint8_t *srcB,
-                                               int nb_pixels) {
-  if (!buffers || !buffers->initialized || !srcR || !srcG || !srcB || nb_pixels <= 0)
-    return;
-
-  memcpy(buffers->raw_R, srcR, nb_pixels);
-  memcpy(buffers->raw_G, srcG, nb_pixels);
-  memcpy(buffers->raw_B, srcB, nb_pixels);
-}
-
-/**
- * @brief Get pointers to the last pure UDP frame (lock-free, read-only).
- *
- * These buffers are never written to by the sampler — they always
- * reflect the last frame received from the CIS sensor via UDP.
- *
- * @param buffers Pointer to AudioImageBuffers structure (const)
- * @param out_R   Receives pointer to raw R channel
- * @param out_G   Receives pointer to raw G channel
- * @param out_B   Receives pointer to raw B channel
- */
-void audio_image_buffers_get_raw_pointers(const AudioImageBuffers *buffers,
-                                          uint8_t **out_R, uint8_t **out_G,
-                                          uint8_t **out_B) {
-  if (!buffers || !buffers->initialized || !out_R || !out_G || !out_B)
-    return;
-
-  *out_R = buffers->raw_R;
-  *out_G = buffers->raw_G;
-  *out_B = buffers->raw_B;
-}
-
-/**
- * @brief Capture a snapshot of the pure sampler frame into the sampler buffers.
- *
- * Must be called ONLY from the FramePlayerThread, passing the raw slot data
- * BEFORE blending with live.  This ensures sampler_R/G/B always contain the
- * pure sampler frame — never contaminated by the live stream.
- *
- * @param buffers   Pointer to AudioImageBuffers structure
- * @param srcR      Source R channel (pure sampler frame)
- * @param srcG      Source G channel (pure sampler frame)
- * @param srcB      Source B channel (pure sampler frame)
- * @param nb_pixels Number of pixels to copy
- */
-void audio_image_buffers_snapshot_sampler(AudioImageBuffers *buffers,
-                                          const uint8_t *srcR,
-                                          const uint8_t *srcG,
-                                          const uint8_t *srcB,
-                                          int nb_pixels) {
-  if (!buffers || !buffers->initialized || !srcR || !srcG || !srcB || nb_pixels <= 0)
-    return;
-
-  memcpy(buffers->sampler_R, srcR, nb_pixels);
-  memcpy(buffers->sampler_G, srcG, nb_pixels);
-  memcpy(buffers->sampler_B, srcB, nb_pixels);
-}
-
-/**
- * @brief Get pointers to the last pure sampler frame (lock-free, read-only).
- *
- * These buffers are never written to by the UDP thread — they always
- * reflect the last frame played by the FramePlayerThread.
- *
- * @param buffers Pointer to AudioImageBuffers structure (const)
- * @param out_R   Receives pointer to sampler R channel
- * @param out_G   Receives pointer to sampler G channel
- * @param out_B   Receives pointer to sampler B channel
- */
-void audio_image_buffers_get_sampler_pointers(const AudioImageBuffers *buffers,
-                                              uint8_t **out_R, uint8_t **out_G,
-                                              uint8_t **out_B) {
-  if (!buffers || !buffers->initialized || !out_R || !out_G || !out_B)
-    return;
-
-  *out_R = buffers->sampler_R;
-  *out_G = buffers->sampler_G;
-  *out_B = buffers->sampler_B;
 }
 
 /**

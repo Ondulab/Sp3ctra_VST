@@ -173,7 +173,7 @@ VisualizerMode CisVisualizerComponent::panelModeAtY(int y) const noexcept
 {
     const int n = static_cast<int>(panels_.size());
     const int H = getHeight();
-    if (n <= 0 || H <= 0) return VisualizerMode::MODULATED;
+    if (n <= 0 || H <= 0) return VisualizerMode::SELECTED_TAP;
     int idx = (y * n) / H;
     idx = juce::jlimit(0, n - 1, idx);
     return panels_[static_cast<size_t>(idx)].mode;
@@ -331,13 +331,7 @@ void CisVisualizerComponent::paintSource(
             : 0;
 
         // Source-level views use raw RGB; downstream views use processed gray
-        const bool isSourceView = (source == VisualizerMode::RAW
-                                || source == VisualizerMode::SAMPLER
-                                || source == VisualizerMode::LIVE
-                                || source == VisualizerMode::MIX
-                                || source == VisualizerMode::LUXPITCH_OUTPUT
-                                || source == VisualizerMode::LUXMASK_OUTPUT
-                                || source == VisualizerMode::SRC_IMAGE
+        const bool isSourceView = (source == VisualizerMode::SRC_IMAGE
                                 || source == VisualizerMode::SRC_VIDEO
                                 || source == VisualizerMode::SRC_CAMERA
                                 || source == VisualizerMode::SELECTED_TAP);
@@ -506,11 +500,6 @@ void CisVisualizerComponent::paintSourceLabel(
     juce::Colour accent;
     switch (source)
     {
-        case VisualizerMode::RAW:
-        case VisualizerMode::LIVE:
-        case VisualizerMode::MODULATED: // (legacy SAMPLER/MIX alias to this)
-            accent = juce::Colour(0xffa87ae0); // Sources — purple
-            break;
         case VisualizerMode::SPCTR_GRAY:
             accent = juce::Colour(0xff6bb8e0); break;
         case VisualizerMode::SPCTR_COLOR:
@@ -525,10 +514,6 @@ void CisVisualizerComponent::paintSourceLabel(
             accent = juce::Colour(0xffd07040); break;
         case VisualizerMode::SYNTH_FFT_COLOR:
             accent = juce::Colour(0xffcc88cc); break;
-        case VisualizerMode::LUXPITCH_OUTPUT:
-            accent = juce::Colour(0xffe06bb8); break;
-        case VisualizerMode::LUXMASK_OUTPUT:
-            accent = juce::Colour(0xff6be0d0); break;
         default:
             accent = juce::Colour(0xffe08844); break;
     }
@@ -646,12 +631,7 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
     const int rawFreezeMode = g_sp3ctra_config.raw_freeze_mode;
     const int liveFreezeMode = (rawFreezeMode > rawLiveFreeze) ? rawFreezeMode : rawLiveFreeze;
 
-    // ── FramePlayerThread writes to AudioImageBuffers only when a slot is
-    // actively playing AND the sampler transport is not STOP.
     const int  rawSmpFreeze  = g_sp3ctra_config.sampler_freeze_mode;
-    const int  smpFreezeMode = (rawFreezeMode > rawSmpFreeze) ? rawFreezeMode : rawSmpFreeze;
-    const bool samplerWriting = (lux_sampler_is_playing() != 0)
-                                && (smpFreezeMode != 2);
 
     // ── publish helper: only the primary panel feeds synthesis/BlobVisualizer ─
     auto publishGray = [this, isPrimary]
@@ -662,39 +642,7 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
     };
 
     // ── Source-specific freeze gates ──────────────────────────────────────────
-    // Each visualizer source has its own freeze semantics:
-    //   RAW  : only rawFreezeMode (upstream of everything)
-    //   LIVE : only liveFreezeMode (independent of sampler)
-    //   MIX  : liveFreezeMode AND samplerWriting (the actual audio output)
-    //   Others: same as MIX
-    if (vizSource == VisualizerMode::RAW)
-    {
-        if (rawFreezeMode == 2) // RAW STOP → white
-        {
-            std::fill(localDataR.begin(),    localDataR.end(),    uint8_t{255});
-            std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
-            std::fill(localDataB.begin(),    localDataB.end(),    uint8_t{255});
-            std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-            publishGray();
-            goto done;
-        }
-        if (rawFreezeMode == 1) goto done; // RAW HOLD → freeze display
-    }
-    else if (vizSource == VisualizerMode::LIVE)
-    {
-        // LIVE freeze gates: only respect liveFreezeMode, ignore sampler
-        if (liveFreezeMode == 2)
-        {
-            std::fill(localDataR.begin(),    localDataR.end(),    uint8_t{255});
-            std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
-            std::fill(localDataB.begin(),    localDataB.end(),    uint8_t{255});
-            std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-            publishGray();
-            goto done;
-        }
-        if (liveFreezeMode == 1) goto done;
-    }
-    else if (vizSource == VisualizerMode::SRC_IMAGE
+    if (vizSource == VisualizerMode::SRC_IMAGE
           || vizSource == VisualizerMode::SRC_VIDEO
           || vizSource == VisualizerMode::SRC_CAMERA
           || vizSource == VisualizerMode::SELECTED_TAP)
@@ -704,31 +652,6 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
         // The module's line is read from the internal source pool below.
         // SELECTED_TAP mirrors its executor's stream verbatim: whatever gating
         // applies upstream is already reflected in the published frames.
-    }
-    else if (vizSource == VisualizerMode::SAMPLER)
-    {
-        // SAMPLER freeze: only the sampler's own transport (NOT propagated
-        // through RAW).  RAW STOP must not blank the sampler.
-        //
-        // FIX(routing): During recording, the live scanner data IS what is
-        // being captured — the Transport UI state (STOP/HOLD) must not blank
-        // or freeze the display.  Bypass all freeze gates while recording so
-        // that visual and audio always reflect the same incoming stream.
-        const bool isRecording = (lux_sampler_is_recording() != 0);
-        if (!isRecording)
-        {
-            if (rawSmpFreeze == 2) // Sampler STOP → white
-            {
-                std::fill(localDataR.begin(),    localDataR.end(),    uint8_t{255});
-                std::fill(localDataG.begin(),    localDataG.end(),    uint8_t{255});
-                std::fill(localDataB.begin(),    localDataB.end(),    uint8_t{255});
-                std::fill(localDataGray.begin(), localDataGray.end(), uint8_t{255});
-                publishGray();
-                goto done;
-            }
-            if (rawSmpFreeze == 1) goto done; // Sampler HOLD → freeze
-        }
-        // isRecording == true: fall through and display the live scanner data
     }
     else
     {
@@ -851,10 +774,6 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
         // when the chain is silent/unfed (cleared on every selection change).
         audio_image_buffers_get_selection_tap_pointers(buffers, &pR, &pG, &pB);
     }
-    else if (vizSource == VisualizerMode::RAW || vizSource == VisualizerMode::LIVE)
-    {
-        audio_image_buffers_get_raw_pointers(buffers, &pR, &pG, &pB);
-    }
     else
     {
         // (P4-M3) The MODULATED / LUXPITCH_OUTPUT / LUXMASK_OUTPUT modes are
@@ -892,28 +811,6 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
     // ── Apply live opacity ───────────────────────────────────────────────────
     // Opacity controls affect ONLY the MIX bus (the blended output).
     // RAW, LIVE, and SAMPLER show their pure data without opacity adjustments.
-    // For MIX: apply live opacity only when sampler is not writing
-    //   (when sampler writes, opacities are already baked into the bus).
-    // Inlined (no function-scope variable) so the freeze-gate `goto done;`
-    // statements do not bypass a variable with an initializer that is in scope
-    // at the label — which would be ill-formed.
-    if (vizSource == VisualizerMode::MIX
-        && !samplerWriting && liveFreezeMode == 0)
-    {
-        const float liveOp = processor.getAPVTS()
-                                 .getRawParameterValue("imageLiveOpacity")->load();
-        if (liveOp < 0.999f)
-        {
-            const float inv = 1.0f - liveOp;
-            for (int i = 0; i < cisPixelsCount; ++i)
-            {
-                localDataR[i] = static_cast<uint8_t>(localDataR[i] * liveOp + 255.f * inv);
-                localDataG[i] = static_cast<uint8_t>(localDataG[i] * liveOp + 255.f * inv);
-                localDataB[i] = static_cast<uint8_t>(localDataB[i] * liveOp + 255.f * inv);
-            }
-        }
-    }
-
     // ── Compute final processed grayscale — single source of truth ───────────
     // Source-level modes (SAMPLER, LIVE, MIX) show the raw RGB → grayscale
     // conversion WITHOUT inversion, DC blocking, or gamma.
@@ -924,10 +821,7 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
     //   STEP 3 — optional DC blocking (AC removal — subtract per-line mean)
     //   STEP 4 — optional gamma
     {
-        const bool isSourceView = (vizSource == VisualizerMode::SAMPLER
-                                || vizSource == VisualizerMode::LIVE
-                                || vizSource == VisualizerMode::MIX
-                                || vizSource == VisualizerMode::SRC_IMAGE
+        const bool isSourceView = (vizSource == VisualizerMode::SRC_IMAGE
                                 || vizSource == VisualizerMode::SRC_VIDEO
                                 || vizSource == VisualizerMode::SRC_CAMERA
                                 || vizSource == VisualizerMode::SELECTED_TAP);
@@ -1164,13 +1058,8 @@ bool CisVisualizerComponent::supportsDisplayModes(VisualizerMode m) const noexce
     // intercepted in paint() before this function is ever consulted.
     switch (m)
     {
-        case VisualizerMode::RAW:
-        case VisualizerMode::LIVE:
-        case VisualizerMode::MODULATED: // (legacy SAMPLER/MIX alias to this)
         case VisualizerMode::SPCTR_GRAY:
         case VisualizerMode::SYNTH_GRAY:
-        case VisualizerMode::LUXPITCH_OUTPUT:
-        case VisualizerMode::LUXMASK_OUTPUT:
         case VisualizerMode::SRC_IMAGE:
         case VisualizerMode::SRC_VIDEO:
         case VisualizerMode::SRC_CAMERA:

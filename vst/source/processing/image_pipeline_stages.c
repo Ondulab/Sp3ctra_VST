@@ -301,7 +301,6 @@ void img_stage_compute_pan_luxstral(
     int            pixels_per_note,
     int            max_notes,
     float          temp_amp,
-    float         *pan_out,
     float         *left_gains_out,
     float         *right_gains_out)
 {
@@ -309,7 +308,7 @@ void img_stage_compute_pan_luxstral(
 
     if (raw_r == NULL || raw_g == NULL || raw_b == NULL)
         return;
-    if (pan_out == NULL || left_gains_out == NULL || right_gains_out == NULL)
+    if (left_gains_out == NULL || right_gains_out == NULL)
         return;
     if (pixel_count <= 0 || pixels_per_note <= 0 || max_notes <= 0)
         return;
@@ -343,14 +342,12 @@ void img_stage_compute_pan_luxstral(
 
             float temperature = calculate_color_temperature_amp(r_avg, g_avg, b_avg,
                                                                 temp_amp);
-            pan_out[note] = temperature;
             calculate_pan_gains(temperature,
                                 &left_gains_out[note],
                                 &right_gains_out[note]);
         }
         else
         {
-            pan_out[note] = 0.0f;
             left_gains_out[note] = 0.707f;
             right_gains_out[note] = 0.707f;
         }

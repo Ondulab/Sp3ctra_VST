@@ -2434,7 +2434,6 @@ uint64_t FramePlayerThread::currentTimeUs() noexcept
 // Non-RT only (FramePlayerThread context).
 //
 // Writes a full-white (255) frame to:
-//   1. AudioImageBuffers sampler snapshot (sampler_R/G/B)
 //   2. AudioImageBuffers main read/write buffer (visual mix bus)
 //   3. DoubleBuffer.preprocessed_data (audio synthesis, Source=S only)
 //
@@ -2446,18 +2445,9 @@ void FramePlayerThread::injectWhiteFrame() noexcept
     if (audioBuffers == nullptr) return;
 
     // White = 255 on all channels = silence in Sp3ctra's image-to-sound mapping.
-    uint8_t whiteR[LuxSamplerConstants::MAX_PIXELS];
-    uint8_t whiteG[LuxSamplerConstants::MAX_PIXELS];
-    uint8_t whiteB[LuxSamplerConstants::MAX_PIXELS];
-    std::memset(whiteR, 255, sizeof(whiteR));
-    std::memset(whiteG, 255, sizeof(whiteG));
-    std::memset(whiteB, 255, sizeof(whiteB));
     const int nbPx = LuxSamplerConstants::MAX_PIXELS;
 
-    // 1. Clear sampler snapshot so the visualizer shows white immediately.
-    audio_image_buffers_snapshot_sampler(audioBuffers, whiteR, whiteG, whiteB, nbPx);
-
-    // 2. Clear the main AudioImageBuffers (visual mix bus / LuxStral source).
+    // 1. Clear the main AudioImageBuffers (visual mix bus / LuxStral source).
     {
         uint8_t* wR = nullptr;
         uint8_t* wG = nullptr;
@@ -2987,29 +2977,9 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
 {
     auto& state = sampler.getAtomicState();
 
-    // ── Snapshot pure sampler frame BEFORE live blend ─────────────────────
-    // So the visualizer can show the sampler output in isolation.
-    // Multi-chain split: the shared sampler snapshot is a SINGLE display
-    // bus — with two engines playing simultaneously only the display
-    // owner writes it (score owns it outright; otherwise the first
-    // driving engine). The other engine's playback still reaches the
-    // synths through its own per-chain staging.
-    {
-        const bool displayOwner =
-            lux_sampler_is_score_playing()
-                ? isScore
-                : (lux_sampler_playing_engine()
-                   == sampler.getEngineIndex());
-        if (displayOwner)
-        {
-            // (P4-M3) The zone-1 view is the SELECTION TAP, published by the
-            // player's own chain walk at the exact position — no more global
-            // modulated publish. The sampler snapshot write remains (its
-            // readers died with the bus; purge slated for M5).
-            audio_image_buffers_snapshot_sampler(audioBuffers,
-                                                 workR, workG, workB, nb);
-        }
-    }
+    // (P4-M5) The shared sampler snapshot is gone (zero readers since the
+    // modulated bus died) — the zone-1 view is the SELECTION TAP, published
+    // by the player's own chain walk at the exact position.
 
     // (P4-M2) Downstream capture moved INTO the unified chain walk below
     // (chain_player_execute_owned): a downstream SAMPLER marker records its

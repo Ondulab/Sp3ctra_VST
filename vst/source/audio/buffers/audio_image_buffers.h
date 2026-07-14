@@ -39,18 +39,6 @@ typedef struct AudioImageBuffers {
   // Write protection mutex (only for UDP thread)
   pthread_mutex_t write_mutex;
 
-  // ── Raw UDP snapshot (written only by UDP thread, never by sampler) ──────
-  // These hold the last pure UDP frame before any sampler mixing.
-  uint8_t *raw_R;
-  uint8_t *raw_G;
-  uint8_t *raw_B;
-
-  // ── Sampler snapshot (written only by FramePlayerThread) ─────────────────
-  // These hold the last pure sampler frame before any live mixing.
-  uint8_t *sampler_R;
-  uint8_t *sampler_G;
-  uint8_t *sampler_B;
-
   // ── Selection tap (contextual visualizer) ─────────────────────────────────
   // Holds the stream frame AT THE SELECTED MODULE'S POSITION in ITS chain,
   // published by whichever chain executor hosts the selection (plan-driven:
@@ -131,48 +119,6 @@ int  audio_image_buffers_gate_should_publish(AudioImageBuffers *buffers);
 void audio_image_buffers_get_read_pointers(AudioImageBuffers *buffers,
                                            uint8_t **out_R, uint8_t **out_G,
                                            uint8_t **out_B);
-
-// ── Raw UDP snapshot (written only by UDP thread, never by sampler) ────────
-// DEPRECATED: snapshot_raw() reads from the read buffer AFTER complete_write(),
-// which is racy — FramePlayerThread may swap the buffer between complete_write()
-// and snapshot_raw(), writing sampler data into raw_R/G/B.
-// Use snapshot_raw_before_swap() instead (see below).
-void audio_image_buffers_snapshot_raw(AudioImageBuffers *buffers);
-
-// FIX(routing): Snapshot raw from the WRITE buffer, BEFORE complete_write().
-// Must be called while write_mutex is still held (between start_write and
-// complete_write).  This guarantees raw_R/G/B always contains pure UDP data —
-// immune to FramePlayerThread's buffer swaps.
-void audio_image_buffers_snapshot_raw_before_swap(AudioImageBuffers *buffers);
-
-// FIX(raw): Snapshot raw from external data (no write_mutex required).
-// Used when the AudioImageBuffers write bus was not started (e.g. during
-// LuxSampler playback) but the UDP thread still needs to update raw_R/G/B
-// so the RAW visualizer and Source=L pipeline stay live.
-void audio_image_buffers_snapshot_raw_external(AudioImageBuffers *buffers,
-                                               const uint8_t *srcR,
-                                               const uint8_t *srcG,
-                                               const uint8_t *srcB,
-                                               int nb_pixels);
-
-// Lock-free read of the last pure UDP frame (no sampler contamination).
-void audio_image_buffers_get_raw_pointers(const AudioImageBuffers *buffers,
-                                          uint8_t **out_R, uint8_t **out_G,
-                                          uint8_t **out_B);
-
-// ── Sampler snapshot (written only by FramePlayerThread) ──────────────────
-// Call snapshot_sampler() from FramePlayerThread BEFORE blending with live
-// to capture the pure sampler frame.
-void audio_image_buffers_snapshot_sampler(AudioImageBuffers *buffers,
-                                          const uint8_t *srcR,
-                                          const uint8_t *srcG,
-                                          const uint8_t *srcB,
-                                          int nb_pixels);
-
-// Lock-free read of the last pure sampler frame (no live contamination).
-void audio_image_buffers_get_sampler_pointers(const AudioImageBuffers *buffers,
-                                              uint8_t **out_R, uint8_t **out_G,
-                                              uint8_t **out_B);
 
 // ── Selection tap (contextual visualizer) ──────────────────────────────────
 // Publish the stream frame at the SELECTED module's chain position.  Called by

@@ -293,7 +293,29 @@ Validation : rack vide → silence total ; 1 send intensity 1 → parité ; topo
 display-only (probe sans OUT) → visuels vivants, moteurs muets ; standalone non-VST
 inchangé.
 
-## M5 — Purge finale + matrice réelle (S)
+## M5 — Purge finale + matrice réelle (S) — PURGE ✅ FAITE (2026-07-14) / MATRICE À VALIDER
+
+Purge livrée (build vert) :
+- **Snapshots RAW + SAMPLER supprimés** d'AudioImageBuffers (API + champs +
+  allocs + écrivains udp/feeder/injectWhiteFrame/outputFrame) — zéro lecteur
+  depuis M3/M4 ; « RAW » n'existe plus nulle part dans le routage ni l'affichage.
+- **VisualizerMode purgé** : RAW/LIVE/MODULATED (+ alias SAMPLER/MIX) et
+  LUXPITCH_OUTPUT/LUXMASK_OUTPUT supprimés de l'enum (jamais persisté — le
+  param APVTS "visualizerMode" est le STYLE de rendu Image/Waveform, conservé) ;
+  branches de gel RAW/LIVE/SAMPLER et bloc opacité MIX de CisVisualizer morts —
+  le gel suit uniquement la chaîne qui nourrit le moteur regardé.
+- **Param "chainInsertOrder" supprimé** (+ ChainModel::isMaskBeforePitch) —
+  l'ordre est celui des modules de chaque chaîne, plus de projection globale.
+- **stereo.pan_positions supprimé** (champ + param de img_stage_compute_pan_
+  luxstral + zéro-init) — le rendu ne lit que les gains L/R (D3 clos).
+- Commentaires périmés balayés (Channel A/B, FIX(raw), docs onglets).
+
+Reste : **la matrice de validation MANUELLE sur device réel** (user) : live UDP ;
+IMAGE/VIDEO/CAMERA ; sampler idle/REC/PLAY/STEP, A+B cross-chaîne ; REC pendant
+lecture (resampling désormais capturé post-mix à la position du marqueur) ;
+relay SCORE/TIMBRE/MIDI SCORE/VOICE + reprise ; chaîne sans source = silence/
+blanc ; topologie sans OUT = muet + vues blanches (D1) ; hot-swap device↔feeder ;
+0 underruns ; CPU udpThread ≤ baseline (rt_profiler).
 
 Suppression des morts (les 4 marcheurs remplacés, auxiliaires, flags), commentaires/
 headers (chain_plan.h, image_chain.h « ONLY consumed by image_chain_run », doc

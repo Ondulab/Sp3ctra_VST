@@ -646,13 +646,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             lwOctNames, 2, kHiddenChoice));
     }
 
-    // Insert chain order (M1 — modular pipeline core): which insert runs
-    // first inside the Modulated channel.
-    params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID{"chainInsertOrder", 1}, "Chain Insert Order",
-        juce::StringArray{"Pitch > Mask", "Mask > Pitch"}, 0));
-    // (Purge 2026-07-12: luxpitchSource/luxmaskSource deleted — Pitch/Mask are
-    // positional chain inserts, their input is the stream at their position.)
+    // (P4-M5: "chainInsertOrder" deleted — per-chain insert order comes from
+    // each chain's own recipe; the global order died with the modulated bus.)
 
     // ── PITCH / MASK — per-instance automatable banks (×8) ───────────────────
     // Each pooled insert instance owns a state-pool slot 0..7 (modulePoolSlots_,
@@ -3598,7 +3593,7 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
     if (luxSampler)  luxSampler ->setEnabled(samplerAPresent && fsParamOn);
     if (luxSamplerB) luxSamplerB->setEnabled(samplerBPresent && fsParamOn);
 
-    // Insert order projection ("chainInsertOrder" host param) — display only,
+    // (P4-M5: the "chainInsertOrder" projection is gone with the param —
     // which LuxStral consumes whenever a Sampler sits on its chain — the default
     // topology. (P4-M3: the GLOBAL insert order died with the modulated
     // build — per-chain order comes from each chain's own recipe; the
@@ -4750,7 +4745,6 @@ void Sp3ctraAudioProcessor::applyChainEnableBridge()
         luxstralEngines_ = enginesNow;
     }
 
-    setParam("chainInsertOrder", chainModel_.isMaskBeforePitch());
     chainActiveTypes_ = now;
 }
 

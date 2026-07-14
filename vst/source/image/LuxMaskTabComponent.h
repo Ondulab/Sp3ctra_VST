@@ -6,12 +6,12 @@
  * Two-column layout (mirrors LuxPitchTabComponent):
  *   Left  — LuxMask controls (enable, background, width, ADSR,
  *           width-bloom horizons, glide, position LFO, velocity)
- *   Right — pipeline output node (LUXMASK_OUTPUT visualizer)
+ *   Right — pipeline output node (contextual selection-tap view)
  *
  * ── Channel model (since "Modulated/Live" refactor) ─────────────────────────
  * LuxMask no longer has a Source selector.  It now lives permanently as an
  * insert inside the Modulated channel : Live ► [LuxPitch ⇄ LuxMask] ► LuxSampler
- * (insert order set by the chainInsertOrder parameter; the sampler records
+ * (insert order = the module's position in its chain; the sampler records
  * the post-insert frame and its playback bypasses the inserts).
  * When disabled or when no MIDI notes are active, it auto-bypasses to the
  * upstream signal (zero-cost pass-through).

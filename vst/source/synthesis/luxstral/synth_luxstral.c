@@ -747,7 +747,6 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
 
   // 🎯 REMOVED: Color temperature calculation - now done in preprocessing (image_preprocessor.c)
   // The stereo pan positions and gains are already calculated and stored in preprocessed data
-  // TODO: Use db->preprocessed_active.stereo.pan_positions[] and gains[] when implementing preprocessed data usage
 
   // M7 — the plan is the single routing authority: consume whatever the
   // plan-driven writers committed (audio-thread mixer / udp / feeder /

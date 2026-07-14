@@ -10,7 +10,7 @@
  * Two fixed channels feed the synthesis engines:
  *
  *   Channel Modulated : Live ► [LuxPitch ⇄ LuxMask] ► LuxSampler ► OUT
- *   (insert order = chainInsertOrder param; sampler playback bypasses inserts)
+ *   (insert order = each chain's own module order)
  *                       Each insert auto-bypasses when inactive:
  *                         - LuxSampler  : pass-through when not playing
  *                         - LuxPitch    : pass-through when no shift active

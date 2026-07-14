@@ -221,7 +221,6 @@ int initDoubleBuffer(DoubleBuffer *db) {
   
   /* Initialize stereo with center panning (equal-power law) */
   for (int i = 0; i < PREPROCESS_MAX_NOTES; i++) {
-    db->preprocessed_data.stereo.pan_positions[i] = 0.0f;  // Center
     db->preprocessed_data.stereo.left_gains[i] = 0.707f;   // -3dB (equal power)
     db->preprocessed_data.stereo.right_gains[i] = 0.707f;  // -3dB (equal power)
   }
@@ -1172,10 +1171,7 @@ void *udpThread(void *arg) {
        * no longer held across packet reception (see the note at the top of
        * this function).  During LuxSampler playback the live publish is
        * skipped: FramePlayerThread is the sole writer (same ownership rule
-       * as before, now decided at completion instead of at line start).
-       * FIX(routing): Snapshot raw BEFORE complete_write so that raw_R/G/B
-       * always contains pure UDP data (post-swap, FramePlayerThread could
-       * race the two calls and contaminate raw_R/G/B with sampler data). */
+       * as before, now decided at completion instead of at line start). */
       {
         int published = 0;
 #ifdef VST_MODE
@@ -1187,22 +1183,13 @@ void *udpThread(void *arg) {
             memcpy(wR, db->activeBuffer_R, nb_pixels);
             memcpy(wG, db->activeBuffer_G, nb_pixels);
             memcpy(wB, db->activeBuffer_B, nb_pixels);
-            audio_image_buffers_snapshot_raw_before_swap(audioBuffers);
             audio_image_buffers_complete_write(audioBuffers);
             published = 1;
           } else {
             log_warning("THREAD", "Failed to start audio buffer write");
           }
         }
-        if (!published) {
-          /* FIX(raw): Write bus not published (sampler is playing and owns
-           * AudioImageBuffers), but the RAW snapshot must still reflect the
-           * live UDP data so the RAW visualizer and Source=L pipeline path
-           * stay live during sampler playback. */
-          audio_image_buffers_snapshot_raw_external(audioBuffers,
-              db->activeBuffer_R, db->activeBuffer_G, db->activeBuffer_B,
-              nb_pixels);
-        }
+        (void) published;   /* (P4-M5: the RAW snapshot bus is gone) */
       }
 
       /* LuxSampler hook (phase 1 — live frame assembled).
@@ -1228,19 +1215,8 @@ void *udpThread(void *arg) {
        * 6 full-line memcpy per UDP line for an identity. The display buses
        * below read db->activeBuffer directly now.) */
 
-      /* Preprocess via pipeline — channel routing selects either
-       * the MODULATED chain or the raw LIVE feed for each synthesis path.
-       *
-       *   Channel A — MODULATED : Live ► LuxSampler ► LuxPitch ► LuxMask
-       *     • base frame  = sampler frame (FramePlayerThread output when a slot
-       *       plays, otherwise live UDP passthrough)
-       *     • LuxPitch and LuxMask auto-bypass when inactive (no voice, no
-       *       config.enabled, etc.) — no branching required at this level
-       *   Channel B — LIVE      : db->activeBuffer (raw UDP, no processing)
-       *
-       * Both synthesis paths (LuxStral and LuxSynth+LuxWave) independently pick
-       * one of these two channels via their own APVTS source parameter.
-       */
+      /* Per-line chain execution scope (P4): one uniform walk per chain —
+       * the legacy Channel A/B routing is gone. */
       {
         PipelineConfig live_cfg = pipeline_build_config_live();
 
@@ -1824,7 +1800,6 @@ void internal_sources_process_tick(void *arg)
       memcpy(wR, dispR, (size_t) nb_pixels);
       memcpy(wG, dispG, (size_t) nb_pixels);
       memcpy(wB, dispB, (size_t) nb_pixels);
-      audio_image_buffers_snapshot_raw_before_swap(audioBuffers);
       audio_image_buffers_complete_write(audioBuffers);
     }
   }

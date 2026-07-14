@@ -295,21 +295,6 @@ void ChainModel::deriveActiveTypes(std::set<ModuleType>& out) const
             out.insert(m.type);
 }
 
-bool ChainModel::isMaskBeforePitch() const
-{
-    for (const auto& ch : chains)
-    {
-        int pitchAt = -1, maskAt = -1;
-        for (int i = 0; i < (int) ch.modules.size(); ++i)
-        {
-            if (ch.modules[(size_t) i].type == ModuleType::Pitch) pitchAt = i;
-            if (ch.modules[(size_t) i].type == ModuleType::Mask)  maskAt  = i;
-        }
-        if (pitchAt >= 0 && maskAt >= 0)
-            return maskAt < pitchAt;   // first chain holding both decides
-    }
-    return false;   // default: Pitch first (legacy)
-}
 
 /* (M8: sourceChannelForSynth removed — the ChainPlan recipes are the single
  * routing authority.) */
