@@ -21,10 +21,13 @@
 //==============================================================================
 juce::String PiperVoiceInfo::displayName() const
 {
-    if (lang.isEmpty())
-        return id;
-    return name + " (" + lang + (region.isNotEmpty() ? "-" + region : "")
-                + ", " + quality + ")";
+    juce::String s = lang.isEmpty()
+        ? id
+        : name + " (" + lang + (region.isNotEmpty() ? "-" + region : "")
+               + ", " + quality + ")";
+    if (builtIn)
+        s += " [built-in]";
+    return s;
 }
 
 juce::File PiperTts::voicesDirectory()
@@ -33,11 +36,21 @@ juce::File PiperTts::voicesDirectory()
                .getChildFile ("Application Support/Sp3ctra/piper_voices");
 }
 
-juce::Array<PiperVoiceInfo> PiperTts::listVoices()
+juce::File PiperTts::bundleVoicesDirectory()
 {
-    juce::Array<PiperVoiceInfo> voices;
+    // currentExecutableFile resolves to the binary of THIS module — the plugin
+    // dylib inside Sp3ctra.vst3/.component when hosted, the app binary for the
+    // Standalone — so ../.. is always the bundle's Contents directory.
+    return juce::File::getSpecialLocation (juce::File::currentExecutableFile)
+               .getParentDirectory()    // Contents/MacOS
+               .getParentDirectory()    // Contents
+               .getChildFile ("Resources/piper_voices");
+}
 
-    for (const auto& dir : voicesDirectory().findChildFiles (juce::File::findDirectories, false))
+static void scanVoicesDir (const juce::File& root, bool builtIn,
+                           juce::Array<PiperVoiceInfo>& out)
+{
+    for (const auto& dir : root.findChildFiles (juce::File::findDirectories, false))
     {
         const auto onnx = dir.findChildFiles (juce::File::findFiles, false, "*.onnx");
         const auto tokens = dir.getChildFile ("tokens.txt");
@@ -45,11 +58,19 @@ juce::Array<PiperVoiceInfo> PiperTts::listVoices()
         if (onnx.size() != 1 || ! tokens.existsAsFile() || ! espeak.isDirectory())
             continue;
 
+        const juce::String id = dir.getFileName();
+        bool seen = false;
+        for (const auto& existing : out)
+            if (existing.id == id) { seen = true; break; }
+        if (seen)
+            continue;   // first occurrence wins (external scanned before bundle)
+
         PiperVoiceInfo v;
-        v.id            = dir.getFileName();
+        v.id            = id;
         v.modelOnnx     = onnx.getReference (0);
         v.tokensTxt     = tokens;
         v.espeakDataDir = espeak;
+        v.builtIn       = builtIn;
 
         // "vits-piper-<lang>_<REGION>-<name>-<quality>"
         static const std::regex re ("vits-piper-([a-z]{2,3})_([A-Z]{2})-(.+)-(low|medium|high)");
@@ -62,8 +83,15 @@ juce::Array<PiperVoiceInfo> PiperTts::listVoices()
             v.name    = juce::String (m[3].str());
             v.quality = juce::String (m[4].str());
         }
-        voices.add (std::move (v));
+        out.add (std::move (v));
     }
+}
+
+juce::Array<PiperVoiceInfo> PiperTts::listVoices (const juce::File& externalDir)
+{
+    juce::Array<PiperVoiceInfo> voices;
+    scanVoicesDir (externalDir, /*builtIn*/ false, voices);   // external wins dedupe
+    scanVoicesDir (bundleVoicesDirectory(), /*builtIn*/ true, voices);
 
     std::sort (voices.begin(), voices.end(),
                [] (const PiperVoiceInfo& a, const PiperVoiceInfo& b)
@@ -275,11 +303,12 @@ void PiperTts::runSmokeTestIfRequested()
     if (env == nullptr)
         return;
 
-    std::fprintf (stderr, "[TTS SMOKE] engineAvailable=%d voicesDir=%s\n",
+    std::fprintf (stderr, "[TTS SMOKE] engineAvailable=%d externalDir=%s bundleDir=%s\n",
                   (int) isEngineAvailable(),
-                  voicesDirectory().getFullPathName().toRawUTF8());
+                  voicesDirectory().getFullPathName().toRawUTF8(),
+                  bundleVoicesDirectory().getFullPathName().toRawUTF8());
 
-    const auto voices = listVoices();
+    const auto voices = listVoices (voicesDirectory());
     std::fprintf (stderr, "[TTS SMOKE] %d voice(s) installed\n", voices.size());
     for (const auto& v : voices)
         std::fprintf (stderr, "[TTS SMOKE]   %s\n", v.displayName().toRawUTF8());
