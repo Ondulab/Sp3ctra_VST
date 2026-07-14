@@ -233,7 +233,7 @@ void MediaSourcePage::chooseMedia()
             bool ok = false;
             if (safe->kind == Kind::Image)
             {
-                if (auto* e = safe->processor.getImageSource())
+                if (auto* e = safe->processor.getImageSource(safe->slot_))
                     ok = e->loadFile(file, err);
             }
             else
@@ -252,7 +252,7 @@ void MediaSourcePage::clearMedia()
     switch (kind)
     {
         case Kind::Image:
-            if (auto* e = processor.getImageSource()) e->unload();
+            if (auto* e = processor.getImageSource(slot_)) e->unload();
             break;
         case Kind::Video:
             if (auto* e = processor.getVideoSource()) e->unload();
@@ -304,7 +304,7 @@ juce::String MediaSourcePage::lineParamId() const
 {
     switch (kind)
     {
-        case Kind::Image:  return "imgSrcPos";
+        case Kind::Image:  return imgSrcParam(slot_, "Pos");
         case Kind::Video:  return "vidSrcLine";
         case Kind::Camera: return "camSrcLine";
     }
@@ -348,7 +348,7 @@ void MediaSourcePage::timerCallback()
 
     if (kind == Kind::Image)
     {
-        if (auto* e = processor.getImageSource())
+        if (auto* e = processor.getImageSource(slot_))
         {
             img = e->getPreviewImage();
             if (e->isPlaying())
@@ -449,4 +449,46 @@ void MediaSourcePage::resized()
     statusLabel.setBounds(b.removeFromBottom(18));
     b.removeFromBottom(4);
     preview.setBounds(b);
+}
+
+//==============================================================================
+// P5-M3 — bind the page to ONE IMAGE instance (pool slot).
+// Attachment rebind trap (memory 2026-07-10): reset FIRST, then recreate —
+// resetting via assignment leaks the previous bank's value into the new one.
+//==============================================================================
+void MediaSourcePage::setSlot(int slot)
+{
+    slot = juce::jlimit(0, 7, slot);
+    if (kind != Kind::Image || slot == slot_)
+        return;
+    slot_ = slot;
+
+    auto& apvts = processor.getAPVTS();
+    auto& mm    = processor.getMidiMap();
+
+    activeAttach.reset();
+    playAttach.reset();
+    loopAttach.reset();
+    speedAttach.reset();
+    learnAtts_.clear();
+
+    activeAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, imgSrcParam(slot_, "Enabled"), activeButton);
+    playAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, imgSrcParam(slot_, "Play"), playButton);
+    loopAttach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        apvts, imgSrcParam(slot_, "Loop"), loopCombo);
+    speedAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, imgSrcParam(slot_, "Duration"), speedSlider);
+
+    learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
+        mm, activeButton, imgSrcParam(slot_, "Enabled")));
+    learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
+        mm, playButton,  imgSrcParam(slot_, "Play")));
+    learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
+        mm, speedSlider, imgSrcParam(slot_, "Duration")));
+    learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
+        mm, loopCombo,   imgSrcParam(slot_, "Loop")));
+
+    repaint();
 }

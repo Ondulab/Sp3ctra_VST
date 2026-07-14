@@ -66,6 +66,17 @@ inline juce::String ecParam(int slot, const char* suffix)
 inline juce::String eqParam(int slot, const char* suffix)
 { return "luxeq" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
 
+// Media source banks (P5-M3) — slot 0 keeps the LEGACY global ids
+// ("imgSrcPos"…) so existing sessions and automation lanes load unchanged;
+// slots 1..7 own "imgSrc{N}_<suffix>". (VIDEO/CAMERA follow the same recipe
+// when their per-slot engines land.)
+inline juce::String imgSrcParam(int slot, const char* suffix)
+{
+    return slot <= 0 ? "imgSrc" + juce::String(suffix)
+                     : "imgSrc" + juce::String(juce::jlimit(1, 7, slot))
+                          + "_" + suffix;
+}
+
 // Engine-send (OUT) conditioning banks — one per send instance (M6 pools).
 inline juce::String lsOutParam(int slot, const char* suffix)
 { return "luxstralOut" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
@@ -157,6 +168,9 @@ namespace module_param_manifest_detail
     inline const char* const kLxLwOut[] = {
         "negative", "dcBlocking", "gamma", "intensity", "enabled",
     };
+    inline const char* const kImage[] = {
+        "Pos", "Duration", "Loop", "Play", "Enabled",
+    };
     inline const char* const kSampler[] = {
         "MidiChannel", "OctaveOffset", "MaxDuration",
         // REC/PLAY/SAVE bind params removed — those actions are now mapped through
@@ -172,6 +186,7 @@ namespace module_param_manifest_detail
     inline juce::String lxId(int s, const char* x) { return lxOutParam(s, x); }
     inline juce::String lwId(int s, const char* x) { return lwOutParam(s, x); }
     inline juce::String fsId(int s, const char* x) { return fsEngineParam(s, x); }
+    inline juce::String imgId(int s, const char* x) { return imgSrcParam(s, x); }
     inline juce::String vsId(int s, const char* x)
     {
         if (std::strcmp(x, "MixLevel") == 0) return vsMixParam(s, "level");
@@ -221,10 +236,15 @@ inline const ModuleParamManifest kModuleParamManifest[] = {
       module_param_manifest_detail::kSampler,
       (int) std::size(module_param_manifest_detail::kSampler),
       &module_param_manifest_detail::fsId },
+    // P5-M3 — IMAGE source instances (slot 0 = legacy ids).
+    { ModuleType::Image,       "imgSrc",      8,
+      module_param_manifest_detail::kImage,
+      (int) std::size(module_param_manifest_detail::kImage),
+      &module_param_manifest_detail::imgId },
 };
 
 /** Manifest entry for a module type, or nullptr when the type carries no
- *  per-instance bank (sources, Score/Sequencer/Timbre). */
+ *  per-instance bank (SP3CTRA/VIDEO/CAMERA sources, Score/Sequencer/Timbre). */
 inline const ModuleParamManifest* moduleParamManifest(ModuleType t)
 {
     for (const auto& m : kModuleParamManifest)

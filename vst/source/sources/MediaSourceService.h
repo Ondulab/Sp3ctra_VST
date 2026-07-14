@@ -14,6 +14,8 @@
 #pragma once
 
 #include <juce_core/juce_core.h>
+#include <array>
+#include <memory>
 #include "MediaSourceEngines.h"
 
 extern "C" {
@@ -24,10 +26,10 @@ extern "C" {
 class MediaSourceService : public juce::Thread
 {
 public:
-    MediaSourceService(ImageSourceEngine& img,
+    MediaSourceService(std::array<std::unique_ptr<ImageSourceEngine>, 8>& imgs,
                        VideoSourceEngine& vid,
                        CameraSourceEngine& cam)
-        : Thread("Sp3ctraMediaSrc"), img_(img), vid_(vid), cam_(cam) {}
+        : Thread("Sp3ctraMediaSrc"), imgs_(imgs), vid_(vid), cam_(cam) {}
 
     ~MediaSourceService() override { stopThread(2000); }
 
@@ -39,7 +41,9 @@ public:
         while (! threadShouldExit())
         {
             const double now = juce::Time::getMillisecondCounterHiRes();
-            img_.tick(now);
+            for (auto& eng : imgs_)
+                if (eng != nullptr)
+                    eng->tick(now);
             vid_.tick(now);
             cam_.tick(now);
 
@@ -58,7 +62,7 @@ public:
     }
 
 private:
-    ImageSourceEngine&  img_;
+    std::array<std::unique_ptr<ImageSourceEngine>, 8>& imgs_;
     VideoSourceEngine&  vid_;
     CameraSourceEngine& cam_;
     std::atomic<Context*> ctx_ { nullptr };

@@ -127,11 +127,17 @@ erase par slot (contrat blanc). RE-SPLIT : le registre de moteurs ×(kind,slot)
 part en M3 avec les params/UI par instance (un moteur par slot sans ses params
 serait inerte) — IMAGE d'abord, puis VIDEO, puis CAMERA.
 
-### P5-M3 — Params média au manifest + UI par instance (M)
-Banques ×8 des 3 types au ModuleParamManifest (VALUES/typeMemory/presets
-gratuits) ; migration des params globaux imgSrc*/vidSrc*/camSrc* → banque
-slot 0 ; SourceSetupPanel/tabs rebind par instance ; LED par instance.
-⚠️ Après le chantier SOURCES de l'autre session.
+### P5-M3 — Params média + moteurs + UI par instance — IMAGE ✅ FAIT (2026-07-14)
+IMAGE ×8 de bout en bout : entrée manifest (slot 0 = ids LEGACY imgSrc*,
+sessions/automation inchangées ; slots 1..7 = imgSrc{N}_*), banques déclarées,
+listeners via la boucle manifest (doubles legacy retirés), 8 moteurs
+ImageSourceEngine (slot → pool (IMAGE, slot), onPlaybackFinished par slot,
+sync/présence/never-auto-run par slot), persistence imagePath{N} (clé legacy
+slot 0), MediaSourceService tick ×8, MediaSourcePage.setSlot (rebind
+attachments reset-first + MIDI-learn + moteur + curseur ligne par slot,
+poussé par l'éditeur à la sélection).
+RESTE M3b/M3c : VIDEO puis CAMERA — même recette exacte (broadcast slot -1
+en attendant : contenus partagés documentés).
 
 ### P5-M4 — ScoreSlotPool + lecture par slot (L — cœur de B)
 Pool de slots score (frames sortis de LuxSampler) ; ScorePlayerService

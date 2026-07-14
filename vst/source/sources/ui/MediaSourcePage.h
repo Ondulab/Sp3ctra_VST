@@ -31,6 +31,11 @@ public:
     MediaSourcePage(Sp3ctraAudioProcessor& p, Kind k);
     ~MediaSourcePage() override;
 
+    /** P5-M3 — rebind the page to ONE IMAGE instance (pool slot 0..7):
+     *  attachments, MIDI-learn targets and engine accessors follow the slot.
+     *  No-op for VIDEO/CAMERA (single instance until their engines pool). */
+    void setSlot(int slot);
+
     static constexpr int kPreferredH = 420;
 
     void paint(juce::Graphics& g) override;
@@ -102,6 +107,7 @@ private:
     std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
 
     bool scrubbing_ = false;
+    int  slot_      = 0;   // P5-M3 — bound IMAGE instance (pool slot)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MediaSourcePage)
 };
