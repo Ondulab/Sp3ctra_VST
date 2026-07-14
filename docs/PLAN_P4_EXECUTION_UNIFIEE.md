@@ -113,7 +113,48 @@ Validation : matrice no-signal (chaîne MIDI SCORE/SCORE/SAMPLER idle → silenc
 blanc, device streaming et feeder) ; parité sonore topologies à sends ; stéréo LuxStral
 inchangée à l'oreille.
 
-## M2 — UN exécuteur : `chain_execute_span()` (L — cœur du chantier)
+## M2 — UN exécuteur : `chain_execute_span()` (L — cœur du chantier) — ✅ FAIT (2026-07-14)
+
+Statut : implémenté, build vert, revue 8-angles passée (1 régression trouvée et
+corrigée avant commit : write-back d'affichage = flux de FIN de chaîne via
+`ChainExecOut.end*`, pas le flux au premier OUT). Réalisation effective :
+- `chain_execute_span(sp, chain, from, to, ctx, in, out)` = LE marcheur unique ;
+  `ChainExecCtx` (scratchs par thread, `rec_mode` NONE/IDLE/INPUT,
+  `rec_skip_engine`, `player_fed`, `force_play`, `publish_tap_at_end`) ; inits
+  désignées aux 5 sites (zéro-fill C99, plus de memset copy-paste).
+- Split-point UNIQUE : `chain_owning_marker_pos(sp, score_owns, engine_slot)`
+  partagé producteurs (-1 = tout moteur driving) / players (moteur exact).
+- Producteurs : TOUTE chaîne player-owned (LS OUT ou non) = span [0, marqueur]
+  chez udp/feeder (probes/FX amont au line rate, OUTs au-dessus du marqueur
+  stagés ICI — avant : orphelins —, marqueurs = record INPUT) + tap blanchi si
+  chaîne sans source ; le player marche (marqueur, N].
+- Player : `chain_player_execute_owned` remplace les 5 chemins
+  (ls_sends_stage_player_frame, lx_send_stage_player_frame,
+  chain_player_apply_synth_a_inserts, chain_apply_post_marker_inserts,
+  chain_player_record_downstream) — UNE marche par chaîne possédée : staging de
+  CHAQUE OUT à sa position, FX/probes tickés UNE fois (avant : double-tick FX +
+  double-capture probes entre marqueur et OUT via copies par send + run
+  in-place), record downstream à la position du marqueur, taps exacts ;
+  scratchs `_Thread_local` (A/B simultanés).
+- VOICE : famille score factorisée (`kScoreFamily`/`isScoreFamily`,
+  ModuleCatalog.h) — le bug « chaîne VOICE seule jamais player-owned » venait
+  d'une 4e liste manuscrite désynchronisée ; les 3 sites processeur itèrent la
+  liste.
+- Morts : chain_execute_positional, chain_run_premarker_segment + les 5 chemins
+  player. RESTENT pour M3 : chain_shortcut_walk, publish_viz_tap_sampler_shortcut,
+  chain_build_sampler_premarker_plan, chain_run_inserts_with_viz_tap (build
+  modulé idle).
+Deltas assumés (doctrine « le module reçoit le flux d'au-dessus ») : le record
+downstream capture le flux À SA POSITION (post-opacité/blend/FX amont — avant :
+playback brut pré-mix) et s'arrête au transport STOP ; le staging LuxSynth/Wave
+player voit SA chaîne à SA position (avant : premier OUT trouvé, frame cross-FX) ;
+OUT au-dessus du marqueur stagé au rythme producteur (avant : jamais pendant la
+lecture). Trou PRÉ-EXISTANT documenté (non traité, → M3/arbitre) : score jouant
++ sampler driving sur UNE chaîne (moteurs sans partage) = double-staging.
+À VALIDER en réel (matrice M5) : sampler A+B cross-chaîne, REC pendant play,
+score/MIDI SCORE/VOICE relay, chaîne sans source, 0 underruns.
+
+### Plan initial (référence)
 
 Généraliser `chain_execute_positional` en marcheur de SEGMENT, seul code au monde qui
 sait exécuter une chaîne :

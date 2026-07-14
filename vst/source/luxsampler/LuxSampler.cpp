@@ -203,8 +203,8 @@ extern "C"
         // processors), captured into the armed slot even while THIS engine
         // is playing — recording never captures the engine's own playback
         // mix. Unlike lux_sampler_record_chain_frame there is deliberately
-        // NO isDrivingChannel skip here: the caller
-        // (chain_run_premarker_segment) targets the marker's own engine.
+        // NO isDrivingChannel skip here: the pre-marker span caller
+        // targets the marker's own engine.
         if (engine < 0 || engine >= LuxSampler::kMaxEngines)
             return;
         static std::atomic<uint32_t> s_inputLineId[LuxSampler::kMaxEngines];
@@ -3122,17 +3122,10 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
         }
     }
 
-    // ── Downstream capture (module contract, 2026-07-13) ──────────────────
-    // The playback frame is the INPUT of every sampler marker placed BELOW
-    // this player's owning marker in its chain — record it into their armed
-    // slots, 1:1 with produced frames (SCORE → sampler bounce, A → B
-    // resampling). REC on a marker ABOVE the owning position — or on the
-    // playing engine itself — captures the chain input instead
-    // (chain_run_premarker_segment, udpThread/feeder). The former self-record
-    // (this engine bouncing its OWN mix) stays removed: REC never captures
-    // the engine's own playback.
-    chain_player_record_downstream(isScore ? 1 : 0, sampler.getEngineIndex(),
-                                   workR, workG, workB, nb);
+    // (P4-M2) Downstream capture moved INTO the unified chain walk below
+    // (chain_player_execute_owned): a downstream SAMPLER marker records its
+    // input AT ITS POSITION in the chain — post-blend, post-upstream-FX —
+    // exactly the stream a module below the player receives.
 
     // ── Live darken-blend: min(sample, live) weighted by blendAmount ─────
     // blendAmount=0 → pure playback; blendAmount=1 → full darken blend.
@@ -3256,26 +3249,19 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
                 }
             }
 
-            // 2b. Synth-split P3: stage every PLAYER-OWNED LuxStral
-            //     send from the RAW blended frame (each send applies
-            //     its own post-marker inserts + conditioning bank; the
-            //     audio-thread mixer blends them).
-            s_playerSendCount = ls_sends_stage_player_frame(
-                workR, workG, workB, nb,
+            // 2b. P4-M2 — ONE positional walk per player-owned chain (the
+            //     same executor as udpThread/feeder): span BELOW the owning
+            //     marker on the blended frame. Stages every OUT at its exact
+            //     position (LuxStral/LuxSynth/LuxWave), runs post-marker
+            //     FX/probes exactly once, records downstream markers
+            //     (bounce/resampling) and publishes the exact selection tap.
+            //     Writes the stream at the first owned LS OUT back into
+            //     work* so the mix bus + audio commits below see post-FX.
+            s_playerSendCount = chain_player_execute_owned(
                 isScore ? 1 : 0,
                 sampler.getEngineIndex(),
                 (state.seqControlledPlay.load(std::memory_order_relaxed)
                  || isScore) ? 1 : 0,
-                audioBuffers);
-
-            // 2c. Engine A: apply the chain inserts placed BELOW the
-            //     SCORE/SAMPLER module (REVERB/ECHO/probes) to the playback
-            //     frame, in place. udpThread's short-circuit skips them
-            //     while the player owns the channel, so this is their only
-            //     execution — everything downstream (visual mix bus,
-            //     preprocessed audio commit, resampling) sees post-FX.
-            chain_player_apply_synth_a_inserts(
-                isScore ? 1 : 0, sampler.getEngineIndex(),
                 audioBuffers, workR, workG, workB, nb);
 
             // 3. Write mixed frame to AudioImageBuffers (the visual mix
@@ -3400,13 +3386,10 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
                 audio_image_buffers_publish_engine_input(
                     audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
                     workR, workG, workB, nb);
-                // M4 — the player owns the LuxSynth chain's
-                // stream: stage the "→ LUXSYNTH" send from the
-                // same frame (engine feed, mixed + FFT'd by the
-                // audio thread).
-                lx_send_stage_player_frame(
-                    workR, workG, workB, nb,
-                    isScore ? 1 : 0, sampler.getEngineIndex());
+                // (P4-M2) The "→ LUXSYNTH"/"→ LUXWAVE" staging happens in
+                // the unified chain walk above, at each OUT's exact position
+                // in its own chain (no more first-OUT-only, cross-chain-FX
+                // approximation).
             }
         }
     }

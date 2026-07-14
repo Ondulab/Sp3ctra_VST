@@ -41,6 +41,25 @@ enum class ModuleType
     Voice                          // UTILS (appended to keep table indices stable)
 };
 
+/** SCORE / TIMBRE / MIDI SCORE / VOICE all audition through the SHARED
+ *  score-player channel (engine A's score slot). THE list — every site that
+ *  gates on the family iterates it or calls isScoreFamily(), so adding the
+ *  next member updates them all at once (the P4-M2 VOICE bug — a chain
+ *  hosting only VOICE never became player-owned — came from one of four
+ *  hand-maintained copies of this list missing the newest member). */
+inline constexpr ModuleType kScoreFamily[] = {
+    ModuleType::Score, ModuleType::Timbre,
+    ModuleType::MidiScore, ModuleType::Voice
+};
+
+inline bool isScoreFamily(ModuleType t)
+{
+    for (auto f : kScoreFamily)
+        if (t == f)
+            return true;
+    return false;
+}
+
 /** Behavioural role — drives the placement constraints. */
 enum class ModuleRole { Source, Processor, Util, Synth };
 
