@@ -89,7 +89,7 @@ private:
      */
     struct PanelData
     {
-        VisualizerMode       mode { VisualizerMode::RAW };
+        VisualizerMode       mode { VisualizerMode::SELECTED_TAP };
         std::vector<uint8_t> r, g, b, gray;
     };
 

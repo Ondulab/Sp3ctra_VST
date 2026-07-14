@@ -56,9 +56,9 @@ typedef struct {
      * real LuxWave feed is the staged "→ LUXWAVE" sends via
      * pipeline_luxwave_feed_tick, not this struct.) */
 
-    /* Stereo panning data (shared, only used if stereo mode enabled) */
+    /* Stereo panning data (shared, only used if stereo mode enabled).
+     * (P4-M5: pan_positions removed — the render reads only the gains.) */
     struct {
-        float pan_positions[PREPROCESS_MAX_NOTES];  /* -1.0 (left) to +1.0 (right) */
         float left_gains[PREPROCESS_MAX_NOTES];     /* 0.0 to 1.0 */
         float right_gains[PREPROCESS_MAX_NOTES];    /* 0.0 to 1.0 */
     } stereo;

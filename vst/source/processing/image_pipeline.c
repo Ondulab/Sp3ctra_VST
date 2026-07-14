@@ -498,7 +498,6 @@ void pipeline_path_luxstral(
             pixels_per_note,
             PREPROCESS_MAX_NOTES,
             config->stereo_temp_amp,
-            out->stereo.pan_positions,
             out->stereo.left_gains,
             out->stereo.right_gains);
     }

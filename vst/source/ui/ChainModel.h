@@ -147,9 +147,6 @@ public:
     //── Phase-1 audio bridge helpers ──────────────────────────────────────────
     /** Every ModuleType present in at least one chain. */
     void deriveActiveTypes(std::set<ModuleType>& out) const;
-    /** Global Pitch/Mask relation for the binary chainInsertOrder param: true if
-     *  the first chain containing both has Mask before Pitch. */
-    bool isMaskBeforePitch() const;
 
 
     //── Persistence ───────────────────────────────────────────────────────────
