@@ -4258,12 +4258,11 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
                     sp.num_inserts++;
                 }
             }
-            else if (t == ModuleType::Score || t == ModuleType::Timbre
-                     || t == ModuleType::MidiScore)
+            else if (isScoreFamily(t))
             {
-                // TIMBRE and MIDI SCORE audition through the same shared
-                // score-player channel as SCORE (loadScoreFramesFromImage), so
-                // all three types raise the same plan flag. Guarded: with
+                // The score family (kScoreFamily) auditions through the one
+                // shared score-player channel (loadScoreFramesFromImage), so
+                // every member raises the same plan flag. Guarded: with
                 // several of them in one chain only the FIRST position becomes
                 // the marker.
                 if (! sp.has_score)
@@ -4361,8 +4360,7 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
             if (m.type == ModuleType::VideoScroll
                 && m.slot >= 0 && m.slot < CHAIN_MAX_CHAINS)
                 hasProbe = true;
-            if (m.type == ModuleType::Sampler || m.type == ModuleType::Score
-                || m.type == ModuleType::Timbre || m.type == ModuleType::MidiScore)
+            if (m.type == ModuleType::Sampler || isScoreFamily(m.type))
                 hasPlayer = true;   // mod-bus owner candidate (REC/relay hooks)
             if (m.id == vizTapModuleId_)
                 hasVizTarget = true;   // selection tap lives in this chain
@@ -4799,17 +4797,20 @@ void Sp3ctraAudioProcessor::teardownAbsentModules(const std::set<ModuleType>& no
     auto removed = [&](ModuleType t)
     { return chainActiveTypes_.count(t) > 0 && now.count(t) == 0; };
 
-    // SCORE / TIMBRE / MIDI SCORE / VOICE share the score-player channel: free
-    // the frame buffer only when the LAST of the four leaves (removing SCORE
-    // must not cut a playing TIMBRE, MIDI SCORE or VOICE page, and vice
-    // versa). SCORE's settings reset stays SCORE-only.
-    if ((removed(ModuleType::Score) || removed(ModuleType::Timbre)
-         || removed(ModuleType::MidiScore) || removed(ModuleType::Voice))
-        && now.count(ModuleType::Score) == 0 && now.count(ModuleType::Timbre) == 0
-        && now.count(ModuleType::MidiScore) == 0 && now.count(ModuleType::Voice) == 0)
+    // The score family shares the score-player channel: free the frame buffer
+    // only when the LAST member leaves (removing SCORE must not cut a playing
+    // TIMBRE/MIDI SCORE/VOICE page, and vice versa). SCORE's settings reset
+    // stays SCORE-only.
     {
-        if (auto* ls = getLuxSampler())
-            ls->uiDiscardScore();
+        bool familyRemoved = false, familyPresent = false;
+        for (ModuleType t : kScoreFamily)
+        {
+            familyRemoved  = familyRemoved  || removed(t);
+            familyPresent  = familyPresent  || now.count(t) != 0;
+        }
+        if (familyRemoved && ! familyPresent)
+            if (auto* ls = getLuxSampler())
+                ls->uiDiscardScore();
     }
     if (removed(ModuleType::Score))
     {

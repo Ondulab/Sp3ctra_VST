@@ -173,38 +173,22 @@ void *audioProcessingThread(void *arg);
  * `arg` is the Context*. No-op when no internal source is active. */
 void internal_sources_process_tick(void *arg);
 
-/* Synth-split P3 — FramePlayerThread: stage every PLAYER-OWNED LuxStral send
- * from the blended playback frame; each send applies its own post-marker
- * inserts + bank on a private copy. Per-chain playback: a sampler send is
- * player-owned only when its chain hosts THIS engine (`engine_slot` = the
- * calling player's engine); is_score=1 matches has_score chains instead.
- * Returns the plan's num_ls_sends (0 → caller keeps the legacy engine-A
- * player path alive). VST only. */
+/* ── P4-M2 — FramePlayerThread: ONE positional walk per player-owned chain ──
+ * For every chain owned by THIS player (its driving engine's SAMPLER marker,
+ * or the SCORE-type marker during score playback — is_score=1), walks the
+ * span BELOW the owning marker on the blended playback frame with the SAME
+ * executor as udpThread/feeder: stages every OUT (LuxStral/LuxSynth/LuxWave)
+ * at its exact position, runs post-marker FX/probes exactly once, records the
+ * downstream SAMPLER markers (bounce/resampling — never the driving engine)
+ * and publishes the exact zone-1 selection tap. The stream at the first owned
+ * LuxStral OUT is copied back into r/g/b (display mix bus + legacy commits
+ * see post-FX) and published as engine tap A. Returns plan.num_ls_sends
+ * (0 → caller keeps the legacy engine-A player path alive). VST only. */
 struct AudioImageBuffers;
-int ls_sends_stage_player_frame(const uint8_t *r, const uint8_t *g,
-                                const uint8_t *b, int nb_pixels,
-                                int is_score, int engine_slot, int force_play,
-                                struct AudioImageBuffers *viz_bus);
-
-/* Engine A ← player-side chain inserts. Called by FramePlayerThread (Non-RT)
- * with the final blended playback frame: applies IN PLACE the inserts of
- * LuxStral A's chain placed BELOW the SCORE (is_score=1) / SAMPLER (is_score=0,
- * marker matching `engine_slot`) module — REVERB/ECHO/probes — and publishes
- * the zone-1 selection tap when it points into that span. The per-line
- * producers skip those inserts while the player owns the channel, so this is
- * their only execution. */
-void chain_player_apply_synth_a_inserts(int is_score, int engine_slot,
-                                        struct AudioImageBuffers *viz_bus,
-                                        uint8_t *r, uint8_t *g, uint8_t *b,
-                                        int nb_pixels);
-
-/* M4 — FramePlayerThread: stage the "→ LUXSYNTH" send from the blended
- * playback frame while the player owns its chain's stream (single writer —
- * udpThread/feeder skip the LuxSynth staging of player-owned chains).
- * Ownership: has_score (is_score=1) or SAMPLER marker == engine_slot. */
-void lx_send_stage_player_frame(const uint8_t *r, const uint8_t *g,
-                                const uint8_t *b, int nb_pixels,
-                                int is_score, int engine_slot);
+int chain_player_execute_owned(int is_score, int engine_slot, int force_play,
+                               struct AudioImageBuffers *viz_bus,
+                               uint8_t *r, uint8_t *g, uint8_t *b,
+                               int nb_pixels);
 
 /* M7 — plan-driven ownership queries (replace the legacy *_source_type
  * gates in the player paths). Non-RT callers. Per-chain playback: the
@@ -219,16 +203,5 @@ int chain_pathb_player_candidate(int is_score, int engine_slot);
  * sourceless chain leaves its last column ringing forever. Called by
  * FramePlayerThread::injectWhiteFrame() (Non-RT). */
 void chain_player_stagings_set_inactive(int engine_slot);
-
-/* Module contract (2026-07-13) — FramePlayerThread: while THIS player owns a
- * chain's stream, the playback frame is the INPUT of every sampler marker
- * placed BELOW the owning marker (this engine's SAMPLER marker, or the SCORE
- * marker for a score session). Record it into their armed slots, 1:1 with
- * produced frames. The playing engine never records its own playback; markers
- * ABOVE the owning position record the chain input instead
- * (chain_run_premarker_segment, udpThread/feeder). */
-void chain_player_record_downstream(int is_score, int engine_slot,
-                                    const uint8_t *r, const uint8_t *g,
-                                    const uint8_t *b, int nb_pixels);
 
 #endif

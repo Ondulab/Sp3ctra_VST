@@ -157,8 +157,9 @@ int lux_sampler_is_recording(void);
  *
  * REC records the module INPUT (2026-07-13): the chain stream arriving AT the
  * sampler's marker (chain source → pre-marker processors) — never the
- * engine's own playback mix. Called by chain_run_premarker_segment (udpThread
- * / feeder tick) while the chain is player-owned; the idle capture path goes
+ * engine's own playback mix. Called by the chain executor's CHAIN_REC_INPUT
+ * spans (udpThread/feeder pre-marker + FramePlayerThread post-marker walks);
+ * the idle capture path goes
  * through lux_sampler_on_modulated_frame_ready as before. Unlike
  * lux_sampler_record_chain_frame this does NOT skip a driving engine.
  * No-op unless a slot is armed.
