@@ -40,6 +40,18 @@ void lux_sampler_on_live_frame_assembled(const uint8_t* R,
                                           uint16_t       pixel_count);
 
 /**
+ * @brief Cache ONE engine's MIX/darken-blend reference: the chain stream
+ *        arriving at ITS SAMPLER marker. Called by the chain executor at that
+ *        exact position (P4 — the blend uses the chain's own flux, never the
+ *        device line). Non-RT producer threads + the player's downstream walk.
+ */
+void lux_sampler_cache_input_frame(int engine_slot,
+                                   const uint8_t* R,
+                                   const uint8_t* G,
+                                   const uint8_t* B,
+                                   uint16_t       pixel_count);
+
+/**
  * @brief Per-chain sampler capture — record ONE chain's stream into ITS
  *        engine's armed recording slot. A DRIVING engine (its own playback
  *        owns the channel) is skipped: it self-records inside its

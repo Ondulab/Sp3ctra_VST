@@ -791,6 +791,13 @@ static void chain_execute_span(const SynthChainPlan *sp, int chain_idx,
                 lux_sampler_record_input_frame(sp->insert_state_idx[i],
                                                cr, cg, cb,
                                                (uint16_t) nb_pixels);
+            /* MIX/darken-blend reference = the module's INPUT: cache the
+             * stream at THIS marker for THIS engine (P4 — the blend follows
+             * the chain's own flux, never the device line). */
+            if (cx->rec_mode != CHAIN_REC_NONE)
+                lux_sampler_cache_input_frame(sp->insert_state_idx[i],
+                                              cr, cg, cb,
+                                              (uint16_t) nb_pixels);
 #endif
         }
         else
@@ -1303,22 +1310,12 @@ void *udpThread(void *arg) {
         (void) published;   /* (P4-M5: the RAW snapshot bus is gone) */
       }
 
-      /* LuxSampler hook (phase 1 — live frame assembled).
-       *
-       * The image chain is now: Live → LuxPitch → LuxMask → LuxSampler.
-       * LuxSampler must therefore see the post-mask frame to:
-       *   • feed the Modulated channel from idle/REC passthrough
-       *   • record into a slot with Pitch+Mask already applied
-       *
-       * Phase 1 here drains start/stop record commands and caches the live
-       * frame for FramePlayerThread.  Phase 2 (the actual capture + sampler
-       * snapshot update) happens AFTER LuxPitch + LuxMask have run — see
-       * lux_sampler_on_modulated_frame_ready() below.
-       */
+      /* LuxSampler drain (start/stop REC commands) — drain-only since P4:
+       * the capture AND the MIX/blend reference are positional (the chain
+       * executor records and caches at each SAMPLER marker, with the chain's
+       * own stream — never the device line). */
 #ifdef VST_MODE
-      lux_sampler_on_live_frame_assembled(
-          db->activeBuffer_R, db->activeBuffer_G, db->activeBuffer_B,
-          (uint16_t)nb_pixels);
+      lux_sampler_on_live_frame_assembled(NULL, NULL, NULL, 0);
 #endif
 
       /* (Legacy ImageSequencer removed: g_image_sequencer was always NULL —
@@ -1711,33 +1708,11 @@ void internal_sources_process_tick(void *arg)
 #endif
 
 #ifdef VST_MODE
-  /* ── Sampler machinery — mirror of udpThread's modulated build ─────────────
-   * Without it, REC was dead whenever the device was silent (VIDEO / IMAGE /
-   * CAMERA sessions): phase 1 below is the ONLY drain site of the start/stop
-   * record commands, and phase 2 the only capture site. Runs BEFORE the
-   * any-active early-out — the drain and the resampling capture need no
-   * internal source (MediaSourceService keeps ticking at its idle rate). */
-  /* MOD-BUS OWNER: the FIRST chain (model order) hosting a sampler — the
-   * modulated channel is built from ITS recipe and ITS OWN source (mirror of
-   * udpThread's owner rule). */
-  const SynthChainPlan *spSmp = NULL;
-  int smp_owner_chain = -1;
-  for (int c = 0; c < frame_plan.num_chains && !spSmp; c++)
-      if (frame_plan.chain[c].present && frame_plan.chain[c].has_sampler)
-      { spSmp = &frame_plan.chain[c]; smp_owner_chain = c; }
-
-  /* (P4-M3) Phase 1 only — drain start/stop REC commands + cache the first
-   * sampler chain's source frame for the player's darken-blend. The idle
-   * capture and the zone-1 view are POSITIONAL now: the uniform loop below
-   * records at each SAMPLER marker (CHAIN_REC_IDLE) and publishes the
-   * selection tap; the global modulated build is gone. */
-  if (spSmp)
-  {
-      const uint8_t *sbR, *sbG, *sbB;
-      (void) synth_source_base(spSmp, smp_owner_chain,
-                               db, nb_pixels, &sbR, &sbG, &sbB);
-      lux_sampler_on_live_frame_assembled(sbR, sbG, sbB, (uint16_t)nb_pixels);
-  }
+  /* LuxSampler drain (start/stop REC commands) — drain-only since P4: the
+   * capture and the MIX/blend reference are positional (at each SAMPLER
+   * marker in the loop below). Unconditional: commands must drain even while
+   * no sampler chain has a source (device silent, media unloaded). */
+  lux_sampler_on_live_frame_assembled(NULL, NULL, NULL, 0);
 #endif
 
   /* NO early-out on !internal_source_any_active() here. The loop below is

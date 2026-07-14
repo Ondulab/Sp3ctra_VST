@@ -64,6 +64,21 @@ extern "C"
         }
     }
 
+    void lux_sampler_cache_input_frame(int engine_slot,
+                                       const uint8_t* R,
+                                       const uint8_t* G,
+                                       const uint8_t* B,
+                                       uint16_t       pixel_count)
+    {
+        // Per-chain MIX/blend reference: the stream arriving at THIS engine's
+        // SAMPLER marker (called by the chain executor at that position).
+        if (engine_slot < 0 || engine_slot >= LuxSampler::kMaxEngines)
+            return;
+        if (auto* e = LuxSampler::pinEngine(engine_slot))
+            e->cacheInputFrame(R, G, B, pixel_count);
+        LuxSampler::unpinEngine(engine_slot);
+    }
+
     void lux_sampler_record_chain_frame(int engine_slot,
                                         const uint8_t* R,
                                         const uint8_t* G,
@@ -425,19 +440,30 @@ bool LuxSampler::onLiveFrameAssembled(const uint8_t* R, const uint8_t* G,
         }
     }
 
-    // ── Cache latest live frame (used by FramePlayerThread for darken-blend) ──
-    // Written here (UDP thread, Non-RT) → read by FramePlayerThread (Non-RT).
-    // Cached regardless of recording state so blend always has the freshest frame.
-    {
-        std::lock_guard<std::mutex> lk(liveMutex_);
-        livePixelCount_ = std::min(static_cast<int>(pixel_count),
-                                   LuxSamplerConstants::MAX_PIXELS);
-        std::memcpy(liveR_, R, static_cast<size_t>(livePixelCount_));
-        std::memcpy(liveG_, G, static_cast<size_t>(livePixelCount_));
-        std::memcpy(liveB_, B, static_cast<size_t>(livePixelCount_));
-    }
+    // (P4 2026-07-14: the blend-reference cache moved to cacheInputFrame() —
+    // fed PER ENGINE by the chain executor at THIS engine's SAMPLER marker,
+    // with the chain's own stream. R may be NULL here: drain-only call.)
+    if (R != nullptr && G != nullptr && B != nullptr)
+        cacheInputFrame(R, G, B, pixel_count);
 
     return true;
+}
+
+// ============================================================================
+// cacheInputFrame — cache the module's INPUT (the chain stream at its SAMPLER
+// marker) as the MIX/darken-blend reference. Non-RT (producer threads / the
+// player's downstream walk) → read by FramePlayerThread via getLiveFrame().
+// P4 doctrine: the blend uses THIS chain's flux, never the device line.
+// ============================================================================
+void LuxSampler::cacheInputFrame(const uint8_t* R, const uint8_t* G,
+                                  const uint8_t* B, uint16_t pixel_count) noexcept
+{
+    std::lock_guard<std::mutex> lk(liveMutex_);
+    livePixelCount_ = std::min(static_cast<int>(pixel_count),
+                               LuxSamplerConstants::MAX_PIXELS);
+    std::memcpy(liveR_, R, static_cast<size_t>(livePixelCount_));
+    std::memcpy(liveG_, G, static_cast<size_t>(livePixelCount_));
+    std::memcpy(liveB_, B, static_cast<size_t>(livePixelCount_));
 }
 
 // ============================================================================
