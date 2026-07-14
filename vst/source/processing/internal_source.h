@@ -29,11 +29,19 @@
 extern "C" {
 #endif
 
-/* Internal source kinds — index into the source pool. */
+/* Internal source kinds — first index into the source pool. */
 #define INTERNAL_SRC_IMAGE  0
 #define INTERNAL_SRC_VIDEO  1
 #define INTERNAL_SRC_CAMERA 2
 #define INTERNAL_SRC_COUNT  3
+
+/* P5-M2 — one line PER MODULE INSTANCE: the pool is (kind, slot 0..7), the
+ * slot being the ModuleInstance's media slot (ChainModel::kMaxMediaSlots).
+ * M2 NOTE: each kind still has ONE engine, which broadcasts to every slot
+ * (slot == -1 on the producer side) — instances of a kind share the same
+ * content until the per-instance engines land (P5-M3). Consumers always read
+ * their exact slot (SynthChainPlan.source_slot). */
+#define INTERNAL_SRC_SLOTS  8
 
 #define INTERNAL_SRC_MAX_PIXELS 3456   /* == FIXED_BUFFER_PIXELS */
 
@@ -43,24 +51,27 @@ extern "C" {
  * kind is placed in a chain AND the source is enabled. Deactivating ERASES
  * the published line (white fill, pixel_count 0) — removing/disabling a
  * source must never leave its old content behind; producers republish a
- * fresh line on re-activation. */
-void internal_source_set_active(int kind, int active);
-int  internal_source_is_active(int kind);
+ * fresh line on re-activation. slot == -1 → every slot of the kind (single
+ * engine broadcast, P5-M2). */
+void internal_source_set_active(int kind, int slot, int active);
+int  internal_source_is_active(int kind, int slot);   /* slot -1 = any slot */
 int  internal_source_any_active(void);
 
-/* Publish the current line (copied). n is clamped to INTERNAL_SRC_MAX_PIXELS. */
-void internal_source_publish(int kind,
+/* Publish the current line (copied). n is clamped to INTERNAL_SRC_MAX_PIXELS.
+ * slot == -1 → publish to every ACTIVE slot of the kind (broadcast). */
+void internal_source_publish(int kind, int slot,
                              const uint8_t *r, const uint8_t *g, const uint8_t *b,
                              int n);
 
-/* Consumer side (udpThread / feeder tick) ─────────────────────────────────── */
+/* Consumer side (udpThread / feeder tick / SRC views) ─────────────────────── */
 
-/* Copy the latest published line into caller buffers (sized >= max_pixels).
- * Returns the pixel count actually copied, or 0 when the source is inactive
- * or nothing has been published yet. When the published line is narrower or
- * wider than max_pixels it is nearest-resampled to max_pixels so consumers
- * always get a full chain-width line. */
-int  internal_source_copy(int kind, uint8_t *r, uint8_t *g, uint8_t *b,
+/* Copy slot `slot`'s latest published line into caller buffers (sized >=
+ * max_pixels). Returns the pixel count actually copied, or 0 when the slot is
+ * inactive or nothing has been published yet. When the published line is
+ * narrower or wider than max_pixels it is nearest-resampled to max_pixels so
+ * consumers always get a full chain-width line. */
+int  internal_source_copy(int kind, int slot,
+                          uint8_t *r, uint8_t *g, uint8_t *b,
                           int max_pixels);
 
 /* Live-feed activity: udpThread stamps every completed line; the feeder only

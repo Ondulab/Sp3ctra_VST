@@ -117,11 +117,15 @@ posables mais runtime kind-wide (mêmes contenus) jusqu'à M2/M4.
   actuel, les instances >0 existent au rack mais silencieuses (documenté).
 - Persistence : slots dans POOL_SLOTS (mécanique existante), schéma inchangé.
 
-### P5-M2 — Pool internal_source par slot + moteurs média ×N (L)
-Pool (kind, slot) + API slot ; registre d'engines MediaSourceService ;
-feeder/udp lisent (kind, source_slot) ; sweep blanc par slot ; reset différé
-des slots orphelins. IMAGE d'abord (trivial : N buffers), puis VIDEO, puis
-CAMERA (devices par instance).
+### P5-M2 — Pool internal_source par slot (L) — ✅ FAIT (2026-07-14, périmètre re-scindé)
+Statut : implémenté, build vert. Pool [3 kinds][8 slots] (mutex unique,
+Non-RT) ; API par (kind, slot) avec broadcast producteur slot = -1 (le moteur
+unique par kind publie vers tous les slots ACTIFS — contenu partagé jusqu'à
+M3) ; udp/feeder lisent (kind, SynthChainPlan.source_slot) ; vues SRC_* lisent
+le slot de l'instance SÉLECTIONNÉE (setSelectedSourceSlot) ; désactivation =
+erase par slot (contrat blanc). RE-SPLIT : le registre de moteurs ×(kind,slot)
+part en M3 avec les params/UI par instance (un moteur par slot sans ses params
+serait inerte) — IMAGE d'abord, puis VIDEO, puis CAMERA.
 
 ### P5-M3 — Params média au manifest + UI par instance (M)
 Banques ×8 des 3 types au ModuleParamManifest (VALUES/typeMemory/presets

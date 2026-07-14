@@ -734,7 +734,8 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
         const int kind = (vizSource == VisualizerMode::SRC_IMAGE) ? INTERNAL_SRC_IMAGE
                        : (vizSource == VisualizerMode::SRC_VIDEO) ? INTERNAL_SRC_VIDEO
                                                                   : INTERNAL_SRC_CAMERA;
-        if (internal_source_copy(kind, localDataR.data(), localDataG.data(),
+        if (internal_source_copy(kind, selectedSourceSlot_,
+                                 localDataR.data(), localDataG.data(),
                                  localDataB.data(), cisPixelsCount) <= 0)
         {
             // Module inactive / nothing loaded → white (= silence), never a
