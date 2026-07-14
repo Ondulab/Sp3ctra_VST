@@ -215,3 +215,32 @@ cd Sp3ctra_VST
 ```
 
 C'est tout ! Relancez votre DAW et profitez de Sp3ctra 🎵
+
+---
+
+## ⚖️ Conformité licence (GPLv3) — obligatoire à chaque release
+
+Sp3ctra est distribué sous **GPLv3-or-later** (espeak-ng, lié statiquement dans
+le moteur TTS du module VOICE, l'impose pour l'œuvre combinée ; JUCE est utilisé
+sous AGPLv3, le SDK VST3 sous GPLv3). Voir [LICENSE](LICENSE) et
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+Checklist par release binaire :
+
+1. **Sources correspondantes** : le dépôt public au tag de la release EST la
+   source correspondante du code Sp3ctra. Joindre aussi à la release l'archive
+   source `sherpa-onnx v1.13.4` (contient espeak-ng) — ne pas dépendre de la
+   seule disponibilité future de l'upstream.
+2. **Fichiers joints aux binaires** : `LICENSE` et `THIRD-PARTY-NOTICES.md`
+   doivent accompagner toute archive binaire (les zips de `prebuilt/` vivent
+   dans le dépôt, donc ils voyagent déjà avec — garder ça vrai si les binaires
+   sont un jour distribués hors dépôt).
+3. **Pas de restrictions supplémentaires** : ne pas ajouter d'EULA/conditions
+   qui contrediraient la GPLv3 sur le binaire distribué.
+4. **Voix Piper** : ne pas embarquer de modèles de voix dans les archives sans
+   avoir vérifié la licence du `MODEL_CARD` de chaque voix (elles sont
+   normalement téléchargées par l'utilisateur via
+   `scripts/install_piper_voices.sh`).
+5. **macOS Gatekeeper** (indépendant de la licence) : pour une distribution
+   sans avertissement de quarantaine, signer Developer ID + notariser les
+   trois formats.

@@ -401,6 +401,11 @@ target_compile_definitions(Sp3ctraVST PRIVATE
     JUCE_USE_CAMERA=1      # M9 — CAMERA source module (juce::CameraDevice)
     NO_SFML=1              # VST does not use SFML (C code uses this for conditional compilation)
     VST_MODE=1
+    # Licensing election: Sp3ctra is distributed under GPLv3-or-later, JUCE is
+    # used under its AGPLv3 option and the VST3 SDK under its GPLv3 option
+    # (see LICENSE + THIRD-PARTY-NOTICES.md). Disabling the JUCE splash screen
+    # is permitted under the (A)GPL usage terms.
+    JUCE_DISPLAY_SPLASH_SCREEN=0
 )
 
 # Link libraries

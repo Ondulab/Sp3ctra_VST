@@ -4,8 +4,8 @@
  *
  * Each SOURCE CIS block is bound to the chain it sits on.  Selecting it shows
  * ONLY that chain's transport (play / hold / stop):
- *   • Chain 1  → sampler transport  (samplerFreezeMode)
- *   • Chain 2  → live frame transport (imageFreezeMode)
+ *   • Chain 1  → sampler transport  (samplerFreezeMode) — no transport fade
+ *   • Chain 2  → live frame transport (imageFreezeMode / imageFadeInMs)
  *
  * The RAW upstream UDP gate is the instrument's own signal and is no longer
  * surfaced here — chains are migrating toward modular slots, so the source
@@ -41,6 +41,14 @@ public:
         addAndMakeVisible(playBtn);
         addAndMakeVisible(holdBtn);
         addAndMakeVisible(stopBtn);
+
+        // Fade-In (ms) — SP3CTRA input source (Chain 2) only. The sampler
+        // (Chain 1) has no transport fade, so this row is hidden there.
+        fadeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+        fadeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, kTextBoxW, kCtrlH);
+        fadeSlider.setTextValueSuffix(" ms");
+        fadeSlider.setNumDecimalPlacesToDisplay(0);
+        addChildComponent(fadeSlider);   // visibility toggled per chain in setChain()
 
         // ── Acquisition speed (frame-advance brake) — GLOBAL source control ──
         // "Vitesse d'acquisition": brakes how often the live CIS line advances
@@ -91,12 +99,30 @@ public:
     {
         activeChain_ = (chain == 2) ? 2 : 1;
 
+        auto& apvts = processor.getAPVTS();
+
+        // Fade-In slider binds to the SP3CTRA input source (Chain 2) only.
+        // Chain 1 (sampler) has no transport fade → hide it.
+        if (activeChain_ == 2)
+        {
+            fadeAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+                apvts, "imageFadeInMs", fadeSlider));
+            fadeSlider.setVisible(true);
+        }
+        else
+        {
+            fadeAttach.reset();
+            fadeSlider.setVisible(false);
+        }
+
         // Right-click MIDI Learn — follows the selected chain's params. The
         // three transport buttons share the freeze-mode param (one CC spans
         // 0=play / mid=hold / 1=stop), so each carries the same mapping badge;
         // the acquisition rate is global (bound once semantics, rebound cheap).
         learnAtts_.clear();
         auto& mm = processor.getMidiMap();
+        if (activeChain_ == 2)
+            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, fadeSlider, "imageFadeInMs"));
         learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, playBtn,       freezeParamId()));
         learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, holdBtn,       freezeParamId()));
         learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, stopBtn,       freezeParamId()));
@@ -105,6 +131,7 @@ public:
         learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, acqDivCombo,     "acqGateSyncDiv"));
         learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, acqMultDivCombo, "acqGateMultDiv"));
 
+        resized();   // fade row appears/disappears → re-flow the acquisition group
         updateTransportButtons();
         repaint();
     }
@@ -127,6 +154,14 @@ public:
             g.drawText(t, formX(), rowY, labelColW() - 8, kCtrlH,
                        juce::Justification::centredRight);
         };
+
+        // Fade In label — SP3CTRA input source (Chain 2) only.
+        if (activeChain_ == 2)
+        {
+            g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+            g.setColour(juce::Colour(0xffd2d8e8));
+            rowLabel("Fade In", fadeRowY());
+        }
 
         // ── Acquisition speed section header ────────────────────────────────────
         g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
@@ -158,6 +193,7 @@ public:
         // Unified form grid — every control fills the same column [ctrlX, +ctrlW].
         const int cx = ctrlX();
         const int cw = ctrlW();
+        fadeSlider     .setBounds(cx, fadeRowY(), cw, kCtrlH);
         acqModeCombo   .setBounds(cx, acqRowY(0), cw, kCtrlH);
         acqRateSlider  .setBounds(cx, acqRowY(1), cw, kCtrlH);
         acqDivCombo    .setBounds(cx, acqRowY(2), cw, kCtrlH);
@@ -169,6 +205,8 @@ private:
     int activeChain_ { 1 };
 
     IconTextButton playBtn, holdBtn, stopBtn;
+    juce::Slider   fadeSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> fadeAttach;
     std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
 
     // ── Acquisition speed (global frame-advance brake) ──────────────────────────
@@ -210,7 +248,11 @@ private:
     int ctrlW()    const { return formW() - kLabelColW - kColGap; }
 
     int transportY() const { return 24; }
-    int acqHeaderY() const { return transportY() + Sp3ctraTheme::kIconBtnSize + 20; } // section header line
+    int fadeRowY()   const { return transportY() + Sp3ctraTheme::kIconBtnSize + 14; }
+    // Chain 2 shows the Fade In row above the Acquisition group; Chain 1
+    // (sampler, no transport fade) pulls the group up under the transport.
+    int acqHeaderY() const { return activeChain_ == 2 ? (fadeRowY() + kRowPitch + 6)
+                                                      : (transportY() + Sp3ctraTheme::kIconBtnSize + 20); }
     int acqRowY(int i) const { return acqHeaderY() + 22 + i * kRowPitch; }
 
     // Grey out controls that don't apply to the current gate mode.
