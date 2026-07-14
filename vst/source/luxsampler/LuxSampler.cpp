@@ -168,20 +168,6 @@ extern "C"
         LuxSampler::unpinEngine(engine);
     }
 
-    int lux_sampler_is_passthrough(void)
-    {
-        // Live should flow only if NO engine is suppressing it (PLAYING/STEP_EMPTY).
-        int passthrough = 1;
-        for (int i = 0; i < LuxSampler::kMaxEngines && passthrough; ++i)
-        {
-            if (auto* e = LuxSampler::pinEngine(i))
-                if (! e->getAtomicState().passthroughEnabled.load(std::memory_order_relaxed))
-                    passthrough = 0;
-            LuxSampler::unpinEngine(i);
-        }
-        return passthrough; // no engine, or all in passthrough → default passthrough
-    }
-
     int lux_sampler_is_seq_live_step(void)
     {
         int liveStep = 0;

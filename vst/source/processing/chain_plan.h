@@ -109,6 +109,15 @@ typedef struct {
     LsSendPlan ls_send[CHAIN_MAX_CHAINS];
 } ChainPlan;
 
+/* P4 — per-chain transport authority (defined in multithreading.c): which
+ * transport gates a send staged from this chain (freeze 0/1/2) and its fade
+ * (ms). Sampler/score chain → sampler transport, instant; SP3CTRA/live →
+ * live transport + RAW acquisition gate + imageFadeInMs; internal source →
+ * none (the media module owns its own transport). The display gates
+ * (CisVisualizer) mirror it — ONE rule everywhere. */
+void chain_send_transport(const SynthChainPlan *sp,
+                          int *freeze_out, int *fade_ms_out);
+
 /* Message thread: publish a new plan (lock-free double buffer + atomic flip). */
 void chain_plan_publish(const ChainPlan* plan);
 

@@ -547,6 +547,69 @@ typedef struct {
                                         * empty) — the chain's outgoing flux */
 } ChainExecOut;
 
+/* ── Per-chain transport authority (P4 doctrine, 2026-07-14) ─────────────────
+ * THE single decision — which transport gates a send staged from this chain,
+ * and its fade. The transport belongs to the CHAIN'S source/replacer:
+ *   • sampler/score chain → the SAMPLER transport, instant (validated user);
+ *   • SP3CTRA/live chain  → the LIVE transport + RAW acquisition gate
+ *                           upstream, with the transport fade (imageFadeInMs);
+ *   • internal source     → NO global transport — the media module owns its
+ *                           own (pause = frozen line, disabled = white,
+ *                           already IN the stream).
+ * Player-fed staging never calls this: the player's authority (sampler
+ * transport + sequencer/score force-PLAY) comes from its builder. Exported:
+ * the display gates (CisVisualizer) mirror the SAME rule. */
+void chain_send_transport(const SynthChainPlan *sp,
+                          int *freeze_out, int *fade_ms_out)
+{
+    if (sp->has_sampler || sp->has_score)
+    {
+        *freeze_out  = g_sp3ctra_config.sampler_freeze_mode;
+        *fade_ms_out = 0;
+    }
+    else if (internal_source_kind_for_chain_src(sp->source_kind) >= 0)
+    {
+        *freeze_out  = 0;
+        *fade_ms_out = 0;
+    }
+    else
+    {
+        int f = g_sp3ctra_config.image_freeze_mode;
+        if (g_sp3ctra_config.raw_freeze_mode > f)
+            f = g_sp3ctra_config.raw_freeze_mode;
+        *freeze_out  = f;
+        *fade_ms_out = g_sp3ctra_config.image_fade_in_ms;
+    }
+}
+
+/* Scalar transport ramp for the line-staged sends (LuxSynth/LuxWave): slews
+ * the send gain toward PLAY=1 / STOP=0 over fade_ms (wall-clock dt, cadence-
+ * insensitive). HOLD never reaches here (the caller skips re-staging — the
+ * mixer holds the last column). One slot per model chain, single writer (the
+ * chain's producer). */
+typedef struct { uint64_t ts_us; float gain; } SendRamp;
+
+static float send_transport_gain(SendRamp *r, int freeze, int fade_ms)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    const uint64_t now =
+        (uint64_t) tv.tv_sec * 1000000ULL + (uint64_t) tv.tv_usec;
+    const float target = (freeze == 2) ? 0.0f : 1.0f;
+    if (fade_ms <= 0 || r->ts_us == 0)
+    { r->ts_us = now; r->gain = target; return r->gain; }
+    const float step = (float)(now - r->ts_us) / ((float) fade_ms * 1000.0f);
+    r->ts_us = now;
+    if (r->gain < target)
+    { r->gain += step; if (r->gain > target) r->gain = target; }
+    else if (r->gain > target)
+    { r->gain -= step; if (r->gain < target) r->gain = target; }
+    return r->gain;
+}
+
+static SendRamp s_lx_send_ramp[CHAIN_MAX_CHAINS];
+static SendRamp s_lw_send_ramp[CHAIN_MAX_CHAINS];
+
 /* ── P4-M2 — THE chain executor ──────────────────────────────────────────────
  * chain_execute_span() is the only code that knows how to run a chain: walk
  * the recipe positions [from, to) on one stream, handling EVERY insert id at
@@ -615,18 +678,17 @@ static void chain_execute_span(const SynthChainPlan *sp, int chain_idx,
                 pipeline_build_config_ls_send(bank, chain_idx, cx->player_fed);
             if (sp->has_sampler || sp->has_score)
             {
-                /* M8 — sampler/score-relayed chain: RAW gate skipped, the
-                 * crossfader opacity applies (legacy parity). */
+                /* M8 — sampler/score-relayed chain: the crossfader opacity
+                 * applies (legacy parity). */
                 scfg.sampler_relayed = 1;
                 scfg.stream_opacity  = g_sp3ctra_config.image_live_opacity;
             }
-            else if (internal_source_kind_for_chain_src(sp->source_kind) >= 0)
+            if (!cx->player_fed)
             {
-                /* Internal-source chain (IMAGE/VIDEO/CAMERA): the media
-                 * module owns its transport — pause/disable are already IN
-                 * the stream (frozen line / white). No global transport, no
-                 * RAW gate, no fade (P4 doctrine, fix 2026-07-14). */
-                scfg.freeze_mode = 0;
+                /* Producer staging: resolve THE chain's transport here —
+                 * stage 7 just applies config (single authority). Player-fed
+                 * configs keep their builder's sampler-transport authority. */
+                chain_send_transport(sp, &scfg.freeze_mode, &scfg.fade_in_ms);
                 scfg.live_regate = 0;
             }
             if (cx->force_play)
@@ -643,14 +705,37 @@ static void chain_execute_span(const SynthChainPlan *sp, int chain_idx,
         else if (id == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
         {
             /* M4 — stage the conditioned line + RGB at the send's position;
-             * the audio thread mixes and runs ONE FFT (luxsynth_feed_tick). */
+             * the audio thread mixes and runs ONE FFT (luxsynth_feed_tick).
+             * Transport: THE chain's own authority (chain_send_transport) —
+             * HOLD skips re-staging (mixer holds the last column), STOP ramps
+             * the line to silence then deactivates the slot. Replaces the old
+             * GLOBAL Chain-2 gate at the engine tick. */
             if (cx->lx_line != NULL)
             {
                 const int bank = sp->insert_state_idx[i];
-                luxsynth_condition_line(cr, cg, cb, bank, cx->lx_line,
-                                        nb_pixels);
-                synth_staging_stage_luxsynth(chain_idx, bank, cx->lx_line,
-                                             cr, cg, cb, nb_pixels);
+                int freeze = 0, fade = 0;
+                if (!cx->player_fed)
+                    chain_send_transport(sp, &freeze, &fade);
+                if (cx->force_play)
+                    freeze = 0;
+                if (freeze != 1)
+                {
+                    const float gv = send_transport_gain(
+                        &s_lx_send_ramp[chain_idx], freeze, fade);
+                    if (gv <= 0.0f)
+                        synth_staging_luxsynth_set_inactive(chain_idx);
+                    else
+                    {
+                        luxsynth_condition_line(cr, cg, cb, bank, cx->lx_line,
+                                                nb_pixels);
+                        if (gv < 0.999f)
+                            for (int px = 0; px < nb_pixels; px++)
+                                cx->lx_line[px] *= gv;
+                        synth_staging_stage_luxsynth(chain_idx, bank,
+                                                     cx->lx_line,
+                                                     cr, cg, cb, nb_pixels);
+                    }
+                }
             }
             if (cx->pb_marker_id == id && !out->pb_found)
             { out->pbR = cr; out->pbG = cg; out->pbB = cb; out->pb_found = 1; }
@@ -658,14 +743,31 @@ static void chain_execute_span(const SynthChainPlan *sp, int chain_idx,
         else if (id == IMAGE_CHAIN_INSERT_OUT_LUXWAVE)
         {
             /* M5 — stage the conditioned wavetable line at the send's
-             * position; the audio thread pulls the bipolar mix. */
+             * position; the audio thread pulls the bipolar mix. Transport:
+             * same per-chain authority as LuxSynth; STOP ramps the line to
+             * FLAT (0.5 = silent wavetable, bipolar neutral) and keeps
+             * staging it — a held MIDI note goes silent, as before. */
             if (cx->lx_line != NULL)
             {
                 const int bank = sp->insert_state_idx[i];
-                luxwave_condition_line(cr, cg, cb, bank, cx->lx_line,
-                                       nb_pixels);
-                synth_staging_stage_luxwave(chain_idx, bank, cx->lx_line,
-                                            nb_pixels);
+                int freeze = 0, fade = 0;
+                if (!cx->player_fed)
+                    chain_send_transport(sp, &freeze, &fade);
+                if (cx->force_play)
+                    freeze = 0;
+                if (freeze != 1)
+                {
+                    const float gv = send_transport_gain(
+                        &s_lw_send_ramp[chain_idx], freeze, fade);
+                    luxwave_condition_line(cr, cg, cb, bank, cx->lx_line,
+                                           nb_pixels);
+                    if (gv < 0.999f)
+                        for (int px = 0; px < nb_pixels; px++)
+                            cx->lx_line[px] =
+                                0.5f + (cx->lx_line[px] - 0.5f) * gv;
+                    synth_staging_stage_luxwave(chain_idx, bank, cx->lx_line,
+                                                nb_pixels);
+                }
             }
             if (cx->pb_marker_id == id && !out->pb_found)
             { out->pbR = cr; out->pbG = cg; out->pbB = cb; out->pb_found = 1; }

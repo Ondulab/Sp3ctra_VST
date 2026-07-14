@@ -82,20 +82,10 @@ void luxsynth_feed_tick(const ChainPlan* plan)
         return;
     }
 
-    /* Chain-2 transport gate (mirror of the UI FFT view):
-     * PLAY → recompute, HOLD → keep the engine's last spectrum,
-     * STOP → silence. */
-    int freeze = (int) g_sp3ctra_config.image_freeze_mode;
-    if ((int) g_sp3ctra_config.raw_freeze_mode > freeze)
-        freeze = (int) g_sp3ctra_config.raw_freeze_mode;
-    if (freeze == 2)
-    {
-        lx_feed_push_silence(nDisplay);
-        return;
-    }
-    if (freeze == 1)
-        return;   /* HOLD — frozen timbre keeps sounding under MIDI */
-
+    /* (P4 — 2026-07-14: the global Chain-2 transport gate is GONE — each
+     * "→ LUXSYNTH" send is gated at staging time by ITS chain's transport:
+     * HOLD = the producer stops re-staging (the mix holds), STOP = the slot
+     * ramps silent then deactivates. The mix below is transport-correct.) */
     if (s_have_gen && gen == s_last_gen && !s_silenced)
         return;   /* nothing restaged — the engine keeps its spectrum */
     s_last_gen = gen;
