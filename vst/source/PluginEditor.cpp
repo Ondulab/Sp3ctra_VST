@@ -550,6 +550,9 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
             // P5-M2 — SRC_* views read the SELECTED instance's own pool slot.
             if (ChainModel::isMediaSource(m->type))
                 cisVisualizer->setSelectedSourceSlot(m->slot >= 0 ? m->slot : 0);
+            // P5-M3 — the IMAGE play face follows the selected instance.
+            if (m->type == ModuleType::Image && imageSrcPage != nullptr)
+                imageSrcPage->setSlot(m->slot >= 0 ? m->slot : 0);
         }
         cisVisualizer->setSelectedTapLabel(tapLabel);
     }

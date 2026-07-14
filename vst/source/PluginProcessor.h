@@ -151,7 +151,11 @@ public:
     FrameSequencer*  getFrameSequencer()  { return frameSequencer.get();  }
 
     // M9 — IMAGE / VIDEO / CAMERA source engines (message-thread accessors)
-    ImageSourceEngine*  getImageSource()  { return imageSource_.get();  }
+    /** P5-M3 — one IMAGE engine per instance slot (0..7); slot 0 = legacy. */
+    ImageSourceEngine*  getImageSource(int slot = 0)
+    {
+        return imageSources_[(size_t) juce::jlimit(0, 7, slot)].get();
+    }
     VideoSourceEngine*  getVideoSource()  { return videoSource_.get();  }
     CameraSourceEngine* getCameraSource() { return cameraSource_.get(); }
 
@@ -437,7 +441,7 @@ private:
 
     // M9 — IMAGE / VIDEO / CAMERA source engines + the single service thread
     // that ticks them and pumps the chains when the device is not streaming.
-    std::unique_ptr<ImageSourceEngine>  imageSource_;
+    std::array<std::unique_ptr<ImageSourceEngine>, 8> imageSources_;   // P5-M3
     std::unique_ptr<VideoSourceEngine>  videoSource_;
     std::unique_ptr<CameraSourceEngine> cameraSource_;
     std::unique_ptr<MediaSourceService> mediaService_;

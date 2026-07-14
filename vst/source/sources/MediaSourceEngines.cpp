@@ -160,7 +160,7 @@ void ImageSourceEngine::setPlaying(bool p)
 
 void ImageSourceEngine::updateActive()
 {
-    internal_source_set_active(INTERNAL_SRC_IMAGE, /*slot broadcast*/ -1,
+    internal_source_set_active(INTERNAL_SRC_IMAGE, slot_,
                                present_.load() && loaded_.load()
                                    && enabled_.load() ? 1 : 0);
 }
@@ -172,7 +172,7 @@ void ImageSourceEngine::publishRow(double frac)
         return;
     const int    row = juce::jlimit(0, rows_ - 1, (int) std::lround(frac * (rows_ - 1)));
     const size_t o   = (size_t) row * (size_t) width_;
-    internal_source_publish(INTERNAL_SRC_IMAGE, /*slot broadcast*/ -1,
+    internal_source_publish(INTERNAL_SRC_IMAGE, slot_,
                             stripR_.data() + o, stripG_.data() + o, stripB_.data() + o,
                             width_);
 }

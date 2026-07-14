@@ -67,6 +67,10 @@ public:
     juce::Image getPreviewImage() const;      ///< aspect-preserving copy for the UI
     int getRowCount() const;
 
+    // ── pool slot (P5-M3): which (IMAGE, slot) line this engine publishes ───
+    void setSlot(int s) noexcept   { slot_ = s; }
+    int  getSlot() const noexcept  { return slot_; }
+
     // ── module presence / params (message thread, atomics) ──────────────────
     // Re-activation (module re-added / source re-enabled) forces a fresh
     // publish (seekPending): deactivation ERASED the pool line.
@@ -98,6 +102,7 @@ private:
     juce::File             file_;
     juce::Image            preview_;
 
+    int                slot_ { 0 };   // P5-M3 — (IMAGE, slot) pool line
     std::atomic<bool>  present_  { false };
     std::atomic<bool>  enabled_  { true };
     std::atomic<bool>  loaded_   { false };
