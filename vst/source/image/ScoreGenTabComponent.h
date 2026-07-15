@@ -124,7 +124,7 @@ public:
         // loaded. The preview image itself is rebuilt on the next GENERATE
         // only (v1 limitation).
         setTransportEnabled(false);
-        if (auto* fs0 = processor.getScoreChannel(ModuleType::Score))
+        if (auto* fs0 = boundChannel())
             if (fs0->scoreHasContent())
                 setTransportEnabled(true);
 
@@ -286,7 +286,7 @@ public:
 
             // ── Reading head: vertical line at the played column (live) or, when
             //    stopped, at the manually-placed scrub position. ───────────────
-            auto* fs = processor.getScoreChannel(ModuleType::Score);
+            auto* fs = boundChannel();
             const bool playing = (fs != nullptr) && fs->isScorePlaying();
             int headFrame = -1;
             if (playing && fs != nullptr) headFrame = fs->getScorePlayHead();
@@ -338,7 +338,7 @@ public:
         // When STOPPED, generate the flux live so the user hears the column under
         // the cursor (sustained tone that follows the drag). While PLAYING, the
         // scrubTo above already performed a live seek — leave the transport alone.
-        if (auto* fs = processor.getScoreChannel(ModuleType::Score))
+        if (auto* fs = boundChannel())
             if (! fs->isScorePlaying())
                 scrubAuditioning = fs->uiBeginScoreScrub();
     }
@@ -348,14 +348,14 @@ public:
         scrubbing = false;
         if (scrubAuditioning)
         {
-            if (auto* fs = processor.getScoreChannel(ModuleType::Score)) fs->uiEndScoreScrub();
+            if (auto* fs = boundChannel()) fs->uiEndScoreScrub();
             scrubAuditioning = false;
         }
     }
 
     void scrubTo(const juce::MouseEvent& e)
     {
-        auto* fs = processor.getScoreChannel(ModuleType::Score);
+        auto* fs = boundChannel();
         if (fs == nullptr) return;
         const int n = fs->getScoreFrameCount();
         if (n <= 0) return;
@@ -737,7 +737,7 @@ private:
         generateButton.setEnabled(false);
         exportPngButton.setEnabled(false);
         exportJpgButton.setEnabled(false);
-        if (auto* fs = processor.getScoreChannel(ModuleType::Score))
+        if (auto* fs = boundChannel())
             fs->uiStopScore();
         processor.stopScorePreview();   // don't let a source preview run during render
         refreshPreviewButton();
@@ -788,7 +788,7 @@ private:
             previewImage   = juce::Image();
             scrubHead      = -1;
             logLabel.setText("Failed: " + r.log, juce::dontSendNotification);
-            if (auto* fs = processor.getScoreChannel(ModuleType::Score))
+            if (auto* fs = boundChannel())
                 fs->uiStopScore();
             setTransportEnabled(false);
             refreshPlayButton();
@@ -864,7 +864,7 @@ private:
     {
         applyEqToImage();
         buildPreview();
-        if (auto* fs = processor.getScoreChannel(ModuleType::Score))
+        if (auto* fs = boundChannel())
         {
             const bool wasPlaying = fs->isScorePlaying();
             // Capture the live head BEFORE the reload — loadScoreFramesFromImage()
@@ -1025,7 +1025,7 @@ private:
 
     void togglePlay()
     {
-        auto* fs = processor.getScoreChannel(ModuleType::Score);
+        auto* fs = boundChannel();
         if (fs == nullptr) return;
 
         const bool play = ! fs->isScorePlaying();
@@ -1049,7 +1049,7 @@ private:
 
     void refreshPlayButton()
     {
-        auto* fs = processor.getScoreChannel(ModuleType::Score);
+        auto* fs = boundChannel();
         const bool playing = (fs != nullptr) && fs->isScorePlaying();
         playStopButton.setPlaying(playing);
     }
@@ -1089,7 +1089,7 @@ private:
         // Keep the button in sync when LoopMode::NONE playback ends on its own.
         refreshPlayButton();
         // Animate the reading head while playing.
-        auto* fs = processor.getScoreChannel(ModuleType::Score);
+        auto* fs = boundChannel();
         // Mirror the scorePlaying param on the real engine state so the DAW
         // lane stays truthful when playback ends on its own (one-shot end) or
         // is stopped by internal reload flows. parameterChanged() ignores
@@ -1122,6 +1122,36 @@ private:
     }
 
     //==========================================================================
+public:
+    /** P5-M5 — bind this page to the SELECTED instance's player slot
+     *  (-1 = first placed instance of this page's type). Ends any running
+     *  scrub on the previously bound channel; the new instance's frames are
+     *  (re)loaded on demand by the next PLAY/GENERATE. */
+    void setScoreSlot(int slot)
+    {
+        if (slot == boundScoreSlot_)
+            return;
+        if (scrubAuditioning)
+            if (auto* fs = boundChannel())
+                fs->uiEndScoreScrub();
+        scrubAuditioning = false;
+        scrubHead        = -1;
+        boundScoreSlot_  = slot;
+        repaint();
+    }
+
+private:
+    /** The bound score channel: the selected instance's slot while it is
+     *  still in the rack, else the first placed instance of this type. */
+    ScoreChannel* boundChannel() const
+    {
+        if (boundScoreSlot_ >= 0
+            && processor.scorePlayerSlotInUse(boundScoreSlot_))
+            return processor.getScoreChannelForSlot(boundScoreSlot_);
+        return processor.getScoreChannel(ModuleType::Score);
+    }
+    int boundScoreSlot_ = -1;
+
     Sp3ctraAudioProcessor& processor;
 
     juce::TextButton loadButton, generateButton, exportPngButton, exportJpgButton;

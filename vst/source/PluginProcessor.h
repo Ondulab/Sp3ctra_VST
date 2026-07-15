@@ -163,6 +163,15 @@ public:
     {
         return scorePlayerService_ ? scorePlayerService_->channel(slot) : nullptr;
     }
+    /** P5-M5 — is this score pool slot backed by a module in the rack? The
+     *  generator pages use it to drop a stale instance binding (the bound
+     *  module was removed) back to their type's first instance. Message
+     *  thread (mask maintained by deriveAndPublishChainPlan). */
+    bool scorePlayerSlotInUse(int slot) const noexcept
+    {
+        return slot >= 0 && slot < 8
+            && ((scoreSlotsPresentMask_ >> slot) & 1u) != 0;
+    }
 
     // M9 — IMAGE / VIDEO / CAMERA source engines (message-thread accessors)
     /** P5-M3 — one IMAGE engine per instance slot (0..7); slot 0 = legacy. */

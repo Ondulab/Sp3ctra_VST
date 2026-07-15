@@ -557,6 +557,16 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
                 videoSrcPage->setSlot(m->slot >= 0 ? m->slot : 0);
             if (m->type == ModuleType::Camera && cameraSrcPage != nullptr)
                 cameraSrcPage->setSlot(m->slot >= 0 ? m->slot : 0);
+            // P5-M5 — the generator pages follow the selected score-family
+            // instance (its own player slot: transport, scrub, LOAD target).
+            if (m->type == ModuleType::Score && scorePage != nullptr)
+                scorePage->setScoreSlot(m->slot >= 0 ? m->slot : 0);
+            if (m->type == ModuleType::Timbre && timbrePage != nullptr)
+                timbrePage->setScoreSlot(m->slot >= 0 ? m->slot : 0);
+            if (m->type == ModuleType::MidiScore && midiScorePage != nullptr)
+                midiScorePage->setScoreSlot(m->slot >= 0 ? m->slot : 0);
+            if (m->type == ModuleType::Voice && voicePage != nullptr)
+                voicePage->setScoreSlot(m->slot >= 0 ? m->slot : 0);
         }
         cisVisualizer->setSelectedTapLabel(tapLabel);
     }
