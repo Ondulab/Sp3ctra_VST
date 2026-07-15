@@ -1550,6 +1550,7 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     // modulated playback channel (one plays at a time — see the arbiter).
     luxSampler  = std::make_unique<LuxSampler>(0);
     luxSamplerB = std::make_unique<LuxSampler>(1);
+    scorePlayerService_ = std::make_unique<ScorePlayerService>();
 
     // SCORE generation defaults (shared by the PLAY page and the SETUP panel).
     score_settings_defaults(&scoreSettings_);
@@ -1643,9 +1644,14 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
         static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_OCT_OFFSET)) - 2);
     luxSampler->setMaxDuration(*apvts.getRawParameterValue(PARAM_FS_MAX_DUR));
 
-    // SCORE transport params → engine (speed 1×, loop on by default).
-    luxSampler->setScoreSpeed(*apvts.getRawParameterValue(PARAM_SCORE_SPEED));
-    luxSampler->setScoreLoopMode(scoreLoopModeFromParams(apvts));
+    // SCORE transport params → every score-player slot (shared until M5).
+    if (scorePlayerService_ != nullptr)
+        for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+        {
+            scorePlayerService_->setSpeed(
+                s, *apvts.getRawParameterValue(PARAM_SCORE_SPEED));
+            scorePlayerService_->setLoopMode(s, scoreLoopModeFromParams(apvts));
+        }
 
     // Engine B: its own APVTS bank (luxSamplerB*) — MIDI channel defaults to 2
     // so direct MIDI doesn't double-trigger out of the box. Per-engine enable
@@ -2012,6 +2018,14 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
         auto* dbf = sharedCore->getCore()->getDoubleBuffer();
         if (luxSampler)  luxSampler->startPlayerThread(aib, dbf);
         if (luxSamplerB) luxSamplerB->startPlayerThread(aib, dbf);
+
+        // P5-M4 — per-instance score players (one thread, 8 slots).
+        if (scorePlayerService_)
+        {
+            scorePlayerService_->setBuffers(aib, dbf);
+            if (! scorePlayerService_->isThreadRunning())
+                scorePlayerService_->startThread();
+        }
 
         // M9 — media source service (ticks the IMAGE/VIDEO/CAMERA engines and
         // pumps the chains when the device is not streaming).
@@ -2974,9 +2988,15 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
             // does not fire for values equal to the pre-restore state).
             if (luxSampler != nullptr)
             {
-                luxSampler->setScoreSpeed(
-                    apvts.getRawParameterValue(PARAM_SCORE_SPEED)->load());
-                luxSampler->setScoreLoopMode(scoreLoopModeFromParams(apvts));
+                // P5-M4: shared transport params → every score-player slot.
+                if (scorePlayerService_ != nullptr)
+                    for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+                    {
+                        scorePlayerService_->setSpeed(s,
+                            apvts.getRawParameterValue(PARAM_SCORE_SPEED)->load());
+                        scorePlayerService_->setLoopMode(
+                            s, scoreLoopModeFromParams(apvts));
+                    }
             }
             // Restore last session path — SamplerPageComponent reads this
             // on construction to auto-reload the session.
@@ -3158,12 +3178,16 @@ void Sp3ctraAudioProcessor::timerCallback()
     // while a scorePlaying change is still pending in the deferred queue —
     // an automation Play marked dirty between the drain above and this
     // mirror would otherwise be swallowed (param 1, engine not started yet).
-    if (luxSampler != nullptr
-        && ! (scorePlayingParamIdx_ >= 0
-              && paramDirty_[(size_t) scorePlayingParamIdx_].load(std::memory_order_acquire)))
+    if (! (scorePlayingParamIdx_ >= 0
+           && paramDirty_[(size_t) scorePlayingParamIdx_].load(std::memory_order_acquire)))
         if (auto* p = apvts.getParameter(PARAM_SCORE_PLAYING))
-            if (p->getValue() >= 0.5f && ! luxSampler->isScorePlaying())
+        {
+            // P5-M4: the param mirrors the SCORE module's own slot (absent
+            // module ⇒ nothing can play ⇒ fold to 0 too).
+            auto* sc = getScoreChannel(ModuleType::Score);
+            if (p->getValue() >= 0.5f && (sc == nullptr || ! sc->isScorePlaying()))
                 p->setValueNotifyingHost(0.0f);
+        }
 
     // ── Deferred Pitch/Mask/Reverb/Echo/VideoScroll pool resets (see header) ──
     if ((pendingPitchResets_ | pendingMaskResets_ | pendingReverbResets_
@@ -3222,35 +3246,45 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
     }
     if (parameterID == PARAM_SCORE_PLAYING)
     {
-        if (luxSampler != nullptr)
+        // P5-M4: the automatable scorePlaying param drives the SCORE module's
+        // own player slot (the other family types' transports are UI/M5).
+        if (auto* sc = getScoreChannel(ModuleType::Score))
         {
             const bool wantPlay = newValue > 0.5f;
-            if (wantPlay != luxSampler->isScorePlaying())
+            if (wantPlay != sc->isScorePlaying())
             {
                 if (wantPlay)
                 {
                     // Same as the SCORE page button: push transport settings first.
-                    luxSampler->setScoreSpeed(
+                    sc->setScoreSpeed(
                         apvts.getRawParameterValue(PARAM_SCORE_SPEED)->load());
-                    luxSampler->setScoreLoopMode(scoreLoopModeFromParams(apvts));
-                    luxSampler->uiPlayScore();
+                    sc->setScoreLoopMode(scoreLoopModeFromParams(apvts));
+                    sc->uiPlayScore();
                 }
                 else
-                    luxSampler->uiStopScore();
+                    sc->uiStopScore();
             }
         }
         return;
     }
     if (parameterID == PARAM_SCORE_SPEED)
     {
-        if (luxSampler != nullptr)
-            luxSampler->setScoreSpeed(newValue);
+        // Shared transport params until M5 (per-instance banks): broadcast to
+        // every score-player slot — matches the legacy single-channel feel
+        // for whichever module is playing.
+        if (scorePlayerService_ != nullptr)
+            for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+                scorePlayerService_->setSpeed(s, newValue);
         return;
     }
     if (parameterID == PARAM_SCORE_LOOP || parameterID == PARAM_SCORE_REVERSE)
     {
-        if (luxSampler != nullptr)
-            luxSampler->setScoreLoopMode(scoreLoopModeFromParams(apvts));
+        if (scorePlayerService_ != nullptr)
+        {
+            const LoopMode m = scoreLoopModeFromParams(apvts);
+            for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+                scorePlayerService_->setLoopMode(s, m);
+        }
         return;
     }
 
@@ -4311,29 +4345,21 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
             }
             else if (isScoreFamily(t))
             {
-                // The score family (kScoreFamily) auditions through the one
-                // shared score-player channel (loadScoreFramesFromImage), so
-                // every member raises the same plan flag. Guarded: with
-                // several of them in one chain only the FIRST position becomes
-                // the marker.
-                if (! sp.has_score)
+                // P5-M4: one marker PER INSTANCE (the shared score channel is
+                // gone) — each SCORE-family module records its POSITION (like
+                // the sampler marker) and ITS pool slot in insert_state_idx,
+                // so the executor gates + split point resolve per slot
+                // (chain_player_owned / chain_hosts_driving_score). A chain
+                // may host up to one module of each family type → up to four
+                // markers, each an independent player.
+                sp.has_score = 1;
+                if (sp.num_inserts < CHAIN_PLAN_MAX_INSERTS)
                 {
-                    sp.has_score = 1;
-                    // Record the score's POSITION (like the sampler marker) so the
-                    // player thread can apply the inserts BELOW the score to the
-                    // playback frames (REVERB/ECHO/probes after SCORE).
-                    // P5-M1: the marker carries the INSTANCE's score-player
-                    // slot (symmetry with the SAMPLER marker/engine) — the
-                    // runtime still plays the single shared channel until
-                    // P5-M4, so every consumer keeps matching by id only.
-                    if (sp.num_inserts < CHAIN_PLAN_MAX_INSERTS)
-                    {
-                        sp.insert_id[sp.num_inserts]        = IMAGE_CHAIN_INSERT_SCORE;
-                        sp.insert_state_idx[sp.num_inserts] =
-                            juce::jlimit(0, ChainModel::kMaxScorePlayers - 1,
-                                         mi.slot >= 0 ? mi.slot : 0);
-                        sp.num_inserts++;
-                    }
+                    sp.insert_id[sp.num_inserts]        = IMAGE_CHAIN_INSERT_SCORE;
+                    sp.insert_state_idx[sp.num_inserts] =
+                        juce::jlimit(0, ChainModel::kMaxScorePlayers - 1,
+                                     mi.slot >= 0 ? mi.slot : 0);
+                    sp.num_inserts++;
                 }
             }
 
@@ -4449,7 +4475,50 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
         LuxSampler::setEnginesShareChain(share);
     }
 
+    // ── P5-M4 — score-family instance map ────────────────────────────────────
+    // Cache the FIRST placed pool slot per family type (getScoreChannel: each
+    // generator tab drives its own type's player) and diff the present slots:
+    // a removed instance's frames are discarded HERE, per slot (replaces the
+    // old "free the shared channel when the LAST family member leaves").
+    {
+        int famSlot[4] = { -1, -1, -1, -1 };
+        uint8_t present = 0;
+        for (const auto& ch : chainModel_.chains)
+            for (const auto& m : ch.modules)
+            {
+                if (! isScoreFamily(m.type)) continue;
+                const int slot = juce::jlimit(0, ChainModel::kMaxScorePlayers - 1,
+                                              m.slot >= 0 ? m.slot : 0);
+                present |= (uint8_t) (1u << slot);
+                for (int f = 0; f < 4; ++f)
+                    if (kScoreFamily[f] == m.type && famSlot[f] < 0)
+                        famSlot[f] = slot;
+            }
+        for (int f = 0; f < 4; ++f)
+            scoreFamilySlot_[f].store(famSlot[f], std::memory_order_release);
+
+        const uint8_t gone = (uint8_t) (scoreSlotsPresentMask_ & ~present);
+        scoreSlotsPresentMask_ = present;
+        if (gone != 0 && scorePlayerService_ != nullptr)
+            for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+                if ((gone >> s) & 1u)
+                    scorePlayerService_->discard(s);
+    }
+
     chain_plan_publish(&plan);
+}
+
+ScoreChannel* Sp3ctraAudioProcessor::getScoreChannel(ModuleType t) noexcept
+{
+    if (scorePlayerService_ == nullptr)
+        return nullptr;
+    for (int f = 0; f < 4; ++f)
+        if (kScoreFamily[f] == t)
+        {
+            const int slot = scoreFamilySlot_[f].load(std::memory_order_acquire);
+            return slot >= 0 ? scorePlayerService_->channel(slot) : nullptr;
+        }
+    return nullptr;
 }
 
 std::vector<int> Sp3ctraAudioProcessor::activeVideoSlots() const
@@ -4852,21 +4921,10 @@ void Sp3ctraAudioProcessor::teardownAbsentModules(const std::set<ModuleType>& no
     auto removed = [&](ModuleType t)
     { return chainActiveTypes_.count(t) > 0 && now.count(t) == 0; };
 
-    // The score family shares the score-player channel: free the frame buffer
-    // only when the LAST member leaves (removing SCORE must not cut a playing
-    // TIMBRE/MIDI SCORE/VOICE page, and vice versa). SCORE's settings reset
-    // stays SCORE-only.
-    {
-        bool familyRemoved = false, familyPresent = false;
-        for (ModuleType t : kScoreFamily)
-        {
-            familyRemoved  = familyRemoved  || removed(t);
-            familyPresent  = familyPresent  || now.count(t) != 0;
-        }
-        if (familyRemoved && ! familyPresent)
-            if (auto* ls = getLuxSampler())
-                ls->uiDiscardScore();
-    }
+    // P5-M4: score-family frames live PER SLOT in the ScorePlayerService —
+    // a removed instance's slot is discarded by the present-mask diff in
+    // deriveAndPublishChainPlan (no shared channel left to guard). SCORE's
+    // settings reset stays SCORE-only.
     if (removed(ModuleType::Score))
     {
         score_settings_defaults(&scoreSettings_);

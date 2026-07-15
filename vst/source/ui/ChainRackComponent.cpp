@@ -1069,18 +1069,20 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const j
 
         // M9 — media sources: ● transport running / ◐ media ready / ○ nothing
         // or DISABLED (the LED click toggles the source's ACTIVE param).
+        // P5-M3/M4 LED fix: each instance's LED reads ITS OWN engine slot
+        // (the default-slot-0 read showed the first instance's state on all).
         case ModuleType::Image:
-            if (auto* e = processor.getImageSource())
+            if (auto* e = processor.getImageSource(engineSlot >= 0 ? engineSlot : 0))
                 return ! e->isLoaded() || ! e->isEnabled() ? LedState::Off
                      : (e->isPlaying() ? LedState::Active : LedState::Idle);
             return LedState::Off;
         case ModuleType::Video:
-            if (auto* e = processor.getVideoSource())
+            if (auto* e = processor.getVideoSource(engineSlot >= 0 ? engineSlot : 0))
                 return ! e->isLoaded() || ! e->isEnabled() ? LedState::Off
                      : (e->isPlaying() ? LedState::Active : LedState::Idle);
             return LedState::Off;
         case ModuleType::Camera:
-            if (auto* e = processor.getCameraSource())
+            if (auto* e = processor.getCameraSource(engineSlot >= 0 ? engineSlot : 0))
                 return e->isOpen() && e->isEnabled() ? LedState::Active
                                                      : LedState::Off;
             return LedState::Off;
@@ -1137,16 +1139,17 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const j
                                            : juce::String("luxwaveEnabled"))
                        ? LedState::Active : LedState::Off;
 
-        // SCORE, TIMBRE, MIDI SCORE and VOICE all drive the SHARED score-player
-        // channel, so their block LED reflects that channel's transport
-        // identically: ● playing / ◐ a page is loaded / ○ empty.
+        // SCORE, TIMBRE, MIDI SCORE and VOICE each own a score-player slot
+        // (P5-M4): the block LED reflects THIS instance's transport —
+        // ● playing / ◐ content loaded / ○ empty.
         case ModuleType::Score:
         case ModuleType::Timbre:
         case ModuleType::MidiScore:
         case ModuleType::Voice:
-            if (auto* fs = processor.getLuxSampler())
-                return fs->isScorePlaying()  ? LedState::Active
-                     : fs->scoreHasContent() ? LedState::Idle
+            if (auto* sc = processor.getScoreChannelForSlot(
+                    engineSlot >= 0 ? engineSlot : 0))
+                return sc->isScorePlaying()  ? LedState::Active
+                     : sc->scoreHasContent() ? LedState::Idle
                      :                         LedState::Off;
             return LedState::Off;
 

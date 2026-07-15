@@ -354,7 +354,7 @@ public:
             g.drawImage(previewImage, imgArea);
 
             // Reading head — only meaningful while OUR frames sit in the player.
-            auto* fs = processor.getLuxSampler();
+            auto* fs = processor.getScoreChannel(ModuleType::MidiScore);
             if (fs != nullptr && framesAreOurs)
             {
                 const bool playing = fs->isScorePlaying();
@@ -404,7 +404,7 @@ public:
                  && previewArea.contains(e.getPosition());
         if (! scrubbing) return;
         scrubTo(e);
-        if (auto* fs = processor.getLuxSampler())
+        if (auto* fs = processor.getScoreChannel(ModuleType::MidiScore))
             if (! fs->isScorePlaying())
                 scrubAuditioning = fs->uiBeginScoreScrub();
     }
@@ -414,7 +414,7 @@ public:
         scrubbing = false;
         if (scrubAuditioning)
         {
-            if (auto* fs = processor.getLuxSampler()) fs->uiEndScoreScrub();
+            if (auto* fs = processor.getScoreChannel(ModuleType::MidiScore)) fs->uiEndScoreScrub();
             scrubAuditioning = false;
         }
     }
@@ -898,7 +898,7 @@ private:
 
     bool reloadPlayFrames()
     {
-        auto* fs = processor.getLuxSampler();
+        auto* fs = processor.getScoreChannel(ModuleType::MidiScore);
         if (fs == nullptr || ! data.ok || data.notes.empty())
             return false;
 
@@ -937,7 +937,7 @@ private:
 
     void togglePlay()
     {
-        auto* fs = processor.getLuxSampler();
+        auto* fs = processor.getScoreChannel(ModuleType::MidiScore);
         if (fs == nullptr) return;
 
         const bool play = ! (fs->isScorePlaying() && framesAreOurs);
@@ -953,22 +953,18 @@ private:
         else
             scrubHead = -1;
 
-        // Route through the scorePlaying param so the DAW lane stays truthful
-        // (same path as the SCORE page — shared transport, shared channel).
-        if (auto* p = processor.getAPVTS().getParameter("scorePlaying"))
-        {
-            const float norm = play ? 1.0f : 0.0f;
-            if (! juce::approximatelyEqual(p->getValue(), norm))
-                p->setValueNotifyingHost(norm);
-            else if (play) fs->uiPlayScore();
-            else           fs->uiStopScore();
-        }
+        // P5-M4: drive THIS instance's own player slot directly. The
+        // scorePlaying param now belongs to the SCORE module's transport —
+        // routing through it here would start the WRONG player (per-instance
+        // automatable transports are M5).
+        if (play) fs->uiPlayScore();
+        else      fs->uiStopScore();
         repaint(previewArea);
     }
 
     void scrubTo(const juce::MouseEvent& e)
     {
-        auto* fs = processor.getLuxSampler();
+        auto* fs = processor.getScoreChannel(ModuleType::MidiScore);
         if (fs == nullptr || ! framesAreOurs) return;
         const int n = fs->getScoreFrameCount();
         if (n <= 0) return;
@@ -992,7 +988,7 @@ private:
             persistState();
         }
 
-        auto* fs = processor.getLuxSampler();
+        auto* fs = processor.getScoreChannel(ModuleType::MidiScore);
         if (fs != nullptr && framesAreOurs)
         {
             // Ownership check: the SCORE/TIMBRE page (or a session restore)

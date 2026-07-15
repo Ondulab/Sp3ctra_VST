@@ -7,6 +7,7 @@
 
 #include "LuxSampler.h"
 #include "lux_sampler_hooks.h"   // forward decls so hooks can call each other in any order
+#include "score_player_hooks.h"  // P5-M4 — display-bus deferral to the score service
 
 extern "C" {
     #include "audio_image_buffers.h"
@@ -2507,12 +2508,14 @@ void FramePlayerThread::injectWhiteFrame() noexcept
         // white frame runs when THIS engine's player goes idle — silence the
         // paths this engine's chain (or the score relay it hosts) fed.
         const int  engineIdx = sampler.getEngineIndex();
+        // P5-M4: SAMPLER ownership only. The old is_score=1 legs meant "the
+        // score rode MY thread" (channel-wide); under per-slot ownership they
+        // would alias engine index 0/1 onto score-player slots 0/1 and let a
+        // stopping sampler white-out a PLAYING score's chains.
         const bool addOwned  =
-            chain_additive_player_candidate(0, engineIdx) != 0
-            || chain_additive_player_candidate(1, engineIdx) != 0;
+            chain_additive_player_candidate(0, engineIdx) != 0;
         const bool pbOwned   =
-            chain_pathb_player_candidate(0, engineIdx) != 0
-            || chain_pathb_player_candidate(1, engineIdx) != 0;
+            chain_pathb_player_candidate(0, engineIdx) != 0;
         if (addOwned)
         {
             pthread_mutex_lock(&doubleBuffer->mutex);
@@ -3139,9 +3142,11 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
             //    bus). Single display bus — with two engines playing
             //    simultaneously only the display owner writes it (the
             //    other playback stays audio-only; per-engine viz is a
-            //    follow-up). Same owner rule as the sampler snapshot.
+            //    follow-up). P5-M4: the samplers defer to the
+            //    ScorePlayerService while any score slot feeds (the legacy
+            //    in-engine score path is dead — isScore never comes true).
             const bool mixBusOwner =
-                lux_sampler_is_score_playing()
+                score_player_any_playing()
                     ? isScore
                     : (lux_sampler_playing_engine()
                        == sampler.getEngineIndex());

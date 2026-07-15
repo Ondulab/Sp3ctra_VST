@@ -4,6 +4,7 @@
 #include "Sp3ctraSharedCore.h"  // Process-wide singleton (UDP + image pipeline + LuxStral)
 #include "Sp3ctraConstants.h"
 #include "luxsampler/LuxSampler.h"
+#include "luxsampler/ScorePlayerService.h"
 #include "framesequencer/FrameSequencer.h"
 #include "processing/AcquisitionGate.h" // "Vitesse d'acquisition" — frame-advance brake clock
 #include "ui/ChainModel.h"      // M6 Phase 2 — editable chain topology (owned here)
@@ -149,6 +150,19 @@ public:
     /** Sampler engine by index: 0 = A, 1 = B. Out-of-range falls back to A. */
     LuxSampler*    getSampler(int i)  { return (i == 1) ? luxSamplerB.get() : luxSampler.get(); }
     FrameSequencer*  getFrameSequencer()  { return frameSequencer.get();  }
+
+    // ── P5-M4 — per-instance score playback ─────────────────────────────────
+    /** The score channel of the FIRST placed instance of score-family type
+     *  @p t (its pool slot is cached at plan derivation), or nullptr when no
+     *  such module is in the rack. The generator tabs bind through this —
+     *  each family type plays ITS OWN slot (per-instance binding of several
+     *  modules of one type is M5). */
+    ScoreChannel* getScoreChannel(ModuleType t) noexcept;
+    /** Score channel by pool slot (rack LEDs — the module knows its slot). */
+    ScoreChannel* getScoreChannelForSlot(int slot) noexcept
+    {
+        return scorePlayerService_ ? scorePlayerService_->channel(slot) : nullptr;
+    }
 
     // M9 — IMAGE / VIDEO / CAMERA source engines (message-thread accessors)
     /** P5-M3 — one IMAGE engine per instance slot (0..7); slot 0 = legacy. */
@@ -445,6 +459,16 @@ private:
     std::shared_ptr<Sp3ctraSharedCore> sharedCore;
     std::unique_ptr<LuxSampler>   luxSampler;    // engine A (sampler slot 0)
     std::unique_ptr<LuxSampler>   luxSamplerB;   // engine B (sampler slot 1) — 2nd sampler
+    // P5-M4 — the per-instance score players (8 slots, one 1 kHz thread).
+    std::unique_ptr<ScorePlayerService> scorePlayerService_;
+    /** First placed pool slot per score-family type (kScoreFamily order),
+     *  -1 = type absent. Written at plan derivation (message thread), read
+     *  by getScoreChannel() — atomics so the transport mirror in the timer
+     *  and MIDI-mapped param changes need no model lock. */
+    std::atomic<int> scoreFamilySlot_[4] { {-1}, {-1}, {-1}, {-1} };
+    /** Pool slots present in the model at the LAST derivation — the diff
+     *  discards a removed instance's frames (per-slot teardown). */
+    uint8_t scoreSlotsPresentMask_ = 0;
     std::unique_ptr<FrameSequencer> frameSequencer;
 
     // M9 — IMAGE / VIDEO / CAMERA source engines + the single service thread
