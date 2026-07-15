@@ -50,10 +50,18 @@ persistance SAMPLER_SLOTS ×8 ; page sampler `engines[8]` ; enable par moteur
 > REC/PLAY sur 0/1 ; dimensionnés kMaxEngines + clamp des deux côtés.
 > ⚠️ .sp3s reste v2 (moteurs 0/1) jusqu'à M2 — TODO posé dans le code.
 
-### P6-M2 — UI + .sp3s ×8 (M)
+### P6-M2 — UI + .sp3s ×8 (M) — **FAIT (2026-07-15)**
 Page sampler et SETUP par instance sélectionnée (mécanisme déjà en place —
 étendre les bornes) ; .sp3s : engines ×8 (format idx-keyé, compat v2 A/B) ;
 LED rack par moteur (déjà per-slot depuis P5) ; strips AUDIO MIX si concernés.
+
+> **Réalisation.** .sp3s **v3** : les 8 banks écrites séquentiellement
+> (moteurs 0..7), XML SlotParams engine 0..7 ; chargement compat v1 (1 bank)
+> / v2 (2 banks), et un fichier v1/v2 REMET À VIDE les moteurs au-delà de son
+> compte (la session = l'état complet). NEW session vide les 8. La page
+> sampler/SlotGrid/SlotEditor étaient déjà génériques (setSamplerIndex poussé
+> à la sélection du module — moteurs 2-7 accessibles en sélectionnant leur
+> bloc au rack) ; aucune étiquette A/B codée en dur trouvée.
 
 ### P6-M3 — Lecture multiplexée (L — la vraie condition du ×8 en scène)
 UN SamplerPlayerService (modèle ScorePlayerService) : les sessions

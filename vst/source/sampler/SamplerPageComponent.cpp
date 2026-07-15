@@ -19,7 +19,9 @@ namespace
     constexpr uint32_t kSessionMagic   = 0x53503353u; // "SP3S"
     // v2: per-engine SlotParams blocks (engine attr) + TWO .fsmp banks (A, B).
     // v1 (single engine) is still readable; new saves are always v2.
-    constexpr uint16_t kSessionVersion = 0x0002u;
+    // v3 (P6): all kMaxEngines sample banks, written engine 0..7 in order.
+    // v2: engines A+B. v1: engine A only.
+    constexpr uint16_t kSessionVersion = 0x0003u;
     constexpr uint32_t kSessionEof     = 0xDEADBEEFu;
 
 } // namespace
@@ -304,15 +306,13 @@ void SamplerPageComponent::resized()
 
 void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
 {
-    // v2: the session carries BOTH sampler engines (A + B) — params and banks.
-    // v1 only stored the engine this page happened to be bound to, silently
-    // dropping the other engine's data on every save.
-    // TODO(P6-M2): v3 — N engines (P6 raised the pool to 8; v2 still saves
-    // engines 0/1 only, so takes recorded on engines 2..7 do NOT survive a
-    // session save until M2 lands).
-    LuxSampler* engines[2] = { processor.getSampler(0), processor.getSampler(1) };
+    // v3 (P6): the session carries EVERY sampler engine (0..7) — params and
+    // banks. v2 stored A+B only; v1 just the bound engine.
+    LuxSampler* engines[LuxSampler::kMaxEngines];
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+        if ((engines[e] = processor.getSampler(e)) == nullptr) return;
     auto* seq = processor.getFrameSequencer();
-    if (!engines[0] || !engines[1] || !seq) return;
+    if (!seq) return;
 
     // ── Build XML ─────────────────────────────────────────────────────────────
     juce::XmlElement root("Sp3ctraSession");
@@ -321,7 +321,7 @@ void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
     // Per-slot play parameters, one block per engine (shared serialisation —
     // same fields as .fslot / DAW state, incl. fade curves
     // and frequency curves that v1 silently dropped).
-    for (int e = 0; e < 2; ++e)
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
     {
         auto* slotsXml = root.createNewChildElement("SlotParams");
         slotsXml->setAttribute("engine",  e);
@@ -338,8 +338,8 @@ void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
     seq->saveToXml(*seqXml);
 
     // ── Save audio frames to temporary .fsmp files (one per engine) ──────────
-    juce::MemoryBlock fsmpBlobs[2];
-    for (int e = 0; e < 2; ++e)
+    juce::MemoryBlock fsmpBlobs[LuxSampler::kMaxEngines];
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
     {
         juce::TemporaryFile tmpFsmp(".fsmp");
         if (!engines[e]->saveToFile(tmpFsmp.getFile()))
@@ -460,9 +460,11 @@ void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
 
 void SamplerPageComponent::doLoadSession(const juce::File& sessionFile, bool isAutoRestore)
 {
-    LuxSampler* engines[2] = { processor.getSampler(0), processor.getSampler(1) };
+    LuxSampler* engines[LuxSampler::kMaxEngines];
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+        if ((engines[e] = processor.getSampler(e)) == nullptr) return;
     auto* seq = processor.getFrameSequencer();
-    if (!engines[0] || !engines[1] || !seq) return;
+    if (!seq) return;
 
     juce::FileInputStream in(sessionFile);
     if (!in.openedOk())
@@ -535,11 +537,13 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile, bool isA
     }
 
     // ── Read + validate the binary .fsmp bank sections BEFORE applying ───────
-    // anything (v2: engine A then B; v1: A only). Applying params/pattern first
-    // and rejecting the banks afterwards left a hybrid, non-undoable state:
-    // the rejected file's params on top of the old banks.
-    const int numBanks = (version >= 2) ? 2 : 1;
-    juce::MemoryBlock fsmpBlobs[2];
+    // anything (v3: engines 0..7 in order; v2: A then B; v1: A only).
+    // Applying params/pattern first and rejecting the banks afterwards left a
+    // hybrid, non-undoable state: the rejected file's params on top of the
+    // old banks.
+    const int numBanks = (version >= 3) ? LuxSampler::kMaxEngines
+                       : (version == 2) ? 2 : 1;
+    juce::MemoryBlock fsmpBlobs[LuxSampler::kMaxEngines];
     for (int e = 0; e < numBanks; ++e)
     {
         const int fsmpLen = in.readInt();
@@ -571,7 +575,7 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile, bool isA
         for (auto* slotsXml : xmlDoc->getChildWithTagNameIterator("SlotParams"))
         {
             const int e = slotsXml->getIntAttribute("engine", 0);
-            if (e < 0 || e > 1) continue;
+            if (e < 0 || e >= LuxSampler::kMaxEngines) continue;
             engines[e]->setOverdubMode(slotsXml->getIntAttribute("overdub", 0) != 0);
             for (auto* s : slotsXml->getChildIterator())
             {
@@ -604,6 +608,16 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile, bool isA
             syncParam("seqDawSync",      seq->isDawSync() ? 1.0f : 0.0f);
             syncParam("seqBeatsPerStep", (float) seq->getBeatsPerStep());
         }
+    }
+
+    // A session is the FULL sampler state: engines beyond the file's bank
+    // count (v1/v2 files on a ×8 build) revert to empty defaults instead of
+    // keeping takes that were never part of that session.
+    for (int e = numBanks; e < LuxSampler::kMaxEngines; ++e)
+    {
+        engines[e]->clearAllSlots();
+        for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
+            engines[e]->resetSlotPlayParams(i);
     }
 
     // ── Load the pre-read .fsmp banks into the engines ────────────────────────
