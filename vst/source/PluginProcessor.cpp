@@ -1016,6 +1016,34 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             juce::ParameterID{"luxSamplerBNumBanks", 1}, "LuxSampler B Banks",
             bBankCounts, 3, kHiddenChoice));  // default = 4 banks
+
+        // P6 — engines 2..7: same six play params, generated ids
+        // ("luxSampler{N}_*", fsEngineParam). MIDI channel defaults to N+1.
+        for (int e = 2; e < LuxSampler::kMaxEngines; ++e)
+        {
+            const juce::String nm = "LuxSampler " + juce::String(e + 1) + " ";
+            params.push_back(std::make_unique<juce::AudioParameterChoice>(
+                juce::ParameterID{fsEngineParam(e, "MidiChannel"), 1},
+                nm + "MIDI Channel", bMidiChNames,
+                juce::jmin(e, 15), kHiddenChoice));
+            params.push_back(std::make_unique<juce::AudioParameterChoice>(
+                juce::ParameterID{fsEngineParam(e, "OctaveOffset"), 1},
+                nm + "Octave Offset", bOctaveNames, 2, kHiddenChoice));
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID{fsEngineParam(e, "MaxDuration"), 1},
+                nm + "Max Duration",
+                juce::NormalisableRange<float>(1.0f, 60.0f, 0.1f), 10.0f,
+                kHiddenFloat));
+            params.push_back(std::make_unique<juce::AudioParameterChoice>(
+                juce::ParameterID{fsEngineParam(e, "RecMode"), 1},
+                nm + "REC Mode", bModeNames, 0, kHiddenChoice));
+            params.push_back(std::make_unique<juce::AudioParameterChoice>(
+                juce::ParameterID{fsEngineParam(e, "PlayMode"), 1},
+                nm + "PLAY Mode", bModeNames, 0, kHiddenChoice));
+            params.push_back(std::make_unique<juce::AudioParameterChoice>(
+                juce::ParameterID{fsEngineParam(e, "NumBanks"), 1},
+                nm + "Banks", bBankCounts, 3, kHiddenChoice));
+        }
     }
 
     // Image export on Save Session: bool toggle + format choice (PNG / JPEG)
@@ -1412,7 +1440,7 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
 
     // Cache raw-parameter pointers read by processBlock (audio thread) —
     // getRawParameterValue("literal") allocates a juce::String per call.
-    for (int e = 0; e < 2; ++e)   // sampler engines A (0) and B (1)
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)   // sampler engines ×8
         luxSamplerMidiChannelParam[e] = apvts.getRawParameterValue(fsEngineParam(e, "MidiChannel"));
     for (int s = 0; s < ChainModel::kMaxChains; ++s)
     {
@@ -1548,8 +1576,8 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     // Create the sampler engines: A (slot 0) + B (slot 1). Per-engine enable is
     // driven by module presence in deriveChainRouting(); both share the single
     // modulated playback channel (one plays at a time — see the arbiter).
-    luxSampler  = std::make_unique<LuxSampler>(0);
-    luxSamplerB = std::make_unique<LuxSampler>(1);
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+        samplers_[(size_t) e] = std::make_unique<LuxSampler>(e);
     scorePlayerService_ = std::make_unique<ScorePlayerService>();
 
     // SCORE generation defaults (shared by the PLAY page and the SETUP panel).
@@ -1559,8 +1587,10 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     // Create FrameSequencer and wire it to the ordered sampler engines (A, B).
     frameSequencer = std::make_unique<FrameSequencer>();
     {
-        LuxSampler* engines[] = { luxSampler.get(), luxSamplerB.get() };
-        frameSequencer->setSamplers(engines, 2);
+        LuxSampler* engines[LuxSampler::kMaxEngines];
+        for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+            engines[e] = samplers_[(size_t) e].get();
+        frameSequencer->setSamplers(engines, LuxSampler::kMaxEngines);
     }
 
     // ── M9 / P5-M3: IMAGE ×8 + VIDEO / CAMERA source engines + service ──────
@@ -1612,9 +1642,12 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener(PARAM_FS_OCT_OFFSET, this);
     apvts.addParameterListener(PARAM_FS_MAX_DUR,    this);
     // Engine B bank (same play params, own values)
-    apvts.addParameterListener(fsEngineParam(1, "MidiChannel"),  this);
-    apvts.addParameterListener(fsEngineParam(1, "OctaveOffset"), this);
-    apvts.addParameterListener(fsEngineParam(1, "MaxDuration"),  this);
+    for (int e = 1; e < LuxSampler::kMaxEngines; ++e)
+    {
+        apvts.addParameterListener(fsEngineParam(e, "MidiChannel"),  this);
+        apvts.addParameterListener(fsEngineParam(e, "OctaveOffset"), this);
+        apvts.addParameterListener(fsEngineParam(e, "MaxDuration"),  this);
+    }
 
     apvts.addParameterListener(PARAM_SEQ_ENABLED,  this);
     apvts.addParameterListener(PARAM_SEQ_BPM,      this);
@@ -1637,12 +1670,12 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     // are registered by the manifest loop above.)
 
     // Sync LuxSampler config with initial APVTS values
-    luxSampler->setEnabled(*apvts.getRawParameterValue(PARAM_FS_ENABLED) > 0.5f);
-    luxSampler->setMidiChannel(
+    samplers_[0]->setEnabled(*apvts.getRawParameterValue(PARAM_FS_ENABLED) > 0.5f);
+    samplers_[0]->setMidiChannel(
         static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_MIDI_CH)) + 1);
-    luxSampler->setOctaveOffset(
+    samplers_[0]->setOctaveOffset(
         static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_OCT_OFFSET)) - 2);
-    luxSampler->setMaxDuration(*apvts.getRawParameterValue(PARAM_FS_MAX_DUR));
+    samplers_[0]->setMaxDuration(*apvts.getRawParameterValue(PARAM_FS_MAX_DUR));
 
     // SCORE transport params → every score-player slot (shared until M5).
     if (scorePlayerService_ != nullptr)
@@ -1653,16 +1686,17 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
             scorePlayerService_->setLoopMode(s, scoreLoopModeFromParams(apvts));
         }
 
-    // Engine B: its own APVTS bank (luxSamplerB*) — MIDI channel defaults to 2
+    // Engines 1..7: their own APVTS banks — MIDI channel defaults to e+1
     // so direct MIDI doesn't double-trigger out of the box. Per-engine enable
     // is set authoritatively by deriveChainRouting().
-    if (luxSamplerB)
+    for (int e = 1; e < LuxSampler::kMaxEngines; ++e)
+    if (samplers_[(size_t) e])
     {
-        luxSamplerB->setMidiChannel(
-            static_cast<int>(*apvts.getRawParameterValue(fsEngineParam(1, "MidiChannel"))) + 1);
-        luxSamplerB->setOctaveOffset(
-            static_cast<int>(*apvts.getRawParameterValue(fsEngineParam(1, "OctaveOffset"))) - 2);
-        luxSamplerB->setMaxDuration(*apvts.getRawParameterValue(fsEngineParam(1, "MaxDuration")));
+        samplers_[(size_t) e]->setMidiChannel(
+            static_cast<int>(*apvts.getRawParameterValue(fsEngineParam(e, "MidiChannel"))) + 1);
+        samplers_[(size_t) e]->setOctaveOffset(
+            static_cast<int>(*apvts.getRawParameterValue(fsEngineParam(e, "OctaveOffset"))) - 2);
+        samplers_[(size_t) e]->setMaxDuration(*apvts.getRawParameterValue(fsEngineParam(e, "MaxDuration")));
     }
 
     // ── Acquire the process-wide shared core ─────────────────────────────────
@@ -1780,16 +1814,17 @@ Sp3ctraAudioProcessor::~Sp3ctraAudioProcessor()
 
     // ── LuxSampler (uses AudioImageBuffers / DoubleBuffer owned by sharedCore) ──
     // Must stop before releasing sharedCore to avoid use-after-free.
-    if (luxSamplerB)
-    {
-        luxSamplerB->stopPlayerThread();
-        luxSamplerB.reset();
-    }
-    if (luxSampler)
+    for (int e = LuxSampler::kMaxEngines - 1; e >= 1; --e)
+        if (samplers_[(size_t) e])
+        {
+            samplers_[(size_t) e]->stopPlayerThread();
+            samplers_[(size_t) e].reset();
+        }
+    if (samplers_[0])
     {
         log_info("VST", "Stopping LuxSampler player thread...");
-        luxSampler->stopPlayerThread();
-        luxSampler.reset();
+        samplers_[0]->stopPlayerThread();
+        samplers_[0].reset();
         log_info("VST", "LuxSampler stopped");
     }
 
@@ -2016,8 +2051,8 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     {
         auto* aib = sharedCore->getCore()->getAudioImageBuffers();
         auto* dbf = sharedCore->getCore()->getDoubleBuffer();
-        if (luxSampler)  luxSampler->startPlayerThread(aib, dbf);
-        if (luxSamplerB) luxSamplerB->startPlayerThread(aib, dbf);
+        for (auto& fs : samplers_)
+            if (fs) fs->startPlayerThread(aib, dbf);
 
         // P5-M4 — per-instance score players (one thread, 8 slots).
         if (scorePlayerService_)
@@ -2382,7 +2417,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // NUM_SLOTS. Gate engine A or B with the decoded slot; ungate the other.
     // Sentinels (< 0) ungate both.
     {
-        int gateA = -1, gateB = -1;
+        int gate[LuxSampler::kMaxEngines];
+        for (int e = 0; e < LuxSampler::kMaxEngines; ++e) gate[e] = -1;
         if (frameSequencer != nullptr
             && frameSequencer->isEnabled()
             && frameSequencer->isPlaying())
@@ -2395,13 +2431,14 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                 {
                     const int smp  = enc / LuxSamplerConstants::NUM_SLOTS;
                     const int slot = enc % LuxSamplerConstants::NUM_SLOTS;
-                    if      (smp == 0) gateA = slot;
-                    else if (smp == 1) gateB = slot;
+                    if (smp >= 0 && smp < LuxSampler::kMaxEngines)
+                        gate[smp] = slot;
                 }
             }
         }
-        if (luxSampler)  luxSampler ->setSeqGateSlot(gateA);
-        if (luxSamplerB) luxSamplerB->setSeqGateSlot(gateB);
+        for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+            if (samplers_[(size_t) e])
+                samplers_[(size_t) e]->setSeqGateSlot(gate[e]);
     }
 
     // ========================================================================
@@ -2986,7 +3023,7 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
             }
             // Push the restored SCORE speed/loop into the engine (the listener
             // does not fire for values equal to the pre-restore state).
-            if (luxSampler != nullptr)
+            if (samplers_[0] != nullptr)
             {
                 // P5-M4: shared transport params → every score-player slot.
                 if (scorePlayerService_ != nullptr)
@@ -3354,15 +3391,23 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
         if (parameterID == PARAM_FS_ENABLED)
         {
             const bool on = newValue > 0.5f;
-            if (luxSampler  != nullptr) luxSampler ->setEnabled(samplerAPresent_ && on);
-            if (luxSamplerB != nullptr) luxSamplerB->setEnabled(samplerBPresent_ && on);
+            for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+                if (samplers_[(size_t) e] != nullptr)
+                    samplers_[(size_t) e]->setEnabled(samplerPresent_[(size_t) e] && on);
             return;
         }
-        // Per-engine banks: "luxSamplerB*" drives engine B, the legacy
-        // "luxSampler*" ids drive engine A (fsEngineParam). The export prefs
-        // and output dir stay shared (session-level, not play params).
-        const int e = parameterID.startsWith("luxSamplerB") ? 1 : 0;
-        LuxSampler* engine = (e == 1) ? luxSamplerB.get() : luxSampler.get();
+        // Per-engine banks (P6 ×8): "luxSamplerB*" = engine 1,
+        // "luxSampler{N}_*" = engines 2..7, the legacy "luxSampler*" ids =
+        // engine 0 (fsEngineParam). The export prefs and output dir stay
+        // shared (session-level, not play params).
+        int e = 0;
+        if (parameterID.startsWith("luxSamplerB"))
+            e = 1;
+        else if (parameterID.length() > 10
+                 && juce::CharacterFunctions::isDigit(parameterID[10]))
+            e = juce::jlimit(0, LuxSampler::kMaxEngines - 1,
+                             parameterID.substring(10).getIntValue());
+        LuxSampler* engine = samplers_[(size_t) e].get();
         if (engine != nullptr)
         {
             engine->setMidiChannel(
@@ -3658,26 +3703,23 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
         }
     }
 
-    // Per-engine sampler enable: a Sampler instance carries its engine index in
-    // `slot` (0 = A, 1 = B). An engine is enabled iff its instance is present
-    // in the model AND the shared luxSamplerEnabled param (rack LED / host
-    // automation) is on — presence alone made the LED a dead toggle.
-    bool samplerAPresent = false, samplerBPresent = false;
+    // Per-engine sampler enable: a Sampler instance carries its engine index
+    // in `slot` (0..7 since P6). An engine is enabled iff its instance is
+    // present in the model AND the shared luxSamplerEnabled param (rack LED /
+    // host automation) is on — presence alone made the LED a dead toggle.
+    std::array<bool, LuxSampler::kMaxEngines> present {};
     for (const auto& ch : chainModel_.chains)
         for (const auto& m : ch.modules)
-        {
             if (m.type == ModuleType::Sampler)
-            {
-                if (m.slot == 1) samplerBPresent = true;
-                else             samplerAPresent = true;   // slot 0 (or unhealed -1)
-            }
-        }
-    samplerAPresent_ = samplerAPresent;
-    samplerBPresent_ = samplerBPresent;
+                present[(size_t) juce::jlimit(
+                    0, LuxSampler::kMaxEngines - 1,
+                    m.slot >= 0 ? m.slot : 0)] = true;
+    samplerPresent_ = present;
     const bool fsParamOn =
         apvts.getRawParameterValue(PARAM_FS_ENABLED)->load() > 0.5f;
-    if (luxSampler)  luxSampler ->setEnabled(samplerAPresent && fsParamOn);
-    if (luxSamplerB) luxSamplerB->setEnabled(samplerBPresent && fsParamOn);
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+        if (samplers_[(size_t) e])
+            samplers_[(size_t) e]->setEnabled(present[(size_t) e] && fsParamOn);
 
     // (P4-M5: the "chainInsertOrder" projection is gone with the param —
     // which LuxStral consumes whenever a Sampler sits on its chain — the default
@@ -3869,13 +3911,21 @@ Sp3ctraAudioProcessor::navTargetForParam(const juce::String& id) const
     else if (banked("luxsynthOut", slot)) { t.type = ModuleType::LuxSynth; t.instanceId = chainInstance(t.type, -1); }
     else if (banked("luxwaveOut",  slot)) { t.type = ModuleType::LuxWave;  t.instanceId = chainInstance(t.type, -1); }
     else if (id.startsWith("luxSamplerB")) { t.type = ModuleType::Sampler; t.instanceId = chainInstance(t.type, 1); }
+    else if (id.startsWith("luxSampler") && id.length() > 10
+             && juce::CharacterFunctions::isDigit(id[10]))
+                                           { t.type = ModuleType::Sampler;
+                                             t.instanceId = chainInstance(t.type,
+                                                 juce::jlimit(0, LuxSampler::kMaxEngines - 1,
+                                                              id.substring(10).getIntValue())); }
     else if (id.startsWith("luxSampler"))  { t.type = ModuleType::Sampler; t.instanceId = chainInstance(t.type, 0); }
     // Virtual (non-APVTS) sampler targets — REC/PLAY actions and per-slot value
     // params. Their synthetic id encodes the engine as "smp:e{E}:…" (E = 0/1),
     // and the model stores that engine index in the module's slot. So a mapped
     // key that records/plays a slot follows to that sampler's page.
-    else if (id.startsWith("smp:e1"))      { t.type = ModuleType::Sampler; t.instanceId = chainInstance(t.type, 1); }
-    else if (id.startsWith("smp:e0"))      { t.type = ModuleType::Sampler; t.instanceId = chainInstance(t.type, 0); }
+    else if (id.startsWith("smp:e"))       { t.type = ModuleType::Sampler;
+                                             t.instanceId = chainInstance(t.type,
+                                                 juce::jlimit(0, LuxSampler::kMaxEngines - 1,
+                                                              id.substring(5).getIntValue())); }
     // Synth ENGINE params (own page). StrokeForge (sf*) / blob (spctr*) belong
     // to LuxStral.
     else if (id.startsWith("luxstral") || id.startsWith("sf") || id.startsWith("spctr"))
@@ -3910,7 +3960,7 @@ int Sp3ctraAudioProcessor::virtualSteps(int targetId) const noexcept
 float Sp3ctraAudioProcessor::virtualRead(int targetId) const noexcept
 {
     const int  e = SamplerMidiTargets::tEngine(targetId);
-    LuxSampler* fs = (e == 1) ? luxSamplerB.get() : luxSampler.get();
+    LuxSampler* fs = getSampler(e);
     if (fs == nullptr) return 0.0f;
     return SamplerMidiTargets::read(*fs, SamplerMidiTargets::tSlot(targetId),
                                     SamplerMidiTargets::tKind(targetId));
@@ -3919,7 +3969,8 @@ float Sp3ctraAudioProcessor::virtualRead(int targetId) const noexcept
 void Sp3ctraAudioProcessor::virtualApply(int targetId, float norm01) noexcept
 {
     const auto kind = SamplerMidiTargets::tKind(targetId);
-    const int  e    = SamplerMidiTargets::tEngine(targetId) & 1;
+    const int  e    = juce::jlimit(0, LuxSampler::kMaxEngines - 1,
+                                   SamplerMidiTargets::tEngine(targetId));
     const int  s    = SamplerMidiTargets::tSlot(targetId) % kSmpSlots;
 
     if (SamplerMidiTargets::isAction(kind))
@@ -3961,7 +4012,7 @@ void Sp3ctraAudioProcessor::virtualApply(int targetId, float norm01) noexcept
 
     // Value target — apply straight to the engine (atomic store), then flag the
     // touch so the open SlotEditor refreshes its sliders if it shows this slot.
-    LuxSampler* fs = (e == 1) ? luxSamplerB.get() : luxSampler.get();
+    LuxSampler* fs = getSampler(e);
     if (fs == nullptr) return;
     SamplerMidiTargets::apply(*fs, s, kind, norm01);
     smpValueTouchWhere_.store((e << 8) | s, std::memory_order_relaxed);
@@ -3971,7 +4022,8 @@ void Sp3ctraAudioProcessor::virtualApply(int targetId, float norm01) noexcept
 void Sp3ctraAudioProcessor::virtualRelease(int targetId) noexcept
 {
     const auto kind = SamplerMidiTargets::tKind(targetId);
-    const int  e    = SamplerMidiTargets::tEngine(targetId) & 1;
+    const int  e    = juce::jlimit(0, LuxSampler::kMaxEngines - 1,
+                                   SamplerMidiTargets::tEngine(targetId));
     const int  s    = SamplerMidiTargets::tSlot(targetId) % kSmpSlots;
 
     // Momentary action "release" — mirror the press latch.
@@ -3992,14 +4044,14 @@ void Sp3ctraAudioProcessor::virtualRelease(int targetId) noexcept
 //==============================================================================
 bool Sp3ctraAudioProcessor::samplerRecMomentary(int engine) const noexcept
 {
-    if (auto* v = apvts.getRawParameterValue(fsEngineParam(engine & 1, "RecMode")))
+    if (auto* v = apvts.getRawParameterValue(fsEngineParam(juce::jlimit(0, LuxSampler::kMaxEngines - 1, engine), "RecMode")))
         return v->load() > 0.5f;
     return false;
 }
 
 bool Sp3ctraAudioProcessor::samplerPlayMomentary(int engine) const noexcept
 {
-    if (auto* v = apvts.getRawParameterValue(fsEngineParam(engine & 1, "PlayMode")))
+    if (auto* v = apvts.getRawParameterValue(fsEngineParam(juce::jlimit(0, LuxSampler::kMaxEngines - 1, engine), "PlayMode")))
         return v->load() > 0.5f;
     return false;
 }
@@ -4339,7 +4391,8 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
                 {
                     sp.insert_id[sp.num_inserts]        = IMAGE_CHAIN_INSERT_SAMPLER;
                     sp.insert_state_idx[sp.num_inserts] =
-                        juce::jlimit(0, 1, mi.slot >= 0 ? mi.slot : 0);
+                        juce::jlimit(0, ChainModel::kMaxSamplerEngines - 1,
+                                     mi.slot >= 0 ? mi.slot : 0);
                     sp.num_inserts++;
                 }
             }
@@ -4452,27 +4505,26 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
             poolResetArmedMs_ = juce::Time::getMillisecondCounter();
     }
 
-    // Multi-chain split (2026-07-13): tell the sampler layer whether engines
-    // A and B currently sit on the SAME chain. Gates the playback arbiter and
-    // the SCORE relay's cross-engine displacement — on split chains both
-    // engines play independently; on a shared chain (one stream) starting one
-    // still evicts the other.
+    // Multi-chain split (per PAIR since P6): publish, for every engine, the
+    // set of engines sharing at least one chain with it. Gates the playback
+    // arbiter — on split chains engines play independently; on a shared
+    // chain (one stream) starting one still evicts the sharing ones.
     {
-        bool share = false;
-        for (int c = 0; c < plan.num_chains && !share; ++c)
+        uint8_t masks[LuxSampler::kMaxEngines] = {};
+        for (int c = 0; c < plan.num_chains; ++c)
         {
             const SynthChainPlan& sp = plan.chain[c];
             if (!sp.present || !sp.has_sampler) continue;
-            bool hasA = false, hasB = false;
+            uint8_t here = 0;
             for (int i = 0; i < sp.num_inserts; ++i)
                 if (sp.insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER)
-                {
-                    if (sp.insert_state_idx[i] == 0) hasA = true;
-                    if (sp.insert_state_idx[i] == 1) hasB = true;
-                }
-            share = hasA && hasB;
+                    here |= (uint8_t) (1u << juce::jlimit(
+                        0, LuxSampler::kMaxEngines - 1, sp.insert_state_idx[i]));
+            for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+                if ((here >> e) & 1u)
+                    masks[e] |= (uint8_t) (here & ~(1u << e));
         }
-        LuxSampler::setEnginesShareChain(share);
+        LuxSampler::setEngineShareMasks(masks);
     }
 
     // ── P5-M4 — score-family instance map ────────────────────────────────────
@@ -4698,18 +4750,18 @@ juce::ValueTree Sp3ctraAudioProcessor::seqStateToTree() const
 juce::ValueTree Sp3ctraAudioProcessor::samplerSlotsStateToTree() const
 {
     juce::ValueTree root("SAMPLER_SLOTS");
-    const LuxSampler* engines[] = { luxSampler.get(), luxSamplerB.get() };
-    for (int e = 0; e < 2; ++e)
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
     {
-        if (engines[e] == nullptr)
+        const LuxSampler* engine = samplers_[(size_t) e].get();
+        if (engine == nullptr)
             continue;
         juce::XmlElement engXml("Engine");
         engXml.setAttribute("idx",     e);
-        engXml.setAttribute("overdub", engines[e]->getOverdubMode() ? 1 : 0);
+        engXml.setAttribute("overdub", engine->getOverdubMode() ? 1 : 0);
         for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
         {
             auto* slotXml = engXml.createNewChildElement("Slot");
-            engines[e]->slotParamsToXml(i, *slotXml);
+            engine->slotParamsToXml(i, *slotXml);
         }
         root.appendChild(juce::ValueTree::fromXml(engXml), nullptr);
     }
@@ -4721,13 +4773,14 @@ void Sp3ctraAudioProcessor::applySamplerParamsFromState()
     auto root = apvts.state.getChildWithName("SAMPLER_SLOTS");
     if (! root.isValid())
         return;
-    LuxSampler* engines[] = { luxSampler.get(), luxSamplerB.get() };
     for (const auto& eng : root)
     {
         const int e = (int) eng.getProperty("idx", -1);
-        if (e < 0 || e > 1 || engines[e] == nullptr)
+        if (e < 0 || e >= LuxSampler::kMaxEngines
+            || samplers_[(size_t) e] == nullptr)
             continue;
-        engines[e]->setOverdubMode((int) eng.getProperty("overdub", 0) != 0);
+        LuxSampler* engine = samplers_[(size_t) e].get();
+        engine->setOverdubMode((int) eng.getProperty("overdub", 0) != 0);
         for (const auto& slot : eng)
         {
             if (auto slotXml = slot.createXml())
@@ -4740,10 +4793,10 @@ void Sp3ctraAudioProcessor::applySamplerParamsFromState()
                 // the auto-load refills the banks and re-runs this overlay,
                 // so content-bearing banks do get their saved settings back.
                 if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS
-                    && ! engines[e]->slotHasContent(i))
-                    engines[e]->resetSlotPlayParams(i);
+                    && ! engine->slotHasContent(i))
+                    engine->resetSlotPlayParams(i);
                 else
-                    engines[e]->slotParamsFromXml(i, *slotXml);
+                    engine->slotParamsFromXml(i, *slotXml);
             }
         }
     }

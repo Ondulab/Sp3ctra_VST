@@ -999,7 +999,7 @@ public:
     // ctor and clears the slot in its dtor. The C hook functions in
     // LuxSampler.cpp reach every live engine (A, B, …) through engineAt().
     // =========================================================================
-    static constexpr int kMaxEngines = 2;           // sampler A + sampler B
+    static constexpr int kMaxEngines = 8;           // P6 — sampler engines ×8 (0=A legacy, 1=B legacy, 2..7)
     static LuxSampler* engineAt(int i) noexcept
     {
         return (i >= 0 && i < kMaxEngines)
@@ -1060,18 +1060,24 @@ public:
     // (aggregated across engines by lux_sampler_is_playing()).
     bool isDrivingChannel() const noexcept;
     // Playback arbiter — SCOPED to shared-chain topologies (multi-chain split,
-    // 2026-07-13): when engines A and B live on DIFFERENT chains each owns its
-    // own stream and both may play simultaneously — the arbiter is a no-op.
-    // Only when both engines share ONE chain (same stream, e.g. A→B resampling
-    // rack) does starting one still evict the other. RT-safe (atomic stores).
+    // 2026-07-13; per-PAIR since P6): engines on DIFFERENT chains each own
+    // their stream and play simultaneously — the arbiter is a no-op between
+    // them. Only an engine sharing a chain with the starting one (same
+    // stream, e.g. A→B resampling rack) is evicted. RT-safe (atomic stores).
     static void stopOtherEnginesPlayback(int exceptIndex) noexcept;
-    // Published by the processor on every chain-plan derive: do sampler A and
-    // B currently sit on the SAME chain? Gates the playback arbiter (only
-    // meaningful on a shared stream).
-    static void setEnginesShareChain(bool share) noexcept
-    { s_enginesShareChain.store(share, std::memory_order_release); }
-    static bool enginesShareSameChain() noexcept
-    { return s_enginesShareChain.load(std::memory_order_acquire); }
+    // Published by the processor on every chain-plan derive: bit j of
+    // masks[i] = "engines i and j have a SAMPLER marker on the same chain".
+    // Gates the playback arbiter per pair (only meaningful on a shared stream).
+    static void setEngineShareMasks(const uint8_t masks[kMaxEngines]) noexcept
+    {
+        for (int i = 0; i < kMaxEngines; ++i)
+            s_shareMask[i].store(masks[i], std::memory_order_release);
+    }
+    static bool enginesShareChainPair(int a, int b) noexcept
+    {
+        if (a < 0 || a >= kMaxEngines || b < 0 || b >= kMaxEngines) return false;
+        return ((s_shareMask[a].load(std::memory_order_acquire) >> b) & 1u) != 0;
+    }
 
 private:
     // -------------------------------------------------------------------------
@@ -1081,7 +1087,7 @@ private:
     bool                    registered_  = false; // this instance owns s_engines[engineIndex_]
     static std::atomic<LuxSampler*> s_engines[kMaxEngines];
     static std::atomic<int>         s_engineBusy[kMaxEngines]; // in-flight hook calls per slot
-    static std::atomic<bool> s_enginesShareChain;  // A and B hosted on ONE chain (plan-derived)
+    static std::atomic<uint8_t> s_shareMask[kMaxEngines]; // per-pair chain sharing (plan-derived)
 
     // -------------------------------------------------------------------------
     // RT state (atomics only)

@@ -314,8 +314,8 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     // Purge stale MIDI action pulses latched while NO editor was open: the MIDI
     // engine keeps latching them, nobody drains them, and acting on a press
     // latched minutes ago would start a phantom recording the moment the editor
-    // opens. Both engines × every slot.
-    for (int e = 0; e < 2; ++e)
+    // opens. Every engine × every slot.
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
         for (int s = 0; s < LuxSamplerConstants::NUM_SLOTS; ++s)
         {
             (void) processor.consumeSmpRecPressed  (e, s);

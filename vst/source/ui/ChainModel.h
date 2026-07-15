@@ -95,7 +95,7 @@ public:
     //── Sampler engine slot pool (A=0, B=1) — INDEPENDENT of the VideoScroll pool ─
     // A Sampler instance's `slot` is its engine index: first placed = A (0),
     // second = B (1). Up to 2 may coexist (even in the same chain).
-    static constexpr int kMaxSamplerEngines = 2;
+    static constexpr int kMaxSamplerEngines = 8;   // P6 — sampler engines ×8
     static bool isSamplerEngine(ModuleType t) noexcept { return t == ModuleType::Sampler; }
     /** Lowest free sampler-engine slot 0..kMaxSamplerEngines-1, or -1 if full. */
     int firstFreeSamplerSlot(const juce::Uuid* movingId = nullptr) const;

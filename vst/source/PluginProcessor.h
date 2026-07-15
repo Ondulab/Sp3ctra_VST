@@ -146,9 +146,12 @@ public:
     {
         return sharedCore && sharedCore->isReady();
     }
-    LuxSampler*    getLuxSampler()    { return luxSampler.get();    }
-    /** Sampler engine by index: 0 = A, 1 = B. Out-of-range falls back to A. */
-    LuxSampler*    getSampler(int i)  { return (i == 1) ? luxSamplerB.get() : luxSampler.get(); }
+    LuxSampler*    getLuxSampler()    { return samplers_[0].get(); }
+    /** Sampler engine by index (0..7 since P6). Out-of-range clamps. */
+    LuxSampler*    getSampler(int i) const
+    {
+        return samplers_[(size_t) juce::jlimit(0, LuxSampler::kMaxEngines - 1, i)].get();
+    }
     FrameSequencer*  getFrameSequencer()  { return frameSequencer.get();  }
 
     // ── P5-M4 — per-instance score playback ─────────────────────────────────
@@ -271,12 +274,12 @@ public:
     //   SAVE       : one-shot  — trigger pulse.
     // "Fixed slot per button": each mapping targets ONE slot, so pulses are
     // addressed by (engine, slot), not by the editor's current selection.
-    bool consumeSmpRecPressed  (int e, int s) noexcept { return smpRecPressed  [e & 1][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
-    bool consumeSmpRecReleased (int e, int s) noexcept { return smpRecReleased [e & 1][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
-    bool consumeSmpPlayPressed (int e, int s) noexcept { return smpPlayPressed [e & 1][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
-    bool consumeSmpPlayReleased(int e, int s) noexcept { return smpPlayReleased[e & 1][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
-    bool consumeSmpSaveTrigger (int e, int s) noexcept { return smpSaveTrigger [e & 1][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
-    bool consumeSmpClearTrigger(int e, int s) noexcept { return smpClearTrigger[e & 1][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
+    bool consumeSmpRecPressed  (int e, int s) noexcept { return smpRecPressed  [(size_t) juce::jlimit(0, LuxSampler::kMaxEngines - 1, e)][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
+    bool consumeSmpRecReleased (int e, int s) noexcept { return smpRecReleased [(size_t) juce::jlimit(0, LuxSampler::kMaxEngines - 1, e)][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
+    bool consumeSmpPlayPressed (int e, int s) noexcept { return smpPlayPressed [(size_t) juce::jlimit(0, LuxSampler::kMaxEngines - 1, e)][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
+    bool consumeSmpPlayReleased(int e, int s) noexcept { return smpPlayReleased[(size_t) juce::jlimit(0, LuxSampler::kMaxEngines - 1, e)][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
+    bool consumeSmpSaveTrigger (int e, int s) noexcept { return smpSaveTrigger [(size_t) juce::jlimit(0, LuxSampler::kMaxEngines - 1, e)][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
+    bool consumeSmpClearTrigger(int e, int s) noexcept { return smpClearTrigger[(size_t) juce::jlimit(0, LuxSampler::kMaxEngines - 1, e)][s % LuxSamplerConstants::NUM_SLOTS].exchange(false, std::memory_order_acquire); }
 
     /** REC / PLAY transport-button mode for a sampler engine (0 = A, 1 = B):
      *  true = Momentary (press-to-start / release-to-stop), false = Toggle
@@ -291,7 +294,7 @@ public:
      *  LuxSampler::setSlotEqBandGain (non-RT). */
     float consumeSmpEqPending(int e, int s, int band) noexcept
     {
-        auto& a = smpEqPending[e & 1][s % LuxSamplerConstants::NUM_SLOTS]
+        auto& a = smpEqPending[(size_t) juce::jlimit(0, LuxSampler::kMaxEngines - 1, e)][s % LuxSamplerConstants::NUM_SLOTS]
                               [band % LuxSampler::kEqBands];
         if (a.load(std::memory_order_relaxed) < 0.0f) return -1.0f;
         return a.exchange(-1.0f, std::memory_order_acq_rel);
@@ -466,8 +469,8 @@ private:
     // The shared_ptr keeps the singleton alive as long as this instance exists.
     // The last instance to be destroyed will tear down UDP + synthesis threads.
     std::shared_ptr<Sp3ctraSharedCore> sharedCore;
-    std::unique_ptr<LuxSampler>   luxSampler;    // engine A (sampler slot 0)
-    std::unique_ptr<LuxSampler>   luxSamplerB;   // engine B (sampler slot 1) — 2nd sampler
+    // P6 — sampler engines ×8 (0 = A legacy, 1 = B legacy, 2..7).
+    std::array<std::unique_ptr<LuxSampler>, LuxSampler::kMaxEngines> samplers_;
     // P5-M4 — the per-instance score players (8 slots, one 1 kHz thread).
     std::unique_ptr<ScorePlayerService> scorePlayerService_;
     /** First placed pool slot per score-family type (kScoreFamily order),
@@ -589,7 +592,7 @@ private:
     // MIDI channel drives note-routing (which channel triggers slot playback) and
     // engine-B's channel filter — kept; the old REC/PLAY/SAVE bind params were
     // removed with the bespoke settings MIDI system (now unified MIDI-Learn).
-    std::atomic<float>* luxSamplerMidiChannelParam [2] = {};
+    std::atomic<float>* luxSamplerMidiChannelParam [LuxSampler::kMaxEngines] = {};
     // Per-instance banks (index = pool slot): each Pitch/Mask instance filters
     // MIDI on ITS OWN channel/octave params.
     std::atomic<float>* luxpitchMidiChannelParam [ChainModel::kMaxChains] = {};
@@ -716,8 +719,7 @@ private:
     // Sampler A/B presence in the model (message thread, set in
     // deriveChainRouting) — combined with the shared luxSamplerEnabled param
     // to drive each engine's setEnabled().
-    bool samplerAPresent_ { false };
-    bool samplerBPresent_ { false };
+    std::array<bool, LuxSampler::kMaxEngines> samplerPresent_ {};
     void deriveChainRouting();              // model → pool bindings + enable bridge + plan
     PoolStale updateModulePoolBindings();   // model → modulePoolSlots_; returns per-type slots to reset
     void deriveAndPublishChainPlan();       // model → RT-safe per-synth ChainPlan
@@ -750,17 +752,17 @@ private:
     // -------------------------------------------------------------------------
     static constexpr int kSmpSlots = LuxSamplerConstants::NUM_SLOTS;
     std::atomic<int>  samplerSelectedSlot { 0 };   // mirror of the editor selection
-    std::atomic<bool> smpRecHeld     [2][kSmpSlots] {};
-    std::atomic<bool> smpPlayHeld    [2][kSmpSlots] {};
-    std::atomic<bool> smpRecPressed  [2][kSmpSlots] {};
-    std::atomic<bool> smpRecReleased [2][kSmpSlots] {};
-    std::atomic<bool> smpPlayPressed [2][kSmpSlots] {};
-    std::atomic<bool> smpPlayReleased[2][kSmpSlots] {};
-    std::atomic<bool> smpSaveTrigger [2][kSmpSlots] {};
-    std::atomic<bool> smpClearTrigger[2][kSmpSlots] {};
+    std::atomic<bool> smpRecHeld     [LuxSampler::kMaxEngines][kSmpSlots] {};
+    std::atomic<bool> smpPlayHeld    [LuxSampler::kMaxEngines][kSmpSlots] {};
+    std::atomic<bool> smpRecPressed  [LuxSampler::kMaxEngines][kSmpSlots] {};
+    std::atomic<bool> smpRecReleased [LuxSampler::kMaxEngines][kSmpSlots] {};
+    std::atomic<bool> smpPlayPressed [LuxSampler::kMaxEngines][kSmpSlots] {};
+    std::atomic<bool> smpPlayReleased[LuxSampler::kMaxEngines][kSmpSlots] {};
+    std::atomic<bool> smpSaveTrigger [LuxSampler::kMaxEngines][kSmpSlots] {};
+    std::atomic<bool> smpClearTrigger[LuxSampler::kMaxEngines][kSmpSlots] {};
     // Pending MIDI EQ-band values (normalised 0..1; -1 = none). Applied on the
     // message thread (setSlotEqBandGain is non-RT). Seeded to -1 in the ctor.
-    std::atomic<float> smpEqPending[2][kSmpSlots][LuxSampler::kEqBands];
+    std::atomic<float> smpEqPending[LuxSampler::kMaxEngines][kSmpSlots][LuxSampler::kEqBands];
 
     // MIDI-touch signal for VALUE targets (see smpValueTouchGen/Where above):
     // bumped by virtualApply so the open SlotEditor can refresh its sliders.

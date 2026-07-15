@@ -101,13 +101,17 @@ inline juce::String lxOutParam(int slot, const char* suffix)
 inline juce::String lwOutParam(int slot, const char* suffix)
 { return "luxwaveOut" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
 
-// Sampler per-engine bank (engines A/B): engine 0 keeps the legacy
-// "luxSampler*" ids (sessions load unchanged), engine 1 owns "luxSamplerB*".
+// Sampler per-engine bank (P6 — engines ×8): engines 0/1 keep the legacy
+// "luxSampler*" / "luxSamplerB*" ids (sessions and MIDI mappings load
+// unchanged), engines 2..7 own "luxSampler{N}_*".
 // Play params only — the enable LED, export prefs and output dir stay shared.
 inline juce::String fsEngineParam(int engine, const char* suffix)
 {
-    return (engine == 1 ? juce::String("luxSamplerB") : juce::String("luxSampler"))
-         + suffix;
+    if (engine == 1)
+        return juce::String("luxSamplerB") + suffix;
+    if (engine >= 2)
+        return "luxSampler" + juce::String(juce::jlimit(2, 7, engine)) + "_" + suffix;
+    return juce::String("luxSampler") + suffix;
 }
 
 /** Bank id for any pooled insert type; empty for non-pooled types. */
@@ -254,7 +258,7 @@ inline const ModuleParamManifest kModuleParamManifest[] = {
       module_param_manifest_detail::kLxLwOut,
       (int) std::size(module_param_manifest_detail::kLxLwOut),
       &module_param_manifest_detail::lwId },
-    { ModuleType::Sampler,     "luxSampler",  2,
+    { ModuleType::Sampler,     "luxSampler",  8,
       module_param_manifest_detail::kSampler,
       (int) std::size(module_param_manifest_detail::kSampler),
       &module_param_manifest_detail::fsId },
