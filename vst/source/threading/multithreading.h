@@ -199,10 +199,14 @@ int chain_additive_player_candidate(int is_score, int engine_slot);
 int chain_pathb_player_candidate(int is_score, int engine_slot);
 
 /* Player stop → staging silence: deactivate the LuxStral/LuxSynth/LuxWave
- * stagings of every chain relayed by THIS player (own sampler chains + score
- * relay). The stagings have no timeout — without this, a stopped player on a
- * sourceless chain leaves its last column ringing forever. Called by
- * FramePlayerThread::injectWhiteFrame() (Non-RT). */
+ * stagings of every chain owned by THIS player. The stagings have no
+ * timeout — without this, a stopped player on a sourceless chain leaves its
+ * last column ringing forever. Non-RT.
+ *   chain_player_stagings_set_inactive — sampler engines (FramePlayerThread::
+ *     injectWhiteFrame), SAMPLER-marker ownership only since P5-M4;
+ *   score_player_stagings_set_inactive — score-player slots
+ *     (ScorePlayerService session teardown), SCORE-marker ownership. */
 void chain_player_stagings_set_inactive(int engine_slot);
+void score_player_stagings_set_inactive(int score_slot);
 
 #endif

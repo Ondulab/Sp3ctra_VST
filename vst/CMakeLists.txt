@@ -183,6 +183,10 @@ target_sources(Sp3ctraVST
         source/framesequencer/FrameSequencer.cpp
         source/luxsampler/LuxSampler.h
         source/framesequencer/FrameSequencer.h
+        # P5-M4 -- per-instance score players
+        source/luxsampler/ScorePlayerService.cpp
+        source/luxsampler/ScorePlayerService.h
+        source/luxsampler/score_player_hooks.h
 
         # Sampler UI components
         source/sampler/SlotGridComponent.cpp

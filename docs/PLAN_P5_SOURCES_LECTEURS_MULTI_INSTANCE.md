@@ -143,12 +143,55 @@ cameraDevice{N}, videoPath{N}), MediaSourcePage.setSlot généralisé aux 3
 kinds (attachments par kind, combo device par instance), éditeur pousse le
 slot des 3 pages. M3 COMPLET — plus aucun broadcast dans le pool média.
 
-### P5-M4 — ScoreSlotPool + lecture par slot (L — cœur de B)
+### P5-M4 — ScoreSlotPool + lecture par slot (L — cœur de B) — **FAIT (2026-07-15)**
 Pool de slots score (frames sortis de LuxSampler) ; ScorePlayerService
 (1 thread, N sessions 1 kHz) ; chain_player_owned/owning_marker par slot ;
 relay sampler scoped par chaîne ; transports par slot ;
 chain_send_transport branché sur le slot du marqueur. Le scoreSlot moteur A
 et uiPlayScore/uiStopScore globaux meurent.
+
+> **Réalisation.** `luxsampler/ScorePlayerService.h/.cpp` + `score_player_hooks.h` :
+> 8 ScoreSlots {frames vector+mutex, transport atomique play/scrub/seek/resume/
+> speed/loop, playHead publié} ; UN thread 1 kHz lock-step qui tick chaque slot
+> feeding (tick = avance tête → `chain_player_execute_owned(1, slot, force_play)`
+> → commit polyphonic PathB si `chain_pathb_player_candidate(1, slot)` → mix bus
+> visuel pour le PLUS BAS slot feeding, les samplers défèrent via
+> `score_player_any_playing()`). `ScoreChannel` = façade par slot, API nom-pour-nom
+> avec l'ancienne (les 4 tabs ont juste changé d'accesseur :
+> `processor.getScoreChannel(ModuleType::X)` → chaque TYPE joue SON slot,
+> le binding par instance multiple d'un même type = M5). Gates C par slot :
+> `chain_hosts_driving_score(sp)` (marqueur SCORE dont le slot joue),
+> `chain_player_owned(sp,1,slot)` = state_idx exact, split-point score par slot
+> dans `chain_owning_marker_pos`, `synth_chain_has_no_signal` sans param score.
+> UN MARQUEUR PAR INSTANCE au plan (≤4 par chaîne, un par type de la famille).
+> Stagings scindés : `chain_player_stagings_set_inactive` = sampler-only,
+> `score_player_stagings_set_inactive(slot)` = score (+ appel synchrone dans
+> `discard()` AVANT publication du plan sans le marqueur — sinon colonne qui
+> sonne). Teardown par slot via diff de masque dans deriveAndPublishChainPlan
+> (remplace le discard famille-entière). PARAM_SCORE_PLAYING → canal du module
+> SCORE ; speed/loop = broadcast 8 slots (partagés jusqu'à M5). RELAY et
+> évictions cross-player SUPPRIMÉS (lecteurs indépendants — c'était le but) ;
+> le trou d'arbitrage même-chaîne (2 joueurs simultanés sur UNE chaîne) reste
+> documenté. Le chemin score legacy de LuxSampler compile mais n'a PLUS AUCUN
+> appelant (purge = M6). LED rack par slot (+ fix LED média slot 0 pour tous).
+>
+> **Fixes de revue (8 findings, 2 agents).** (1) tabs TIMBRE/MIDI SCORE/VOICE
+> ne passent plus par le param `scorePlaying` (il appartient au module SCORE) —
+> transport direct sur leur canal ; (2) gate d'affichage live udpThread étendu
+> à `score_player_any_playing()` (sinon flicker live vs score) ; (3)
+> injectWhiteFrame sampler = ownership SAMPLER only (l'alias moteur 0/1 ↔ slot
+> score 0/1 blanchissait les chaînes d'un score EN LECTURE à chaque stop
+> sampler) ; (4) registre des hooks C en CAS + drain `s_hookBusy` au dtor
+> (multi-instance DAW + UAF teardown) ; (5) endSession = teardown PathB
+> (memset polyphonic + tap PATHB/LUXSTRAL_A blancs — sinon chaîne pb sans
+> source gelée sur la dernière colonne, parité injectWhiteFrame) ; (6) STOP
+> désarme aussi seekHead (seek périmé appliqué au PLAY suivant) ; (7) discard()
+> désactive les stagings AVANT la publication du plan sans le marqueur ;
+> (8) pacing = busy-yield assumé (parité legacy, branche sleep morte retirée).
+>
+> **Limitation connue (différée, comme la viz per-sampler)** : DEUX scores
+> simultanés sur DEUX chaînes à OUT LuxStral → le tap A du bandeau strobe
+> entre les deux (N écrivains, 1 tap global). Résolution = viz par instance.
 
 ### P5-M5 — Générateurs + UI par instance (M)
 Les 4 onglets (Score/Timbre/MidiScore/Voice) écrivent le slot de LEUR

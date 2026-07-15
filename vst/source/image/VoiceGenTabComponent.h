@@ -374,7 +374,7 @@ public:
             g.drawImage(previewImage, imgArea);
 
             // Reading head — only while OUR frames sit in the shared player.
-            auto* fs = processor.getLuxSampler();
+            auto* fs = processor.getScoreChannel(ModuleType::Voice);
             if (fs != nullptr && framesAreOurs)
             {
                 const bool playing = fs->isScorePlaying();
@@ -430,7 +430,7 @@ public:
                  && previewArea.contains(e.getPosition());
         if (! scrubbing) return;
         scrubTo(e);
-        if (auto* fs = processor.getLuxSampler())
+        if (auto* fs = processor.getScoreChannel(ModuleType::Voice))
             if (! fs->isScorePlaying())
                 scrubAuditioning = fs->uiBeginScoreScrub();
     }
@@ -440,14 +440,14 @@ public:
         scrubbing = false;
         if (scrubAuditioning)
         {
-            if (auto* fs = processor.getLuxSampler()) fs->uiEndScoreScrub();
+            if (auto* fs = processor.getScoreChannel(ModuleType::Voice)) fs->uiEndScoreScrub();
             scrubAuditioning = false;
         }
     }
 
     void scrubTo(const juce::MouseEvent& e)
     {
-        auto* fs = processor.getLuxSampler();
+        auto* fs = processor.getScoreChannel(ModuleType::Voice);
         if (fs == nullptr || ! framesAreOurs) return;
         const int n = fs->getScoreFrameCount();
         if (n <= 0) return;
@@ -917,7 +917,7 @@ private:
         generateButton.setEnabled(false);
         exportPngButton.setEnabled(false);
         exportJpgButton.setEnabled(false);
-        if (auto* fs = processor.getLuxSampler())
+        if (auto* fs = processor.getScoreChannel(ModuleType::Voice))
             if (framesAreOurs)
                 fs->uiStopScore();
         processor.stopScorePreview();
@@ -948,7 +948,7 @@ private:
             framesAreOurs  = false;
             const juce::String why = r.error.isNotEmpty() ? r.error : r.render.log;
             logLabel.setText("Failed: " + why, juce::dontSendNotification);
-            if (auto* fs = processor.getLuxSampler())
+            if (auto* fs = processor.getScoreChannel(ModuleType::Voice))
                 if (framesAreOurs)
                     fs->uiStopScore();
             setTransportEnabled(false);
@@ -1055,7 +1055,7 @@ private:
     {
         applyEqToImage();
         buildPreview();
-        if (auto* fs = processor.getLuxSampler())
+        if (auto* fs = processor.getScoreChannel(ModuleType::Voice))
         {
             const bool wasPlaying = fs->isScorePlaying() && framesAreOurs;
             const int savedHead = wasPlaying ? fs->getScorePlayHead() : 0;
@@ -1196,7 +1196,7 @@ private:
     //==========================================================================
     void togglePlay()
     {
-        auto* fs = processor.getLuxSampler();
+        auto* fs = processor.getScoreChannel(ModuleType::Voice);
         if (fs == nullptr || busy) return;
 
         const bool play = ! (fs->isScorePlaying() && framesAreOurs);
@@ -1223,22 +1223,19 @@ private:
         if (! play)
             scrubHead = -1;
 
-        // Route through the scorePlaying param so the DAW lane stays truthful.
-        if (auto* p = processor.getAPVTS().getParameter("scorePlaying"))
-        {
-            const float norm = play ? 1.0f : 0.0f;
-            if (! juce::approximatelyEqual(p->getValue(), norm))
-                p->setValueNotifyingHost(norm);
-            else if (play) fs->uiPlayScore();
-            else           fs->uiStopScore();
-        }
+        // P5-M4: drive THIS instance's own player slot directly. The
+        // scorePlaying param now belongs to the SCORE module's transport —
+        // routing through it here would start the WRONG player (per-instance
+        // automatable transports are M5).
+        if (play) fs->uiPlayScore();
+        else      fs->uiStopScore();
         refreshPlayButton();
         repaint(previewArea);
     }
 
     void refreshPlayButton()
     {
-        auto* fs = processor.getLuxSampler();
+        auto* fs = processor.getScoreChannel(ModuleType::Voice);
         const bool playing = (fs != nullptr) && fs->isScorePlaying() && framesAreOurs;
         playStopButton.setPlaying(playing);
     }
@@ -1275,7 +1272,7 @@ private:
             && juce::Time::getMillisecondCounter() - lastEditMs > 800)
             persistState();
 
-        auto* fs = processor.getLuxSampler();
+        auto* fs = processor.getScoreChannel(ModuleType::Voice);
         if (fs != nullptr && framesAreOurs)
         {
             // Ownership check: SCORE/TIMBRE/MIDI SCORE (or a restore) reloaded

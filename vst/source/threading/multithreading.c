@@ -32,6 +32,7 @@
 #ifdef VST_MODE
 extern void luxstral_wait_for_buffer_consumed(void);
 #include "../luxsampler/lux_sampler_hooks.h"
+#include "../luxsampler/score_player_hooks.h"
 #endif
 
 /* External sequencer instance */
@@ -88,15 +89,43 @@ static int chain_hosts_driving_engine(const SynthChainPlan *sp)
 #endif
 }
 
+/* (P5-M4) Does this chain host ANY feeding score-player slot? Per-slot
+ * symmetry with chain_hosts_driving_engine: a SCORE-family marker owns its
+ * chain only while ITS OWN pool slot (insert_state_idx) plays — the shared
+ * "has_score = the score channel owns you" era is over. */
+static int chain_hosts_driving_score(const SynthChainPlan *sp)
+{
 #ifdef VST_MODE
-/* One predicate for every player-ownership gate: SCORE relay matches
- * has_score (channel-wide, never engine-matched); sampler playback matches
- * the chain's own SAMPLER marker against the playing engine. */
+    if (!sp->has_score)
+        return 0;
+    for (int i = 0; i < sp->num_inserts; i++)
+        if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_SCORE
+            && score_player_slot_is_playing(sp->insert_state_idx[i]))
+            return 1;
+    return 0;
+#else
+    (void)sp;
+    return 0;
+#endif
+}
+
+#ifdef VST_MODE
+/* One predicate for every player-ownership gate, per slot on BOTH sides
+ * (P5-M4): sampler playback matches the chain's own SAMPLER marker against
+ * the playing engine; score playback matches the chain's SCORE-family
+ * marker against the calling score-player slot. */
 static int chain_player_owned(const SynthChainPlan *sp, int is_score,
                               int engine_slot)
 {
-    return is_score ? sp->has_score
-                    : chain_hosts_sampler_engine(sp, engine_slot);
+    if (!is_score)
+        return chain_hosts_sampler_engine(sp, engine_slot);
+    if (!sp->has_score)
+        return 0;
+    for (int i = 0; i < sp->num_inserts; i++)
+        if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_SCORE
+            && sp->insert_state_idx[i] == engine_slot)
+            return 1;
+    return 0;
 }
 
 /* (P4-M2) The player-side execution — post-marker OUT staging, FX/probes,
@@ -455,20 +484,19 @@ static int synth_source_base(const SynthChainPlan *sp, int synth_slot,
 
 /* True when a synth chain carries NO signal THIS LINE: its base source
  * resolved to "no signal" AND no player is ACTUALLY substituting a stream
- * right now. The substitution test must be dynamic: the score player feeds
- * every has_score chain only while it RUNS, a sampler feeds a chain only
- * while that chain's own engine is DRIVING. The old static exclusion (the
- * has_sampler/has_score plan flags) declared a SCORE/sampler chain "fed"
- * even with its player idle — the executor then ran the chain on
- * synth_source_base's live fallback pointers, leaking the SP3CTRA device
- * feed into a chain with no input of its own (audible on its OUT sends,
- * visible in its probes). */
-static int synth_chain_has_no_signal(const SynthChainPlan *sp, int base_sig,
-                                     int score_playing)
+ * right now. The substitution test must be dynamic AND per slot (P5-M4): a
+ * score-player slot feeds only the chains carrying ITS marker while it RUNS,
+ * a sampler feeds a chain only while that chain's own engine is DRIVING.
+ * The old static exclusion (the has_sampler/has_score plan flags) declared a
+ * SCORE/sampler chain "fed" even with its player idle — the executor then
+ * ran the chain on synth_source_base's live fallback pointers, leaking the
+ * SP3CTRA device feed into a chain with no input of its own (audible on its
+ * OUT sends, visible in its probes). */
+static int synth_chain_has_no_signal(const SynthChainPlan *sp, int base_sig)
 {
     if (!sp->present || base_sig >= 0)
         return 0;
-    if (sp->has_score && score_playing)
+    if (chain_hosts_driving_score(sp))
         return 0;
     if (chain_hosts_driving_engine(sp))
         return 0;
@@ -818,17 +846,18 @@ static void chain_execute_span(const SynthChainPlan *sp, int chain_idx,
 /* Position of the marker whose player OWNS the stream below it, -1 if none.
  * THE single split-point definition — producers and players MUST agree on it,
  * or the pre-marker and post-marker spans gap/overlap.
- *   score_owns   — the score channel plays AND owns this chain (has_score):
- *                  the first SCORE-type marker wins (SCORE/TIMBRE/MIDI SCORE/
- *                  VOICE share the relay, which owns the whole channel).
- *   engine_slot  — >= 0: that exact engine's SAMPLER marker (the caller IS
- *                  its player); -1: any DRIVING engine's marker (producers,
- *                  which only know "some player owns this stream").
- * KNOWN GAP (pre-existing arbitration hole, see PLAN_P4 M3): a chain hosting
- * a playing score AND a driving sampler whose engine does not share a chain
- * with the score's engine is not arbitrated — both players walk overlapping
- * spans and double-stage the same OUTs. The relay eviction covers the shared-
- * chain cases only. */
+ *   score_owns   — a score-player slot owns this chain (P5-M4, per slot):
+ *                  the first SCORE-family marker whose pool slot matches
+ *                  (players) or is feeding (producers) wins.
+ *   engine_slot  — >= 0: the caller IS a player — its exact marker (sampler
+ *                  engine, or score-player slot when score_owns); -1: any
+ *                  DRIVING marker (producers, which only know "some player
+ *                  owns this stream").
+ * KNOWN GAP (pre-existing arbitration hole, see PLAN_P4 M3 / P5-M4): a chain
+ * hosting SEVERAL simultaneously-driving players (score slot + sampler
+ * engine, or two feeding score slots) is not arbitrated — each player walks
+ * from its own marker and they double-stage the shared OUTs below both.
+ * Cross-chain there is no overlap by construction (per-slot ownership). */
 static int chain_owning_marker_pos(const SynthChainPlan *sp, int score_owns,
                                    int engine_slot)
 {
@@ -837,8 +866,22 @@ static int chain_owning_marker_pos(const SynthChainPlan *sp, int score_owns,
         const int id = sp->insert_id[i];
         if (score_owns)
         {
+            /* (P5-M4) Per-slot: the SCORE-family marker wins only when it is
+             * the caller's own slot (players pass their slot) or when its
+             * slot is actually feeding (producers pass -1) — two idle SCORE
+             * modules above a playing one must NOT hijack the split point. */
             if (id == IMAGE_CHAIN_INSERT_SCORE)
-                return i;
+            {
+                if (engine_slot >= 0)
+                {
+                    if (sp->insert_state_idx[i] == engine_slot)
+                        return i;
+                }
+#ifdef VST_MODE
+                else if (score_player_slot_is_playing(sp->insert_state_idx[i]))
+                    return i;
+#endif
+            }
         }
         else if (id == IMAGE_CHAIN_INSERT_SAMPLER)
         {
@@ -987,23 +1030,21 @@ int chain_pathb_player_candidate(int is_score, int engine_slot)
  * chains keep their own producers. Same cross-engine imprecision as the
  * addOwned/pbOwned gates there: if the OTHER engine still plays one of these
  * chains, its next 1 ms tick re-stages — a self-healing one-tick dropout. */
-void chain_player_stagings_set_inactive(int engine_slot)
+static void player_stagings_set_inactive_impl(int is_score, int player_slot)
 {
     ChainPlan plan;
     chain_plan_get(&plan);
     for (int k = 0; k < plan.num_ls_sends && k < CHAIN_MAX_CHAINS; k++)
     {
         const LsSendPlan *snd = &plan.ls_send[k];
-        if (chain_player_owned(&snd->recipe, 0, engine_slot)
-            || chain_player_owned(&snd->recipe, 1, engine_slot))
+        if (chain_player_owned(&snd->recipe, is_score, player_slot))
             synth_staging_set_inactive(snd->chain_idx);
     }
     for (int c = 0; c < plan.num_chains && c < CHAIN_MAX_CHAINS; c++)
     {
         const SynthChainPlan *sp = &plan.chain[c];
         if (!sp->present) continue;
-        if (!chain_player_owned(sp, 0, engine_slot)
-            && !chain_player_owned(sp, 1, engine_slot))
+        if (!chain_player_owned(sp, is_score, player_slot))
             continue;
         for (int i = 0; i < sp->num_inserts; i++)
         {
@@ -1013,6 +1054,18 @@ void chain_player_stagings_set_inactive(int engine_slot)
                 synth_staging_luxwave_set_inactive(c);
         }
     }
+}
+
+void chain_player_stagings_set_inactive(int engine_slot)
+{
+    /* (P5-M4) Sampler ownership ONLY: the score no longer rides the sampler
+     * threads — engine index k must not silence score-slot k's chains. */
+    player_stagings_set_inactive_impl(0, engine_slot);
+}
+
+void score_player_stagings_set_inactive(int score_slot)
+{
+    player_stagings_set_inactive_impl(1, score_slot);
 }
 
 void *udpThread(void *arg) {
@@ -1293,7 +1346,11 @@ void *udpThread(void *arg) {
       {
         int published = 0;
 #ifdef VST_MODE
-        if (!lux_sampler_is_playing())
+        /* (P5-M4) The score players no longer ride the sampler engines —
+         * their display ownership is a separate aggregate. Without it the
+         * live publish fights the ScorePlayerService's 1 kHz writes (visible
+         * flicker between the device feed and the score). */
+        if (!lux_sampler_is_playing() && !score_player_any_playing())
 #endif
         {
           uint8_t *wR = NULL, *wG = NULL, *wB = NULL;
@@ -1358,11 +1415,12 @@ void *udpThread(void *arg) {
         src_G = db->activeBuffer_G;
         src_B = db->activeBuffer_B;
 #ifdef VST_MODE
-        const int player_running_now = lux_sampler_is_playing();
-        const int score_playing_now  = lux_sampler_is_score_playing();
+        /* (P5-M4) Score ownership is resolved PER CHAIN/PER SLOT below
+         * (chain_hosts_driving_score) — no channel-wide score flag left. */
+        const int player_running_now =
+            lux_sampler_is_playing() || score_player_any_playing();
 #else
         const int player_running_now = 0;
-        const int score_playing_now  = 0;
 #endif
 
         /* ── M3: uniform per-chain loop ──────────────────────────────────────
@@ -1406,13 +1464,13 @@ void *udpThread(void *arg) {
                 { ls_bank = sp->insert_state_idx[i]; break; }
 
             /* Per-chain playback: this chain is player-owned when ITS OWN
-             * engine is driving (or the SCORE relay for a score chain) — a
-             * chain hosting an idle engine keeps its positional run on its
-             * own stream. Per-engine query: BOTH chains may be player-owned
-             * simultaneously (multi-chain split). */
+             * engine is driving or ITS OWN score-player slot is feeding
+             * (P5-M4, per-marker on both sides) — a chain hosting an idle
+             * player keeps its positional run on its own stream. Several
+             * chains may be player-owned simultaneously. */
             const int stream_player_owned =
                 chain_hosts_driving_engine(sp)
-                || (sp->has_score && score_playing_now);
+                || chain_hosts_driving_score(sp);
 
             if (stream_player_owned)
             {
@@ -1431,7 +1489,7 @@ void *udpThread(void *arg) {
                         sp, c, db, nb_pixels,
                         &pmR, &pmG, &pmB);
                     const int own_mk = chain_owning_marker_pos(
-                        sp, score_playing_now && sp->has_score, -1);
+                        sp, chain_hosts_driving_score(sp), -1);
                     if (pmSig >= 0 && own_mk >= 0)
                     {
                         /* Pre-marker span [0, marker]: upstream probes/FX run
@@ -1474,7 +1532,7 @@ void *udpThread(void *arg) {
             const uint8_t *sbR, *sbG, *sbB;
             const int sig = synth_source_base(sp, c, db,
                                               nb_pixels, &sbR, &sbG, &sbB);
-            if (synth_chain_has_no_signal(sp, sig, score_playing_now))
+            if (synth_chain_has_no_signal(sp, sig))
             {
                 /* Path-B tap: published by the pb_no_signal block after the
                  * loop (is_pb_chain = 0 here — no double publish). */
@@ -1700,11 +1758,12 @@ void internal_sources_process_tick(void *arg)
   chain_plan_get(&frame_plan);
 
 #ifdef VST_MODE
-  const int sampler_playing = lux_sampler_is_playing();
-  const int score_playing   = lux_sampler_is_score_playing();
+  /* (P5-M4) Score ownership is per chain/per slot (chain_hosts_driving_score)
+   * — this aggregate only arbitrates the single visual mix bus below. */
+  const int any_player_playing =
+      lux_sampler_is_playing() || score_player_any_playing();
 #else
-  const int sampler_playing = 0;
-  const int score_playing   = 0;
+  const int any_player_playing = 0;
 #endif
 
 #ifdef VST_MODE
@@ -1763,12 +1822,12 @@ void internal_sources_process_tick(void *arg)
       if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSTRAL)
       { ls_bank = sp->insert_state_idx[i]; break; }
 
-    /* Per-chain playback: owned when ITS OWN engine is driving (or the
-     * SCORE relay for a score chain) — mirror of udpThread's per-engine
-     * gate; both chains may be player-owned simultaneously. */
+    /* Per-chain playback: owned when ITS OWN engine is driving or ITS OWN
+     * score-player slot is feeding (P5-M4) — mirror of udpThread's
+     * per-marker gate; several chains may be player-owned simultaneously. */
     const int stream_player_owned =
         chain_hosts_driving_engine(sp)
-        || (sp->has_score && score_playing);
+        || chain_hosts_driving_score(sp);
     if (stream_player_owned)
     {
       /* P4-M2 — EVERY player-owned chain splits at its owning marker (mirror
@@ -1780,7 +1839,7 @@ void internal_sources_process_tick(void *arg)
       const int pmSig = synth_source_base(sp, c, db,
                                           nb_pixels, &pmR, &pmG, &pmB);
       const int own_mk = chain_owning_marker_pos(
-          sp, score_playing && sp->has_score, -1);
+          sp, chain_hosts_driving_score(sp), -1);
       if (pmSig >= 0 && own_mk >= 0)
       {
           /* Pre-marker span [0, marker] — mirror of udpThread's. */
@@ -1811,7 +1870,7 @@ void internal_sources_process_tick(void *arg)
     const uint8_t *sbR, *sbG, *sbB;
     const int sig = synth_source_base(sp, c, db,
                                       nb_pixels, &sbR, &sbG, &sbB);
-    const int no_sig = synth_chain_has_no_signal(sp, sig, score_playing);
+    const int no_sig = synth_chain_has_no_signal(sp, sig);
     if (no_sig || sig <= 0)
     {
       /* sig==0 → the live path owns this chain's frames (device streaming
@@ -1846,7 +1905,7 @@ void internal_sources_process_tick(void *arg)
 
     /* Engine tap A — from the first send (mirror of udpThread). */
     if (ex.ls_staged && c == first_send_chain
-        && !(sp->has_score && score_playing))
+        && !chain_hosts_driving_score(sp))
       audio_image_buffers_publish_engine_input(
           audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
           ex.lsR, ex.lsG, ex.lsB, nb_pixels);
@@ -1878,7 +1937,7 @@ void internal_sources_process_tick(void *arg)
   const uint8_t *dispG = pb_base_G;
   const uint8_t *dispB = pb_base_B;
 
-  if (!sampler_playing)
+  if (!any_player_playing)
   {
     uint8_t *wR, *wG, *wB;
     if (audio_image_buffers_start_write(audioBuffers, &wR, &wG, &wB) == 0)
