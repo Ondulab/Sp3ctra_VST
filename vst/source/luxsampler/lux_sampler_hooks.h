@@ -70,7 +70,7 @@ void lux_sampler_record_chain_frame(int engine_slot,
                                     uint16_t       pixel_count);
 
 /**
- * @brief Per-engine driving query — is THIS engine's playback (or score)
+ * @brief Per-engine driving query — is THIS engine's playback
  *        currently driving its stream?
  *
  * Multi-chain split (2026-07-13): the chain executors gate player-ownership
@@ -105,8 +105,7 @@ int lux_sampler_is_playing(void);
  * Thread: any Non-RT producer. Atomic reads only.
  *
  * @return engine slot (0=A, 1=B) whose SAMPLER playback owns the channel;
- *         -1 when idle OR when the channel is score-relayed (the SCORE path
- *         has its own has_score gates — never engine-matched).
+ *         -1 when idle.
  */
 int lux_sampler_playing_engine(void);
 
@@ -159,20 +158,6 @@ void lux_sampler_record_input_frame(int engine,
  * @return 1 if sequencer STEP_LIVE is active, 0 otherwise
  */
 int lux_sampler_is_seq_live_step(void);
-
-/**
- * @brief Returns non-zero while the SCORE player is actively playing back
- *        (any engine's dedicated scoreSlot is in playback).
- *
- * Used by udpThread() / the feeder tick to leave a score-fed chain's input
- * alone while FramePlayerThread owns it, and to commit silence to a score-fed
- * chain only when the score is idle.
- *
- * Thread: UDP receiver thread / feeder (Non-RT). Atomic read only.
- *
- * @return 1 if score playback active, 0 otherwise
- */
-int lux_sampler_is_score_playing(void);
 
 #ifdef __cplusplus
 } /* extern "C" */

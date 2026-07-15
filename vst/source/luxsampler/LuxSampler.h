@@ -35,12 +35,6 @@ extern "C"
 namespace LuxSamplerConstants
 {
     constexpr int     NUM_SLOTS           = 12;
-    // Sentinel "slot" index for the SCORE module's internal playback slot.
-    // Equals NUM_SLOTS so it never collides with a real slot index. It is used
-    // ONLY as the value of activePlaySlot / startPlayCmd and to resolve the
-    // dedicated scoreSlot in FramePlayerThread — it must NEVER be used to index
-    // any of the NUM_SLOTS-sized arrays (slotState[], currentPlayHead[], …).
-    constexpr int     SCORE_SLOT          = NUM_SLOTS;
     // Max frames per slot — sized for the slot duration cap below:
     //   200 DPI sensor → ~2000 fps, 60 s × 2000 = 120 000, ×1.5 safety margin = 180 000.
     // Memory cost: lazy-allocated, ~1.87 GB per actively-used slot (sizeof(CapturedFrame)
@@ -241,18 +235,6 @@ struct LuxSamplerAtomicState
     std::atomic<int>  startPlayCmd { -1 };   // slot index, -1 = no command
     std::atomic<bool> stopPlayCmd  { false };
 
-    /** Manual SCORE scrub: UI posts a target frame (≥0); FramePlayerThread snaps
-     *  the score play head to it on its next tick and disarms (exchange → -1).
-     *  -1 = no pending seek. Only consulted for the dedicated score slot. */
-    std::atomic<int>  scoreSeekHead { -1 };
-
-    /** Manual SCORE scrub-audition: set while the user click-drags over the
-     *  preview of a STOPPED score. FramePlayerThread plays the score slot but
-     *  HOLDS the play head (no auto-advance) so the column under the cursor is
-     *  re-injected every tick — the user hears a sustained tone that follows the
-     *  drag. Cleared on mouse-up (uiEndScoreScrub), which stops like a normal STOP. */
-    std::atomic<bool> scoreScrubbing { false };
-
     /** Silence-injection command — posted from RT (triggerStep(STEP_EMPTY) or
      *  rtStop()) and consumed by FramePlayerThread (Non-RT).
      *  When set, FramePlayerThread writes a full-white (255) frame to
@@ -311,12 +293,11 @@ private:
     void injectWhiteFrame() noexcept;
 
     // ── Multi-voice playback (multi-bank simultaneous play, 2026-07-13) ───────
-    // One VoiceCtx per simultaneously-playing sampler slot; a SCORE session
-    // keeps exactly one voice. All members are touched exclusively on the
-    // FramePlayerThread.
+    // One VoiceCtx per simultaneously-playing sampler slot. All members are
+    // touched exclusively on the FramePlayerThread.
     struct VoiceCtx
     {
-        int      slot           = -1;    // slot index (SCORE_SLOT for the score)
+        int      slot           = -1;    // slot index
         int      direction      = 1;     // +1 forward / -1 backward
         float    frameAcc       = 0.0f;  // sub-frame speed accumulator
         int      prevStartFrame = -1;
@@ -330,7 +311,7 @@ private:
      *  (trim/loop/attack/decay/floor/EQ) into outR/G/B (zero-filled
      *  beyond outNb). Returns false when the voice ended this tick
      *  (LoopMode::NONE reached its boundary). */
-    bool tickVoice(VoiceCtx& v, FrameSlot& slot, bool isScore,
+    bool tickVoice(VoiceCtx& v, FrameSlot& slot,
                    uint8_t* outR, uint8_t* outG, uint8_t* outB, int& outNb);
 
     /** Composite one voice frame into the master frame (darkness domain,
@@ -345,14 +326,8 @@ private:
      *  self-resampling record, live darken-blend, transport fade, sends
      *  staging, chain inserts, visual mix bus + preprocessed commit. */
     void outputFrame(uint8_t* workR, uint8_t* workG, uint8_t* workB, int nb,
-                     bool isScore, float liveBlendAmount);
+                     float liveBlendAmount);
 
-    /** SCORE relay: when SCORE relinquishes the shared channel, hand it back to
-     *  the sampler slot it overrode. Returns true when a slot was re-armed. */
-    bool resumeScoreRelaySlot();
-
-    /** One SCORE playback session (single voice on the dedicated score slot). */
-    void runScoreSession();
     /** One sampler playback session — the voice set follows slotState[]:
      *  every PLAYING slot is a voice, composited per-bank (level + mix mode). */
     void runSamplerSession();
@@ -675,15 +650,11 @@ public:
     }
     float    getSlotSpeed(int i) const noexcept
     {
-        if (i == LuxSamplerConstants::SCORE_SLOT)
-            return scoreParams.speed.load(std::memory_order_relaxed);
         if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 1.0f;
         return slotParams[i].speed.load(std::memory_order_relaxed);
     }
     LoopMode getSlotLoopMode(int i) const noexcept
     {
-        if (i == LuxSamplerConstants::SCORE_SLOT)
-            return static_cast<LoopMode>(scoreParams.loopMode.load(std::memory_order_relaxed));
         if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return LoopMode::LOOP;
         return static_cast<LoopMode>(slotParams[i].loopMode.load(std::memory_order_relaxed));
     }
@@ -831,128 +802,6 @@ public:
      *  If the slot is already PLAYING, stop it (restore passthrough).
      *  No-op if the slot is empty or currently recording. */
     void uiPlaySlot(int slotIndex) noexcept;
-
-    // =========================================================================
-    // SCORE module playback (Non-RT) — reuses FramePlayerThread via the
-    // dedicated internal scoreSlot (sentinel activePlaySlot == SCORE_SLOT).
-    // The SCORE block in CHAIN 1 plays a generated spectrogram image exactly
-    // like a sampler slot, but with its own transport (Play/Stop/Loop/Speed).
-    // =========================================================================
-    /** Convert a generated spectrogram into playable frames. ONLY the `band`
-     *  region (the part a CIS sensor would scan — see ScoreGenRenderer) is read:
-     *  each band COLUMN → one CapturedFrame.
-     *
-     *  The band's vertical axis is LINEAR in frequency over [scoreMinHz,
-     *  scoreMaxHz] (bottom = min). The synthesis maps pixel index LOGARITHMICALLY
-     *  over the instrument's range; so each output pixel is sampled from the band
-     *  at the band row whose linear frequency equals the synth's LOG frequency
-     *  for that pixel — making the reconstructed pitches faithful. Frequencies
-     *  outside the band map to white (silence).
-     *
-     *  Passing an empty band falls back to the full image; passing scoreMax<=min
-     *  falls back to a plain flipped linear resample. Non-RT — stops any score
-     *  playback first. Safe to call from the message thread.
-     *
-     *  `stereo`: when true the image is a colour composite (left=red, right=blue)
-     *  and each frame keeps its R/G/B so LuxStral's colour-temperature panning
-     *  reproduces the stereo image. When false the (greyscale) red channel is
-     *  copied to R=G=B as before (centred/mono playback). */
-    void loadScoreFramesFromImage(const juce::Image& image,
-                                  juce::Rectangle<int> band = {},
-                                  double scoreMinHz = 0.0,
-                                  double scoreMaxHz = 0.0,
-                                  bool stereo = false);
-
-    /** Toggle SCORE playback: start if idle (taking over the Modulated channel
-     *  like the sampler), stop if already playing. No-op if no frames loaded. */
-    void uiPlayScore() noexcept;
-    /** Stop SCORE playback and restore live passthrough. */
-    void uiStopScore() noexcept;
-    /** Full SCORE teardown for module removal: stop playback (so FramePlayerThread
-     *  releases scoreSlot), then free the slot buffer and reset its state. After
-     *  this scoreHasContent()/isScorePlaying() are both false. Non-RT (takes the
-     *  slot mutex), call on the message thread only. */
-    void uiDiscardScore();
-    /** Begin a scrub-audition on a STOPPED score: take over the synthesis channel
-     *  and start FramePlayerThread in held-position mode so the column under the
-     *  drag is re-injected continuously (the user hears it). No-op (returns false)
-     *  if the score is already playing or has no content. Pair with uiEndScoreScrub
-     *  on mouse-up. The play-head must be armed first (uiSeekScore) so the audition
-     *  starts at the clicked column. */
-    bool uiBeginScoreScrub() noexcept;
-    /** End a scrub-audition (mouse-up): stop injection and restore live passthrough,
-     *  exactly like a STOP, but keep the play head where the scrub left it. */
-    void uiEndScoreScrub() noexcept;
-    /** True while a scrub-audition is active (held-position injection). */
-    bool isScoreScrubbing() const noexcept
-    {
-        return atomicState.scoreScrubbing.load(std::memory_order_acquire);
-    }
-    /** True while the SCORE module is playing (drives the PLAY/STOP button + LED). */
-    bool isScorePlaying() const noexcept
-    {
-        return scorePlaying.load(std::memory_order_acquire);
-    }
-    /** True once a generated image has been loaded into the score slot. */
-    bool scoreHasContent() const noexcept { return scoreSlot.has_content; }
-    /** Number of frames (time columns) loaded into the score slot. */
-    int  getScoreFrameCount() const noexcept { return scoreSlot.frame_count; }
-    /** Current score playback head (frame index). Non-RT safe (atomic). */
-    int  getScorePlayHead() const noexcept
-    {
-        return scorePlayHead.load(std::memory_order_relaxed);
-    }
-    /** Internal: called by FramePlayerThread to publish the score play head. */
-    void notifyScorePlayHead(int head) noexcept
-    {
-        scorePlayHead.store(head, std::memory_order_relaxed);
-    }
-    /** Arm a one-shot resume frame for the NEXT uiPlayScore() so the play head
-     *  survives a frame reload (e.g. live EQ re-apply) instead of restarting at
-     *  0. Pass a frame index ≥0; cleared automatically once consumed. */
-    void setScoreResumeHead(int frame) noexcept
-    {
-        scoreResumeHead.store(frame, std::memory_order_relaxed);
-    }
-    /** Internal: FramePlayerThread takes the armed resume frame (returns -1 when
-     *  none) and disarms it, so a fresh PLAY always starts from the beginning. */
-    int consumeScoreResumeHead() noexcept
-    {
-        return scoreResumeHead.exchange(-1, std::memory_order_relaxed);
-    }
-    /** Internal: FramePlayerThread takes the armed relay slot (the sampler slot to
-     *  resume when SCORE relinquishes the shared channel) and disarms it; returns
-     *  -1 when none is armed. */
-    int consumeScoreRelaySlot() noexcept
-    {
-        return scoreRelaySlot_.exchange(-1, std::memory_order_relaxed);
-    }
-    /** Manually move the score play head to @p frame (UI scrub).
-     *  • If playing, FramePlayerThread snaps the live head there on its next tick.
-     *  • Either way, arms it as the resume point so a subsequent PLAY starts there,
-     *    and publishes it immediately so the UI play-head line follows the drag. */
-    void uiSeekScore(int frame) noexcept
-    {
-        const int n = scoreSlot.frame_count;
-        if (n <= 0) return;
-        const int f = juce::jlimit(0, n - 1, frame);
-        atomicState.scoreSeekHead.store(f, std::memory_order_release); // live seek if playing
-        scoreResumeHead.store(f, std::memory_order_relaxed);           // start here on next PLAY
-        scorePlayHead.store(f, std::memory_order_relaxed);             // reflect immediately in UI
-    }
-    void setScoreSpeed(float v) noexcept
-    {
-        scoreParams.speed.store(juce::jlimit(0.01f, 32.0f, v), std::memory_order_relaxed);
-    }
-    void setScoreLoopMode(LoopMode m) noexcept
-    {
-        scoreParams.loopMode.store(static_cast<int>(m), std::memory_order_relaxed);
-    }
-    /** Internal: called by FramePlayerThread when score playback ends on its own
-     *  (LoopMode::NONE reached the end). Non-RT. */
-    void notifyScoreStopped() noexcept { scorePlaying.store(false, std::memory_order_release); }
-    /** Internal access for FramePlayerThread to the dedicated score slot. */
-    FrameSlot& getScoreSlot() noexcept { return scoreSlot; }
 
     // =========================================================================
     // Timeline / playhead queries (Non-RT, for UI display)
@@ -1176,8 +1025,8 @@ public:
     // =========================================================================
     // Player-release handshake (message thread ⇄ FramePlayerThread).
     // playerBusyMask_ mirrors the slots the player is CURRENTLY dereferencing
-    // (bit i for slots[i], bit SCORE_SLOT for the score — multi-voice playback
-    // holds several at once); 0 when idle. Every message-thread path that
+    // (bit i for slots[i] — multi-voice playback holds several at once);
+    // 0 when idle. Every message-thread path that
     // frees/replaces a slot's frame buffer must stop playback and then
     // waitForPlayerRelease() before touching the buffer — stop commands are
     // asynchronous and the player reads frames WITHOUT slotsMutex_.
@@ -1217,8 +1066,8 @@ public:
     // rack) does starting one still evict the other. RT-safe (atomic stores).
     static void stopOtherEnginesPlayback(int exceptIndex) noexcept;
     // Published by the processor on every chain-plan derive: do sampler A and
-    // B currently sit on the SAME chain? Gates the arbiter + the SCORE relay's
-    // cross-engine displacement (both only make sense on a shared stream).
+    // B currently sit on the SAME chain? Gates the playback arbiter (only
+    // meaningful on a shared stream).
     static void setEnginesShareChain(bool share) noexcept
     { s_enginesShareChain.store(share, std::memory_order_release); }
     static bool enginesShareSameChain() noexcept
@@ -1274,7 +1123,7 @@ private:
     DoubleBuffer*      doubleBuffer_ = nullptr; // stored by startPlayerThread()
 
     // Bitmask of the slots the player is currently dereferencing (bit i for
-    // slots[i], bit SCORE_SLOT for the score) — multi-voice playback can hold
+    // slots[i]) — multi-voice playback can hold
     // several slots at once. 0 when idle — see waitForPlayerRelease().
     std::atomic<uint32_t> playerBusyMask_ { 0 };
     // True while saveToFile/saveSlotToFile copy frames chunk by chunk: the
@@ -1350,26 +1199,6 @@ private:
     /** Reset slot i's edit handles (start/end/attack/decay/floor) to defaults so a
      *  cleared slot starts fresh. Called by the clear paths. */
     void resetSlotEditHandles(int i) noexcept;
-
-    // -------------------------------------------------------------------------
-    // SCORE module — dedicated internal slot + params, played by the same
-    // FramePlayerThread via the SCORE_SLOT sentinel. Independent of the 12
-    // sampler slots (never indexes the NUM_SLOTS-sized arrays).
-    // -------------------------------------------------------------------------
-    FrameSlot         scoreSlot;
-    SlotPlayParams    scoreParams;
-    std::atomic<bool> scorePlaying  { false };
-    std::atomic<int>  scorePlayHead { 0 };
-    // One-shot resume frame for the NEXT score play start (-1 = from beginning).
-    // Lets the UI preserve the play head across a frame reload (e.g. EQ re-apply)
-    // instead of snapping back to 0. Consumed (reset to -1) by FramePlayerThread.
-    std::atomic<int>  scoreResumeHead { -1 };
-    // Relay: the sampler slot that owned the shared playback channel when SCORE
-    // took over (-1 = none). When SCORE stops, FramePlayerThread hands the channel
-    // back to this slot so the sampler stream resumes underneath instead of going
-    // silent ("SCORE takes over the relay; when it stops, the sampler stream lives on").
-    // Armed by uiPlayScore(); consumed (reset to -1) by FramePlayerThread.
-    std::atomic<int>  scoreRelaySlot_ { -1 };
 
     // Per-slot playhead atomics — written by FramePlayerThread, read by UI.
     // Per-slot playhead atomics — written by FramePlayerThread, read by UI.

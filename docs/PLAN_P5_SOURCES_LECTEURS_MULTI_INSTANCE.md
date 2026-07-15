@@ -215,12 +215,24 @@ par instance.
 > (documents par instance = chantier UX séparé si besoin). Speed/loop encore
 > broadcast (params globaux) — banques par instance si le besoin se confirme.
 
-### P5-M6 — Purge + matrice (S)
+### P5-M6 — Purge + matrice (S) — **PURGE FAITE (2026-07-15), matrice device À TESTER**
 Purge du canal partagé résiduel (notifyScoreStopped global, isScorePlaying
 channel-wide, scoreRelaySlot_ encodage moteur), commentaires ; matrice :
 2 scores sur 2 chaînes en simultané, score+sampler même chaîne (le trou
 d'arbitrage M2 se résout naturellement par slot), IMAGE ×2 chaînes avec
 contenus différents, VIDEO+CAMERA simultanés, presets/reload, 0 underruns.
+
+> **Réalisation purge (~830 lignes).** LuxSampler ne connaît PLUS le score :
+> scoreSlot/scoreParams/scorePlaying/scorePlayHead/scoreResumeHead/
+> scoreRelaySlot_, SCORE_SLOT, scoreSeekHead/scoreScrubbing (AtomicState),
+> loadScoreFramesFromImage, uiPlay/Stop/Discard/Seek/Begin/EndScrub,
+> notifyScorePlayHead/Stopped, set/getScoreSpeed/LoopMode, runScoreSession,
+> resumeScoreRelaySlot, le dispatch SCORE_SLOT de run(), le hook C
+> lux_sampler_is_score_playing — tous SUPPRIMÉS. tickVoice/outputFrame ont
+> perdu leur param isScore (constant-foldé : transport, opacité, blend live,
+> walk is_score=0, mixBusOwner = !score_player_any_playing && moteur).
+> getSlotSpeed/LoopMode sans branche sentinelle. Le score vit UNIQUEMENT dans
+> ScorePlayerService. **RESTE : la matrice device manuelle avec le user.**
 
 ## Décisions à valider
 
