@@ -96,7 +96,7 @@ extern "C"
             s_chainLineId[engine_slot].fetch_add(1, std::memory_order_relaxed);
         if (auto* e = LuxSampler::pinEngine(engine_slot))
         {
-            // A DRIVING engine (its own playback / score owns the channel)
+            // A DRIVING engine (its own playback owns the channel)
             // self-records the modulated output via lux_samplers_record_modulated
             // — skip the positional capture so it never double-records itself.
             // A NON-driving engine on another chain records ITS OWN stream here
@@ -135,13 +135,11 @@ extern "C"
     int lux_sampler_playing_engine(void)
     {
         // One-plays-at-a-time arbiter ⇒ at most one engine drives the channel.
-        // Score relay reports -1: the SCORE path is gated by has_score, never
-        // by engine matching.
         for (int i = 0; i < LuxSampler::kMaxEngines; ++i)
         {
             int driving = 0;
             if (auto* e = LuxSampler::pinEngine(i))
-                driving = (e->isDrivingChannel() && ! e->isScorePlaying()) ? 1 : 0;
+                driving = e->isDrivingChannel() ? 1 : 0;
             LuxSampler::unpinEngine(i);
             if (driving)
                 return i;
@@ -196,18 +194,6 @@ extern "C"
         }
         return liveStep;
     }
-
-    int lux_sampler_is_score_playing(void)
-    {
-        int playing = 0;
-        for (int i = 0; i < LuxSampler::kMaxEngines && !playing; ++i)
-        {
-            if (auto* e = LuxSampler::pinEngine(i))
-                playing = e->isScorePlaying() ? 1 : 0;
-            LuxSampler::unpinEngine(i);
-        }
-        return playing;
-    }
 }
 
 // ============================================================================
@@ -216,8 +202,6 @@ extern "C"
 // ============================================================================
 bool LuxSampler::isDrivingChannel() const noexcept
 {
-    if (isScorePlaying())
-        return true;                       // SCORE always takes over the channel
     if (!enabled.load(std::memory_order_relaxed))
         return false;                      // disabled module = passthrough:
                                            // the upstream flow crosses the
@@ -572,7 +556,7 @@ void LuxSampler::setEnabled(bool e) noexcept
         }
     }
 
-    // Stop a REAL playing slot (a running SCORE keeps its own lifecycle) and
+    // Stop a REAL playing slot and
     // hand the live feed back.
     const int cp = atomicState.activePlaySlot.load(std::memory_order_acquire);
     if (cp >= 0 && cp < LuxSamplerConstants::NUM_SLOTS)
@@ -640,7 +624,7 @@ void LuxSampler::uiToggleRecord(int slotIndex) noexcept
     }
 
     // Punch-in: stop playback of THIS slot only (a slot cannot play and record
-    // at once). Other playing banks — and a running SCORE — keep going: the
+    // at once). Other playing banks keep going: the
     // player self-records its composited output into the armed slot, so
     // recording while other banks play IS the resampling path (multi-chain
     // split, 2026-07-13). When nothing else plays, the player session ends by
@@ -695,365 +679,10 @@ void LuxSampler::uiPlaySlot(int slotIndex) noexcept
     // Clear any stale stop request BEFORE arming playback — stopPlayerThread()
     // (every prepareToPlay) leaves stopPlayCmd=true that the idle player never
     // consumes; the first PLAY after it was silently swallowed ("press PLAY
-    // twice" bug — same fix as uiPlayScore). Sequenced-before startPlayCmd.
+    // twice" bug). Sequenced-before startPlayCmd.
     atomicState.stopPlayCmd.store(false,         std::memory_order_release);
     atomicState.startPlayCmd.store(slotIndex,    std::memory_order_release);
     atomicState.passthroughEnabled.store(false,  std::memory_order_release);
-}
-
-// ============================================================================
-// SCORE module — image → frames + transport
-// ============================================================================
-
-void LuxSampler::loadScoreFramesFromImage(const juce::Image& image,
-                                         juce::Rectangle<int> band,
-                                         double scoreMinHz,
-                                         double scoreMaxHz,
-                                         bool stereo)
-{
-    // Always stop any score playback first — FramePlayerThread must not be
-    // reading scoreSlot while we reallocate it. The stop is asynchronous, so
-    // also wait until the player has actually released the score slot.
-    uiStopScore();
-    waitForPlayerRelease(LuxSamplerConstants::SCORE_SLOT);
-    scorePlayHead.store(0, std::memory_order_relaxed);
-
-    if (!image.isValid() || image.getWidth() <= 0 || image.getHeight() <= 0)
-    {
-        std::lock_guard<std::mutex> lk(slotsMutex_);
-        scoreSlot.clear();
-        log_warning("FS", "Score: invalid image, slot cleared");
-        return;
-    }
-
-    // Extract ONLY the spectrogram band (the part a CIS sensor would scan).
-    // Empty band ⇒ fall back to the full image.
-    juce::Rectangle<int> b = band.getWidth() > 0 && band.getHeight() > 0
-        ? band.getIntersection(image.getBounds())
-        : image.getBounds();
-    if (b.getWidth() <= 0 || b.getHeight() <= 0)
-        b = image.getBounds();
-
-    const int bandX = b.getX();
-    const int bandY = b.getY();
-    const int bandW = b.getWidth();
-    const int bandH = b.getHeight();
-    const int frames = std::min(bandW, LuxSamplerConstants::MAX_FRAMES_PER_SLOT);
-
-    // Allocate the score slot to the ACTUAL number of frames (NOT the 180k
-    // FrameSlot::allocate() default — that would reserve ~1.87 GB).
-    auto buffer = std::make_unique<CapturedFrame[]>(static_cast<size_t>(frames));
-
-    // ── Build the per-output-pixel band row LUT ───────────────────────────────
-    // The synthesis maps pixel index px∈[0,kPx) LOGARITHMICALLY to frequency over
-    // the instrument's range [synthLo, synthHi]. The score band is ALSO drawn on a
-    // LOG axis over [scoreMinHz, scoreMaxHz] (see ScoreGenRenderer — matches
-    // PhonoPaper). So this is a log→log match: when the two ranges coincide it is a
-    // straight 1:1 row-per-oscillator readout, identical to how the physical CIS
-    // scanner reads a printed strip. This keeps the live preview equal to the
-    // print+scan result. Rows outside the band map to -1 → white (silence).
-    constexpr int kPx = LuxSamplerConstants::MAX_PIXELS;
-    const int denom = (kPx > 1) ? (kPx - 1) : 1;
-
-    extern sp3ctra_config_t g_sp3ctra_config;
-    const double synthLo = (double) g_sp3ctra_config.low_frequency;
-    const double synthHi = (double) g_sp3ctra_config.high_frequency;
-    const bool logMap = (scoreMaxHz > scoreMinHz) && (scoreMinHz > 0.0)
-                         && (synthHi > synthLo) && (synthLo > 0.0);
-
-    std::vector<int> rowLut(static_cast<size_t>(kPx));
-    for (int px = 0; px < kPx; ++px)
-    {
-        if (logMap)
-        {
-            const double t = (double) px / (double) denom;             // 0..1 (px → note)
-            const double f = synthLo * std::pow(synthHi / synthLo, t); // synth log freq
-            // Position of f on the band's LOG frequency axis (matches the image).
-            const double pos = std::log(f / scoreMinHz)
-                             / std::log(scoreMaxHz / scoreMinHz);
-            if (pos < 0.0 || pos > 1.0)
-                rowLut[(size_t) px] = -1;                              // outside band → silence
-            else
-                rowLut[(size_t) px] = (bandY + bandH - 1)
-                    - (int) (pos * (double) (bandH - 1) + 0.5);        // flip: low freq → bottom
-        }
-        else
-        {
-            // Fallback: plain flipped linear resample of the band.
-            rowLut[(size_t) px] = (bandY + bandH - 1)
-                - (int) ((static_cast<int64_t>(px) * (bandH - 1)) / denom);
-        }
-    }
-
-    {
-        const juce::Image::BitmapData bmp(image, juce::Image::BitmapData::readOnly);
-        for (int x = 0; x < frames; ++x)
-        {
-            CapturedFrame& f = buffer[static_cast<size_t>(x)];
-            f.timestamp_us = static_cast<uint64_t>(x) * 1000ULL; // 1 ms/frame (1000 lps)
-            f.line_id      = static_cast<uint32_t>(x);
-            f.pixel_count  = static_cast<uint16_t>(kPx);
-            const int imgX = bandX + x;
-            for (int px = 0; px < kPx; ++px)
-            {
-                const int srcRow = rowLut[(size_t) px];
-                if (srcRow < 0)
-                {
-                    // Frequency outside the band → white (silence) on every channel.
-                    f.R[px] = f.G[px] = f.B[px] = 255;
-                    continue;
-                }
-                const juce::Colour c = bmp.getPixelColour(imgX,
-                        juce::jlimit(bandY, bandY + bandH - 1, srcRow));
-                if (stereo)
-                {
-                    // Colour composite (left=red, right=blue): forward R/B unchanged
-                    // so LuxStral's colour-temperature panning splits L/R, and
-                    // rebalance loudness through GREEN only (green is pan-neutral —
-                    // it cancels in both colour-temperature axes). The synth
-                    // amplitude is ITU luma, which weights red (0.299) ≠ blue (0.114),
-                    // so a left-panned cell would otherwise sit ~2 dB below an equal
-                    // right-panned one. A fully-panned cell can be at most
-                    // (1-0.299)=0.701 loud (its silent side forces the red channel to
-                    // 255), so we drive every cell's inverted-luma to a side-symmetric
-                    // target — L and R end up equal, centre stays full. No LuxStral
-                    // code is touched; the displayed/exported image is unchanged.
-                    const int   R  = c.getRed(), B = c.getBlue();
-                    const float rE = 1.0f - R / 255.0f;     // right energy
-                    const float lE = 1.0f - B / 255.0f;     // left  energy
-                    const float mx = juce::jmax(lE, rE);
-                    const float mn = juce::jmin(lE, rE);
-                    const float ampTarget = 0.701f * mx + 0.299f * mn;
-                    const float fg = 255.0f
-                        * (1.0f - (ampTarget - 0.299f * rE - 0.114f * lE) / 0.587f);
-                    f.R[px] = (uint8_t) R;
-                    f.G[px] = (uint8_t) juce::jlimit(0, 255, (int) (fg + 0.5f));
-                    f.B[px] = (uint8_t) B;
-                }
-                else
-                {
-                    // Greyscale: red channel copied to R=G=B (centred playback).
-                    const uint8_t g = c.getRed();
-                    f.R[px] = f.G[px] = f.B[px] = g;
-                }
-            }
-        }
-    }
-
-    {
-        std::lock_guard<std::mutex> lk(slotsMutex_);
-        scoreSlot.frames      = std::move(buffer);
-        scoreSlot.capacity    = frames;
-        scoreSlot.frame_count = frames;
-        scoreSlot.play_head   = 0;
-        scoreSlot.duration_us = static_cast<uint64_t>(frames) * 1000ULL;
-        scoreSlot.has_content = true;
-    }
-
-    log_info("FS", "Score: loaded %d frames from band %dx%d (image %dx%d)",
-             frames, bandW, bandH, image.getWidth(), image.getHeight());
-}
-
-void LuxSampler::uiPlayScore() noexcept
-{
-    if (scorePlaying.load(std::memory_order_acquire))
-    {
-        uiStopScore();
-        return;
-    }
-
-    if (!scoreSlot.has_content) return; // nothing generated yet
-
-    // Relay: if a sampler slot currently owns the shared channel, remember it so it
-    // resumes when SCORE stops — SCORE takes over the relay; when it stops, the
-    // sampler stream lives on. Halt the sampler's injection (slotState→IDLE) and free the
-    // channel for SCORE. A non-slot owner leaves any armed relay untouched, so it
-    // survives a live-EQ reload (stop → reallocate → re-play).
-    // Encoding: engine * NUM_SLOTS + slot — the channel may be owned by
-    // ANOTHER engine (e.g. sampler B playing while SCORE lives on A); the
-    // arbiter below would otherwise stop it with no memory and the contract
-    // "the sampler resumes when SCORE stops" broke for engine B.
-    const int curPlay = atomicState.activePlaySlot.load(std::memory_order_relaxed);
-    if (curPlay >= 0)
-    {
-        atomicState.stopPlayCmd.store(true, std::memory_order_release);
-        if (curPlay < LuxSamplerConstants::NUM_SLOTS)
-        {
-            scoreRelaySlot_.store(engineIndex_ * LuxSamplerConstants::NUM_SLOTS + curPlay,
-                                  std::memory_order_relaxed);
-            atomicState.slotState[curPlay].store(static_cast<int>(SlotState::IDLE),
-                                                 std::memory_order_release);
-        }
-    }
-    else
-    {
-        // Cross-engine displacement only exists on a SHARED chain (one
-        // stream). On split chains the other engine keeps playing — the
-        // arbiter below is a no-op there and arming a relay for it would
-        // wrongly re-trigger its (still playing) slot when SCORE stops.
-        if (enginesShareSameChain())
-            for (int i = 0; i < kMaxEngines; ++i)
-            {
-                if (i == engineIndex_) continue;
-                LuxSampler* e = s_engines[i].load(std::memory_order_acquire);
-                if (e == nullptr) continue;
-                const int cp = e->atomicState.activePlaySlot.load(std::memory_order_relaxed);
-                if (cp >= 0 && cp < LuxSamplerConstants::NUM_SLOTS)
-                {
-                    scoreRelaySlot_.store(i * LuxSamplerConstants::NUM_SLOTS + cp,
-                                          std::memory_order_relaxed);
-                    break;   // single playback channel → at most one owner
-                }
-            }
-    }
-
-    // Score is UI-driven (never sequencer-controlled): FramePlayerThread is
-    // free to restore live passthrough when one-shot playback ends.
-    stopOtherEnginesPlayback(engineIndex_);  // shared-chain eviction only
-    atomicState.seqControlledPlay.store(false, std::memory_order_release);
-    // A real PLAY always advances — clear any leftover scrub-hold flag.
-    atomicState.scoreScrubbing.store(false, std::memory_order_release);
-    scorePlaying.store(true, std::memory_order_release);
-    atomicState.activePlaySlot.store(LuxSamplerConstants::SCORE_SLOT, std::memory_order_release);
-    // Clear any stale stop request BEFORE arming playback. loadScoreFramesFromImage()
-    // (run on every GENERATE / EQ reload) calls uiStopScore(), which leaves
-    // stopPlayCmd=true; because nothing is playing then, the idle FramePlayerThread
-    // never consumes it. Without this clear the first PLAY's inner loop would see the
-    // leftover flag on its very first iteration and break out immediately — that is
-    // the "must press PLAY twice to start" bug. Sequenced-before the startPlayCmd
-    // release store below, so the thread is guaranteed to observe stopPlayCmd=false
-    // once it picks up this play command.
-    atomicState.stopPlayCmd.store(false, std::memory_order_release);
-    atomicState.startPlayCmd.store(LuxSamplerConstants::SCORE_SLOT,   std::memory_order_release);
-    atomicState.passthroughEnabled.store(false, std::memory_order_release);
-}
-
-void LuxSampler::uiStopScore() noexcept
-{
-    scorePlaying.store(false, std::memory_order_release);
-    atomicState.scoreScrubbing.store(false, std::memory_order_release); // also ends any scrub
-    scorePlayHead.store(0, std::memory_order_relaxed);
-    scoreResumeHead.store(-1, std::memory_order_relaxed); // drop any armed resume
-
-    // Only touch the shared playback channel if SCORE actually owns it. A sampler
-    // slot playing on the same channel must keep running: SCORE teardown (manual
-    // STOP, GENERATE, live-EQ reload, tab close) must never interrupt the sampler.
-    if (atomicState.activePlaySlot.load(std::memory_order_relaxed)
-        != LuxSamplerConstants::SCORE_SLOT)
-        return;
-
-    // STOP ⇒ silence, like a natural end-of-score (stoppedByNoneMode) and the
-    // scrub release: without it a mid-play STOP leaves the last staged column
-    // ringing (no staging timeout, no other producer on a sourceless chain).
-    // An armed relay still resumes right after — the white frame is overwritten
-    // on the resumed sampler's next 1 ms tick.
-    atomicState.injectSilenceCmd.store(true, std::memory_order_release);
-    atomicState.stopPlayCmd.store(true, std::memory_order_release);
-    atomicState.activePlaySlot.store(-1, std::memory_order_release);
-    // Leave passthrough disabled when a sampler slot is queued to resume (the
-    // player thread re-arms it from its relay slot); restore live only when there
-    // is nothing to relay.
-    if (scoreRelaySlot_.load(std::memory_order_relaxed) < 0)
-        atomicState.passthroughEnabled.store(true, std::memory_order_release);
-}
-
-void LuxSampler::uiDiscardScore()
-{
-    // Stop first: FramePlayerThread must not be reading scoreSlot while we free it
-    // (same ordering as loadScoreFramesFromImage's reallocation path). The stop is
-    // asynchronous, so wait until the player has actually released the score slot.
-    uiStopScore();
-    waitForPlayerRelease(LuxSamplerConstants::SCORE_SLOT);
-    scorePlayHead.store(0, std::memory_order_relaxed);
-    scoreResumeHead.store(-1, std::memory_order_relaxed);
-
-    std::lock_guard<std::mutex> lk(slotsMutex_);
-    scoreSlot.clear();   // releases the frame buffer + resets has_content/frame_count
-}
-
-bool LuxSampler::uiBeginScoreScrub() noexcept
-{
-    // Already playing → the live-seek path (uiSeekScore) handles the drag; don't
-    // spin up a second transport.
-    if (scorePlaying.load(std::memory_order_acquire)) return false;
-    if (!scoreSlot.has_content) return false;
-
-    // Take over the synthesis channel from any other player (sampler slot or
-    // sequencer), mirroring uiPlayScore(). Relay: remember an overridden sampler
-    // slot so it resumes when the scrub ends (uiEndScoreScrub). Same encoding
-    // as uiPlayScore: engine * NUM_SLOTS + slot (cross-engine relay).
-    const int curPlay = atomicState.activePlaySlot.load(std::memory_order_relaxed);
-    if (curPlay >= 0)
-    {
-        atomicState.stopPlayCmd.store(true, std::memory_order_release);
-        if (curPlay < LuxSamplerConstants::NUM_SLOTS)
-        {
-            scoreRelaySlot_.store(engineIndex_ * LuxSamplerConstants::NUM_SLOTS + curPlay,
-                                  std::memory_order_relaxed);
-            atomicState.slotState[curPlay].store(static_cast<int>(SlotState::IDLE),
-                                                 std::memory_order_release);
-        }
-    }
-    else
-    {
-        for (int i = 0; i < kMaxEngines; ++i)
-        {
-            if (i == engineIndex_) continue;
-            LuxSampler* e = s_engines[i].load(std::memory_order_acquire);
-            if (e == nullptr) continue;
-            const int cp = e->atomicState.activePlaySlot.load(std::memory_order_relaxed);
-            if (cp >= 0 && cp < LuxSamplerConstants::NUM_SLOTS
-                && enginesShareSameChain())   // cross-engine relay: shared chain only
-            {
-                scoreRelaySlot_.store(i * LuxSamplerConstants::NUM_SLOTS + cp,
-                                      std::memory_order_relaxed);
-                break;   // single playback channel → at most one owner
-            }
-        }
-    }
-
-    // Scrub is UI-driven and HOLDS position: FramePlayerThread injects the column
-    // at the (uiSeekScore-armed) play head every tick but never auto-advances.
-    // Note: scorePlaying stays FALSE so the PLAY/STOP button + head-line keep
-    // their stopped appearance — this is a transient audition, not playback.
-    stopOtherEnginesPlayback(engineIndex_);  // shared-chain eviction only
-    atomicState.seqControlledPlay.store(false, std::memory_order_release);
-    atomicState.scoreScrubbing.store(true, std::memory_order_release);
-    atomicState.activePlaySlot.store(LuxSamplerConstants::SCORE_SLOT, std::memory_order_release);
-    // Clear any stale stop request left by a prior uiStopScore()/uiEndScoreScrub()
-    // (the idle thread never consumes it) BEFORE arming, else the inner loop would
-    // break out on its first iteration. Sequenced-before the startPlayCmd release.
-    atomicState.stopPlayCmd.store(false, std::memory_order_release);
-    atomicState.startPlayCmd.store(LuxSamplerConstants::SCORE_SLOT, std::memory_order_release);
-    atomicState.passthroughEnabled.store(false, std::memory_order_release);
-    return true;
-}
-
-void LuxSampler::uiEndScoreScrub() noexcept
-{
-    // Stop injection and relinquish the channel — same channel-aware path as a
-    // normal STOP (see uiStopScore): only act if SCORE owns the channel so a
-    // sampler playing underneath keeps running. We do NOT reset scorePlayHead, so
-    // the scrub head line stays where the drag left it, and we keep the armed
-    // resume head so a subsequent PLAY starts from that column.
-    atomicState.scoreScrubbing.store(false, std::memory_order_release);
-    if (atomicState.activePlaySlot.load(std::memory_order_relaxed)
-        != LuxSamplerConstants::SCORE_SLOT)
-        return;
-    // The audition falls SILENT on release — audio/video symmetry: the probe
-    // rings stop receiving frames the instant the session dies, so the held
-    // column must stop sounding too (it used to ring forever: the stagings
-    // have no timeout and a sourceless score chain has no other producer).
-    // Set BEFORE stopPlayCmd so the exiting session is guaranteed to observe
-    // it in its end-of-session silence block; the idle drain in run() catches
-    // the flag if the session already exited.
-    atomicState.injectSilenceCmd.store(true, std::memory_order_release);
-    atomicState.stopPlayCmd.store(true, std::memory_order_release);
-    atomicState.activePlaySlot.store(-1, std::memory_order_release);
-    // Leave passthrough disabled when a sampler slot is queued to resume (the
-    // player thread re-arms it); restore live only when there is nothing to relay.
-    if (scoreRelaySlot_.load(std::memory_order_relaxed) < 0)
-        atomicState.passthroughEnabled.store(true, std::memory_order_release);
 }
 
 void LuxSampler::uiClearSlot(int slotIndex) noexcept
@@ -1140,8 +769,7 @@ void LuxSampler::waitForPlayerRelease(int slotIndex, int timeoutMs) const noexce
     // Message thread only. Stop commands are asynchronous: the player may still
     // be inside its current tick dereferencing slot.frames. Wait until it has
     // released the slot before the caller frees/replaces the frame buffer.
-    // slotIndex < 0 waits for "no REAL slot busy" (a running SCORE keeps its own
-    // scoreSlot and does not conflict with slots[] replacement).
+    // slotIndex < 0 waits for "no slot busy".
     // Two consecutive idle observations are required: the player publishes
     // playerBusyMask_ a few instructions AFTER consuming startPlayCmd, so a
     // single read could race a playback that is just starting.
@@ -1918,8 +1546,7 @@ bool LuxSampler::loadFromFile(const juce::File& file)
     // ── Stop any ongoing activity before replacing slot contents ─────────
     // (mirrors loadSlotFromFile). The player dereferences slot.frames WITHOUT
     // slotsMutex_, so freeing a playing slot's buffer below would be a
-    // use-after-free. Stop playback of real slots (a running SCORE keeps its
-    // own scoreSlot — untouched here), disarm recording, suspend command
+    // use-after-free. Stop playback, disarm recording, suspend command
     // pickup for the whole load, and wait for the player to release.
     playbackSuspended_.store(true, std::memory_order_release);
     struct SuspendReset
@@ -2558,70 +2185,13 @@ void FramePlayerThread::injectWhiteFrame() noexcept
 //
 // Architecture (2026-07-13 multi-bank mixer):
 //   run()               outer loop — waits for a startPlayCmd wake-up, then
-//                       dispatches to a SCORE session or a sampler session.
+//                       starts a sampler session.
 //   runSamplerSession() the voice set FOLLOWS slotState[]: every slot whose
 //                       state is PLAYING is a voice; each tick every voice is
 //                       advanced (tickVoice) and composited into ONE master
 //                       frame via its bank mixer (level = 1 − brightnessLift,
 //                       per-bank SlotMixMode), then injected (outputFrame).
-//   runScoreSession()   single-voice session on the dedicated score slot —
-//                       same tick/output path, no bank mixer.
 // ============================================================================
-
-// ── SCORE relay ──────────────────────────────────────────────────────────────
-// When SCORE relinquishes the shared channel, hand it back to the sampler slot
-// it overrode (armed by uiPlayScore()/uiBeginScoreScrub()) so the sampler
-// stream resumes underneath instead of going silent. The slot replays under
-// its own Resume mode. Multi-bank limitation: only the PRIMARY voice (lowest
-// slot, mirrored in activePlaySlot) is relayed — additional voices that were
-// playing when SCORE took over do not resume automatically.
-// Returns true when a slot was re-armed (caller must then NOT restore live
-// passthrough).
-bool FramePlayerThread::resumeScoreRelaySlot()
-{
-    auto& state = sampler.getAtomicState();
-
-    // Encoded engine * NUM_SLOTS + slot (see uiPlayScore) — the channel
-    // may have been owned by ANOTHER engine (sampler B under SCORE on A).
-    const int enc = sampler.consumeScoreRelaySlot();
-    if (enc < 0) return false;
-    const int engIdx = enc / LuxSamplerConstants::NUM_SLOTS;
-    const int relay  = enc % LuxSamplerConstants::NUM_SLOTS;
-    // Pin the target engine: this runs on A's player thread while the
-    // processor may be destroying engine B — an unpinned dereference
-    // could race the dtor's CAS-unregister (same protocol as the C hooks).
-    LuxSampler* target = LuxSampler::pinEngine(engIdx);
-    struct RelayPinReset
-    {
-        int idx;
-        ~RelayPinReset() { LuxSampler::unpinEngine(idx); }
-    } pinReset { engIdx };
-    if (target == nullptr) return false;
-    if (!target->getSlot(relay).has_content) return false;
-
-    auto& ts = target->getAtomicState();
-    ts.slotState[relay].store(static_cast<int>(SlotState::PLAYING),
-                              std::memory_order_release);
-    ts.activePlaySlot.store(relay, std::memory_order_release);
-    ts.stopPlayCmd.store(false, std::memory_order_release);   // clear stale stop
-    ts.startPlayCmd.store(relay, std::memory_order_release);
-    ts.passthroughEnabled.store(false, std::memory_order_release);
-
-    if (&ts != &state)
-    {
-        // Cross-engine resume: release OUR channel bookkeeping — the score
-        // sentinel must not linger in activePlaySlot (it would poison the
-        // next arbiter pass), and our passthrough flag must not keep the
-        // live feed suppressed (the target engine owns that now).
-        if (state.activePlaySlot.load(std::memory_order_relaxed)
-            == LuxSamplerConstants::SCORE_SLOT)
-            state.activePlaySlot.store(-1, std::memory_order_release);
-        state.passthroughEnabled.store(true, std::memory_order_release);
-    }
-    log_info("FS", "SCORE stopped — relaying back to sampler %d slot %d",
-             engIdx, relay);
-    return true;
-}
 
 // ── tickVoice ────────────────────────────────────────────────────────────────
 // Advance ONE voice by one 1 ms tick and render its processed frame into
@@ -2631,11 +2201,10 @@ bool FramePlayerThread::resumeScoreRelaySlot()
 // Returns false when the voice ended this tick (LoopMode::NONE reached its
 // boundary); the overshot play head is left unclamped so a Resume-mode restart
 // falls back to the region start (historical behaviour).
-bool FramePlayerThread::tickVoice(VoiceCtx& v, FrameSlot& slot, bool isScore,
+bool FramePlayerThread::tickVoice(VoiceCtx& v, FrameSlot& slot,
                                   uint8_t* outR, uint8_t* outG, uint8_t* outB,
                                   int& outNb)
 {
-    auto& state = sampler.getAtomicState();
     const int slotIdx = v.slot;
     outNb = 0;
 
@@ -2700,25 +2269,8 @@ bool FramePlayerThread::tickVoice(VoiceCtx& v, FrameSlot& slot, bool isScore,
         v.frameAcc = 0.0f;
     }
 
-    // ── Manual scrub: UI dragged the score play head elsewhere ───────────────
-    if (isScore)
-    {
-        const int seek = state.scoreSeekHead.exchange(-1, std::memory_order_acq_rel);
-        if (seek >= 0)
-        {
-            slot.play_head = juce::jlimit(0, slot.frame_count - 1, seek);
-            v.frameAcc     = 0.0f;
-        }
-    }
-
     // ── Advance play_head by fractional speed per tick ───────────────────────
     // Integer step: 0 is allowed for speed<1 (repeats current frame).
-    // Scrub-audition (held position): NEVER auto-advance — the play head moves
-    // only via the seek above, so the column under the cursor is re-injected
-    // unchanged every tick → a sustained tone.
-    const bool scrubHold = isScore
-        && state.scoreScrubbing.load(std::memory_order_relaxed);
-    if (!scrubHold)
     {
         v.frameAcc    += p_speed;
         const int step = static_cast<int>(v.frameAcc);
@@ -2916,10 +2468,7 @@ bool FramePlayerThread::tickVoice(VoiceCtx& v, FrameSlot& slot, bool isScore,
     }
 
     // Update UI playhead cursor (atomic write — Non-RT safe)
-    if (isScore)
-        sampler.notifyScorePlayHead(slot.play_head);
-    else
-        sampler.notifyPlayHead(slotIdx, slot.play_head);
+    sampler.notifyPlayHead(slotIdx, slot.play_head);
 
     outNb = nb;
     return true;
@@ -2988,7 +2537,7 @@ void FramePlayerThread::compositeVoice(uint8_t* mR, uint8_t* mG, uint8_t* mB,
 // Runs once per 1 ms tick regardless of how many voices were composited.
 void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
                                     uint8_t* workB, int nb,
-                                    bool isScore, float liveBlendAmount)
+                                    float liveBlendAmount)
 {
     auto& state = sampler.getAtomicState();
 
@@ -3045,9 +2594,7 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
         // sampler_freeze_mode only controls the manual Play/Hold/Stop Transport UI
         // and must not gate injection into AudioImageBuffers during sequencer play.
         const bool seqDriven  = state.seqControlledPlay.load(std::memory_order_relaxed);
-        // The SCORE module has its own transport — the sampler Transport
-        // UI (sampler_freeze_mode) must never gate or fade it.
-        const int   smpFreeze  = (seqDriven || isScore) ? 0 : g_sp3ctra_config.sampler_freeze_mode;
+        const int   smpFreeze  = seqDriven ? 0 : g_sp3ctra_config.sampler_freeze_mode;
         const int   liveFreeze = g_sp3ctra_config.image_freeze_mode;
         const float liveOp     = g_sp3ctra_config.image_live_opacity;
         const float smpOp      = g_sp3ctra_config.image_sampler_opacity;
@@ -3071,13 +2618,12 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
         // identity) before it reaches the visual mix bus AND the audio
         // pipeline (the preprocessed_data step below reads these same
         // whitened pixels), so the sampler stops contributing while the
-        // FramePlayerThread keeps advancing the play head. The SCORE relay
-        // (isScore) owns a separate enable and is never gated here.
-        const bool moduleIgnored = (! isScore && ! sampler.isEnabled());
+        // FramePlayerThread keeps advancing the play head.
+        const bool moduleIgnored = ! sampler.isEnabled();
         const float effectiveSmpOp = moduleIgnored
             ? 0.0f
-            : (addRelayed || isScore)
-                ? 1.0f      // relay/Score: full opacity
+            : addRelayed
+                ? 1.0f      // relay: full opacity
                 : smpOp;    // legacy MIX: crossfader balance
 
         if (smpFreeze != 2) // Do not inject when sampler transport is STOP
@@ -3095,9 +2641,8 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
             }
 
             // 2. Darken-blend with live when live transport is active
-            //    Skip entirely when the additive path is sampler-
-            //    relayed and for the Score (no live contribution).
-            if (!addRelayed && !isScore
+            //    Skip entirely when the additive path is sampler-relayed.
+            if (!addRelayed
                 && liveFreeze != 2 && liveOp > 0.001f)
             {
                 uint8_t lvR[LuxSamplerConstants::MAX_PIXELS] {};
@@ -3132,10 +2677,9 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
             //     Writes the stream at the first owned LS OUT back into
             //     work* so the mix bus + audio commits below see post-FX.
             (void) chain_player_execute_owned(
-                isScore ? 1 : 0,
+                /*is_score*/ 0,
                 sampler.getEngineIndex(),
-                (state.seqControlledPlay.load(std::memory_order_relaxed)
-                 || isScore) ? 1 : 0,
+                state.seqControlledPlay.load(std::memory_order_relaxed) ? 1 : 0,
                 audioBuffers, workR, workG, workB, nb);
 
             // 3. Write mixed frame to AudioImageBuffers (the visual mix
@@ -3143,13 +2687,11 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
             //    simultaneously only the display owner writes it (the
             //    other playback stays audio-only; per-engine viz is a
             //    follow-up). P5-M4: the samplers defer to the
-            //    ScorePlayerService while any score slot feeds (the legacy
-            //    in-engine score path is dead — isScore never comes true).
+            //    ScorePlayerService while any score slot feeds.
             const bool mixBusOwner =
-                score_player_any_playing()
-                    ? isScore
-                    : (lux_sampler_playing_engine()
-                       == sampler.getEngineIndex());
+                ! score_player_any_playing()
+                && (lux_sampler_playing_engine()
+                    == sampler.getEngineIndex());
             uint8_t* wR = nullptr;
             uint8_t* wG = nullptr;
             uint8_t* wB = nullptr;
@@ -3190,7 +2732,7 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
         // its chain walk). Only the polyphonic (pb) views remain player-
         // committed while the pb chain is relayed.
         const bool pbOwned  = chain_pathb_player_candidate(
-            isScore ? 1 : 0, sampler.getEngineIndex()) != 0;
+            /*is_score*/ 0, sampler.getEngineIndex()) != 0;
 
         if (doubleBuffer != nullptr && pbOwned)
         {
@@ -3205,8 +2747,8 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
             // by the pipeline envelope when sampler_freeze_mode=STOP (2).
             // Override freeze_mode to PLAY so ENVELOPE_SAMPLER processes
             // the frame normally regardless of the Transport UI state.
-            if (state.seqControlledPlay.load(std::memory_order_relaxed) || isScore)
-                sampler_cfg.freeze_mode = 0; /* force PLAY — sequencer / score active */
+            if (state.seqControlledPlay.load(std::memory_order_relaxed))
+                sampler_cfg.freeze_mode = 0; /* force PLAY — sequencer active */
 
             pipeline_path_luxsynth_luxwave(workR, workG, workB,
                                            &sampler_cfg, &ppData);
@@ -3228,152 +2770,6 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
                 // the unified chain walk above, at each OUT's exact position
                 // in its own chain (no more first-OUT-only, cross-chain-FX
                 // approximation).
-            }
-        }
-    }
-}
-
-// ── runScoreSession ──────────────────────────────────────────────────────────
-// One SCORE playback session: a single voice on the dedicated score slot,
-// exclusive owner of the shared channel (sentinel activePlaySlot==SCORE_SLOT).
-void FramePlayerThread::runScoreSession()
-{
-    auto& state = sampler.getAtomicState();
-    using namespace LuxSamplerConstants;
-
-    // Publish the busy bit BEFORE touching the slot's fields — message-thread
-    // code that frees/replaces the score frames stops playback then
-    // waitForPlayerRelease()s on this mask. Cleared on every exit path (RAII).
-    sampler.addPlayerBusySlot(SCORE_SLOT);
-    struct BusyReset
-    {
-        LuxSampler& s;
-        ~BusyReset() { s.clearPlayerBusyMask(); }
-    } busyReset { sampler };
-
-    FrameSlot& slot = sampler.getScoreSlot();
-
-    if (!slot.has_content || slot.frame_count == 0 || !slot.isAllocated())
-    {
-        log_warning("FS", "Score: play requested but no content");
-        sampler.notifyScoreStopped();
-        // SCORE took the channel but has nothing to play — hand it back to
-        // the sampler slot it overrode (if any) rather than silencing.
-        if (resumeScoreRelaySlot())
-            return;
-        state.activePlaySlot.store(-1, std::memory_order_release);
-        if (!state.seqControlledPlay.load(std::memory_order_relaxed))
-            state.passthroughEnabled.store(true, std::memory_order_release);
-        return;
-    }
-
-    log_info("FS", "Score: playback start — %d frames, %.2f s",
-             slot.frame_count, static_cast<double>(slot.duration_us) / 1e6);
-
-    VoiceCtx v;
-    v.slot         = SCORE_SLOT;
-    v.active       = true;
-    v.prevLoopMode = sampler.getSlotLoopMode(SCORE_SLOT);
-    v.direction    = (v.prevLoopMode == LoopMode::INVERSE) ? -1 : 1;
-    slot.play_head = 0; // set on first range init below
-    // SCORE resume: an armed resume frame (e.g. from a live EQ re-apply that
-    // reloaded the frames) takes over the initial head so playback continues
-    // where it left off instead of snapping back to 0. One-shot — consumed
-    // here, so a fresh PLAY still starts from the beginning.
-    {
-        const int resume = sampler.consumeScoreResumeHead();
-        if (resume > 0 && slot.frame_count > 0)
-            slot.play_head = juce::jlimit(0, slot.frame_count - 1, resume);
-    }
-
-    constexpr uint64_t kPeriodUs = 1000; // 1 ms = 1000 lines/sec
-    uint64_t lastInjectUs      = currentTimeUs();
-    bool     stoppedByNoneMode = false;
-
-    uint8_t workR[MAX_PIXELS];
-    uint8_t workG[MAX_PIXELS];
-    uint8_t workB[MAX_PIXELS];
-
-    while (!threadShouldExit())
-    {
-        // External stop commands
-        if (state.stopPlayCmd.exchange(false, std::memory_order_acq_rel))
-            break;
-        // The score has no slotState entry — it stops only via stopPlayCmd or
-        // a competing startPlayCmd.
-        {
-            const int pending = state.startPlayCmd.load(std::memory_order_relaxed);
-            if (pending >= 0 && pending != SCORE_SLOT)
-                break;
-        }
-
-        // ── Pause / hold: freeze play_head, re-anchor injection timer ─────
-        if (sampler.isSeqPlayerHeld())
-        {
-            lastInjectUs = currentTimeUs(); // no burst on resume
-            Thread::sleep(2);
-            continue;
-        }
-
-        // ── Wait for next 1ms injection tick ──────────────────────────────
-        const uint64_t now             = currentTimeUs();
-        const uint64_t sinceLastInject = now - lastInjectUs;
-        if (sinceLastInject < kPeriodUs)
-        {
-            const uint64_t remaining = kPeriodUs - sinceLastInject;
-            if (remaining > 2000) Thread::sleep(1);
-            else                  Thread::yield();
-            continue;
-        }
-        // Lock-step advance — avoid drift accumulation
-        lastInjectUs += kPeriodUs;
-        if (lastInjectUs > now) lastInjectUs = now; // catch-up safety
-
-        int nb = 0;
-        const bool alive = tickVoice(v, slot, true, workR, workG, workB, nb);
-        if (nb > 0)
-            outputFrame(workR, workG, workB, nb, true, 0.0f);
-        if (!alive)
-        {
-            stoppedByNoneMode = true;
-            break;
-        }
-    }
-
-    // ── Inject white (silence) frame when playback ends ───────────────────
-    {
-        const bool doSilence =
-            stoppedByNoneMode
-            || sampler.isSeqSilentStepActive()
-            || state.injectSilenceCmd.exchange(false, std::memory_order_acq_rel);
-        const bool liveStep = state.seqLiveStepActive.load(std::memory_order_relaxed);
-        if (doSilence && !liveStep)
-        {
-            log_info("FS", "Score: playback end — injecting white frame (silence)");
-            injectWhiteFrame();
-        }
-        else if (doSilence && liveStep)
-            log_info("FS", "Score: playback end — seqLiveStep active, skipping white frame");
-    }
-
-    log_info("FS", "Score: playback stopped (head=%d/%d)",
-             slot.play_head, slot.frame_count);
-
-    // Relinquish the channel unless a fresh score play is already queued
-    // (rapid stop+play).
-    {
-        const int pendingCmd = state.startPlayCmd.load(std::memory_order_acquire);
-        if (pendingCmd != SCORE_SLOT)
-        {
-            sampler.notifyScoreStopped();
-            // Relay first: if SCORE overrode a playing sampler slot, resume
-            // it. Otherwise relinquish the channel and restore live.
-            if (!resumeScoreRelaySlot())
-            {
-                if (state.activePlaySlot.load(std::memory_order_relaxed)
-                    == SCORE_SLOT)
-                    state.activePlaySlot.store(-1, std::memory_order_release);
-                state.passthroughEnabled.store(true, std::memory_order_release);
             }
         }
     }
@@ -3462,8 +2858,6 @@ void FramePlayerThread::runSamplerSession()
             break;
         {
             const int pending = state.startPlayCmd.load(std::memory_order_acquire);
-            if (pending == SCORE_SLOT)
-                break;   // SCORE takes over — the outer loop starts its session
             if (pending >= 0)
             {
                 state.startPlayCmd.exchange(-1, std::memory_order_acq_rel);
@@ -3540,7 +2934,7 @@ void FramePlayerThread::runSamplerSession()
         {
             if (!voices[i].active) continue;
             int nb = 0;
-            const bool alive = tickVoice(voices[i], sampler.getSlot(i), false,
+            const bool alive = tickVoice(voices[i], sampler.getSlot(i),
                                          vR, vG, vB, nb);
             // Bank mixer: fader = 1 − brightnessLift, per-bank mix mode.
             compositeVoice(workR, workG, workB, vR, vG, vB, nb,
@@ -3557,7 +2951,7 @@ void FramePlayerThread::runSamplerSession()
         }
 
         if (masterNb > 0)
-            outputFrame(workR, workG, workB, masterNb, false, liveBlend);
+            outputFrame(workR, workG, workB, masterNb, liveBlend);
 
         if (numActive == 0)
             break;
@@ -3674,10 +3068,7 @@ void FramePlayerThread::run()
             continue;
         }
 
-        if (slotToPlay == LuxSamplerConstants::SCORE_SLOT)
-            runScoreSession();
-        else
-            runSamplerSession();
+        runSamplerSession();
     }
 
     // Final safety: restore passthrough on thread exit only when not under
