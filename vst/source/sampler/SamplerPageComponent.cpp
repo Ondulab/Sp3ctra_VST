@@ -85,7 +85,7 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
                 // on BOTH engines: SAVE SESSION always writes banks A AND B, so
                 // leaving the other engine's takes in RAM would silently embed
                 // them into the brand-new session file.
-                for (int e = 0; e < 2; ++e)
+                for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
                 {
                     auto* fs = processor.getSampler(e);
                     if (fs == nullptr) continue;
@@ -307,6 +307,9 @@ void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
     // v2: the session carries BOTH sampler engines (A + B) — params and banks.
     // v1 only stored the engine this page happened to be bound to, silently
     // dropping the other engine's data on every save.
+    // TODO(P6-M2): v3 — N engines (P6 raised the pool to 8; v2 still saves
+    // engines 0/1 only, so takes recorded on engines 2..7 do NOT survive a
+    // session save until M2 lands).
     LuxSampler* engines[2] = { processor.getSampler(0), processor.getSampler(1) };
     auto* seq = processor.getFrameSequencer();
     if (!engines[0] || !engines[1] || !seq) return;

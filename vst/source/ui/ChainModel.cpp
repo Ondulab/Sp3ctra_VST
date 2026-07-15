@@ -146,7 +146,7 @@ bool ChainModel::canInsertIntoNewChain(ModuleType type, const juce::Uuid* moving
     if (isSlottedType(type) && firstFreeVideoSlot(movingId) < 0)
         return false;   // pool full (8 used)
 
-    // Sampler is multi-instance too (engines A/B), bounded by its own 2-slot pool.
+    // Sampler is multi-instance too (engines 0..7 since P6), bounded by its own pool.
     if (isSamplerEngine(type) && firstFreeSamplerSlot(movingId) < 0)
         return false;   // both sampler engines (A + B) already placed
 
@@ -475,7 +475,7 @@ void ChainModel::validateAndRepair()
 
     std::set<ModuleType> seenSingletons;   // synth/util types already placed (global)
     int videoBudget    = kMaxVideoSlots;    // at most 8 slotted instances model-wide
-    int samplerBudget  = kMaxSamplerEngines;// at most 2 sampler engines (A/B) model-wide
+    int samplerBudget  = kMaxSamplerEngines;// at most kMaxSamplerEngines engines model-wide
     // M6 — engine sends: up to 8 per TYPE model-wide (independent pools).
     auto sendIdx = [](ModuleType t) noexcept {
         return t == ModuleType::LuxStral ? 0 : t == ModuleType::LuxSynth ? 1 : 2;

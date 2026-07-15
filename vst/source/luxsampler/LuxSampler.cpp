@@ -26,9 +26,9 @@ extern "C" {
 // ============================================================================
 // Static instance (singleton for C hook access)
 // ============================================================================
-std::atomic<LuxSampler*> LuxSampler::s_engines[LuxSampler::kMaxEngines] = { nullptr, nullptr };
-std::atomic<int>         LuxSampler::s_engineBusy[LuxSampler::kMaxEngines] = { 0, 0 };
-std::atomic<bool> LuxSampler::s_enginesShareChain{ false };
+std::atomic<LuxSampler*> LuxSampler::s_engines[LuxSampler::kMaxEngines]    = {};
+std::atomic<int>         LuxSampler::s_engineBusy[LuxSampler::kMaxEngines] = {};
+std::atomic<uint8_t>     LuxSampler::s_shareMask[LuxSampler::kMaxEngines]  = {};
 
 // ============================================================================
 // C-linkage hook functions — called from udpThread() in multithreading.c.
@@ -219,16 +219,16 @@ bool LuxSampler::isDrivingChannel() const noexcept
 // ============================================================================
 // Playback arbiter — SCOPED to shared-chain topologies (multi-chain split).
 // Engines on DIFFERENT chains own independent streams: both may play at once,
-// so the arbiter is a no-op. Only when A and B sit on ONE chain (same stream)
-// does starting one still evict the other. RT-safe (atomic stores only).
+// so the arbiter is a no-op. Only an engine sharing a chain with the starting
+// one (same stream) is evicted — per PAIR since P6. RT-safe (atomic stores).
 // ============================================================================
 void LuxSampler::stopOtherEnginesPlayback(int exceptIndex) noexcept
 {
-    if (! s_enginesShareChain.load(std::memory_order_acquire))
-        return;   // cross-chain independence: nothing to evict
     for (int i = 0; i < kMaxEngines; ++i)
     {
         if (i == exceptIndex) continue;
+        if (! enginesShareChainPair(exceptIndex, i))
+            continue;   // cross-chain independence: nothing to evict
         LuxSampler* e = s_engines[i].load(std::memory_order_acquire);
         if (e == nullptr) continue;
         auto& as = e->atomicState;
