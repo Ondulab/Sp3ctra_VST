@@ -306,7 +306,7 @@ public:
             }
 
             // Reading head — only meaningful while OUR frames sit in the player.
-            auto* fs = processor.getScoreChannel(ModuleType::Timbre);
+            auto* fs = boundChannel();
             if (fs != nullptr && framesAreOurs)
             {
                 const bool playing = fs->isScorePlaying();
@@ -355,7 +355,7 @@ public:
                  && previewArea.contains(e.getPosition());
         if (! scrubbing) return;
         scrubTo(e);
-        if (auto* fs = processor.getScoreChannel(ModuleType::Timbre))
+        if (auto* fs = boundChannel())
             if (! fs->isScorePlaying())
                 scrubAuditioning = fs->uiBeginScoreScrub();
     }
@@ -365,7 +365,7 @@ public:
         scrubbing = false;
         if (scrubAuditioning)
         {
-            if (auto* fs = processor.getScoreChannel(ModuleType::Timbre)) fs->uiEndScoreScrub();
+            if (auto* fs = boundChannel()) fs->uiEndScoreScrub();
             scrubAuditioning = false;
         }
     }
@@ -834,7 +834,7 @@ private:
     //==========================================================================
     void togglePlay()
     {
-        auto* fs = processor.getScoreChannel(ModuleType::Timbre);
+        auto* fs = boundChannel();
         if (fs == nullptr) return;
 
         const bool play = ! (fs->isScorePlaying() && framesAreOurs);
@@ -865,7 +865,7 @@ private:
 
     void scrubTo(const juce::MouseEvent& e)
     {
-        auto* fs = processor.getScoreChannel(ModuleType::Timbre);
+        auto* fs = boundChannel();
         if (fs == nullptr || ! framesAreOurs) return;
         const int n = fs->getScoreFrameCount();
         if (n <= 0) return;
@@ -888,7 +888,7 @@ private:
             persistState();
         }
 
-        auto* fs = processor.getScoreChannel(ModuleType::Timbre);
+        auto* fs = boundChannel();
         if (fs != nullptr && framesAreOurs)
         {
             // Ownership check: the SCORE page (or a session restore) reloaded the
@@ -988,6 +988,39 @@ private:
     }
 
     //==========================================================================
+public:
+    /** P5-M5 — bind this page to the SELECTED instance's player slot
+     *  (-1 = first placed instance of this page's type). Ends any running
+     *  scrub on the previously bound channel; the new instance's frames are
+     *  (re)loaded on demand by the next PLAY/GENERATE. */
+    void setScoreSlot(int slot)
+    {
+        if (slot == boundScoreSlot_)
+            return;
+        if (scrubAuditioning)
+            if (auto* fs = boundChannel())
+                fs->uiEndScoreScrub();
+        scrubAuditioning = false;
+        framesAreOurs    = false;
+        loadedFrameCount = 0;
+        scrubHead        = -1;
+        scrubbing        = false;
+        boundScoreSlot_  = slot;
+        repaint();
+    }
+
+private:
+    /** The bound score channel: the selected instance's slot while it is
+     *  still in the rack, else the first placed instance of this type. */
+    ScoreChannel* boundChannel() const
+    {
+        if (boundScoreSlot_ >= 0
+            && processor.scorePlayerSlotInUse(boundScoreSlot_))
+            return processor.getScoreChannelForSlot(boundScoreSlot_);
+        return processor.getScoreChannel(ModuleType::Timbre);
+    }
+    int boundScoreSlot_ = -1;
+
     Sp3ctraAudioProcessor& processor;
 
     std::array<timbregen::TimbreSlotParams, timbregen::kNumSlots> slots;

@@ -300,9 +300,27 @@ void ChainRackComponent::rebuild()
             bp->onClick        = [this](juce::Uuid id) { selectInstance(id, true); };
             bp->onToggleEnable = [this, bp]            { toggleEnable(bp->getEnableParam()); };
             bp->onRemove       = [this](juce::Uuid id) { removeInstance(id); };
+            // P5-M5 — the score-family LED is the instance's TRANSPORT: click
+            // = PLAY/STOP of ITS player slot (uiPlayScore toggles; empty slot
+            // = no-op). The sentinel id only arms the LED hit-zone/hover ring
+            // — the callback above is replaced, nothing reaches the APVTS.
+            if (isScoreFamily(m.type))
+            {
+                const int scoreSlot = m.slot >= 0 ? m.slot : 0;
+                bp->setEnableParamOverride("__scoreTransport");
+                bp->onToggleEnable = [this, scoreSlot]
+                {
+                    if (auto* sc = processor.getScoreChannelForSlot(scoreSlot))
+                        sc->uiPlayScore();
+                };
+            }
             bp->setRemovable(! locked);
             const bool hasLed = bp->getEnableParam().isNotEmpty();
-            bp->setTooltip(hasLed
+            const bool isTransportLed = isScoreFamily(m.type);
+            bp->setTooltip(isTransportLed
+                ? (locked ? "Click the LED to play/stop - drag to reorder"
+                          : "Click the LED to play/stop - drag to reorder - x to remove")
+                : hasLed
                 ? (locked ? "Click the LED to enable/disable - drag to reorder"
                           : "Click the LED to enable/disable - drag to reorder - x to remove")
                 : (locked ? "Drag to reorder" : "Drag to reorder - x to remove"));

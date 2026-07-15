@@ -374,7 +374,7 @@ public:
             g.drawImage(previewImage, imgArea);
 
             // Reading head — only while OUR frames sit in the shared player.
-            auto* fs = processor.getScoreChannel(ModuleType::Voice);
+            auto* fs = boundChannel();
             if (fs != nullptr && framesAreOurs)
             {
                 const bool playing = fs->isScorePlaying();
@@ -430,7 +430,7 @@ public:
                  && previewArea.contains(e.getPosition());
         if (! scrubbing) return;
         scrubTo(e);
-        if (auto* fs = processor.getScoreChannel(ModuleType::Voice))
+        if (auto* fs = boundChannel())
             if (! fs->isScorePlaying())
                 scrubAuditioning = fs->uiBeginScoreScrub();
     }
@@ -440,14 +440,14 @@ public:
         scrubbing = false;
         if (scrubAuditioning)
         {
-            if (auto* fs = processor.getScoreChannel(ModuleType::Voice)) fs->uiEndScoreScrub();
+            if (auto* fs = boundChannel()) fs->uiEndScoreScrub();
             scrubAuditioning = false;
         }
     }
 
     void scrubTo(const juce::MouseEvent& e)
     {
-        auto* fs = processor.getScoreChannel(ModuleType::Voice);
+        auto* fs = boundChannel();
         if (fs == nullptr || ! framesAreOurs) return;
         const int n = fs->getScoreFrameCount();
         if (n <= 0) return;
@@ -917,7 +917,7 @@ private:
         generateButton.setEnabled(false);
         exportPngButton.setEnabled(false);
         exportJpgButton.setEnabled(false);
-        if (auto* fs = processor.getScoreChannel(ModuleType::Voice))
+        if (auto* fs = boundChannel())
             if (framesAreOurs)
                 fs->uiStopScore();
         processor.stopScorePreview();
@@ -948,7 +948,7 @@ private:
             framesAreOurs  = false;
             const juce::String why = r.error.isNotEmpty() ? r.error : r.render.log;
             logLabel.setText("Failed: " + why, juce::dontSendNotification);
-            if (auto* fs = processor.getScoreChannel(ModuleType::Voice))
+            if (auto* fs = boundChannel())
                 if (framesAreOurs)
                     fs->uiStopScore();
             setTransportEnabled(false);
@@ -1055,7 +1055,7 @@ private:
     {
         applyEqToImage();
         buildPreview();
-        if (auto* fs = processor.getScoreChannel(ModuleType::Voice))
+        if (auto* fs = boundChannel())
         {
             const bool wasPlaying = fs->isScorePlaying() && framesAreOurs;
             const int savedHead = wasPlaying ? fs->getScorePlayHead() : 0;
@@ -1196,7 +1196,7 @@ private:
     //==========================================================================
     void togglePlay()
     {
-        auto* fs = processor.getScoreChannel(ModuleType::Voice);
+        auto* fs = boundChannel();
         if (fs == nullptr || busy) return;
 
         const bool play = ! (fs->isScorePlaying() && framesAreOurs);
@@ -1235,7 +1235,7 @@ private:
 
     void refreshPlayButton()
     {
-        auto* fs = processor.getScoreChannel(ModuleType::Voice);
+        auto* fs = boundChannel();
         const bool playing = (fs != nullptr) && fs->isScorePlaying() && framesAreOurs;
         playStopButton.setPlaying(playing);
     }
@@ -1272,7 +1272,7 @@ private:
             && juce::Time::getMillisecondCounter() - lastEditMs > 800)
             persistState();
 
-        auto* fs = processor.getScoreChannel(ModuleType::Voice);
+        auto* fs = boundChannel();
         if (fs != nullptr && framesAreOurs)
         {
             // Ownership check: SCORE/TIMBRE/MIDI SCORE (or a restore) reloaded
@@ -1372,6 +1372,38 @@ private:
     }
 
     //==========================================================================
+public:
+    /** P5-M5 — bind this page to the SELECTED instance's player slot
+     *  (-1 = first placed instance of this page's type). Ends any running
+     *  scrub on the previously bound channel; the new instance's frames are
+     *  (re)loaded on demand by the next PLAY/GENERATE. */
+    void setScoreSlot(int slot)
+    {
+        if (slot == boundScoreSlot_)
+            return;
+        if (scrubAuditioning)
+            if (auto* fs = boundChannel())
+                fs->uiEndScoreScrub();
+        scrubAuditioning = false;
+        framesAreOurs    = false;
+        loadedFrameCount = 0;
+        scrubHead        = -1;
+        boundScoreSlot_  = slot;
+        repaint();
+    }
+
+private:
+    /** The bound score channel: the selected instance's slot while it is
+     *  still in the rack, else the first placed instance of this type. */
+    ScoreChannel* boundChannel() const
+    {
+        if (boundScoreSlot_ >= 0
+            && processor.scorePlayerSlotInUse(boundScoreSlot_))
+            return processor.getScoreChannelForSlot(boundScoreSlot_);
+        return processor.getScoreChannel(ModuleType::Voice);
+    }
+    int boundScoreSlot_ = -1;
+
     Sp3ctraAudioProcessor& processor;
 
     // TTS block.

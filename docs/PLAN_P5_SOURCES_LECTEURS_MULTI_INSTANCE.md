@@ -193,11 +193,27 @@ et uiPlayScore/uiStopScore globaux meurent.
 > simultanés sur DEUX chaînes à OUT LuxStral → le tap A du bandeau strobe
 > entre les deux (N écrivains, 1 tap global). Résolution = viz par instance.
 
-### P5-M5 — Générateurs + UI par instance (M)
+### P5-M5 — Générateurs + UI par instance (M) — **FAIT (2026-07-15)**
 Les 4 onglets (Score/Timbre/MidiScore/Voice) écrivent le slot de LEUR
 instance (loadScoreFramesFromImage → slot) ; pages rebindées à l'instance
 sélectionnée ; LED/transport par module au rack ; export/cache WAV (VOICE)
 par instance.
+
+> **Réalisation.** Chaque page a `setScoreSlot(slot)` + `boundChannel()` :
+> sélectionner un module score-famille au rack rebinde sa page sur SON slot
+> (transport, scrub, tête, cible du LOAD) ; -1/slot retiré du rack → retombe
+> sur la première instance du type (`scorePlayerSlotInUse`, masque maintenu au
+> derive). Le rebind termine proprement un scrub en cours sur l'ancien canal
+> et invalide framesAreOurs (le PLAY suivant recharge dans le bon slot).
+> **LED rack = transport par instance** pour la famille score : clic sur la
+> pastille = PLAY/STOP du slot de CE module (sentinelle `__scoreTransport`,
+> jamais projetée sur l'APVTS ; slot vide = no-op ; tooltip adapté).
+> Cache WAV VOICE : état de génération par page (suit la sélection), les
+> frames restent par slot — rien à scinder. NOTE : le "document" de
+> génération (image/texte/MIDI) reste UN par type de page ; deux instances
+> d'un même type partagent le document mais PAS les frames ni le transport
+> (documents par instance = chantier UX séparé si besoin). Speed/loop encore
+> broadcast (params globaux) — banques par instance si le besoin se confirme.
 
 ### P5-M6 — Purge + matrice (S)
 Purge du canal partagé résiduel (notifyScoreStopped global, isScorePlaying
