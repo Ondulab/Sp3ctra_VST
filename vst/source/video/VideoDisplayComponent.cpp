@@ -92,7 +92,7 @@ void VideoDisplayComponent::captureCurrentFrame()
     // ── Source selection (M7 — per-chain engine taps) ────────────────────────
     // videoScrollSource (APVTS choice) selects which synthesis engine the
     // waterfall mirrors:
-    //   0 = LuxStral         → engine input tap A  (frame the engine consumed)
+    //   0 = LuxStral         → LuxStral engine input tap (frame the engine consumed)
     //   1 = LuxSynth/LuxWave → engine input tap Path-B
     //   2 = AllSynth         → 50/50 blend of the two taps
     // The taps are published by whichever thread owns each engine's commit
@@ -125,7 +125,7 @@ void VideoDisplayComponent::captureCurrentFrame()
         // AllSynth: 50/50 blend per channel.
         uint8_t *lsR = nullptr, *lsG = nullptr, *lsB = nullptr;
         uint8_t *lxR = nullptr, *lxG = nullptr, *lxB = nullptr;
-        resolveEngineInput(AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A, lsR, lsG, lsB);
+        resolveEngineInput(AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL, lsR, lsG, lsB);
         resolveEngineInput(AUDIO_IMAGE_ENGINE_TAP_PATHB,      lxR, lxG, lxB);
         const bool lsOk = (lsR && lsG && lsB);
         const bool lxOk = (lxR && lxG && lxB);
@@ -146,7 +146,7 @@ void VideoDisplayComponent::captureCurrentFrame()
     {
         // LuxStral (srcChoice 0) or LuxSynth/LuxWave (srcChoice 1).
         resolveEngineInput(srcChoice == 1 ? AUDIO_IMAGE_ENGINE_TAP_PATHB
-                                          : AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                                          : AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL,
                            pR, pG, pB);
     }
 

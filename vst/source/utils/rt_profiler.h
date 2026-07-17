@@ -29,6 +29,31 @@ extern "C" {
 /* Reporting interval */
 #define RT_PROFILER_REPORT_INTERVAL_FRAMES  500   /* Report every 500 frames (~10s @ 48kHz, ~5s @ 96kHz) */
 
+/* ── Per-synthesis-family timers ─────────────────────────────────────────────
+ * One slot per engine family so a performance fault can NAME the offender
+ * ("Sampler over budget") instead of only "the synth thread is slow". Each slot
+ * accumulates processing time from whatever thread runs that engine (LuxStral =
+ * synth pool, LuxSynth/LuxWave = inline in processBlock, Sampler/Score = their
+ * player threads); the message thread flushes avg/max % of the block budget and
+ * edge-triggers a named alert. Reference for % is the audio block budget: no
+ * single engine iteration should approach it. */
+typedef enum {
+    RT_ENGINE_LUXSTRAL = 0,
+    RT_ENGINE_LUXSYNTH,
+    RT_ENGINE_LUXWAVE,
+    RT_ENGINE_SAMPLER,
+    RT_ENGINE_SCORE,
+    RT_ENGINE_COUNT
+} rt_engine_id;
+
+typedef struct {
+    atomic_uint_fast64_t total_us;   /* summed processing time since last flush */
+    atomic_uint_fast64_t max_us;     /* worst single iteration since last flush */
+    atomic_uint_fast64_t iters;      /* iterations since last flush */
+    int      perf_state;             /* 0/1/2 edge state (message thread only) */
+    uint64_t fault_reminder_ms;      /* last persist-reminder (message thread) */
+} RTEngineTimer;
+
 /**
  * @brief Real-time profiler structure
  * 
@@ -64,6 +89,7 @@ typedef struct {
     int sample_rate;
     int buffer_size;
     int enabled;  /* 0 = disabled, 1 = enabled */
+    uint64_t report_interval_callbacks;  /* summary cadence, ~10 s of callbacks */
     
     /* Timing helper */
     struct timeval callback_start_time;
@@ -89,6 +115,17 @@ typedef struct {
     atomic_uint_fast64_t mutex_critical_wait_events;  /* critical mutex waits since last flush */
     atomic_uint_fast64_t mutex_warn_wait_events;      /* long mutex waits since last flush */
     atomic_uint_fast64_t mutex_contention_events;     /* contentions since last flush */
+
+    /* Edge-triggered health state machine (message thread only, in print_stats).
+     * 0 = OK, 1 = ELEVATED (load high, not yet faulting), 2 = FAULT. A warning
+     * is logged on the OK/ELEVATED → FAULT transition and repeated at most every
+     * 30 s while it persists; recovery logs an info line. This replaces the old
+     * "warn every 500-frame period while bad" behaviour that spammed the log. */
+    int      perf_state;
+    uint64_t perf_fault_reminder_ms;
+
+    /* Per-synthesis-family timers (see rt_engine_id above). */
+    RTEngineTimer engines[RT_ENGINE_COUNT];
 } RTProfiler;
 
 /**
@@ -242,6 +279,18 @@ int rt_profiler_is_healthy(RTProfiler *profiler);
  * @param elapsed_us Time spent in iteration (microseconds)
  */
 void rt_profiler_report_audio_thread_iteration(RTProfiler *profiler, uint64_t elapsed_us);
+
+/**
+ * @brief Report one processing iteration of a synthesis-family engine.
+ * Lock-free (atomics only) — safe to call from any engine thread. `elapsed_us`
+ * is the wall-clock time that engine spent producing this block/frame. The
+ * message thread turns these into per-family avg/max % of budget + named alerts.
+ *
+ * @param profiler   Profiler instance (g_vst_rt_profiler)
+ * @param id         Engine family (RT_ENGINE_LUXSTRAL … RT_ENGINE_SCORE)
+ * @param elapsed_us Processing time for this iteration, microseconds
+ */
+void rt_profiler_engine_report(RTProfiler *profiler, rt_engine_id id, uint64_t elapsed_us);
 
 /**
  * @brief Report UDP thread packet processing time

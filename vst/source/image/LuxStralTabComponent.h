@@ -618,7 +618,7 @@ private:
                                sfEnabledAttach, sfFocusOnlyAttach;
 
     // MIDI-learn popups: shared controls bound once (ctor), engine-scoped
-    // ones recreated by bindEngineParams() on A/B selection.
+    // ones recreated by bindEngineParams().
     std::vector<std::unique_ptr<MidiLearnAttachment>> learnShared_, learnEngine_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxStralTabComponent)

@@ -201,7 +201,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"deviceEnabled", 1}, "Device On", true));
 
-    // ── Setup — Soft limiter (LuxStral A) ────────────────────────────────────
+    // ── Setup — Soft limiter (LuxStral) ──────────────────────────────────────
     // These IDs were referenced by LuxStralSetupPanel but never created — the
     // sliders were silently inert (JUCE skips attachments on unknown IDs).
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -985,6 +985,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     // now mapped through the unified MIDI-Learn engine (right-click the buttons),
     // so the old bespoke REC/PLAY/SAVE bind params were removed for both engines.
     {
+        // Per-engine enable (P6) — engine B owns its own rack LED / on-off, so a
+        // Sampler in one chain toggles independently from a Sampler in another.
+        // (Engine A keeps the legacy "luxSamplerEnabled" above.)
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{"luxSamplerBEnabled", 1}, "LuxSampler B Enabled",
+            false));
+
         juce::StringArray bMidiChNames;
         for (int i = 1; i <= 16; ++i)
             bMidiChNames.add("Channel " + juce::String(i));
@@ -1022,6 +1029,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         for (int e = 2; e < LuxSampler::kMaxEngines; ++e)
         {
             const juce::String nm = "LuxSampler " + juce::String(e + 1) + " ";
+            // Per-engine enable (P6) — each engine's rack LED is independent.
+            params.push_back(std::make_unique<juce::AudioParameterBool>(
+                juce::ParameterID{fsEngineParam(e, "Enabled"), 1},
+                nm + "Enabled", false));
             params.push_back(std::make_unique<juce::AudioParameterChoice>(
                 juce::ParameterID{fsEngineParam(e, "MidiChannel"), 1},
                 nm + "MIDI Channel", bMidiChNames,
@@ -1291,7 +1302,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     // Source = which synth engine's input image we visualize — the engine
     // taps published by the chain executors (AUDIO_IMAGE_ENGINE_TAP_*), so
     // the waterfall always matches what the audio engine actually sees.
-    //   0 = LuxStral          (engine tap A)
+    //   0 = LuxStral          (LuxStral engine tap)
     //   1 = LuxSynth/LuxWave  (Path-B tap — LuxWave shares it)
     //   2 = AllSynth          (50/50 blend of the two streams above)
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
@@ -1641,9 +1652,12 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener(PARAM_FS_MIDI_CH,    this);
     apvts.addParameterListener(PARAM_FS_OCT_OFFSET, this);
     apvts.addParameterListener(PARAM_FS_MAX_DUR,    this);
-    // Engine B bank (same play params, own values)
+    // Engine B..H banks (same play params, own values). The per-engine enable
+    // (P6) makes each Sampler instance's rack LED independent — engine 0 keeps
+    // the legacy PARAM_FS_ENABLED listener registered just above.
     for (int e = 1; e < LuxSampler::kMaxEngines; ++e)
     {
+        apvts.addParameterListener(fsEngineParam(e, "Enabled"),      this);
         apvts.addParameterListener(fsEngineParam(e, "MidiChannel"),  this);
         apvts.addParameterListener(fsEngineParam(e, "OctaveOffset"), this);
         apvts.addParameterListener(fsEngineParam(e, "MaxDuration"),  this);
@@ -1757,6 +1771,8 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     log_info("VST", "  - Shared core acquired (ref-count now %ld)",
              sharedCore.use_count());
     log_info("VST", "  - Pipeline start deferred to prepareToPlay()");
+    if (const char* logPath = logger_log_file_path())
+        log_info("VST", "  - Session log: %s", logPath);
 }
 
 void Sp3ctraAudioProcessor::getMusicalFrequencyRange(double& lowHz, double& highHz) const noexcept
@@ -2455,10 +2471,10 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // DO NOT set ready=0 in the consumer — let the producer manage ready flags.
     //
     // The consume/handshake below runs whenever the core is up — INDEPENDENT of
-    // deviceEnabled. It paces audioProcessingThread, which renders engine A AND
-    // engine B on this signal: gating it on A's output toggle starved engine B
-    // down to the 50ms wait timeout (each grain replayed ~4-5x = robotic sound).
-    // deviceEnabled now only gates the WRITE into the JUCE buffer.
+    // deviceEnabled. It paces audioProcessingThread (the whole synth pipeline
+    // renders on this signal): gating it on the output toggle starved the
+    // pipeline down to the 50ms wait timeout (each grain replayed ~4-5x =
+    // robotic sound). deviceEnabled only gates the WRITE into the JUCE buffer.
     // ========================================================================
     const bool luxstralEnabled = (deviceEnabledParam == nullptr || deviceEnabledParam->load() >= 0.5f);
     if (sharedCore && sharedCore->isReady() && luxstral_are_audio_buffers_ready()) {
@@ -2573,6 +2589,9 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         const bool lxEnabled = luxsynthEnabledParam->load() > 0.5f;
         if (lxEnabled)
         {
+            struct timeval lxT0, lxT1;
+            gettimeofday(&lxT0, NULL);   // per-family perf attribution
+
             // 1. Drain pending MIDI events into engine voices
             luxsynth_process_pending_midi();
 
@@ -2606,6 +2625,11 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                 }
             }
             lxPkBlock_ = pk;
+
+            gettimeofday(&lxT1, NULL);
+            rt_profiler_engine_report(&g_vst_rt_profiler, RT_ENGINE_LUXSYNTH,
+                (uint64_t)((lxT1.tv_sec - lxT0.tv_sec) * 1000000LL
+                           + (lxT1.tv_usec - lxT0.tv_usec)));
         }
     }
 
@@ -2621,6 +2645,9 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         const bool lwEnabled = luxwaveEnabledParam->load() > 0.5f;
         if (lwEnabled)
         {
+            struct timeval lwT0, lwT1;
+            gettimeofday(&lwT0, NULL);   // per-family perf attribution
+
             // 1. Update engine config from APVTS (RT-safe: simple struct copy)
             LuxWaveConfig lwCfg;
             lwCfg.attack_ms           = luxwaveAttackMsParam->load();
@@ -2677,6 +2704,11 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                 }
             }
             lwPkBlock_ = pk;
+
+            gettimeofday(&lwT1, NULL);
+            rt_profiler_engine_report(&g_vst_rt_profiler, RT_ENGINE_LUXWAVE,
+                (uint64_t)((lwT1.tv_sec - lwT0.tv_sec) * 1000000LL
+                           + (lwT1.tv_usec - lwT0.tv_usec)));
         }
     }
 
@@ -2756,8 +2788,9 @@ void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     state.setProperty("samplerOutputDir", samplerOutputDir, nullptr);
     state.setProperty("scoreWavPath",     scoreWavPath,     nullptr);
     // Synth-split state version — gates the staged migrations in
-    // setStateInformation (absent = pre-split blob; 1 = pre per-send enable).
-    state.setProperty("synthSplitVersion", 2, nullptr);
+    // setStateInformation (absent = pre-split blob; 1 = pre per-send enable;
+    // 2 = pre per-sampler-engine enable).
+    state.setProperty("synthSplitVersion", 3, nullptr);
 
     // Non-APVTS module state → child trees. Replace (never append next to) any
     // stale copy restored at load time.
@@ -2890,7 +2923,7 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
 
             // Migration — synth-split P1: blobs saved before the per-OUT
             // conditioning banks carry the legacy global conditioning params
-            // (luxstral*/luxstralB*/luxsynth*). Seed the OUT banks from them
+            // (luxstral*/luxsynth*). Seed the OUT banks from them
             // so the reloaded session sounds identical. Detected by the
             // absence of the synthSplitVersion root attribute (stamped by
             // getStateInformation since P1). The legacy params stay restored
@@ -2919,31 +2952,29 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
                     e->setAttribute("value", v);
                 };
 
-                // v2 — per-send enable: the 2nd send's power used to be
-                // luxstralBEnabled (rack LED of the B slot).
-                if (splitVer < 2)
-                    seedBank(lsOutParam(1, "enabled"),
-                             legacy("luxstralBEnabled", 1.0));
+                // v3 — per-sampler-engine enable: engines B..H used to share the
+                // single "luxSamplerEnabled" param (one rack LED gated every
+                // present engine). Seed each engine's own enable from it so a
+                // reloaded session keeps the same engines audible. Engine 0
+                // already reads the legacy id, so only 1..7 need seeding.
+                if (splitVer < 3)
+                    for (int e = 1; e < LuxSampler::kMaxEngines; ++e)
+                        seedBank(fsEngineParam(e, "Enabled"),
+                                 legacy("luxSamplerEnabled", 0.0));
 
                 if (splitVer < 1)
                 {
 
-                const double aGamma  = legacy("luxstralGammaEnable", 1.0) >= 0.5
+                const double lsGamma = legacy("luxstralGammaEnable", 1.0) >= 0.5
                                      ? legacy("luxstralGammaValue", 1.0) : 1.0;
                 const double rangeDb = legacy("luxstralFidelityRangeDb", 50.0);
 
-                // LuxStral OUT — slot 0 = engine A, slot 1 = engine B
-                // (Range dB was shared A+B: both slots inherit it).
+                // LuxStral OUT slot 0 — carries the legacy global conditioning.
                 seedBank(lsOutParam(0, "negative"),    legacy("luxstralInversion",   1.0));
                 seedBank(lsOutParam(0, "dcBlocking"),  legacy("luxstralAcRemoval",   1.0));
-                seedBank(lsOutParam(0, "gamma"),       aGamma);
+                seedBank(lsOutParam(0, "gamma"),       lsGamma);
                 seedBank(lsOutParam(0, "contrastMin"), legacy("luxstralContrastMin", 0.21));
                 seedBank(lsOutParam(0, "rangeDb"),     rangeDb);
-                seedBank(lsOutParam(1, "negative"),    legacy("luxstralBInversion",  1.0));
-                seedBank(lsOutParam(1, "dcBlocking"),  legacy("luxstralBAcRemoval",  1.0));
-                seedBank(lsOutParam(1, "gamma"),       legacy("luxstralBGammaValue", 1.0));
-                seedBank(lsOutParam(1, "contrastMin"), legacy("luxstralBContrastMin", 0.21));
-                seedBank(lsOutParam(1, "rangeDb"),     rangeDb);
 
                 // LuxSynth OUT slot 0 — and LuxWave OUT slot 0 seeds from the
                 // SAME values: before its own bank, LuxWave inherited the
@@ -2963,13 +2994,23 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
                 }
             }
 
+            // replaceState fires the APVTS listeners synchronously. On the
+            // message thread each restored parameter runs applyParameterChange
+            // inline — silence the per-parameter log storm (the coalesced config
+            // work is drained once in applyRestoredStateOnMessageThread). On a
+            // loader thread the listeners defer instead, so bulkParamApply_ is
+            // never read there; only touch the flag on the message thread to
+            // avoid a cross-thread write.
+            auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+            const bool onMessageThread = (mm == nullptr || mm->isThisTheMessageThread());
+            if (onMessageThread) bulkParamApply_ = true;
             apvts.replaceState(juce::ValueTree::fromXml(*xmlState));
+            if (onMessageThread) bulkParamApply_ = false;
 
             // Everything below mutates non-APVTS state that UI timers iterate
             // concurrently (chainModel_, SCORE/SEQ trees, engines). Some hosts
             // call setStateInformation from a project-loading thread — apply
             // on the message thread only (replaceState above is thread-safe).
-            auto* mm = juce::MessageManager::getInstanceWithoutCreating();
             if (mm == nullptr || mm->isThisTheMessageThread())
             {
                 applyRestoredStateOnMessageThread();
@@ -3156,6 +3197,10 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
                 onStateRestoredUi();
         }
     }
+
+    // Apply any config resync / wavetable reinit / envelope coeff rebuild the
+    // restored parameters raised (now on the message thread, core coming up).
+    drainPendingConfig();
 }
 
 //==============================================================================
@@ -3199,13 +3244,25 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
 void Sp3ctraAudioProcessor::timerCallback()
 {
     // ── Deferred parameter changes (audio/loader thread → here) ──────────────
+    // A DAW project restore delivers its parameters through this drain (the
+    // loader thread defers instead of applying inline). Suppress the noisy
+    // per-parameter logs for the batch; the coalesced config work runs once via
+    // drainPendingConfig() below.
     if (anyParamDirty_.exchange(false, std::memory_order_acq_rel))
     {
+        bulkParamApply_ = true;
+        int applied = 0;
         for (int i = 0; i < deferredParamIds_.size(); ++i)
             if (paramDirty_[(size_t) i].exchange(false, std::memory_order_acq_rel))
                 if (auto* raw = apvts.getRawParameterValue(deferredParamIds_[i]))
-                    applyParameterChange(deferredParamIds_[i], raw->load());
+                { applyParameterChange(deferredParamIds_[i], raw->load()); ++applied; }
+        bulkParamApply_ = false;
+        if (applied > 0)
+            log_debug("VST", "Applied %d deferred parameter change(s)", applied);
     }
+
+    // ── Coalesced config resync / wavetable reinit / envelope coeff rebuild ──
+    drainPendingConfig();
 
     // ── SCORE transport mirror ────────────────────────────────────────────────
     // The SCORE page is a view: it no longer force-stops the score in its
@@ -3260,7 +3317,8 @@ void Sp3ctraAudioProcessor::timerCallback()
 // Real parameter handler — message thread only (see dispatcher above).
 void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID, float newValue)
 {
-    log_debug("VST", "Parameter '%s' changed to %.2f", parameterID.toRawUTF8(), newValue);
+    if (!bulkParamApply_)
+        log_debug("VST", "Parameter '%s' changed to %.2f", parameterID.toRawUTF8(), newValue);
 
     // ── PLAY transports — DAW-automatable commands relayed to the engines ────
     // Host automation may deliver these on the audio thread; every engine call
@@ -3384,18 +3442,6 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
     // LuxSampler parameters — update atomic config on LuxSampler
     if (parameterID.startsWith("luxSampler"))
     {
-        // Per-engine sampler enable = model presence AND the shared enable
-        // param (the rack LED / host automation). Presence alone used to be
-        // authoritative, which made the LED a dead toggle: switching it off
-        // changed nothing audible while showing "off".
-        if (parameterID == PARAM_FS_ENABLED)
-        {
-            const bool on = newValue > 0.5f;
-            for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
-                if (samplers_[(size_t) e] != nullptr)
-                    samplers_[(size_t) e]->setEnabled(samplerPresent_[(size_t) e] && on);
-            return;
-        }
         // Per-engine banks (P6 ×8): "luxSamplerB*" = engine 1,
         // "luxSampler{N}_*" = engines 2..7, the legacy "luxSampler*" ids =
         // engine 0 (fsEngineParam). The export prefs and output dir stay
@@ -3410,6 +3456,12 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
         LuxSampler* engine = samplers_[(size_t) e].get();
         if (engine != nullptr)
         {
+            // Per-engine enable = model presence AND this engine's OWN enable
+            // param (its rack LED / host automation). Each Sampler instance
+            // toggles independently — previously all engines shared one param,
+            // so a Sampler in chain 2 flipped the one in chain 1.
+            engine->setEnabled(samplerPresent_[(size_t) e]
+                && apvts.getRawParameterValue(fsEngineParam(e, "Enabled"))->load() > 0.5f);
             engine->setMidiChannel(
                 static_cast<int>(*apvts.getRawParameterValue(fsEngineParam(e, "MidiChannel"))) + 1);
             engine->setOctaveOffset(
@@ -3437,58 +3489,68 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
         return;
     }
 
+    // ── "Silent config update" branches ─────────────────────────────────────
+    // These only refresh g_sp3ctra_config (no socket restart, no engine call).
+    // Coalesced: raise the dirty flag and let drainPendingConfig() run ONE
+    // applyConfigurationToCore() per timer tick / restore, instead of one full
+    // ~60-lookup resync per parameter (see header). Hot-reload triggers below
+    // are likewise deferred to a single coalesced reinit / coefficient rebuild.
     bool isStrokeForgeParam = parameterID.startsWith("sf");
     if (isStrokeForgeParam) {
-        applyConfigurationToCore(false);
+        configResyncPending_ = true;
         return;
     }
 
     // LuxSynth blob detection — independent of StrokeForge (visualizer-only params)
     if (parameterID.startsWith("lxBlob")) {
-        applyConfigurationToCore(false);
+        configResyncPending_ = true;
         return;
     }
 
     // SPCTR blob detection — IMAGE LUXSTRAL tab (drives visualizer + StrokeForge audio)
     if (parameterID.startsWith("spctrBlob")) {
-        applyConfigurationToCore(false);
+        configResyncPending_ = true;
         return;
     }
-    
+
     bool isLuxStralParam = parameterID.startsWith("luxstral");
     if (isLuxStralParam) {
-        // Just update g_sp3ctra_config silently (no restart)
-        applyConfigurationToCore(false);
+        // Just update g_sp3ctra_config silently (no restart) — coalesced.
+        configResyncPending_ = true;
 
         // 🔧 HOT-RELOAD: Musical parameters (tuning, root note, octaves) change frequency range
         // This triggers fade-out → regenerate → fade-in for smooth transition
-        if (parameterID == "luxstralTuning" || 
-            parameterID == "luxstralRootNote" || 
+        if (parameterID == "luxstralTuning" ||
+            parameterID == "luxstralRootNote" ||
             parameterID == "luxstralNumOctaves") {
-            log_info("VST", "Musical parameter changed - requesting hot-reload");
-            request_frequency_reinit();
+            if (!bulkParamApply_)
+                log_info("VST", "Musical parameter changed - requesting hot-reload");
+            freqReinitPending_ = true;
         }
-        
+
         // 🔧 HOT-RELOAD: Physiological filter toggle requires wavetable regeneration
         // Waveform amplitudes change when equal-loudness compensation is enabled/disabled
         if (parameterID == "luxstralPhysiologicalFilter") {
-            log_info("VST", "Physiological filter %s - requesting wavetable regeneration",
-                     newValue > 0.5f ? "ENABLED" : "DISABLED");
-            request_frequency_reinit();
+            if (!bulkParamApply_)
+                log_info("VST", "Physiological filter %s - requesting wavetable regeneration",
+                         newValue > 0.5f ? "ENABLED" : "DISABLED");
+            freqReinitPending_ = true;
         }
-        
+
         // 🔧 HOT-RELOAD: Depth change requires re-weighting all wavetable gains
         if (parameterID == "luxstralPhysiologicalDepth") {
-            log_info("VST", "Physiological depth changed to %.2f - requesting wavetable regeneration",
-                     newValue);
-            request_frequency_reinit();
+            if (!bulkParamApply_)
+                log_info("VST", "Physiological depth changed to %.2f - requesting wavetable regeneration",
+                         newValue);
+            freqReinitPending_ = true;
         }
-        
+
         // 🔧 HOT-RELOAD: Envelope parameters (Attack/Release) require coefficient update
         // Recalculates alpha_up and alpha_down_weighted for all oscillators.
         if (parameterID == "luxstralAttackMs" || parameterID == "luxstralReleaseMs") {
-            log_info("VST", "Envelope parameter changed - updating coefficients");
-            update_gap_limiter_coefficients();
+            if (!bulkParamApply_)
+                log_info("VST", "Envelope parameter changed - updating coefficients");
+            coeffUpdatePending_ = true;
         }
 
         return;  // Done - synthesis engine will pick up changes automatically
@@ -3550,20 +3612,43 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
         if (auto* p = apvts.getParameter("imageSamplerOpacity"))
             p->setValueNotifyingHost(p->convertTo0to1(smpOp));
 
-        applyConfigurationToCore(false);
+        configResyncPending_ = true;   // coalesced (see header)
         return;
     }
     else
     {
         // For other non-UDP, non-LuxStral parameters (sensor DPI, log level, visualizer mode)
-        applyConfigurationToCore(false);  // needsSocketRestart = false
-        
+        configResyncPending_ = true;   // coalesced — applied on the next drain
+
         // RT Profiler stays ALWAYS enabled — profiler output uses log_info (not log_debug)
         // so it is visible regardless of log level. Changing log level only affects
         // the verbose per-metric breakdown (which uses log_debug).
-        if (parameterID == PARAM_LOG_LEVEL) {
+        if (parameterID == PARAM_LOG_LEVEL && !bulkParamApply_) {
             log_info("VST", "Log level changed - RT Profiler summary remains visible at INFO");
         }
+    }
+}
+
+// Apply coalesced config work once, on the message thread. Called from the
+// 30 ms timer and at the end of a state restore. Idempotent: flags are cleared
+// as they are consumed, so repeat calls with nothing pending are ~free.
+void Sp3ctraAudioProcessor::drainPendingConfig()
+{
+    if (configResyncPending_) {
+        configResyncPending_ = false;
+        applyConfigurationToCore(false);   // one full g_sp3ctra_config resync
+    }
+    if (freqReinitPending_) {
+        freqReinitPending_ = false;
+        request_frequency_reinit();        // flips an atomic; regen on synth thread
+    }
+    if (coeffUpdatePending_) {
+        coeffUpdatePending_ = false;
+        // Skip while the core is still coming up: prepareToPlay() builds the
+        // envelope coefficients from config anyway, and calling this before the
+        // wavetables exist only produced the "waves is NULL, skipping" warning.
+        if (!coreNeedsInit)
+            update_gap_limiter_coefficients();
     }
 }
 
@@ -3624,7 +3709,7 @@ void Sp3ctraAudioProcessor::loadChainModelFromState()
     chainModel_.deriveActiveTypes(chainActiveTypes_);
     videoScrollSlots_.clear();
     videoScrollSlotIds_.clear();
-    luxstralEngines_.clear();
+    luxstralSends_.clear();
     for (const auto& ch : chainModel_.chains)
         for (const auto& mod : ch.modules)
         {
@@ -3635,8 +3720,8 @@ void Sp3ctraAudioProcessor::loadChainModelFromState()
                 videoScrollSlotIds_[mod.slot] = mod.id;   // identity baseline (no reset on load)
             }
             if (mod.type == ModuleType::LuxStral
-                && mod.slot >= 0 && mod.slot < ChainModel::kMaxLuxStralEngines)
-                luxstralEngines_.insert(mod.slot);
+                && mod.slot >= 0 && mod.slot < ChainModel::kMaxEngineSends)
+                luxstralSends_.insert(mod.slot);
         }
 
     deriveChainRouting();   // headless-correct per-synth source routing
@@ -3705,8 +3790,9 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
 
     // Per-engine sampler enable: a Sampler instance carries its engine index
     // in `slot` (0..7 since P6). An engine is enabled iff its instance is
-    // present in the model AND the shared luxSamplerEnabled param (rack LED /
-    // host automation) is on — presence alone made the LED a dead toggle.
+    // present in the model AND its OWN enable param (rack LED / host automation)
+    // is on — each Sampler instance toggles independently, so a Sampler in
+    // chain 2 no longer flips the one in chain 1.
     std::array<bool, LuxSampler::kMaxEngines> present {};
     for (const auto& ch : chainModel_.chains)
         for (const auto& m : ch.modules)
@@ -3715,11 +3801,10 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
                     0, LuxSampler::kMaxEngines - 1,
                     m.slot >= 0 ? m.slot : 0)] = true;
     samplerPresent_ = present;
-    const bool fsParamOn =
-        apvts.getRawParameterValue(PARAM_FS_ENABLED)->load() > 0.5f;
     for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
         if (samplers_[(size_t) e])
-            samplers_[(size_t) e]->setEnabled(present[(size_t) e] && fsParamOn);
+            samplers_[(size_t) e]->setEnabled(present[(size_t) e]
+                && apvts.getRawParameterValue(fsEngineParam(e, "Enabled"))->load() > 0.5f);
 
     // (P4-M5: the "chainInsertOrder" projection is gone with the param —
     // which LuxStral consumes whenever a Sampler sits on its chain — the default
@@ -4940,20 +5025,20 @@ void Sp3ctraAudioProcessor::applyChainEnableBridge()
 
     // LuxStral engine enable (same add ⇒ on / absent ⇒ off diff semantics).
     {
-        std::set<int> enginesNow;
+        std::set<int> sendsNow;
         for (const auto& ch : chainModel_.chains)
             for (const auto& m : ch.modules)
                 if (m.type == ModuleType::LuxStral && m.slot >= 0
-                    && m.slot < ChainModel::kMaxLuxStralEngines)
-                    enginesNow.insert(m.slot);
+                    && m.slot < ChainModel::kMaxEngineSends)
+                    sendsNow.insert(m.slot);
 
-        const bool anyNow = ! enginesNow.empty();
-        const bool anyWas = ! luxstralEngines_.empty();
+        const bool anyNow = ! sendsNow.empty();
+        const bool anyWas = ! luxstralSends_.empty();
         if (anyNow && ! anyWas)
             setParam("deviceEnabled", true);
         else if (! anyNow)
             setParam("deviceEnabled", false);
-        luxstralEngines_ = enginesNow;
+        luxstralSends_ = sendsNow;
     }
 
     chainActiveTypes_ = now;
@@ -4962,7 +5047,7 @@ void Sp3ctraAudioProcessor::applyChainEnableBridge()
 // Free the state of every module that just disappeared from the topology. The
 // enable bridge (next call) silences modules that own an enable param, but some
 // modules keep state the bridge cannot reach: SCORE has NO enable param (its
-// has_score plan flag only routes the engine-B player feed), so removal alone
+// has_score plan flag only routes the score-player feed), so removal alone
 // never stops it; VideoScroll keeps a captured waterfall ring; Pitch/Mask hold live
 // MIDI voices. Recorded content (sampler slots, sequencer pattern, synth params)
 // is intentionally preserved — removal only tears down transient/live state.
@@ -5231,8 +5316,11 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     // is no longer needed: the shared sine table (4 KB, L1-resident) eliminates
     // the cache-miss bottleneck that made high oscillator counts CPU-expensive.
     g_sp3ctra_config.pixels_per_note = 1;
-    log_info("VST", "Resolution: pixels_per_note=1 → %d oscillators (max, shared sine table)",
-             get_cis_pixels_nb());
+    // DEBUG, not INFO: this is a fixed constant (get_cis_pixels_nb()), NOT a
+    // per-call oscillator (re)allocation — nothing is built here. Logging it at
+    // INFO made every config resync look like heavy work and flooded restores.
+    log_debug("VST", "Resolution: pixels_per_note=1 → %d oscillators (max, shared sine table)",
+              get_cis_pixels_nb());
     
     // ========================================================================
     // Synchronize LuxStral parameters from APVTS to g_sp3ctra_config

@@ -53,7 +53,7 @@ static int s_udp_frame_pb_ran = 0;     /* udpThread-only: Path-B products of
                                         * preprocessed_temp valid this line */
 
 /* ── Per-chain playback (2026-07-12) ─────────────────────────────────────────
- * Does this chain host `engine`'s SAMPLER? (marker slot = engine A=0/B=1).
+ * Does this chain host `engine`'s SAMPLER? (marker slot = engine index).
  * The player-ownership gates match the PLAYING engine against the chain's
  * own marker — a chain hosting the idle engine keeps its positional run.
  * (Outside VST_MODE the engine is always -1 → never player-owned.) */
@@ -544,7 +544,7 @@ static void chain_publish_no_signal(const SynthChainPlan *sp, int chain_idx,
         synth_staging_set_inactive(chain_idx);
         if (is_first_send_chain && audioBuffers != NULL)
             audio_image_buffers_publish_engine_input(
-                audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL,
                 NULL, NULL, NULL, nb_pixels);
     }
     if (has_lx)
@@ -901,28 +901,29 @@ static int chain_owning_marker_pos(const SynthChainPlan *sp, int score_owns,
 
 #ifdef VST_MODE
 /* ── P4-M2 — FramePlayerThread: ONE positional walk per owned chain ──────────
- * Replaces the four player-side paths (per-send private copies + engine-A
- * in-place inserts + LuxSynth first-OUT staging + downstream record): for
- * every chain owned by THIS player (its driving engine's SAMPLER marker, or
- * the SCORE-type marker during score playback), walk the span BELOW the
- * owning marker on the blended playback frame. The walk stages every OUT at
- * its exact position, ticks post-marker FX/probes exactly ONCE per frame
- * (the old per-send copies + in-place engine-A run double-ticked stateful FX
- * and double-captured probes between marker and OUT), records the downstream
- * SAMPLER markers at their position (SCORE→sampler bounce, A→B resampling —
- * never the driving engine itself) and publishes the exact selection tap.
- * The stream at the FIRST owned LuxStral OUT is copied back into r/g/b AFTER
- * the loop and published as engine tap A, so the caller's display mix bus and
- * legacy audio commits see the post-FX frame (parity with the old in-place
- * engine-A inserts). Returns plan.num_ls_sends (legacy-path gate). */
+ * Replaces the four legacy player-side paths (per-send private copies +
+ * in-place LuxStral inserts + LuxSynth first-OUT staging + downstream
+ * record): for every chain owned by THIS player (its driving engine's SAMPLER
+ * marker, or the SCORE-type marker during score playback), walk the span
+ * BELOW the owning marker on the blended playback frame. The walk stages
+ * every OUT at its exact position, ticks post-marker FX/probes exactly ONCE
+ * per frame (the old per-send copies + in-place LuxStral run double-ticked
+ * stateful FX and double-captured probes between marker and OUT), records the
+ * downstream SAMPLER markers at their position (SCORE→sampler bounce,
+ * engine→engine resampling — never the driving engine itself) and publishes
+ * the exact selection tap. The stream at the FIRST owned LuxStral OUT is
+ * copied back into r/g/b AFTER the loop and published as the LuxStral engine
+ * tap, so the caller's display mix bus and legacy audio commits see the
+ * post-FX frame (parity with the old in-place LuxStral inserts). Returns
+ * plan.num_ls_sends (legacy-path gate). */
 int chain_player_execute_owned(int is_score, int engine_slot, int force_play,
                                struct AudioImageBuffers *viz_bus,
                                uint8_t *r, uint8_t *g, uint8_t *b,
                                int nb_pixels)
 {
-    /* Per-thread: engines A and B each run their OWN FramePlayerThread and
-     * may tick simultaneously (cross-chain playback) — a shared scratch would
-     * mix their conditioning mid-frame. */
+    /* Per-thread: every sampler engine runs its OWN FramePlayerThread and
+     * they may tick simultaneously (cross-chain playback) — a shared scratch
+     * would mix their conditioning mid-frame. */
     static _Thread_local PreprocessedImageData s_pp_player;
     static _Thread_local float s_lx_player[CIS_MAX_PIXELS_NB];
 
@@ -963,13 +964,13 @@ int chain_player_execute_owned(int is_score, int engine_slot, int force_play,
              * tap shows the stream AT the OUT (what the engine hears); the
              * display/commit write-back is the chain's END stream — inserts
              * placed BELOW the OUT included (parity with the old in-place
-             * engine-A run over the full post-marker sub-plan). Pool-instance
+             * LuxStral run over the full post-marker sub-plan). Pool-instance
              * output buffers stay valid across the remaining iterations
              * (per-instance pools — no other chain touches them). */
             dispR = ex.endR; dispG = ex.endG; dispB = ex.endB;
             if (viz_bus != NULL)
                 audio_image_buffers_publish_engine_input(
-                    viz_bus, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                    viz_bus, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL,
                     ex.lsR, ex.lsG, ex.lsB, nb_pixels);
         }
     }
@@ -1381,7 +1382,7 @@ void *udpThread(void *arg) {
        * below read db->activeBuffer directly now.) */
 
       /* Per-line chain execution scope (P4): one uniform walk per chain —
-       * the legacy Channel A/B routing is gone. */
+       * the legacy dual-channel routing is gone. */
       {
         PipelineConfig live_cfg = pipeline_build_config_live();
 
@@ -1391,11 +1392,11 @@ void *udpThread(void *arg) {
 
         /* ── ONE ChainPlan snapshot per frame ─────────────────────────────────
          * Taken BEFORE the modulated build: need_modulated below must also see
-         * the plan (a sampler on LuxStral B's chain needs the modulated frame
-         * even when engine A's routing does not), and every per-synth input
-         * selection further down must share the SAME topology — a fresh
-         * snapshot per consumer could mix two plans within one frame when a
-         * rack edit is published mid-frame. */
+         * the plan (a sampler chain can need the modulated frame even when the
+         * live routing does not), and every per-synth input selection further
+         * down must share the SAME topology — a fresh snapshot per consumer
+         * could mix two plans within one frame when a rack edit is published
+         * mid-frame. */
         ChainPlan frame_plan;
         chain_plan_get(&frame_plan);
 
@@ -1514,7 +1515,7 @@ void *udpThread(void *arg) {
                          * walk only publishes tap A for BELOW-marker OUTs). */
                         if (pex.ls_staged && c == first_send_chain)
                             audio_image_buffers_publish_engine_input(
-                                audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                                audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL,
                                 pex.lsR, pex.lsG, pex.lsB, nb_pixels);
                     }
                     else if (own_mk >= 0 && audioBuffers != NULL
@@ -1575,7 +1576,7 @@ void *udpThread(void *arg) {
              * approximation: the head panel shows one engine input line). */
             if (ex.ls_staged && c == first_send_chain)
                 audio_image_buffers_publish_engine_input(
-                    audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                    audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL,
                     ex.lsR, ex.lsG, ex.lsB, nb_pixels);
         }
 
@@ -1591,7 +1592,7 @@ void *udpThread(void *arg) {
          * send; while a player runs, its walk owns the tap. */
         if (frame_plan.num_ls_sends == 0 && !player_running_now)
             audio_image_buffers_publish_engine_input(
-                audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL,
                 NULL, NULL, NULL, nb_pixels);
 #endif
 
@@ -1857,7 +1858,7 @@ void internal_sources_process_tick(void *arg)
           /* Above-marker LS OUT staged here → keep tap A live (mirror). */
           if (pex.ls_staged && c == first_send_chain)
               audio_image_buffers_publish_engine_input(
-                  audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                  audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL,
                   pex.lsR, pex.lsG, pex.lsB, nb_pixels);
       }
       else if (own_mk >= 0 && audioBuffers != NULL
@@ -1907,7 +1908,7 @@ void internal_sources_process_tick(void *arg)
     if (ex.ls_staged && c == first_send_chain
         && !chain_hosts_driving_score(sp))
       audio_image_buffers_publish_engine_input(
-          audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+          audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL,
           ex.lsR, ex.lsG, ex.lsB, nb_pixels);
   }
 
@@ -2222,6 +2223,8 @@ void *audioProcessingThread(void *arg) {
     // Access VST's global profiler
     extern RTProfiler g_vst_rt_profiler;
     rt_profiler_report_audio_thread_iteration(&g_vst_rt_profiler, elapsed_us);
+    // Per-family attribution: the synth thread IS the LuxStral engine.
+    rt_profiler_engine_report(&g_vst_rt_profiler, RT_ENGINE_LUXSTRAL, elapsed_us);
 #endif
 
 #ifndef VST_MODE

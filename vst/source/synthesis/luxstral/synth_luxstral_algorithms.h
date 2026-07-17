@@ -43,8 +43,7 @@ struct wave;
  * @param volumeBuffer Output volume buffer for audio samples
  * @retval None
  */
-/* `waves` is the OWNING engine's oscillator array (worker->engine->waves) — the
- * per-note current_volume/target_volume it reads/writes must be per-engine (M8). */
+/* `waves` is the engine's oscillator array (worker->engine->waves). */
 void apply_gap_limiter_ramp(volatile struct wave *waves, int note, float target_volume, const float *pre_wave, float *volumeBuffer);
 
 /**
@@ -53,12 +52,6 @@ void apply_gap_limiter_ramp(volatile struct wave *waves, int note, float target_
  * @retval None
  */
 void update_gap_limiter_coefficients(void);
-/* Parameterized core (M8): writes alpha_up / alpha_down_weighted into any
- * oscillator array with caller-supplied taus — used for engine B's private
- * waves[] so its Attack/Release knobs are independent of engine A's. */
-struct wave;
-void update_gap_limiter_coefficients_for(volatile struct wave *w,
-                                         float tau_up_ms, float tau_down_ms);
 
 #ifdef __cplusplus
 }

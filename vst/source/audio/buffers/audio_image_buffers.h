@@ -57,7 +57,7 @@ typedef struct AudioImageBuffers {
   // (SPCTR_* / SYNTH_*) and the video waterfall read these instead of the
   // legacy luxstral/luxsynth_source_type → RAW/SAMPLER/MODULATED switch, so
   // the display follows each engine's OWN chain.
-#define AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A 0
+#define AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL 0
 #define AUDIO_IMAGE_ENGINE_TAP_PATHB      1  /* LuxSynth + LuxWave shared input */
 #define AUDIO_IMAGE_NUM_ENGINE_TAPS       2
   uint8_t *engine_tap_R[AUDIO_IMAGE_NUM_ENGINE_TAPS];

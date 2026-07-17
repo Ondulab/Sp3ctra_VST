@@ -87,7 +87,7 @@ VideoScrollTab::VideoScrollTab(Sp3ctraAudioProcessor& processor)
     // ── Source ────────────────────────────────────────────────────────────────
     // The waterfall follows the IMAGE INPUT of a synthesis engine — the taps
     // published by the chain executors (AUDIO_IMAGE_ENGINE_TAP_*):
-    //   - LuxStral          → engine tap A (mix of the → LUXSTRAL sends)
+    //   - LuxStral          → LuxStral engine tap (mix of the → LUXSTRAL sends)
     //   - LuxSynth/LuxWave  → Path-B tap (LuxWave shares it)
     //   - AllSynth          → 50/50 luminance blend of the two streams above
     sourceCombo_.addItem("LuxStral",         1);

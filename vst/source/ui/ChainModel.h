@@ -108,11 +108,9 @@ public:
     // model-wide — the audio-thread mixers blend every active send into the
     // engine feed.
     static constexpr int kMaxEngineSends = kMaxChains;       // 8 sends per type
-    static constexpr int kMaxLuxStralEngines = kMaxEngineSends; // legacy alias
     static bool isEngineSend(ModuleType t) noexcept
         { return t == ModuleType::LuxStral || t == ModuleType::LuxSynth
               || t == ModuleType::LuxWave; }
-    static bool isLuxStralEngine(ModuleType t) noexcept { return t == ModuleType::LuxStral; }
     /** Lowest free send slot of `type` (0..kMaxEngineSends-1), or -1 if full.
      *  Each send type owns an independent pool. */
     int firstFreeEngineSendSlot(ModuleType type,

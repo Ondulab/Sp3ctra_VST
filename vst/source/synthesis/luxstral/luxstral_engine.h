@@ -4,17 +4,17 @@
  * LuxStral engine instance state (M3 phase A — de-globalization)
  *
  * Groups ALL mutable state of the additive synthesis engine into a single
- * instantiable struct. Internal luxstral functions receive a LuxStralEngine*
- * and operate on its fields; the historical public entry points
- * (synth_AudioProcess, synth_IfftMode, init/shutdown/freeze/display APIs)
- * keep their signatures and forward to the single instance g_luxstral_engine_a.
+ * struct. Internal luxstral functions receive a LuxStralEngine* and operate
+ * on its fields; the historical public entry points (synth_AudioProcess,
+ * synth_IfftMode, init/shutdown/freeze/display APIs) keep their signatures
+ * and forward to the single instance g_luxstral_engine.
  *
  * NOTE for external consumers (outside synthesis/luxstral/):
  *   Do NOT access struct fields directly — use the accessor functions
  *   declared at the bottom of this header (display buffers, freeze state).
  *
- * The shared sine/square tables (wave_generation.c) are READ-ONLY after init
- * and deliberately stay global — they are shared by all engine instances.
+ * The sine/square tables (wave_generation.c) are READ-ONLY after init
+ * and deliberately stay global.
  *
  * Author: zhonx
  */
@@ -142,10 +142,10 @@ typedef struct LuxStralEngine {
 /* Exported variables --------------------------------------------------------*/
 
 /* The LuxStral engine (single instance since the P3 mix-pull migration). */
-extern LuxStralEngine g_luxstral_engine_a;
+extern LuxStralEngine g_luxstral_engine;
 
 /* Public accessors for external consumers ------------------------------------
- * These wrap the display buffers of g_luxstral_engine_a so external files
+ * These wrap the display buffers of g_luxstral_engine so external files
  * (e.g. threading/multithreading.c) never touch the struct internals.        */
 void luxstral_engine_displayable_lock(void);
 void luxstral_engine_displayable_unlock(void);

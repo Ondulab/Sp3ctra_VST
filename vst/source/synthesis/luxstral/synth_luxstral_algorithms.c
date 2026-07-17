@@ -24,12 +24,18 @@
  * Called at startup and when tau parameters change at runtime
  * @retval None
  */
-void update_gap_limiter_coefficients_for(volatile struct wave *w,
-                                         float tau_up_ms, float tau_down_ms) {
-    // Safety check: the target array must be initialized
+void update_gap_limiter_coefficients(void) {
+    volatile struct wave *w = waves;
+    float tau_up_ms   = g_sp3ctra_config.tau_up_base_ms;
+    float tau_down_ms = g_sp3ctra_config.tau_down_base_ms;
+
+    // Safety check: the target array must be initialized. Being called before
+    // the wavetables exist is an EXPECTED pre-init condition (e.g. envelope
+    // params restored before prepareToPlay builds the waves) — debug, not a
+    // warning, so it stops reading as a fault in the log.
     if (w == NULL) {
-        log_warning("LUXSTRAL", "update_gap_limiter_coefficients_for: waves is NULL, skipping");
-        return;  // Silently return if called before initialization
+        log_debug("LUXSTRAL", "update_gap_limiter_coefficients: waves not yet initialised, skipping");
+        return;
     }
 
     const float Fs = (float)g_sp3ctra_config.sampling_frequency;
@@ -84,13 +90,6 @@ void update_gap_limiter_coefficients_for(volatile struct wave *w,
     }
 }
 
-void update_gap_limiter_coefficients(void) {
-    // Legacy entry — engine A: global waves[] + the global (A) tau params.
-    update_gap_limiter_coefficients_for(waves,
-                                        g_sp3ctra_config.tau_up_base_ms,
-                                        g_sp3ctra_config.tau_down_base_ms);
-}
-
 
 /**
  * @brief Apply GAP_LIMITER volume ramp for a single note
@@ -101,8 +100,8 @@ void update_gap_limiter_coefficients(void) {
  * @retval None
  */
 void apply_gap_limiter_ramp(volatile struct wave *waves, int note, float target_volume, const float *pre_wave, float *volumeBuffer) {
-    // `waves` (param) shadows the global — engine A passes the global array,
-    // engine B its own copy, so per-note current_volume stays per-engine (M8).
+    // `waves` (param) shadows the global — callers pass the engine's
+    // oscillator array (worker->engine->waves).
     (void)pre_wave; // No longer used (phase weighting removed)
 
     // Apply per-note physiological (equal-loudness) gain.

@@ -23,7 +23,7 @@ const double G_SYNTH_DATA_FADE_DURATION_SECONDS = 5.0; // Corresponds to visual 
 
 /* NOTE: freeze/fade flags, frozen grayscale buffer and displayable RGB buffers
  * now live in LuxStralEngine (luxstral_engine.h). The public functions below
- * are thin wrappers operating on the single instance g_luxstral_engine_a.    */
+ * are thin wrappers operating on the single instance g_luxstral_engine.    */
 
 /* Private function implementations ------------------------------------------*/
 
@@ -114,48 +114,42 @@ static void displayable_synth_buffers_cleanup_impl(LuxStralEngine *eng) {
   }
 }
 
-/* Public wrappers (signatures unchanged, operate on g_luxstral_engine_a) ----*/
+/* Public wrappers (signatures unchanged, operate on g_luxstral_engine) ----*/
 
 void synth_data_freeze_init(void) {
-  synth_data_freeze_init_impl(&g_luxstral_engine_a);
-}
-
-/* Per-engine freeze-state init. synth_AudioProcess_impl locks
- * eng->synth_data_freeze_mutex every frame, so it MUST be initialised. */
-void synth_data_freeze_init_engine(LuxStralEngine *eng) {
-  synth_data_freeze_init_impl(eng);
+  synth_data_freeze_init_impl(&g_luxstral_engine);
 }
 
 void synth_data_freeze_cleanup(void) {
-  synth_data_freeze_cleanup_impl(&g_luxstral_engine_a);
+  synth_data_freeze_cleanup_impl(&g_luxstral_engine);
 }
 
 void displayable_synth_buffers_init(void) {
-  displayable_synth_buffers_init_impl(&g_luxstral_engine_a);
+  displayable_synth_buffers_init_impl(&g_luxstral_engine);
 }
 
 void displayable_synth_buffers_cleanup(void) {
-  displayable_synth_buffers_cleanup_impl(&g_luxstral_engine_a);
+  displayable_synth_buffers_cleanup_impl(&g_luxstral_engine);
 }
 
 /* Display buffer accessors for external consumers (multithreading.c, UI) ----*/
 
 void luxstral_engine_displayable_lock(void) {
-  pthread_mutex_lock(&g_luxstral_engine_a.displayable_synth_mutex);
+  pthread_mutex_lock(&g_luxstral_engine.displayable_synth_mutex);
 }
 
 void luxstral_engine_displayable_unlock(void) {
-  pthread_mutex_unlock(&g_luxstral_engine_a.displayable_synth_mutex);
+  pthread_mutex_unlock(&g_luxstral_engine.displayable_synth_mutex);
 }
 
 uint8_t *luxstral_engine_displayable_R(void) {
-  return g_luxstral_engine_a.displayable_synth_R;
+  return g_luxstral_engine.displayable_synth_R;
 }
 
 uint8_t *luxstral_engine_displayable_G(void) {
-  return g_luxstral_engine_a.displayable_synth_G;
+  return g_luxstral_engine.displayable_synth_G;
 }
 
 uint8_t *luxstral_engine_displayable_B(void) {
-  return g_luxstral_engine_a.displayable_synth_B;
+  return g_luxstral_engine.displayable_synth_B;
 }

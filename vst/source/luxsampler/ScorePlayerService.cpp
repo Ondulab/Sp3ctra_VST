@@ -11,12 +11,17 @@ extern "C" {
     #include "../processing/image_preprocessor.h" // PreprocessedImageData
 #include "../processing/image_pipeline.h"     // pipeline_build_config_sampler, pipeline_path_luxsynth_luxwave
     #include "logger.h"
+    #include "rt_profiler.h"                   // per-family perf timing (Score)
 }
 
 #include <sys/time.h>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+
+// The shared RT profiler (defined in PluginProcessor.cpp) — the score player
+// thread reports its per-tick processing time into the Score family slot.
+extern RTProfiler g_vst_rt_profiler;
 
 namespace
 {
@@ -411,6 +416,8 @@ void ScorePlayerService::run()
         lastTickUs += 1000;
         if (lastTickUs > now) lastTickUs = now;
 
+        const uint64_t scoreTickT0 = nowUs();   // per-family perf timing
+
         // Display owner: the LOWEST feeding slot writes the visual mix bus
         // (single display bus; the sampler engines defer while any score
         // plays — per-slot viz is the same follow-up as the samplers').
@@ -453,6 +460,9 @@ void ScorePlayerService::run()
                 endSession(i, i == displayOwner);
             }
         }
+
+        rt_profiler_engine_report(&g_vst_rt_profiler, RT_ENGINE_SCORE,
+                                  nowUs() - scoreTickT0);
     }
 
     // Thread teardown: silence everything we still own.
@@ -532,7 +542,7 @@ void ScorePlayerService::endSession(int slot, bool wasDisplayOwner) noexcept
     if (audioBuffers_ != nullptr
         && chain_additive_player_candidate(/*is_score*/ 1, slot) != 0)
         audio_image_buffers_publish_engine_input(
-            audioBuffers_, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+            audioBuffers_, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL,
             NULL, NULL, NULL, get_cis_pixels_nb());
 
     if (wasDisplayOwner)
