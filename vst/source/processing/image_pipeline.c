@@ -236,15 +236,15 @@ PipelineConfig pipeline_build_config_live(void)
 {
     PipelineConfig cfg;
 
-    /* Path A — LuxStral: per-OUT conditioning bank, engine A = slot 0
+    /* Path A — LuxStral: per-OUT conditioning bank, slot 0
      * (synth-split P1: the pipeline reads luxstral_out[], not the legacy
-     * per-engine globals). Gamma convention: 1.0 = off (stage skips it). */
-    const lux_out_params_t *out_a = &g_sp3ctra_config.luxstral_out[0];
-    cfg.luxstral_path.inversion  = out_a->negative;
-    cfg.luxstral_path.ac_removal = out_a->dc_blocking;
-    cfg.luxstral_path.gamma      = out_a->gamma;
-    cfg.luxstral_db_range        = out_a->range_db;
-    cfg.luxstral_intensity       = out_a->intensity;
+     * global conditioning params). Gamma convention: 1.0 = off (stage skips it). */
+    const lux_out_params_t *out0 = &g_sp3ctra_config.luxstral_out[0];
+    cfg.luxstral_path.inversion  = out0->negative;
+    cfg.luxstral_path.ac_removal = out0->dc_blocking;
+    cfg.luxstral_path.gamma      = out0->gamma;
+    cfg.luxstral_db_range        = out0->range_db;
+    cfg.luxstral_intensity       = out0->intensity;
 
     /* Path B — LuxSynth+LuxWave: per-OUT bank, slot 0. These fields are
      * informational for this path (preprocess_luxsynth and the LuxWave feed
@@ -264,7 +264,7 @@ PipelineConfig pipeline_build_config_live(void)
      * chains override sampler_relayed + stream_opacity per send (executor). */
     cfg.sampler_relayed = 0;
     cfg.stream_opacity  = 1.0f;
-    cfg.contrast_min   = out_a->contrast_min;
+    cfg.contrast_min   = out0->contrast_min;
 
     /* Misc */
     cfg.stereo_enabled  = g_sp3ctra_config.stereo_mode_enabled;
@@ -278,8 +278,8 @@ PipelineConfig pipeline_build_config_live(void)
     return cfg;
 }
 
-/* Synth-split P3 — config for ONE LuxStral send: engine-A shape, the SEND's
- * conditioning bank (luxstral_out[bank_slot]) and its own envelope state
+/* Synth-split P3 — config for ONE LuxStral send: the LuxStral path shape, the
+ * SEND's conditioning bank (luxstral_out[bank_slot]) and its own envelope state
  * (ENVELOPE_LS_SEND_BASE + chain_idx). Intensity stays 1.0 per frame — the
  * audio-thread mixer applies the bank's intensity as the mix weight.
  * player_fed = 1 → FramePlayerThread drives this send: its freeze_mode is
@@ -312,17 +312,17 @@ PipelineConfig pipeline_build_config_sampler(void)
 {
     PipelineConfig cfg;
 
-    /* Path A — LuxStral: per-OUT conditioning bank, engine A = slot 0
+    /* Path A — LuxStral: per-OUT conditioning bank, slot 0
      * (synth-split P1 — same bank as the live builder: the OUT owns its
      * conditioning regardless of which worker drives the pipeline).
      * contrast_min stays on the sampler-specific floor below (parity with
      * the legacy sampler stream); unification is a P3/P4 concern. */
-    const lux_out_params_t *out_a = &g_sp3ctra_config.luxstral_out[0];
-    cfg.luxstral_path.inversion  = out_a->negative;
-    cfg.luxstral_path.ac_removal = out_a->dc_blocking;
-    cfg.luxstral_path.gamma      = out_a->gamma;
-    cfg.luxstral_db_range        = out_a->range_db;
-    cfg.luxstral_intensity       = out_a->intensity;
+    const lux_out_params_t *out0 = &g_sp3ctra_config.luxstral_out[0];
+    cfg.luxstral_path.inversion  = out0->negative;
+    cfg.luxstral_path.ac_removal = out0->dc_blocking;
+    cfg.luxstral_path.gamma      = out0->gamma;
+    cfg.luxstral_db_range        = out0->range_db;
+    cfg.luxstral_intensity       = out0->intensity;
 
     /* Path B — LuxSynth+LuxWave: per-OUT bank, slot 0 (informational — the
      * consumers read their banks directly, see pipeline_build_config_live). */

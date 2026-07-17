@@ -20,8 +20,8 @@
 
 /* Color temperature and stereo panning */
 float calculate_color_temperature(uint8_t r, uint8_t g, uint8_t b);
-/* Per-engine variant (M8): caller passes its own temperature amplification
- * (LuxStral A/B each have their own Stereo Temp knob). */
+/* Variant taking the temperature amplification explicitly (the pipeline
+ * passes the stream's own Stereo Temp value). */
 float calculate_color_temperature_amp(uint8_t r, uint8_t g, uint8_t b,
                                       float temp_amplification);
 void calculate_pan_gains(float pan_position, float *left_gain, float *right_gain);

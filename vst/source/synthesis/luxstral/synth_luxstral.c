@@ -47,14 +47,14 @@
 
 
 /* Engine instance -----------------------------------------------------------*/
-/* The single LuxStral engine instance (M3 phase A). All mutable engine state
+/* The single LuxStral engine instance. All mutable engine state
  * (DSP buffers, worker pool, barriers, RT output buffers, freeze/display
  * state, counters) lives in this struct — see luxstral_engine.h.
  * Zero-initialized except use_barriers (enabled by default, matching the
  * former `_Atomic int g_use_barriers = 1;` static initializer).             */
-LuxStralEngine g_luxstral_engine_a = {
+LuxStralEngine g_luxstral_engine = {
     .use_barriers = 1,
-    .out_L = luxstral_buffers_L,          /* legacy globals — A behaviour unchanged */
+    .out_L = luxstral_buffers_L,          /* historical output globals */
     .out_R = luxstral_buffers_R,
     .out_index = &luxstral_buffer_index,
 };
@@ -111,7 +111,7 @@ static void synth_luxstral_cleanup_impl(LuxStralEngine *eng) {
 
 // Public wrapper (registered via atexit; called by Sp3ctraSharedCore)
 void synth_luxstral_cleanup(void) {
-  synth_luxstral_cleanup_impl(&g_luxstral_engine_a);
+  synth_luxstral_cleanup_impl(&g_luxstral_engine);
   // The engine only BORROWS the runtime's global waves[] (freed by
   // synth_runtime_free_buffers) — never free it here.
 }
@@ -138,7 +138,7 @@ static int32_t synth_IfftInit_impl(LuxStralEngine *eng) {
 
   // Set global waves pointer (allocated in synth_runtime_allocate_buffers)
   waves = synth_runtime_get_waves();
-  eng->waves = waves;   /* engine A uses the historical global oscillator array */
+  eng->waves = waves;   /* the engine uses the historical global oscillator array */
 
   // Register cleanup functions
   atexit(synth_runtime_free_buffers);
@@ -230,7 +230,7 @@ static int32_t synth_IfftInit_impl(LuxStralEngine *eng) {
 
 // Public wrapper (signature unchanged for external callers)
 int32_t synth_IfftInit(void) {
-  return synth_IfftInit_impl(&g_luxstral_engine_a);
+  return synth_IfftInit_impl(&g_luxstral_engine);
 }
 
 /**
@@ -693,7 +693,7 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
 
 // Public wrapper (signature unchanged for external callers)
 void synth_IfftMode(float *imageData, float *audioDataLeft, float *audioDataRight, float contrast_factor, DoubleBuffer *db) {
-  synth_IfftMode_impl(&g_luxstral_engine_a, imageData, audioDataLeft, audioDataRight, contrast_factor, db);
+  synth_IfftMode_impl(&g_luxstral_engine, imageData, audioDataLeft, audioDataRight, contrast_factor, db);
 }
 
 // Synth process function
@@ -925,7 +925,7 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
 // Public wrapper (signature unchanged for external callers, e.g. multithreading.c)
 void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
                         uint8_t *buffer_B, DoubleBuffer *db) {
-  synth_AudioProcess_impl(&g_luxstral_engine_a, buffer_R, buffer_G, buffer_B, db, /*commit_now*/1);
+  synth_AudioProcess_impl(&g_luxstral_engine, buffer_R, buffer_G, buffer_B, db, /*commit_now*/1);
 }
 
 /**
@@ -934,5 +934,5 @@ void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
  * @note Used by auto-volume system to detect audio intensity for adaptive thresholding
  */
 float synth_get_last_contrast_factor(void) {
-  return g_luxstral_engine_a.last_contrast_factor;
+  return g_luxstral_engine.last_contrast_factor;
 }

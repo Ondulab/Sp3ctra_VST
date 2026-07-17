@@ -14,8 +14,28 @@
 
 /* Helper function to calculate time difference in microseconds */
 static inline uint64_t timeval_diff_us(struct timeval *start, struct timeval *end) {
-    return (end->tv_sec - start->tv_sec) * 1000000ULL + 
+    return (end->tv_sec - start->tv_sec) * 1000000ULL +
            (end->tv_usec - start->tv_usec);
+}
+
+/* Display names for the per-family engine timers (indexed by rt_engine_id). */
+static const char *const RT_ENGINE_NAMES[RT_ENGINE_COUNT] = {
+    "LuxStral", "LuxSynth", "LuxWave", "Sampler", "Score"
+};
+
+void rt_profiler_engine_report(RTProfiler *profiler, rt_engine_id id, uint64_t elapsed_us) {
+    if (!profiler->enabled || id < 0 || id >= RT_ENGINE_COUNT) return;
+
+    RTEngineTimer *e = &profiler->engines[id];
+    atomic_fetch_add(&e->total_us, elapsed_us);
+    atomic_fetch_add(&e->iters, 1);
+
+    /* Lock-free max: retry until our value is stored or a bigger one already is. */
+    uint64_t cur = atomic_load(&e->max_us);
+    while (elapsed_us > cur &&
+           !atomic_compare_exchange_weak(&e->max_us, &cur, elapsed_us)) {
+        /* cur reloaded by CAS */
+    }
 }
 
 void rt_profiler_init(RTProfiler *profiler, int sample_rate, int buffer_size) {
@@ -27,8 +47,15 @@ void rt_profiler_init(RTProfiler *profiler, int sample_rate, int buffer_size) {
     
     /* Calculate callback budget: (buffer_size / sample_rate) * 1,000,000 µs */
     profiler->callback_budget_us = ((uint64_t)buffer_size * 1000000ULL) / sample_rate;
-    
-    log_info("RT_PROFILER", "Initialized: %d Hz, %d frames, budget=%llu µs",
+
+    /* Summary cadence ≈ 10 s of callbacks, independent of buffer size (a small
+     * 192-frame buffer would otherwise report every ~2 s and flood the log). */
+    profiler->report_interval_callbacks =
+        (buffer_size > 0) ? ((uint64_t)sample_rate * 10ULL) / (uint64_t)buffer_size : 500ULL;
+    if (profiler->report_interval_callbacks == 0)
+        profiler->report_interval_callbacks = 1;
+
+    log_info("RT_PROFILER", "Initialized: %d Hz, %d frames, budget=%llu µs (summary every ~10 s)",
              sample_rate, buffer_size, profiler->callback_budget_us);
 }
 
@@ -66,7 +93,8 @@ void rt_profiler_callback_end(RTProfiler *profiler) {
      * (logger mutex + localtime + fprintf) blocked the callback, so we only
      * raise a flag here and rt_profiler_flush_logs() prints on the message
      * thread. */
-    if (profiler->callback_count % RT_PROFILER_REPORT_INTERVAL_FRAMES == 0) {
+    if (profiler->report_interval_callbacks != 0 &&
+        profiler->callback_count % profiler->report_interval_callbacks == 0) {
         atomic_store(&profiler->report_due, 1);
     }
 
@@ -143,6 +171,180 @@ void rt_profiler_mutex_contention(RTProfiler *profiler) {
     atomic_fetch_add(&profiler->mutex_contention_events, 1);
 }
 
+/* Classify current performance into OK (0) / ELEVATED (1) / FAULT (2) and fill
+ * `reason` with a short human string naming the dominant cause. Single source of
+ * truth for both the edge-triggered alert in print_stats and is_healthy(). The
+ * FAULT thresholds match the former is_healthy() checks; ELEVATED adds an early
+ * warning band (> WARN%) below the critical band so load is flagged BEFORE it
+ * turns into audible dropouts. */
+static int rt_profiler_perf_state(RTProfiler *profiler, char *reason, size_t rlen) {
+    if (reason && rlen) reason[0] = '\0';
+    if (!profiler->enabled || profiler->callback_count == 0) return 0;
+
+    const float budget = (float)profiler->callback_budget_us;
+    const float cpu = rt_profiler_get_cpu_percent(profiler);   /* callback avg % */
+
+    uint64_t underruns = atomic_load(&profiler->underrun_count);
+    uint64_t miss = atomic_load(&profiler->buffer_miss_luxstral)
+                  + atomic_load(&profiler->buffer_miss_luxsynth)
+                  + atomic_load(&profiler->buffer_miss_luxwave);
+    float miss_rate  = (miss  * 100.0f) / profiler->callback_count;
+    uint64_t stale   = atomic_load(&profiler->buffer_stale_luxstral);
+    float stale_rate = (stale * 100.0f) / profiler->callback_count;
+
+    float synth_avg_ratio = 0.0f, synth_max_ratio = 0.0f;
+    uint64_t iters = atomic_load(&profiler->audio_thread_iteration_count);
+    if (iters > 0 && budget > 0.0f) {
+        uint64_t avg = atomic_load(&profiler->audio_thread_total_time_us) / iters;
+        uint64_t mx  = atomic_load(&profiler->audio_thread_max_time_us);
+        synth_avg_ratio = (avg * 100.0f) / budget;
+        synth_max_ratio = (mx  * 100.0f) / budget;
+    }
+
+    float mutex_avg = 0.0f, contention_rate = 0.0f;
+    if (profiler->mutex_lock_attempts > 0) {
+        mutex_avg = (float)(profiler->mutex_total_wait_us / profiler->mutex_lock_attempts);
+        contention_rate = (profiler->mutex_contentions * 100.0f) / profiler->mutex_lock_attempts;
+    }
+
+    /* ── FAULT band (audible-risk): any one trips it ── */
+    if (underruns > 0) {
+        if (reason) snprintf(reason, rlen, "%llu underrun(s)", (unsigned long long)underruns);
+        return 2;
+    }
+    if (cpu > RT_PROFILER_CRITICAL_LATENCY_PERCENT) {
+        if (reason) snprintf(reason, rlen, "callback CPU %.0f%% (> %.0f%% budget)",
+                             cpu, RT_PROFILER_CRITICAL_LATENCY_PERCENT);
+        return 2;
+    }
+    if (synth_max_ratio > RT_PROFILER_CRITICAL_LATENCY_PERCENT) {
+        if (reason) snprintf(reason, rlen, "synth spike %.0f%% of budget", synth_max_ratio);
+        return 2;
+    }
+    if (miss_rate > 2.0f) {
+        if (reason) snprintf(reason, rlen, "buffer miss %.1f%% (silence out)", miss_rate);
+        return 2;
+    }
+    if (stale_rate > 1.0f) {
+        if (reason) snprintf(reason, rlen,
+                             "producer slower than consumer: %.1f%% stale re-output", stale_rate);
+        return 2;
+    }
+    if (contention_rate > 5.0f) {
+        if (reason) snprintf(reason, rlen, "mutex contention %.1f%%", contention_rate);
+        return 2;
+    }
+    if (mutex_avg > (float)RT_PROFILER_WARN_MUTEX_WAIT_US) {
+        if (reason) snprintf(reason, rlen, "mutex avg wait %.0f µs", mutex_avg);
+        return 2;
+    }
+
+    /* ── ELEVATED band (early warning, not yet audible) ── */
+    if (synth_avg_ratio > RT_PROFILER_WARN_LATENCY_PERCENT) {
+        if (reason) snprintf(reason, rlen, "synth load %.0f%% of budget (avg)", synth_avg_ratio);
+        return 1;
+    }
+    if (synth_max_ratio > RT_PROFILER_WARN_LATENCY_PERCENT) {
+        if (reason) snprintf(reason, rlen, "synth peaks %.0f%% of budget", synth_max_ratio);
+        return 1;
+    }
+    if (cpu > RT_PROFILER_WARN_LATENCY_PERCENT) {
+        if (reason) snprintf(reason, rlen, "callback CPU %.0f%%", cpu);
+        return 1;
+    }
+
+    return 0;
+}
+
+/* Emit health-state transitions only (not every reporting period). Called from
+ * print_stats on the message thread. */
+static void rt_profiler_report_health_edges(RTProfiler *profiler) {
+    char reason[192];
+    int state = rt_profiler_perf_state(profiler, reason, sizeof reason);
+    int prev  = profiler->perf_state;
+
+    if (state == 2 && prev != 2) {
+        log_warning("RT_PROFILER", "PERFORMANCE FAULT: %s", reason);
+        profiler->perf_fault_reminder_ms = log_monotonic_ms();
+    } else if (state == 2 && prev == 2) {
+        uint64_t now = log_monotonic_ms();
+        if (now - profiler->perf_fault_reminder_ms >= 30000) {
+            profiler->perf_fault_reminder_ms = now;
+            log_warning("RT_PROFILER", "PERFORMANCE FAULT persists: %s", reason);
+        }
+    } else if (state == 1 && prev != 1) {
+        log_info("RT_PROFILER", "Synth load elevated: %s", reason);
+    } else if (state == 0 && prev != 0) {
+        log_info("RT_PROFILER", "Performance recovered (within budget)");
+    }
+
+    profiler->perf_state = state;
+}
+
+/* Per-family engine breakdown + named edge-triggered alerts. Runs once per
+ * report period on the message thread; consumes and resets each slot's counters.
+ * A family is over budget when its OWN per-iteration time approaches the audio
+ * block budget — that isolates which synthesis is the offender. */
+static void rt_profiler_report_engines(RTProfiler *profiler) {
+    const float budget = (float)profiler->callback_budget_us;
+
+    for (int i = 0; i < RT_ENGINE_COUNT; i++) {
+        RTEngineTimer *e = &profiler->engines[i];
+        uint64_t iters = atomic_load(&e->iters);
+
+        if (iters == 0) {
+            /* Engine idle this period — fold any prior alert back to normal. */
+            if (e->perf_state != 0) {
+                log_info("PERF", "%s back to normal (idle)", RT_ENGINE_NAMES[i]);
+                e->perf_state = 0;
+            }
+            continue;
+        }
+
+        uint64_t avg = atomic_load(&e->total_us) / iters;
+        uint64_t mx  = atomic_load(&e->max_us);
+        float avgp = (budget > 0.0f) ? (avg * 100.0f) / budget : 0.0f;
+        float mxp  = (budget > 0.0f) ? (mx  * 100.0f) / budget : 0.0f;
+
+        log_debug("PERF", "  %-9s avg %llu µs (%.1f%%), max %llu µs (%.1f%%), iters %llu",
+                  RT_ENGINE_NAMES[i], (unsigned long long)avg, avgp,
+                  (unsigned long long)mx, mxp, (unsigned long long)iters);
+
+        /* Per-engine state: FAULT if it alone nears/exceeds the block budget. */
+        int state = 0;
+        if (avgp > RT_PROFILER_CRITICAL_LATENCY_PERCENT || mxp > 100.0f)
+            state = 2;
+        else if (avgp > RT_PROFILER_WARN_LATENCY_PERCENT ||
+                 mxp  > RT_PROFILER_CRITICAL_LATENCY_PERCENT)
+            state = 1;
+
+        int prev = e->perf_state;
+        if (state == 2 && prev != 2) {
+            log_warning("PERF", "%s over budget: %.0f%% avg / %.0f%% peak of block",
+                        RT_ENGINE_NAMES[i], avgp, mxp);
+            e->fault_reminder_ms = log_monotonic_ms();
+        } else if (state == 2 && prev == 2) {
+            uint64_t now = log_monotonic_ms();
+            if (now - e->fault_reminder_ms >= 30000) {
+                e->fault_reminder_ms = now;
+                log_warning("PERF", "%s still over budget: %.0f%% avg / %.0f%% peak",
+                            RT_ENGINE_NAMES[i], avgp, mxp);
+            }
+        } else if (state == 1 && prev != 1) {
+            log_info("PERF", "%s load elevated: %.0f%% avg / %.0f%% peak of block",
+                     RT_ENGINE_NAMES[i], avgp, mxp);
+        } else if (state == 0 && prev != 0) {
+            log_info("PERF", "%s back to normal", RT_ENGINE_NAMES[i]);
+        }
+        e->perf_state = state;
+
+        /* Reset per-period counters. */
+        atomic_store(&e->total_us, 0);
+        atomic_store(&e->iters, 0);
+        atomic_store(&e->max_us, 0);
+    }
+}
+
 void rt_profiler_print_stats(RTProfiler *profiler) {
     if (!profiler->enabled || profiler->callback_count == 0) return;
 
@@ -194,16 +396,6 @@ void rt_profiler_print_stats(RTProfiler *profiler) {
         stale_rate,
         underruns);
 
-    /* Warn immediately on any stale re-output (producer is slower than consumer) */
-    if (stale > 0 && stale_rate > 1.0f) {
-        log_warning("RT_PROFILER",
-            "Producer is SLOWER than consumer: %.1f%% of callbacks re-output stale buffer "
-            "(synth %.0f µs avg vs budget %llu µs). "
-            "Risk of phase discontinuities / crackling at high SR.",
-            stale_rate, (float)audio_avg,
-            profiler->callback_budget_us);
-    }
-
     /* ---- detailed breakdown (log_debug only) ---- */
     log_debug("RT_PROFILER", "  processBlock: avg %llu µs (%.1f%%), max %llu µs, calls %llu",
               avg_callback_us, callback_ratio,
@@ -219,9 +411,13 @@ void rt_profiler_print_stats(RTProfiler *profiler) {
               "  buffer: miss %llu (%.2f%%), stale %llu (%.2f%%), underruns %llu",
               miss, miss_rate, stale, stale_rate, underruns);
 
-    if (!rt_profiler_is_healthy(profiler)) {
-        log_warning("RT_PROFILER", "PERFORMANCE ISSUES DETECTED");
-    }
+    /* Edge-triggered health alert: warns on the transition INTO a fault and on
+     * recovery, plus a throttled reminder while it persists — instead of the
+     * old per-period "PERFORMANCE ISSUES DETECTED" that repeated every summary. */
+    rt_profiler_report_health_edges(profiler);
+
+    /* Per-synthesis-family breakdown + named alerts (isolates the offender). */
+    rt_profiler_report_engines(profiler);
 
     /* Reset per-period synthesis counters */
     if (audio_iterations > 0) {
@@ -314,49 +510,9 @@ float rt_profiler_get_cpu_percent(RTProfiler *profiler) {
 }
 
 int rt_profiler_is_healthy(RTProfiler *profiler) {
-    if (!profiler->enabled || profiler->callback_count == 0) {
-        return 1;  /* Assume healthy if not profiling */
-    }
-    
-    /* Check CPU usage */
-    float cpu_percent = rt_profiler_get_cpu_percent(profiler);
-    if (cpu_percent > RT_PROFILER_CRITICAL_LATENCY_PERCENT) {
-        return 0;  /* CPU usage too high */
-    }
-    
-    /* Check underruns */
-    uint64_t underruns = atomic_load(&profiler->underrun_count);
-    if (underruns > 0) {
-        return 0;  /* Any underruns = not healthy */
-    }
-    
-    /* Check buffer miss rate */
-    uint64_t miss_add = atomic_load(&profiler->buffer_miss_luxstral);
-    uint64_t miss_poly = atomic_load(&profiler->buffer_miss_luxsynth);
-    uint64_t miss_photo = atomic_load(&profiler->buffer_miss_luxwave);
-    uint64_t miss_total = miss_add + miss_poly + miss_photo;
-    
-    if (miss_total > 0) {
-        float miss_rate = (miss_total * 100.0f) / profiler->callback_count;
-        if (miss_rate > 2.0f) {  /* > 2% buffer miss rate */
-            return 0;
-        }
-    }
-    
-    /* Check mutex contention */
-    if (profiler->mutex_lock_attempts > 0) {
-        float contention_rate = (profiler->mutex_contentions * 100.0f) / profiler->mutex_lock_attempts;
-        if (contention_rate > 5.0f) {  /* > 5% contention */
-            return 0;
-        }
-        
-        uint64_t avg_mutex_wait = profiler->mutex_total_wait_us / profiler->mutex_lock_attempts;
-        if (avg_mutex_wait > RT_PROFILER_WARN_MUTEX_WAIT_US) {
-            return 0;  /* Average wait too long */
-        }
-    }
-    
-    return 1;  /* All checks passed */
+    /* Healthy = not in the FAULT band. Delegates to the single classifier so
+     * the thresholds never drift from the edge-triggered alert. */
+    return rt_profiler_perf_state(profiler, NULL, 0) < 2 ? 1 : 0;
 }
 
 void rt_profiler_report_audio_thread_iteration(RTProfiler *profiler, uint64_t elapsed_us) {

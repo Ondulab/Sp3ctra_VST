@@ -92,7 +92,7 @@ typedef struct {
     int        sampler_relayed;
 
     /* Synth-split P1 — per-OUT conditioning, from g_sp3ctra_config.luxstral_out[slot]
-     * (slot picked by the builder: A=0, B=1). */
+     * (slot picked by the builder). */
     float      luxstral_db_range;       /* inverse-dB decode window (Range dB) */
     float      luxstral_intensity;      /* pre-engine mix weight of this send (1.0 = unity;
                                          * P3 send configs keep 1.0 — the mixer weighs) */
@@ -100,7 +100,7 @@ typedef struct {
     /* Freeze re-gate authority (P3): 1 = live-style — pipeline_path_luxstral
      * re-gates the envelope to the chain-1 transport (sampler_freeze_mode) +
      * RAW gate; 0 = the caller's freeze_mode is authoritative
-     * (FramePlayerThread overrides / engine-B parity). */
+     * (FramePlayerThread overrides). */
     int        live_regate;
 
     /* Stereo and misc */

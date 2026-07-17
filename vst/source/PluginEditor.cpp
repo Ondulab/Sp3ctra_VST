@@ -66,7 +66,7 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     // page/setup stay bound to the single LuxStral engine's parameter set.
     chainRack->onLuxStralBlockSelected = [this](int slot)
     {
-        luxStralEngineIndex_ = juce::jlimit(0, ChainModel::kMaxChains - 1, slot);
+        luxStralSendSlot_ = juce::jlimit(0, ChainModel::kMaxChains - 1, slot);
     };
     // A chain edit changes the rack's preferred height → re-run the zone layout.
     chainRack->onModelChanged  = [this]
@@ -271,12 +271,12 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     if ((bool) state.getProperty("catalogCollapsed", false))
         setCatalogCollapsed(true, false);   // also locks the chain rack
 
-    // ── Restore the zone-3 selection (block + face + A/B bindings) ────────────
+    // ── Restore the zone-3 selection (block + face + engine bindings) ─────────
     // Bindings first, so the restored selection lands on the same engine /
     // video instance the user was editing (rack clicks set these callbacks-
     // first for the same reason).
-    luxStralEngineIndex_ = juce::jlimit(0, ChainModel::kMaxChains - 1,
-        (int) state.getProperty("selLuxStralEngine", 0));
+    luxStralSendSlot_ = juce::jlimit(0, ChainModel::kMaxChains - 1,
+        (int) state.getProperty("selLuxStralSend", 0));
     samplerEngineIndex_  = juce::jlimit(0, 1,
         (int) state.getProperty("selSamplerEngine", 0));
     videoSlotIndex_      = juce::jlimit(0, ChainModel::kMaxVideoSlots - 1,
@@ -518,7 +518,7 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
                 sendSlot = juce::jlimit(0, ChainModel::kMaxChains - 1,
                                         m->slot >= 0 ? m->slot : 0);
         if (id == ChainBlockId::LuxStral)
-            luxStralEngineIndex_ = sendSlot;
+            luxStralSendSlot_ = sendSlot;
     }
     if (synthOutPage != nullptr && isSynthBlock(id))
     {
@@ -1203,7 +1203,7 @@ void Sp3ctraAudioProcessorEditor::persistLayoutProps()
     state.setProperty("selBlock",          (int) selectedBlock,  nullptr);
     state.setProperty("selSetupFace",      setupFace,            nullptr);
     state.setProperty("selEngineView",     engineView_,          nullptr);
-    state.setProperty("selLuxStralEngine", luxStralEngineIndex_, nullptr);
+    state.setProperty("selLuxStralSend", luxStralSendSlot_, nullptr);
     state.setProperty("selSamplerEngine",  samplerEngineIndex_,  nullptr);
     state.setProperty("selVideoSlot",      videoSlotIndex_,      nullptr);
 }

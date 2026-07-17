@@ -407,9 +407,10 @@ target_compile_definitions(Sp3ctraVST PRIVATE
     VST_MODE=1
     # Licensing election: Sp3ctra is distributed under GPLv3-or-later, JUCE is
     # used under its AGPLv3 option and the VST3 SDK under its GPLv3 option
-    # (see LICENSE + THIRD-PARTY-NOTICES.md). Disabling the JUCE splash screen
-    # is permitted under the (A)GPL usage terms.
-    JUCE_DISPLAY_SPLASH_SCREEN=0
+    # (see LICENSE + THIRD-PARTY-NOTICES.md). This JUCE version does not ship a
+    # splash screen at all, so JUCE_DISPLAY_SPLASH_SCREEN is intentionally not
+    # defined — defining it (even to 0) only triggers a "flag is ignored"
+    # compiler warning.
 )
 
 # Link libraries

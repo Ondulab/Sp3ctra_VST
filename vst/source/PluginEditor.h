@@ -474,7 +474,7 @@ private:
     void layoutZone3();
 
     /** Writes editorW/H, zone2W/zone4W, scrollCollapsed, catalogCollapsed and
-     *  the zone-3 selection (block, PLAY/SETUP face, engine A/B + video-slot
+     *  the zone-3 selection (block, PLAY/SETUP face, engine + video-slot
      *  bindings) into apvts.state so they ride in the session blob. */
     void persistLayoutProps();
 
@@ -496,7 +496,7 @@ private:
     // false = OUT page (per-chain send conditioning, reached from the rack),
     // true  = ENGINE page (reached from the ZONE-5 synth dock card).
     bool engineView_ { false };
-    int  luxStralEngineIndex_ { 0 };   // selected LuxStral SEND slot (0..7, OUT bank)
+    int  luxStralSendSlot_ { 0 };   // selected LuxStral SEND slot (0..7, OUT bank)
     int  samplerEngineIndex_  { 0 };   // selected Sampler engine (0 = A, 1 = B)
     int  videoSlotIndex_      { 0 };   // selected VideoScroll instance slot (0..7)
     int zone2Width { kZone2DefaultW };

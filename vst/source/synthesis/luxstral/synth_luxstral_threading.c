@@ -33,8 +33,12 @@
 #include <pthread/qos.h>
 #endif
 
-/* External RT Profiler */
-extern RTProfiler g_rt_profiler;
+/* External RT Profiler — the REAL, enabled, message-thread-flushed instance
+ * (defined in PluginProcessor.cpp, also used by multithreading.c). Previously
+ * this pointed at a separate g_rt_profiler that was zero-initialised (enabled=0
+ * → every mutex measurement early-returned) and never flushed, so LuxStral
+ * double-buffer handoff contention was invisible. */
+extern RTProfiler g_vst_rt_profiler;
 
 /* Maximum buffer size for static allocation (industry standard) */
 #define MAX_BUFFER_SIZE 4096
@@ -612,15 +616,15 @@ void synth_precompute_wave_data(LuxStralEngine *eng, float *imageData, DoubleBuf
   // RT PROFILER: Measure mutex contention
   struct timeval mutex_start, mutex_end;
   gettimeofday(&mutex_start, NULL);
-  rt_profiler_mutex_lock_start(&g_rt_profiler);
-  
+  rt_profiler_mutex_lock_start(&g_vst_rt_profiler);
+
   pthread_mutex_lock(&db->mutex);
-  
+
   gettimeofday(&mutex_end, NULL);
   int64_t sec_diff = (int64_t)(mutex_end.tv_sec - mutex_start.tv_sec);
   int64_t usec_diff = (int64_t)(mutex_end.tv_usec - mutex_start.tv_usec);
   uint64_t wait_us = (uint64_t)(sec_diff * 1000000LL + usec_diff);
-  rt_profiler_mutex_lock_end(&g_rt_profiler, wait_us);
+  rt_profiler_mutex_lock_end(&g_vst_rt_profiler, wait_us);
   
   const int eng_stereo_enabled = g_sp3ctra_config.stereo_mode_enabled;
 
@@ -894,5 +898,5 @@ static void synth_shutdown_thread_pool_impl(LuxStralEngine *eng) {
  * @retval None
  */
 void synth_shutdown_thread_pool(void) {
-  synth_shutdown_thread_pool_impl(&g_luxstral_engine_a);
+  synth_shutdown_thread_pool_impl(&g_luxstral_engine);
 }

@@ -657,7 +657,7 @@ private:
     std::map<int, juce::Uuid> videoScrollSlotIds_;
     // LuxStral send slots present last edit — diffed so the engine enable
     // (deviceEnabled) follows the presence of ANY "→ LUXSTRAL" send.
-    std::set<int>        luxstralEngines_;
+    std::set<int>        luxstralSends_;
     // Stable MODULE-INSTANCE → pool-slot binding (Pitch/Mask/Reverb/Echo),
     // keyed by the ModuleInstance UUID. A module keeps its pool slot for its
     // whole lifetime — moving it to another chain, or removing / reordering
@@ -716,9 +716,9 @@ private:
     float lsPkBlock_ { 0.0f }, lxPkBlock_ { 0.0f }, lwPkBlock_ { 0.0f };
     std::atomic<float> meterLuxStral_ { 0.0f }, meterLuxSynth_ { 0.0f },
                        meterLuxWave_  { 0.0f }, meterMaster_   { 0.0f };
-    // Sampler A/B presence in the model (message thread, set in
-    // deriveChainRouting) — combined with the shared luxSamplerEnabled param
-    // to drive each engine's setEnabled().
+    // Per-engine sampler presence in the model (message thread, set in
+    // deriveChainRouting) — combined with EACH engine's own enable param
+    // (fsEngineParam(e,"Enabled")) to drive that engine's setEnabled().
     std::array<bool, LuxSampler::kMaxEngines> samplerPresent_ {};
     void deriveChainRouting();              // model → pool bindings + enable bridge + plan
     PoolStale updateModulePoolBindings();   // model → modulePoolSlots_; returns per-type slots to reset
@@ -812,6 +812,21 @@ private:
     std::unique_ptr<std::atomic<bool>[]>  paramDirty_;
     std::atomic<bool>                     anyParamDirty_ { false };
     int                                   scorePlayingParamIdx_ { -1 }; // SCORE mirror guard
+
+    // Config-resync coalescing (message thread only). applyConfigurationToCore()
+    // re-reads ~60 APVTS params into g_sp3ctra_config on EVERY call — firing it
+    // per parameter turned a state restore into hundreds of full resyncs (and
+    // 3 log lines each). The "silent config update" dispatch branches now just
+    // raise these flags; drainPendingConfig() performs ONE resync per drain
+    // (timer tick / end of restore). bulkParamApply_ silences the per-parameter
+    // logs while a restore or a deferred-automation batch is being applied.
+    bool bulkParamApply_    = false;  // suppress per-param + hot-reload logs in bulk
+    bool configResyncPending_ = false;
+    bool freqReinitPending_   = false;
+    bool coeffUpdatePending_  = false;
+    // Apply any pending g_sp3ctra_config resync / wavetable reinit / envelope
+    // coefficient rebuild, once, on the message thread. Idempotent.
+    void drainPendingConfig();
 
     // R6 — pool resets deferred past the in-flight frame: chain_plan_publish()
     // makes the NEXT frame stop pulling a removed Pitch/Mask/VideoScroll pool

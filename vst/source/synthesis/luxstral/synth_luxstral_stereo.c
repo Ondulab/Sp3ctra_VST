@@ -49,8 +49,8 @@ float calculate_color_temperature_amp(uint8_t r, uint8_t g, uint8_t b,
   // Combine with configurable weight on blue-red axis
   float temperature = blue_red_diff * g_sp3ctra_config.stereo_blue_red_weight + cyan_yellow_diff * g_sp3ctra_config.stereo_cyan_yellow_weight;
 
-  // Amplification — per-engine: LuxStral A and B each pass their own
-  // Stereo Temp knob through the pipeline config (M8).
+  // Amplification — the caller passes the stream's Stereo Temp value
+  // through the pipeline config.
   temperature *= temp_amplification;  // Amplify the base signal
 
   // Apply configurable non-linear curve to push values toward extremes
@@ -68,7 +68,7 @@ float calculate_color_temperature_amp(uint8_t r, uint8_t g, uint8_t b,
 }
 
 float calculate_color_temperature(uint8_t r, uint8_t g, uint8_t b) {
-  // Legacy wrapper — historical callers use the global (engine A) knob.
+  // Legacy wrapper — historical callers use the global knob.
   return calculate_color_temperature_amp(
       r, g, b, g_sp3ctra_config.stereo_temperature_amplification);
 }

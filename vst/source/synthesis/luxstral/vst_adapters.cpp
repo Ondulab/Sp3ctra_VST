@@ -36,14 +36,13 @@ static int luxstral_audio_buffer_size = 0;  // Track current buffer size for rea
 // NOTE: wavesGeneratorParams, waves, and unitary_waveform are defined in wave_generation.c
 // Don't redefine them here to avoid duplicate symbols
 
-// RT Profiler (disabled in VST)
-// Define g_rt_profiler here with proper type from rt_profiler.h
+// RT Profiler type (the LuxStral threading now records mutex-contention timing
+// into the REAL g_vst_rt_profiler defined in PluginProcessor.cpp — the former
+// separate g_rt_profiler instance here was zero-initialised and never flushed,
+// so its measurements were dead. Removed.)
 extern "C" {
 #include "../utils/rt_profiler.h"
 }
-
-// Global instance (disabled)
-RTProfiler g_rt_profiler = {};
 
 /* Logging Functions Implementation ------------------------------*/
 

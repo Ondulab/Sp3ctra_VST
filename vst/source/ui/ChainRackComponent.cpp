@@ -290,6 +290,21 @@ void ChainRackComponent::rebuild()
             // own enable param, so the mixer can drop just this output.
             if (m.type == ModuleType::VideoScroll && m.slot >= 0)
                 bp->setEnableParamOverride(vsParam(m.slot, "enabled"));
+            // P5-M3 media sources (Image/Video/Camera) are per-slot engines: the
+            // rack LED must toggle THIS instance's own enable param, not the
+            // global default (slot 0). Without this override every chain's LED
+            // wrote "imgSrcEnabled" == slot 0, so Chain 2's button flipped
+            // Chain 1's Image. The LED read side already uses mi->slot.
+            if (m.type == ModuleType::Image && m.slot >= 0)
+                bp->setEnableParamOverride(imgSrcParam(m.slot, "Enabled"));
+            if (m.type == ModuleType::Video && m.slot >= 0)
+                bp->setEnableParamOverride(vidSrcParam(m.slot, "Enabled"));
+            if (m.type == ModuleType::Camera && m.slot >= 0)
+                bp->setEnableParamOverride(camSrcParam(m.slot, "Enabled"));
+            // P6 sampler engines are per-slot too: the LED toggles THIS engine's
+            // own enable, so a Sampler in chain 2 no longer flips chain 1's.
+            if (m.type == ModuleType::Sampler && m.slot >= 0)
+                bp->setEnableParamOverride(fsEngineParam(m.slot, "Enabled"));
             // Pooled inserts are per-instance too: the LED toggles the enable of
             // THIS instance's bank (pool slot bound to the module UUID).
             if (m.type == ModuleType::Pitch || m.type == ModuleType::Mask
@@ -364,9 +379,9 @@ void ChainRackComponent::refreshAfterModelEdit(bool notifySelection)
             if (m->type == ModuleType::VideoScroll && onVideoBlockSelected)
                 onVideoBlockSelected(m->slot);
             if (m->type == ModuleType::Sampler && onSamplerBlockSelected)
-                onSamplerBlockSelected(m->slot);   // engine A (0) / B (1)
+                onSamplerBlockSelected(m->slot);
             if (m->type == ModuleType::LuxStral && onLuxStralBlockSelected)
-                onLuxStralBlockSelected(m->slot == 1 ? 1 : 0);   // engine A (0) / B (1)
+                onLuxStralBlockSelected(m->slot);   // send slot (0..7, OUT bank)
             onBlockSelected(instanceToBlockId(m->type, sc));
         }
         else
@@ -481,9 +496,9 @@ void ChainRackComponent::selectInstance(const juce::Uuid& id, bool notify)
             if (m->type == ModuleType::VideoScroll && onVideoBlockSelected)
                 onVideoBlockSelected(m->slot);   // bind the per-instance bank first
             if (m->type == ModuleType::Sampler && onSamplerBlockSelected)
-                onSamplerBlockSelected(m->slot);   // engine A (0) / B (1)
+                onSamplerBlockSelected(m->slot);
             if (m->type == ModuleType::LuxStral && onLuxStralBlockSelected)
-                onLuxStralBlockSelected(m->slot == 1 ? 1 : 0);   // engine A (0) / B (1)
+                onLuxStralBlockSelected(m->slot);   // send slot (0..7, OUT bank)
             onBlockSelected(instanceToBlockId(m->type, c));
         }
     }
@@ -1141,7 +1156,12 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const j
         }
 
         case ModuleType::Sampler:
-            return paramOn("luxSamplerEnabled") ? LedState::Active : LedState::Off;
+            // Per-engine enable (P6): each Sampler instance reads ITS OWN engine
+            // slot's enable, so the rack LED shows the right on/off per chain
+            // (engine 0 keeps the legacy "luxSamplerEnabled" id).
+            return paramOn(engineSlot >= 0 ? fsEngineParam(engineSlot, "Enabled")
+                                           : juce::String("luxSamplerEnabled"))
+                       ? LedState::Active : LedState::Off;
         case ModuleType::LuxStral:
             // Per-send power (the send's own conditioning bank); the ENGINE
             // enables live on the AUDIO MIX strips (M6).

@@ -773,7 +773,7 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
                            || vizSource == VisualizerMode::SPCTR_BLOB);
         audio_image_buffers_get_engine_input_pointers(
             buffers,
-            isSpctr ? AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A
+            isSpctr ? AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL
                     : AUDIO_IMAGE_ENGINE_TAP_PATHB,
             &pR, &pG, &pB);
     }

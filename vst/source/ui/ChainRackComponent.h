@@ -73,9 +73,9 @@ public:
      *  sampler page + setup panel to the right engine. */
     std::function<void(int)> onSamplerBlockSelected;
 
-    /** Fired (BEFORE onBlockSelected) when the selected block is a LUXSTRAL,
-     *  carrying its engine index (slot: 0 = A, 1 = B) so the editor can bind the
-     *  module page + setup panel to the right engine's parameter set (M8). */
+    /** Fired (BEFORE onBlockSelected) when the selected block is a LUXSTRAL
+     *  send, carrying its send slot (0..7) so the editor can bind the OUT
+     *  page to the right conditioning bank. */
     std::function<void(int)> onLuxStralBlockSelected;
 
     /** Fired after a model mutation so the editor can re-run layoutZones()

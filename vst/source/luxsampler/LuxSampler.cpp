@@ -15,6 +15,7 @@ extern "C" {
     #include "../processing/image_preprocessor.h" // PreprocessedImageData
 #include "../processing/image_pipeline.h"     // pipeline_process_frame, pipeline_build_config_sampler
     #include "logger.h"
+    #include "rt_profiler.h"                   // per-family perf timing (Sampler)
 }
 
 #include <sys/time.h>
@@ -22,6 +23,10 @@ extern "C" {
 #include <cstring>
 #include <cmath>
 #include <vector>
+
+// The shared RT profiler (defined in PluginProcessor.cpp) — the sampler player
+// thread reports its per-frame processing time into the Sampler family slot.
+extern RTProfiler g_vst_rt_profiler;
 
 // ============================================================================
 // Static instance (singleton for C hook access)
@@ -2170,7 +2175,7 @@ void FramePlayerThread::injectWhiteFrame() noexcept
             // injection above so the head panels show "unfed" (white) instead
             // of the last playback frame.
             audio_image_buffers_publish_engine_input(
-                audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL_A,
+                audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL,
                 nullptr, nullptr, nullptr, nbPx);
             if (pbOwned)
                 audio_image_buffers_publish_engine_input(
@@ -2924,6 +2929,7 @@ void FramePlayerThread::runSamplerSession()
         // The master starts white (255 = silence): the identity element of
         // every mix mode, so a single bank at level 1 is bit-exact with the
         // legacy single-voice output.
+        const uint64_t smpFrameT0 = currentTimeUs();   // per-family perf timing
         std::memset(workR, 255, sizeof(workR));
         std::memset(workG, 255, sizeof(workG));
         std::memset(workB, 255, sizeof(workB));
@@ -2952,6 +2958,9 @@ void FramePlayerThread::runSamplerSession()
 
         if (masterNb > 0)
             outputFrame(workR, workG, workB, masterNb, liveBlend);
+
+        rt_profiler_engine_report(&g_vst_rt_profiler, RT_ENGINE_SAMPLER,
+                                  currentTimeUs() - smpFrameT0);
 
         if (numActive == 0)
             break;
