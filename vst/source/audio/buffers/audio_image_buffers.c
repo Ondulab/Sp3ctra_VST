@@ -129,8 +129,7 @@ int audio_image_buffers_init(AudioImageBuffers *buffers) {
   buffers->buffer_swaps = 0;
   buffers->initialized = 1;
 
-  log_info("BUFFERS", "Dual buffer system initialized: 2 x %d pixels x 3 channels", nb_pixels);
-  log_info("BUFFERS", "Initial state: Buffer 0 = read, Buffer 1 = write");
+  log_startup_detail("BUFFERS", "Dual buffer system initialized: 2 x %d pixels x 3 channels", nb_pixels);
 
   return 0;
 }

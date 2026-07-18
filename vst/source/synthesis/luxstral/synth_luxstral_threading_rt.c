@@ -140,7 +140,7 @@ int synth_init_barriers(LuxStralEngine *eng, int num_threads) {
   }
 #endif
 
-  log_info("SYNTH_RT", "Barrier synchronization initialized for %d threads", num_threads);
+  log_startup_detail("SYNTH_RT", "Barrier synchronization initialized for %d threads", num_threads);
   return 0;
 }
 

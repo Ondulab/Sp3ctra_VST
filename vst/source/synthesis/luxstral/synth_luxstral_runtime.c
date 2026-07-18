@@ -38,7 +38,7 @@ int synth_runtime_init(int max_pixels, int pixels_per_note) {
     g_synth_runtime.pixels_per_note = pixels_per_note;
     g_synth_runtime.num_notes = max_pixels / pixels_per_note;
     
-    log_info("RUNTIME", "Initialized runtime: %d notes (px=%d, px/note=%d)",
+    log_startup_detail("RUNTIME", "Initialized runtime: %d notes (px=%d, px/note=%d)",
              g_synth_runtime.num_notes,
              g_synth_runtime.max_pixels,
              g_synth_runtime.pixels_per_note);
@@ -62,9 +62,9 @@ int synth_runtime_allocate_buffers(void) {
     
     /* The shared sine table (g_sine_table[SINE_TABLE_SIZE] = 4 KB) is a static
      * global array in wave_generation.c — no heap allocation needed here.    */
-    log_info("RUNTIME", "Allocated waves array: %d notes, %d bytes/note",
+    log_startup_detail("RUNTIME", "Allocated waves array: %d notes, %d bytes/note",
              g_synth_runtime.num_notes, (int)sizeof(struct wave));
-    log_info("RUNTIME", "Shared sine table: %d entries (4 KB) — no heap alloc",
+    log_startup_detail("RUNTIME", "Shared sine table: %d entries (4 KB) — no heap alloc",
              SINE_TABLE_SIZE);
     
     return 0;

@@ -2,7 +2,12 @@
 #include "SetupHeader.h"
 #include "../../Sp3ctraConstants.h"
 #include "../../UITheme.h"
+#include "../../synthesis/luxstral/luxstral_wavetable.h"
+extern "C" {
+#include "../../utils/logger.h"
+}
 #include <cmath>
+#include <vector>
 
 //==============================================================================
 LuxStralSetupPanel::LuxStralSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour)
@@ -131,6 +136,66 @@ LuxStralSetupPanel::LuxStralSetupPanel(Sp3ctraAudioProcessor& processor, juce::C
         apvts, "luxstralSoftLimitKnee", softLimitKneeSlider);
 
     // ========================================================================
+    // Section: Timbre — Sample Wavetable (tuned grains)
+    // ========================================================================
+    timbreSectionLabel.setText(juce::String::fromUTF8("Timbre — Sample Wavetable"), juce::dontSendNotification);
+    timbreSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
+    timbreSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
+    addAndMakeVisible(timbreSectionLabel);
+
+    timbreLoadButton.setButtonText("LOAD SAMPLE...");
+    timbreLoadButton.setTooltip(
+        "Load an audio file as the oscillator bank's timbre.\n"
+        "One cycle is extracted at the detected fundamental and each of the\n"
+        "3456 oscillators replays it band-limited at its own pitch - the\n"
+        "image stays readable as a score, with the sample's color.");
+    addAndMakeVisible(timbreLoadButton);
+    timbreLoadButton.onClick = [this]
+    {
+        timbreFileChooser = std::make_unique<juce::FileChooser>(
+            "Select a sample for the LuxStral timbre",
+            juce::File::getSpecialLocation(juce::File::userMusicDirectory),
+            "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg;*.m4a");
+        const auto flags = juce::FileBrowserComponent::openMode
+                         | juce::FileBrowserComponent::canSelectFiles;
+        timbreFileChooser->launchAsync(flags, [this](const juce::FileChooser& fc)
+        {
+            const auto file = fc.getResult();
+            if (file.existsAsFile())
+                loadTimbreSample(file);
+        });
+    };
+
+    timbreClearButton.setButtonText("CLEAR");
+    timbreClearButton.setTooltip("Back to the analytic sine/square timbre.");
+    addAndMakeVisible(timbreClearButton);
+    timbreClearButton.onClick = [this]
+    {
+        luxstral_wavetable_clear();
+        updateTimbreInfo();
+    };
+
+    timbreInfoLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).italicised());
+    addAndMakeVisible(timbreInfoLabel);
+
+    timbreMixLabel.setText("Timbre Mix:", juce::dontSendNotification);
+    timbreMixLabel.setJustificationType(juce::Justification::centredRight);
+    timbreMixLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+    timbreMixLabel.setTooltip(
+        "0 = pure sine/square bank, 1 = pure sample timbre.\n"
+        "Automatable and MIDI-mappable; no effect while no sample is loaded.");
+    addAndMakeVisible(timbreMixLabel);
+
+    timbreMixSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    timbreMixSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
+    timbreMixSlider.setTooltip(timbreMixLabel.getTooltip());
+    addAndMakeVisible(timbreMixSlider);
+    timbreMixAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "luxstralTimbreMix", timbreMixSlider);
+
+    updateTimbreInfo();
+
+    // ========================================================================
     // Section: StrokeForge Advanced Blob Detection
     // ========================================================================
     sfBlobSectionLabel.setText("StrokeForge — Advanced Blob Detection", juce::dontSendNotification);
@@ -239,6 +304,23 @@ void LuxStralSetupPanel::resized()
     yPos += rowHeight + sectionSpacing;
 
     // ========================================================================
+    // Section: Timbre — Sample Wavetable (tuned grains)
+    // ========================================================================
+    timbreSectionLabel.setBounds(padding, yPos, contentWidth, 25);
+    yPos += 30;
+
+    timbreLoadButton.setBounds(padding, yPos + vc, 130, ctrlH);
+    timbreClearButton.setBounds(padding + 130 + Sp3ctraTheme::kGap, yPos + vc, 70, ctrlH);
+    yPos += rowHeight + itemSpacing;
+
+    timbreInfoLabel.setBounds(padding, yPos, contentWidth, 20);
+    yPos += 25 + itemSpacing;
+
+    timbreMixLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    timbreMixSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
+    yPos += rowHeight + sectionSpacing;
+
+    // ========================================================================
     // Section: StrokeForge Advanced Blob Detection
     // ========================================================================
     sfBlobSectionLabel.setBounds(padding, yPos, contentWidth, 25);
@@ -274,6 +356,79 @@ void LuxStralSetupPanel::sliderValueChanged(juce::Slider* slider)
             updateOctavesSliderRange();
         }
         updateFrequencyRangeInfo();
+    }
+}
+
+//==============================================================================
+// Timbre — sample wavetable (tuned grains)
+//==============================================================================
+
+void LuxStralSetupPanel::loadTimbreSample(const juce::File& file)
+{
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(file));
+    if (reader == nullptr || reader->lengthInSamples < 512)
+    {
+        timbreInfoLabel.setText("Could not read: " + file.getFileName(),
+                                juce::dontSendNotification);
+        timbreInfoLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+        log_warning("VST", "Timbre load failed: unreadable/too-short file '%s'",
+                    file.getFullPathName().toRawUTF8());
+        return;
+    }
+
+    // The analysis only needs the loudest few thousand cycles — cap the read
+    // at 10 s so a long file doesn't stall the message thread.
+    const auto maxLen = (juce::int64)(reader->sampleRate * 10.0);
+    const int  numSamples =
+        (int) juce::jmin<juce::int64>(reader->lengthInSamples, maxLen);
+    const int  numCh = (int) reader->numChannels;
+
+    juce::AudioBuffer<float> buf(numCh, numSamples);
+    reader->read(&buf, 0, numSamples, 0, true, true);
+
+    std::vector<float> mono((size_t) numSamples, 0.0f);
+    const float chScale = 1.0f / (float) juce::jmax(1, numCh);
+    for (int c = 0; c < numCh; ++c)
+    {
+        const float* src = buf.getReadPointer(c);
+        for (int i = 0; i < numSamples; ++i)
+            mono[(size_t) i] += src[i] * chScale;
+    }
+
+    if (luxstral_wavetable_load(mono.data(), numSamples,
+                                (float) reader->sampleRate, 0.0f,
+                                file.getFileName().toRawUTF8()) != 0)
+    {
+        timbreInfoLabel.setText("No stable pitch found in " + file.getFileName()
+                                    + " - timbre unchanged",
+                                juce::dontSendNotification);
+        timbreInfoLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+        return;
+    }
+    updateTimbreInfo();
+}
+
+void LuxStralSetupPanel::updateTimbreInfo()
+{
+    char  name[LUXSTRAL_WT_NAME_MAX] = {0};
+    float rootHz = 0.0f, confidence = 0.0f;
+    if (luxstral_wavetable_get_info(name, sizeof(name), &rootHz, &confidence))
+    {
+        timbreInfoLabel.setText(juce::String::fromUTF8(name)
+                                    + juce::String::formatted(" - root %.1f Hz", rootHz)
+                                    + (confidence < 0.6f ? " (uncertain pitch)" : ""),
+                                juce::dontSendNotification);
+        timbreInfoLabel.setColour(juce::Label::textColourId,
+                                  confidence < 0.6f ? juce::Colours::orange
+                                                    : juce::Colours::lightgreen);
+    }
+    else
+    {
+        timbreInfoLabel.setText("No sample loaded - analytic sine/square timbre",
+                                juce::dontSendNotification);
+        timbreInfoLabel.setColour(juce::Label::textColourId, juce::Colours::grey);
     }
 }
 

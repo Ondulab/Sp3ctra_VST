@@ -283,7 +283,7 @@ int image_preprocess_fft(PreprocessedImageData *data) {
     
     /* Lazy initialization of FFT state */
     if (!fft_history_state.initialized) {
-        log_info("PREPROCESS", "FFT: Initializing KissFFT for %d pixels", nb_pixels);
+        log_startup_detail("PREPROCESS", "FFT: Initializing KissFFT for %d pixels", nb_pixels);
         
         /* Allocate FFT buffers */
         fft_history_state.fft_input = (kiss_fft_scalar *)calloc(nb_pixels, sizeof(kiss_fft_scalar));
@@ -317,7 +317,7 @@ int image_preprocess_fft(PreprocessedImageData *data) {
         fft_history_state.fill_count = FFT_HISTORY_SIZE;  /* History pre-filled */
         fft_history_state.initialized = 1;
         
-        log_info("PREPROCESS", "FFT: Initialized with %d-frame temporal smoothing (%.1fms @ 1kHz)", 
+        log_startup_detail("PREPROCESS", "FFT: Initialized with %d-frame temporal smoothing (%.1fms @ 1kHz)",
                  FFT_HISTORY_SIZE, FFT_HISTORY_SIZE * 1.0f);
     }
     
@@ -413,7 +413,7 @@ static int image_preprocess_color_fft(
     
     /* Lazy initialization of color FFT state */
     if (!color_fft_history_state.initialized) {
-        log_info("PREPROCESS", "Color FFT: Initializing KissFFT for %d pixels", nb_pixels);
+        log_startup_detail("PREPROCESS", "Color FFT: Initializing KissFFT for %d pixels", nb_pixels);
         
         /* Allocate color FFT buffers */
         color_fft_history_state.color_fft_input = (kiss_fft_scalar *)calloc(nb_pixels, sizeof(kiss_fft_scalar));
@@ -446,7 +446,7 @@ static int image_preprocess_color_fft(
         color_fft_history_state.fill_count = FFT_HISTORY_SIZE;  /* History pre-filled */
         color_fft_history_state.initialized = 1;
         
-        log_info("PREPROCESS", "Color FFT: Initialized with %d-frame temporal smoothing (%.1fms @ 1kHz)", 
+        log_startup_detail("PREPROCESS", "Color FFT: Initialized with %d-frame temporal smoothing (%.1fms @ 1kHz)",
                  FFT_HISTORY_SIZE, FFT_HISTORY_SIZE * 1.0f);
     }
     

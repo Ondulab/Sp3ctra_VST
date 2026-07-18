@@ -72,7 +72,7 @@ int udp_Init(struct sockaddr_in *si_other, struct sockaddr_in *si_me) {
     die("socket");
   }
 
-  log_info("UDP", "Creating UDP socket for %s:%d", udp_address, udp_port);
+  log_startup_detail("UDP", "Creating UDP socket for %s:%d", udp_address, udp_port);
 
   // ── SO_REUSEADDR: allow rapid socket restart without EADDRINUSE on TIME_WAIT ──
   int reuse = 1;
@@ -104,7 +104,7 @@ int udp_Init(struct sockaddr_in *si_other, struct sockaddr_in *si_me) {
     log_warning("UDP", "Failed to set SO_REUSEPORT: %s", strerror(errno));
     log_warning("UDP", "Multiple standalone instances on the same port may not work");
   } else {
-    log_info("UDP", "SO_REUSEPORT enabled (multi-process fanout for multicast)");
+    log_startup_detail("UDP", "SO_REUSEPORT enabled (multi-process fanout for multicast)");
   }
 
   // Set socket timeout so recvfrom() can be interrupted for clean shutdown
@@ -132,7 +132,7 @@ int udp_Init(struct sockaddr_in *si_other, struct sockaddr_in *si_me) {
     return -1;
   }
 
-  log_info("UDP", "Socket bound to port %d", udp_port);
+  log_startup_detail("UDP", "Socket bound to port %d", udp_port);
   
   // Check if address is multicast and join the group
   if (is_multicast_address(udp_address)) {
@@ -176,7 +176,7 @@ int udp_Init(struct sockaddr_in *si_other, struct sockaddr_in *si_me) {
     
     log_info("UDP", "Successfully joined multicast group %s", udp_address);
   } else {
-    log_info("UDP", "Unicast mode - listening on %s:%d", udp_address, udp_port);
+    log_startup_detail("UDP", "Unicast mode - listening on %s:%d", udp_address, udp_port);
   }
 
   // Return the socket descriptor

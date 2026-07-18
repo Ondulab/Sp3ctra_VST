@@ -217,7 +217,7 @@ void pipeline_init(void)
         g_envelope[i].prev_freeze = -1;
     }
 
-    log_info("PIPELINE", "Image pipeline initialized");
+    log_startup_detail("PIPELINE", "Image pipeline initialized");
     g_pipeline_initialized = 1;
 }
 
@@ -570,9 +570,10 @@ void pipeline_luxwave_feed_tick(const ChainPlan *plan)
     int nb = 0;
     const int mixed = synth_staging_mix_luxwave(plan, s_mixed_line,
                                                 get_cis_pixels_nb(), &nb);
-    if (mixed == 0 || nb <= 0)
-        return;   /* no "→ LUXWAVE" send → the wavetable keeps its last
-                   * content (it only sounds under held MIDI notes) */
+    if (mixed <= 0 || nb <= 0)
+        return;   /* no "→ LUXWAVE" send (0) or torn slot (-1) → the wavetable
+                   * keeps its last content (it only sounds under held MIDI
+                   * notes) */
 
     /* (P4 — 2026-07-14: the global Chain-2 gate is GONE — each "→ LUXWAVE"
      * send is gated at staging time by ITS chain's transport, with the fade

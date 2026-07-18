@@ -22,6 +22,7 @@
 #define LUXSYNTH_FEED_H
 
 #include "chain_plan.h"
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,6 +31,11 @@ extern "C" {
 /* Audio thread (audioProcessingThread): pull the send mix and refresh the
  * LuxSynth engine's spectral data. Cheap no-op when nothing changed. */
 void luxsynth_feed_tick(const ChainPlan* plan);
+
+/* Dropout diagnostics (monotonic, process lifetime; message-thread drain):
+ * how many times the feed pushed SILENCE (no-send contract) vs real spectra. */
+uint64_t luxsynth_feed_silence_pushes(void);
+uint64_t luxsynth_feed_spec_pushes(void);
 
 #ifdef __cplusplus
 }

@@ -112,7 +112,7 @@ int luxstral_init_audio_buffers(int buffer_size) {
         return -1;
     }
     
-    log_info("SYNTH", "Initializing audio buffers (size=%d samples)", buffer_size);
+    log_startup_detail("SYNTH", "Initializing audio buffers (size=%d samples)", buffer_size);
     
     // Allocate buffers for both double-buffer slots
     for (int i = 0; i < 2; i++) {
@@ -174,7 +174,6 @@ int luxstral_init_audio_buffers(int buffer_size) {
         log_info("SYNTH", "mlock unavailable - continuing without memory locking");
     }
     
-    log_info("SYNTH", "Audio buffers initialized successfully");
     return 0;
 }
 
@@ -226,7 +225,7 @@ int luxstral_get_audio_buffer_size(void) {
  */
 void luxstral_init_callback_sync(void) {
     g_vst_callback_consumed_buffer = 1;  // Start ready for first synthesis
-    log_info("SYNTH", "Callback synchronization initialized");
+    log_startup_detail("SYNTH", "Callback synchronization initialized");
 }
 
 /**

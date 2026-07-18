@@ -1,0 +1,410 @@
+/*
+ * luxstral_wavetable.c
+ *
+ * User-sample timbre wavetable — analysis, mipmap build, lock-free publish.
+ * See luxstral_wavetable.h for the design contract.
+ *
+ * Author: zhonx
+ */
+
+#include "luxstral_wavetable.h"
+#include "logger.h"
+
+#include <math.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define WT_PI 3.14159265358979323846
+
+/* Analysis window for pitch detection / cycle averaging */
+#define WT_ANALYSIS_WIN   4096
+/* Uniform grid one extracted cycle is resampled to before projection */
+#define WT_CYCLE_GRID     4096
+/* Max cycles averaged (noise / vibrato smoothing) */
+#define WT_MAX_AVG_CYCLES 8
+/* Pitch search range */
+#define WT_F0_MIN_HZ      27.5f
+#define WT_F0_MAX_HZ      2000.0f
+/* NSDF peak below this = no usable periodicity */
+#define WT_MIN_CONFIDENCE 0.30f
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * Ping-pong slots — see header for the reuse contract.
+ *──────────────────────────────────────────────────────────────────────────────*/
+static luxstral_wavetable_t g_slots[2];
+static int g_build_slot = 0; /* next slot to build into (message thread only) */
+static luxstral_wavetable_t *_Atomic g_active = NULL;
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * Analysis helpers (all non-RT)
+ *──────────────────────────────────────────────────────────────────────────────*/
+
+/* Start of the strongest WT_ANALYSIS_WIN-sample window (RMS), so the analysis
+ * lands on the sustained part of the sample rather than silence or tail.     */
+static int find_loudest_window(const float *x, int n, int win)
+{
+    if (n <= win)
+        return 0;
+    const int hop = win / 2;
+    double best_e = -1.0;
+    int    best_i = 0;
+    for (int i = 0; i + win <= n; i += hop) {
+        double e = 0.0;
+        for (int j = 0; j < win; j++)
+            e += (double)x[i + j] * (double)x[i + j];
+        if (e > best_e) {
+            best_e = e;
+            best_i = i;
+        }
+    }
+    return best_i;
+}
+
+/* McLeod-style NSDF over one window: nsdf[tau] = 2·Σx[i]x[i+tau] /
+ * Σ(x[i]²+x[i+tau]²). Picks the first local max ≥ 0.85 × the global max
+ * (avoids octave-down errors), parabolic sub-sample refinement.
+ * Returns the period in samples, or 0 on failure.                            */
+static float detect_period_nsdf(const float *x, int n, float fs,
+                                float *confidence_out)
+{
+    int tau_min = (int)(fs / WT_F0_MAX_HZ);
+    int tau_max = (int)(fs / WT_F0_MIN_HZ);
+    if (tau_min < 2)
+        tau_min = 2;
+    if (tau_max > n / 2)
+        tau_max = n / 2;
+    if (tau_max <= tau_min + 2)
+        return 0.0f;
+
+    const int ntau = tau_max - tau_min + 1;
+    float *nsdf = (float *)malloc((size_t)ntau * sizeof(float));
+    if (nsdf == NULL)
+        return 0.0f;
+
+    for (int tau = tau_min; tau <= tau_max; tau++) {
+        double acf = 0.0, m = 0.0;
+        const int lim = n - tau;
+        for (int i = 0; i < lim; i++) {
+            const double a = x[i], b = x[i + tau];
+            acf += a * b;
+            m   += a * a + b * b;
+        }
+        nsdf[tau - tau_min] = (m > 1e-12) ? (float)(2.0 * acf / m) : 0.0f;
+    }
+
+    float global_max = 0.0f;
+    for (int i = 0; i < ntau; i++)
+        if (nsdf[i] > global_max)
+            global_max = nsdf[i];
+
+    float best_tau = 0.0f, best_val = 0.0f;
+    if (global_max >= WT_MIN_CONFIDENCE) {
+        const float thresh = 0.85f * global_max;
+        for (int i = 1; i < ntau - 1; i++) {
+            if (nsdf[i] >= thresh && nsdf[i] >= nsdf[i - 1] &&
+                nsdf[i] >= nsdf[i + 1]) {
+                /* Parabolic refinement around the discrete peak */
+                const float y0 = nsdf[i - 1], y1 = nsdf[i], y2 = nsdf[i + 1];
+                const float den = y0 - 2.0f * y1 + y2;
+                float delta = 0.0f;
+                if (fabsf(den) > 1e-12f) {
+                    delta = 0.5f * (y0 - y2) / den;
+                    if (delta > 0.5f)
+                        delta = 0.5f;
+                    if (delta < -0.5f)
+                        delta = -0.5f;
+                }
+                best_tau = (float)(i + tau_min) + delta;
+                best_val = y1;
+                break; /* first acceptable peak = highest fundamental candidate */
+            }
+        }
+    }
+
+    free(nsdf);
+    if (confidence_out != NULL)
+        *confidence_out = best_val;
+    return best_tau;
+}
+
+/* Advance to the first rising zero-crossing within one period of `start`, so
+ * consecutive extracted cycles align on the same waveform feature.           */
+static int align_to_rising_zero(const float *x, int n, int start, int period)
+{
+    const int lim = start + period;
+    for (int i = start + 1; i < lim && i < n - 1; i++)
+        if (x[i - 1] <= 0.0f && x[i] > 0.0f)
+            return i;
+    return start;
+}
+
+/* Resample [t0, t0+period) onto the uniform WT_CYCLE_GRID via linear
+ * interpolation, accumulating into grid[] (caller averages).                 */
+static void accumulate_cycle(const float *x, int n, double t0, double period,
+                             double *grid)
+{
+    for (int g = 0; g < WT_CYCLE_GRID; g++) {
+        const double t  = t0 + period * (double)g / (double)WT_CYCLE_GRID;
+        const int    i0 = (int)t;
+        if (i0 < 0 || i0 + 1 >= n)
+            return; /* partial cycle at the very end — skip the remainder */
+        const double frac = t - (double)i0;
+        grid[g] += (double)x[i0] + frac * ((double)x[i0 + 1] - (double)x[i0]);
+    }
+}
+
+/* Project the averaged cycle onto harmonics 1..num_harm (DFT on the uniform
+ * grid), RMS-normalize the coefficient set to the sine table's RMS (1/√2).
+ * Returns 0, or -1 if the cycle is silent.                                   */
+static int project_harmonics(const double *grid, int num_harm, float *re_out,
+                             float *im_out)
+{
+    /* Remove DC first — harmonic 0 is deliberately dropped */
+    double mean = 0.0;
+    for (int g = 0; g < WT_CYCLE_GRID; g++)
+        mean += grid[g];
+    mean /= (double)WT_CYCLE_GRID;
+
+    double rms_sq = 0.0;
+    for (int k = 1; k <= num_harm; k++) {
+        const double w = 2.0 * WT_PI * (double)k / (double)WT_CYCLE_GRID;
+        double a = 0.0, b = 0.0;
+        for (int g = 0; g < WT_CYCLE_GRID; g++) {
+            const double v   = grid[g] - mean;
+            const double ang = w * (double)g;
+            a += v * cos(ang);
+            b += v * sin(ang);
+        }
+        a *= 2.0 / (double)WT_CYCLE_GRID;
+        b *= 2.0 / (double)WT_CYCLE_GRID;
+        re_out[k - 1] = (float)a;
+        im_out[k - 1] = (float)b;
+        rms_sq += 0.5 * (a * a + b * b);
+    }
+
+    if (rms_sq < 1e-18)
+        return -1;
+
+    const float scale = (float)(0.70710678118 / sqrt(rms_sq));
+    for (int k = 0; k < num_harm; k++) {
+        re_out[k] *= scale;
+        im_out[k] *= scale;
+    }
+    return 0;
+}
+
+/* Resynthesize the mip tables from harmonic coefficients: build the richest
+ * level incrementally, snapshotting at each power-of-two harmonic boundary
+ * (levels share their low harmonics — one accumulation pass builds all 9).   */
+static void build_mips(luxstral_wavetable_t *wt)
+{
+    static double acc[LUXSTRAL_WT_TABLE_SIZE]; /* message-thread only */
+    memset(acc, 0, sizeof(acc));
+    memset(wt->mips, 0, sizeof(wt->mips));
+
+    int level = LUXSTRAL_WT_LEVELS - 1; /* next boundary: 1, 2, 4, … harmonics */
+    int boundary = LUXSTRAL_WT_MAX_HARMONICS >> level;
+
+    for (int k = 1; k <= wt->num_harmonics; k++) {
+        const double a = (double)wt->harm_re[k - 1];
+        const double b = (double)wt->harm_im[k - 1];
+        if (a != 0.0 || b != 0.0) {
+            const double w = 2.0 * WT_PI * (double)k / (double)LUXSTRAL_WT_TABLE_SIZE;
+            for (int i = 0; i < LUXSTRAL_WT_TABLE_SIZE; i++) {
+                const double ang = w * (double)i;
+                acc[i] += a * cos(ang) + b * sin(ang);
+            }
+        }
+        while (level >= 0 && k == boundary) {
+            for (int i = 0; i < LUXSTRAL_WT_TABLE_SIZE; i++)
+                wt->mips[level][i] = (float)acc[i];
+            level--;
+            boundary = (level >= 0) ? (LUXSTRAL_WT_MAX_HARMONICS >> level) : -1;
+        }
+    }
+    /* Fewer harmonics than a level's boundary ⇒ that level is just the full
+     * set — fill every remaining (richer) level with the final accumulation. */
+    for (; level >= 0; level--)
+        for (int i = 0; i < LUXSTRAL_WT_TABLE_SIZE; i++)
+            wt->mips[level][i] = (float)acc[i];
+}
+
+static void publish(luxstral_wavetable_t *wt)
+{
+    atomic_store_explicit(&g_active, wt, memory_order_release);
+    g_build_slot ^= 1;
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * Public API
+ *──────────────────────────────────────────────────────────────────────────────*/
+
+int luxstral_wavetable_load(const float *mono, int num_samples,
+                            float sample_rate, float root_hz_override,
+                            const char *source_name)
+{
+    if (mono == NULL || num_samples < 512 || sample_rate < 8000.0f) {
+        log_error("WAVETABLE", "Load rejected: %d samples @ %.0f Hz",
+                  num_samples, (double)sample_rate);
+        return -1;
+    }
+
+    /* 1 — analysis region + fundamental */
+    const int win_start =
+        find_loudest_window(mono, num_samples, WT_ANALYSIS_WIN);
+    const int win_len = (num_samples - win_start < WT_ANALYSIS_WIN)
+                            ? num_samples - win_start
+                            : WT_ANALYSIS_WIN;
+
+    float confidence = 1.0f;
+    double period;
+    if (root_hz_override > 0.0f) {
+        period = (double)sample_rate / (double)root_hz_override;
+    } else {
+        const float p = detect_period_nsdf(mono + win_start, win_len,
+                                           sample_rate, &confidence);
+        if (p <= 0.0f) {
+            log_warning("WAVETABLE",
+                        "No periodicity found (confidence %.2f) — load aborted",
+                        (double)confidence);
+            return -1;
+        }
+        period = (double)p;
+    }
+    const float root_hz = (float)((double)sample_rate / period);
+
+    /* 2 — average up to WT_MAX_AVG_CYCLES aligned cycles onto the grid */
+    static double grid[WT_CYCLE_GRID]; /* message-thread only */
+    memset(grid, 0, sizeof(grid));
+    const int t0 =
+        align_to_rising_zero(mono, num_samples, win_start, (int)period);
+    int cycles = 0;
+    for (int c = 0; c < WT_MAX_AVG_CYCLES; c++) {
+        const double start = (double)t0 + period * (double)c;
+        if (start + period + 1.0 >= (double)num_samples)
+            break;
+        accumulate_cycle(mono, num_samples, start, period, grid);
+        cycles++;
+    }
+    if (cycles == 0) {
+        log_warning("WAVETABLE", "Sample too short for one full cycle "
+                                 "(period %.1f smp) — load aborted",
+                    period);
+        return -1;
+    }
+    for (int g = 0; g < WT_CYCLE_GRID; g++)
+        grid[g] /= (double)cycles;
+
+    /* 3 — harmonic projection into the inactive slot, then mips + publish.
+     * Harmonics above the source's own Nyquist don't exist — cap there.     */
+    luxstral_wavetable_t *wt = &g_slots[g_build_slot];
+    int num_harm = (int)(period * 0.5);
+    if (num_harm > LUXSTRAL_WT_MAX_HARMONICS)
+        num_harm = LUXSTRAL_WT_MAX_HARMONICS;
+    if (num_harm < 1)
+        num_harm = 1;
+
+    memset(wt->harm_re, 0, sizeof(wt->harm_re));
+    memset(wt->harm_im, 0, sizeof(wt->harm_im));
+    if (project_harmonics(grid, num_harm, wt->harm_re, wt->harm_im) != 0) {
+        log_warning("WAVETABLE", "Extracted cycle is silent — load aborted");
+        return -1;
+    }
+    wt->num_harmonics = num_harm;
+    wt->root_hz       = root_hz;
+    wt->confidence    = confidence;
+    snprintf(wt->source_name, sizeof(wt->source_name), "%s",
+             (source_name != NULL) ? source_name : "(unnamed)");
+
+    build_mips(wt);
+    publish(wt);
+
+    log_info("WAVETABLE",
+             "Timbre loaded: '%s' — root %.1f Hz (confidence %.2f), "
+             "%d harmonics, %d cycles averaged, %d mip levels",
+             wt->source_name, (double)root_hz, (double)confidence, num_harm,
+             cycles, LUXSTRAL_WT_LEVELS);
+    return 0;
+}
+
+int luxstral_wavetable_load_from_harmonics(const float *harm_re,
+                                           const float *harm_im,
+                                           int num_harmonics, float root_hz,
+                                           const char *source_name)
+{
+    if (harm_re == NULL || harm_im == NULL || num_harmonics < 1 ||
+        num_harmonics > LUXSTRAL_WT_MAX_HARMONICS)
+        return -1;
+
+    luxstral_wavetable_t *wt = &g_slots[g_build_slot];
+    memset(wt->harm_re, 0, sizeof(wt->harm_re));
+    memset(wt->harm_im, 0, sizeof(wt->harm_im));
+    memcpy(wt->harm_re, harm_re, (size_t)num_harmonics * sizeof(float));
+    memcpy(wt->harm_im, harm_im, (size_t)num_harmonics * sizeof(float));
+    wt->num_harmonics = num_harmonics;
+    wt->root_hz       = root_hz;
+    wt->confidence    = 1.0f;
+    snprintf(wt->source_name, sizeof(wt->source_name), "%s",
+             (source_name != NULL) ? source_name : "(restored)");
+
+    build_mips(wt);
+    publish(wt);
+
+    log_info("WAVETABLE", "Timbre restored from session: '%s' — root %.1f Hz, "
+                          "%d harmonics",
+             wt->source_name, (double)root_hz, num_harmonics);
+    return 0;
+}
+
+void luxstral_wavetable_clear(void)
+{
+    if (atomic_load_explicit(&g_active, memory_order_acquire) != NULL) {
+        atomic_store_explicit(&g_active, NULL, memory_order_release);
+        log_info("WAVETABLE", "Timbre cleared — bank back to sine/square");
+    }
+}
+
+const luxstral_wavetable_t *luxstral_wavetable_acquire(void)
+{
+    return atomic_load_explicit(&g_active, memory_order_acquire);
+}
+
+int luxstral_wavetable_is_loaded(void)
+{
+    return atomic_load_explicit(&g_active, memory_order_acquire) != NULL;
+}
+
+int luxstral_wavetable_get_info(char *name_out, int name_cap,
+                                float *root_hz_out, float *confidence_out)
+{
+    const luxstral_wavetable_t *wt =
+        atomic_load_explicit(&g_active, memory_order_acquire);
+    if (wt == NULL)
+        return 0;
+    if (name_out != NULL && name_cap > 0)
+        snprintf(name_out, (size_t)name_cap, "%s", wt->source_name);
+    if (root_hz_out != NULL)
+        *root_hz_out = wt->root_hz;
+    if (confidence_out != NULL)
+        *confidence_out = wt->confidence;
+    return 1;
+}
+
+int luxstral_wavetable_get_harmonics(float *harm_re_out, float *harm_im_out,
+                                     int max_harmonics, float *root_hz_out)
+{
+    const luxstral_wavetable_t *wt =
+        atomic_load_explicit(&g_active, memory_order_acquire);
+    if (wt == NULL || harm_re_out == NULL || harm_im_out == NULL)
+        return 0;
+    int n = wt->num_harmonics;
+    if (n > max_harmonics)
+        n = max_harmonics;
+    memcpy(harm_re_out, wt->harm_re, (size_t)n * sizeof(float));
+    memcpy(harm_im_out, wt->harm_im, (size_t)n * sizeof(float));
+    if (root_hz_out != NULL)
+        *root_hz_out = wt->root_hz;
+    return n;
+}

@@ -141,13 +141,15 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     videoScrollPage = std::make_unique<VideoScrollPage>(audioProcessor);
     zone3Content.addChildComponent(videoScrollPage.get());
 
-    // FX — REVERB / ECHO / EQ insert pages (all controls on the PLAY face)
+    // FX — REVERB / ECHO / EQ / SCALE insert pages (all controls on the PLAY face)
     reverbPage = std::make_unique<LuxReverbTabComponent>(audioProcessor);
     echoPage   = std::make_unique<LuxEchoTabComponent>(audioProcessor);
     eqPage     = std::make_unique<LuxEqTabComponent>(audioProcessor);
+    harmoPage  = std::make_unique<LuxHarmoTabComponent>(audioProcessor);
     zone3Content.addChildComponent(reverbPage.get());
     zone3Content.addChildComponent(echoPage.get());
     zone3Content.addChildComponent(eqPage.get());
+    zone3Content.addChildComponent(harmoPage.get());
 
     // M9 — IMAGE / VIDEO / CAMERA source pages (preview + movable line + transport)
     imageSrcPage  = std::make_unique<MediaSourcePage>(audioProcessor, MediaSourcePage::Kind::Image);
@@ -292,7 +294,7 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     {
         const int raw = (int) state.getProperty("selBlock", (int) sel);
         if (raw >= (int) ChainBlockId::Chain1Source
-            && raw <= (int) ChainBlockId::Equalizer
+            && raw < (int) ChainBlockId::None
             && chainRack->hasBlock((ChainBlockId) raw))
             sel = (ChainBlockId) raw;
     }
@@ -343,7 +345,7 @@ bool Sp3ctraAudioProcessorEditor::blockHasSetup(ChainBlockId id) noexcept
     // IMAGE / VIDEO / CAMERA media modules (source picking lives on PLAY).
     return id != ChainBlockId::Sequencer && id != ChainBlockId::VideoScroll
         && id != ChainBlockId::Reverb    && id != ChainBlockId::Echo
-        && id != ChainBlockId::Equalizer
+        && id != ChainBlockId::Equalizer && id != ChainBlockId::Harmonize
         && id != ChainBlockId::Timbre    && id != ChainBlockId::MidiScore
         && id != ChainBlockId::Voice
         && id != ChainBlockId::None
@@ -387,6 +389,7 @@ void Sp3ctraAudioProcessorEditor::applyZone3Visibility()
     if (reverbPage)      reverbPage     ->setVisible(play && id == ChainBlockId::Reverb);
     if (echoPage)        echoPage       ->setVisible(play && id == ChainBlockId::Echo);
     if (eqPage)          eqPage         ->setVisible(play && id == ChainBlockId::Equalizer);
+    if (harmoPage)       harmoPage      ->setVisible(play && id == ChainBlockId::Harmonize);
     if (videoScrollPage) videoScrollPage->setVisible(play && id == ChainBlockId::VideoScroll);
     if (imageSrcPage)    imageSrcPage   ->setVisible(play && id == ChainBlockId::ImageSrc);
     if (videoSrcPage)    videoSrcPage   ->setVisible(play && id == ChainBlockId::VideoSrc);
@@ -502,6 +505,10 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
     else if (id == ChainBlockId::Equalizer)
     {
         if (eqPage) eqPage->setSlot(insertSlot);
+    }
+    else if (id == ChainBlockId::Harmonize)
+    {
+        if (harmoPage) harmoPage->setSlot(insertSlot);
     }
     // Synth blocks: rebind the OUT/send page to this send's conditioning bank.
     // The LuxStral slot is resolved from the SELECTED INSTANCE (not from the
@@ -633,6 +640,7 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
         case ChainBlockId::Reverb:
         case ChainBlockId::Echo:
         case ChainBlockId::Equalizer:
+        case ChainBlockId::Harmonize:
             sources = { VisualizerMode::SELECTED_TAP };
             break;
         // M9 — media sources: zone 1 shows the MODULE'S OWN line (internal
@@ -708,6 +716,8 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
             enableId = ecParam(insertSlot, "Enabled");
         else if (id == ChainBlockId::Equalizer)
             enableId = eqParam(insertSlot, "Enabled");
+        else if (id == ChainBlockId::Harmonize)
+            enableId = hmParam(insertSlot, "Enabled");
         // Power follows the enable param alone — blocks without a SETUP face
         // (Sequencer, the FX inserts) still need their on/off switch here.
         const bool showPower = enableId.isNotEmpty();
@@ -1096,6 +1106,7 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
             case ChainBlockId::Reverb:
             case ChainBlockId::Echo:
             case ChainBlockId::Equalizer:
+            case ChainBlockId::Harmonize:
             case ChainBlockId::Timbre:
             case ChainBlockId::MidiScore:
             case ChainBlockId::Voice:
@@ -1148,6 +1159,8 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
                 top = echoPage.get();        topMinH = LuxEchoTabComponent::kPreferredH; break;
             case ChainBlockId::Equalizer:
                 top = eqPage.get();          topMinH = LuxEqTabComponent::kPreferredH; break;
+            case ChainBlockId::Harmonize:
+                top = harmoPage.get();       topMinH = LuxHarmoTabComponent::kPreferredH; break;
             case ChainBlockId::ImageSrc:
                 top = imageSrcPage.get();    topMinH = MediaSourcePage::kPreferredH; break;
             case ChainBlockId::VideoSrc:

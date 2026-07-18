@@ -137,8 +137,20 @@ typedef struct {
     /* Configuration (copied atomically from UI) */
     LuxSynthConfig config;
 
-    /* Spectral data snapshot (copied from pipeline) */
+    /* Spectral data — RENDER copy, owned by the audio thread. Writers never
+     * touch it: they stage into `spectral_pending` under the seqlock below,
+     * and luxsynth_engine_process latches it at BLOCK START, ramping the
+     * magnitudes across the block (a push must never step the waveform
+     * mid-block — the unsynchronised memcpy did, audible as crackle at the
+     * feed's ~250 Hz push rate with a moving image). */
     LuxSynthSpectralData spectral;
+
+    /* Writer-side staging (luxsynth_feed_tick, synth thread). seqlock:
+     * odd = writer inside; the render latch retries next block on a torn
+     * read (spec_applied_seq tracks the last even seq actually applied). */
+    LuxSynthSpectralData spectral_pending;
+    volatile uint32_t    spec_pending_seq;
+    uint32_t             spec_applied_seq;
 
     /* Sample rate cache */
     float sample_rate;

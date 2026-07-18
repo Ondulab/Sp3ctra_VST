@@ -129,13 +129,14 @@ bool Sp3ctraSharedCore::startWithConfig(const Sp3ctraCore::ActiveConfig& config,
              luxstralPixelsPerNote,
              get_cis_pixels_nb() / (luxstralPixelsPerNote > 0 ? luxstralPixelsPerNote : 1));
 
-    // ── 6. Queue wavetable init BEFORE audio thread starts ──────────────────
-    // synth_IfftInit() calloc's waves[] → all start_ptr fields are NULL.
-    // init_waves() (called by check_and_process_frequency_reinit inside
-    // synth_IfftMode) must run before synth_precompute_wave_data — otherwise
-    // the thread would dereference NULL → SIGSEGV.
+    // ── 6. Clear any stale frequency-reinit BEFORE the audio thread starts ──
+    // synth_IfftInit() just built the wavetables (init_waves + gap-limiter
+    // coefficients + phase randomization) from the current — already restored —
+    // config: queuing a reinit here would only regenerate the same table a
+    // second time. A request left pending from before the pipeline was up is
+    // stale; clearing it also restores the global fade that request had sent
+    // toward 0 with nobody to complete it.
     reset_frequency_reinit_state();
-    request_frequency_reinit(); // PENDING is set BEFORE the thread starts → safe
 
     // ── 7. Audio processing thread (LuxStral) ────────────────────────────────
     audioThread = std::make_unique<AudioProcessingThread>(core.get());

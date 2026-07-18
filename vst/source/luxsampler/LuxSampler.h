@@ -1021,6 +1021,7 @@ public:
         s_engineBusy[i].fetch_sub(1, std::memory_order_acq_rel);
     }
     int getEngineIndex() const noexcept { return engineIndex_; }
+    char engineTag() const noexcept { return (char) ('A' + engineIndex_); }
 
     // =========================================================================
     // Player-release handshake (message thread ⇄ FramePlayerThread).

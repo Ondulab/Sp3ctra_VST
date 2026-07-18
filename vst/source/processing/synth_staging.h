@@ -29,6 +29,7 @@
 
 #include "image_preprocessor.h"
 #include "chain_plan.h"
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,8 +54,10 @@ void synth_staging_set_inactive(int chain_idx);
  * the blended contrast factor. Weights come from
  * g_sp3ctra_config.luxstral_out[bank_slot] (intensity × enabled).
  * Returns the number of sends actually mixed; 0 → the caller must commit
- * silence. stereo_valid_out is 1 when at least one mixed send carried pan
- * gains (silent-note fallback = constant-power centre). */
+ * silence; -1 → a slot was torn by a concurrent staging (writer mid-copy on
+ * every retry) — the caller must HOLD its previous commit untouched, the
+ * outputs are undefined. stereo_valid_out is 1 when at least one mixed send
+ * carried pan gains (silent-note fallback = constant-power centre). */
 int synth_staging_mix_luxstral(const ChainPlan* plan,
                                float* notes_out, int max_notes,
                                float* left_out, float* right_out,
@@ -75,7 +78,8 @@ void synth_staging_luxsynth_set_inactive(int chain_idx);
 /* Consumer: mix every staged LuxSynth send of a chain whose plan recipe
  * carries an OUT_LUXSYNTH marker. line_out = clamp01(Σ w·line_k), RGB =
  * w-weighted average (harmonicity/colour). Returns the number of sends mixed
- * (0 → silence). generation_out (may be NULL) receives a counter that changes
+ * (0 → silence, -1 → torn slot: HOLD the engine's spectrum, outputs
+ * undefined). generation_out (may be NULL) receives a counter that changes
  * whenever any contributing slot was restaged — cheap dirty check. */
 int synth_staging_mix_luxsynth(const ChainPlan* plan,
                                float* line_out,
@@ -95,9 +99,17 @@ void synth_staging_stage_luxwave(int chain_idx, int bank_slot,
 
 void synth_staging_luxwave_set_inactive(int chain_idx);
 
+/* Same return contract as the other mixers: N mixed, 0 = no send (the
+ * wavetable holds anyway), -1 = torn slot (hold, outputs undefined). */
 int synth_staging_mix_luxwave(const ChainPlan* plan,
                               float* line_out, int max_pixels,
                               int* nb_pixels_out);
+
+/* Diagnostic: total mixer ticks that HELD on a torn slot (all three mixers).
+ * Monotonic, process-lifetime. Message-thread drain (PluginProcessor timer)
+ * — a steadily climbing value under device streaming confirms staging
+ * contention (was audible as LuxSynth micro-dropouts before the hold). */
+uint64_t synth_staging_contention_holds(void);
 
 #ifdef __cplusplus
 }

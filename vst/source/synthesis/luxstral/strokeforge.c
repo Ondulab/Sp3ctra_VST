@@ -120,7 +120,7 @@ static int detect_blobs(
 
 void strokeforge_init(void)
 {
-    log_info("STROKEFORGE", "StrokeForge initialized (enabled=%d)",
+    log_startup_detail("STROKEFORGE", "StrokeForge initialized (enabled=%d)",
              g_sp3ctra_config.strokeforge_enabled);
 }
 
