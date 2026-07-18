@@ -228,6 +228,8 @@ target_sources(Sp3ctraVST
         source/synthesis/luxstral/synth_luxstral_threading_rt.c
         source/synthesis/luxstral/wave_generation.c
         source/synthesis/luxstral/wave_generation.h
+        source/synthesis/luxstral/luxstral_wavetable.c
+        source/synthesis/luxstral/luxstral_wavetable.h
         source/synthesis/luxstral/pow_approx.c
         source/synthesis/luxstral/pow_approx.h
         source/synthesis/luxstral/strokeforge.c
@@ -332,6 +334,8 @@ target_sources(Sp3ctraVST
         source/processing/lux_echo.h
         source/processing/lux_eq.c
         source/processing/lux_eq.h
+        source/processing/lux_harmo.c
+        source/processing/lux_harmo.h
         source/processing/video_scroll.c
         source/processing/video_scroll.h
         source/processing/internal_source.c

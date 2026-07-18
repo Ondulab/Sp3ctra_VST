@@ -23,6 +23,7 @@
 #include "../processing/lux_reverb.h"
 #include "../processing/lux_echo.h"
 #include "../processing/lux_eq.h"
+#include "../processing/lux_harmo.h"
 #include "../processing/video_scroll.h"
 #include "../processing/internal_source.h"
 #include <time.h>
@@ -261,7 +262,7 @@ int initDoubleBuffer(DoubleBuffer *db) {
   
   db->preprocessed_data.timestamp_us = 0;
 
-  log_info("THREAD", "DoubleBuffer preprocessed_data initialized with safe defaults");
+  log_startup_detail("THREAD", "DoubleBuffer preprocessed_data initialized with safe defaults");
   return 0;
 }
 
@@ -399,6 +400,8 @@ static void chain_resolve_insert_states(const SynthChainPlan *sp,
                 states[i] = (void *)lux_echo_instance(sp->insert_state_idx[i]); break;
             case IMAGE_CHAIN_INSERT_LUXEQ:
                 states[i] = (void *)lux_eq_instance(sp->insert_state_idx[i]); break;
+            case IMAGE_CHAIN_INSERT_LUXHARMO:
+                states[i] = (void *)lux_harmo_instance(sp->insert_state_idx[i]); break;
             case IMAGE_CHAIN_INSERT_VIDEOSCROLL:
                 states[i] = (void *)video_scroll_instance(sp->insert_state_idx[i]); break;
             default:
@@ -1135,7 +1138,7 @@ void *udpThread(void *arg) {
     return NULL;
   }
 
-  log_info("THREAD", "UDP thread started with dual buffer system");
+  log_startup_detail("THREAD", "UDP thread started with dual buffer system");
   log_info("THREAD", "Listening for packets on socket %d, expecting IMAGE_DATA_HEADER (0x%02X)", s, IMAGE_DATA_HEADER);
 
   int first_packet_logged = 0;  // Log very first packet after restart
@@ -2071,8 +2074,8 @@ void *audioProcessingThread(void *arg) {
   uint8_t *audio_read_B = NULL;
 
 #ifdef VST_MODE
-  log_info("THREAD", "Audio processing thread started with VST SYNCHRONIZATION");
-  log_info("THREAD", "Producer/consumer handoff with processBlock() callback");
+  log_startup_detail("THREAD", "Audio processing thread started with VST SYNCHRONIZATION");
+  log_startup_detail("THREAD", "Producer/consumer handoff with processBlock() callback");
 #else
   log_info("THREAD", "Audio processing thread started with lock-free dual buffer system");
   log_info("THREAD", "Real-time audio processing guaranteed - no timeouts, no blocking!");
@@ -2173,7 +2176,7 @@ void *audioProcessingThread(void *arg) {
                                   mixed_contrast, &s_mixed_pp.strokeforge);
           }
         }
-        else
+        else if (mixed == 0)
         {
           /* No active send → TRUE silence (chain no-signal contract). */
           memset(&s_mixed_pp.additive,    0, sizeof(s_mixed_pp.additive));
@@ -2183,7 +2186,13 @@ void *audioProcessingThread(void *arg) {
                  sizeof(s_mixed_pp.stereo.right_gains));
           memset(&s_mixed_pp.strokeforge, 0, sizeof(s_mixed_pp.strokeforge));
         }
+        /* mixed < 0 → a staging slot was torn by its producer mid-copy:
+         * skip the commit — the engine renders the PREVIOUS frame for one
+         * 4 ms iteration (inaudible hold). Committing silence here turned
+         * that transient race into a LuxStral micro-dropout. */
 
+        if (mixed >= 0)
+        {
         pthread_mutex_lock(&mdb->mutex);
         memcpy(&mdb->preprocessed_data.additive, &s_mixed_pp.additive,
                sizeof(s_mixed_pp.additive));
@@ -2204,6 +2213,7 @@ void *audioProcessingThread(void *arg) {
         /* M7 — dataReady is a plain has-data flag (source tags removed). */
         mdb->dataReady = 1;
         pthread_mutex_unlock(&mdb->mutex);
+        }
 
         synth_AudioProcess(audio_read_R, audio_read_G, audio_read_B,
                            context->doubleBuffer);

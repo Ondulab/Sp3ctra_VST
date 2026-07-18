@@ -310,11 +310,12 @@ LuxSampler::LuxSampler(int engineIndex)
         lastDirection[i].store(1,    std::memory_order_relaxed); // forward by default
     }
     initFreqCurveDefaults();
-    log_info("FS", "LuxSampler[%c] initialised — %d slots, %d frames/slot max, %.1f s/slot max",
+    // Per-engine init detail lives behind SP3CTRA_STARTUP_VERBOSE=2 — the
+    // processor logs one "engines A-H ready" summary for all of them.
+    log_startup_detail("FS", "LuxSampler[%c] initialised — %d slots, %d frames/slot max",
              (char) ('A' + engineIndex_),
              LuxSamplerConstants::NUM_SLOTS,
-             LuxSamplerConstants::MAX_FRAMES_PER_SLOT,
-             static_cast<double>(LuxSamplerConstants::MAX_DURATION_S));
+             LuxSamplerConstants::MAX_FRAMES_PER_SLOT);
 }
 
 LuxSampler::~LuxSampler()
@@ -754,7 +755,8 @@ void LuxSampler::startPlayerThread(AudioImageBuffers* audioBuffers,
 
     playerThread = std::make_unique<FramePlayerThread>(*this, audioBuffers, doubleBuffer);
     playerThread->startThread(juce::Thread::Priority::normal);
-    log_info("FS", "FramePlayerThread started");
+    // The thread logs "FramePlayerThread[X] running" itself once run() starts —
+    // that line is the authoritative "it's alive" marker (absence = diagnostic).
 }
 
 void LuxSampler::stopPlayerThread()
@@ -765,7 +767,7 @@ void LuxSampler::stopPlayerThread()
         atomicState.passthroughEnabled.store(true, std::memory_order_release);
         playerThread->stopThread(2000);
         playerThread.reset();
-        log_info("FS", "FramePlayerThread stopped");
+        log_debug("FS", "FramePlayerThread[%c] stopped", engineTag());
     }
 }
 
@@ -823,7 +825,6 @@ void LuxSampler::clearSlot(int i)
     // Also reset the vertical (HF/LF frequency) filter — see uiClearSlot.
     resetSlotFreqCurve(i);
     resetSlotEditHandles(i);   // start/end/fades/floor back to defaults
-    log_info("FS", "Slot %d cleared", i);
 }
 
 void LuxSampler::resetSlotEditHandles(int i) noexcept
@@ -858,7 +859,7 @@ void LuxSampler::clearAllSlots()
 {
     for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
         clearSlot(i);
-    log_info("FS", "All slots cleared");
+    log_info("FS", "LuxSampler[%c] all slots cleared", engineTag());
 }
 
 // ============================================================================
@@ -1580,6 +1581,7 @@ bool LuxSampler::loadFromFile(const juce::File& file)
     waitForPlayerRelease(-1);
 
     // ── Slot blocks ──────────────────────────────────────────────────────
+    int filled = 0;
     for (int s = 0; s < numSlotsInFile; ++s)
     {
         FsmpSlotHeader shdr {};
@@ -1653,10 +1655,11 @@ bool LuxSampler::loadFromFile(const juce::File& file)
                         static_cast<size_t>(count) * sizeof(CapturedFrame));
             slots[idx].frame_count = count;
         }
+        ++filled;
     }
 
-    log_info("FS", "Loaded from '%s' (%d slots)",
-             file.getFullPathName().toRawUTF8(), numSlotsInFile);
+    log_info("FS", "LuxSampler[%c] loaded from '%s' (%d/%d slots filled)",
+             engineTag(), file.getFullPathName().toRawUTF8(), filled, numSlotsInFile);
     return true;
 }
 
@@ -3035,7 +3038,7 @@ void FramePlayerThread::runSamplerSession()
 void FramePlayerThread::run()
 {
     auto& state = sampler.getAtomicState();
-    log_info("FS", "FramePlayerThread running");
+    log_debug("FS", "FramePlayerThread[%c] running", sampler.engineTag());
 
     while (!threadShouldExit())
     {

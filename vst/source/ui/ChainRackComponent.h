@@ -45,6 +45,7 @@ enum class ChainBlockId
     Equalizer,                         // FX — graphic EQ insert (appended: ordinals persist)
     MidiScore,                         // UTILS — MIDI-file score generator (appended: ordinals persist)
     Voice,                             // UTILS — TTS vocal-spectrum generator (appended: ordinals persist)
+    Harmonize,                         // FX — SCALE quantizer insert (appended: ordinals persist)
     None                               // empty rack — no module selected
 };
 

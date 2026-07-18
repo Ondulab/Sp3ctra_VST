@@ -247,6 +247,11 @@ typedef struct {
     float luxstral_phase_position;         /* strike/pluck position, BELL impact seed [0..1] */
     float luxstral_phase_drift_cents;      /* per-onset random detune ±cents [0..3], 0 = off */
 
+    /* Timbre wavetable mix [0..1]: blend between the analytic sine/square
+     * bank and the user-sample wavetable (luxstral_wavetable.h). Inert while
+     * no table is published — the workers force 0 when acquire() is NULL.   */
+    float luxstral_timbre_mix;
+
     /* image_freeze_mode : transport state for the live image stream           */
     /*   0 = PLAY  — normal frame update                                       */
     /*   1 = HOLD  — freeze last captured frame (skip update)                  */

@@ -134,6 +134,8 @@ typedef struct LuxStralEngine {
   uint32_t log_counter;
   /* Source routing diagnostic counter (VST_MODE, synth_AudioProcess)         */
   int diag_ctr;
+  /* Last logged SRC-GATE state signature (edge-triggered diagnostic)         */
+  int diag_last_sig;
   /* One-time "Float32 path active" log flag (worker threads)                 */
   _Atomic int f32_path_logged;
 

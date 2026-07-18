@@ -13,6 +13,7 @@
 #include "lux_reverb.h"
 #include "lux_echo.h"
 #include "lux_eq.h"
+#include "lux_harmo.h"
 #include "video_scroll.h"
 
 /* ── M6 Phase 2 — per-chain executor (explicit ordered state list) ──────────── */
@@ -66,6 +67,11 @@ void image_chain_run(
                 lux_eq_process_frame((LuxEqState *)insert_states[i],
                                      cr, cg, cb, pixel_count,
                                      luxstral_num_octaves, &nr, &ng, &nb);
+                break;
+            case IMAGE_CHAIN_INSERT_LUXHARMO:
+                lux_harmo_process_frame((LuxHarmoState *)insert_states[i],
+                                        cr, cg, cb, pixel_count,
+                                        luxstral_num_octaves, &nr, &ng, &nb);
                 break;
             default:
                 break;   /* unknown insert → pass-through */

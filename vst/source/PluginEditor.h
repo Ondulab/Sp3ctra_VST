@@ -11,6 +11,7 @@
 #include "image/LuxReverbTabComponent.h"
 #include "image/LuxEchoTabComponent.h"
 #include "image/LuxEqTabComponent.h"
+#include "image/LuxHarmoTabComponent.h"
 #include "image/LuxStralTabComponent.h"
 #include "image/LuxSynthTabComponent.h"
 #include "image/ScoreGenTabComponent.h"
@@ -548,6 +549,7 @@ private:
     std::unique_ptr<LuxReverbTabComponent> reverbPage;       // FX > REVERB
     std::unique_ptr<LuxEchoTabComponent>   echoPage;         // FX > ECHO
     std::unique_ptr<LuxEqTabComponent>     eqPage;           // FX > EQ
+    std::unique_ptr<LuxHarmoTabComponent>  harmoPage;        // FX > SCALE
     std::unique_ptr<VideoScrollPage>      videoScrollPage;   // OUT > VIDEO SCROLL (per-instance)
     std::unique_ptr<AudioWavePanel>       audioWavePanel;
     std::unique_ptr<SynthOutPageComponent> synthOutPage;   // OUT/send page (synth-split P2)

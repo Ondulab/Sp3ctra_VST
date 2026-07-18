@@ -16,6 +16,7 @@
 #include "pow_approx.h"
 #include "wave_generation.h"
 #include "strokeforge.h"
+#include "luxstral_wavetable.h"
 #include "../../utils/rt_profiler.h"
 #include <stdio.h>
 #include <string.h>
@@ -131,7 +132,7 @@ int synth_init_thread_pool(LuxStralEngine *eng) {
     eng->num_workers = (eng->num_workers < 1) ? 1 : MAX_WORKERS;
   }
 
-  log_info("SYNTH", "Initializing thread pool with %d workers", eng->num_workers);
+  log_startup_detail("SYNTH", "Initializing thread pool with %d workers", eng->num_workers);
 
   // Allocate thread pool and worker threads arrays
   eng->thread_pool = (synth_thread_worker_t*)calloc(eng->num_workers, sizeof(synth_thread_worker_t));
@@ -312,7 +313,7 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
   // Thread-safe one-time log using atomic compare-exchange (per-engine flag)
   int expected = 0;
   if (atomic_compare_exchange_strong(&worker->engine->f32_path_logged, &expected, 1)) {
-    log_info("SYNTH", "Float32 path active in worker threads");
+    log_startup_detail("SYNTH", "Float32 path active in worker threads");
   }
 
   // Release capture buffers if capture was disabled since last buffer
@@ -356,7 +357,17 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
   const float drift_scale =
       g_sp3ctra_config.luxstral_phase_drift_cents * 5.7762265e-4f;
   const int capture_enabled = image_debug_is_oscillator_capture_enabled();
-  
+  // User timbre wavetable (tuned-grain feature) — snapshot acquired ONCE per
+  // worker pass; the ping-pong slot stays valid far longer than the pass (see
+  // luxstral_wavetable.h). NULL or mix ≤ 0 keeps the legacy sine/square path
+  // bit-exact.
+  const luxstral_wavetable_t *user_wt = luxstral_wavetable_acquire();
+  float timbre_mix = g_sp3ctra_config.luxstral_timbre_mix;
+  if (user_wt == NULL || timbre_mix < 0.0f)
+    timbre_mix = 0.0f;
+  else if (timbre_mix > 1.0f)
+    timbre_mix = 1.0f;
+
   // Main note processing loop - optimized for cache efficiency
   for (note = worker->start_note; note < worker->end_note; note++) {
     local_note_idx = note - worker->start_note;
@@ -471,26 +482,68 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
        * morph=0 → pure sine  |  morph=1 → pure square (bandlimited, WAVETABLE_HARMONICS odd harmonics)
        * Linear interpolation inside each table preserves sub-sample accuracy.
        * morph == 0 (the default) skips the square-table gather + morph lerp —
-       * half the table reads and one lerp saved per sample per oscillator. */
-      if (morph == 0.0f) {
-        for (int s = 0; s < audio_buffer_size; s++) {
-          phase += inc;
-          if (phase >= fsize) phase -= fsize;
-          const int   i0   = (int)phase;
-          const float frac = phase - (float)i0;
-          const int   i1   = (i0 + 1) & SINE_TABLE_MASK;
-          pre_wave_w[s] = g_sine_table[i0] + frac * (g_sine_table[i1] - g_sine_table[i0]);
+       * half the table reads and one lerp saved per sample per oscillator.
+       *
+       * timbre_mix > 0 blends toward the user-sample wavetable (tuned-grain
+       * timbre). The user tables live in a 2× larger domain — the shared
+       * phase accumulator is scaled on the fly, and each note reads the mip
+       * level matching its own phase_inc so no harmonic crosses Nyquist. */
+      if (timbre_mix <= 0.0f) {
+        if (morph == 0.0f) {
+          for (int s = 0; s < audio_buffer_size; s++) {
+            phase += inc;
+            if (phase >= fsize) phase -= fsize;
+            const int   i0   = (int)phase;
+            const float frac = phase - (float)i0;
+            const int   i1   = (i0 + 1) & SINE_TABLE_MASK;
+            pre_wave_w[s] = g_sine_table[i0] + frac * (g_sine_table[i1] - g_sine_table[i0]);
+          }
+        } else {
+          for (int s = 0; s < audio_buffer_size; s++) {
+            phase += inc;
+            if (phase >= fsize) phase -= fsize;
+            const int   i0   = (int)phase;
+            const float frac = phase - (float)i0;
+            const int   i1   = (i0 + 1) & SINE_TABLE_MASK;
+            float sine_s   = g_sine_table[i0]   + frac * (g_sine_table[i1]   - g_sine_table[i0]);
+            float square_s = g_square_table[i0] + frac * (g_square_table[i1] - g_square_table[i0]);
+            pre_wave_w[s]  = sine_s + morph * (square_s - sine_s);
+          }
         }
       } else {
-        for (int s = 0; s < audio_buffer_size; s++) {
-          phase += inc;
-          if (phase >= fsize) phase -= fsize;
-          const int   i0   = (int)phase;
-          const float frac = phase - (float)i0;
-          const int   i1   = (i0 + 1) & SINE_TABLE_MASK;
-          float sine_s   = g_sine_table[i0]   + frac * (g_sine_table[i1]   - g_sine_table[i0]);
-          float square_s = g_square_table[i0] + frac * (g_square_table[i1] - g_square_table[i0]);
-          pre_wave_w[s]  = sine_s + morph * (square_s - sine_s);
+        const float *utab = user_wt->mips[luxstral_wavetable_mip_for_phase_inc(
+            worker->engine->waves[note].phase_inc, SINE_TABLE_SIZE)];
+        const float uscale = (float)(LUXSTRAL_WT_TABLE_SIZE / SINE_TABLE_SIZE);
+        if (timbre_mix >= 1.0f) {
+          /* Pure user timbre — single gather, same cost as the pure sine path. */
+          for (int s = 0; s < audio_buffer_size; s++) {
+            phase += inc;
+            if (phase >= fsize) phase -= fsize;
+            const float up    = phase * uscale;
+            const int   ui0   = (int)up;
+            const float ufrac = up - (float)ui0;
+            const int   ui1   = (ui0 + 1) & LUXSTRAL_WT_TABLE_MASK;
+            pre_wave_w[s] = utab[ui0] + ufrac * (utab[ui1] - utab[ui0]);
+          }
+        } else {
+          for (int s = 0; s < audio_buffer_size; s++) {
+            phase += inc;
+            if (phase >= fsize) phase -= fsize;
+            const int   i0   = (int)phase;
+            const float frac = phase - (float)i0;
+            const int   i1   = (i0 + 1) & SINE_TABLE_MASK;
+            float base_s = g_sine_table[i0] + frac * (g_sine_table[i1] - g_sine_table[i0]);
+            if (morph != 0.0f) {
+              float square_s = g_square_table[i0] + frac * (g_square_table[i1] - g_square_table[i0]);
+              base_s += morph * (square_s - base_s);
+            }
+            const float up    = phase * uscale;
+            const int   ui0   = (int)up;
+            const float ufrac = up - (float)ui0;
+            const int   ui1   = (ui0 + 1) & LUXSTRAL_WT_TABLE_MASK;
+            const float user_s = utab[ui0] + ufrac * (utab[ui1] - utab[ui0]);
+            pre_wave_w[s] = base_s + timbre_mix * (user_s - base_s);
+          }
         }
       }
       worker->engine->waves[note].phase_acc = phase;  /* per-engine + disjoint per-worker ranges */
@@ -762,7 +815,7 @@ int synth_start_worker_threads(LuxStralEngine *eng) {
   // Condensed summary log (always shown in NORMAL mode)
 #if defined(__linux__) || defined(__APPLE__)
   if (rt_success_count == eng->num_workers) {
-    log_info("SYNTH", "RT priority enabled for all %d worker threads", eng->num_workers);
+    log_startup_detail("SYNTH", "RT priority enabled for all %d worker threads", eng->num_workers);
   } else if (rt_success_count > 0) {
     log_info("SYNTH", "RT priority enabled for %d/%d worker threads", rt_success_count, eng->num_workers);
   } else {

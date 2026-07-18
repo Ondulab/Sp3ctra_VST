@@ -11,6 +11,7 @@ extern "C" {
     #include "processing/lux_reverb.h"                // FX pools — LED monitoring
     #include "processing/lux_echo.h"
     #include "processing/lux_eq.h"
+    #include "processing/lux_harmo.h"
     #include "audio/buffers/audio_image_buffers.h"    // lines_received counter
 }
 
@@ -45,6 +46,7 @@ ModuleType chainBlockToModuleType(ChainBlockId id) noexcept
         case ChainBlockId::Reverb:   return ModuleType::Reverb;
         case ChainBlockId::Echo:     return ModuleType::Echo;
         case ChainBlockId::Equalizer:return ModuleType::Equalizer;
+        case ChainBlockId::Harmonize:return ModuleType::Harmonize;
         case ChainBlockId::Sampler:  return ModuleType::Sampler;
         case ChainBlockId::Score:    return ModuleType::Score;
         case ChainBlockId::Timbre:   return ModuleType::Timbre;
@@ -309,7 +311,7 @@ void ChainRackComponent::rebuild()
             // THIS instance's bank (pool slot bound to the module UUID).
             if (m.type == ModuleType::Pitch || m.type == ModuleType::Mask
                 || m.type == ModuleType::Reverb || m.type == ModuleType::Echo
-                || m.type == ModuleType::Equalizer)
+                || m.type == ModuleType::Equalizer || m.type == ModuleType::Harmonize)
                 bp->setEnableParamOverride(insertBankParam(
                     m.type, processor.poolSlotForInstance(m.id), "Enabled"));
             bp->onClick        = [this](juce::Uuid id) { selectInstance(id, true); };
@@ -454,6 +456,7 @@ ChainBlockId ChainRackComponent::instanceToBlockId(ModuleType type, int chainIdx
         case ModuleType::Reverb:   return ChainBlockId::Reverb;
         case ModuleType::Echo:     return ChainBlockId::Echo;
         case ModuleType::Equalizer:return ChainBlockId::Equalizer;
+        case ModuleType::Harmonize:return ChainBlockId::Harmonize;
         case ModuleType::Sampler:  return ChainBlockId::Sampler;
         case ModuleType::Score:    return ChainBlockId::Score;
         case ModuleType::Timbre:   return ChainBlockId::Timbre;
@@ -1153,6 +1156,12 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const j
             const LuxEqState* st = lux_eq_instance(processor.poolSlotForInstance(uid));
             return st->config.enabled == 0 ? LedState::Off
                  : (st->eq_active != 0     ? LedState::Active : LedState::Idle);
+        }
+        case ModuleType::Harmonize:
+        {
+            const LuxHarmoState* st = lux_harmo_instance(processor.poolSlotForInstance(uid));
+            return st->config.enabled == 0 ? LedState::Off
+                 : (st->harmo_active != 0  ? LedState::Active : LedState::Idle);
         }
 
         case ModuleType::Sampler:

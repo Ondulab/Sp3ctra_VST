@@ -42,7 +42,6 @@ public:
 
     void run() override
     {
-        log_info("LUXSYNTH", "LuxSynthProcessingThread starting...");
 
         if (!core)
         {
@@ -59,7 +58,7 @@ public:
 
 #ifdef __APPLE__
         if (pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) == 0)
-            log_info("LUXSYNTH", "QoS set to USER_INTERACTIVE");
+            log_startup_detail("LUXSYNTH", "QoS set to USER_INTERACTIVE");
         else
             log_warning("LUXSYNTH", "Failed to set QoS class");
 #endif

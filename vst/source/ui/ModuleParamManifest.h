@@ -66,6 +66,9 @@ inline juce::String ecParam(int slot, const char* suffix)
 inline juce::String eqParam(int slot, const char* suffix)
 { return "luxeq" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
 
+inline juce::String hmParam(int slot, const char* suffix)
+{ return "luxharmo" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
+
 // Media source banks (P5-M3) — slot 0 keeps the LEGACY global ids
 // ("imgSrcPos"…) so existing sessions and automation lanes load unchanged;
 // slots 1..7 own "imgSrc{N}_<suffix>". (VIDEO/CAMERA follow the same recipe
@@ -124,6 +127,7 @@ inline juce::String insertBankParam(ModuleType t, int slot, const char* suffix)
         case ModuleType::Reverb:    return rvParam(slot, suffix);
         case ModuleType::Echo:      return ecParam(slot, suffix);
         case ModuleType::Equalizer: return eqParam(slot, suffix);
+        case ModuleType::Harmonize: return hmParam(slot, suffix);
         default:                    return {};
     }
 }
@@ -174,6 +178,11 @@ namespace module_param_manifest_detail
         "Band5", "Band6", "Band7", "Band8",
         "BackgroundMode",
     };
+    inline const char* const kHarmo[] = {
+        "Enabled", "Mode", "Root", "Scale",
+        "Strength", "Width", "Slope", "Glide",
+        "BackgroundMode",
+    };
     inline const char* const kVideoScroll[] = {
         "mode", "speed", "linePos", "thickness", "zoom", "fade",
         "compress", "invert", "colorMode", "paused", "enabled",
@@ -206,6 +215,7 @@ namespace module_param_manifest_detail
     inline juce::String rvId(int s, const char* x) { return rvParam(s, x); }
     inline juce::String ecId(int s, const char* x) { return ecParam(s, x); }
     inline juce::String eqId(int s, const char* x) { return eqParam(s, x); }
+    inline juce::String hmId(int s, const char* x) { return hmParam(s, x); }
     inline juce::String lsId(int s, const char* x) { return lsOutParam(s, x); }
     inline juce::String lxId(int s, const char* x) { return lxOutParam(s, x); }
     inline juce::String lwId(int s, const char* x) { return lwOutParam(s, x); }
@@ -242,6 +252,10 @@ inline const ModuleParamManifest kModuleParamManifest[] = {
       module_param_manifest_detail::kEq,
       (int) std::size(module_param_manifest_detail::kEq),
       &module_param_manifest_detail::eqId },
+    { ModuleType::Harmonize,   "luxharmo",    8,
+      module_param_manifest_detail::kHarmo,
+      (int) std::size(module_param_manifest_detail::kHarmo),
+      &module_param_manifest_detail::hmId },
     { ModuleType::VideoScroll, "videoScroll", 8,
       module_param_manifest_detail::kVideoScroll,
       (int) std::size(module_param_manifest_detail::kVideoScroll),

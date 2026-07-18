@@ -100,6 +100,10 @@ sp3ctra_config_t g_sp3ctra_config = {
     // Phase drift — per-onset random micro-detune (±cents), 0 = off
     .luxstral_phase_drift_cents = 0.0f,
 
+    // Timbre wavetable mix — full user timbre once a table is loaded
+    // (inert while none is published)
+    .luxstral_timbre_mix = 1.0f,
+
     // 🔧 CRITICAL: Stereo processing
     .stereo_mode_enabled = 1,
     .stereo_blue_red_weight = 0.7f,           // Primary color axis weight

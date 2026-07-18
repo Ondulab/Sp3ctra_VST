@@ -121,9 +121,6 @@ void synth_luxstral_cleanup(void) {
 static int32_t synth_IfftInit_impl(LuxStralEngine *eng) {
   int32_t buffer_len = 0;
 
-  log_info("SYNTH", "---------- SYNTH INIT ---------");
-  log_info("SYNTH", "-------------------------------");
-
   // Initialize runtime configuration
   if (synth_runtime_init(get_cis_pixels_nb(), g_sp3ctra_config.pixels_per_note) != 0) {
     log_error("SYNTH", "Failed to initialize runtime configuration");
@@ -139,6 +136,7 @@ static int32_t synth_IfftInit_impl(LuxStralEngine *eng) {
   // Set global waves pointer (allocated in synth_runtime_allocate_buffers)
   waves = synth_runtime_get_waves();
   eng->waves = waves;   /* the engine uses the historical global oscillator array */
+  eng->diag_last_sig = -1;   /* force the first SRC-GATE line after (re)init */
 
   // Register cleanup functions
   atexit(synth_runtime_free_buffers);
@@ -178,20 +176,7 @@ static int32_t synth_IfftInit_impl(LuxStralEngine *eng) {
   /* buffer_len is always 0 with the shared sine table — no overflow possible */
   (void)buffer_len;
 
-  log_info("SYNTH", "Note number = %d", (int)get_current_number_of_notes());
-  log_info("SYNTH", "Using Float32 path + shared sine table (%d entries, 4 KB)",
-           SINE_TABLE_SIZE);
-
-  if (get_current_number_of_notes() > 0)
-  {
-    log_info("SYNTH", "First note: %.2f Hz, phase_inc=%.5f",
-             waves[0].frequency, (double)waves[0].phase_inc);
-    log_info("SYNTH", "Last  note: %.2f Hz, phase_inc=%.5f",
-             waves[get_current_number_of_notes() - 1].frequency,
-             (double)waves[get_current_number_of_notes() - 1].phase_inc);
-  }
-
-  log_info("SYNTH", "-------------------------------");
+  /* Range/first/last-note details are logged once by init_waves() above. */
 
 #ifdef PRINT_IFFT_FREQUENCY
   for (uint32_t pix = 0; pix < (uint32_t)get_current_number_of_notes(); pix++)
@@ -256,7 +241,7 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
   // Initialize thread pool and RT-safe buffers if not initialized
   // This handles both first start AND restart after buffer size change
   if (!eng->pool_initialized) {
-    log_info("SYNTH", "Initializing synthesis system (pool_init=%d, shutdown=%d)",
+    log_startup_detail("SYNTH", "Initializing synthesis system (pool_init=%d, shutdown=%d)",
              eng->pool_initialized, eng->pool_shutdown);
 
     // (init_rt_safe_buffers removed: the "RT-safe double buffering" subsystem
@@ -264,7 +249,8 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
     // pool init and never freed them.)
     if (synth_init_thread_pool(eng) == 0) {
       if (synth_start_worker_threads(eng) == 0) {
-        log_info("SYNTH", "RT-safe synthesis system initialized successfully");
+        log_info("SYNTH", "RT-safe synthesis pool ready — %d workers, RT priority",
+                 eng->num_workers);
       } else {
         log_error("SYNTH", "Failed to start worker threads, synthesis will fail");
         eng->pool_initialized = 0;
@@ -400,12 +386,20 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
       const int bs = g_sp3ctra_config.audio_buffer_size > 0
                          ? g_sp3ctra_config.audio_buffer_size : 512;
       if (++frames[ei] >= (uint32_t)(5 * g_sp3ctra_config.sampling_frequency / bs)) {
-        log_info("SYNTH",
-                 "PHASE[%c] mode=%d: %u onsets/5s (peak %u/buf) | ref %.4f bed %.4f gate %.4f | drift +/-%.2f ct",
-                 ei ? 'B' : 'A', g_sp3ctra_config.luxstral_phase_mode,
-                 rst_acc[ei], burst_max[ei], (double)eng->phase_onset_ref,
-                 (double)eng->phase_onset_floor, (double)eng->phase_gate_abs,
-                 (double)g_sp3ctra_config.luxstral_phase_drift_cents);
+        if (rst_acc[ei] > 0)
+          log_info("SYNTH",
+                   "PHASE[%c] mode=%d: %u onsets/5s (peak %u/buf) | ref %.4f bed %.4f gate %.4f | drift +/-%.2f ct",
+                   ei ? 'B' : 'A', g_sp3ctra_config.luxstral_phase_mode,
+                   rst_acc[ei], burst_max[ei], (double)eng->phase_onset_ref,
+                   (double)eng->phase_onset_floor, (double)eng->phase_gate_abs,
+                   (double)g_sp3ctra_config.luxstral_phase_drift_cents);
+        else
+          /* Idle window (0 onsets): heartbeat only — no 5 s flood at rest. */
+          log_info_every_ms(60000, "SYNTH",
+                   "PHASE[%c] mode=%d idle | ref %.4f bed %.4f gate %.4f",
+                   ei ? 'B' : 'A', g_sp3ctra_config.luxstral_phase_mode,
+                   (double)eng->phase_onset_ref,
+                   (double)eng->phase_onset_floor, (double)eng->phase_gate_abs);
         rst_acc[ei] = 0; burst_max[ei] = 0; vol_max[ei] = 0.0f; frames[ei] = 0;
       }
     }
@@ -781,10 +775,24 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
   }
   pthread_mutex_unlock(&db->mutex);
 
-  if (_diag_print)
-    log_info("SRC-GATE", "has_pre=%d cf=%.4f gray_sum=%.2f notes_sum=%.2f ts=%llu",
-             has_preprocessed, _diag_cf,
-             _diag_gray_sum, _diag_notes_sum, (unsigned long long)_diag_ts);
+  if (_diag_print) {
+    /* Edge-triggered: INFO when the source state changes (stream appearing or
+     * disappearing, content starting/stopping), slow heartbeat otherwise — the
+     * unconditional every-2s line flooded the session log (~1800 lines/h). */
+    const int _sig = (has_preprocessed ? 2 : 0)
+                   | ((_diag_gray_sum > 0.0f || _diag_notes_sum > 0.0f) ? 1 : 0);
+    if (_sig != eng->diag_last_sig) {
+      eng->diag_last_sig = _sig;
+      log_info("SRC-GATE", "has_pre=%d cf=%.4f gray_sum=%.2f notes_sum=%.2f ts=%llu",
+               has_preprocessed, _diag_cf,
+               _diag_gray_sum, _diag_notes_sum, (unsigned long long)_diag_ts);
+    } else {
+      log_info_every_ms(60000, "SRC-GATE",
+               "has_pre=%d cf=%.4f gray_sum=%.2f notes_sum=%.2f ts=%llu (heartbeat)",
+               has_preprocessed, _diag_cf,
+               _diag_gray_sum, _diag_notes_sum, (unsigned long long)_diag_ts);
+    }
+  }
 
   if (!has_preprocessed) {
     /* Nothing committed yet (startup) → silence. */

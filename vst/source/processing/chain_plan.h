@@ -27,16 +27,16 @@ extern "C" {
 #endif
 
 /* Max ordered inserts in ONE chain recipe. Worst case allowed by the model:
- * Pitch + Mask + Reverb + Echo + EQ + up to CHAIN_MAX_CHAINS (8) VideoScroll
- * probes (the per-chain duplicate rule is relaxed for VideoScroll only) + up
- * to 2 Sampler position markers + 1 Score position marker + 3 OUT send
- * markers (M3: 1 per type per chain) = 19. The `num_inserts <
+ * Pitch + Mask + Reverb + Echo + EQ + Harmo + up to CHAIN_MAX_CHAINS (8)
+ * VideoScroll probes (the per-chain duplicate rule is relaxed for VideoScroll
+ * only) + up to 2 Sampler position markers + 1 Score position marker + 3 OUT
+ * send markers (M3: 1 per type per chain) = 20. The `num_inserts <
  * CHAIN_PLAN_MAX_INSERTS` gate in deriveAndPublishChainPlan is a defensive
- * cap; at 20 it is unreachable for any legal model (an overflow would
+ * cap; at 21 it is unreachable for any legal model (an overflow would
  * silently drop entries — a dropped marker misroutes every probe/FX placed
- * after it). states[] locals in multithreading.c grow to 20*sizeof(void*) =
- * 160 B — negligible stack. */
-#define CHAIN_PLAN_MAX_INSERTS 20   /* max ordered processors/probes/markers per chain */
+ * after it). states[] locals in multithreading.c grow to 21*sizeof(void*) =
+ * 168 B — negligible stack. */
+#define CHAIN_PLAN_MAX_INSERTS 21   /* max ordered processors/probes/markers per chain */
 #define CHAIN_MAX_CHAINS       8    /* per-instance state pool size (Pitch/Mask/VideoScroll) */
 
 /* Where a chain's input frame comes from. */

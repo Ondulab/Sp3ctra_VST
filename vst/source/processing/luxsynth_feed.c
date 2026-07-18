@@ -32,10 +32,31 @@ static int             s_have_gen = 0;
 static int             s_silenced = 0;
 static uint64_t        s_last_push_us = 0;
 
+/* Consecutive no-send ticks before the silence contract fires (~100 ms at
+ * the 2-4 ms tick rate) — a shorter flicker holds the spectrum instead. */
+#define LX_FEED_SILENCE_DEBOUNCE_TICKS 50
+static int             s_zero_ticks = 0;
+
+/* Dropout diagnostics — how often the feed pushed SILENCE vs real spectra.
+ * Audio thread bumps, message thread drains (PluginProcessor timer). */
+static volatile uint64_t s_diag_silence_pushes = 0;
+static volatile uint64_t s_diag_spec_pushes   = 0;
+
+uint64_t luxsynth_feed_silence_pushes(void)
+{
+    return __atomic_load_n(&s_diag_silence_pushes, __ATOMIC_RELAXED);
+}
+
+uint64_t luxsynth_feed_spec_pushes(void)
+{
+    return __atomic_load_n(&s_diag_spec_pushes, __ATOMIC_RELAXED);
+}
+
 static void lx_feed_push_silence(int nDisplay)
 {
     if (s_silenced)
         return;
+    __atomic_fetch_add(&s_diag_silence_pushes, 1, __ATOMIC_RELAXED);
     memset(s_smoothed, 0, sizeof(s_smoothed));
     luxsynth_engine_set_spectral_data(&g_luxsynth_engine,
                                       s_smoothed + 1, NULL, s_harm + 1,
@@ -75,12 +96,27 @@ void luxsynth_feed_tick(const ChainPlan* plan)
     const int mixed = synth_staging_mix_luxsynth(plan, s_line,
                                                  s_r, s_g, s_b,
                                                  N, &nbp, &gen);
+    if (mixed < 0)
+        return;   /* torn slot (producer mid-staging) — HOLD the engine's
+                   * spectrum; pushing silence here was the audible LuxSynth
+                   * micro-dropout whenever this tick collided with device
+                   * line-rate staging (s_silenced/s_have_gen untouched). */
     if (mixed == 0)
     {
-        /* No active "→ LUXSYNTH" send → silence (no-send contract). */
-        lx_feed_push_silence(nDisplay);
+        /* No active "→ LUXSYNTH" send THIS tick. A transient inactive — a
+         * player stop that restages within a few ms, a no-signal flicker —
+         * must NOT wipe the spectrum: that instant wipe WAS the audible
+         * "micro coupure" (field logs: clicks == silencePushes, 1:1). Only
+         * a PERSISTENT no-send state is a real removal/stop → then the
+         * no-send contract applies (~100 ms at the 2-4 ms tick rate). */
+        if (s_zero_ticks < LX_FEED_SILENCE_DEBOUNCE_TICKS)
+        {
+            if (++s_zero_ticks == LX_FEED_SILENCE_DEBOUNCE_TICKS)
+                lx_feed_push_silence(nDisplay);
+        }
         return;
     }
+    s_zero_ticks = 0;
 
     /* (P4 — 2026-07-14: the global Chain-2 transport gate is GONE — each
      * "→ LUXSYNTH" send is gated at staging time by ITS chain's transport:
@@ -195,6 +231,7 @@ void luxsynth_feed_tick(const ChainPlan* plan)
         }
     }
 
+    __atomic_fetch_add(&s_diag_spec_pushes, 1, __ATOMIC_RELAXED);
     luxsynth_engine_set_spectral_data(&g_luxsynth_engine,
                                       s_smoothed + 1,   /* skip DC */
                                       NULL,

@@ -692,15 +692,16 @@ private:
     juce::Uuid vizTapModuleId_;
     // Per-type masks of pool slots whose binding changed in the LAST rebind
     // (released or freshly assigned) — their pool state is stale.
-    struct PoolStale { uint32_t pitch = 0, mask = 0, reverb = 0, echo = 0, eq = 0; };
-    // Pool slots owning a Pitch/Mask/Reverb/Echo/EQ instance after the LAST
-    // derive — diffed to reset instances whose module (or whole chain) was just
-    // removed.
+    struct PoolStale { uint32_t pitch = 0, mask = 0, reverb = 0, echo = 0, eq = 0, harmo = 0; };
+    // Pool slots owning a Pitch/Mask/Reverb/Echo/EQ/Harmo instance after the
+    // LAST derive — diffed to reset instances whose module (or whole chain) was
+    // just removed.
     uint32_t prevPitchSlots_  { 0 };
     uint32_t prevMaskSlots_   { 0 };
     uint32_t prevReverbSlots_ { 0 };
     uint32_t prevEchoSlots_   { 0 };
     uint32_t prevEqSlots_     { 0 };
+    uint32_t prevHarmoSlots_  { 0 };
     // Bit i set ⇒ the chain bound to pool slot i has a Pitch/Mask instance →
     // fan MIDI to pool slot i. Default bit 0 = legacy single-instance behaviour.
     std::atomic<uint32_t> chainPitchMask_ { 1 };
@@ -709,6 +710,7 @@ private:
     std::atomic<uint32_t> chainReverbMask_ { 0 };
     std::atomic<uint32_t> chainEchoMask_   { 0 };
     std::atomic<uint32_t> chainEqMask_     { 0 };
+    std::atomic<uint32_t> chainHarmoMask_  { 0 };
 
     // ── UI VU meters (AUDIO MIX) — written by processBlock only ─────────────
     // Per-block peak accumulators (RT thread locals, folded + reset each block)
@@ -732,6 +734,8 @@ private:
     // Non-APVTS state ↔ session blob (see the public flags above).
     juce::ValueTree scoreStateToTree() const;                 // SCORE settings + freq override
     void restoreScoreStateFromTree(const juce::ValueTree& t);
+    juce::ValueTree luxstralWavetableToTree() const;          // user timbre wavetable (harmonics)
+    void restoreLuxstralWavetableFromTree(const juce::ValueTree& t);
     juce::ValueTree samplerSlotsStateToTree() const;          // both engines × 12 slots (+ overdub)
     juce::ValueTree seqStateToTree() const;                   // sequencer pattern + timing
     bool seqRestoredFromState_    = false;
@@ -838,6 +842,7 @@ private:
     uint32_t pendingReverbResets_     { 0 };
     uint32_t pendingEchoResets_       { 0 };
     uint32_t pendingEqResets_         { 0 };
+    uint32_t pendingHarmoResets_      { 0 };
     uint32_t pendingVideoScrollInits_ { 0 };
     // M3 — chain slots whose "→ LUXSTRAL" send disappeared: their staging must
     // go inactive (silence) once the in-flight frame is done.

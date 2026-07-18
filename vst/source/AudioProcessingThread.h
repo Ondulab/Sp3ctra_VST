@@ -41,7 +41,6 @@ public:
      */
     explicit AudioProcessingThread(Sp3ctraCore* core)
         : Thread("Sp3ctraAudioProcessing"), core(core) {
-        log_info("SYNTH", "AudioProcessingThread: Constructor called");
     }
     
     /**
@@ -67,7 +66,6 @@ public:
      * - Context->running flag for shutdown
      */
     void run() override {
-        log_info("SYNTH", "AudioProcessingThread starting with RT priority...");
         
         if (!core) {
             log_error("SYNTH", "AudioProcessingThread: core is null!");
@@ -84,7 +82,7 @@ public:
         // This ensures the audio processing thread gets CPU time before other processes
 #ifdef __APPLE__
         if (pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) == 0) {
-            log_info("SYNTH", "AudioProcessingThread: QoS set to USER_INTERACTIVE");
+            log_startup_detail("SYNTH", "AudioProcessingThread: QoS set to USER_INTERACTIVE");
         } else {
             log_warning("SYNTH", "AudioProcessingThread: Failed to set QoS class");
         }
@@ -95,7 +93,6 @@ public:
         // without killing the UDP thread (which uses ctx->running)
         ctx->audio_thread_running = 1;
         
-        log_info("SYNTH", "Calling C audioProcessingThread() function...");
         
         // Call existing C function (blocks until Context->audio_thread_running = 0)
         audioProcessingThread((void*)ctx);

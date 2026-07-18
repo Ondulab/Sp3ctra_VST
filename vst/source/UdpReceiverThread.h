@@ -29,7 +29,6 @@ public:
      */
     explicit UdpReceiverThread(Sp3ctraCore* core)
         : Thread("Sp3ctraUDP"), core(core) {
-        log_info("UDP", "UdpReceiverThread: Constructor called");
     }
     
     /**
@@ -55,7 +54,6 @@ public:
      * - Context->running flag for shutdown
      */
     void run() override {
-        log_info("UDP", "Thread starting...");
         
         if (!core) {
             log_error("UDP", "core is null!");
@@ -71,7 +69,6 @@ public:
         // 🔧 FIX: Do NOT set ctx->running here - already set by restartUdp() BEFORE thread starts
         // Setting it again here can cause race conditions with thread synchronization
         
-        log_info("UDP", "Calling C udpThread() function (ctx->running=%d)...", ctx->running);
         
         // Call existing C function (blocks until Context->running = 0)
         udpThread((void*)ctx);

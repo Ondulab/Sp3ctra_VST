@@ -16,11 +16,13 @@ extern "C" {
     #include "synthesis/luxstral/synth_luxstral_algorithms.h" // update_gap_limiter_coefficients()
     #include "synthesis/luxstral/vst_adapters.h"              // luxstral_are_audio_buffers_ready(), buffers
     #include "synthesis/luxstral/wave_generation.h"           // request_frequency_reinit() hot-reload
+    #include "synthesis/luxstral/luxstral_wavetable.h"        // user timbre wavetable (tuned grains)
     #include "processing/lux_pitch.h"                         // LuxPitch engine (g_lux_pitch_proc)
     #include "processing/lux_mask.h"                          // LuxMask engine (g_lux_mask_proc)
     #include "processing/lux_reverb.h"                        // LuxReverb FX (g_lux_reverb_proc)
     #include "processing/lux_echo.h"                          // LuxEcho FX (g_lux_echo_proc)
     #include "processing/lux_eq.h"                            // LuxEq FX (g_lux_eq_proc)
+    #include "processing/lux_harmo.h"                         // LuxHarmo/SCALE FX (g_lux_harmo_proc)
     #include "processing/video_scroll.h"                      // VideoScroll capture-ring pool
     #include "processing/image_chain.h"                       // Insert chain executor (order + taps)
     #include "processing/chain_plan.h"                         // M6 Phase 2 — RT chain descriptor
@@ -31,14 +33,29 @@ extern "C" {
     #include "audio/buffers/audio_image_buffers.h"             // selection tap (contextual zone 1)
     #include "synthesis/luxsynth/luxsynth_vst_adapter.h"      // luxsynth_push_midi_event(), buffers, engine
     #include "synthesis/luxwave/luxwave_vst_adapter.h"        // luxwave_push_midi_event(), g_luxwave_engine
+    #include "processing/luxsynth_feed.h"                      // dropout diag counters (silence/spec pushes)
 
 }
+#include <atomic>
 // Note: synth_luxstral_threading.h / synth_luxstral_runtime.h / AudioProcessingThread.h
 // are now included transitively via Sp3ctraSharedCore.h and handled by Sp3ctraSharedCore.
 
 // Global RT Profiler accessible from C threads (audioProcessingThread)
 // This must be declared here (not in header) to avoid multiple definition errors
 RTProfiler g_vst_rt_profiler = {};
+
+// LuxSynth dropout diagnostics — bumped in processBlock (RT), drained by the
+// message-thread timer next to the [STAGING] drain. File-scope on purpose:
+// shared across instances, diagnostics only.
+std::atomic<uint64_t> g_lxDiagGapsVoiced{0}, g_lxDiagGapsUnvoiced{0};
+std::atomic<int>      g_lxDiagLastVoices{0}, g_lxDiagLastBins{0};
+std::atomic<float>    g_lxDiagLastMaxMag{0.0f};
+// Click detector (single-sample discontinuities — the gap detector only sees
+// full collapses). Context captured at the worst click: was a spectral latch
+// applied this block, did the volume fader step, how many voices.
+std::atomic<uint64_t> g_lxDiagClicks{0};
+std::atomic<float>    g_lxDiagClickDelta{0.0f}, g_lxDiagClickVolStep{0.0f};
+std::atomic<int>      g_lxDiagClickLatched{0}, g_lxDiagClickVoices{0};
 
 //==============================================================================
 // Pooled-insert bank suffixes — single source of truth for the per-instance
@@ -56,7 +73,7 @@ namespace
     {
         return t == ModuleType::Pitch  || t == ModuleType::Mask
             || t == ModuleType::Reverb || t == ModuleType::Echo
-            || t == ModuleType::Equalizer;
+            || t == ModuleType::Equalizer || t == ModuleType::Harmonize;
     }
 }
 
@@ -252,6 +269,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"luxstralPhaseDriftCents", 1}, "Phase Drift",
         juce::NormalisableRange<float>(0.0f, 3.0f, 0.01f), 0.0f,
         juce::AudioParameterFloatAttributes{}.withLabel("ct")));
+
+    // Timbre wavetable mix — blend between the analytic sine/square bank and
+    // the user-sample wavetable (tuned-grain timbre, luxstral_wavetable.h).
+    // Inert while no sample is loaded; default 1.0 so loading a sample is
+    // immediately audible.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxstralTimbreMix", 1}, "Timbre Mix",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
 
     // ── Synth-split P1 — per-OUT conditioning banks (pool slots 0..7) ────────
     // One bank per OUT-module instance: the OUT conditions its chain's flux
@@ -901,6 +926,46 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             id("BackgroundMode"), tag + "Background",
             juce::StringArray{"Auto", "Black", "White"}, 0));
     }
+    for (int n = 0; n < 8; ++n)
+    {
+        const juce::String tag = "SC" + juce::String(n) + " ";
+        auto id = [n](const char* sfx) { return juce::ParameterID{hmParam(n, sfx), 1}; };
+
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            id("Enabled"), tag + "Enabled", false));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            id("Mode"), tag + "Mode",
+            juce::StringArray{"Mask", "Warp"}, LUX_HARMO_MODE_WARP));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            id("Root"), tag + "Root",
+            juce::StringArray{"C", "C#", "D", "D#", "E", "F",
+                              "F#", "G", "G#", "A", "A#", "B"}, 0));
+        // Order MUST match the LUX_HARMO_SCALE_* preset indices (lux_harmo.h).
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            id("Scale"), tag + "Scale",
+            juce::StringArray{"Chromatic", "Major", "Minor", "Harm Minor",
+                              "Penta Maj", "Penta Min", "Blues", "Whole Tone",
+                              "Dorian", "Phrygian", "Lydian", "Mixolydian",
+                              "Fifths", "Octaves"}, LUX_HARMO_SCALE_MAJOR));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("Strength"), tag + "Strength",
+            juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 100.0f,
+            juce::AudioParameterFloatAttributes{}.withLabel("%")));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("Width"), tag + "Width",
+            juce::NormalisableRange<float>(0.05f, 1.0f, 0.01f), 0.35f,
+            juce::AudioParameterFloatAttributes{}.withLabel("st")));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("Slope"), tag + "Slope",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterInt>(
+            id("Glide"), tag + "Glide",
+            0, 1000, 64,
+            juce::AudioParameterIntAttributes{}.withLabel("lines")));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            id("BackgroundMode"), tag + "Background",
+            juce::StringArray{"Auto", "Black", "White"}, 0));
+    }
 
     // Fade-in duration [ms] — applied when restarting the live stream after Stop.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -1415,7 +1480,6 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
 {
     log_info("VST", "=============================================================");
     log_info("VST", "Sp3ctraAudioProcessor: Constructor - Initializing VST plugin");
-    log_info("VST", "  Using APVTS (AudioProcessorValueTreeState) for parameters");
     log_info("VST", "=============================================================");
 
     // VOICE module TTS diagnostic — no-op unless SP3CTRA_TTS_SMOKE is set.
@@ -1525,6 +1589,7 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("luxstralPhaseSensitivity", this);
     apvts.addParameterListener("luxstralPhasePosition", this);
     apvts.addParameterListener("luxstralPhaseDriftCents", this);
+    apvts.addParameterListener("luxstralTimbreMix", this);
     
     // Register StrokeForge parameter listeners
     apvts.addParameterListener("sfEnabled", this);
@@ -1589,6 +1654,10 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     // modulated playback channel (one plays at a time — see the arbiter).
     for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
         samplers_[(size_t) e] = std::make_unique<LuxSampler>(e);
+    log_info("FS", "LuxSampler engines A-%c ready — %d slots, %.1f s/slot max",
+             (char) ('A' + LuxSampler::kMaxEngines - 1),
+             LuxSamplerConstants::NUM_SLOTS,
+             static_cast<double>(LuxSamplerConstants::MAX_DURATION_S));
     scorePlayerService_ = std::make_unique<ScorePlayerService>();
 
     // SCORE generation defaults (shared by the PLAY page and the SETUP panel).
@@ -1739,6 +1808,7 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     lux_reverb_init_all();
     lux_echo_init_all();
     lux_eq_init_all();
+    lux_harmo_init_all();
     video_scroll_init_all();   // init 8 VideoScroll capture rings (RT pool) before the synth thread starts
 
     // Just update g_sp3ctra_config with current APVTS defaults (no socket/buffer creation)
@@ -1965,6 +2035,7 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     // 🛡️ PROTECTION: Suspend visualizer to prevent Metal/CoreGraphics race
     setVisualizerSuspendedSafely(true);
 
+    const double prepareStartMs = juce::Time::getMillisecondCounterHiRes();
     log_info("VST", "=============================================================");
     log_info("VST", "prepareToPlay - SR=%.1f Hz, BS=%d samples", sampleRate, samplesPerBlock);
 
@@ -2088,6 +2159,8 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
         }
     }
 
+    log_info("VST", "prepareToPlay complete in %.1f ms",
+             juce::Time::getMillisecondCounterHiRes() - prepareStartMs);
     log_info("VST", "=============================================================");
 
     setVisualizerSuspendedSafely(false);
@@ -2592,6 +2665,11 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             struct timeval lxT0, lxT1;
             gettimeofday(&lxT0, NULL);   // per-family perf attribution
 
+            // Click-diagnostic context: what happened during THIS block.
+            const unsigned long long lxTrigBefore =
+                g_luxsynth_engine.current_trigger_order;
+            const uint32_t lxSeqBefore = g_luxsynth_engine.spec_applied_seq;
+
             // 1. Drain pending MIDI events into engine voices
             luxsynth_process_pending_midi();
 
@@ -2599,6 +2677,11 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             luxsynth_engine_process(&g_luxsynth_engine, numSamples,
                                     g_luxsynth_engine.output_left,
                                     g_luxsynth_engine.output_right);
+
+            const int lxNoteOnThisBlock =
+                (g_luxsynth_engine.current_trigger_order != lxTrigBefore);
+            const int lxLatchedThisBlock =
+                (g_luxsynth_engine.spec_applied_seq != lxSeqBefore);
 
             // 3. Mix into JUCE output buffer (additive)
             const float lxVol = luxsynthVolumeParam->load();
@@ -2625,6 +2708,98 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                 }
             }
             lxPkBlock_ = pk;
+
+            // ── Dropout diagnostic (RT-safe: counters only, timer drains) ────
+            // A block whose RAW engine output collapses to ~0 right after a
+            // loud block is a hard cut. "voiced" gaps (voices still held) point
+            // upstream (spectrum zeroed / feed silence); "unvoiced" gaps point
+            // at MIDI (note-offs). Pre-volume peak so a fader move can't fake
+            // a gap.
+            {
+                extern std::atomic<uint64_t> g_lxDiagGapsVoiced,
+                                             g_lxDiagGapsUnvoiced;
+                extern std::atomic<int>      g_lxDiagLastVoices,
+                                             g_lxDiagLastBins;
+                extern std::atomic<float>    g_lxDiagLastMaxMag;
+                static float s_lxPrevRawPk = 0.0f;
+
+                float rawPk = 0.0f;
+                for (int i = 0; i < numSamples; ++i) {
+                    const float aL = std::abs(g_luxsynth_engine.output_left[i]);
+                    const float aR = std::abs(g_luxsynth_engine.output_right[i]);
+                    if (aL > rawPk) rawPk = aL;
+                    if (aR > rawPk) rawPk = aR;
+                }
+                const float prevPk = s_lxPrevRawPk;
+                s_lxPrevRawPk = rawPk;
+                if (prevPk > 0.05f && rawPk < 1.0e-4f)
+                {
+                    int voiced = 0;
+                    for (int v = 0; v < g_luxsynth_engine.num_voices; ++v)
+                        if (g_luxsynth_engine.voices[v].volume_env.state
+                            != ADSR_STATE_IDLE)
+                            ++voiced;
+                    float maxMag = 0.0f;
+                    const int nb = g_luxsynth_engine.spectral.num_bins;
+                    for (int k = 0; k < nb && k < LUXSYNTH_MAX_OSCILLATORS; ++k)
+                        if (g_luxsynth_engine.spectral.magnitudes[k] > maxMag)
+                            maxMag = g_luxsynth_engine.spectral.magnitudes[k];
+                    g_lxDiagLastVoices.store(voiced, std::memory_order_relaxed);
+                    g_lxDiagLastBins.store(nb, std::memory_order_relaxed);
+                    g_lxDiagLastMaxMag.store(maxMag, std::memory_order_relaxed);
+                    (voiced > 0 ? g_lxDiagGapsVoiced : g_lxDiagGapsUnvoiced)
+                        .fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+
+            // ── Click diagnostic: single-sample discontinuities in the RAW
+            // engine output (the gap detector above only sees full collapses).
+            // A fresh note-on legitimately jumps — those blocks are skipped.
+            // Post-volume zipper is reported separately via volStep.
+            {
+                extern std::atomic<uint64_t> g_lxDiagClicks;
+                extern std::atomic<float>    g_lxDiagClickDelta,
+                                             g_lxDiagClickVolStep;
+                extern std::atomic<int>      g_lxDiagClickLatched,
+                                             g_lxDiagClickVoices;
+                static float s_lxPrevLastL = 0.0f;   // block-boundary continuity
+                static float s_lxPrevVol   = -1.0f;
+
+                const float volStep =
+                    (s_lxPrevVol >= 0.0f) ? (lxVol - s_lxPrevVol) : 0.0f;
+                s_lxPrevVol = lxVol;
+
+                if (!lxNoteOnThisBlock && numSamples > 0)
+                {
+                    float maxDelta = 0.0f;
+                    float prev = s_lxPrevLastL;
+                    for (int i = 0; i < numSamples; ++i) {
+                        const float cur = g_luxsynth_engine.output_left[i];
+                        const float d = std::abs(cur - prev);
+                        if (d > maxDelta) maxDelta = d;
+                        prev = cur;
+                    }
+                    if (maxDelta > 0.35f)
+                    {
+                        int voiced = 0;
+                        for (int v = 0; v < g_luxsynth_engine.num_voices; ++v)
+                            if (g_luxsynth_engine.voices[v].volume_env.state
+                                != ADSR_STATE_IDLE)
+                                ++voiced;
+                        g_lxDiagClickDelta.store(maxDelta,
+                                                 std::memory_order_relaxed);
+                        g_lxDiagClickVolStep.store(volStep,
+                                                   std::memory_order_relaxed);
+                        g_lxDiagClickLatched.store(lxLatchedThisBlock,
+                                                   std::memory_order_relaxed);
+                        g_lxDiagClickVoices.store(voiced,
+                                                  std::memory_order_relaxed);
+                        g_lxDiagClicks.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+                s_lxPrevLastL = (numSamples > 0)
+                    ? g_luxsynth_engine.output_left[numSamples - 1] : 0.0f;
+            }
 
             gettimeofday(&lxT1, NULL);
             rt_profiler_engine_report(&g_vst_rt_profiler, RT_ENGINE_LUXSYNTH,
@@ -2804,6 +2979,15 @@ void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
         state.appendChild(child, nullptr);
     };
     replaceChild(scoreStateToTree());        // SCORE settings + freq override
+    replaceChild(luxstralWavetableToTree()); // user timbre wavetable (harmonics)
+    // A cleared timbre writes no child — drop any stale copy so it doesn't
+    // resurrect on the next load.
+    if (! luxstral_wavetable_is_loaded())
+    {
+        auto stale = state.getChildWithName("LUXSTRAL_WAVETABLE");
+        if (stale.isValid())
+            state.removeChild(stale, nullptr);
+    }
     replaceChild(seqStateToTree());          // sequencer pattern (steps A/B)
     replaceChild(samplerSlotsStateToTree()); // per-slot params, engines A + B
     replaceChild(mediaSourcesStateToTree()); // M9 — IMAGE/VIDEO paths + camera
@@ -3086,11 +3270,14 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
                 .getProperty("samplerOutputDir", "").toString();
             scoreWavPath = apvts.state
                 .getProperty("scoreWavPath", "").toString();
-            log_info("VST", "State restored from DAW project");
+            log_info("VST", "State restored from DAW project — applying to engines...");
 
             // On state restore, just update g_sp3ctra_config.
             // The actual pipeline start (if needed) happens in prepareToPlay().
             applyConfigurationToCore(false);
+            // That was a FULL resync — drop the coalesced dirty flag raised by
+            // the bulk param apply so drainPendingConfig() doesn't redo it.
+            configResyncPending_ = false;
 
             // M9 — restore media paths + camera device BEFORE the chain model:
             // updateMediaSourcePresence() (inside deriveChainRouting) reopens
@@ -3148,6 +3335,11 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
             // SCORE settings + frequency override (processor members, not APVTS).
             restoreScoreStateFromTree(apvts.state.getChildWithName("SCORE"));
 
+            // User timbre wavetable — rebuilds the mip tables from the
+            // persisted harmonics (absent child ⇒ clears any loaded table).
+            restoreLuxstralWavetableFromTree(
+                apvts.state.getChildWithName("LUXSTRAL_WAVETABLE"));
+
             // Sequencer pattern — steps are not APVTS params, only their
             // transport/timing is. Timing attrs in the tree were captured
             // together with the APVTS values, so applying both is consistent.
@@ -3195,6 +3387,14 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
             // Let an OPEN editor rebuild its rack/panels from the new model.
             if (onStateRestoredUi)
                 onStateRestoredUi();
+
+            int restoredModules = 0;
+            for (const auto& ch : chainModel_.chains)
+                restoredModules += (int) ch.modules.size();
+            log_info("VST", "Restore complete — %d chains, %d modules, "
+                            "sampler session auto-load %s",
+                     (int) chainModel_.chains.size(), restoredModules,
+                     lastSessionPath.isNotEmpty() ? "armed" : "none");
         }
     }
 
@@ -3285,7 +3485,8 @@ void Sp3ctraAudioProcessor::timerCallback()
 
     // ── Deferred Pitch/Mask/Reverb/Echo/VideoScroll pool resets (see header) ──
     if ((pendingPitchResets_ | pendingMaskResets_ | pendingReverbResets_
-         | pendingEchoResets_ | pendingEqResets_ | pendingVideoScrollInits_
+         | pendingEchoResets_ | pendingEqResets_ | pendingHarmoResets_
+         | pendingVideoScrollInits_
          | pendingStagingResets_) != 0
         && juce::Time::getMillisecondCounter() - poolResetArmedMs_ >= 40)
     {
@@ -3296,6 +3497,7 @@ void Sp3ctraAudioProcessor::timerCallback()
             if ((pendingReverbResets_ >> i) & 1u) lux_reverb_reset(lux_reverb_instance(i));
             if ((pendingEchoResets_   >> i) & 1u) lux_echo_reset(lux_echo_instance(i));
             if ((pendingEqResets_     >> i) & 1u) lux_eq_reset(lux_eq_instance(i));
+            if ((pendingHarmoResets_  >> i) & 1u) lux_harmo_reset(lux_harmo_instance(i));
             if ((pendingVideoScrollInits_ >> i) & 1u)
                 video_scroll_init(video_scroll_instance(i));
             if ((pendingStagingResets_ >> i) & 1u)
@@ -3307,11 +3509,74 @@ void Sp3ctraAudioProcessor::timerCallback()
         }
         pendingPitchResets_ = pendingMaskResets_ = pendingVideoScrollInits_ = 0;
         pendingReverbResets_ = pendingEchoResets_ = pendingEqResets_ = 0;
+        pendingHarmoResets_ = 0;
         pendingStagingResets_ = 0;
     }
 
     // ── RT profiler: drain deferred logs (RT threads never log directly) ─────
     rt_profiler_flush_logs(&g_vst_rt_profiler);
+
+    // ── Staging seqlock contention (mixer held instead of silencing) ─────────
+    {
+        static uint64_t s_holdsLogged = 0;
+        static uint32_t s_holdsLogMs  = 0;
+        const uint64_t holds = synth_staging_contention_holds();
+        const uint32_t nowMs = juce::Time::getMillisecondCounter();
+        if (holds != s_holdsLogged && nowMs - s_holdsLogMs >= 10000)
+        {
+            log_info("STAGING",
+                     "contention holds: %llu total (+%llu) — mixer kept "
+                     "previous output on a torn slot (was audible dropout)",
+                     (unsigned long long) holds,
+                     (unsigned long long) (holds - s_holdsLogged));
+            s_holdsLogged = holds;
+            s_holdsLogMs  = nowMs;
+        }
+    }
+
+    // ── LuxSynth dropout diagnostic (gap + click detectors in processBlock) ──
+    {
+        static uint64_t s_gapsV = 0, s_gapsU = 0, s_sil = 0, s_clicks = 0;
+        static uint32_t s_lastMs = 0;
+        const uint64_t gapsV = g_lxDiagGapsVoiced.load(std::memory_order_relaxed);
+        const uint64_t gapsU = g_lxDiagGapsUnvoiced.load(std::memory_order_relaxed);
+        const uint64_t clicks = g_lxDiagClicks.load(std::memory_order_relaxed);
+        const uint64_t sil   = luxsynth_feed_silence_pushes();
+        const uint32_t nowMs = juce::Time::getMillisecondCounter();
+        // Trigger on the GAP/CLICK counters only — silencePushes ticks steadily
+        // at idle (feeder pushing silence is nominal) and made this line fire
+        // every 3 s with all-zero gap fields. sil/spec stay in the payload.
+        if ((gapsV != s_gapsV || gapsU != s_gapsU || clicks != s_clicks)
+            && nowMs - s_lastMs >= 3000)
+        {
+            log_info("LXDIAG",
+                     "gaps voiced=%llu (+%llu) unvoiced=%llu (+%llu) | clicks="
+                     "%llu (+%llu) [last: delta=%.3f latched=%d volStep=%+.4f "
+                     "voices=%d] | feed silencePushes=%llu (+%llu) specPushes="
+                     "%llu | lastGap: voices=%d bins=%d maxMag=%.4f",
+                     (unsigned long long) gapsV,
+                     (unsigned long long) (gapsV - s_gapsV),
+                     (unsigned long long) gapsU,
+                     (unsigned long long) (gapsU - s_gapsU),
+                     (unsigned long long) clicks,
+                     (unsigned long long) (clicks - s_clicks),
+                     (double) g_lxDiagClickDelta.load(std::memory_order_relaxed),
+                     g_lxDiagClickLatched.load(std::memory_order_relaxed),
+                     (double) g_lxDiagClickVolStep.load(std::memory_order_relaxed),
+                     g_lxDiagClickVoices.load(std::memory_order_relaxed),
+                     (unsigned long long) sil,
+                     (unsigned long long) (sil - s_sil),
+                     (unsigned long long) luxsynth_feed_spec_pushes(),
+                     g_lxDiagLastVoices.load(std::memory_order_relaxed),
+                     g_lxDiagLastBins.load(std::memory_order_relaxed),
+                     (double) g_lxDiagLastMaxMag.load(std::memory_order_relaxed));
+            s_gapsV  = gapsV;
+            s_gapsU  = gapsU;
+            s_sil    = sil;
+            s_clicks = clicks;
+            s_lastMs = nowMs;
+        }
+    }
 }
 
 // Real parameter handler — message thread only (see dispatcher above).
@@ -3640,7 +3905,12 @@ void Sp3ctraAudioProcessor::drainPendingConfig()
     }
     if (freqReinitPending_) {
         freqReinitPending_ = false;
-        request_frequency_reinit();        // flips an atomic; regen on synth thread
+        // Skip while the core is still coming up: synth_IfftInit() builds the
+        // wavetables from the (already restored) config at startWithConfig()
+        // time — a request now would only go stale (no synth thread to process
+        // it, and the fade-out it starts would never fade back in).
+        if (!coreNeedsInit)
+            request_frequency_reinit();    // flips an atomic; regen on synth thread
     }
     if (coeffUpdatePending_) {
         coeffUpdatePending_ = false;
@@ -3746,7 +4016,8 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
     // Active Pitch/Mask/Reverb/Echo instances → MIDI fan-out + config-sync
     // mask, indexed by the INSTANCE'S pool slot (stable across edits and
     // chain moves).
-    uint32_t pitchMask = 0, maskMask = 0, reverbMask = 0, echoMask = 0, eqMask = 0;
+    uint32_t pitchMask = 0, maskMask = 0, reverbMask = 0, echoMask = 0, eqMask = 0,
+             harmoMask = 0;
     for (int c = 0; c < chainModel_.numChains(); ++c)
     {
         for (const auto& m : chainModel_.chains[(size_t) c].modules)
@@ -3757,6 +4028,7 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
             if (m.type == ModuleType::Reverb)    reverbMask |= (1u << slot);
             if (m.type == ModuleType::Echo)      echoMask   |= (1u << slot);
             if (m.type == ModuleType::Equalizer) eqMask     |= (1u << slot);
+            if (m.type == ModuleType::Harmonize) harmoMask  |= (1u << slot);
         }
     }
     chainPitchMask_.store(pitchMask, std::memory_order_relaxed);
@@ -3764,6 +4036,7 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
     chainReverbMask_.store(reverbMask, std::memory_order_relaxed);
     chainEchoMask_.store(echoMask,   std::memory_order_relaxed);
     chainEqMask_.store(eqMask,       std::memory_order_relaxed);
+    chainHarmoMask_.store(harmoMask, std::memory_order_relaxed);
 
     // Per-instance `enabled` sync — must NOT wait for applyConfigurationToCore:
     // a pure topology change (Pitch dragged to another chain, chain removal,
@@ -3785,6 +4058,8 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
                 (bankOn(ecParam(i, "Enabled")) && ((echoMask   >> i) & 1u)) ? 1 : 0;
             lux_eq_instance(i)->config.enabled =
                 (bankOn(eqParam(i, "Enabled")) && ((eqMask     >> i) & 1u)) ? 1 : 0;
+            lux_harmo_instance(i)->config.enabled =
+                (bankOn(hmParam(i, "Enabled")) && ((harmoMask  >> i) & 1u)) ? 1 : 0;
         }
     }
 
@@ -3832,11 +4107,13 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
         const uint32_t lostReverb = (prevReverbSlots_ & ~reverbMask) | staleSlots.reverb;
         const uint32_t lostEcho   = (prevEchoSlots_   & ~echoMask)   | staleSlots.echo;
         const uint32_t lostEq     = (prevEqSlots_     & ~eqMask)     | staleSlots.eq;
+        const uint32_t lostHarmo  = (prevHarmoSlots_  & ~harmoMask)  | staleSlots.harmo;
         pendingPitchResets_  |= lostPitch;
         pendingMaskResets_   |= lostMask;
         pendingReverbResets_ |= lostReverb;
         pendingEchoResets_   |= lostEcho;
         pendingEqResets_     |= lostEq;
+        pendingHarmoResets_  |= lostHarmo;
         // A slot ACTIVE in the new plan must not be reset by a pending bit
         // armed for a previous removal (remove + re-add within the 40 ms
         // window): the deferred reset would wipe — and race — the freshly
@@ -3847,13 +4124,15 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
         pendingReverbResets_ &= ~reverbMask;
         pendingEchoResets_   &= ~echoMask;
         pendingEqResets_     &= ~eqMask;
-        if ((lostPitch | lostMask | lostReverb | lostEcho | lostEq) != 0)
+        pendingHarmoResets_  &= ~harmoMask;
+        if ((lostPitch | lostMask | lostReverb | lostEcho | lostEq | lostHarmo) != 0)
             poolResetArmedMs_ = juce::Time::getMillisecondCounter();
         prevPitchSlots_  = pitchMask;
         prevMaskSlots_   = maskMask;
         prevReverbSlots_ = reverbMask;
         prevEchoSlots_   = echoMask;
         prevEqSlots_     = eqMask;
+        prevHarmoSlots_  = harmoMask;
     }
 }
 
@@ -3876,6 +4155,7 @@ Sp3ctraAudioProcessor::PoolStale Sp3ctraAudioProcessor::updateModulePoolBindings
             case ModuleType::Mask:      return stale.mask;
             case ModuleType::Reverb:    return stale.reverb;
             case ModuleType::Equalizer: return stale.eq;
+            case ModuleType::Harmonize: return stale.harmo;
             case ModuleType::Echo:
             default:                    return stale.echo;
         }
@@ -3884,7 +4164,7 @@ Sp3ctraAudioProcessor::PoolStale Sp3ctraAudioProcessor::updateModulePoolBindings
     {
         return t == ModuleType::Pitch  || t == ModuleType::Mask
             || t == ModuleType::Reverb || t == ModuleType::Echo
-            || t == ModuleType::Equalizer;
+            || t == ModuleType::Equalizer || t == ModuleType::Harmonize;
     };
 
     std::map<juce::Uuid, ModuleType> live;
@@ -3990,6 +4270,7 @@ Sp3ctraAudioProcessor::navTargetForParam(const juce::String& id) const
     else if (banked("luxreverb", slot)) { t.type = ModuleType::Reverb;     t.instanceId = poolInstance (t.type, slot); }
     else if (banked("luxecho",   slot)) { t.type = ModuleType::Echo;       t.instanceId = poolInstance (t.type, slot); }
     else if (banked("luxeq",     slot)) { t.type = ModuleType::Equalizer;  t.instanceId = poolInstance (t.type, slot); }
+    else if (banked("luxharmo",  slot)) { t.type = ModuleType::Harmonize;  t.instanceId = poolInstance (t.type, slot); }
     else if (banked("videoScroll", slot) || banked("videoMix", slot))
                                         { t.type = ModuleType::VideoScroll; t.instanceId = chainInstance(t.type, slot); }
     else if (banked("luxstralOut", slot)) { t.type = ModuleType::LuxStral; t.instanceId = chainInstance(t.type, slot); }
@@ -4425,7 +4706,7 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
             const ModuleType t = mi.type;
             if ((t == ModuleType::Pitch || t == ModuleType::Mask
                  || t == ModuleType::Reverb || t == ModuleType::Echo
-                 || t == ModuleType::Equalizer)
+                 || t == ModuleType::Equalizer || t == ModuleType::Harmonize)
                 && sp.num_inserts < CHAIN_PLAN_MAX_INSERTS)
             {
                 sp.insert_id[sp.num_inserts] =
@@ -4433,6 +4714,7 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
                     : (t == ModuleType::Mask)  ? IMAGE_CHAIN_INSERT_LUXMASK
                     : (t == ModuleType::Reverb)? IMAGE_CHAIN_INSERT_LUXREVERB
                     : (t == ModuleType::Echo)  ? IMAGE_CHAIN_INSERT_LUXECHO
+                    : (t == ModuleType::Harmonize) ? IMAGE_CHAIN_INSERT_LUXHARMO
                     :                            IMAGE_CHAIN_INSERT_LUXEQ;
                 // Pool slot bound to THIS INSTANCE's UUID — stable across edits
                 // and chain moves (must match deriveChainRouting's masks).
@@ -4821,6 +5103,68 @@ void Sp3ctraAudioProcessor::restoreScoreStateFromTree(const juce::ValueTree& t)
     scoreFreq_.tuning    = (double) t.getProperty("ovTuning",  scoreFreq_.tuning);
     scoreFreq_.rootIndex = (int)    t.getProperty("ovRoot",    scoreFreq_.rootIndex);
     scoreFreq_.octaves   = (int)    t.getProperty("ovOctaves", scoreFreq_.octaves);
+}
+
+// User timbre wavetable (tuned grains): persist the harmonic coefficients the
+// mip tables were built from — ~2 KB, and the session survives a moved or
+// deleted source WAV (the tables rebuild bit-exact from the harmonics).
+juce::ValueTree Sp3ctraAudioProcessor::luxstralWavetableToTree() const
+{
+    float re[LUXSTRAL_WT_MAX_HARMONICS];
+    float im[LUXSTRAL_WT_MAX_HARMONICS];
+    float rootHz = 0.0f;
+    const int n = luxstral_wavetable_get_harmonics(re, im,
+                                                   LUXSTRAL_WT_MAX_HARMONICS,
+                                                   &rootHz);
+    if (n <= 0)
+        return {};   // nothing loaded — no child written (absent = cleared)
+
+    char name[LUXSTRAL_WT_NAME_MAX] = {0};
+    luxstral_wavetable_get_info(name, sizeof(name), nullptr, nullptr);
+
+    juce::MemoryBlock blob((size_t) n * 2 * sizeof(float));
+    auto* dst = static_cast<float*>(blob.getData());
+    for (int k = 0; k < n; ++k)
+    {
+        dst[2 * k]     = re[k];
+        dst[2 * k + 1] = im[k];
+    }
+
+    juce::ValueTree t("LUXSTRAL_WAVETABLE");
+    t.setProperty("numHarmonics", n,                          nullptr);
+    t.setProperty("rootHz",       (double) rootHz,            nullptr);
+    t.setProperty("name",         juce::String::fromUTF8(name), nullptr);
+    t.setProperty("harmonics",    juce::var(blob),            nullptr);
+    return t;
+}
+
+void Sp3ctraAudioProcessor::restoreLuxstralWavetableFromTree(const juce::ValueTree& t)
+{
+    if (! t.isValid())
+    {
+        luxstral_wavetable_clear();   // session saved without a table
+        return;
+    }
+    const int    n      = (int)    t.getProperty("numHarmonics", 0);
+    const double rootHz = (double) t.getProperty("rootHz", 0.0);
+    const auto   name   = t.getProperty("name", "(restored)").toString();
+    auto*        blob   = t.getProperty("harmonics").getBinaryData();
+    if (blob == nullptr || n < 1 || n > LUXSTRAL_WT_MAX_HARMONICS
+        || blob->getSize() < (size_t) n * 2 * sizeof(float) || rootHz <= 0.0)
+    {
+        log_warning("VST", "LUXSTRAL_WAVETABLE blob invalid — timbre not restored");
+        return;
+    }
+    float re[LUXSTRAL_WT_MAX_HARMONICS];
+    float im[LUXSTRAL_WT_MAX_HARMONICS];
+    const auto* src = static_cast<const float*>(blob->getData());
+    for (int k = 0; k < n; ++k)
+    {
+        re[k] = src[2 * k];
+        im[k] = src[2 * k + 1];
+    }
+    luxstral_wavetable_load_from_harmonics(re, im, n, (float) rootHz,
+                                           name.toRawUTF8());
 }
 
 juce::ValueTree Sp3ctraAudioProcessor::seqStateToTree() const
@@ -5393,6 +5737,10 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     g_sp3ctra_config.luxstral_phase_drift_cents =
         apvts.getRawParameterValue("luxstralPhaseDriftCents")->load();
 
+    // Timbre wavetable mix (inert while no table is published)
+    g_sp3ctra_config.luxstral_timbre_mix =
+        apvts.getRawParameterValue("luxstralTimbreMix")->load();
+
     // Performance
     g_sp3ctra_config.num_workers = 
         (int)apvts.getRawParameterValue("luxstralNumWorkers")->load();
@@ -5647,6 +5995,38 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
                         raw(("Band" + juce::String(b)).toRawUTF8());
                 if (((qmask >> i) & 1u) == 0) c.enabled = 0;
                 lux_eq_instance(i)->config = c;
+            }
+        }
+
+        // ── Sync LuxHarmo (SCALE) configs — one APVTS bank per pool instance ──
+        {
+            // Choice order is {Auto, Black, White} — map onto the C-side modes.
+            static const int kHmBgChoiceToMode[3] =
+                { LUX_HARMO_BG_AUTO, LUX_HARMO_BG_BLACK, LUX_HARMO_BG_WHITE };
+            const uint32_t hmask = chainHarmoMask_.load(std::memory_order_relaxed);
+            for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
+            {
+                auto raw = [&, i](const char* sfx)
+                { return apvts.getRawParameterValue(hmParam(i, sfx))->load(); };
+
+                int bgChoice = static_cast<int>(raw("BackgroundMode"));
+                if (bgChoice < 0 || bgChoice > 2) bgChoice = 0;
+
+                LuxHarmoConfig c  = lux_harmo_config_default();
+                c.enabled         = static_cast<int>(raw("Enabled"));
+                c.mode            = static_cast<int>(raw("Mode"));
+                c.root            = static_cast<int>(raw("Root"));
+                c.scale           = static_cast<int>(raw("Scale"));
+                c.strength        = raw("Strength") / 100.0f;
+                c.width_st        = raw("Width");
+                c.slope           = raw("Slope");
+                c.glide_lines     = static_cast<int>(raw("Glide"));
+                c.background_mode = kHmBgChoiceToMode[bgChoice];
+                // Anchor the degree grid on the instrument's PHYSICAL axis so
+                // the allowed rows line up with its true pitch classes.
+                c.axis_low_hz     = g_sp3ctra_config.low_frequency;
+                if (((hmask >> i) & 1u) == 0) c.enabled = 0;
+                lux_harmo_instance(i)->config = c;
             }
         }
 

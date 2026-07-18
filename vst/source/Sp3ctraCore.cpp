@@ -20,7 +20,6 @@ extern "C" {
 }
 
 Sp3ctraCore::Sp3ctraCore() {
-    log_info("CORE", "Constructor called");
 }
 
 Sp3ctraCore::~Sp3ctraCore() {
@@ -37,7 +36,7 @@ bool Sp3ctraCore::initialize(const ActiveConfig& config) {
         shutdownBuffers();
     }
     
-    log_info("CORE", "Initializing...");
+    log_startup_detail("CORE", "Initializing...");
     
     // Store active configuration
     active = config;
@@ -226,7 +225,7 @@ bool Sp3ctraCore::initializeBuffers() {
         synth_data_freeze_init();
         pipeline_init();
         strokeforge_init();
-        log_info("CORE", "Global display buffers initialized");
+        log_startup_detail("CORE", "Global display buffers initialized");
         
         // 🔧 CRITICAL: Expose buffers globally for processBlock to use
         extern AudioImageBuffers *g_audioImageBuffers;
@@ -234,7 +233,6 @@ bool Sp3ctraCore::initializeBuffers() {
         g_audioImageBuffers = audioImageBuffers.get();
         g_doubleBuffer = doubleBuffer.get();
         
-        log_info("CORE", "Buffers initialized successfully");
         return true;
         
     } catch (const std::exception& e) {

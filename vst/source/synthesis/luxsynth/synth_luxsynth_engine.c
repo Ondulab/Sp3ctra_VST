@@ -348,18 +348,27 @@ void luxsynth_engine_set_spectral_data(LuxSynthEngine *engine,
     if (!engine || !magnitudes) return;
 
     int n = (num_bins > LUXSYNTH_MAX_OSCILLATORS) ? LUXSYNTH_MAX_OSCILLATORS : num_bins;
-    engine->spectral.num_bins = n;
 
-    memcpy(engine->spectral.magnitudes, magnitudes, (size_t)n * sizeof(float));
-
+    /* Stage into the PENDING copy under the seqlock — never into the render
+     * copy: the audio thread was reading it per sample, so a push landed as
+     * an amplitude step anywhere inside the block (audible crackle while the
+     * image moves). The render latch in luxsynth_engine_process applies this
+     * at block start and ramps to it. */
+    LuxSynthSpectralData *p = &engine->spectral_pending;
+    __atomic_store_n(&engine->spec_pending_seq,
+                     engine->spec_pending_seq + 1, __ATOMIC_RELEASE); /* odd */
+    p->num_bins = n;
+    memcpy(p->magnitudes, magnitudes, (size_t)n * sizeof(float));
     if (pan_positions)
-        memcpy(engine->spectral.pan_positions, pan_positions, (size_t)n * sizeof(float));
+        memcpy(p->pan_positions, pan_positions, (size_t)n * sizeof(float));
     if (harmonicity)
-        memcpy(engine->spectral.harmonicity, harmonicity, (size_t)n * sizeof(float));
+        memcpy(p->harmonicity, harmonicity, (size_t)n * sizeof(float));
     if (left_gains)
-        memcpy(engine->spectral.left_gains, left_gains, (size_t)n * sizeof(float));
+        memcpy(p->left_gains, left_gains, (size_t)n * sizeof(float));
     if (right_gains)
-        memcpy(engine->spectral.right_gains, right_gains, (size_t)n * sizeof(float));
+        memcpy(p->right_gains, right_gains, (size_t)n * sizeof(float));
+    __atomic_store_n(&engine->spec_pending_seq,
+                     engine->spec_pending_seq + 1, __ATOMIC_RELEASE); /* even */
 }
 
 /* ============================================================================
@@ -445,13 +454,21 @@ int luxsynth_engine_note_on(LuxSynthEngine *engine, uint8_t note, uint8_t veloci
         /* Don't reset phase for smoother retrigger */
     }
 
-    /* Initialize ADSR envelopes */
+    /* Initialize ADSR envelopes. adsr_init resets current_output to 0, which
+     * defeated adsr_trigger's click-free retrigger (attack FROM the current
+     * level): a stolen voice still sounding dropped to zero instantly — an
+     * audible click on every steal/retrigger. Preserve the live level across
+     * the re-init so the new attack shapes from it. */
+    const float vol_level = v->volume_env.current_output;
+    const float flt_level = v->filter_env.current_output;
+
     adsr_init(&v->volume_env,
               engine->config.attack_ms, engine->config.decay_ms,
               engine->config.sustain_level, engine->config.release_ms,
               engine->sample_rate,
               engine->config.attack_curve, engine->config.decay_curve,
               engine->config.release_curve);
+    v->volume_env.current_output = vol_level;
     adsr_trigger(&v->volume_env);
 
     adsr_init(&v->filter_env,
@@ -460,6 +477,7 @@ int luxsynth_engine_note_on(LuxSynthEngine *engine, uint8_t note, uint8_t veloci
               engine->sample_rate,
               engine->config.filter_attack_curve, engine->config.filter_decay_curve,
               engine->config.filter_release_curve);
+    v->filter_env.current_output = flt_level;
     adsr_trigger(&v->filter_env);
 
     return best_idx;
@@ -532,6 +550,40 @@ void luxsynth_engine_process(LuxSynthEngine *engine, int num_samples,
     memset(out_left,  0, (size_t)num_samples * sizeof(float));
     memset(out_right, 0, (size_t)num_samples * sizeof(float));
 
+    /* ── Latch a pending spectral push (block start ONLY) ────────────────────
+     * Snapshot spectral_pending under its seqlock, keep the outgoing
+     * magnitudes, and ramp old→new across THIS block: a push (image moved,
+     * or feed silence) reaches the output as a 1-block linear fade instead
+     * of an instantaneous step at a random sample (that step was audible as
+     * crackle at the feed's push rate). A torn read (writer mid-staging)
+     * simply retries next block — seq stays != applied. */
+    static LuxSynthSpectralData s_spec_snap;        /* audio thread only */
+    float mag_from[LUXSYNTH_MAX_OSCILLATORS];
+    int   ramping = 0;
+    {
+        const uint32_t ps =
+            __atomic_load_n(&engine->spec_pending_seq, __ATOMIC_ACQUIRE);
+        if (!(ps & 1u) && ps != engine->spec_applied_seq)
+        {
+            memcpy(&s_spec_snap, (const void *)&engine->spectral_pending,
+                   sizeof(s_spec_snap));
+            const uint32_t ps2 =
+                __atomic_load_n(&engine->spec_pending_seq, __ATOMIC_ACQUIRE);
+            if (ps2 == ps)
+            {
+                const int old_bins = engine->spectral.num_bins;
+                memcpy(mag_from, engine->spectral.magnitudes, sizeof(mag_from));
+                for (int k = old_bins; k < LUXSYNTH_MAX_OSCILLATORS; ++k)
+                    mag_from[k] = 0.0f;   /* freshly exposed bins fade in */
+                engine->spectral = s_spec_snap;
+                engine->spec_applied_seq = ps;
+                ramping = 1;
+            }
+        }
+    }
+    const float ramp_step =
+        (num_samples > 0) ? 1.0f / (float)num_samples : 0.0f;
+
     const float nyquist = engine->sample_rate * 0.5f;
     const float master_vol = engine->config.master_volume;
     const int num_bins = engine->spectral.num_bins;
@@ -551,6 +603,9 @@ void luxsynth_engine_process(LuxSynthEngine *engine, int num_samples,
     /* Process each sample */
     for (int s = 0; s < num_samples; s++)
     {
+        /* Spectral ramp position — hits the new spectrum at block end. */
+        const float ramp_a = ramping ? (float)(s + 1) * ramp_step : 1.0f;
+
         /* Update global LFO (once per sample) */
         float lfo_val = lfo_process(&engine->global_lfo);
         float lfo_pitch_mult = lfo_pitch_active
@@ -612,6 +667,8 @@ void luxsynth_engine_process(LuxSynthEngine *engine, int num_samples,
                  * bank (pixel domain, luxsynth_condition_line), never here:
                  * a second spectral gamma would double-apply it. */
                 float mag = engine->spectral.magnitudes[osc];
+                if (ramping)
+                    mag = mag_from[osc] + ramp_a * (mag - mag_from[osc]);
 
                 /* Advance phase with LFO-modulated increment (always, so a
                  * bin fading back in resumes with a continuous phase). */

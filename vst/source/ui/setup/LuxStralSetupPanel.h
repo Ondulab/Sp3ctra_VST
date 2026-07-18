@@ -16,6 +16,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_audio_utils/juce_audio_utils.h>
 #include "../../PluginProcessor.h"
 
 class LuxStralSetupPanel : public juce::Component,
@@ -26,9 +27,9 @@ public:
     LuxStralSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour);
     ~LuxStralSetupPanel() override;
 
-    /** Natural content height (header + 3 sections, no internal viewport —
-     *  the zone-3 viewport scrolls). Enable row removed (−47 px). */
-    static constexpr int kPreferredH = 505;
+    /** Natural content height (header + 4 sections, no internal viewport —
+     *  the zone-3 viewport scrolls). */
+    static constexpr int kPreferredH = 645;
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -65,6 +66,16 @@ private:
     juce::Slider softLimitKneeSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> softLimitKneeAttachment;
 
+    // Section: Timbre — sample wavetable (tuned grains)
+    juce::Label timbreSectionLabel;
+    juce::TextButton timbreLoadButton;
+    juce::TextButton timbreClearButton;
+    juce::Label timbreInfoLabel;
+    juce::Label timbreMixLabel;
+    juce::Slider timbreMixSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> timbreMixAttachment;
+    std::unique_ptr<juce::FileChooser> timbreFileChooser;
+
     // Section: StrokeForge Advanced Blob Detection
     juce::Label sfBlobSectionLabel;
     juce::Label contrastAdaptiveLabel;
@@ -79,6 +90,8 @@ private:
     void sliderValueChanged(juce::Slider* slider) override;
 
     // Helper functions
+    void loadTimbreSample(const juce::File& file);
+    void updateTimbreInfo();
     float getRootNoteFrequency() const;
     int getMaxOctavesForRootNote() const;
     void updateOctavesSliderRange();

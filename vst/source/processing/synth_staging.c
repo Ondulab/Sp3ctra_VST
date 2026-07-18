@@ -5,10 +5,22 @@
 #include "image_chain.h"         /* IMAGE_CHAIN_INSERT_OUT_LUXSYNTH */
 #include "config/config_loader.h"
 #include "config_instrument.h"   /* CIS_MAX_PIXELS_NB (LuxSynth line staging) */
+#include <stdint.h>
 #include <string.h>
 
 /* Constant-power centre for notes with no pan information. */
 #define SYNTH_STAGING_CENTRE_GAIN 0.70710678f
+
+/* Contention diagnostics — a mixer tick found a slot persistently torn
+ * (writer mid-staging on every retry) and HELD its previous output instead
+ * of mixing. RT threads only bump the counter; the message thread drains it
+ * (PluginProcessor timer). */
+static volatile uint64_t s_contention_holds = 0;
+
+uint64_t synth_staging_contention_holds(void)
+{
+    return __atomic_load_n(&s_contention_holds, __ATOMIC_RELAXED);
+}
 
 typedef struct {
     /* seqlock: odd = writer inside; readers retry on mismatch/odd. */
@@ -67,8 +79,13 @@ void synth_staging_set_inactive(int chain_idx)
     __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
 }
 
-/* Consistent snapshot of one slot (bounded retries; ~40 KB memcpy). Returns 0
- * when the slot is inactive or persistently torn (skip it this frame). */
+/* Consistent snapshot of one slot (bounded retries; ~40 KB memcpy).
+ * Returns 1 = data copied, 0 = slot inactive, -1 = persistently torn (the
+ * writer was mid-staging on every retry — the retries are back-to-back ns
+ * loads, a single ~µs staging memcpy outlasts all of them). A -1 must make
+ * the caller HOLD its previous output: treating it as "inactive" turned a
+ * transient race into an audible dropout (spectrum/mix slammed to silence)
+ * every time the audio tick collided with device line-rate staging. */
 static int staging_snapshot(const LsSendStaging* s, LsSendStaging* out)
 {
     for (int attempt = 0; attempt < 4; ++attempt)
@@ -83,7 +100,7 @@ static int staging_snapshot(const LsSendStaging* s, LsSendStaging* out)
         if (s0 == s1)
             return out->active;
     }
-    return 0;
+    return -1;
 }
 
 int synth_staging_mix_luxstral(const ChainPlan* plan,
@@ -105,13 +122,17 @@ int synth_staging_mix_luxstral(const ChainPlan* plan,
     int    mixed          = 0;
     int    any_stereo     = 0;
     int    out_notes      = 0;
+    int    contended      = 0;
 
     for (int k = 0; k < plan->num_ls_sends && k < CHAIN_MAX_CHAINS; ++k)
     {
         const LsSendPlan* snd = &plan->ls_send[k];
         if (snd->chain_idx < 0 || snd->chain_idx >= CHAIN_MAX_CHAINS)
             continue;
-        if (! staging_snapshot(&s_ls_staging[snd->chain_idx], &s_mix_snap))
+        const int snap =
+            staging_snapshot(&s_ls_staging[snd->chain_idx], &s_mix_snap);
+        if (snap < 0) { contended = 1; break; }
+        if (snap == 0)
             continue;
 
         /* Weight = the send's bank intensity, gated by its per-send power.
@@ -153,6 +174,18 @@ int synth_staging_mix_luxstral(const ChainPlan* plan,
         contrast_acc += w * s_mix_snap.contrast_factor;
         weight_acc   += w;
         ++mixed;
+    }
+
+    /* A torn slot means a producer was mid-staging RIGHT NOW — fresh data is
+     * a µs away. HOLD the previous commit (return -1) instead of mixing a
+     * partial set or, worse, committing silence: that conflation was the
+     * audible micro-dropout under device line-rate staging. */
+    if (contended)
+    {
+        __atomic_fetch_add(&s_contention_holds, 1, __ATOMIC_RELAXED);
+        if (contrast_out)     *contrast_out     = 0.0f;
+        if (stereo_valid_out) *stereo_valid_out = 0;
+        return -1;
     }
 
     if (mixed == 0)
@@ -279,6 +312,7 @@ int synth_staging_mix_luxsynth(const ChainPlan* plan,
     uint32_t gen        = 0;
     int      mixed      = 0;
     int      out_px     = 0;
+    int      contended  = 0;
 
     for (int c = 0; c < plan->num_chains && c < CHAIN_MAX_CHAINS; ++c)
     {
@@ -292,10 +326,13 @@ int synth_staging_mix_luxsynth(const ChainPlan* plan,
                 has_lx = 1;
         if (! has_lx) continue;
 
-        if (! lx_staging_snapshot(&s_lx_staging[c], &s_lx_snap))
+        const int snap = lx_staging_snapshot(&s_lx_staging[c], &s_lx_snap);
+        if (snap < 0) { contended = 1; break; }
+        if (snap == 0)
             continue;
-        gen += __atomic_load_n(&s_lx_staging[c].seq, __ATOMIC_ACQUIRE)
-               + (uint32_t) (c * 0x9E3779B9u);
+        /* Generation from the SNAPPED seq — consistent with the copied line
+         * (a live re-read could see the next write's odd value). */
+        gen += s_lx_snap.seq + (uint32_t) (c * 0x9E3779B9u);
 
         const lux_out_params_t* bank =
             &g_sp3ctra_config.luxsynth_out[s_lx_snap.bank_slot];
@@ -317,6 +354,16 @@ int synth_staging_mix_luxsynth(const ChainPlan* plan,
             }
         weight_acc += w;
         ++mixed;
+    }
+
+    /* Torn slot → HOLD (see mix_luxstral): the engine keeps its spectrum
+     * for one tick; silence here was the audible LuxSynth micro-dropout. */
+    if (contended)
+    {
+        __atomic_fetch_add(&s_contention_holds, 1, __ATOMIC_RELAXED);
+        if (nb_pixels_out)   *nb_pixels_out = 0;
+        if (generation_out)  *generation_out = 0;
+        return -1;
     }
 
     if (mixed == 0)
@@ -391,6 +438,7 @@ void synth_staging_luxwave_set_inactive(int chain_idx)
     __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
 }
 
+/* Tri-state like staging_snapshot: 1 = data, 0 = inactive, -1 = torn (hold). */
 static int lw_staging_snapshot(const LwSendStaging* s, LwSendStaging* out)
 {
     for (int attempt = 0; attempt < 4; ++attempt)
@@ -405,7 +453,7 @@ static int lw_staging_snapshot(const LwSendStaging* s, LwSendStaging* out)
         if (s0 == s1)
             return out->active;
     }
-    return 0;
+    return -1;
 }
 
 int synth_staging_mix_luxwave(const ChainPlan* plan,
@@ -419,8 +467,9 @@ int synth_staging_mix_luxwave(const ChainPlan* plan,
     for (int i = 0; i < max_pixels; ++i)
         line_out[i] = 0.5f;
 
-    int mixed  = 0;
-    int out_px = 0;
+    int mixed     = 0;
+    int out_px    = 0;
+    int contended = 0;
 
     for (int c = 0; c < plan->num_chains && c < CHAIN_MAX_CHAINS; ++c)
     {
@@ -432,7 +481,9 @@ int synth_staging_mix_luxwave(const ChainPlan* plan,
                 has_lw = 1;
         if (! has_lw) continue;
 
-        if (! lw_staging_snapshot(&s_lw_staging[c], &s_lw_snap))
+        const int snap = lw_staging_snapshot(&s_lw_staging[c], &s_lw_snap);
+        if (snap < 0) { contended = 1; break; }
+        if (snap == 0)
             continue;
 
         const lux_out_params_t* bank =
@@ -448,6 +499,14 @@ int synth_staging_mix_luxwave(const ChainPlan* plan,
         for (int i = 0; i < n; ++i)
             line_out[i] += w * (s_lw_snap.line[i] - 0.5f);
         ++mixed;
+    }
+
+    /* Torn slot → HOLD (the wavetable keeps its last content, as on 0). */
+    if (contended)
+    {
+        __atomic_fetch_add(&s_contention_holds, 1, __ATOMIC_RELAXED);
+        if (nb_pixels_out) *nb_pixels_out = 0;
+        return -1;
     }
 
     if (mixed == 0)

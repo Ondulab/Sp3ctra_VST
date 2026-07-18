@@ -196,7 +196,7 @@ void init_sine_table(void)
                                  * (float)WAVE_AMP_RESOLUTION;
         }
     }
-    log_info("SYNTH", "Sine table initialized: %d entries, %.0f bytes, L1-resident",
+    log_startup_detail("SYNTH", "Sine table initialized: %d entries, %.0f bytes, L1-resident",
              SINE_TABLE_SIZE, (float)(SINE_TABLE_SIZE * sizeof(float)));
 }
 
@@ -227,14 +227,11 @@ void init_waves(volatile struct wave *waves,
     /* Precomputed factor: phase_inc = freq × (SINE_TABLE_SIZE / Fs) */
     const float phase_inc_factor = (float)SINE_TABLE_SIZE / (float)sample_rate;
 
-    log_info("SYNTH", "---------- WAVES INIT (shared sine table) ----------");
-    log_info("SYNTH", "Freq range: %.1f - %.1f Hz, %d notes, Fs=%d Hz",
+    log_info("SYNTH", "WAVES INIT: %.1f - %.1f Hz, %d notes, Fs=%d Hz (shared sine table)",
              low_freq, high_freq, total_notes, sample_rate);
-    log_info("SYNTH", "Sine table: %d entries (%.0f bytes) — L1 resident",
-             SINE_TABLE_SIZE, (float)(SINE_TABLE_SIZE * sizeof(float)));
 
-    /* Diagnostic: log frequency mapping at key positions */
-    log_info("SYNTH", "Frequency mapping check:");
+    /* Diagnostic: log frequency mapping at key positions (calibration aid) */
+    log_startup_detail("SYNTH", "Frequency mapping check:");
     int test_pos[] = {0, total_notes / 4, total_notes / 2, (3 * total_notes) / 4, total_notes - 1};
     for (int ti = 0; ti < 5; ti++)
     {
@@ -242,7 +239,7 @@ void init_waves(volatile struct wave *waves,
         if (test_note >= 0 && test_note < total_notes)
         {
             float tf = calculate_frequency_for_note(test_note, total_notes, low_freq, high_freq);
-            log_info("SYNTH", "  Note %4d/%d (%.0f%%) → %.2f Hz, phase_inc=%.5f",
+            log_startup_detail("SYNTH", "  Note %4d/%d (%.0f%%) → %.2f Hz, phase_inc=%.5f",
                      test_note, total_notes,
                      100.0f * test_note / (float)(total_notes > 1 ? total_notes - 1 : 1),
                      tf, tf * phase_inc_factor);
@@ -266,9 +263,9 @@ void init_waves(volatile struct wave *waves,
     /* Log first and last note */
     if (total_notes > 0)
     {
-        log_info("SYNTH", "First note: %.2f Hz, phase_inc=%.5f",
+        log_startup_detail("SYNTH", "First note: %.2f Hz, phase_inc=%.5f",
                  waves[0].frequency, (double)waves[0].phase_inc);
-        log_info("SYNTH", "Last  note: %.2f Hz, phase_inc=%.5f",
+        log_startup_detail("SYNTH", "Last  note: %.2f Hz, phase_inc=%.5f",
                  waves[total_notes - 1].frequency, (double)waves[total_notes - 1].phase_inc);
     }
 
@@ -306,11 +303,9 @@ void init_waves(volatile struct wave *waves,
             if (waves[n].physiological_gain < g_min) g_min = waves[n].physiological_gain;
             if (waves[n].physiological_gain > g_max) g_max = waves[n].physiological_gain;
         }
-        log_info("SYNTH", "Physiological gains: RMS=%.4f → normalized range [%.3f, %.3f]",
+        log_startup_detail("SYNTH", "Physiological gains: RMS=%.4f → normalized range [%.3f, %.3f]",
                  rms, g_min, g_max);
     }
-
-    log_info("SYNTH", "----------------------------------------------------");
 }
 
 /**************************************************************************************
@@ -341,6 +336,9 @@ void reset_frequency_reinit_state(void)
     int prev = atomic_exchange(&g_freq_reinit_state, FREQ_REINIT_IDLE);
     if (prev != FREQ_REINIT_IDLE)
     {
+        /* The discarded request drove the global fade toward 0 with nobody left
+         * to complete the reinit — restore full level or the engine stays mute. */
+        g_global_fade_target = 1.0f;
         log_info("FREQ_REINIT", "Stale reinit state cleared (was %d) - ready for new request", prev);
     }
 }
