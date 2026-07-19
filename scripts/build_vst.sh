@@ -28,6 +28,7 @@ echo -e "${BLUE}========================================${NC}"
 CLEAN_BUILD=0
 INSTALL_PLUGINS=0
 RUN_STANDALONE=0
+FULL_BUILD=0
 BUILD_CONFIG="Release"
 
 # Parse all arguments
@@ -49,29 +50,46 @@ for arg in "$@"; do
             RUN_STANDALONE=1
             echo -e "${YELLOW}Will launch standalone after build${NC}"
             ;;
+        all|--all)
+            FULL_BUILD=1
+            echo -e "${YELLOW}Full build requested (all formats + archives)${NC}"
+            ;;
         help|--help|-h)
             echo ""
-            echo "Usage: $0 [clean] [install] [debug] [run] [help]"
+            echo "Usage: $0 [clean] [install] [debug] [run] [all] [help]"
             echo ""
             echo "Options:"
             echo "  clean    - Clean build directory before building"
             echo "  install  - Install plugins after successful build"
             echo "  debug    - Build in Debug mode (default: Release)"
             echo "  run      - Launch standalone after successful build"
+            echo "           (run alone = fast build: Standalone only, no ZIPs;"
+            echo "            add 'all' or 'install' to build every format)"
+            echo "  all      - Force building all formats + ZIP archives"
             echo "  help     - Show this help message"
             echo ""
             echo "Examples:"
-            echo "  $0                    # Standard Release build"
+            echo "  $0                    # Standard Release build (all formats + ZIPs)"
             echo "  $0 clean              # Clean + Release build"
             echo "  $0 install            # Build + Install to system"
-            echo "  $0 run                # Build + Launch standalone"
-            echo "  $0 debug run          # Debug build + Launch"
+            echo "  $0 run                # FAST: Standalone-only build + Launch"
+            echo "  $0 run all            # Full build + Launch"
+            echo "  $0 debug run          # Debug Standalone build + Launch"
             echo "  $0 clean debug run    # Clean + Debug + Launch"
             echo ""
             exit 0
             ;;
     esac
 done
+
+# Fast mode: 'run' without 'install'/'all' builds only the Standalone target
+# and skips ZIP archiving — VST3/AU compile+link and 3x200MB zips are the bulk
+# of an incremental iteration.
+FAST_BUILD=0
+if [ $RUN_STANDALONE -eq 1 ] && [ $INSTALL_PLUGINS -eq 0 ] && [ $FULL_BUILD -eq 0 ]; then
+    FAST_BUILD=1
+    echo -e "${YELLOW}Fast mode: Standalone only (use 'all' for VST3/AU + ZIPs)${NC}"
+fi
 
 # Clean build directory if requested
 if [ $CLEAN_BUILD -eq 1 ]; then
@@ -86,14 +104,35 @@ fi
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
-# Configure with CMake
-echo ""
-echo -e "${BLUE}Configuring project with CMake ($BUILD_CONFIG)...${NC}"
-if cmake -DCMAKE_BUILD_TYPE=$BUILD_CONFIG ..; then
-    echo -e "${GREEN}✓ Configuration successful (CMAKE_BUILD_TYPE=$BUILD_CONFIG)${NC}"
+# Compiler cache (big speedup on clean rebuilds / branch or config switches)
+CMAKE_EXTRA_ARGS=()
+if command -v ccache >/dev/null 2>&1; then
+    CMAKE_EXTRA_ARGS+=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
+fi
+
+# Skip the configure step (~3s) when the cache already matches; a CMakeLists
+# change still triggers auto-reconfigure from `cmake --build`.
+NEED_CONFIGURE=1
+if [ -f "$BUILD_DIR/CMakeCache.txt" ] \
+   && grep -q "^CMAKE_BUILD_TYPE:STRING=$BUILD_CONFIG\$" "$BUILD_DIR/CMakeCache.txt"; then
+    if [ ${#CMAKE_EXTRA_ARGS[@]} -eq 0 ] \
+       || grep -q "^CMAKE_CXX_COMPILER_LAUNCHER:.*=ccache\$" "$BUILD_DIR/CMakeCache.txt"; then
+        NEED_CONFIGURE=0
+    fi
+fi
+
+if [ $NEED_CONFIGURE -eq 1 ]; then
+    echo ""
+    echo -e "${BLUE}Configuring project with CMake ($BUILD_CONFIG)...${NC}"
+    if cmake -DCMAKE_BUILD_TYPE=$BUILD_CONFIG "${CMAKE_EXTRA_ARGS[@]}" ..; then
+        echo -e "${GREEN}✓ Configuration successful (CMAKE_BUILD_TYPE=$BUILD_CONFIG)${NC}"
+    else
+        echo -e "${RED}✗ Configuration failed${NC}"
+        exit 1
+    fi
 else
-    echo -e "${RED}✗ Configuration failed${NC}"
-    exit 1
+    echo ""
+    echo -e "${GREEN}✓ CMake cache up to date ($BUILD_CONFIG) — configure skipped${NC}"
 fi
 
 # Build
@@ -101,7 +140,12 @@ echo ""
 echo -e "${BLUE}Building project ($BUILD_CONFIG)...${NC}"
 echo -e "${YELLOW}This may take 2-3 minutes on first build...${NC}"
 
-if cmake --build . --config $BUILD_CONFIG -j$(sysctl -n hw.ncpu); then
+BUILD_TARGET_ARGS=()
+if [ $FAST_BUILD -eq 1 ]; then
+    BUILD_TARGET_ARGS=(--target Sp3ctraVST_Standalone)
+fi
+
+if cmake --build . --config $BUILD_CONFIG "${BUILD_TARGET_ARGS[@]}" -j$(sysctl -n hw.ncpu); then
     echo -e "${GREEN}✓ Build successful${NC}"
 else
     echo -e "${RED}✗ Build failed${NC}"
@@ -116,16 +160,18 @@ STANDALONE_PATH="$BUILD_DIR/Sp3ctraVST_artefacts/$BUILD_CONFIG/Standalone/Sp3ctr
 echo ""
 echo -e "${BLUE}Build artifacts:${NC}"
 
-if [ -d "$VST3_PATH" ]; then
-    echo -e "${GREEN}✓ VST3:${NC} $VST3_PATH"
-else
-    echo -e "${YELLOW}⚠ VST3 not found${NC}"
-fi
+if [ $FAST_BUILD -eq 0 ]; then
+    if [ -d "$VST3_PATH" ]; then
+        echo -e "${GREEN}✓ VST3:${NC} $VST3_PATH"
+    else
+        echo -e "${YELLOW}⚠ VST3 not found${NC}"
+    fi
 
-if [ -d "$AU_PATH" ]; then
-    echo -e "${GREEN}✓ AU:${NC} $AU_PATH"
-else
-    echo -e "${YELLOW}⚠ AU not found${NC}"
+    if [ -d "$AU_PATH" ]; then
+        echo -e "${GREEN}✓ AU:${NC} $AU_PATH"
+    else
+        echo -e "${YELLOW}⚠ AU not found${NC}"
+    fi
 fi
 
 if [ -d "$STANDALONE_PATH" ]; then
@@ -134,8 +180,9 @@ else
     echo -e "${YELLOW}⚠ Standalone not found${NC}"
 fi
 
-# Create ZIP archives for Git distribution (solves symlink issues)
-if [ "$BUILD_CONFIG" = "Release" ]; then
+# Create ZIP archives for Git distribution (solves symlink issues).
+# Skipped in fast mode: zipping 3x200MB bundles dominates iteration time.
+if [ "$BUILD_CONFIG" = "Release" ] && [ $FAST_BUILD -eq 0 ]; then
     echo ""
     echo -e "${BLUE}Creating ZIP archives for Git distribution...${NC}"
     
