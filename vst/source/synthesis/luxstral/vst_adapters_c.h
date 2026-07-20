@@ -84,6 +84,13 @@ typedef struct {
 } AudioImageBuffer;
 
 // RENAMED to avoid conflicts with audio_c_api.h
+// extern "C": these globals are DEFINED in vst_adapters.cpp (C++) and read by
+// the C engine (synth_luxstral.c). MSVC mangles namespace-scope C++ variables
+// but not C ones, so the declaration must force C linkage or the Windows link
+// fails (macOS/Itanium never mangles these, so it only bites on Windows).
+#ifdef __cplusplus
+extern "C" {
+#endif
 extern AudioImageBuffer luxstral_buffers_L[2];
 extern AudioImageBuffer luxstral_buffers_R[2];
 extern volatile int luxstral_buffer_index;  /* ACCESS ONLY via __atomic_*_n! */
@@ -92,6 +99,9 @@ extern volatile int luxstral_buffer_index;  /* ACCESS ONLY via __atomic_*_n! */
 // 🔧 LOCK-FREE: Replaced pthread_cond with atomic flag polling
 // pthread_cond_signal() without mutex caused lost signals → 200ms audio gaps
 extern volatile int g_vst_callback_consumed_buffer;  /* ACCESS via __atomic_*_n! */
+#ifdef __cplusplus
+}
+#endif
 
 // Compatibility macros for LuxStral code
 #define buffers_L luxstral_buffers_L
