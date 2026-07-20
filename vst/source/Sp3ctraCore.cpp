@@ -17,6 +17,12 @@ extern "C" {
     #include <sys/socket.h>
     #include <netinet/in.h>
     #include <unistd.h>
+
+    /* VST display buffers, defined in global_stubs.c. Declared here with C
+     * linkage so the block-scope externs in initialize() bind to the C symbol
+     * (MSVC mangles namespace-scope C++ variables; macOS/Itanium does not). */
+    extern AudioImageBuffers *g_audioImageBuffers;
+    extern DoubleBuffer *g_doubleBuffer;
 }
 
 Sp3ctraCore::Sp3ctraCore() {
@@ -227,9 +233,9 @@ bool Sp3ctraCore::initializeBuffers() {
         strokeforge_init();
         log_startup_detail("CORE", "Global display buffers initialized");
         
-        // 🔧 CRITICAL: Expose buffers globally for processBlock to use
-        extern AudioImageBuffers *g_audioImageBuffers;
-        extern DoubleBuffer *g_doubleBuffer;
+        // 🔧 CRITICAL: Expose buffers globally for processBlock to use.
+        // These block-scope externs adopt C linkage from the file-scope
+        // extern "C" declarations below (defined in global_stubs.c, a C TU).
         g_audioImageBuffers = audioImageBuffers.get();
         g_doubleBuffer = doubleBuffer.get();
         
