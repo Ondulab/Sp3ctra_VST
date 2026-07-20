@@ -96,7 +96,7 @@ bool Sp3ctraCore::applyConfig(const ActiveConfig& config) {
     return true;
 }
 
-bool Sp3ctraCore::restartUdp(int port, const std::string& address, const std::string& interface) {
+bool Sp3ctraCore::restartUdp(int port, const std::string& address, const std::string& iface) {
     std::lock_guard<std::mutex> lock(configMutex);
 
     if (!initialized.load()) {
@@ -123,7 +123,7 @@ bool Sp3ctraCore::restartUdp(int port, const std::string& address, const std::st
     }
 
     // Create new socket with new parameters
-    if (!initializeUdp(port, address, interface)) {
+    if (!initializeUdp(port, address, iface)) {
         log_error("CORE", "Failed to restart UDP with new config");
         return false;
     }
@@ -131,7 +131,7 @@ bool Sp3ctraCore::restartUdp(int port, const std::string& address, const std::st
     // Update stored config
     active.udpPort.store(port);
     active.udpAddress = address;
-    active.multicastInterface = interface;
+    active.multicastInterface = iface;
 
     log_info("CORE", "UDP restarted on %s:%d (socket fd=%d)",
              address.c_str(), port, socketFd.load());
@@ -267,7 +267,7 @@ void Sp3ctraCore::shutdownBuffers() {
     log_info("CORE", "Buffers cleaned up");
 }
 
-bool Sp3ctraCore::initializeUdp(int port, const std::string& address, const std::string& interface) {
+bool Sp3ctraCore::initializeUdp(int port, const std::string& address, const std::string& iface) {
     try {
         // Allocate sockaddr structures
         si_me = std::make_unique<sockaddr_in>();
@@ -285,8 +285,8 @@ bool Sp3ctraCore::initializeUdp(int port, const std::string& address, const std:
         strncpy(g_sp3ctra_config.udp_address, address.c_str(), sizeof(g_sp3ctra_config.udp_address) - 1);
         g_sp3ctra_config.udp_address[sizeof(g_sp3ctra_config.udp_address) - 1] = '\0';
         
-        if (!interface.empty()) {
-            strncpy(g_sp3ctra_config.multicast_interface, interface.c_str(), sizeof(g_sp3ctra_config.multicast_interface) - 1);
+        if (!iface.empty()) {
+            strncpy(g_sp3ctra_config.multicast_interface, iface.c_str(), sizeof(g_sp3ctra_config.multicast_interface) - 1);
             g_sp3ctra_config.multicast_interface[sizeof(g_sp3ctra_config.multicast_interface) - 1] = '\0';
         }
         

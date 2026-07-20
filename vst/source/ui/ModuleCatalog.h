@@ -65,7 +65,7 @@ inline bool isScoreFamily(ModuleType t)
 enum class ModuleRole { Source, Processor, Util, Synth };
 
 /** Catalogue section a module belongs to. */
-enum class ModuleCat  { SRC, MIDI, FX, UTILS, SYNTH, OUT };
+enum class ModuleCat  { SRC, MIDI, FX, UTILS, SYNTH, Out };  // "Out": OUT is a Windows macro
 
 /** Immutable per-type metadata. */
 struct ModuleDesc
@@ -102,10 +102,10 @@ inline const std::array<ModuleDesc, 20>& moduleTable()
         // Synth-split P2 — the three synths are OUT/send modules in the rack
         // (the flux leaves the chain toward the global engine, which lives in
         // the ZONE-5 dock): OUT category, arrow-prefixed names.
-        { ModuleType::LuxStral,    ModuleCat::OUT,   ModuleRole::Synth,    "\xE2\x86\x92 LUXSTRAL",   0xff4fa3e0,  "deviceEnabled",     "LuxStral" },
-        { ModuleType::LuxSynth,    ModuleCat::OUT,   ModuleRole::Synth,    "\xE2\x86\x92 LUXSYNTH",   0xffb07af0,  "luxsynthEnabled",   "LuxSynth" },
-        { ModuleType::LuxWave,     ModuleCat::OUT,   ModuleRole::Synth,    "\xE2\x86\x92 LUXWAVE",    0xff8fd05a,  "luxwaveEnabled",    "LuxWave"  },
-        { ModuleType::VideoScroll, ModuleCat::OUT,   ModuleRole::Processor,"VIDEO SCROLL",            0xff5ad0c8,  "",                  "VideoScroll" },
+        { ModuleType::LuxStral,    ModuleCat::Out,   ModuleRole::Synth,    "\xE2\x86\x92 LUXSTRAL",   0xff4fa3e0,  "deviceEnabled",     "LuxStral" },
+        { ModuleType::LuxSynth,    ModuleCat::Out,   ModuleRole::Synth,    "\xE2\x86\x92 LUXSYNTH",   0xffb07af0,  "luxsynthEnabled",   "LuxSynth" },
+        { ModuleType::LuxWave,     ModuleCat::Out,   ModuleRole::Synth,    "\xE2\x86\x92 LUXWAVE",    0xff8fd05a,  "luxwaveEnabled",    "LuxWave"  },
+        { ModuleType::VideoScroll, ModuleCat::Out,   ModuleRole::Processor,"VIDEO SCROLL",            0xff5ad0c8,  "",                  "VideoScroll" },
         { ModuleType::Camera,      ModuleCat::SRC,   ModuleRole::Source,   "CAMERA",                  0xff68788f,  "camSrcEnabled",     "Camera"   },
         { ModuleType::Reverb,      ModuleCat::FX,    ModuleRole::Processor,"REVERB",                  0xff9d8ce0,  "",                  "Reverb"   },
         { ModuleType::Echo,        ModuleCat::FX,    ModuleRole::Processor,"ECHO",                    0xffe0c95a,  "",                  "Echo"     },
@@ -204,7 +204,7 @@ inline const char* moduleCatLabel(ModuleCat c)
         case ModuleCat::FX:    return "FX";
         case ModuleCat::UTILS: return "UTILS";
         case ModuleCat::SYNTH: return "SYNTH";
-        case ModuleCat::OUT:   return "OUT";
+        case ModuleCat::Out:   return "OUT";
     }
     return "";
 }

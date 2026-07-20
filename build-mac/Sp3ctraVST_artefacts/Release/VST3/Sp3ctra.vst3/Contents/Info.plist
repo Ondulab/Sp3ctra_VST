@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist>
+  <dict>
+    <key>NSCameraUsageDescription</key>
+    <string>Sp3ctra uses the camera as a scan-line source (CAMERA module).</string>
+    <key>CFBundleExecutable</key>
+    <string>Sp3ctra</string>
+    <key>CFBundleIconFile</key>
+    <string>Icon.icns</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.Ondulab.Sp3ctraVST</string>
+    <key>CFBundleName</key>
+    <string>Sp3ctra</string>
+    <key>CFBundleDisplayName</key>
+    <string>Sp3ctra</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.2.18</string>
+    <key>CFBundleVersion</key>
+    <string>1.2.18</string>
+    <key>NSHumanReadableCopyright</key>
+    <string></string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+  </dict>
+</plist>
