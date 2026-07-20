@@ -170,6 +170,19 @@ static void log_build_path(void) {
         snprintf(g_log_file_path, sizeof g_log_file_path, "%s", env);
         return;
     }
+#ifdef _WIN32
+    // %LOCALAPPDATA%\Sp3ctra\Logs — forward slashes on purpose: Windows path
+    // APIs accept them and log_open_file's mkdir walk splits on '/'.
+    const char* base = getenv("LOCALAPPDATA");
+    if (base == NULL || base[0] == '\0')
+        base = getenv("USERPROFILE");
+    if (base == NULL || base[0] == '\0') {
+        snprintf(g_log_file_path, sizeof g_log_file_path, "C:/Temp/Sp3ctra.log");
+        return;
+    }
+    snprintf(g_log_file_path, sizeof g_log_file_path,
+             "%s/Sp3ctra/Logs/Sp3ctra.log", base);
+#else
     const char* home = getenv("HOME");
     if (home == NULL || home[0] == '\0') {
         snprintf(g_log_file_path, sizeof g_log_file_path, "/tmp/Sp3ctra.log");
@@ -181,6 +194,7 @@ static void log_build_path(void) {
 #else
     snprintf(g_log_file_path, sizeof g_log_file_path,
              "%s/.local/state/Sp3ctra/Sp3ctra.log", home);
+#endif
 #endif
 }
 

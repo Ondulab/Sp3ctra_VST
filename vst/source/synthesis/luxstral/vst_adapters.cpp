@@ -20,14 +20,19 @@
 // No need to include vst_adapters_c.h here (would cause redefinitions)
 
 // VST-specific audio buffers for LuxStral (RENAMED to avoid conflicts)
-AudioImageBuffer luxstral_buffers_L[2] = {{nullptr, 0, 0}, {nullptr, 0, 0}};
-AudioImageBuffer luxstral_buffers_R[2] = {{nullptr, 0, 0}, {nullptr, 0, 0}};
-volatile int luxstral_buffer_index = 0;  // 🔧 Access ONLY via __atomic_*_n for ARM64
-
+// extern "C": the C engine (synth_luxstral.c) references these by their plain
+// name; without C linkage MSVC would mangle the C++ definition and the link
+// would fail (macOS/Itanium leaves namespace-scope variables unmangled, so it
+// only bites on Windows). vst_adapters_c.h declares the matching extern "C".
 // VST callback synchronization (producer/consumer handoff)
 // 🔧 LOCK-FREE: Replaced pthread_cond with atomic flag polling
 // pthread_cond_signal() without mutex caused lost signals → 200ms audio gaps
+extern "C" {
+AudioImageBuffer luxstral_buffers_L[2] = {{nullptr, 0, 0}, {nullptr, 0, 0}};
+AudioImageBuffer luxstral_buffers_R[2] = {{nullptr, 0, 0}, {nullptr, 0, 0}};
+volatile int luxstral_buffer_index = 0;  // 🔧 Access ONLY via __atomic_*_n for ARM64
 volatile int g_vst_callback_consumed_buffer = 1;  // 🔧 Access ONLY via __atomic_*_n
+}
 
 // Flag to track buffer initialization
 static bool luxstral_audio_buffers_initialized = false;

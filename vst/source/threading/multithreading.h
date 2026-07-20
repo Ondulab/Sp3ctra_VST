@@ -13,7 +13,11 @@
 #include <windows.h>
 #include <io.h>
 #include <stdint.h>
+#include <math.h> /* float_t (packet_IMU) */
+#ifndef _SSIZE_T_DEFINED
+#define _SSIZE_T_DEFINED
 typedef SSIZE_T ssize_t;
+#endif
 #else
 #include <arpa/inet.h>
 #include <sys/socket.h>

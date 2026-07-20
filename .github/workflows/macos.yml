@@ -1,0 +1,58 @@
+# macOS build — VST3 + AU + Standalone (arm64).
+#
+# Compilation CI only: binaries are NOT codesigned/notarized (Gatekeeper will
+# warn on machines other than the build host) — signing is a separate release
+# concern. Voices are embedded in each bundle (~160 MB per format).
+name: macOS build
+
+on:
+  push:
+    branches: [master, feature/windows-port]
+    paths-ignore:
+      - '**.md'
+      - 'prebuilt/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache deps (JUCE, sherpa-onnx, voices)
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('vst/CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -B build -S vst -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build (VST3 + AU + Standalone)
+        run: >
+          cmake --build build
+          --target Sp3ctraVST_VST3 Sp3ctraVST_AU Sp3ctraVST_Standalone
+          --parallel 3
+
+      - name: Upload VST3
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sp3ctra-VST3-macOS-arm64
+          path: build/Sp3ctraVST_artefacts/Release/VST3/
+          if-no-files-found: error
+
+      - name: Upload AU
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sp3ctra-AU-macOS-arm64
+          path: build/Sp3ctraVST_artefacts/Release/AU/
+          if-no-files-found: error
+
+      - name: Upload Standalone
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sp3ctra-Standalone-macOS-arm64
+          path: build/Sp3ctraVST_artefacts/Release/Standalone/
+          if-no-files-found: error

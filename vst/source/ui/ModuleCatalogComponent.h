@@ -67,7 +67,7 @@ public:
 
         const ModuleCat order[] = { ModuleCat::SRC, ModuleCat::MIDI,
                                     ModuleCat::FX, ModuleCat::UTILS,
-                                    ModuleCat::SYNTH, ModuleCat::OUT };
+                                    ModuleCat::SYNTH, ModuleCat::Out };
         for (auto cat : order)
         {
             // Skip empty sections (SYNTH emptied by the synth split — the

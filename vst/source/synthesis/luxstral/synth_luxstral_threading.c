@@ -30,6 +30,10 @@
 #include <sched.h>
 #endif
 
+#ifdef _WIN32
+#include <avrt.h> /* MMCSS: AvSetMmThreadCharacteristicsW (link avrt.lib) */
+#endif
+
 #ifdef __APPLE__
 #include <pthread/qos.h>
 #endif
@@ -269,6 +273,16 @@ void *synth_persistent_worker_thread(void *arg) {
 #ifdef __APPLE__
   if (pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) == 0) {
     log_startup_detail("SYNTH", "Worker %d: QoS set to USER_INTERACTIVE", worker->thread_id);
+  }
+#elif defined(_WIN32)
+  // Windows equivalent: join the Pro Audio MMCSS class (elevated scheduling
+  // without starving the system) + TIME_CRITICAL. Must run inside the thread.
+  {
+    DWORD mmcss_task_index = 0;
+    if (AvSetMmThreadCharacteristicsW(L"Pro Audio", &mmcss_task_index) != NULL) {
+      log_startup_detail("SYNTH", "Worker %d: MMCSS Pro Audio joined", worker->thread_id);
+    }
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
   }
 #endif
 

@@ -95,11 +95,11 @@ public:
      * @brief Restart UDP socket with new parameters (buffers untouched)
      * @param port New UDP port
      * @param address New UDP multicast address
-     * @param interface Multicast interface (empty for auto-detect)
+     * @param iface Multicast iface (empty for auto-detect)
      * @return true on success, false on failure
      * @note This only restarts the socket, audio buffers are NOT affected
      */
-    bool restartUdp(int port, const std::string& address, const std::string& interface);
+    bool restartUdp(int port, const std::string& address, const std::string& iface);
 
     /**
      * @brief Force close the UDP socket fd without freeing address structs
@@ -148,7 +148,7 @@ private:
     std::atomic<bool> initialized{false};
     
     // Internal helpers
-    bool initializeUdp(int port, const std::string& address, const std::string& interface);
+    bool initializeUdp(int port, const std::string& address, const std::string& iface);
     void shutdownUdp();
     bool initializeBuffers();
     void shutdownBuffers();
