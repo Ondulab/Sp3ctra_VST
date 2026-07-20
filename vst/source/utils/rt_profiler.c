@@ -20,7 +20,7 @@ static inline uint64_t timeval_diff_us(struct timeval *start, struct timeval *en
 
 /* Display names for the per-family engine timers (indexed by rt_engine_id). */
 static const char *const RT_ENGINE_NAMES[RT_ENGINE_COUNT] = {
-    "LuxStral", "LuxSynth", "LuxWave", "Sampler", "Score"
+    "LuxStral", "LuxSynth", "LuxWave", "LuxGrain", "Sampler", "Score"
 };
 
 void rt_profiler_engine_report(RTProfiler *profiler, rt_engine_id id, uint64_t elapsed_us) {

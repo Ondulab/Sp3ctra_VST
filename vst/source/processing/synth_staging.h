@@ -105,6 +105,28 @@ int synth_staging_mix_luxwave(const ChainPlan* plan,
                               float* line_out, int max_pixels,
                               int* nb_pixels_out);
 
+/* ── LuxGrain sends (conditioned LINE + raw RGB at the OUT position) ───────
+ * Producers stage the send's conditioned line (luxgrain_condition_line,
+ * WITHOUT intensity) plus the raw RGB stream at the OUT marker (colour →
+ * per-cell grain pan). The consumer (luxgrain_feed_tick) pulls the unipolar
+ * mix clamp01(Σ w·line_k) + weight-averaged RGB and folds them into the
+ * granular engine's band cells. Plan-gated on the OUT_LUXGRAIN marker.
+ * generation_out mirrors the LuxSynth contract (dirty check). */
+void synth_staging_stage_luxgrain(int chain_idx, int bank_slot,
+                                  const float* line,
+                                  const uint8_t* r, const uint8_t* g,
+                                  const uint8_t* b, int nb_pixels);
+
+void synth_staging_luxgrain_set_inactive(int chain_idx);
+
+/* Same return contract as the other mixers: N mixed, 0 = no send,
+ * -1 = torn slot (hold, outputs undefined). r/g/b_out may be NULL. */
+int synth_staging_mix_luxgrain(const ChainPlan* plan,
+                               float* line_out,
+                               uint8_t* r_out, uint8_t* g_out, uint8_t* b_out,
+                               int max_pixels, int* nb_pixels_out,
+                               uint32_t* generation_out);
+
 /* Diagnostic: total mixer ticks that HELD on a torn slot (all three mixers).
  * Monotonic, process-lifetime. Message-thread drain (PluginProcessor timer)
  * — a steadily climbing value under device streaming confirms staging

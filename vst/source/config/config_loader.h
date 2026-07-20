@@ -197,6 +197,7 @@ typedef struct {
     lux_out_params_t luxstral_out[LUX_OUT_MAX_SLOTS];
     lux_out_params_t luxsynth_out[LUX_OUT_MAX_SLOTS];
     lux_out_params_t luxwave_out[LUX_OUT_MAX_SLOTS];
+    lux_out_params_t luxgrain_out[LUX_OUT_MAX_SLOTS];
 
     /* ── Phase management: physical onset modes ──────────────────────────
      * Selecting a mode is the ONLY required gesture — the onset gate is
@@ -247,10 +248,18 @@ typedef struct {
     float luxstral_phase_position;         /* strike/pluck position, BELL impact seed [0..1] */
     float luxstral_phase_drift_cents;      /* per-onset random detune ±cents [0..3], 0 = off */
 
+    /* Timbre master switch: 0 = the whole sample-timbre feature is bypassed
+     * (pure analytic sine/square bank, mix AND formant inert), 1 = active.  */
+    int   luxstral_timbre_enable;
     /* Timbre wavetable mix [0..1]: blend between the analytic sine/square
      * bank and the user-sample wavetable (luxstral_wavetable.h). Inert while
      * no table is published — the workers force 0 when acquire() is NULL.   */
     float luxstral_timbre_mix;
+    /* Formant-follower depth [0..1]: each note is weighted by the sample's
+     * spectral envelope at the scan position (vocoder-like color).
+     * Independent of the mix — also filters the pure sine bank. Inert while
+     * no table is published.                                                */
+    float luxstral_timbre_formant;
 
     /* image_freeze_mode : transport state for the live image stream           */
     /*   0 = PLAY  — normal frame update                                       */

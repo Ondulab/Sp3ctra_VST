@@ -82,10 +82,11 @@ public:
         addAndMakeVisible(rescanButton);
 
         folderButton.setButtonText("Voices...");
-        folderButton.setTooltip("Choose the EXTERNAL voices folder — extra voices "
+        folderButton.setTooltip(juce::String::fromUTF8(
+                                "Choose the EXTERNAL voices folder — extra voices "
                                 "besides the built-in ones (one extracted "
                                 "vits-piper-* bundle per sub-folder; see "
-                                "scripts/install_piper_voices.sh)");
+                                "scripts/install_piper_voices.sh)"));
         folderButton.onClick = [this]
         {
             externalVoicesDir.createDirectory();

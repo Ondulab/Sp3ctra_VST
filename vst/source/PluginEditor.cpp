@@ -164,6 +164,8 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     // now part of their module pages (imgLuxStralPage / imgLuxSynthPage).
     audioWavePanel  = std::make_unique<AudioWavePanel>(audioProcessor);
     zone3Content.addChildComponent(audioWavePanel.get());
+    luxGrainPanel   = std::make_unique<LuxGrainPanel>(audioProcessor);
+    zone3Content.addChildComponent(luxGrainPanel.get());
 
     // OUT/send page (synth-split P2) — one instance, rebound per selection to
     // the selected send's conditioning bank (type + slot).
@@ -184,6 +186,8 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         audioProcessor, ChainRackComponent::blockColour(ChainBlockId::LuxSynth));
     waveSetup    = std::make_unique<LuxWaveSetupPanel>(
         audioProcessor, ChainRackComponent::blockColour(ChainBlockId::LuxWave));
+    grainSetup   = std::make_unique<LuxGrainSetupPanel>(
+        audioProcessor, ChainRackComponent::blockColour(ChainBlockId::LuxGrain));
     samplerSetup = std::make_unique<SamplerSetupPanel>(
         audioProcessor, ChainRackComponent::blockColour(ChainBlockId::Sampler));
     scoreSetup   = std::make_unique<ScoreSetupPanel>(
@@ -196,6 +200,7 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     zone3Content.addChildComponent(stralSetup.get());
     zone3Content.addChildComponent(synthSetup.get());
     zone3Content.addChildComponent(waveSetup.get());
+    zone3Content.addChildComponent(grainSetup.get());
     zone3Content.addChildComponent(samplerSetup.get());
     zone3Content.addChildComponent(scoreSetup.get());
 
@@ -219,6 +224,7 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         engineView_ = true;
         selectBlock(t == ModuleType::LuxSynth ? ChainBlockId::LuxSynth
                   : t == ModuleType::LuxWave  ? ChainBlockId::LuxWave
+                  : t == ModuleType::LuxGrain ? ChainBlockId::LuxGrain
                                               : ChainBlockId::LuxStral);
         persistLayoutProps();
     };
@@ -359,7 +365,7 @@ bool Sp3ctraAudioProcessorEditor::blockHasSetup(ChainBlockId id) noexcept
 static bool isSynthBlock(ChainBlockId id) noexcept
 {
     return id == ChainBlockId::LuxStral || id == ChainBlockId::LuxSynth
-        || id == ChainBlockId::LuxWave;
+        || id == ChainBlockId::LuxWave  || id == ChainBlockId::LuxGrain;
 }
 
 //==============================================================================
@@ -381,6 +387,7 @@ void Sp3ctraAudioProcessorEditor::applyZone3Visibility()
     if (imgLuxStralPage) imgLuxStralPage->setVisible(play && engineView_ && id == ChainBlockId::LuxStral);
     if (imgLuxSynthPage) imgLuxSynthPage->setVisible(play && engineView_ && id == ChainBlockId::LuxSynth);
     if (audioWavePanel)  audioWavePanel ->setVisible(play && engineView_ && id == ChainBlockId::LuxWave);
+    if (luxGrainPanel)   luxGrainPanel  ->setVisible(play && engineView_ && id == ChainBlockId::LuxGrain);
     if (synthOutPage)    synthOutPage   ->setVisible(play && !engineView_ && isSynthBlock(id));
     if (scorePage)       scorePage      ->setVisible(play && id == ChainBlockId::Score);
     if (timbrePage)      timbrePage     ->setVisible(play && id == ChainBlockId::Timbre);
@@ -405,6 +412,7 @@ void Sp3ctraAudioProcessorEditor::applyZone3Visibility()
     if (stralSetup)   stralSetup  ->setVisible(setupFace && id == ChainBlockId::LuxStral);
     if (synthSetup)   synthSetup  ->setVisible(setupFace && id == ChainBlockId::LuxSynth);
     if (waveSetup)    waveSetup   ->setVisible(setupFace && id == ChainBlockId::LuxWave);
+    if (grainSetup)   grainSetup  ->setVisible(setupFace && id == ChainBlockId::LuxGrain);
 }
 
 //==============================================================================
@@ -533,6 +541,8 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
             synthOutPage->setTarget(ModuleType::LuxStral, sendSlot);
         else if (id == ChainBlockId::LuxSynth)
             synthOutPage->setTarget(ModuleType::LuxSynth, sendSlot);
+        else if (id == ChainBlockId::LuxGrain)
+            synthOutPage->setTarget(ModuleType::LuxGrain, sendSlot);
         else
             synthOutPage->setTarget(ModuleType::LuxWave, sendSlot);
     }
@@ -541,6 +551,7 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
         if (isSynthBlock(id) && engineView_)
             audioMixPanel->setSelectedEngine(id == ChainBlockId::LuxSynth ? ModuleType::LuxSynth
                                            : id == ChainBlockId::LuxWave  ? ModuleType::LuxWave
+                                           : id == ChainBlockId::LuxGrain ? ModuleType::LuxGrain
                                                                           : ModuleType::LuxStral,
                                              true);
         else
@@ -619,6 +630,11 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
             break;
         case ChainBlockId::LuxWave:
             sources = { VisualizerMode::SYNTH_GRAY };
+            break;
+        // LUXGRAIN send — contextual like every OUT: the stream at the send's
+        // position in its chain (a dedicated cloud viz may come later).
+        case ChainBlockId::LuxGrain:
+            sources = { VisualizerMode::SELECTED_TAP };
             break;
         // Score family + SEQUENCER: contextual like every other module —
         // the stream at their position in their chain (playback included,
@@ -1093,6 +1109,8 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
                 top = synthSetup.get();   topMinH = LuxSynthSetupPanel::kPreferredH; break;
             case ChainBlockId::LuxWave:
                 top = waveSetup.get();    topMinH = LuxWaveSetupPanel::kPreferredH;  break;
+            case ChainBlockId::LuxGrain:
+                top = grainSetup.get();   topMinH = LuxGrainSetupPanel::kPreferredH; break;
             case ChainBlockId::Score:
                 top = scoreSetup.get();   topMinH = ScoreSetupPanel::kPreferredH;    break;
             case ChainBlockId::Chain1Source:
@@ -1142,6 +1160,10 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
             case ChainBlockId::LuxWave:
                 if (engineView_) { top = audioWavePanel.get();  topMinH = AudioWavePanel::kPreferredH; }
                 else             { top = synthOutPage.get();    topMinH = SynthOutPageComponent::kPreferredH; }
+                break;
+            case ChainBlockId::LuxGrain:
+                if (engineView_) { top = luxGrainPanel.get(); topMinH = LuxGrainPanel::kPreferredH; }
+                else             { top = synthOutPage.get();  topMinH = SynthOutPageComponent::kPreferredH; }
                 break;
             case ChainBlockId::Score:
                 top = scorePage.get();       topMinH = 360; break;  // actions + transport only

@@ -46,6 +46,7 @@ enum class ChainBlockId
     MidiScore,                         // UTILS — MIDI-file score generator (appended: ordinals persist)
     Voice,                             // UTILS — TTS vocal-spectrum generator (appended: ordinals persist)
     Harmonize,                         // FX — SCALE quantizer insert (appended: ordinals persist)
+    LuxGrain,                          // OUT — "→ LUXGRAIN" granular send (appended: ordinals persist)
     None                               // empty rack — no module selected
 };
 

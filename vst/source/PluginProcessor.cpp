@@ -33,6 +33,7 @@ extern "C" {
     #include "audio/buffers/audio_image_buffers.h"             // selection tap (contextual zone 1)
     #include "synthesis/luxsynth/luxsynth_vst_adapter.h"      // luxsynth_push_midi_event(), buffers, engine
     #include "synthesis/luxwave/luxwave_vst_adapter.h"        // luxwave_push_midi_event(), g_luxwave_engine
+    #include "synthesis/luxgrain/luxgrain_vst_adapter.h"      // g_luxgrain_engine + render scratch
     #include "processing/luxsynth_feed.h"                      // dropout diag counters (silence/spec pushes)
 
 }
@@ -213,6 +214,66 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxsynthVolume", 1}, "LuxSynth Vol.",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxgrainVolume", 1}, "LuxGrain Vol.",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    // LuxGrain engine enable (AUDIO MIX strip LED, like luxwaveEnabled).
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"luxgrainEnabled", 1}, "LuxGrain On", true));
+
+    // ── LuxGrain engine (cloud) params — M4. Defaults mirror
+    // luxgrain_config_default() so a fresh session sounds like the harness. ──
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxgrainDensity", 1}, "LuxGrain Density",
+        juce::NormalisableRange<float>(0.1f, 50.0f, 0.01f, 0.35f), 6.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("g/s")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxgrainDensityShape", 1}, "LuxGrain Dens. Shape",
+        juce::NormalisableRange<float>(0.25f, 4.0f, 0.01f, 0.5f), 1.5f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxgrainSpread", 1}, "LuxGrain Spread",
+        juce::NormalisableRange<float>(1.0f, 512.0f, 1.0f, 0.35f), 1.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("lines")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxgrainSizeMin", 1}, "LuxGrain Size Min",
+        juce::NormalisableRange<float>(2.0f, 100.0f, 0.1f, 0.5f), 8.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxgrainSizeMax", 1}, "LuxGrain Size Max",
+        juce::NormalisableRange<float>(20.0f, 2000.0f, 1.0f, 0.4f), 220.0f,
+        juce::AudioParameterFloatAttributes{}.withLabel("ms")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxgrainTexture", 1}, "LuxGrain Texture>Size",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.7f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxgrainJitter", 1}, "LuxGrain Jitter",
+        juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 0.15f,
+        juce::AudioParameterFloatAttributes{}.withLabel("st")));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxgrainWidth", 1}, "LuxGrain Width",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.6f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxgrainAmpFollow", 1}, "LuxGrain Amp Follow",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"luxgrainEnvShape", 1}, "LuxGrain Envelope",
+        juce::StringArray{"Hann", "Tukey", "Expodec", "Rexpodec"}, 0));
+    // Lot 2 — colour pan / edge bursts / band folding / sample material.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxgrainColorPan", 1}, "LuxGrain Color Pan",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxgrainEdge", 1}, "LuxGrain Edge Burst",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{"luxgrainBands", 1}, "LuxGrain Bands",
+        16, 192, 128, kHiddenInt));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"luxgrainMaterial", 1}, "LuxGrain Material",
+        juce::StringArray{"Sine", "Sample"}, 0));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxgrainScrub", 1}, "LuxGrain Scrub",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
 
     // ── Gameplay — Device On ─────────────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterBool>(
@@ -277,6 +338,38 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxstralTimbreMix", 1}, "Timbre Mix",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+
+    // Timbre scan position — WHERE in the retained sample the cycle is
+    // extracted (0 = start, 1 = end). Each move re-extracts and renormalizes
+    // at the new spot (quiet passages play as loud as strong ones — only the
+    // color changes). Automatable/MIDI-mappable; coalesced on the 30 ms drain.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxstralTimbrePos", 1}, "Timbre Position",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.5f));
+
+    // Timbre master switch — the badge toggle of the TIMBRE section: OFF
+    // bypasses the whole sample-timbre feature (pure analytic SIN bank,
+    // mix AND formant inert), ON restores it. MIDI-mappable A/B gesture.
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"luxstralTimbreEnable", 1}, "Timbre Enable",
+        true));
+
+    // Formant follower — depth of the vocoder-like per-note weighting by the
+    // sample's spectral envelope at the scan position. Independent of the
+    // mix (also colors the pure sine bank). Inert without a loaded sample.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxstralTimbreFormant", 1}, "Timbre Formant",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+
+    // Timbre playhead — when ON, the scan position advances through the file
+    // on its own (looping), at Rate × real time. The timbre then follows the
+    // sample's evolution — the link between source and sound becomes obvious.
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"luxstralTimbreScanPlay", 1}, "Timbre Scan Play",
+        false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxstralTimbreScanRate", 1}, "Timbre Scan Rate",
+        juce::NormalisableRange<float>(0.05f, 4.0f, 0.01f, 0.5f), 1.0f));
 
     // ── Synth-split P1 — per-OUT conditioning banks (pool slots 0..7) ────────
     // One bank per OUT-module instance: the OUT conditions its chain's flux
@@ -357,6 +450,25 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID{lwOutParam(s, "enabled"), 1},
             "LW OUT" + n + " On", true));
+
+        // LuxGrain OUT — autonomous conditioning (granular engine, M2)
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{lgOutParam(s, "negative"), 1},
+            "LG OUT" + n + " Negative", true));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{lgOutParam(s, "dcBlocking"), 1},
+            "LG OUT" + n + " DC Blocking", true));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{lgOutParam(s, "gamma"), 1},
+            "LG OUT" + n + " Gamma",
+            juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f, 0.30f), 1.0f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{lgOutParam(s, "intensity"), 1},
+            "LG OUT" + n + " Intensity",
+            juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 1.0f));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{lgOutParam(s, "enabled"), 1},
+            "LG OUT" + n + " On", true));
     }
 
     // ── Gameplay — StrokeForge enable ────────────────────────────────────────
@@ -646,7 +758,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     // LuxWave Scan Mode
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"luxwaveScanMode", 1}, "LW Scan Mode",
-        juce::StringArray{"Left→Right", "Right→Left", "Dual"}, 0));
+        juce::StringArray{juce::String::fromUTF8("Left→Right"),
+                          juce::String::fromUTF8("Right→Left"), "Dual"}, 0));
 
     // LuxWave Amplitude
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -1198,6 +1311,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"imgSrcLoop", 1}, "Image Src Loop",
         juce::StringArray{"Once", "Loop", "Reverse", "Ping-Pong"}, 1));
+    // Scan bounds — the transport reads only [start, end] of the image
+    // (crossed values are normalised by the engine); the manual LINE cursor
+    // stays free. Defaults = full image.
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"imgSrcScanStart", 1}, "Image Src Scan Start",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.0001f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"imgSrcScanEnd", 1}, "Image Src Scan End",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.0001f), 1.0f));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"imgSrcPlay", 1}, "Image Src Play", false));
     // ACTIVE: off = the source feeds NOTHING (its chain streams blank paper);
@@ -1221,6 +1343,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             juce::ParameterID{imgSrcParam(s, "Loop"), 1}, nm + "Loop",
             juce::StringArray{"Once", "Loop", "Reverse", "Ping-Pong"}, 1));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{imgSrcParam(s, "ScanStart"), 1}, nm + "Scan Start",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.0001f), 0.0f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{imgSrcParam(s, "ScanEnd"), 1}, nm + "Scan End",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.0001f), 1.0f));
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID{imgSrcParam(s, "Play"), 1}, nm + "Play", false));
         params.push_back(std::make_unique<juce::AudioParameterBool>(
@@ -1528,6 +1656,23 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     luxsynthMidiChannelParam    = apvts.getRawParameterValue("luxsynthMidiChannel");
     luxsynthOctaveOffsetParam   = apvts.getRawParameterValue("luxsynthOctaveOffset");
     luxsynthVolumeParam         = apvts.getRawParameterValue("luxsynthVolume");
+    luxgrainEnabledParam        = apvts.getRawParameterValue("luxgrainEnabled");
+    luxgrainVolumeParam         = apvts.getRawParameterValue("luxgrainVolume");
+    luxgrainDensityParam        = apvts.getRawParameterValue("luxgrainDensity");
+    luxgrainDensityShapeParam   = apvts.getRawParameterValue("luxgrainDensityShape");
+    luxgrainSpreadParam         = apvts.getRawParameterValue("luxgrainSpread");
+    luxgrainSizeMinParam        = apvts.getRawParameterValue("luxgrainSizeMin");
+    luxgrainSizeMaxParam        = apvts.getRawParameterValue("luxgrainSizeMax");
+    luxgrainTextureParam        = apvts.getRawParameterValue("luxgrainTexture");
+    luxgrainJitterParam         = apvts.getRawParameterValue("luxgrainJitter");
+    luxgrainWidthParam          = apvts.getRawParameterValue("luxgrainWidth");
+    luxgrainAmpFollowParam      = apvts.getRawParameterValue("luxgrainAmpFollow");
+    luxgrainEnvShapeParam       = apvts.getRawParameterValue("luxgrainEnvShape");
+    luxgrainColorPanParam       = apvts.getRawParameterValue("luxgrainColorPan");
+    luxgrainEdgeParam           = apvts.getRawParameterValue("luxgrainEdge");
+    luxgrainBandsParam          = apvts.getRawParameterValue("luxgrainBands");
+    luxgrainMaterialParam       = apvts.getRawParameterValue("luxgrainMaterial");
+    luxgrainScrubParam          = apvts.getRawParameterValue("luxgrainScrub");
     luxwaveEnabledParam         = apvts.getRawParameterValue("luxwaveEnabled");
     luxwaveMidiChannelParam     = apvts.getRawParameterValue("luxwaveMidiChannel");
     luxwaveOctaveOffsetParam    = apvts.getRawParameterValue("luxwaveOctaveOffset");
@@ -1590,6 +1735,10 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("luxstralPhasePosition", this);
     apvts.addParameterListener("luxstralPhaseDriftCents", this);
     apvts.addParameterListener("luxstralTimbreMix", this);
+    apvts.addParameterListener("luxstralTimbrePos", this);
+    apvts.addParameterListener("luxstralTimbreFormant", this);
+    apvts.addParameterListener("luxstralTimbreEnable", this);
+    // (ScanPlay/ScanRate need no listener: the 30 ms timer polls them.)
     
     // Register StrokeForge parameter listeners
     apvts.addParameterListener("sfEnabled", this);
@@ -1689,6 +1838,8 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
         eng->setPosition (apvts.getRawParameterValue(imgSrcParam(s, "Pos"))->load());
         eng->setDurationS(apvts.getRawParameterValue(imgSrcParam(s, "Duration"))->load());
         eng->setLoopMode ((int) apvts.getRawParameterValue(imgSrcParam(s, "Loop"))->load());
+        eng->setScanStart(apvts.getRawParameterValue(imgSrcParam(s, "ScanStart"))->load());
+        eng->setScanEnd  (apvts.getRawParameterValue(imgSrcParam(s, "ScanEnd"))->load());
         eng->setEnabled  (apvts.getRawParameterValue(imgSrcParam(s, "Enabled"))->load() > 0.5f);
     }
     for (int s = 0; s < 8; ++s)
@@ -2429,7 +2580,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 
     // ── LuxSynth MIDI (RT-safe: push into lock-free ring buffer) ─────────────
     {
-        const bool lxEnabled = luxsynthEnabledParam->load() > 0.5f;
+        const bool lxEnabled = luxsynthEnabledParam->load() > 0.5f
+                               && sendCountLuxSynth_.load(std::memory_order_relaxed) > 0;
         if (lxEnabled && g_luxsynth_engine.initialized)
         {
             const int lxCh  = static_cast<int>(luxsynthMidiChannelParam->load()) + 1;
@@ -2450,7 +2602,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 
     // ── LuxWave MIDI (RT-safe: push into lock-free ring buffer) ──────────────
     {
-        const bool lwEnabled = luxwaveEnabledParam->load() > 0.5f;
+        const bool lwEnabled = luxwaveEnabledParam->load() > 0.5f
+                               && sendCountLuxWave_.load(std::memory_order_relaxed) > 0;
         if (lwEnabled && g_luxwave_engine.initialized)
         {
             const int lwCh  = static_cast<int>(luxwaveMidiChannelParam->load()) + 1;
@@ -2547,9 +2700,30 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // deviceEnabled. It paces audioProcessingThread (the whole synth pipeline
     // renders on this signal): gating it on the output toggle starved the
     // pipeline down to the 50ms wait timeout (each grain replayed ~4-5x =
-    // robotic sound). deviceEnabled only gates the WRITE into the JUCE buffer.
+    // robotic sound). deviceEnabled gates the WRITE into the JUCE buffer here,
+    // and (via g_engine_render_gates below) collapses the producer's render to
+    // a silence commit — the handshake itself is never gated.
     // ========================================================================
     const bool luxstralEnabled = (deviceEnabledParam == nullptr || deviceEnabledParam->load() >= 0.5f);
+
+    // ── Zero-CPU contract — publish per-engine render gates to the synth
+    // thread (multithreading.c): enabled && ≥1 OUT send. A cleared LuxStral
+    // bit collapses synth_AudioProcess to a cheap silence commit (the
+    // producer/consumer pacing stays intact); a cleared LuxSynth/LuxWave/
+    // LuxGrain bit skips that engine's feed tick.
+    {
+        extern volatile uint32_t g_engine_render_gates;
+        const uint32_t gates =
+              (luxstralEnabled
+               && sendCountLuxStral_.load(std::memory_order_relaxed) > 0 ? 1u : 0u)
+            | (luxsynthEnabledParam->load() > 0.5f
+               && sendCountLuxSynth_.load(std::memory_order_relaxed) > 0 ? 2u : 0u)
+            | (luxwaveEnabledParam->load() > 0.5f
+               && sendCountLuxWave_.load(std::memory_order_relaxed) > 0 ? 4u : 0u)
+            | (luxgrainEnabledParam && luxgrainEnabledParam->load() > 0.5f
+               && sendCountLuxGrain_.load(std::memory_order_relaxed) > 0 ? 8u : 0u);
+        __atomic_store_n(&g_engine_render_gates, gates, __ATOMIC_RELEASE);
+    }
     if (sharedCore && sharedCore->isReady() && luxstral_are_audio_buffers_ready()) {
         extern AudioImageBuffer luxstral_buffers_L[2];
         extern AudioImageBuffer luxstral_buffers_R[2];
@@ -2659,7 +2833,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // ========================================================================
     if (sharedCore && sharedCore->isReady() && g_luxsynth_engine.initialized)
     {
-        const bool lxEnabled = luxsynthEnabledParam->load() > 0.5f;
+        const bool lxEnabled = luxsynthEnabledParam->load() > 0.5f
+                               && sendCountLuxSynth_.load(std::memory_order_relaxed) > 0;
         if (lxEnabled)
         {
             struct timeval lxT0, lxT1;
@@ -2817,7 +2992,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // ========================================================================
     if (sharedCore && sharedCore->isReady() && g_luxwave_engine.initialized)
     {
-        const bool lwEnabled = luxwaveEnabledParam->load() > 0.5f;
+        const bool lwEnabled = luxwaveEnabledParam->load() > 0.5f
+                               && sendCountLuxWave_.load(std::memory_order_relaxed) > 0;
         if (lwEnabled)
         {
             struct timeval lwT0, lwT1;
@@ -2887,6 +3063,86 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         }
     }
 
+    // ========================================================================
+    // 🎯 LUXGRAIN INLINE SYNTHESIS (RT-SAFE, GRANULAR CLOUD)
+    //
+    // Stochastic granular engine driven by the "→ LUXGRAIN" image sends
+    // (luminance → grain emission density). The feed folds the mixed line
+    // into band cells on audioProcessingThread; the engine latches here at
+    // block start (internal seqlocks) and renders the cloud inline.
+    // ========================================================================
+    if (sharedCore && sharedCore->isReady() && g_luxgrain_engine.initialized)
+    {
+        const bool lgEnabled = luxgrainEnabledParam
+                               && luxgrainEnabledParam->load() > 0.5f
+                               && sendCountLuxGrain_.load(std::memory_order_relaxed) > 0;
+        if (lgEnabled && numSamples <= LUXGRAIN_MAX_BUFFER_SIZE)
+        {
+            struct timeval lgT0, lgT1;
+            gettimeofday(&lgT0, NULL);   // per-family perf attribution
+
+            // 1. Engine config from APVTS (RT-safe: staged struct copy, M4).
+            LuxGrainConfig lgCfg = luxgrain_config_default();
+            lgCfg.enabled       = 1;
+            lgCfg.master_volume = 0.35f;   // M5 calibration may retune this
+            lgCfg.density_hz      = luxgrainDensityParam->load();
+            lgCfg.density_shape   = luxgrainDensityShapeParam->load();
+            lgCfg.spread_lines    = luxgrainSpreadParam->load();
+            lgCfg.dur_min_ms      = luxgrainSizeMinParam->load();
+            lgCfg.dur_max_ms      = juce::jmax(lgCfg.dur_min_ms,
+                                               luxgrainSizeMaxParam->load());
+            lgCfg.contrast_amount = luxgrainTextureParam->load();
+            lgCfg.env_shape       = (int) luxgrainEnvShapeParam->load();
+            lgCfg.pitch_jitter_st = luxgrainJitterParam->load();
+            lgCfg.stereo_width    = luxgrainWidthParam->load();
+            lgCfg.amp_follow      = luxgrainAmpFollowParam->load();
+            lgCfg.color_pan       = luxgrainColorPanParam->load();
+            lgCfg.edge_amount     = luxgrainEdgeParam->load();
+            lgCfg.num_bands       = (int) luxgrainBandsParam->load();
+            lgCfg.material        = (int) luxgrainMaterialParam->load();
+            lgCfg.scrub           = luxgrainScrubParam->load();
+            if (g_sp3ctra_config.low_frequency > 0.0f)
+                lgCfg.axis_low_hz = g_sp3ctra_config.low_frequency;
+            if (g_sp3ctra_config.num_octaves > 0)
+                lgCfg.num_octaves = g_sp3ctra_config.num_octaves;
+            luxgrain_engine_set_config(&g_luxgrain_engine, &lgCfg);
+
+            // 2. Render the cloud, then mix (additive, like LuxWave)
+            luxgrain_engine_process(&g_luxgrain_engine,
+                                    g_luxgrain_out_l, g_luxgrain_out_r,
+                                    numSamples);
+            const float lgVol = luxgrainVolumeParam
+                                ? luxgrainVolumeParam->load() : 1.0f;
+            float pk = lgPkBlock_;   // VU: post-volume block peak
+            if (totalNumOutputChannels >= 1)
+            {
+                float* dest = buffer.getWritePointer(0);
+                for (int i = 0; i < numSamples; ++i) {
+                    const float v = g_luxgrain_out_l[i] * lgVol;
+                    dest[i] += v;
+                    const float a = v < 0.0f ? -v : v;
+                    if (a > pk) pk = a;
+                }
+            }
+            if (totalNumOutputChannels >= 2)
+            {
+                float* dest = buffer.getWritePointer(1);
+                for (int i = 0; i < numSamples; ++i) {
+                    const float v = g_luxgrain_out_r[i] * lgVol;
+                    dest[i] += v;
+                    const float a = v < 0.0f ? -v : v;
+                    if (a > pk) pk = a;
+                }
+            }
+            lgPkBlock_ = pk;
+
+            gettimeofday(&lgT1, NULL);
+            rt_profiler_engine_report(&g_vst_rt_profiler, RT_ENGINE_LUXGRAIN,
+                (uint64_t)((lgT1.tv_sec - lgT0.tv_sec) * 1000000LL
+                           + (lgT1.tv_usec - lgT0.tv_usec)));
+        }
+    }
+
     // ── SCORE source preview: mix the auditioned WAV region into the output ──
     // RT-safe: try-lock (skip this block on contention), no I/O, no allocation.
     if (scorePreviewPlaying_.load(std::memory_order_acquire))
@@ -2933,7 +3189,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         fold(meterLuxStral_, lsPkBlock_);
         fold(meterLuxSynth_, lxPkBlock_);
         fold(meterLuxWave_,  lwPkBlock_);
-        lsPkBlock_ = lxPkBlock_ = lwPkBlock_ = 0.0f;
+        fold(meterLuxGrain_, lgPkBlock_);
+        lsPkBlock_ = lxPkBlock_ = lwPkBlock_ = lgPkBlock_ = 0.0f;
     }
 
     rt_profiler_callback_end(&g_vst_rt_profiler);
@@ -2962,6 +3219,7 @@ void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     state.setProperty("lastSessionPath",  lastSessionPath,  nullptr);
     state.setProperty("samplerOutputDir", samplerOutputDir, nullptr);
     state.setProperty("scoreWavPath",     scoreWavPath,     nullptr);
+    state.setProperty("luxgrainSamplePath", luxgrainSamplePath_, nullptr);
     // Synth-split state version — gates the staged migrations in
     // setStateInformation (absent = pre-split blob; 1 = pre per-send enable;
     // 2 = pre per-sampler-engine enable).
@@ -3292,6 +3550,8 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
                     eng->setPosition (apvts.getRawParameterValue(imgSrcParam(s, "Pos"))->load());
                     eng->setDurationS(apvts.getRawParameterValue(imgSrcParam(s, "Duration"))->load());
                     eng->setLoopMode ((int) apvts.getRawParameterValue(imgSrcParam(s, "Loop"))->load());
+                    eng->setScanStart(apvts.getRawParameterValue(imgSrcParam(s, "ScanStart"))->load());
+                    eng->setScanEnd  (apvts.getRawParameterValue(imgSrcParam(s, "ScanEnd"))->load());
                     eng->setEnabled  (apvts.getRawParameterValue(imgSrcParam(s, "Enabled"))->load() > 0.5f);
                 }
             for (int s = 0; s < 8; ++s)
@@ -3339,6 +3599,24 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
             // persisted harmonics (absent child ⇒ clears any loaded table).
             restoreLuxstralWavetableFromTree(
                 apvts.state.getChildWithName("LUXSTRAL_WAVETABLE"));
+
+            // LuxGrain grain material — re-retain the persisted file
+            // (moved/deleted file ⇒ the cloud falls back to SINE material).
+            {
+                const auto path =
+                    apvts.state.getProperty("luxgrainSamplePath", "").toString();
+                luxgrainSamplePath_.clear();
+                luxgrain_engine_clear_sample(&g_luxgrain_engine);
+                if (path.isNotEmpty())
+                {
+                    juce::File f(path);
+                    juce::String err;
+                    if (! (f.existsAsFile() && loadLuxGrainSampleFile(f, err)))
+                        log_warning("VST", "LuxGrain material '%s' unavailable "
+                                           "— cloud falls back to SINE",
+                                    path.toRawUTF8());
+                }
+            }
 
             // Sequencer pattern — steps are not APVTS params, only their
             // transport/timing is. Timing attrs in the tree were captured
@@ -3464,6 +3742,38 @@ void Sp3ctraAudioProcessor::timerCallback()
     // ── Coalesced config resync / wavetable reinit / envelope coeff rebuild ──
     drainPendingConfig();
 
+    // ── Timbre scan position (coalesced — latest value wins) ─────────────────
+    if (timbreScanPending_.exchange(false, std::memory_order_acq_rel))
+        luxstral_wavetable_set_position(
+            timbreScanPos_.load(std::memory_order_relaxed));
+
+    // ── Timbre playhead: advance the scan through the file (looping) ─────────
+    // Runs AFTER the manual drain above, so a drag scrubs the playhead and
+    // playback continues from there. Position lives module-side (not pushed
+    // back into luxstralTimbrePos — the host isn't spammed with automation).
+    {
+        const bool play =
+            apvts.getRawParameterValue("luxstralTimbreScanPlay")->load() > 0.5f;
+        const float dur = luxstral_wavetable_get_duration_s();
+        if (play && dur > 0.05f)
+        {
+            const double now = juce::Time::getMillisecondCounterHiRes();
+            if (timbreScanLastMs_ > 0.0)
+            {
+                const float rate =
+                    apvts.getRawParameterValue("luxstralTimbreScanRate")->load();
+                float pos = luxstral_wavetable_get_position()
+                          + (float)((now - timbreScanLastMs_) * 0.001)
+                                * rate / dur;
+                pos -= std::floor(pos);   // loop over the whole file
+                luxstral_wavetable_set_position(pos);
+            }
+            timbreScanLastMs_ = now;
+        }
+        else
+            timbreScanLastMs_ = 0.0;
+    }
+
     // ── SCORE transport mirror ────────────────────────────────────────────────
     // The SCORE page is a view: it no longer force-stops the score in its
     // destructor, so with no page open somebody must still fold the engine's
@@ -3505,6 +3815,7 @@ void Sp3ctraAudioProcessor::timerCallback()
                 synth_staging_set_inactive(i);
                 synth_staging_luxsynth_set_inactive(i);
                 synth_staging_luxwave_set_inactive(i);
+                synth_staging_luxgrain_set_inactive(i);
             }
         }
         pendingPitchResets_ = pendingMaskResets_ = pendingVideoScrollInits_ = 0;
@@ -3661,6 +3972,10 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
             { eng->setDurationS(newValue); return; }
             if (parameterID == imgSrcParam(s, "Loop"))
             { eng->setLoopMode((int) (newValue + 0.5f)); return; }
+            if (parameterID == imgSrcParam(s, "ScanStart"))
+            { eng->setScanStart(newValue); return; }
+            if (parameterID == imgSrcParam(s, "ScanEnd"))
+            { eng->setScanEnd(newValue); return; }
             if (parameterID == imgSrcParam(s, "Play"))
             { eng->setPlaying(newValue > 0.5f); return; }
             if (parameterID == imgSrcParam(s, "Enabled"))
@@ -3775,6 +4090,17 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
     // SPCTR blob detection — IMAGE LUXSTRAL tab (drives visualizer + StrokeForge audio)
     if (parameterID.startsWith("spctrBlob")) {
         configResyncPending_ = true;
+        return;
+    }
+
+    // Timbre scan position: NOT a config value — it drives a message-thread
+    // re-extraction of the timbre wavetable. Must be caught BEFORE the generic
+    // startsWith("luxstral") branch below, which only marks a config resync
+    // and returns (it would swallow the scan). Coalesced: the 30 ms drain
+    // applies the LATEST value, one extraction per tick max.
+    if (parameterID == "luxstralTimbrePos") {
+        timbreScanPos_.store(newValue, std::memory_order_relaxed);
+        timbreScanPending_.store(true, std::memory_order_release);
         return;
     }
 
@@ -4276,6 +4602,7 @@ Sp3ctraAudioProcessor::navTargetForParam(const juce::String& id) const
     else if (banked("luxstralOut", slot)) { t.type = ModuleType::LuxStral; t.instanceId = chainInstance(t.type, slot); }
     else if (banked("luxsynthOut", slot)) { t.type = ModuleType::LuxSynth; t.instanceId = chainInstance(t.type, -1); }
     else if (banked("luxwaveOut",  slot)) { t.type = ModuleType::LuxWave;  t.instanceId = chainInstance(t.type, -1); }
+    else if (banked("luxgrainOut", slot)) { t.type = ModuleType::LuxGrain; t.instanceId = chainInstance(t.type, -1); }
     else if (id.startsWith("luxSamplerB")) { t.type = ModuleType::Sampler; t.instanceId = chainInstance(t.type, 1); }
     else if (id.startsWith("luxSampler") && id.length() > 10
              && juce::CharacterFunctions::isDigit(id[10]))
@@ -4298,6 +4625,7 @@ Sp3ctraAudioProcessor::navTargetForParam(const juce::String& id) const
                                         { t.type = ModuleType::LuxStral; t.engineView = true; t.instanceId = chainInstance(t.type, -1); }
     else if (id.startsWith("luxsynth")) { t.type = ModuleType::LuxSynth; t.engineView = true; t.instanceId = chainInstance(t.type, -1); }
     else if (id.startsWith("luxwave"))  { t.type = ModuleType::LuxWave;  t.engineView = true; t.instanceId = chainInstance(t.type, -1); }
+    else if (id.startsWith("luxgrain")) { t.type = ModuleType::LuxGrain; t.engineView = true; t.instanceId = chainInstance(t.type, -1); }
     else if (id.startsWith("score"))    { t.type = ModuleType::Score;    t.instanceId = chainInstance(t.type, -1); }
     else if (id.startsWith("timbre"))   { t.type = ModuleType::Timbre;   t.instanceId = chainInstance(t.type, -1); }
     else
@@ -4731,7 +5059,7 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
                 sp.num_inserts++;
             }
             else if ((t == ModuleType::LuxStral || t == ModuleType::LuxSynth
-                      || t == ModuleType::LuxWave)
+                      || t == ModuleType::LuxWave || t == ModuleType::LuxGrain)
                      && sp.num_inserts < CHAIN_PLAN_MAX_INSERTS)
             {
                 // OUT SEND MARKER (M3/M6) — pass-through; locates the send so
@@ -4741,7 +5069,8 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
                 sp.insert_id[sp.num_inserts] =
                       (t == ModuleType::LuxStral) ? IMAGE_CHAIN_INSERT_OUT_LUXSTRAL
                     : (t == ModuleType::LuxSynth) ? IMAGE_CHAIN_INSERT_OUT_LUXSYNTH
-                    :                               IMAGE_CHAIN_INSERT_OUT_LUXWAVE;
+                    : (t == ModuleType::LuxWave)  ? IMAGE_CHAIN_INSERT_OUT_LUXWAVE
+                    :                               IMAGE_CHAIN_INSERT_OUT_LUXGRAIN;
                 sp.insert_state_idx[sp.num_inserts] =
                     juce::jlimit(0, CHAIN_MAX_CHAINS - 1,
                                  mi.slot >= 0 ? mi.slot : 0);
@@ -4834,7 +5163,7 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
         for (const auto& m : ch.modules)
         {
             if (m.type == ModuleType::LuxStral || m.type == ModuleType::LuxSynth
-                || m.type == ModuleType::LuxWave)
+                || m.type == ModuleType::LuxWave || m.type == ModuleType::LuxGrain)
                 hasOut = true;
             if (m.type == ModuleType::VideoScroll
                 && m.slot >= 0 && m.slot < CHAIN_MAX_CHAINS)
@@ -4922,6 +5251,25 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
             for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
                 if ((gone >> s) & 1u)
                     scorePlayerService_->discard(s);
+    }
+
+    // ── AUDIO MIX / zero-CPU contract — per-engine OUT send counts ──────────
+    // 0 sends → processBlock skips that engine's render entirely and the
+    // AUDIO MIX panel hides its strip. (LuxStral: matches plan.num_ls_sends.)
+    {
+        int n[4] = { 0, 0, 0, 0 };
+        for (const auto& ch : chainModel_.chains)
+            for (const auto& m : ch.modules)
+            {
+                if      (m.type == ModuleType::LuxStral) ++n[0];
+                else if (m.type == ModuleType::LuxSynth) ++n[1];
+                else if (m.type == ModuleType::LuxWave)  ++n[2];
+                else if (m.type == ModuleType::LuxGrain) ++n[3];
+            }
+        sendCountLuxStral_.store(n[0], std::memory_order_relaxed);
+        sendCountLuxSynth_.store(n[1], std::memory_order_relaxed);
+        sendCountLuxWave_ .store(n[2], std::memory_order_relaxed);
+        sendCountLuxGrain_.store(n[3], std::memory_order_relaxed);
     }
 
     chain_plan_publish(&plan);
@@ -5135,20 +5483,142 @@ juce::ValueTree Sp3ctraAudioProcessor::luxstralWavetableToTree() const
     t.setProperty("rootHz",       (double) rootHz,            nullptr);
     t.setProperty("name",         juce::String::fromUTF8(name), nullptr);
     t.setProperty("harmonics",    juce::var(blob),            nullptr);
+    // Spectral envelope at the saved position — so the static fallback
+    // restore keeps the formant color too.
+    {
+        float env[LUXSTRAL_WT_ENV_POINTS];
+        if (luxstral_wavetable_get_env(env))
+        {
+            juce::MemoryBlock envBlob(env, sizeof(env));
+            t.setProperty("envelope", juce::var(envBlob), nullptr);
+        }
+    }
+    // Full source path: lets the restore re-retain the file so the scan
+    // position stays live. The harmonics above are the fallback when the
+    // file has moved. (Scan position itself is APVTS: luxstralTimbrePos.)
+    t.setProperty("sourcePath",   timbreSamplePath_,          nullptr);
     return t;
+}
+
+bool Sp3ctraAudioProcessor::loadTimbreSampleFile(const juce::File& file,
+                                                 float rootHzOverride,
+                                                 juce::String& errorOut)
+{
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(file));
+    if (reader == nullptr || reader->lengthInSamples < 512)
+    {
+        errorOut = "Could not read: " + file.getFileName();
+        return false;
+    }
+
+    // Retain up to 30 s: enough to scan through, bounded memory (~5.8 MB).
+    const auto maxLen = (juce::int64)(reader->sampleRate * 30.0);
+    const int  numSamples =
+        (int) juce::jmin<juce::int64>(reader->lengthInSamples, maxLen);
+    const int  numCh = (int) reader->numChannels;
+
+    juce::AudioBuffer<float> buf(numCh, numSamples);
+    reader->read(&buf, 0, numSamples, 0, true, true);
+
+    std::vector<float> mono((size_t) numSamples, 0.0f);
+    const float chScale = 1.0f / (float) juce::jmax(1, numCh);
+    for (int c = 0; c < numCh; ++c)
+    {
+        const float* src = buf.getReadPointer(c);
+        for (int i = 0; i < numSamples; ++i)
+            mono[(size_t) i] += src[i] * chScale;
+    }
+
+    if (luxstral_wavetable_load(mono.data(), numSamples,
+                                (float) reader->sampleRate, rootHzOverride,
+                                file.getFileName().toRawUTF8()) != 0)
+    {
+        errorOut = "No stable pitch found in " + file.getFileName();
+        return false;
+    }
+    timbreSamplePath_ = file.getFullPathName();
+    // Land the extraction on the persisted/current scan position.
+    luxstral_wavetable_set_position(
+        apvts.getRawParameterValue("luxstralTimbrePos")->load());
+    return true;
+}
+
+bool Sp3ctraAudioProcessor::loadLuxGrainSampleFile(const juce::File& file,
+                                                   juce::String& errorOut)
+{
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(file));
+    if (reader == nullptr || reader->lengthInSamples < 512)
+    {
+        errorOut = "Could not read: " + file.getFileName();
+        return false;
+    }
+
+    // Retain up to the engine bank capacity (10 s at 48 kHz).
+    const int numSamples = (int) juce::jmin<juce::int64>(
+        reader->lengthInSamples, (juce::int64) LUXGRAIN_SAMPLE_MAX);
+    const int numCh = (int) reader->numChannels;
+
+    juce::AudioBuffer<float> buf(numCh, numSamples);
+    reader->read(&buf, 0, numSamples, 0, true, true);
+
+    std::vector<float> mono((size_t) numSamples, 0.0f);
+    const float chScale = 1.0f / (float) juce::jmax(1, numCh);
+    for (int c = 0; c < numCh; ++c)
+    {
+        const float* src = buf.getReadPointer(c);
+        for (int i = 0; i < numSamples; ++i)
+            mono[(size_t) i] += src[i] * chScale;
+    }
+
+    if (luxgrain_engine_set_sample(&g_luxgrain_engine, mono.data(), numSamples,
+                                   (float) reader->sampleRate, 0.0f) != 0)
+    {
+        errorOut = "No stable pitch found in " + file.getFileName();
+        return false;
+    }
+    luxgrainSamplePath_ = file.getFullPathName();
+    return true;
+}
+
+void Sp3ctraAudioProcessor::clearLuxGrainSample()
+{
+    luxgrainSamplePath_.clear();
+    luxgrain_engine_clear_sample(&g_luxgrain_engine);
 }
 
 void Sp3ctraAudioProcessor::restoreLuxstralWavetableFromTree(const juce::ValueTree& t)
 {
     if (! t.isValid())
     {
+        timbreSamplePath_.clear();
         luxstral_wavetable_clear();   // session saved without a table
         return;
     }
     const int    n      = (int)    t.getProperty("numHarmonics", 0);
     const double rootHz = (double) t.getProperty("rootHz", 0.0);
     const auto   name   = t.getProperty("name", "(restored)").toString();
+    const auto   path   = t.getProperty("sourcePath", juce::String()).toString();
     auto*        blob   = t.getProperty("harmonics").getBinaryData();
+
+    // Preferred path: re-retain the source file so the scan position stays
+    // live. The persisted root is forced (no re-detection) so the session
+    // sounds identical. loadTimbreSampleFile() also re-applies the restored
+    // luxstralTimbrePos.
+    if (path.isNotEmpty() && rootHz > 0.0)
+    {
+        juce::File f(path);
+        juce::String err;
+        if (f.existsAsFile() && loadTimbreSampleFile(f, (float) rootHz, err))
+            return;
+        log_warning("VST", "Timbre source '%s' unavailable — restoring static "
+                           "timbre from harmonics",
+                    path.toRawUTF8());
+    }
+
     if (blob == nullptr || n < 1 || n > LUXSTRAL_WT_MAX_HARMONICS
         || blob->getSize() < (size_t) n * 2 * sizeof(float) || rootHz <= 0.0)
     {
@@ -5163,7 +5633,16 @@ void Sp3ctraAudioProcessor::restoreLuxstralWavetableFromTree(const juce::ValueTr
         re[k] = src[2 * k];
         im[k] = src[2 * k + 1];
     }
-    luxstral_wavetable_load_from_harmonics(re, im, n, (float) rootHz,
+    const float* envPtr = nullptr;
+    float env[LUXSTRAL_WT_ENV_POINTS];
+    if (auto* envBlob = t.getProperty("envelope").getBinaryData())
+        if (envBlob->getSize() >= sizeof(env))
+        {
+            memcpy(env, envBlob->getData(), sizeof(env));
+            envPtr = env;
+        }
+    timbreSamplePath_.clear();   // static fallback — no scanning available
+    luxstral_wavetable_load_from_harmonics(re, im, n, (float) rootHz, envPtr,
                                            name.toRawUTF8());
 }
 
@@ -5355,7 +5834,7 @@ void Sp3ctraAudioProcessor::applyChainEnableBridge()
     // updateInsertParamMemory() (their enable lives in the per-slot bank).
     static const ModuleType kEnableTypes[] = {
         ModuleType::Sampler, ModuleType::Sequencer,
-        ModuleType::LuxSynth, ModuleType::LuxWave
+        ModuleType::LuxSynth, ModuleType::LuxWave, ModuleType::LuxGrain
     };
     for (auto t : kEnableTypes)
     {
@@ -5737,9 +6216,13 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
     g_sp3ctra_config.luxstral_phase_drift_cents =
         apvts.getRawParameterValue("luxstralPhaseDriftCents")->load();
 
-    // Timbre wavetable mix (inert while no table is published)
+    // Timbre master switch + mix + formant depth (inert while no table)
+    g_sp3ctra_config.luxstral_timbre_enable =
+        (int)apvts.getRawParameterValue("luxstralTimbreEnable")->load();
     g_sp3ctra_config.luxstral_timbre_mix =
         apvts.getRawParameterValue("luxstralTimbreMix")->load();
+    g_sp3ctra_config.luxstral_timbre_formant =
+        apvts.getRawParameterValue("luxstralTimbreFormant")->load();
 
     // Performance
     g_sp3ctra_config.num_workers = 
@@ -5846,6 +6329,13 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
             lw->gamma       = rawf(lwOutParam(s, "gamma"));
             lw->intensity   = rawf(lwOutParam(s, "intensity"));
             lw->enabled     = (int)rawf(lwOutParam(s, "enabled"));
+
+            lux_out_params_t* lg = &g_sp3ctra_config.luxgrain_out[s];
+            lg->negative    = (int)rawf(lgOutParam(s, "negative"));
+            lg->dc_blocking = (int)rawf(lgOutParam(s, "dcBlocking"));
+            lg->gamma       = rawf(lgOutParam(s, "gamma"));
+            lg->intensity   = rawf(lgOutParam(s, "intensity"));
+            lg->enabled     = (int)rawf(lgOutParam(s, "enabled"));
         }
 
         // ── Insert chain order (M1 — modular pipeline core) ──

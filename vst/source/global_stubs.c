@@ -92,6 +92,10 @@ sp3ctra_config_t g_sp3ctra_config = {
         {.negative = 1, .dc_blocking = 1, .gamma = 1.0f,
          .contrast_min = 0.21f, .range_db = 50.0f, .intensity = 1.0f,
          .enabled = 1}},
+    .luxgrain_out = {[0 ... LUX_OUT_MAX_SLOTS - 1] =
+        {.negative = 1, .dc_blocking = 1, .gamma = 1.0f,
+         .contrast_min = 0.21f, .range_db = 50.0f, .intensity = 1.0f,
+         .enabled = 1}},
 
     // Phase management — mode FREE = legacy free-running phases
     .luxstral_phase_mode = 0,               // LUXSTRAL_PHASE_MODE_FREE
@@ -100,9 +104,13 @@ sp3ctra_config_t g_sp3ctra_config = {
     // Phase drift — per-onset random micro-detune (±cents), 0 = off
     .luxstral_phase_drift_cents = 0.0f,
 
+    // Timbre — master switch ON (feature still inert while no table loaded)
+    .luxstral_timbre_enable = 1,
     // Timbre wavetable mix — full user timbre once a table is loaded
     // (inert while none is published)
     .luxstral_timbre_mix = 1.0f,
+    // Formant follower — full vocoder color by default (inert while no table)
+    .luxstral_timbre_formant = 1.0f,
 
     // 🔧 CRITICAL: Stereo processing
     .stereo_mode_enabled = 1,
