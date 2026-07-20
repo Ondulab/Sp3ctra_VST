@@ -269,6 +269,17 @@ typedef struct {
 /**************************************************************************************
  * Global Configuration Instance
  **************************************************************************************/
+/* C linkage on purpose: the instance is defined in global_stubs.c (C) and
+ * read from many C++ TUs. MSVC mangles namespace-scope C++ variables while C
+ * does not, so the declaration seen by C++ must be extern "C" or the Windows
+ * link fails (the Itanium ABI on macOS does not mangle these, hence it only
+ * bites on Windows). */
+#ifdef __cplusplus
+extern "C" {
+#endif
 extern sp3ctra_config_t g_sp3ctra_config;
+#ifdef __cplusplus
+}
+#endif
 
 #endif // CONFIG_LOADER_H

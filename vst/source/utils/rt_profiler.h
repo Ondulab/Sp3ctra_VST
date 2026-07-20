@@ -128,6 +128,12 @@ typedef struct {
     RTEngineTimer engines[RT_ENGINE_COUNT];
 } RTProfiler;
 
+/* Process-wide profiler instance (defined in PluginProcessor.cpp). Declared
+ * here with C linkage so the C engines and the C++ TUs agree on the symbol
+ * name — MSVC mangles namespace-scope C++ variables, the Itanium ABI does
+ * not, so without this the Windows link fails with a name mismatch. */
+extern RTProfiler g_vst_rt_profiler;
+
 /**
  * @brief Initialize the RT profiler
  * 
