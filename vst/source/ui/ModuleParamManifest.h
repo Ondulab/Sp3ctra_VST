@@ -104,6 +104,9 @@ inline juce::String lxOutParam(int slot, const char* suffix)
 inline juce::String lwOutParam(int slot, const char* suffix)
 { return "luxwaveOut" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
 
+inline juce::String lgOutParam(int slot, const char* suffix)
+{ return "luxgrainOut" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
+
 // Sampler per-engine bank (P6 — engines ×8): engines 0/1 keep the legacy
 // "luxSampler*" / "luxSamplerB*" ids (sessions and MIDI mappings load
 // unchanged), engines 2..7 own "luxSampler{N}_*".
@@ -196,7 +199,7 @@ namespace module_param_manifest_detail
         "negative", "dcBlocking", "gamma", "intensity", "enabled",
     };
     inline const char* const kImage[] = {
-        "Pos", "Duration", "Loop", "Play", "Enabled",
+        "Pos", "Duration", "Loop", "Play", "Enabled", "ScanStart", "ScanEnd",
     };
     inline const char* const kVideo[] = {
         "Line", "Speed", "Loop", "Play", "Enabled",
@@ -219,6 +222,7 @@ namespace module_param_manifest_detail
     inline juce::String lsId(int s, const char* x) { return lsOutParam(s, x); }
     inline juce::String lxId(int s, const char* x) { return lxOutParam(s, x); }
     inline juce::String lwId(int s, const char* x) { return lwOutParam(s, x); }
+    inline juce::String lgId(int s, const char* x) { return lgOutParam(s, x); }
     inline juce::String fsId(int s, const char* x) { return fsEngineParam(s, x); }
     inline juce::String imgId(int s, const char* x) { return imgSrcParam(s, x); }
     inline juce::String vidId(int s, const char* x) { return vidSrcParam(s, x); }
@@ -272,6 +276,10 @@ inline const ModuleParamManifest kModuleParamManifest[] = {
       module_param_manifest_detail::kLxLwOut,
       (int) std::size(module_param_manifest_detail::kLxLwOut),
       &module_param_manifest_detail::lwId },
+    { ModuleType::LuxGrain,    "luxgrainOut", 8,
+      module_param_manifest_detail::kLxLwOut,
+      (int) std::size(module_param_manifest_detail::kLxLwOut),
+      &module_param_manifest_detail::lgId },
     { ModuleType::Sampler,     "luxSampler",  8,
       module_param_manifest_detail::kSampler,
       (int) std::size(module_param_manifest_detail::kSampler),

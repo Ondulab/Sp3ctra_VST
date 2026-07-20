@@ -40,7 +40,18 @@ extern void luxstral_wait_for_buffer_consumed(void);
 
 #include "../processing/synth_staging.h"
 #include "../processing/luxsynth_feed.h"           /* M4 — core-side LuxSynth feed */
+#include "../processing/luxgrain_feed.h"           /* LuxGrain granular feed */
 #include "../processing/image_pipeline_stages.h"   /* img_stage_blob_detect (P3 mixer) */
+
+/* Zero-CPU render gates (AUDIO MIX contract) — one bit per engine, published
+ * by processBlock each block: enabled && ≥1 OUT send placed in a chain.
+ *   bit 0 = LuxStral   → cleared: synth_AudioProcess collapses to a cheap
+ *                        silence commit (pacing handshake preserved)
+ *   bit 1 = LuxSynth   → cleared: luxsynth_feed_tick skipped
+ *   bit 2 = LuxWave    → cleared: pipeline_luxwave_feed_tick skipped
+ *   bit 3 = LuxGrain   → cleared: luxgrain_feed_tick skipped
+ * Default all-on: standalone CLI parity until the first audio block. */
+volatile uint32_t g_engine_render_gates = 0xFu;
 
 /* Synth-split P3 — per-thread scratch for ONE LuxStral send's conditioned
  * frame before staging (each producer thread has its own; the staging module
@@ -526,7 +537,7 @@ static void chain_publish_no_signal(const SynthChainPlan *sp, int chain_idx,
 {
     const uint8_t *s_white_line = chain_white_line();
 
-    int ls_bank = -1, has_lx = 0, has_lw = 0;
+    int ls_bank = -1, has_lx = 0, has_lw = 0, has_lg = 0;
     for (int i = 0; i < sp->num_inserts; i++)
     {
         const int id = sp->insert_id[i];
@@ -536,6 +547,8 @@ static void chain_publish_no_signal(const SynthChainPlan *sp, int chain_idx,
             has_lx = 1;
         else if (id == IMAGE_CHAIN_INSERT_OUT_LUXWAVE)
             has_lw = 1;
+        else if (id == IMAGE_CHAIN_INSERT_OUT_LUXGRAIN)
+            has_lg = 1;
         else if (id == IMAGE_CHAIN_INSERT_VIDEOSCROLL)
             video_scroll_capture_line(
                 video_scroll_instance(sp->insert_state_idx[i]),
@@ -554,6 +567,8 @@ static void chain_publish_no_signal(const SynthChainPlan *sp, int chain_idx,
         synth_staging_luxsynth_set_inactive(chain_idx);
     if (has_lw)
         synth_staging_luxwave_set_inactive(chain_idx);
+    if (has_lg)
+        synth_staging_luxgrain_set_inactive(chain_idx);
     if (is_pb_chain && audioBuffers != NULL)
         audio_image_buffers_publish_engine_input(
             audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
@@ -640,6 +655,7 @@ static float send_transport_gain(SendRamp *r, int freeze, int fade_ms)
 
 static SendRamp s_lx_send_ramp[CHAIN_MAX_CHAINS];
 static SendRamp s_lw_send_ramp[CHAIN_MAX_CHAINS];
+static SendRamp s_lg_send_ramp[CHAIN_MAX_CHAINS];
 
 /* ── P4-M2 — THE chain executor ──────────────────────────────────────────────
  * chain_execute_span() is the only code that knows how to run a chain: walk
@@ -802,6 +818,43 @@ static void chain_execute_span(const SynthChainPlan *sp, int chain_idx,
             }
             if (cx->pb_marker_id == id && !out->pb_found)
             { out->pbR = cr; out->pbG = cg; out->pbB = cb; out->pb_found = 1; }
+        }
+        else if (id == IMAGE_CHAIN_INSERT_OUT_LUXGRAIN)
+        {
+            /* Stage the conditioned line at the send's position; the audio
+             * thread pulls the unipolar mix and folds it into the granular
+             * engine's band cells (luxgrain_feed_tick). Transport: same
+             * per-chain authority as LuxSynth — HOLD skips re-staging (the
+             * engine's spread ring keeps playing the past, by design), STOP
+             * ramps the line to silence then deactivates the slot (the feed
+             * wipes the ring after the debounce). */
+            if (cx->lx_line != NULL)
+            {
+                const int bank = sp->insert_state_idx[i];
+                int freeze = 0, fade = 0;
+                if (!cx->player_fed)
+                    chain_send_transport(sp, &freeze, &fade);
+                if (cx->force_play)
+                    freeze = 0;
+                if (freeze != 1)
+                {
+                    const float gv = send_transport_gain(
+                        &s_lg_send_ramp[chain_idx], freeze, fade);
+                    if (gv <= 0.0f)
+                        synth_staging_luxgrain_set_inactive(chain_idx);
+                    else
+                    {
+                        luxgrain_condition_line(cr, cg, cb, bank, cx->lx_line,
+                                                nb_pixels);
+                        if (gv < 0.999f)
+                            for (int px = 0; px < nb_pixels; px++)
+                                cx->lx_line[px] *= gv;
+                        synth_staging_stage_luxgrain(chain_idx, bank,
+                                                     cx->lx_line,
+                                                     cr, cg, cb, nb_pixels);
+                    }
+                }
+            }
         }
         else if (id == IMAGE_CHAIN_INSERT_SAMPLER)
         {
@@ -1056,6 +1109,8 @@ static void player_stagings_set_inactive_impl(int is_score, int player_slot)
                 synth_staging_luxsynth_set_inactive(c);
             else if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXWAVE)
                 synth_staging_luxwave_set_inactive(c);
+            else if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXGRAIN)
+                synth_staging_luxgrain_set_inactive(c);
         }
     }
 }
@@ -2128,6 +2183,12 @@ void *audioProcessingThread(void *arg) {
     struct timeval iteration_start, iteration_end;
     gettimeofday(&iteration_start, NULL);
 
+#ifdef VST_MODE
+    /* Zero-CPU contract — did the LuxStral render actually run this
+     * iteration? Gates the per-family profiler attribution below. */
+    int luxstral_active = 1;
+#endif
+
     // Call synthesis routine directly with stable image data
     // This will NEVER block, even if scanner disconnects!
 #ifdef VST_MODE
@@ -2137,15 +2198,31 @@ void *audioProcessingThread(void *arg) {
       ChainPlan planB_render;
       chain_plan_get(&planB_render);
 
+      /* Zero-CPU contract: an engine that is disabled OR has no OUT send in
+       * any chain gets NO work at all — its feed tick is skipped and (for
+       * LuxStral) the render collapses to a silence commit below. */
+      const uint32_t render_gates =
+          __atomic_load_n(&g_engine_render_gates, __ATOMIC_ACQUIRE);
+
       /* M4 — LuxSynth engine feed: mix the staged "→ LUXSYNTH" sends, run ONE
        * FFT and push the spectral data (cheap no-op when nothing changed).
        * Replaces the UI-thread bridge — the engine sounds with the editor
        * closed. */
-      luxsynth_feed_tick(&planB_render);
+      if (render_gates & (1u << 1))
+        luxsynth_feed_tick(&planB_render);
 
       /* M5 — LuxWave wavetable feed: bipolar mix of the staged "→ LUXWAVE"
        * sends + Chain-2 transport envelope. */
-      pipeline_luxwave_feed_tick(&planB_render);
+      if (render_gates & (1u << 2))
+        pipeline_luxwave_feed_tick(&planB_render);
+
+      /* LuxGrain granular feed: unipolar mix of the staged "→ LUXGRAIN"
+       * sends → band-cell fold (cheap no-op when nothing restaged). */
+      if (render_gates & (1u << 3))
+        luxgrain_feed_tick(&planB_render);
+
+      luxstral_active = (render_gates & 1u) != 0
+                        && planB_render.num_ls_sends > 0;
 
       {
         /* ── PULL MIX — THE additive writer (P4-M4, D1) ───────────────────
@@ -2224,8 +2301,15 @@ void *audioProcessingThread(void *arg) {
         pthread_mutex_unlock(&mdb->mutex);
         }
 
-        synth_AudioProcess(audio_read_R, audio_read_G, audio_read_B,
-                           context->doubleBuffer);
+        if (luxstral_active)
+          synth_AudioProcess(audio_read_R, audio_read_G, audio_read_B,
+                             context->doubleBuffer);
+        else
+          /* Engine gated (disabled / no "→ LUXSTRAL" send): commit SILENT
+           * buffers instead of rendering — processBlock keeps consuming and
+           * signalling, so this loop (and the feed ticks above) keeps its
+           * cadence. The full additive render costs nothing while idle. */
+          synth_AudioProcess_silence();
       }
     }
 #else
@@ -2242,8 +2326,11 @@ void *audioProcessingThread(void *arg) {
     // Access VST's global profiler
     extern RTProfiler g_vst_rt_profiler;
     rt_profiler_report_audio_thread_iteration(&g_vst_rt_profiler, elapsed_us);
-    // Per-family attribution: the synth thread IS the LuxStral engine.
-    rt_profiler_engine_report(&g_vst_rt_profiler, RT_ENGINE_LUXSTRAL, elapsed_us);
+    // Per-family attribution: the synth thread IS the LuxStral engine — but
+    // only when its render actually ran (an idle iteration is feed ticks +
+    // a silence commit, not LuxStral CPU).
+    if (luxstral_active)
+      rt_profiler_engine_report(&g_vst_rt_profiler, RT_ENGINE_LUXSTRAL, elapsed_us);
 #endif
 
 #ifndef VST_MODE

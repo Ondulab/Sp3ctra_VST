@@ -478,9 +478,11 @@ void ChainModel::validateAndRepair()
     int samplerBudget  = kMaxSamplerEngines;// at most kMaxSamplerEngines engines model-wide
     // M6 — engine sends: up to 8 per TYPE model-wide (independent pools).
     auto sendIdx = [](ModuleType t) noexcept {
-        return t == ModuleType::LuxStral ? 0 : t == ModuleType::LuxSynth ? 1 : 2;
+        return t == ModuleType::LuxStral ? 0 : t == ModuleType::LuxSynth ? 1
+             : t == ModuleType::LuxWave  ? 2 : 3;
     };
-    int sendBudget[3] = { kMaxEngineSends, kMaxEngineSends, kMaxEngineSends };
+    int sendBudget[4] = { kMaxEngineSends, kMaxEngineSends, kMaxEngineSends,
+                          kMaxEngineSends };
     // P5-M1 — media pools (per kind) + score-player pool (per FAMILY).
     auto mediaIdx = [](ModuleType t) noexcept {
         return t == ModuleType::Image ? 0 : t == ModuleType::Video ? 1 : 2;

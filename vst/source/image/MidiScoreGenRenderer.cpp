@@ -534,7 +534,7 @@ scoregen::RenderResult renderStrip(
     const int h = juce::jmax(2, (int) std::round(mmToPx(settings.spectroHeightMM, dpiY)));
     if ((juce::int64) w * (juce::int64) h > (juce::int64) 200'000'000)
         return fail("Strip too large (" + juce::String(w) + " x " + juce::String(h)
-                    + " px) — lower the resolution or shorten the window");
+                    + juce::String::fromUTF8(" px) — lower the resolution or shorten the window"));
 
     juce::Image img(juce::Image::RGB, w, h, true);
     {
@@ -641,7 +641,7 @@ scoregen::RenderResult renderPage(
         g.setColour(juce::Colours::black);
         g.setFont(juce::FontOptions(labelH * 0.72f));
         g.drawText(juce::File(data.sourcePath).getFileName()
-                       + "  —  page " + juce::String(pageIndex + 1)
+                       + juce::String::fromUTF8("  —  page ") + juce::String(pageIndex + 1)
                        + "/" + juce::String(nPages),
                    juce::Rectangle<float>((float) spectroLeft,
                                           (float) mmToPx(2.0, dpi),
@@ -656,7 +656,7 @@ scoregen::RenderResult renderPage(
                        + juce::String(settings.spectroHeightMM, 3) + " mm  |  "
                        + juce::String(settings.writingSpeed, 1) + " cm/s  |  "
                        + juce::String(t0, 1) + "-" + juce::String(t0 + pageSec, 1) + " s  |  "
-                       + juce::String(dpi, 0) + " DPI — print at 100%",
+                       + juce::String(dpi, 0) + juce::String::fromUTF8(" DPI — print at 100%"),
                    juce::Rectangle<float>((float) spectroLeft,
                                           (float) mmToPx(6.5, dpi),
                                           (float) spectroWidth, (float) mmToPx(3.5, dpi)),

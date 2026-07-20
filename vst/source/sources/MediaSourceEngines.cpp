@@ -201,22 +201,36 @@ void ImageSourceEngine::tick(double nowMs)
     {
         const int lm = loopMode_.load();
 
+        // Scan bounds: the transport is confined to [lo, hi]. Crossed markers
+        // are normalised, a degenerate span is widened so the head still moves.
+        // durS_ stays the FULL-image traversal time — narrower bounds loop
+        // faster at the same scan speed.
+        const float a = scanStart_.load(), b = scanEnd_.load();
+        double lo = (double) juce::jmin(a, b);
+        double hi = (double) juce::jmax(a, b);
+        if (hi - lo < 1e-3)
+            hi = juce::jmin(1.0, lo + 1e-3);
+        const double span = hi - lo;
+
         if (justStarted_.exchange(false))
         {
             dir_ = (lm == MediaSrc::Reverse) ? -1 : +1;
             // ONCE restart from the matching edge when the head already sits there
-            if (lm == MediaSrc::Once && dir_ > 0 && head_ >= 1.0)
-                head_ = 0.0;
+            if (lm == MediaSrc::Once && dir_ > 0 && head_ >= hi)
+                head_ = lo;
         }
+        // Pull the head inside the bounds (start outside them, or bounds moved
+        // while playing).
+        head_ = juce::jlimit(lo, hi, head_);
 
         head_ += dir_ * (dt / (double) durS_.load());
 
         switch (lm)
         {
             case MediaSrc::Once:
-                if (head_ >= 1.0)
+                if (head_ >= hi)
                 {
-                    head_ = 1.0;
+                    head_ = hi;
                     playing_.store(false, std::memory_order_release);
                     if (onPlaybackFinished)
                     {
@@ -224,19 +238,19 @@ void ImageSourceEngine::tick(double nowMs)
                         juce::MessageManager::callAsync([cb] { cb(); });
                     }
                 }
-                else if (head_ < 0.0)
-                    head_ = 0.0;
+                else if (head_ < lo)
+                    head_ = lo;
                 break;
 
             case MediaSrc::Loop:
             case MediaSrc::Reverse:
-                while (head_ > 1.0) head_ -= 1.0;
-                while (head_ < 0.0) head_ += 1.0;
+                while (head_ > hi) head_ -= span;
+                while (head_ < lo) head_ += span;
                 break;
 
             case MediaSrc::PingPong:
-                if (head_ >= 1.0) { head_ = juce::jmax(0.0, 2.0 - head_); dir_ = -1; }
-                else if (head_ <= 0.0) { head_ = juce::jmin(1.0, -head_); dir_ = +1; }
+                if (head_ >= hi) { head_ = juce::jmax(lo, 2.0 * hi - head_); dir_ = -1; }
+                else if (head_ <= lo) { head_ = juce::jmin(hi, 2.0 * lo - head_); dir_ = +1; }
                 break;
         }
         doPublish = true;

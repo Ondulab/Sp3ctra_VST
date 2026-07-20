@@ -119,7 +119,7 @@ public:
             if (! info.ok)
             {
                 out.error = "Cached render missing (" + req_.wavFile.getFileName()
-                          + ") — GENERATE again";
+                          + juce::String::fromUTF8(") — GENERATE again");
                 finish (std::move (out));
                 return;
             }

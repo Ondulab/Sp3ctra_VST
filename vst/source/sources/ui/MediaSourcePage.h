@@ -4,7 +4,9 @@
  *
  * Layout: a large media preview with a draggable horizontal LINE cursor (the
  * row injected into the chain), plus the transport row:
- *   IMAGE  — PLAY/STOP, loop mode (Once/Loop/Reverse/Ping-Pong), scan time.
+ *   IMAGE  — PLAY/STOP, loop mode (Once/Loop/Reverse/Ping-Pong), scan time,
+ *            and two draggable SCAN BOUNDS confining the transport to a
+ *            region of the image (imgSrcScanStart/End, automatable).
  *   VIDEO  — PLAY/STOP, loop mode, speed, position scrub.
  *   CAMERA — line only (live feed, no transport).
  *
@@ -49,6 +51,10 @@ private:
     float  lineParamValue() const;
     void   setLineParam(float v, bool gestureBegin, bool gestureEnd);
 
+    // IMAGE scan bounds (imgSrcScanStart/End) — no-ops for VIDEO/CAMERA.
+    float  scanParamValue(bool start) const;
+    void   setScanParam(bool start, float v, bool gestureBegin, bool gestureEnd);
+
     // Source picking (formerly the SETUP face)
     void chooseMedia();
     void clearMedia();
@@ -70,12 +76,17 @@ private:
         juce::Image image;          ///< latest preview (updated by the timer)
         float lineFrac     = 0.5f;  ///< param-bound line cursor
         float playheadFrac = -1.f;  ///< engine playhead (<0 = hidden)
+        float scanStartFrac = -1.f; ///< IMAGE scan bounds (<0 = hidden)
+        float scanEndFrac   = -1.f;
         juce::String emptyHint;
 
     private:
+        enum class DragTarget { Line, ScanStart, ScanEnd };
+
         juce::Rectangle<float> imageArea() const;
-        void dragToLine(const juce::MouseEvent& e, bool begin, bool end);
+        void dragTo(const juce::MouseEvent& e, bool begin, bool end);
         MediaSourcePage& owner;
+        DragTarget drag_ = DragTarget::Line;
     };
 
     Sp3ctraAudioProcessor& processor;
