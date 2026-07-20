@@ -859,7 +859,7 @@ private:
         const auto s = settingsWithTuning();
         const int pages = midiscoregen::pageCount(data, s);
         fileLabel.setText(juce::File(data.sourcePath).getFileName()
-                          + "  —  " + juce::String((int) data.notes.size()) + " notes, "
+                          + juce::String::fromUTF8("  —  ") + juce::String((int) data.notes.size()) + " notes, "
                           + juce::String(data.numVoices) + " voice(s), "
                           + juce::String(data.durationSec, 1) + " s, "
                           + juce::String(pages) + " page(s) A4",
@@ -926,7 +926,7 @@ private:
         scrubHead        = -1;
         playDirty        = false;
 
-        juce::String msg = juce::String(loadedFrameCount) + " frames loaded — "
+        juce::String msg = juce::String(loadedFrameCount) + juce::String::fromUTF8(" frames loaded — ")
                          + "real tempo at Speed " + juce::String(pxPerSec / 1000.0, 2) + "x";
         if (reduced)
             msg += " (long piece: time grid reduced to "
@@ -1030,7 +1030,7 @@ private:
         if (nPages > 60)
         {
             logLabel.setText("Too many pages (" + juce::String(nPages)
-                             + ") — raise the writing speed",
+                             + juce::String::fromUTF8(") — raise the writing speed"),
                              juce::dontSendNotification);
             return;
         }

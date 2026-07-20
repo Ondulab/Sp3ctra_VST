@@ -2,14 +2,17 @@
  * @file AudioMixPanel.h
  * @brief AUDIO MIX — bottom half of ZONE 4 (synth-split P2b).
  *
- * The three global engines + MASTER as a vertical mixer: one strip each with
+ * The global engines + MASTER as a vertical mixer: one strip each with
  *
  *   ● power LED · engine name · sends count
  *   VU meter (post-volume peak, fed by processBlock) + vertical fader
  *
- * Clicking a strip body opens the ENGINE page in ZONE 3 (editor callback);
- * a strip with zero sends renders dimmed. In MINI mode (ZONE 4 collapsed to
- * its 24 px band) only a vertical MASTER fader + its VU remain visible.
+ * Only engines with at least one OUT send placed in a chain are shown — a
+ * send-less engine's strip is hidden entirely (it is also skipped by the
+ * audio side: zero-CPU contract). Faders display 0..100 (percent), not the
+ * raw 0..1 parameter value. Clicking a strip body opens the ENGINE page in
+ * ZONE 3 (editor callback). In MINI mode (ZONE 4 collapsed to its 24 px
+ * band) only a vertical MASTER fader + its VU remain visible.
  */
 #pragma once
 
@@ -38,8 +41,9 @@ public:
             { ModuleType::LuxStral, "luxstralVolume" },
             { ModuleType::LuxSynth, "luxsynthVolume" },
             { ModuleType::LuxWave,  "luxwaveVolume"  },
+            { ModuleType::LuxGrain, "luxgrainVolume" },
         };
-        for (int i = 0; i < 3; ++i)
+        for (int i = 0; i < kNumEngines; ++i)
         {
             auto& s = strips[(size_t) i];
             s.type   = kEngines[i].t;
@@ -58,12 +62,13 @@ public:
             initFader(*s.fader, true);
             s.faderAttach = std::make_unique<SldAttach>(p.getAPVTS(),
                 kEngines[i].volumeId, *s.fader);
+            setPercentDisplay(*s.fader);
             s.learn = std::make_unique<MidiLearnAttachment>(p.getMidiMap(),
                 *s.fader, kEngines[i].volumeId);
         }
 
         // MASTER — output gain after all engines. No LED, no engine page.
-        auto& m = strips[3];
+        auto& m = strips[kMasterIdx];
         m.type   = ModuleType::Sp3ctra;   // sentinel — never clickable
         m.colour = juce::Colour(0xffc9d4e0);
         m.name   = "MASTER";
@@ -71,6 +76,7 @@ public:
         initFader(*m.fader, true);
         m.faderAttach = std::make_unique<SldAttach>(processor.getAPVTS(),
                                                     "masterVolume", *m.fader);
+        setPercentDisplay(*m.fader);
         m.learn = std::make_unique<MidiLearnAttachment>(processor.getMidiMap(),
                                                         *m.fader, "masterVolume");
 
@@ -83,6 +89,7 @@ public:
         miniMasterLearn = std::make_unique<MidiLearnAttachment>(processor.getMidiMap(),
                                                                 miniMaster, "masterVolume");
 
+        recountSends();     // hide send-less strips from the first paint
         startTimerHz(30);   // VU refresh (+ sends recount every ~8 ticks)
     }
 
@@ -99,7 +106,7 @@ public:
     void setSelectedEngine(ModuleType t, bool selected)
     {
         for (auto& s : strips)
-            s.selected = selected && s.type == t && &s != &strips[3];
+            s.selected = selected && s.type == t && &s != &strips[kMasterIdx];
         repaint();
     }
 
@@ -113,7 +120,8 @@ public:
         if (mini_)
         {
             // Mini VU beside the master fader.
-            drawVu(g, miniVuArea, strips[3].disp, strips[3].colour, true);
+            drawVu(g, miniVuArea, strips[kMasterIdx].disp,
+                   strips[kMasterIdx].colour, true);
             return;
         }
 
@@ -125,34 +133,34 @@ public:
 
         for (auto& s : strips)
         {
-            const bool isMaster = (&s == &strips[3]);
-            const bool fed      = isMaster || s.sendCount > 0;
-            const float alpha   = fed ? 1.0f : 0.45f;
+            if (s.area.isEmpty())
+                continue;   // send-less engine — strip hidden entirely
+            const bool isMaster = (&s == &strips[kMasterIdx]);
 
             // Strip body
             auto b = s.area.toFloat().reduced(1.f);
-            g.setColour(s.colour.withAlpha(0.06f * alpha));
+            g.setColour(s.colour.withAlpha(0.06f));
             g.fillRoundedRectangle(b, 4.f);
             g.setColour(s.selected ? s.colour.withAlpha(0.95f)
-                                   : s.colour.withAlpha(0.28f * alpha));
+                                   : s.colour.withAlpha(0.28f));
             g.drawRoundedRectangle(b, 4.f, s.selected ? 1.5f : 1.f);
 
             // Name (tiny, centred under the LED row)
-            g.setColour(s.colour.brighter(0.35f).withAlpha(alpha));
+            g.setColour(s.colour.brighter(0.35f));
             g.setFont(juce::Font(juce::FontOptions(9.5f)).boldened());
             g.drawText(s.name, s.nameArea, juce::Justification::centred, true);
 
-            // Sends count under the name ("2 SEND" / "NO SEND"); master skips it.
+            // Sends count under the name ("2 SEND"); master skips it.
             if (! isMaster)
             {
                 g.setFont(juce::FontOptions(8.5f));
-                g.setColour(fed ? s.colour.withAlpha(0.75f) : juce::Colour(0xff5a5a66));
-                g.drawText(fed ? juce::String(s.sendCount) + " SEND" : juce::String("NO SEND"),
+                g.setColour(s.colour.withAlpha(0.75f));
+                g.drawText(juce::String(s.sendCount) + " SEND",
                            s.badgeArea, juce::Justification::centred, false);
             }
 
             // VU meter
-            drawVu(g, s.vuArea, s.disp, s.colour, fed);
+            drawVu(g, s.vuArea, s.disp, s.colour, true);
         }
     }
 
@@ -180,22 +188,40 @@ public:
 
         miniMaster.setVisible(false);
 
+        // Only strips with a send (plus MASTER) get laid out — hidden strips
+        // keep an empty area (skipped by paint/mouseUp) and no visible child.
+        auto isShown = [this](const Strip& s)
+        {
+            return &s == &strips[kMasterIdx] || s.sendCount > 0;
+        };
+
         const int pad  = 4;
         const int gap  = 4;
-        const int stripW = juce::jmax(44, (getWidth() - 2 * pad - 3 * gap) / 4);
+        int nStrips = 0;
+        for (auto& s : strips)
+            if (isShown(s)) ++nStrips;
+        const int stripW = juce::jmax(40, (getWidth() - 2 * pad
+                                           - (nStrips - 1) * gap) / nStrips);
         int x = pad;
         int y = kHeaderH;
         const int h = getHeight() - y - pad;
 
         for (auto& s : strips)
         {
+            if (! isShown(s))
+            {
+                s.area = s.nameArea = s.badgeArea = s.vuArea = {};
+                if (s.led)   s.led->setVisible(false);
+                if (s.fader) s.fader->setVisible(false);
+                continue;
+            }
             s.area = { x, y, stripW, h };
 
             const int cx  = x + 3;
             const int cw  = stripW - 6;
             int cy = y + 4;
 
-            const bool isMaster = (&s == &strips[3]);
+            const bool isMaster = (&s == &strips[kMasterIdx]);
             if (s.led)
             {
                 s.led->setVisible(true);
@@ -228,7 +254,7 @@ public:
     void mouseUp(const juce::MouseEvent& e) override
     {
         if (mini_) return;
-        for (size_t i = 0; i < 3; ++i)   // master strip is not clickable
+        for (size_t i = 0; i < kNumEngines; ++i)   // master strip is not clickable
             if (strips[i].area.contains(e.getPosition()))
             {
                 if (onEngineSelected) onEngineSelected(strips[i].type);
@@ -281,6 +307,36 @@ private:
         addAndMakeVisible(s);
     }
 
+    /** Value box shows 0..100 (percent), not the raw 0..1 param value. Must
+     *  run AFTER the SliderAttachment (which installs the parameter's own
+     *  text conversion). */
+    static void setPercentDisplay(juce::Slider& s)
+    {
+        s.textFromValueFunction = [](double v)
+        { return juce::String(juce::roundToInt(v * 100.0)); };
+        s.valueFromTextFunction = [](const juce::String& t)
+        { return juce::jlimit(0.0, 1.0, t.getDoubleValue() / 100.0); };
+        s.updateText();
+    }
+
+    /** Pull per-engine OUT send counts from the processor (derived on every
+     *  chain-model change). Returns true when any count changed. */
+    bool recountSends()
+    {
+        const int n[kNumEngines] = { processor.sendsLuxStral(),
+                                     processor.sendsLuxSynth(),
+                                     processor.sendsLuxWave(),
+                                     processor.sendsLuxGrain() };
+        bool changed = false;
+        for (size_t i = 0; i < kNumEngines; ++i)
+            if (n[i] != strips[i].sendCount)
+            {
+                strips[i].sendCount = n[i];
+                changed = true;
+            }
+        return changed;
+    }
+
     /** Peak bar with a soft perceptual curve; red cap above 1.0 (clip). */
     static void drawVu(juce::Graphics& g, juce::Rectangle<int> r,
                        float level, juce::Colour accent, bool lit)
@@ -307,8 +363,9 @@ private:
     void timerCallback() override
     {
         // VU: read processor peaks, keep our own display release for smoothness.
-        const float lv[4] = { processor.meterLuxStral(), processor.meterLuxSynth(),
-                              processor.meterLuxWave(),  processor.meterMaster() };
+        const float lv[5] = { processor.meterLuxStral(), processor.meterLuxSynth(),
+                              processor.meterLuxWave(),  processor.meterLuxGrain(),
+                              processor.meterMaster() };
         bool dirty = false;
         for (size_t i = 0; i < strips.size(); ++i)
         {
@@ -317,19 +374,12 @@ private:
             if (std::abs(next - s.disp) > 0.002f) { s.disp = next; dirty = true; }
         }
 
-        // Sends recount (cheap; every ~8th tick ≈ 4 Hz)
-        if (++tick_ % 8 == 0)
+        // Sends recount (cheap; every ~8th tick ≈ 4 Hz). A change shows/hides
+        // strips → relayout, not just repaint.
+        if (++tick_ % 8 == 0 && recountSends())
         {
-            const auto& model = processor.getChainModel();
-            for (size_t i = 0; i < 3; ++i)
-            {
-                int n = 0;
-                for (const auto& chain : model.chains)
-                    for (const auto& mi : chain.modules)
-                        if (mi.type == strips[i].type)
-                            ++n;
-                if (n != strips[i].sendCount) { strips[i].sendCount = n; dirty = true; }
-            }
+            resized();
+            dirty = true;
         }
 
         if (dirty)
@@ -341,7 +391,9 @@ private:
     bool mini_ { false };
     int  tick_ { 0 };
 
-    std::array<Strip, 4> strips;   // LuxStral / LuxSynth / LuxWave / MASTER
+    static constexpr size_t kNumEngines = 4;
+    static constexpr size_t kMasterIdx  = kNumEngines;
+    std::array<Strip, kNumEngines + 1> strips;   // engines + MASTER
 
     juce::Slider miniMaster;
     juce::Rectangle<int> miniVuArea;

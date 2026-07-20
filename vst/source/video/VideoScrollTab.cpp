@@ -93,12 +93,12 @@ VideoScrollTab::VideoScrollTab(Sp3ctraAudioProcessor& processor)
     sourceCombo_.addItem("LuxStral",         1);
     sourceCombo_.addItem("LuxSynth/LuxWave", 2);
     sourceCombo_.addItem("AllSynth",         3);
-    sourceCombo_.setTooltip(
+    sourceCombo_.setTooltip(juce::String::fromUTF8(
         "Which synthesis engine's image input to visualize.\n"
         "  - LuxStral          → image fed to LuxStral synthesis\n"
         "  - LuxSynth/LuxWave  → image fed to LuxSynth and LuxWave (shared)\n"
         "  - AllSynth          → 50/50 blend of both streams above\n"
-        "The waterfall always matches what the audio engine actually processes.");
+        "The waterfall always matches what the audio engine actually processes."));
 
 
     addAndMakeVisible(sourceCombo_);

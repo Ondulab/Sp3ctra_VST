@@ -60,6 +60,15 @@ int32_t synth_IfftInit(void);
 void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G, uint8_t *buffer_B, struct DoubleBuffer *db);
 
 /**
+ * @brief Zero-CPU idle commit — publish a SILENT output buffer.
+ *
+ * Used by audioProcessingThread when the LuxStral engine is gated (disabled
+ * or no "→ LUXSTRAL" send placed in any chain): keeps the processBlock
+ * producer/consumer handshake paced without running the additive render.
+ */
+void synth_AudioProcess_silence(void);
+
+/**
  * @brief Main synthesis processing function
  * @param imageData Input image data array
  * @param audioLeft Output left channel audio buffer

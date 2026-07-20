@@ -130,6 +130,7 @@ target_sources(Sp3ctraVST
         source/ui/ChainRackComponent.h
         source/ui/EngineAudioPanels.cpp
         source/ui/EngineAudioPanels.h
+        source/ui/LuxGrainPanel.h
         source/ui/AudioPanelWidgets.h
         source/ui/WaterfallColumnComponent.cpp
         source/ui/WaterfallColumnComponent.h
@@ -161,6 +162,7 @@ target_sources(Sp3ctraVST
         source/ui/setup/LuxSynthSetupPanel.h
         source/ui/setup/LuxWaveSetupPanel.cpp
         source/ui/setup/LuxWaveSetupPanel.h
+        source/ui/setup/LuxGrainSetupPanel.h
         source/ui/setup/SamplerSetupPanel.cpp
         source/ui/setup/SamplerSetupPanel.h
         source/ui/setup/ScoreSetupPanel.cpp
@@ -242,6 +244,7 @@ target_sources(Sp3ctraVST
         source/synthesis/luxstral/wave_generation.h
         source/synthesis/luxstral/luxstral_wavetable.c
         source/synthesis/luxstral/luxstral_wavetable.h
+        source/ui/TimbreWaveformStrip.h
         source/synthesis/luxstral/pow_approx.c
         source/synthesis/luxstral/pow_approx.h
         source/synthesis/luxstral/strokeforge.c
@@ -261,6 +264,12 @@ target_sources(Sp3ctraVST
         source/synthesis/luxwave/synth_luxwave_engine.h
         source/synthesis/luxwave/luxwave_vst_adapter.c
         source/synthesis/luxwave/luxwave_vst_adapter.h
+
+        # LuxGrain Granular Synthesis Engine
+        source/synthesis/luxgrain/synth_luxgrain_engine.c
+        source/synthesis/luxgrain/synth_luxgrain_engine.h
+        source/synthesis/luxgrain/luxgrain_vst_adapter.c
+        source/synthesis/luxgrain/luxgrain_vst_adapter.h
 
         # LuxPitch UI Tab
         source/image/LuxPitchTabComponent.h
@@ -382,6 +391,8 @@ target_sources(Sp3ctraVST
         source/processing/synth_staging.h
         source/processing/luxsynth_feed.c
         source/processing/luxsynth_feed.h
+        source/processing/luxgrain_feed.c
+        source/processing/luxgrain_feed.h
         source/processing/lux_pitch.c
         source/processing/lux_mask.c
         source/processing/lux_reverb.c
@@ -450,6 +461,7 @@ target_include_directories(Sp3ctraVST
         ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/common
         ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/luxwave
         ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/luxsynth
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/luxgrain
         ${CMAKE_CURRENT_SOURCE_DIR}/source/synthesis/luxstral
         ${CMAKE_CURRENT_SOURCE_DIR}/source/luxsampler
         ${CMAKE_CURRENT_SOURCE_DIR}/source/sampler

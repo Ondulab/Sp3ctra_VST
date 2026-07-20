@@ -25,6 +25,7 @@
 #include "ui/ChainRackComponent.h"
 #include "ui/KeyboardRulerComponent.h"
 #include "ui/EngineAudioPanels.h"
+#include "ui/LuxGrainPanel.h"
 #include "ui/SynthOutPageComponent.h"
 #include "ui/AudioMixPanel.h"
 #include "ui/VideoMixerColumn.h"
@@ -37,6 +38,7 @@
 #include "ui/setup/LuxStralSetupPanel.h"
 #include "ui/setup/LuxSynthSetupPanel.h"
 #include "ui/setup/LuxWaveSetupPanel.h"
+#include "ui/setup/LuxGrainSetupPanel.h"
 #include "ui/setup/SamplerSetupPanel.h"
 #include "ui/setup/ScoreSetupPanel.h"
 #include "UITheme.h"
@@ -552,6 +554,7 @@ private:
     std::unique_ptr<LuxHarmoTabComponent>  harmoPage;        // FX > SCALE
     std::unique_ptr<VideoScrollPage>      videoScrollPage;   // OUT > VIDEO SCROLL (per-instance)
     std::unique_ptr<AudioWavePanel>       audioWavePanel;
+    std::unique_ptr<LuxGrainPanel>        luxGrainPanel;    // LUXGRAIN engine page (M4)
     std::unique_ptr<SynthOutPageComponent> synthOutPage;   // OUT/send page (synth-split P2)
     std::unique_ptr<MediaSourcePage>      imageSrcPage;      // M9 — SRC > IMAGE
     std::unique_ptr<MediaSourcePage>      videoSrcPage;      // M9 — SRC > VIDEO
@@ -564,6 +567,7 @@ private:
     std::unique_ptr<LuxStralSetupPanel>   stralSetup;
     std::unique_ptr<LuxSynthSetupPanel>   synthSetup;
     std::unique_ptr<LuxWaveSetupPanel>    waveSetup;
+    std::unique_ptr<LuxGrainSetupPanel>   grainSetup;
     std::unique_ptr<SamplerSetupPanel>    samplerSetup;
     std::unique_ptr<ScoreSetupPanel>      scoreSetup;
     // (M9 media modules have no SETUP face — picking lives on MediaSourcePage)

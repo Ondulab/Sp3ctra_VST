@@ -61,6 +61,7 @@ public:
             {
                 case ModuleType::LuxSynth: return lxOutParam(slot_, suffix);
                 case ModuleType::LuxWave:  return lwOutParam(slot_, suffix);
+                case ModuleType::LuxGrain: return lgOutParam(slot_, suffix);
                 default:                   return lsOutParam(slot_, suffix);
             }
         };

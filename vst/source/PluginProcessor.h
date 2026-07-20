@@ -95,6 +95,19 @@ public:
     // Public accessors for UI
     juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
 
+    /** Decode an audio file and load it as the LuxStral timbre wavetable
+     *  (message thread). rootHzOverride > 0 skips pitch detection. On success
+     *  the path is remembered for session persistence (scan restore). */
+    bool loadTimbreSampleFile(const juce::File& file, float rootHzOverride,
+                              juce::String& errorOut);
+
+    /** Decode an audio file and publish it as the LuxGrain grain material
+     *  (message thread; NSDF root detection inside the engine). The path is
+     *  remembered for session persistence. */
+    bool loadLuxGrainSampleFile(const juce::File& file, juce::String& errorOut);
+    void clearLuxGrainSample();
+    const juce::String& luxgrainSamplePath() const { return luxgrainSamplePath_; }
+
     /** Slots (0..7) of every VIDEO SCROLL output instance currently patched into
      *  a chain, ascending. Drives the right-band mixer's dynamic voice list.
      *  Message-thread only (reads the editable chain model). */
@@ -343,7 +356,16 @@ public:
     float meterLuxStral() const noexcept { return meterLuxStral_.load(std::memory_order_relaxed); }
     float meterLuxSynth() const noexcept { return meterLuxSynth_.load(std::memory_order_relaxed); }
     float meterLuxWave()  const noexcept { return meterLuxWave_ .load(std::memory_order_relaxed); }
+    float meterLuxGrain() const noexcept { return meterLuxGrain_.load(std::memory_order_relaxed); }
     float meterMaster()   const noexcept { return meterMaster_  .load(std::memory_order_relaxed); }
+
+    /** AUDIO MIX — number of OUT sends placed per engine across all chains
+     *  (deriveAndPublishChainPlan). 0 = the engine is hidden from the mixer
+     *  AND its render is skipped entirely (zero-CPU contract). */
+    int sendsLuxStral() const noexcept { return sendCountLuxStral_.load(std::memory_order_relaxed); }
+    int sendsLuxSynth() const noexcept { return sendCountLuxSynth_.load(std::memory_order_relaxed); }
+    int sendsLuxWave()  const noexcept { return sendCountLuxWave_ .load(std::memory_order_relaxed); }
+    int sendsLuxGrain() const noexcept { return sendCountLuxGrain_.load(std::memory_order_relaxed); }
 
     /** Pitch/Mask/FX state-pool slot bound to a MODULE INSTANCE (0..7), or 0
      *  when unknown. The binding is keyed by the ModuleInstance UUID and
@@ -603,6 +625,23 @@ private:
     std::atomic<float>* luxsynthMidiChannelParam    = nullptr;
     std::atomic<float>* luxsynthOctaveOffsetParam   = nullptr;
     std::atomic<float>* luxsynthVolumeParam         = nullptr;
+    std::atomic<float>* luxgrainEnabledParam        = nullptr;
+    std::atomic<float>* luxgrainVolumeParam         = nullptr;
+    std::atomic<float>* luxgrainDensityParam        = nullptr;
+    std::atomic<float>* luxgrainDensityShapeParam   = nullptr;
+    std::atomic<float>* luxgrainSpreadParam         = nullptr;
+    std::atomic<float>* luxgrainSizeMinParam        = nullptr;
+    std::atomic<float>* luxgrainSizeMaxParam        = nullptr;
+    std::atomic<float>* luxgrainTextureParam        = nullptr;
+    std::atomic<float>* luxgrainJitterParam         = nullptr;
+    std::atomic<float>* luxgrainWidthParam          = nullptr;
+    std::atomic<float>* luxgrainAmpFollowParam      = nullptr;
+    std::atomic<float>* luxgrainEnvShapeParam       = nullptr;
+    std::atomic<float>* luxgrainColorPanParam       = nullptr;
+    std::atomic<float>* luxgrainEdgeParam           = nullptr;
+    std::atomic<float>* luxgrainBandsParam          = nullptr;
+    std::atomic<float>* luxgrainMaterialParam       = nullptr;
+    std::atomic<float>* luxgrainScrubParam          = nullptr;
     std::atomic<float>* luxwaveEnabledParam         = nullptr;
     std::atomic<float>* luxwaveMidiChannelParam     = nullptr;
     std::atomic<float>* luxwaveOctaveOffsetParam    = nullptr;
@@ -715,9 +754,16 @@ private:
     // ── UI VU meters (AUDIO MIX) — written by processBlock only ─────────────
     // Per-block peak accumulators (RT thread locals, folded + reset each block)
     // and the atomics the UI reads (peak with exponential release).
-    float lsPkBlock_ { 0.0f }, lxPkBlock_ { 0.0f }, lwPkBlock_ { 0.0f };
+    float lsPkBlock_ { 0.0f }, lxPkBlock_ { 0.0f }, lwPkBlock_ { 0.0f },
+          lgPkBlock_ { 0.0f };
     std::atomic<float> meterLuxStral_ { 0.0f }, meterLuxSynth_ { 0.0f },
-                       meterLuxWave_  { 0.0f }, meterMaster_   { 0.0f };
+                       meterLuxWave_  { 0.0f }, meterLuxGrain_ { 0.0f },
+                       meterMaster_   { 0.0f };
+    // Per-engine OUT send counts (message thread writes in
+    // deriveAndPublishChainPlan; UI + processBlock read). 0 → the engine's
+    // render is skipped (no CPU) and its AUDIO MIX strip is hidden.
+    std::atomic<int> sendCountLuxStral_ { 0 }, sendCountLuxSynth_ { 0 },
+                     sendCountLuxWave_  { 0 }, sendCountLuxGrain_ { 0 };
     // Per-engine sampler presence in the model (message thread, set in
     // deriveChainRouting) — combined with EACH engine's own enable param
     // (fsEngineParam(e,"Enabled")) to drive that engine's setEnabled().
@@ -736,6 +782,14 @@ private:
     void restoreScoreStateFromTree(const juce::ValueTree& t);
     juce::ValueTree luxstralWavetableToTree() const;          // user timbre wavetable (harmonics)
     void restoreLuxstralWavetableFromTree(const juce::ValueTree& t);
+    /** Timbre scan position (luxstralTimbrePos) — changes are coalesced here
+     *  and drained on the 30 ms timer: one re-extraction per tick max, never
+     *  one per automation/drag event. */
+    std::atomic<float> timbreScanPos_ { 0.5f };
+    std::atomic<bool>  timbreScanPending_ { false };
+    juce::String timbreSamplePath_;                            // full path ("" = none)
+    juce::String luxgrainSamplePath_;                          // LuxGrain material ("" = none)
+    double timbreScanLastMs_ = 0.0;   // playhead dt reference (0 = stopped)
     juce::ValueTree samplerSlotsStateToTree() const;          // both engines × 12 slots (+ overdub)
     juce::ValueTree seqStateToTree() const;                   // sequencer pattern + timing
     bool seqRestoredFromState_    = false;

@@ -936,6 +936,46 @@ void synth_AudioProcess(uint8_t *buffer_R, uint8_t *buffer_G,
   synth_AudioProcess_impl(&g_luxstral_engine, buffer_R, buffer_G, buffer_B, db, /*commit_now*/1);
 }
 
+// Zero-CPU idle commit: same slot selection / ready / flip protocol as the
+// real render, but the output is a memset — no worker pool, no IFFT. Keeps
+// processBlock consuming (and thus the synth-thread cadence) while the engine
+// is gated (disabled or zero "→ LUXSTRAL" sends).
+void synth_AudioProcess_silence(void) {
+  LuxStralEngine *eng = &g_luxstral_engine;
+  AudioImageBuffer *obL = (AudioImageBuffer *)eng->out_L;
+  AudioImageBuffer *obR = (AudioImageBuffer *)eng->out_R;
+  volatile int *obIdx = eng->out_index;
+  const int n = luxstral_get_audio_buffer_size();
+  if (n <= 0)
+    return;
+
+  int index = __atomic_load_n(obIdx, __ATOMIC_RELAXED);
+  if (__atomic_load_n(&obL[index].ready, __ATOMIC_ACQUIRE) != 0 ||
+      __atomic_load_n(&obR[index].ready, __ATOMIC_ACQUIRE) != 0) {
+    int alt_index = 1 - index;
+    if (__atomic_load_n(&obL[alt_index].ready, __ATOMIC_ACQUIRE) == 0 &&
+        __atomic_load_n(&obR[alt_index].ready, __ATOMIC_ACQUIRE) == 0)
+      index = alt_index;
+  }
+  if (!obL[index].data || !obR[index].data)
+    return;
+
+  memset(obL[index].data, 0, (size_t)n * sizeof(float));
+  memset(obR[index].data, 0, (size_t)n * sizeof(float));
+
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  uint64_t timestamp_us = (uint64_t)tv.tv_sec * 1000000ULL + (uint64_t)tv.tv_usec;
+  obL[index].write_timestamp_us = timestamp_us;
+  obR[index].write_timestamp_us = timestamp_us;
+
+  __atomic_store_n(&obL[index].ready, 1, __ATOMIC_RELEASE);
+  __atomic_store_n(&obR[index].ready, 1, __ATOMIC_RELEASE);
+
+  eng->last_write_index = index;
+  __atomic_store_n(obIdx, 1 - index, __ATOMIC_RELEASE);
+}
+
 /**
  * @brief Get the last calculated contrast factor (thread-safe)
  * @return Last contrast factor value (0.0-1.0 range typically)

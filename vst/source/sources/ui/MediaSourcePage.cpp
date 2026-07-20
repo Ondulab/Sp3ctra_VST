@@ -6,6 +6,8 @@
 #include "../MediaSourceEngines.h"
 #include "../../UITheme.h"
 
+#include <cmath>
+
 namespace
 {
     constexpr int kCtrlH   = 24;
@@ -47,6 +49,32 @@ void MediaSourcePage::PreviewComponent::paint(juce::Graphics& g)
     const auto area = imageArea();
     g.drawImage(image, area, juce::RectanglePlacement::stretchToFit);
 
+    // IMAGE scan bounds — the transport only reads [start, end]; the excluded
+    // regions are dimmed and each bound is a draggable cyan marker.
+    if (scanStartFrac >= 0.0f && scanEndFrac >= 0.0f)
+    {
+        const float lo  = juce::jmin(scanStartFrac, scanEndFrac);
+        const float hi  = juce::jmax(scanStartFrac, scanEndFrac);
+        const float yLo = area.getY() + lo * area.getHeight();
+        const float yHi = area.getY() + hi * area.getHeight();
+
+        g.setColour(juce::Colours::black.withAlpha(0.55f));
+        g.fillRect(area.getX(), area.getY(), area.getWidth(), yLo - area.getY());
+        g.fillRect(area.getX(), yHi, area.getWidth(), area.getBottom() - yHi);
+
+        const auto boundCol = juce::Colour(0xff4ab8e0);
+        g.setColour(boundCol);
+        g.fillRect(area.getX(), yLo - 1.0f, area.getWidth(), 2.0f);
+        g.fillRect(area.getX(), yHi - 1.0f, area.getWidth(), 2.0f);
+        // edge handles pointing into the readable region
+        juce::Path h;
+        h.addTriangle(area.getX(), yLo - 5.0f, area.getX(), yLo + 5.0f, area.getX() + 9.0f, yLo);
+        h.addTriangle(area.getRight(), yLo - 5.0f, area.getRight(), yLo + 5.0f, area.getRight() - 9.0f, yLo);
+        h.addTriangle(area.getX(), yHi - 5.0f, area.getX(), yHi + 5.0f, area.getX() + 9.0f, yHi);
+        h.addTriangle(area.getRight(), yHi - 5.0f, area.getRight(), yHi + 5.0f, area.getRight() - 9.0f, yHi);
+        g.fillPath(h);
+    }
+
     // Engine playhead (thin, behind the param cursor)
     if (playheadFrac >= 0.0f)
     {
@@ -64,22 +92,54 @@ void MediaSourcePage::PreviewComponent::paint(juce::Graphics& g)
     g.fillEllipse(area.getRight() - 5.0f,  y - 4.0f, 8.0f, 8.0f);
 }
 
-void MediaSourcePage::PreviewComponent::dragToLine(const juce::MouseEvent& e,
-                                                   bool begin, bool end)
+void MediaSourcePage::PreviewComponent::dragTo(const juce::MouseEvent& e,
+                                               bool begin, bool end)
 {
     const auto area = imageArea();
     if (area.getHeight() <= 0.0f)
         return;
     const float frac = juce::jlimit(0.0f, 1.0f,
         (e.position.y - area.getY()) / area.getHeight());
-    owner.setLineParam(frac, begin, end);
-    lineFrac = frac;
+    switch (drag_)
+    {
+        case DragTarget::Line:
+            owner.setLineParam(frac, begin, end);
+            lineFrac = frac;
+            break;
+        case DragTarget::ScanStart:
+            owner.setScanParam(true, frac, begin, end);
+            scanStartFrac = frac;
+            break;
+        case DragTarget::ScanEnd:
+            owner.setScanParam(false, frac, begin, end);
+            scanEndFrac = frac;
+            break;
+    }
     repaint();
 }
 
-void MediaSourcePage::PreviewComponent::mouseDown(const juce::MouseEvent& e) { dragToLine(e, true,  false); }
-void MediaSourcePage::PreviewComponent::mouseDrag(const juce::MouseEvent& e) { dragToLine(e, false, false); }
-void MediaSourcePage::PreviewComponent::mouseUp  (const juce::MouseEvent& e) { dragToLine(e, false, true);  }
+void MediaSourcePage::PreviewComponent::mouseDown(const juce::MouseEvent& e)
+{
+    // A click near a scan bound grabs THAT bound; the LINE cursor keeps
+    // priority when it sits closer (it is the primary control).
+    drag_ = DragTarget::Line;
+    const auto area = imageArea();
+    if (scanStartFrac >= 0.0f && scanEndFrac >= 0.0f && area.getHeight() > 0.0f)
+    {
+        constexpr float grab = 6.0f;
+        const float dL = std::abs(e.position.y - (area.getY() + lineFrac      * area.getHeight()));
+        const float dS = std::abs(e.position.y - (area.getY() + scanStartFrac * area.getHeight()));
+        const float dE = std::abs(e.position.y - (area.getY() + scanEndFrac   * area.getHeight()));
+        if (dS <= grab && dS <= dE && dS < dL)
+            drag_ = DragTarget::ScanStart;
+        else if (dE <= grab && dE < dL)
+            drag_ = DragTarget::ScanEnd;
+    }
+    dragTo(e, true, false);
+}
+
+void MediaSourcePage::PreviewComponent::mouseDrag(const juce::MouseEvent& e) { dragTo(e, false, false); }
+void MediaSourcePage::PreviewComponent::mouseUp  (const juce::MouseEvent& e) { dragTo(e, false, true);  }
 
 //==============================================================================
 // MediaSourcePage
@@ -328,6 +388,29 @@ void MediaSourcePage::setLineParam(float v, bool gestureBegin, bool gestureEnd)
     }
 }
 
+float MediaSourcePage::scanParamValue(bool start) const
+{
+    if (kind != Kind::Image)
+        return start ? 0.0f : 1.0f;
+    if (auto* raw = processor.getAPVTS().getRawParameterValue(
+            imgSrcParam(slot_, start ? "ScanStart" : "ScanEnd")))
+        return raw->load();
+    return start ? 0.0f : 1.0f;
+}
+
+void MediaSourcePage::setScanParam(bool start, float v, bool gestureBegin, bool gestureEnd)
+{
+    if (kind != Kind::Image)
+        return;
+    if (auto* param = processor.getAPVTS().getParameter(
+            imgSrcParam(slot_, start ? "ScanStart" : "ScanEnd")))
+    {
+        if (gestureBegin) param->beginChangeGesture();
+        param->setValueNotifyingHost(param->convertTo0to1(v));
+        if (gestureEnd)   param->endChangeGesture();
+    }
+}
+
 void MediaSourcePage::visibilityChanged()
 {
     if (isVisible())
@@ -388,6 +471,11 @@ void MediaSourcePage::timerCallback()
     preview.image        = img;
     preview.playheadFrac = head;
     preview.lineFrac     = juce::jlimit(0.0f, 1.0f, lineParamValue());
+    if (kind == Kind::Image)
+    {
+        preview.scanStartFrac = juce::jlimit(0.0f, 1.0f, scanParamValue(true));
+        preview.scanEndFrac   = juce::jlimit(0.0f, 1.0f, scanParamValue(false));
+    }
     statusLabel.setText(status, juce::dontSendNotification);
     preview.repaint();
 }

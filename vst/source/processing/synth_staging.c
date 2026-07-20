@@ -523,3 +523,177 @@ int synth_staging_mix_luxwave(const ChainPlan* plan,
     if (nb_pixels_out) *nb_pixels_out = (out_px > 0 ? out_px : max_pixels);
     return mixed;
 }
+
+/* ══ LuxGrain sends (conditioned line, unipolar mix + generation) ══════════ */
+
+typedef struct {
+    volatile uint32_t seq;
+    volatile int      active;
+    int               bank_slot;
+    int               nb_pixels;
+    float             line[CIS_MAX_PIXELS_NB];
+    uint8_t           rgb[3][CIS_MAX_PIXELS_NB];  /* raw stream (grain pan) */
+} LgSendStaging;
+
+static LgSendStaging s_lg_staging[CHAIN_MAX_CHAINS];
+static LgSendStaging s_lg_snap;   /* consumer-side snapshot (audio thread) */
+
+void synth_staging_stage_luxgrain(int chain_idx, int bank_slot,
+                                  const float* line,
+                                  const uint8_t* r, const uint8_t* g,
+                                  const uint8_t* b, int nb_pixels)
+{
+    if (chain_idx < 0 || chain_idx >= CHAIN_MAX_CHAINS || line == NULL)
+        return;
+    if (nb_pixels < 0) nb_pixels = 0;
+    if (nb_pixels > CIS_MAX_PIXELS_NB) nb_pixels = CIS_MAX_PIXELS_NB;
+
+    LgSendStaging* s = &s_lg_staging[chain_idx];
+    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+    s->bank_slot = (bank_slot >= 0 && bank_slot < CHAIN_MAX_CHAINS)
+                   ? bank_slot : 0;
+    s->nb_pixels = nb_pixels;
+    memcpy(s->line, line, (size_t) nb_pixels * sizeof(float));
+    if (r && g && b)
+    {
+        memcpy(s->rgb[0], r, (size_t) nb_pixels);
+        memcpy(s->rgb[1], g, (size_t) nb_pixels);
+        memcpy(s->rgb[2], b, (size_t) nb_pixels);
+    }
+    else
+    {
+        memset(s->rgb[0], 0, (size_t) nb_pixels);
+        memset(s->rgb[1], 0, (size_t) nb_pixels);
+        memset(s->rgb[2], 0, (size_t) nb_pixels);
+    }
+    s->active = 1;
+    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+}
+
+void synth_staging_luxgrain_set_inactive(int chain_idx)
+{
+    if (chain_idx < 0 || chain_idx >= CHAIN_MAX_CHAINS)
+        return;
+    LgSendStaging* s = &s_lg_staging[chain_idx];
+    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+    s->active = 0;
+    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+}
+
+static int lg_staging_snapshot(const LgSendStaging* s, LgSendStaging* out)
+{
+    for (int attempt = 0; attempt < 4; ++attempt)
+    {
+        const uint32_t s0 = __atomic_load_n(&s->seq, __ATOMIC_ACQUIRE);
+        if (s0 & 1u)
+            continue;
+        if (! s->active)
+            return 0;
+        memcpy(out, (const void*) s, sizeof(*out));
+        const uint32_t s1 = __atomic_load_n(&s->seq, __ATOMIC_ACQUIRE);
+        if (s0 == s1)
+            return out->active;
+    }
+    return -1;
+}
+
+int synth_staging_mix_luxgrain(const ChainPlan* plan,
+                               float* line_out,
+                               uint8_t* r_out, uint8_t* g_out, uint8_t* b_out,
+                               int max_pixels, int* nb_pixels_out,
+                               uint32_t* generation_out)
+{
+    if (plan == NULL || line_out == NULL || max_pixels <= 0)
+        return 0;
+
+    memset(line_out, 0, (size_t) max_pixels * sizeof(float));
+
+    /* RGB accumulators (weighted average — colour quality, not energy). */
+    static float s_lg_rgb_acc[3][CIS_MAX_PIXELS_NB];   /* audio thread only */
+    if (r_out) memset(s_lg_rgb_acc, 0, sizeof(s_lg_rgb_acc));
+
+    float    weight_acc = 0.0f;
+    uint32_t gen       = 0;
+    int      mixed     = 0;
+    int      out_px    = 0;
+    int      contended = 0;
+
+    for (int c = 0; c < plan->num_chains && c < CHAIN_MAX_CHAINS; ++c)
+    {
+        /* Only chains whose CURRENT plan recipe carries an OUT_LUXGRAIN send
+         * contribute — a stale staging from a removed OUT never leaks in. */
+        const SynthChainPlan* sp = &plan->chain[c];
+        if (! sp->present) continue;
+        int has_lg = 0;
+        for (int i = 0; i < sp->num_inserts && ! has_lg; ++i)
+            if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXGRAIN)
+                has_lg = 1;
+        if (! has_lg) continue;
+
+        const int snap = lg_staging_snapshot(&s_lg_staging[c], &s_lg_snap);
+        if (snap < 0) { contended = 1; break; }
+        if (snap == 0)
+            continue;
+        /* Generation from the SNAPPED seq (see mix_luxsynth). */
+        gen += s_lg_snap.seq + (uint32_t) (c * 0x9E3779B9u);
+
+        const lux_out_params_t* bank =
+            &g_sp3ctra_config.luxgrain_out[s_lg_snap.bank_slot];
+        if (! bank->enabled) continue;
+        float w = bank->intensity;
+        if (w <= 0.0f) { ++mixed; continue; }   /* silent send still counts */
+
+        const int n = s_lg_snap.nb_pixels < max_pixels ? s_lg_snap.nb_pixels
+                                                       : max_pixels;
+        if (n > out_px) out_px = n;
+        for (int i = 0; i < n; ++i)
+            line_out[i] += w * s_lg_snap.line[i];
+        if (r_out)
+            for (int i = 0; i < n; ++i)
+            {
+                s_lg_rgb_acc[0][i] += w * (float) s_lg_snap.rgb[0][i];
+                s_lg_rgb_acc[1][i] += w * (float) s_lg_snap.rgb[1][i];
+                s_lg_rgb_acc[2][i] += w * (float) s_lg_snap.rgb[2][i];
+            }
+        weight_acc += w;
+        ++mixed;
+    }
+
+    /* Torn slot → HOLD (the engine keeps its ring, as everywhere else). */
+    if (contended)
+    {
+        __atomic_fetch_add(&s_contention_holds, 1, __ATOMIC_RELAXED);
+        if (nb_pixels_out)  *nb_pixels_out = 0;
+        if (generation_out) *generation_out = 0;
+        return -1;
+    }
+
+    if (mixed == 0)
+    {
+        if (nb_pixels_out)  *nb_pixels_out = 0;
+        if (generation_out) *generation_out = 0;
+        return 0;
+    }
+
+    for (int i = 0; i < out_px; ++i)
+    {
+        if (line_out[i] < 0.0f) line_out[i] = 0.0f;
+        if (line_out[i] > 1.0f) line_out[i] = 1.0f;
+    }
+    if (r_out && g_out && b_out && weight_acc > 0.0f)
+    {
+        const float inv = 1.0f / weight_acc;
+        for (int i = 0; i < out_px; ++i)
+        {
+            float rv = s_lg_rgb_acc[0][i] * inv;
+            float gv = s_lg_rgb_acc[1][i] * inv;
+            float bv = s_lg_rgb_acc[2][i] * inv;
+            r_out[i] = (uint8_t) (rv < 0.0f ? 0.0f : (rv > 255.0f ? 255.0f : rv));
+            g_out[i] = (uint8_t) (gv < 0.0f ? 0.0f : (gv > 255.0f ? 255.0f : gv));
+            b_out[i] = (uint8_t) (bv < 0.0f ? 0.0f : (bv > 255.0f ? 255.0f : bv));
+        }
+    }
+    if (nb_pixels_out)  *nb_pixels_out = (out_px > 0 ? out_px : max_pixels);
+    if (generation_out) *generation_out = gen;
+    return mixed;
+}

@@ -134,7 +134,7 @@ VideoMixerColumn::VideoMixerColumn(Sp3ctraAudioProcessor& p)
     };
     addAndMakeVisible(playBtn_);
 
-    stopBtn_.setTooltip("Stop — freeze and clear all video outputs");
+    stopBtn_.setTooltip(juce::String::fromUTF8("Stop — freeze and clear all video outputs"));
     stopBtn_.onClick = [this]
     {
         mixer_.stopAll();
