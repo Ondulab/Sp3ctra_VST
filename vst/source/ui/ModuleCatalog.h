@@ -135,6 +135,13 @@ inline juce::String moduleDisplayName(ModuleType t)  { return juce::String::from
 inline ModuleRole   moduleRole(ModuleType t)         { return descFor(t).role; }
 inline ModuleCat    moduleCategory(ModuleType t)     { return descFor(t).category; }
 
+/** Catalogue display rank inside a section. The table is frozen in enum order
+ *  (descFor indexes by ordinal), so late-appended modules use this to slot into
+ *  their natural place — a stable sort keeps table order among equals. Today:
+ *  VIDEO SCROLL closes the OUT section so the "→" engine sends (incl. the
+ *  appended LUXGRAIN) stay grouped above it. */
+inline int          moduleCatalogueRank(ModuleType t) { return t == ModuleType::VideoScroll ? 1 : 0; }
+
 /** True when a module needs incoming MIDI to do anything — i.e. it consumes
  *  NoteOn/NoteOff in processBlock. Keyed on the MIDI catalogue section (PITCH /
  *  MASK today), so any future MIDI-category module inherits the picto for free.

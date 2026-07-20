@@ -59,7 +59,11 @@ typedef struct AudioImageBuffers {
   // the display follows each engine's OWN chain.
 #define AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL 0
 #define AUDIO_IMAGE_ENGINE_TAP_PATHB      1  /* LuxSynth + LuxWave shared input */
-#define AUDIO_IMAGE_NUM_ENGINE_TAPS       2
+#define AUDIO_IMAGE_ENGINE_TAP_LUXGRAIN   2  /* granular engine input — the
+                                              * intensity-weighted MIX of every
+                                              * "→ LUXGRAIN" send, published by
+                                              * the feed (audioProcessingThread) */
+#define AUDIO_IMAGE_NUM_ENGINE_TAPS       3
   uint8_t *engine_tap_R[AUDIO_IMAGE_NUM_ENGINE_TAPS];
   uint8_t *engine_tap_G[AUDIO_IMAGE_NUM_ENGINE_TAPS];
   uint8_t *engine_tap_B[AUDIO_IMAGE_NUM_ENGINE_TAPS];

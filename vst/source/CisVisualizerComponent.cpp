@@ -514,6 +514,10 @@ void CisVisualizerComponent::paintSourceLabel(
             accent = juce::Colour(0xffd07040); break;
         case VisualizerMode::SYNTH_FFT_COLOR:
             accent = juce::Colour(0xffcc88cc); break;
+        case VisualizerMode::GRAIN_GRAY:
+            accent = juce::Colour(0xffd0a25a); break;   // LuxGrain identity
+        case VisualizerMode::GRAIN_COLOR:
+            accent = juce::Colour(0xffe0c07a); break;
         default:
             accent = juce::Colour(0xffe08844); break;
     }
@@ -658,18 +662,32 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
         const bool isSpctrLocal = (vizSource == VisualizerMode::SPCTR_GRAY
                                 || vizSource == VisualizerMode::SPCTR_COLOR
                                 || vizSource == VisualizerMode::SPCTR_BLOB);
+        const bool isGrainLocal = (vizSource == VisualizerMode::GRAIN_GRAY
+                                || vizSource == VisualizerMode::GRAIN_COLOR);
         ChainPlan gatePlan;
         chain_plan_get(&gatePlan);
         /* (P4-M4) plan.synth[] is gone — the gate follows the chain that
          * actually FEEDS the viewed engine: SPCTR = the first "→ LUXSTRAL"
          * send's chain (the head tap's source), SYNTH = the Path-B chain
-         * (first "→ LUXSYNTH" OUT, else "→ LUXWAVE"). No OUT anywhere →
-         * unfed engine: the tap is already white, nothing to gate. */
+         * (first "→ LUXSYNTH" OUT, else "→ LUXWAVE"), GRAIN = the first
+         * "→ LUXGRAIN" send's chain. No OUT anywhere → unfed engine: the
+         * tap is already white, nothing to gate. */
         const SynthChainPlan* spGate = nullptr;
         if (isSpctrLocal)
         {
             if (gatePlan.num_ls_sends > 0)
                 spGate = &gatePlan.ls_send[0].recipe;
+        }
+        else if (isGrainLocal)
+        {
+            for (int c = 0; c < gatePlan.num_chains && spGate == nullptr; ++c)
+            {
+                const SynthChainPlan& sp = gatePlan.chain[c];
+                if (! sp.present) continue;
+                for (int i = 0; i < sp.num_inserts; ++i)
+                    if (sp.insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXGRAIN)
+                    { spGate = &sp; break; }
+            }
         }
         else
         {
@@ -771,10 +789,13 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
         const bool isSpctr = (vizSource == VisualizerMode::SPCTR_GRAY
                            || vizSource == VisualizerMode::SPCTR_COLOR
                            || vizSource == VisualizerMode::SPCTR_BLOB);
+        const bool isGrain = (vizSource == VisualizerMode::GRAIN_GRAY
+                           || vizSource == VisualizerMode::GRAIN_COLOR);
         audio_image_buffers_get_engine_input_pointers(
             buffers,
             isSpctr ? AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL
-                    : AUDIO_IMAGE_ENGINE_TAP_PATHB,
+            : isGrain ? AUDIO_IMAGE_ENGINE_TAP_LUXGRAIN
+                      : AUDIO_IMAGE_ENGINE_TAP_PATHB,
             &pR, &pG, &pB);
     }
     if (pR != nullptr)   // null for SRC_* views (already filled localData* above)
@@ -807,15 +828,45 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
         const bool isSpctrView = (vizSource == VisualizerMode::SPCTR_GRAY
                                || vizSource == VisualizerMode::SPCTR_COLOR
                                || vizSource == VisualizerMode::SPCTR_BLOB);
+        const bool isGrainView = (vizSource == VisualizerMode::GRAIN_GRAY
+                               || vizSource == VisualizerMode::GRAIN_COLOR);
+
+        /* GRAIN_*: condition with the bank of the send actually displayed
+         * (the first "→ LUXGRAIN" in the plan). Sends KEEP their pool slot
+         * when another is removed, so slot 0 may be unused — hardcoding it
+         * made the conditioning toggles look dead on the head panel. */
+        int grainViewSlot = 0;
+        if (isGrainView)
+        {
+            ChainPlan condPlan;
+            chain_plan_get(&condPlan);
+            bool found = false;
+            for (int c = 0; c < condPlan.num_chains && ! found; ++c)
+            {
+                const SynthChainPlan& sp = condPlan.chain[c];
+                if (! sp.present) continue;
+                for (int i = 0; i < sp.num_inserts; ++i)
+                    if (sp.insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXGRAIN)
+                    {
+                        grainViewSlot = juce::jlimit(
+                            0, LUX_OUT_MAX_SLOTS - 1, sp.insert_state_idx[i]);
+                        found = true;
+                        break;
+                    }
+            }
+        }
 
         /* Per-path flags — synth-split P1: read the per-OUT conditioning banks
-         * (SPCTR_* = LuxStral OUT slot 0, SYNTH_* = LuxSynth OUT slot 0), the
-         * same values the pipeline consumes. */
+         * (SPCTR_* = LuxStral OUT slot 0, SYNTH_* = LuxSynth OUT slot 0,
+         * GRAIN_* = LuxGrain OUT slot 0), the same values the pipeline
+         * consumes. */
         const int doInvert = isSourceView ? 0
                            : (isSpctrView ? g_sp3ctra_config.luxstral_out[0].negative
+                           : isGrainView  ? g_sp3ctra_config.luxgrain_out[grainViewSlot].negative
                                           : g_sp3ctra_config.luxsynth_out[0].negative);
         const int doDcBlock = isSourceView ? 0
                             : (isSpctrView ? g_sp3ctra_config.luxstral_out[0].dc_blocking
+                            : isGrainView  ? g_sp3ctra_config.luxgrain_out[grainViewSlot].dc_blocking
                                            : g_sp3ctra_config.luxsynth_out[0].dc_blocking);
 
         /* Gamma: per-OUT bank value; no enable toggle — identity at 1.0. */
@@ -826,6 +877,9 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
             gammaOn  = 0;
         } else if (isSpctrView) {
             gammaVal = g_sp3ctra_config.luxstral_out[0].gamma;
+            gammaOn  = (gammaVal > 0.0f && gammaVal != 1.0f) ? 1 : 0;
+        } else if (isGrainView) {
+            gammaVal = g_sp3ctra_config.luxgrain_out[grainViewSlot].gamma;
             gammaOn  = (gammaVal > 0.0f && gammaVal != 1.0f) ? 1 : 0;
         } else {
             gammaVal = g_sp3ctra_config.luxsynth_out[0].gamma;
@@ -1025,7 +1079,8 @@ bool CisVisualizerComponent::isColorSource(VisualizerMode m) const noexcept
     // Note: SYNTH_FFT_COLOR is intercepted before this call in paint() and
     // handled by its own dedicated renderer — do NOT include it here.
     return m == VisualizerMode::SPCTR_COLOR
-        || m == VisualizerMode::SYNTH_COLOR;
+        || m == VisualizerMode::SYNTH_COLOR
+        || m == VisualizerMode::GRAIN_COLOR;
 }
 
 //==============================================================================
@@ -1039,6 +1094,7 @@ bool CisVisualizerComponent::supportsDisplayModes(VisualizerMode m) const noexce
     {
         case VisualizerMode::SPCTR_GRAY:
         case VisualizerMode::SYNTH_GRAY:
+        case VisualizerMode::GRAIN_GRAY:
         case VisualizerMode::SRC_IMAGE:
         case VisualizerMode::SRC_VIDEO:
         case VisualizerMode::SRC_CAMERA:

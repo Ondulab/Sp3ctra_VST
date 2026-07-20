@@ -15,6 +15,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../UITheme.h"
 #include "ModuleCatalog.h"
+#include <algorithm>
 #include <vector>
 
 class ModuleCatalogComponent : public juce::Component
@@ -36,6 +37,10 @@ public:
             addAndMakeVisible(chip.get());
             chips.push_back(std::move(chip));
         }
+
+        std::stable_sort(chips.begin(), chips.end(),
+                         [](const auto& a, const auto& b)
+                         { return moduleCatalogueRank(a->getType()) < moduleCatalogueRank(b->getType()); });
     }
 
     void paint(juce::Graphics& g) override

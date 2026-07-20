@@ -631,10 +631,12 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
         case ChainBlockId::LuxWave:
             sources = { VisualizerMode::SYNTH_GRAY };
             break;
-        // LUXGRAIN send — contextual like every OUT: the stream at the send's
-        // position in its chain (a dedicated cloud viz may come later).
+        // LUXGRAIN send — engine-input panels like the other OUT synths:
+        // GRAY = the conditioned mix the cloud folds, COLOR = the colour
+        // temperature that drives the per-grain pan.
         case ChainBlockId::LuxGrain:
-            sources = { VisualizerMode::SELECTED_TAP };
+            sources = { VisualizerMode::GRAIN_GRAY,
+                        VisualizerMode::GRAIN_COLOR };
             break;
         // Score family + SEQUENCER: contextual like every other module —
         // the stream at their position in their chain (playback included,
