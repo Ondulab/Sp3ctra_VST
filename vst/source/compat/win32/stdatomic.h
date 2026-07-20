@@ -16,7 +16,7 @@
 
 #include <stdint.h>
 
-typedef _Atomic _Bool              atomic_bool;
+typedef _Atomic bool               atomic_bool; /* C++: _Bool n'existe pas */
 typedef _Atomic char               atomic_char;
 typedef _Atomic int                atomic_int;
 typedef _Atomic unsigned int       atomic_uint;
