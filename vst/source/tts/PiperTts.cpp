@@ -32,19 +32,33 @@ juce::String PiperVoiceInfo::displayName() const
 
 juce::File PiperTts::voicesDirectory()
 {
+#if JUCE_WINDOWS
+    // %APPDATA%\Sp3ctra\piper_voices (userApplicationDataDirectory = %APPDATA%)
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+               .getChildFile ("Sp3ctra/piper_voices");
+#else
     return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
                .getChildFile ("Application Support/Sp3ctra/piper_voices");
+#endif
 }
 
 juce::File PiperTts::bundleVoicesDirectory()
 {
     // currentExecutableFile resolves to the binary of THIS module — the plugin
-    // dylib inside Sp3ctra.vst3/.component when hosted, the app binary for the
-    // Standalone — so ../.. is always the bundle's Contents directory.
+    // dylib/DLL when hosted, the app binary for the Standalone.
+#if JUCE_WINDOWS
+    // No bundle machinery: the build copies voices to Resources/piper_voices
+    // NEXT TO the binary (inside the .vst3 folder for the plugin).
+    return juce::File::getSpecialLocation (juce::File::currentExecutableFile)
+               .getParentDirectory()
+               .getChildFile ("Resources/piper_voices");
+#else
+    // macOS bundles: ../.. from Contents/MacOS is the Contents directory.
     return juce::File::getSpecialLocation (juce::File::currentExecutableFile)
                .getParentDirectory()    // Contents/MacOS
                .getParentDirectory()    // Contents
                .getChildFile ("Resources/piper_voices");
+#endif
 }
 
 static void scanVoicesDir (const juce::File& root, bool builtIn,
