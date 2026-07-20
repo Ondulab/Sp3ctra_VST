@@ -24,6 +24,37 @@
 #include "udp.h"
 #include "../../config/config_loader.h"
 
+/* ── Platform glue: BSD sockets vs Winsock2 ─────────────────────────────────
+ * Winsock closes sockets with closesocket() (close() would hit the CRT fd
+ * table), reports errors through WSAGetLastError() (errno stays 0), and needs
+ * a one-time WSAStartup before the first socket(). setsockopt option pointers
+ * are const char* there, hence the casts at each call site. */
+#ifdef _WIN32
+#define sp3_close_socket closesocket
+#ifndef SHUT_RDWR
+#define SHUT_RDWR SD_BOTH
+#endif
+static const char *sp3_sock_strerror(void) {
+  static char buf[48];
+  snprintf(buf, sizeof buf, "winsock error %d", WSAGetLastError());
+  return buf;
+}
+#define SP3_SOCK_ERRSTR sp3_sock_strerror()
+static void sp3_wsa_init_once(void) {
+  static int done = 0;
+  if (!done) {
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) == 0)
+      done = 1;
+    else
+      log_error("UDP", "WSAStartup failed");
+  }
+}
+#else
+#define sp3_close_socket close
+#define SP3_SOCK_ERRSTR strerror(errno)
+#endif
+
 // #define CALIBRATION
 // #define SSS_MOD_MODE
 
@@ -67,8 +98,12 @@ int udp_Init(struct sockaddr_in *si_other, struct sockaddr_in *si_me) {
     udp_port = SP3CTRA_DEFAULT_UDP_PORT;
   }
 
+#ifdef _WIN32
+  sp3_wsa_init_once();
+#endif
+
   // Creating UDP socket
-  if ((s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1) {
+  if ((s = (int)socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1) {
     die("socket");
   }
 
@@ -76,8 +111,9 @@ int udp_Init(struct sockaddr_in *si_other, struct sockaddr_in *si_me) {
 
   // ── SO_REUSEADDR: allow rapid socket restart without EADDRINUSE on TIME_WAIT ──
   int reuse = 1;
-  if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) == -1) {
-    log_warning("UDP", "Failed to set SO_REUSEADDR: %s", strerror(errno));
+  if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse,
+                 sizeof(reuse)) == -1) {
+    log_warning("UDP", "Failed to set SO_REUSEADDR: %s", SP3_SOCK_ERRSTR);
   }
 
   // ── SO_REUSEPORT: required for multi-process UDP fanout ──────────────────
@@ -100,14 +136,27 @@ int udp_Init(struct sockaddr_in *si_other, struct sockaddr_in *si_me) {
   //   closed file descriptor. The 100 ms recvfrom() timeout means at most one
   //   partially-missed poll cycle → negligible for audio synthesis.
   //   This trade-off is acceptable given the multi-process requirement.
+#ifndef _WIN32
   if (setsockopt(s, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse)) == -1) {
     log_warning("UDP", "Failed to set SO_REUSEPORT: %s", strerror(errno));
     log_warning("UDP", "Multiple standalone instances on the same port may not work");
   } else {
     log_startup_detail("UDP", "SO_REUSEPORT enabled (multi-process fanout for multicast)");
   }
+#else
+  // Winsock has no SO_REUSEPORT; SO_REUSEADDR already lets multiple sockets
+  // bind the same port for multicast reception on Windows.
+  log_startup_detail("UDP", "SO_REUSEADDR only (Winsock multicast fanout)");
+#endif
 
   // Set socket timeout so recvfrom() can be interrupted for clean shutdown
+#ifdef _WIN32
+  DWORD timeout_ms = 100;
+  if (setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout_ms,
+                 sizeof(timeout_ms)) == -1) {
+    log_warning("UDP", "Failed to set SO_RCVTIMEO: %s", SP3_SOCK_ERRSTR);
+  }
+#else
   struct timeval timeout;
   timeout.tv_sec = 0;
   timeout.tv_usec = 100000; // 100ms timeout
@@ -115,6 +164,7 @@ int udp_Init(struct sockaddr_in *si_other, struct sockaddr_in *si_me) {
     log_warning("UDP", "Failed to set SO_RCVTIMEO: %s", strerror(errno));
     // Continue anyway, this is not critical for operation
   }
+#endif
 
   // Initialize the structure
   memset(si_me, 0, sizeof(*si_me));
@@ -127,8 +177,8 @@ int udp_Init(struct sockaddr_in *si_other, struct sockaddr_in *si_me) {
     log_error("UDP", "Failed to bind UDP socket to port %d", udp_port);
     log_error("UDP", "This usually means the port is already in use by another process");
     log_error("UDP", "Try waiting a few seconds or check if another instance is running");
-    log_error("UDP", "bind error: %s", strerror(errno));
-    close(s);
+    log_error("UDP", "bind error: %s", SP3_SOCK_ERRSTR);
+    sp3_close_socket(s);
     return -1;
   }
 
@@ -142,7 +192,7 @@ int udp_Init(struct sockaddr_in *si_other, struct sockaddr_in *si_me) {
     // Set multicast group address
     if (inet_pton(AF_INET, udp_address, &mreq.imr_multiaddr) != 1) {
       log_error("UDP", "Invalid multicast address: %s", udp_address);
-      close(s);
+      sp3_close_socket(s);
       return -1;
     }
     
@@ -151,7 +201,7 @@ int udp_Init(struct sockaddr_in *si_other, struct sockaddr_in *si_me) {
       // Use specific interface
       if (inet_pton(AF_INET, multicast_interface, &mreq.imr_interface) != 1) {
         log_error("UDP", "Invalid multicast interface address: %s", multicast_interface);
-        close(s);
+        sp3_close_socket(s);
         return -1;
       }
       log_info("UDP", "Using multicast interface: %s", multicast_interface);
@@ -161,16 +211,18 @@ int udp_Init(struct sockaddr_in *si_other, struct sockaddr_in *si_me) {
     }
     
     // Join multicast group
-    if (setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
-      log_error("UDP", "Failed to join multicast group %s: %s", udp_address, strerror(errno));
-      close(s);
+    if (setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, (const char *)&mreq,
+                   sizeof(mreq)) < 0) {
+      log_error("UDP", "Failed to join multicast group %s: %s", udp_address, SP3_SOCK_ERRSTR);
+      sp3_close_socket(s);
       return -1;
     }
-    
+
     // Enable multicast loopback (receive own packets)
     unsigned char loop = 1;
-    if (setsockopt(s, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop)) < 0) {
-      log_warning("UDP", "Failed to set IP_MULTICAST_LOOP: %s", strerror(errno));
+    if (setsockopt(s, IPPROTO_IP, IP_MULTICAST_LOOP, (const char *)&loop,
+                   sizeof(loop)) < 0) {
+      log_warning("UDP", "Failed to set IP_MULTICAST_LOOP: %s", SP3_SOCK_ERRSTR);
       // Continue anyway, this is not critical
     }
     
@@ -193,16 +245,17 @@ void udp_cleanup(int socket_fd) {
     so_linger.l_onoff = 1;   // Enable linger
     so_linger.l_linger = 0;  // Timeout = 0 (immediate close, send RST)
     
-    if (setsockopt(socket_fd, SOL_SOCKET, SO_LINGER, &so_linger, sizeof(so_linger)) < 0) {
-      log_warning("UDP", "Failed to set SO_LINGER: %s", strerror(errno));
+    if (setsockopt(socket_fd, SOL_SOCKET, SO_LINGER, (const char *)&so_linger,
+                   sizeof(so_linger)) < 0) {
+      log_warning("UDP", "Failed to set SO_LINGER: %s", SP3_SOCK_ERRSTR);
     }
-    
+
     // Shutdown socket FIRST to unblock any pending recvfrom() calls
     // This allows the UDP thread to terminate cleanly
     shutdown(socket_fd, SHUT_RDWR);
-    
+
     // Close the socket (will be immediate due to SO_LINGER)
-    close(socket_fd);
+    sp3_close_socket(socket_fd);
     
     log_info("UDP", "Socket closed (immediate via SO_LINGER)");
   }

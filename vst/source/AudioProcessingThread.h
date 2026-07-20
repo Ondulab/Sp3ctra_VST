@@ -8,6 +8,12 @@
 #include <pthread/qos.h>
 #endif
 
+// Windows MMCSS support for RT priority (Pro Audio scheduling class)
+#ifdef _WIN32
+#include <windows.h>
+#include <avrt.h>
+#endif
+
 // Forward declaration of C functions
 extern "C" {
     void* audioProcessingThread(void* arg);
@@ -85,6 +91,15 @@ public:
             log_startup_detail("SYNTH", "AudioProcessingThread: QoS set to USER_INTERACTIVE");
         } else {
             log_warning("SYNTH", "AudioProcessingThread: Failed to set QoS class");
+        }
+#elif defined(_WIN32)
+        {
+            DWORD mmcssTaskIndex = 0;
+            if (AvSetMmThreadCharacteristicsW(L"Pro Audio", &mmcssTaskIndex) != nullptr)
+                log_startup_detail("SYNTH", "AudioProcessingThread: MMCSS Pro Audio joined");
+            else
+                log_warning("SYNTH", "AudioProcessingThread: MMCSS join failed");
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
         }
 #endif
         

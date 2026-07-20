@@ -45,6 +45,12 @@ extern "C" {
 // This must be declared here (not in header) to avoid multiple definition errors
 RTProfiler g_vst_rt_profiler = {};
 
+// AUDIO MIX render gates — DEFINED in multithreading.c (C). Declared here with
+// C linkage so the in-function extern below (processBlock) binds to the C
+// symbol: MSVC mangles namespace-scope C++ variables, the Itanium ABI does not,
+// so without this the Windows link fails on a name mismatch.
+extern "C" volatile uint32_t g_engine_render_gates;
+
 // LuxSynth dropout diagnostics — bumped in processBlock (RT), drained by the
 // message-thread timer next to the [STAGING] drain. File-scope on purpose:
 // shared across instances, diagnostics only.

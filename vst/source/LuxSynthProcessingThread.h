@@ -7,6 +7,11 @@
 #include <pthread/qos.h>
 #endif
 
+#ifdef _WIN32
+#include <windows.h>
+#include <avrt.h>
+#endif
+
 extern "C" {
     #include "synthesis/luxsynth/luxsynth_vst_adapter.h"
     #include "core/context.h"
@@ -61,6 +66,15 @@ public:
             log_startup_detail("LUXSYNTH", "QoS set to USER_INTERACTIVE");
         else
             log_warning("LUXSYNTH", "Failed to set QoS class");
+#elif defined(_WIN32)
+        {
+            DWORD mmcssTaskIndex = 0;
+            if (AvSetMmThreadCharacteristicsW(L"Pro Audio", &mmcssTaskIndex) != nullptr)
+                log_startup_detail("LUXSYNTH", "MMCSS Pro Audio joined");
+            else
+                log_warning("LUXSYNTH", "MMCSS join failed");
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+        }
 #endif
 
         ctx->luxsynth_thread_running = 1;

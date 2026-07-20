@@ -198,3 +198,4 @@ _deps/
 # conditions d'usage Microsoft ; le module VOICE génère en local via Piper)
 tts_voices*/
 tts_wav_*/
+build-mac/

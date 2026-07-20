@@ -1,0 +1,67 @@
+# Windows build — VST3 + Standalone.
+#
+# Toolchain: Ninja + clang-cl inside an MSVC dev environment (msvc-dev-cmd
+# picks whatever VS the runner image ships, so this survives image upgrades).
+# clang-cl is required (not plain MSVC cl): the C core uses C11 <stdatomic.h>
+# and __builtin_prefetch. See vst/source/compat/win32/ for the POSIX→Win32
+# layer.
+#
+# TTS (sherpa-onnx) and the VIDEO file source are macOS-only for now and are
+# compiled out automatically (PiperTts stub + VideoFileReaderStub).
+name: Windows build
+
+on:
+  push:
+    branches: [master, feature/windows-port]
+    paths-ignore:
+      - '**.md'
+      - 'prebuilt/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # JUCE is fetched by CMake FetchContent into build/_deps (~2 min clone);
+      # cache it keyed on the pinned tag in vst/CMakeLists.txt.
+      - name: Cache JUCE (FetchContent)
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-deps-${{ runner.os }}-${{ hashFiles('vst/CMakeLists.txt') }}
+
+      - name: MSVC dev environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        run: >
+          cmake -B build -S vst -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=clang-cl
+          -DCMAKE_CXX_COMPILER=clang-cl
+
+      - name: Build (VST3 + Standalone)
+        run: >
+          cmake --build build
+          --target Sp3ctraVST_VST3 Sp3ctraVST_Standalone
+          --parallel
+
+      - name: Upload VST3
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sp3ctra-VST3-Windows-x64
+          path: build/Sp3ctraVST_artefacts/Release/VST3/
+          if-no-files-found: error
+
+      - name: Upload Standalone
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sp3ctra-Standalone-Windows-x64
+          path: build/Sp3ctraVST_artefacts/Release/Standalone/
+          if-no-files-found: error

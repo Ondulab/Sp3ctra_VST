@@ -42,23 +42,43 @@ FetchContent_MakeAvailable(JUCE)
 # ---------------------------------------------------------------------------
 option(SP3CTRA_ENABLE_TTS "Enable the VOICE module TTS engine (sherpa-onnx, static)" ON)
 
-if(APPLE AND SP3CTRA_ENABLE_TTS)
+if(SP3CTRA_ENABLE_TTS AND (APPLE OR WIN32))
     set(SP3CTRA_SHERPA_VER 1.13.4)
+    if(APPLE)
+        set(_sherpa_archive sherpa-onnx-v${SP3CTRA_SHERPA_VER}-osx-arm64-static-lib)
+        set(_sherpa_hash 57801db2bbb786a5d343f515a38ff210b401842338bdc804fa075312d1cd2404)
+    else() # WIN32 — MD (dynamic CRT, matches clang-cl default), Release, libs only
+        set(_sherpa_archive sherpa-onnx-v${SP3CTRA_SHERPA_VER}-win-x64-static-MD-Release-lib)
+        set(_sherpa_hash b60194bcac6e6bed1f2018e56d52c7cd092be8ef9573d5fc6be9c7fda112ad45)
+    endif()
     FetchContent_Declare(sherpa_onnx_libs
-        URL https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SP3CTRA_SHERPA_VER}/sherpa-onnx-v${SP3CTRA_SHERPA_VER}-osx-arm64-static-lib.tar.bz2
-        URL_HASH SHA256=57801db2bbb786a5d343f515a38ff210b401842338bdc804fa075312d1cd2404
+        URL https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SP3CTRA_SHERPA_VER}/${_sherpa_archive}.tar.bz2
+        URL_HASH SHA256=${_sherpa_hash}
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
     FetchContent_MakeAvailable(sherpa_onnx_libs)
 
-    # The -static-lib archive ships no headers; fetch the single self-contained
-    # C header at the same pinned tag.
+    # The -lib archives ship no headers; fetch the single self-contained C
+    # header at the same pinned tag.
     set(SP3CTRA_SHERPA_INCLUDE ${CMAKE_BINARY_DIR}/sherpa-onnx-include)
     file(DOWNLOAD
         https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v${SP3CTRA_SHERPA_VER}/sherpa-onnx/c-api/c-api.h
         ${SP3CTRA_SHERPA_INCLUDE}/sherpa-onnx/c-api/c-api.h
         EXPECTED_HASH SHA256=587e1039cc4ee242169494f3c0ba5baecc22482341168d88d57db965e1e77fa9
     )
+endif()
+
+# ---------------------------------------------------------------------------
+# Platform format set: AU is macOS-only. COPY_PLUGIN_AFTER_BUILD would try to
+# write into "C:\Program Files\Common Files\VST3" on Windows (admin-only), so
+# it stays a macOS convenience.
+# ---------------------------------------------------------------------------
+if(APPLE)
+    set(SP3CTRA_PLUGIN_FORMATS VST3 AU Standalone)
+    set(SP3CTRA_COPY_PLUGIN TRUE)
+else()
+    set(SP3CTRA_PLUGIN_FORMATS VST3 Standalone)
+    set(SP3CTRA_COPY_PLUGIN FALSE)
 endif()
 
 # Define the plugin with sources directly
@@ -69,10 +89,10 @@ juce_add_plugin(Sp3ctraVST
     NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
-    COPY_PLUGIN_AFTER_BUILD TRUE
+    COPY_PLUGIN_AFTER_BUILD ${SP3CTRA_COPY_PLUGIN}
     PLUGIN_MANUFACTURER_CODE "Ondu"
     PLUGIN_CODE "Sp3c"
-    FORMATS VST3 AU Standalone
+    FORMATS ${SP3CTRA_PLUGIN_FORMATS}
     PRODUCT_NAME "Sp3ctra"
     # App/bundle icon (dock + Finder). JUCE's juceaide builds the .icns from
     # this PNG and sets CFBundleIconFile on the Standalone .app. Source: the
@@ -156,22 +176,19 @@ target_sources(Sp3ctraVST
         source/ui/setup/ScoreSetupPanel.h
 
         # M9 — IMAGE / VIDEO / CAMERA source modules (engines + service + UI)
+        # (VideoFileReader impl is platform-specific — see block below)
         source/sources/MediaSourceEngines.cpp
         source/sources/MediaSourceEngines.h
         source/sources/MediaSourceService.h
         source/sources/VideoFileReader.h
-        source/sources/VideoFileReader.mm
         source/sources/ui/MediaSourcePage.cpp
         source/sources/ui/MediaSourcePage.h
         source/sources/ui/MediaSourceSetupPanel.cpp
         source/sources/ui/MediaSourceSetupPanel.h
 
-        # VOICE module — offline TTS (Piper voices via sherpa-onnx) + AUTO
-        # language detection (NLLanguageRecognizer) + generation job + page
+        # VOICE module — offline TTS (Piper voices via sherpa-onnx)
         source/tts/PiperTts.cpp
         source/tts/PiperTts.h
-        source/tts/LanguageDetector.h
-        source/tts/LanguageDetector.mm
         source/tts/VoiceGenJob.h
         source/image/VoiceGenTabComponent.h
 
@@ -303,6 +320,57 @@ target_sources(Sp3ctraVST
         source/ui/VideoMixerColumn.cpp
         source/ui/VideoMixerColumn.h
 )
+
+# ---------------------------------------------------------------------------
+# Platform-specific implementations: AVFoundation VIDEO reader on macOS,
+# graceful stub elsewhere (VIDEO file source disabled). AUTO language
+# detection was removed entirely (used to be macOS NaturalLanguage-only).
+# ---------------------------------------------------------------------------
+if(APPLE)
+    target_sources(Sp3ctraVST PRIVATE
+        source/sources/VideoFileReader.mm
+    )
+elseif(WIN32)
+    # VIDEO file source via Media Foundation (mirrors the AVFoundation reader).
+    target_sources(Sp3ctraVST PRIVATE
+        source/sources/VideoFileReaderMF.cpp
+    )
+else()
+    target_sources(Sp3ctraVST PRIVATE
+        source/sources/VideoFileReaderStub.cpp
+    )
+endif()
+
+# ---------------------------------------------------------------------------
+# Windows port: the C core is written against POSIX (pthread, unistd,
+# sys/time, BSD sockets). source/compat/win32 mirrors those headers onto
+# Win32 primitives (SRWLOCK/CONDITION_VARIABLE/_beginthreadex/Winsock2) so
+# the C sources compile unchanged. Requires clang-cl (VS toolset -T ClangCL):
+# the C sources use C11 <stdatomic.h> and __builtin_prefetch, which plain
+# MSVC cl does not support.
+# ---------------------------------------------------------------------------
+if(WIN32)
+    target_include_directories(Sp3ctraVST PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/compat/win32)
+    target_compile_definitions(Sp3ctraVST PRIVATE
+        _CRT_SECURE_NO_WARNINGS      # snprintf/getenv/strerror & co
+        _CRT_NONSTDC_NO_DEPRECATE    # strdup/_mkdir POSIX-name warnings
+        _USE_MATH_DEFINES            # M_PI in the DSP code
+        NOMINMAX                     # keep std::min/max usable
+    )
+    target_link_libraries(Sp3ctraVST PRIVATE
+        ws2_32     # Winsock2 (UDP device stream)
+        avrt       # MMCSS "Pro Audio" scheduling for RT threads
+        mfplat      # Media Foundation — VIDEO file source (VideoFileReaderMF)
+        mfreadwrite
+        mfuuid
+    )
+    if(MSVC)
+        # /utf-8: sources contain UTF-8 literals & comments; /bigobj: large
+        # JUCE-heavy translation units (PluginProcessor.cpp).
+        target_compile_options(Sp3ctraVST PRIVATE /utf-8 /bigobj)
+    endif()
+endif()
 
 # ✨ BRICK 1: UDP Reception - Add C sources
 # Only include what's needed for UDP + buffers (no synthesis yet)
@@ -449,7 +517,6 @@ if(APPLE)
         "-framework CoreMedia"
         "-framework CoreVideo"
         "-framework QuartzCore"
-        "-framework NaturalLanguage"   # VOICE — AUTO language detection
     )
 endif()
 
@@ -473,8 +540,10 @@ set(SP3CTRA_VOICE_SHA_vits-piper-fr_FR-siwis-medium
 set(SP3CTRA_VOICE_SHA_vits-piper-en_US-ljspeech-medium
     3dfb4b759d8be032a4903a9538d128b0fda2a06ab1de6cbc2d93a97e2dd83dba)
 
-if(APPLE AND SP3CTRA_ENABLE_TTS AND SP3CTRA_EMBED_VOICES)
+if((APPLE OR WIN32) AND SP3CTRA_ENABLE_TTS AND SP3CTRA_EMBED_VOICES)
     set(SP3CTRA_EMBEDDED_VOICE_FILES "")
+    set(SP3CTRA_VOICE_NAMES "")
+    set(SP3CTRA_VOICE_DIRS "")
     foreach(_voice IN LISTS SP3CTRA_EMBED_VOICES)
         string(TOLOWER "${_voice}" _vname)
         string(MAKE_C_IDENTIFIER "${_vname}" _vname)
@@ -485,48 +554,80 @@ if(APPLE AND SP3CTRA_ENABLE_TTS AND SP3CTRA_EMBED_VOICES)
         endif()
         FetchContent_Declare(${_vname} ${_vargs})
         FetchContent_MakeAvailable(${_vname})
+        list(APPEND SP3CTRA_VOICE_NAMES "${_voice}")
+        list(APPEND SP3CTRA_VOICE_DIRS "${${_vname}_SOURCE_DIR}")
 
-        # Preserve the bundle's tree under Resources/piper_voices/<bundle>/.
-        file(GLOB_RECURSE _vfiles "${${_vname}_SOURCE_DIR}/*")
-        foreach(_f IN LISTS _vfiles)
-            file(RELATIVE_PATH _rel "${${_vname}_SOURCE_DIR}" "${_f}")
-            get_filename_component(_reldir "${_rel}" DIRECTORY)
-            set_source_files_properties(${_f} PROPERTIES
-                MACOSX_PACKAGE_LOCATION "Resources/piper_voices/${_voice}/${_reldir}")
-            list(APPEND SP3CTRA_EMBEDDED_VOICE_FILES ${_f})
-        endforeach()
-    endforeach()
-
-    # Resources belong to the per-format BUNDLE targets, not the shared code lib.
-    foreach(_fmt Standalone VST3 AU)
-        if(TARGET Sp3ctraVST_${_fmt})
-            target_sources(Sp3ctraVST_${_fmt} PRIVATE ${SP3CTRA_EMBEDDED_VOICE_FILES})
+        if(APPLE)
+            # Preserve the bundle's tree under Resources/piper_voices/<bundle>/.
+            file(GLOB_RECURSE _vfiles "${${_vname}_SOURCE_DIR}/*")
+            foreach(_f IN LISTS _vfiles)
+                file(RELATIVE_PATH _rel "${${_vname}_SOURCE_DIR}" "${_f}")
+                get_filename_component(_reldir "${_rel}" DIRECTORY)
+                set_source_files_properties(${_f} PROPERTIES
+                    MACOSX_PACKAGE_LOCATION "Resources/piper_voices/${_voice}/${_reldir}")
+                list(APPEND SP3CTRA_EMBEDDED_VOICE_FILES ${_f})
+            endforeach()
         endif()
     endforeach()
+
+    if(APPLE)
+        # Resources belong to the per-format BUNDLE targets, not the shared code lib.
+        foreach(_fmt Standalone VST3 AU)
+            if(TARGET Sp3ctraVST_${_fmt})
+                target_sources(Sp3ctraVST_${_fmt} PRIVATE ${SP3CTRA_EMBEDDED_VOICE_FILES})
+            endif()
+        endforeach()
+    else()
+        # Windows has no bundle machinery: copy each voice next to the binary
+        # (Resources/piper_voices/<bundle>), where PiperTts looks on Windows.
+        # For VST3 this lands inside the .vst3 folder → self-contained plugin.
+        foreach(_fmt Standalone VST3)
+            if(TARGET Sp3ctraVST_${_fmt})
+                list(LENGTH SP3CTRA_VOICE_NAMES _nvoices)
+                math(EXPR _last "${_nvoices} - 1")
+                foreach(_i RANGE ${_last})
+                    list(GET SP3CTRA_VOICE_NAMES ${_i} _voice)
+                    list(GET SP3CTRA_VOICE_DIRS ${_i} _vdir)
+                    add_custom_command(TARGET Sp3ctraVST_${_fmt} POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                            "${_vdir}"
+                            "$<TARGET_FILE_DIR:Sp3ctraVST_${_fmt}>/Resources/piper_voices/${_voice}"
+                        COMMENT "Embedding Piper voice ${_voice} (${_fmt})")
+                endforeach()
+            endif()
+        endforeach()
+    endif()
 endif()
 
 # VOICE module — sherpa-onnx static libs (link order from the official .pc;
 # libkissfft-float members only load for symbols the in-tree KissFFT doesn't
 # define — same float ABI, so either resolution is correct).
-if(APPLE AND SP3CTRA_ENABLE_TTS)
+if((APPLE OR WIN32) AND SP3CTRA_ENABLE_TTS)
     target_include_directories(Sp3ctraVST PRIVATE ${SP3CTRA_SHERPA_INCLUDE})
     # Absolute paths: plain -l names don't propagate their -L dir from the
     # shared-code static lib to the Standalone/VST3/AU link steps.
     set(SP3CTRA_SHERPA_LIBDIR ${sherpa_onnx_libs_SOURCE_DIR}/lib)
+    if(APPLE)
+        set(_sl_prefix ${SP3CTRA_SHERPA_LIBDIR}/lib)
+        set(_sl_suffix .a)
+    else()
+        set(_sl_prefix ${SP3CTRA_SHERPA_LIBDIR}/)
+        set(_sl_suffix .lib)
+    endif()
     target_link_libraries(Sp3ctraVST PRIVATE
-        ${SP3CTRA_SHERPA_LIBDIR}/libsherpa-onnx-c-api.a
-        ${SP3CTRA_SHERPA_LIBDIR}/libsherpa-onnx-core.a
-        ${SP3CTRA_SHERPA_LIBDIR}/libkaldi-decoder-core.a
-        ${SP3CTRA_SHERPA_LIBDIR}/libsherpa-onnx-kaldifst-core.a
-        ${SP3CTRA_SHERPA_LIBDIR}/libsherpa-onnx-fstfar.a
-        ${SP3CTRA_SHERPA_LIBDIR}/libsherpa-onnx-fst.a
-        ${SP3CTRA_SHERPA_LIBDIR}/libkaldi-native-fbank-core.a
-        ${SP3CTRA_SHERPA_LIBDIR}/libkissfft-float.a
-        ${SP3CTRA_SHERPA_LIBDIR}/libpiper_phonemize.a
-        ${SP3CTRA_SHERPA_LIBDIR}/libespeak-ng.a
-        ${SP3CTRA_SHERPA_LIBDIR}/libucd.a
-        ${SP3CTRA_SHERPA_LIBDIR}/libonnxruntime.a
-        ${SP3CTRA_SHERPA_LIBDIR}/libssentencepiece_core.a
+        ${_sl_prefix}sherpa-onnx-c-api${_sl_suffix}
+        ${_sl_prefix}sherpa-onnx-core${_sl_suffix}
+        ${_sl_prefix}kaldi-decoder-core${_sl_suffix}
+        ${_sl_prefix}sherpa-onnx-kaldifst-core${_sl_suffix}
+        ${_sl_prefix}sherpa-onnx-fstfar${_sl_suffix}
+        ${_sl_prefix}sherpa-onnx-fst${_sl_suffix}
+        ${_sl_prefix}kaldi-native-fbank-core${_sl_suffix}
+        ${_sl_prefix}kissfft-float${_sl_suffix}
+        ${_sl_prefix}piper_phonemize${_sl_suffix}
+        ${_sl_prefix}espeak-ng${_sl_suffix}
+        ${_sl_prefix}ucd${_sl_suffix}
+        ${_sl_prefix}onnxruntime${_sl_suffix}
+        ${_sl_prefix}ssentencepiece_core${_sl_suffix}
     )
     target_compile_definitions(Sp3ctraVST PRIVATE SP3CTRA_HAS_TTS=1)
 endif()

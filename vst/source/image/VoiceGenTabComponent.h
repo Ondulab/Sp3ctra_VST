@@ -33,7 +33,6 @@
 #include "WaveformSelectorComponent.h"
 #include "../tts/PiperTts.h"
 #include "../tts/VoiceGenJob.h"
-#include "../tts/LanguageDetector.h"
 
 class VoiceGenTabComponent : public juce::Component,
                              private juce::Timer
@@ -788,12 +787,10 @@ private:
     bool resolveAutoVoice(const juce::String& forText, PiperVoiceInfo& out,
                           juce::String& outLang)
     {
-        juce::StringArray langs;
-        for (const auto& v : voices)
-            if (v.lang.isNotEmpty())
-                langs.addIfNotAlreadyThere(v.lang);
-
-        outLang = LanguageDetector::detect(forText, langs);
+        // AUTO language detection removed (was macOS-only NaturalLanguage):
+        // resolve to the selected voice, else the first installed one.
+        juce::ignoreUnused(forText);
+        outLang = {};
 
         auto findById = [this](const juce::String& id) -> const PiperVoiceInfo*
         {
