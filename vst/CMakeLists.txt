@@ -179,11 +179,9 @@ target_sources(Sp3ctraVST
         source/sources/ui/MediaSourceSetupPanel.cpp
         source/sources/ui/MediaSourceSetupPanel.h
 
-        # VOICE module — offline TTS (Piper voices via sherpa-onnx) + AUTO
-        # language detection (impl platform-specific — see block below)
+        # VOICE module — offline TTS (Piper voices via sherpa-onnx)
         source/tts/PiperTts.cpp
         source/tts/PiperTts.h
-        source/tts/LanguageDetector.h
         source/tts/VoiceGenJob.h
         source/image/VoiceGenTabComponent.h
 
@@ -317,18 +315,17 @@ target_sources(Sp3ctraVST
 )
 
 # ---------------------------------------------------------------------------
-# Platform-specific implementations: AVFoundation / NaturalLanguage on macOS,
-# graceful stubs elsewhere (VIDEO source disabled, AUTO language undecided).
+# Platform-specific implementations: AVFoundation VIDEO reader on macOS,
+# graceful stub elsewhere (VIDEO file source disabled). AUTO language
+# detection was removed entirely (used to be macOS NaturalLanguage-only).
 # ---------------------------------------------------------------------------
 if(APPLE)
     target_sources(Sp3ctraVST PRIVATE
         source/sources/VideoFileReader.mm
-        source/tts/LanguageDetector.mm
     )
 else()
     target_sources(Sp3ctraVST PRIVATE
         source/sources/VideoFileReaderStub.cpp
-        source/tts/LanguageDetectorStub.cpp
     )
 endif()
 
@@ -505,7 +502,6 @@ if(APPLE)
         "-framework CoreMedia"
         "-framework CoreVideo"
         "-framework QuartzCore"
-        "-framework NaturalLanguage"   # VOICE — AUTO language detection
     )
 endif()
 
