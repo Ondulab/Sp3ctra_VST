@@ -611,7 +611,7 @@ RenderResult renderScore(const juce::File& wav,
         logLines.add("Stereo: 2 spectrograms (left=red, right=blue)");
     else if (s.enableStereoMode != 0)
         logLines.add("Stereo ON but source is mono (" + juce::String(reader->numChannels)
-                     + " ch) → greyscale. Load a stereo WAV for L/R.");
+                     + juce::String::fromUTF8(" ch) → greyscale. Load a stereo WAV for L/R."));
 
     freeLayers();
 

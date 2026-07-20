@@ -56,6 +56,7 @@ ModuleType chainBlockToModuleType(ChainBlockId id) noexcept
         case ChainBlockId::LuxStral: return ModuleType::LuxStral;
         case ChainBlockId::LuxSynth: return ModuleType::LuxSynth;
         case ChainBlockId::LuxWave:  return ModuleType::LuxWave;
+        case ChainBlockId::LuxGrain: return ModuleType::LuxGrain;
         case ChainBlockId::VideoScroll: return ModuleType::VideoScroll;
         case ChainBlockId::ImageSrc:  return ModuleType::Image;
         case ChainBlockId::VideoSrc:  return ModuleType::Video;
@@ -288,6 +289,8 @@ void ChainRackComponent::rebuild()
                 bp->setEnableParamOverride(lxOutParam(m.slot, "enabled"));
             if (m.type == ModuleType::LuxWave && m.slot >= 0)
                 bp->setEnableParamOverride(lwOutParam(m.slot, "enabled"));
+            if (m.type == ModuleType::LuxGrain && m.slot >= 0)
+                bp->setEnableParamOverride(lgOutParam(m.slot, "enabled"));
             // Each VideoScroll output is per-instance: its LED toggles the slot's
             // own enable param, so the mixer can drop just this output.
             if (m.type == ModuleType::VideoScroll && m.slot >= 0)
@@ -466,6 +469,7 @@ ChainBlockId ChainRackComponent::instanceToBlockId(ModuleType type, int chainIdx
         case ModuleType::LuxStral: return ChainBlockId::LuxStral;
         case ModuleType::LuxSynth: return ChainBlockId::LuxSynth;
         case ModuleType::LuxWave:  return ChainBlockId::LuxWave;
+        case ModuleType::LuxGrain: return ChainBlockId::LuxGrain;
         case ModuleType::VideoScroll: return ChainBlockId::VideoScroll;
         case ModuleType::Image:    return ChainBlockId::ImageSrc;    // M9 — own pages
         case ModuleType::Video:    return ChainBlockId::VideoSrc;
@@ -1184,6 +1188,10 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const j
         case ModuleType::LuxWave:
             return paramOn(engineSlot >= 0 ? lwOutParam(engineSlot, "enabled")
                                            : juce::String("luxwaveEnabled"))
+                       ? LedState::Active : LedState::Off;
+        case ModuleType::LuxGrain:
+            return paramOn(engineSlot >= 0 ? lgOutParam(engineSlot, "enabled")
+                                           : juce::String("luxgrainEnabled"))
                        ? LedState::Active : LedState::Off;
 
         // SCORE, TIMBRE, MIDI SCORE and VOICE each own a score-player slot

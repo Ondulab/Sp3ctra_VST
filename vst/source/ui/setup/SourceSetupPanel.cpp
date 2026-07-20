@@ -189,7 +189,7 @@ SourceSetupPanel::SourceSetupPanel (Sp3ctraAudioProcessor& processor, juce::Colo
     calibrateCisButton.setButtonText ("Start CIS Calibration");
     calibrateCisButton.onClick = [this] {
         deviceClient.postForm ("startCalibration", "CIS_CAL_START", {});
-        setConnState (connState, "CIS calibration started — move over white reference");
+        setConnState (connState, juce::String::fromUTF8("CIS calibration started — move over white reference"));
     };
     addAndMakeVisible (calibrateCisButton);
 
@@ -215,7 +215,7 @@ SourceSetupPanel::SourceSetupPanel (Sp3ctraAudioProcessor& processor, juce::Colo
     calibrateImuButton.setButtonText ("Start IMU Calibration");
     calibrateImuButton.onClick = [this] {
         deviceClient.postForm ("startIMUCalibration", "IMU_CAL_START", {});
-        setConnState (connState, "IMU calibration started — keep device still (~1.5s)");
+        setConnState (connState, juce::String::fromUTF8("IMU calibration started — keep device still (~1.5s)"));
     };
     addAndMakeVisible (calibrateImuButton);
 

@@ -96,6 +96,18 @@ void luxsynth_condition_line(
     int nb_pixels
 );
 
+/* LuxGrain per-send conditioning — same steps as luxsynth_condition_line
+ * (RGB → grayscale → Negative → DC blocking → Gamma) but from the
+ * luxgrain_out bank. WITHOUT intensity (mix weight). */
+void luxgrain_condition_line(
+    const uint8_t *raw_r,
+    const uint8_t *raw_g,
+    const uint8_t *raw_b,
+    int bank_slot,
+    float *line_out,
+    int nb_pixels
+);
+
 /* LuxSynth synthesis preprocessing
  * Pipeline: RGB → Grayscale → Inversion (optional) → FFT (no gamma for linear response)
  */

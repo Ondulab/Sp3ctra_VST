@@ -380,7 +380,7 @@ scoregen::RenderResult renderTimbrePage(
                            + juce::String(settings.spectroHeightMM, 3) + " mm  |  "
                            + juce::String(settings.writingSpeed, 1) + " cm/s  |  "
                            + juce::String(slotSec, 2) + " s/sound  |  "
-                           + juce::String(dpi, 0) + " DPI — print at 100%",
+                           + juce::String(dpi, 0) + juce::String::fromUTF8(" DPI — print at 100%"),
                        juce::Rectangle<float>((float) spectroLeft,
                                               (float) mmToPx(6.5, dpi),
                                               (float) spectroWidth, (float) mmToPx(3.5, dpi)),

@@ -12,7 +12,8 @@
  *   IMAGE  — a still image resized to the chain width; ONE row is the line.
  *            The row is movable (PLAY face / host automation) and has a
  *            sampler-like transport: scan the image once / loop / reverse
- *            loop / ping-pong over a configurable traversal duration.
+ *            loop / ping-pong over a configurable traversal duration,
+ *            confined to user-draggable scan bounds [start, end].
  *   VIDEO  — a video file (AVFoundation); ONE chosen row of the running video
  *            is the line. Transport: play once / loop / reverse / ping-pong
  *            at a speed factor.
@@ -81,6 +82,10 @@ public:
     void setPosition(float frac);              ///< manual / automated line seek
     void setDurationS(float s)     { durS_.store(juce::jlimit(0.05f, 600.f, s)); }
     void setLoopMode(int m)        { loopMode_.store(juce::jlimit(0, 3, m)); }
+    // Scan bounds: the transport reads only [start, end] of the image (manual
+    // seeks stay free). Crossed markers are normalised at tick time.
+    void setScanStart(float f)     { scanStart_.store(juce::jlimit(0.f, 1.f, f)); }
+    void setScanEnd(float f)       { scanEnd_.store(juce::jlimit(0.f, 1.f, f)); }
     void setPlaying(bool p);
     bool isPlaying() const         { return playing_.load(std::memory_order_acquire); }
     float getPlayheadFrac() const  { return headPub_.load(std::memory_order_relaxed); }
@@ -109,6 +114,8 @@ private:
     std::atomic<float> targetPos_{ 0.5f };
     std::atomic<bool>  seekPending_{ true };
     std::atomic<float> durS_     { 5.0f };
+    std::atomic<float> scanStart_{ 0.0f };
+    std::atomic<float> scanEnd_  { 1.0f };
     std::atomic<int>   loopMode_ { MediaSrc::Loop };
     std::atomic<bool>  playing_  { false };
     std::atomic<bool>  justStarted_{ false };

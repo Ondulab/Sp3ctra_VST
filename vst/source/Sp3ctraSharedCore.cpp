@@ -15,6 +15,7 @@ extern "C"
     #include "synthesis/luxstral/wave_generation.h"          // request_frequency_reinit / reset_frequency_reinit_state
     #include "synthesis/luxsynth/luxsynth_vst_adapter.h"     // luxsynth_init_audio_buffers / luxsynth_engine_init / luxsynth_free_audio_buffers
     #include "synthesis/luxwave/luxwave_vst_adapter.h"       // g_luxwave_engine / luxwave_engine_init
+    #include "synthesis/luxgrain/luxgrain_vst_adapter.h"     // g_luxgrain_engine / luxgrain_engine_init
 }
 
 // ============================================================================
@@ -181,6 +182,22 @@ bool Sp3ctraSharedCore::startWithConfig(const Sp3ctraCore::ActiveConfig& config,
         {
             log_info("SHARED", "LuxWave engine initialized inline (SR=%.0f, BS=%d)",
                      sampleRate, samplesPerBlock);
+        }
+    }
+
+    // ── 10. LuxGrain granular synthesis engine ───────────────────────────────
+    {
+        int lgResult = luxgrain_engine_init(&g_luxgrain_engine,
+                                            static_cast<float>(sampleRate));
+        if (lgResult != 0)
+        {
+            log_error("SHARED", "startWithConfig() — luxgrain_engine_init() failed (rc=%d)", lgResult);
+            // Non-fatal: other engines still work
+        }
+        else
+        {
+            log_info("SHARED", "LuxGrain engine initialized inline (SR=%.0f)",
+                     sampleRate);
         }
     }
 

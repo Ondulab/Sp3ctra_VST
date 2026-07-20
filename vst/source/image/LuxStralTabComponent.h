@@ -30,6 +30,7 @@
 #include "../midi/MidiLearnAttachment.h"
 #include "../ui/AudioPanelWidgets.h"      // AudioPanelLayout + AudioPanelUI (shared look)
 #include "../ui/EnvelopeEditorComponent.h"
+#include "../ui/TimbreWaveformStrip.h"    // sample scan strip (luxstral_wavetable)
 #include "VisualizerMode.h"
 
 // Phase-management activity counter (synth_luxstral.c) — polled by the page
@@ -147,6 +148,97 @@ public:
         updateStereoEnablement();
         updateStrokeForgeEnablement();
 
+        // ── TIMBRE — sample wavetable + scan (performance controls) ─────────
+        // The whole granular play set lives HERE (PLAY page): file selection,
+        // scan strip, transport, and the three color knobs — all MIDI-learnable.
+        timbreLoadButton.setButtonText("LOAD...");
+        timbreLoadButton.setTooltip(
+            "Load an audio file as the bank's timbre. One cycle is extracted\n"
+            "at the scan position and every oscillator replays it band-limited\n"
+            "at its own pitch; the spectral envelope drives the Formant color.");
+        addAndMakeVisible(timbreLoadButton);
+        timbreLoadButton.onClick = [this]
+        {
+            timbreFileChooser = std::make_unique<juce::FileChooser>(
+                "Select a sample for the LuxStral timbre",
+                juce::File::getSpecialLocation(juce::File::userMusicDirectory),
+                "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg;*.m4a");
+            const auto flags = juce::FileBrowserComponent::openMode
+                             | juce::FileBrowserComponent::canSelectFiles;
+            timbreFileChooser->launchAsync(flags, [this](const juce::FileChooser& fc)
+            {
+                const auto file = fc.getResult();
+                if (file.existsAsFile())
+                    loadTimbreSample(file);
+            });
+        };
+
+        timbreClearButton.setButtonText("CLEAR");
+        timbreClearButton.setTooltip("Back to the analytic sine/square timbre.");
+        addAndMakeVisible(timbreClearButton);
+        timbreClearButton.onClick = [this]
+        {
+            luxstral_wavetable_clear();
+            updateTimbreInfo();
+            timbreStrip->repaint();
+        };
+
+        // Sample transport — PLAY loops the extraction point through the file;
+        // STOP freezes it (the cursor stays scrubable by mouse or MIDI).
+        timbrePlayButton.setButtonText("PLAY");
+        timbrePlayButton.setTooltip(
+            "Read the sample: the extraction point walks through the file\n"
+            "(looping) at Rate x real time. Drag the strip to scrub.");
+        timbrePlayButton.setColour(juce::TextButton::buttonOnColourId,
+                                   juce::Colour(0xff2f7a44));
+        addAndMakeVisible(timbrePlayButton);
+        timbrePlayButton.onClick = [this]
+        {
+            if (auto* p = processor.getAPVTS().getParameter("luxstralTimbreScanPlay"))
+                p->setValueNotifyingHost(1.0f);
+        };
+        timbreStopButton.setButtonText("STOP");
+        timbreStopButton.setTooltip("Freeze the extraction point (scrub stays live).");
+        addAndMakeVisible(timbreStopButton);
+        timbreStopButton.onClick = [this]
+        {
+            if (auto* p = processor.getAPVTS().getParameter("luxstralTimbreScanPlay"))
+                p->setValueNotifyingHost(0.0f);
+        };
+
+        timbreInfoLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).italicised());
+        addAndMakeVisible(timbreInfoLabel);
+
+        timbreStrip = std::make_unique<TimbreWaveformStrip>(apvts);
+        addAndMakeVisible(*timbreStrip);
+
+        // TIMBRE master switch — docked in the badge (same pattern as the
+        // STEREO enable): OFF bypasses the whole sample timbre and the bank
+        // falls back to the analytic SIN spectral synthesis.
+        timbreEnableToggle.setButtonText({});
+        timbreEnableToggle.setTooltip(
+            "Granular/sample timbre mode: OFF = pure analytic sine bank\n"
+            "(mix and formant bypassed), ON = sample timbre active.");
+        addAndMakeVisible(timbreEnableToggle);
+        timbreEnableAttach.reset(new BtnAttach(apvts, "luxstralTimbreEnable",
+                                               timbreEnableToggle));
+        timbreEnableToggle.onClick = [this] { updateTimbreEnablement(); };
+
+        AudioPanelUI::initKnob(timbreRateKnob, " x");
+        addAndMakeVisible(timbreRateKnob);
+        timbreRateAttach.reset(new SldAttach(apvts, "luxstralTimbreScanRate",
+                                             timbreRateKnob));
+        AudioPanelUI::initKnob(timbreFormantKnob);
+        addAndMakeVisible(timbreFormantKnob);
+        timbreFormantAttach.reset(new SldAttach(apvts, "luxstralTimbreFormant",
+                                                timbreFormantKnob));
+        AudioPanelUI::initKnob(timbreMixKnob);
+        addAndMakeVisible(timbreMixKnob);
+        timbreMixAttach.reset(new SldAttach(apvts, "luxstralTimbreMix",
+                                            timbreMixKnob));
+        updateTimbreInfo();
+        updateTimbreEnablement();
+
         // Right-click MIDI Learn on the SHARED controls (bound once — the
         // per-engine ones are wired in bindEngineParams).
         auto& mm = processor.getMidiMap();
@@ -166,6 +258,16 @@ public:
         learn(sfMorphWidthSlider,    "sfMorphWidthScale");
         learn(sfFocusSigmaSlider,    "sfBlobFocusSigma");
         learn(sfSpectralThreshSlider,"sfSpectralWidthThreshold");
+        // TIMBRE — the whole granular play set is MIDI-mappable, including
+        // the scan strip itself (right-click it → learn luxstralTimbrePos,
+        // which drives the cursor whether the transport plays or not).
+        learn(timbreEnableToggle,    "luxstralTimbreEnable");
+        learn(timbrePlayButton,      "luxstralTimbreScanPlay");
+        learn(timbreStopButton,      "luxstralTimbreScanPlay");
+        learn(timbreRateKnob,        "luxstralTimbreScanRate");
+        learn(timbreFormantKnob,     "luxstralTimbreFormant");
+        learn(timbreMixKnob,         "luxstralTimbreMix");
+        learn(*timbreStrip,          "luxstralTimbrePos");
     }
 
     //==========================================================================
@@ -235,6 +337,19 @@ public:
             }
         }
 
+        // ── LEFT: TIMBRE — sample wavetable (badge toggle = mode ON/OFF) ────
+        {
+            const bool tbOn = timbreEnableToggle.getToggleState()
+                              && luxstral_wavetable_has_sample();
+            drawSectionBg(g, L.tbBg.getX(), L.tbBg.getY(), L.tbBg.getWidth(), L.tbBg.getHeight());
+            drawBadge(g, L.tbBadge.getX(), L.tbBadge.getY(), L.tbBadge.getWidth(),
+                      0xff1c3755, 0xff7ab0f0, "TIMBRE  --  SAMPLE");
+            const juce::uint32 klbl = tbOn ? 0xffb8c4d0 : kDimText;
+            drawKnobLabel(g, L.tbGridX, L.tbGridW, L.tbGridY, 0, "Scan Rate", klbl);
+            drawKnobLabel(g, L.tbGridX, L.tbGridW, L.tbGridY, 1, "Formant",   klbl);
+            drawKnobLabel(g, L.tbGridX, L.tbGridW, L.tbGridY, 2, "Timbre Mix", klbl);
+        }
+
         // ── RIGHT: STEREO (enable toggle sits in the badge) ─────────────────
         const bool stOn = stereoEnableToggle.getToggleState();
         drawSectionBg(g, L.stBg.getX(), L.stBg.getY(), L.stBg.getWidth(), L.stBg.getHeight());
@@ -283,6 +398,18 @@ public:
         phaseModeCombo.setBounds(L.oscBadge.getRight() - 92,
                                  L.oscBadge.getY() + 1,
                                  88, L.oscBadge.getHeight() - 2);
+
+        // TIMBRE — sample wavetable + scan
+        timbreEnableToggle.setBounds(L.tbBadgeToggle);
+        timbreLoadButton.setBounds(L.tbLoad);
+        timbreClearButton.setBounds(L.tbClear);
+        timbrePlayButton.setBounds(L.tbPlay);
+        timbreStopButton.setBounds(L.tbStop);
+        timbreInfoLabel.setBounds(L.tbInfo);
+        timbreStrip->setBounds(L.tbStrip);
+        AudioPanelUI::placeKnob(timbreRateKnob,    L.tbGridX, L.tbGridW, L.tbGridY, 0);
+        AudioPanelUI::placeKnob(timbreFormantKnob, L.tbGridX, L.tbGridW, L.tbGridY, 1);
+        AudioPanelUI::placeKnob(timbreMixKnob,     L.tbGridX, L.tbGridW, L.tbGridY, 2);
 
         // RIGHT
         stereoEnableToggle.setBounds(L.stBadgeToggle);
@@ -377,8 +504,13 @@ private:
     static constexpr int kStereoSecH = kBadgeH + kBadgeGap + kKnobH + kSecPadB;                        // 107
     static constexpr int kSfSecH     = kBadgeH + kBadgeGap + kCapH + (4 * kRowH + 3 * kRowGap) + kDivGap
                                      + kCapH + kRowH + kToggleGap + kKnobH + kSecPadB;                 // 271
+    // TIMBRE — sample wavetable + scan (badge toggle = scan transport):
+    // buttons/info row, waveform strip, then Rate/Formant/Mix knobs.
+    static constexpr int kTimbreStripH = 40;
+    static constexpr int kTimbreSecH   = kBadgeH + kBadgeGap + kRowH + kToggleGap
+                                       + kTimbreStripH + kToggleGap + kKnobH + kSecPadB;               // 181
 
-    static constexpr int kLeftColH   = kHeaderH + kSecGapV + kOscSecH;
+    static constexpr int kLeftColH   = kHeaderH + kSecGapV + kOscSecH + kSecGapV + kTimbreSecH;
     // Right column starts with the engine-identity chip (same height as the
     // Volume strip) so both columns share the top header row (M8).
     static constexpr int kRightColH  = kHeaderH + kSecGapV + kStereoSecH + kSecGapV + kSfSecH;         // 456
@@ -397,6 +529,9 @@ private:
         juce::Rectangle<int> volStrip, volLabel, volSlider;
         juce::Rectangle<int> oscBg, oscBadge, env;
         int oscCaptionY = 0, oscGridX = 0, oscGridW = 0, oscGridY = 0;
+        juce::Rectangle<int> tbBg, tbBadge, tbBadgeToggle;
+        juce::Rectangle<int> tbLoad, tbClear, tbPlay, tbStop, tbInfo, tbStrip;
+        int tbGridX = 0, tbGridW = 0, tbGridY = 0;
         // right
         juce::Rectangle<int> engineChip;
         juce::Rectangle<int> stBg, stBadge, stBadgeToggle;
@@ -451,6 +586,25 @@ private:
             L.env = { cx, cy, cw, kEnvH };
             cy += kEnvH + kEnvGap;
             L.oscGridX = cx; L.oscGridW = cw; L.oscGridY = cy;
+            y += kOscSecH + kSecGapV;
+
+            // TIMBRE — sample wavetable + scan (toggle in badge = transport)
+            L.tbBg          = { leftX - 2, y, colW + 4, kTimbreSecH };
+            L.tbBadge       = { leftX, y, colW, kBadgeH };
+            L.tbBadgeToggle = badgeToggle(L.tbBadge);
+            cy = y + kBadgeH + kBadgeGap;
+            {
+                int bx = cx;
+                L.tbLoad  = { bx, cy, 76, kRowH };  bx += 76 + gap;
+                L.tbClear = { bx, cy, 56, kRowH };  bx += 56 + gap;
+                L.tbPlay  = { bx, cy, 52, kRowH };  bx += 52 + 2;
+                L.tbStop  = { bx, cy, 52, kRowH };  bx += 52 + gap;
+                L.tbInfo  = { bx, cy, cx + cw - bx, kRowH };
+            }
+            cy += kRowH + kToggleGap;
+            L.tbStrip = { cx, cy, cw, kTimbreStripH };
+            cy += kTimbreStripH + kToggleGap;
+            L.tbGridX = cx; L.tbGridW = cw; L.tbGridY = cy;
         }
 
         // ── RIGHT COLUMN ────────────────────────────────────────────────────
@@ -527,6 +681,17 @@ private:
             onsetLedOn_ = lit;
             repaint();
         }
+
+        // TIMBRE transport indicator — PLAY lights while the scan runs
+        // (param may change from MIDI/automation, not just our buttons).
+        const bool playing =
+            processor.getAPVTS().getRawParameterValue("luxstralTimbreScanPlay")
+                ->load() > 0.5f;
+        if (playing != lastScanPlaying_)
+        {
+            lastScanPlaying_ = playing;
+            timbrePlayButton.setToggleState(playing, juce::dontSendNotification);
+        }
     }
 
     void updateStrokeForgeEnablement()
@@ -560,6 +725,53 @@ private:
         if (onVisualizerSourcesChanged) onVisualizerSourcesChanged();
     }
 
+    // ── TIMBRE helpers ──────────────────────────────────────────────────────
+    void updateTimbreEnablement()
+    {
+        // OFF = the bank is back to the analytic SIN synthesis — grey the
+        // color knobs (transport/LOAD stay live so you can cue while off).
+        const bool on = timbreEnableToggle.getToggleState();
+        timbreRateKnob.setEnabled(on);
+        timbreFormantKnob.setEnabled(on);
+        timbreMixKnob.setEnabled(on);
+        repaint();   // knob label tints
+    }
+
+    void loadTimbreSample(const juce::File& file)
+    {
+        juce::String err;
+        if (! processor.loadTimbreSampleFile(file, 0.0f, err))
+        {
+            timbreInfoLabel.setText(err, juce::dontSendNotification);
+            timbreInfoLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+            return;
+        }
+        updateTimbreInfo();
+        timbreStrip->repaint();
+        repaint();   // un-dim the knob labels
+    }
+
+    void updateTimbreInfo()
+    {
+        char  name[LUXSTRAL_WT_NAME_MAX] = {0};
+        float rootHz = 0.0f, confidence = 0.0f;
+        if (luxstral_wavetable_get_info(name, sizeof(name), &rootHz, &confidence))
+        {
+            timbreInfoLabel.setText(juce::String::fromUTF8(name)
+                                        + juce::String::formatted(" - %.1f Hz", rootHz)
+                                        + (luxstral_wavetable_has_sample() ? "" : " (static)"),
+                                    juce::dontSendNotification);
+            timbreInfoLabel.setColour(juce::Label::textColourId,
+                                      confidence < 0.6f ? juce::Colours::orange
+                                                        : juce::Colours::lightgreen);
+        }
+        else
+        {
+            timbreInfoLabel.setText("no sample loaded", juce::dontSendNotification);
+            timbreInfoLabel.setColour(juce::Label::textColourId, juce::Colours::grey);
+        }
+    }
+
     void initLabel(juce::Label& lbl, const juce::String& text)
     {
         lbl.setText(text, juce::dontSendNotification);
@@ -590,6 +802,16 @@ private:
     juce::Slider       phasePositionSlider; // strike/pluck position, BELL impact — SHARED A+B
     juce::Slider       phaseDriftSlider;   // per-onset micro-detune — SHARED A+B
 
+    // TIMBRE (left) — sample wavetable + scan transport
+    juce::TextButton   timbreLoadButton, timbreClearButton;
+    juce::TextButton   timbrePlayButton, timbreStopButton;  // sample transport
+    juce::Label        timbreInfoLabel;
+    std::unique_ptr<TimbreWaveformStrip> timbreStrip;
+    juce::ToggleButton timbreEnableToggle;   // badge toggle = timbre mode ON/OFF
+    juce::Slider       timbreRateKnob, timbreFormantKnob, timbreMixKnob;
+    std::unique_ptr<juce::FileChooser> timbreFileChooser;
+    bool               lastScanPlaying_ = false;  // PLAY button lit state
+
     // STEREO (right)
     juce::ToggleButton stereoEnableToggle;
     juce::Slider       stereoTempSlider;
@@ -613,9 +835,11 @@ private:
                                blobMergeGapAttach, blobColorSplitAttach,
                                sfMorphWidthAttach, sfFocusSigmaAttach, sfSpectralThreshAttach,
                                phaseSensAttach,
-                               phasePositionAttach, phaseDriftAttach;
+                               phasePositionAttach, phaseDriftAttach,
+                               timbreRateAttach, timbreFormantAttach, timbreMixAttach;
     std::unique_ptr<BtnAttach> stereoEnableAttach,
-                               sfEnabledAttach, sfFocusOnlyAttach;
+                               sfEnabledAttach, sfFocusOnlyAttach,
+                               timbreEnableAttach;
 
     // MIDI-learn popups: shared controls bound once (ctor), engine-scoped
     // ones recreated by bindEngineParams().

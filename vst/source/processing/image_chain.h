@@ -60,7 +60,9 @@ extern "C" {
 #define IMAGE_CHAIN_INSERT_OUT_LUXWAVE  10
 #define IMAGE_CHAIN_INSERT_LUXHARMO    11  /* FX — SCALE musical quantizer on the
                                             * pixel/frequency axis (per-chain pool) */
-#define IMAGE_CHAIN_NUM_INSERTS        12
+#define IMAGE_CHAIN_INSERT_OUT_LUXGRAIN 12 /* OUT send marker — "→ LUXGRAIN"
+                                            * granular engine (luxgrain_out[]) */
+#define IMAGE_CHAIN_NUM_INSERTS        13
 
 /*
  * M6 Phase 2 — generalised executor driven by an explicit ordered insert list

@@ -362,11 +362,24 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
   // luxstral_wavetable.h). NULL or mix ≤ 0 keeps the legacy sine/square path
   // bit-exact.
   const luxstral_wavetable_t *user_wt = luxstral_wavetable_acquire();
-  float timbre_mix = g_sp3ctra_config.luxstral_timbre_mix;
+  // Master switch: OFF bypasses the whole sample-timbre feature — pure
+  // analytic sine/square bank, both the waveform mix and the formant
+  // follower inert (the badge toggle on the PLAY page).
+  const int timbre_enabled = g_sp3ctra_config.luxstral_timbre_enable;
+  float timbre_mix = timbre_enabled ? g_sp3ctra_config.luxstral_timbre_mix : 0.0f;
   if (user_wt == NULL || timbre_mix < 0.0f)
     timbre_mix = 0.0f;
   else if (timbre_mix > 1.0f)
     timbre_mix = 1.0f;
+  // Formant follower — vocoder-like per-note weighting by the sample's
+  // spectral envelope at the scan position. Independent of timbre_mix (also
+  // colors the pure sine bank); inert without a published table.
+  float timbre_formant =
+      timbre_enabled ? g_sp3ctra_config.luxstral_timbre_formant : 0.0f;
+  if (user_wt == NULL || timbre_formant < 0.0f)
+    timbre_formant = 0.0f;
+  else if (timbre_formant > 1.0f)
+    timbre_formant = 1.0f;
 
   // Main note processing loop - optimized for cache efficiency
   for (note = worker->start_note; note < worker->end_note; note++) {
@@ -557,6 +570,15 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
     
     // Use preprocessed volume data (already has: RGB → Grayscale → Inversion → Gamma → Averaging)
     float target_volume = worker->precomputed_volume[local_note_idx];
+
+    /* Formant follower: weight the note by the sample's spectral envelope at
+     * its own frequency (max-normalized ≤ 1, floor −60 dB — attenuation
+     * only, no clipping risk). Linear depth crossfade toward the filter.    */
+    if (timbre_formant > 0.0f) {
+      const float env = luxstral_wavetable_env_for_freq(
+          user_wt, worker->engine->waves[note].frequency);
+      target_volume *= 1.0f + timbre_formant * (env - 1.0f);
+    }
 
     // Phase management telemetry: max feeds the auto-gate reference, min
     // tracks the decode law's resting bed (the gate is floored above it so
