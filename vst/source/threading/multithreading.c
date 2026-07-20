@@ -1144,12 +1144,21 @@ void *udpThread(void *arg) {
   int first_packet_logged = 0;  // Log very first packet after restart
 
   while (ctx->running) {
-    recv_len = recvfrom(s, &packet, sizeof(packet), 0,
+    recv_len = recvfrom(s, (char *)&packet, sizeof(packet), 0,
                         (struct sockaddr *)si_other, &slen);
     if (recv_len < 0) {
+#ifdef _WIN32
+      // Winsock reports through WSAGetLastError(), not errno; the 100 ms
+      // SO_RCVTIMEO poll timeout surfaces as WSAETIMEDOUT.
+      int werr = WSAGetLastError();
+      if (werr != WSAETIMEDOUT && werr != WSAEWOULDBLOCK && werr != WSAEINTR) {
+        log_error("THREAD", "recvfrom error: winsock %d", werr);
+      }
+#else
       if (errno != EAGAIN && errno != EWOULDBLOCK) {
         log_error("THREAD", "recvfrom error: %s", strerror(errno));
       }
+#endif
       continue;
     }
 
