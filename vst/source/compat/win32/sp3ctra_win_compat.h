@@ -217,6 +217,23 @@ static inline unsigned int sleep(unsigned int seconds) {
   return 0;
 }
 
+/* sched_yield → SwitchToThread (yields only to ready threads, closest match) */
+static inline int sched_yield(void) {
+  SwitchToThread();
+  return 0;
+}
+
+/* mlock/munlock → VirtualLock/VirtualUnlock (same intent: pin RT audio
+ * buffers in physical RAM; NB Windows caps per-process locked pages unless
+ * the working-set size is raised — failure is non-fatal, callers log it). */
+static inline int mlock(const void *addr, size_t len) {
+  return VirtualLock((LPVOID)addr, len) ? 0 : -1;
+}
+
+static inline int munlock(const void *addr, size_t len) {
+  return VirtualUnlock((LPVOID)addr, len) ? 0 : -1;
+}
+
 #ifndef STDIN_FILENO
 #define STDIN_FILENO 0
 #define STDOUT_FILENO 1
