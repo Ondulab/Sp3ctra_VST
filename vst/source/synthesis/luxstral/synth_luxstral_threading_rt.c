@@ -272,10 +272,24 @@ int synth_set_rt_priority(pthread_t thread, int priority) {
   if (success_count >= 1) {
     return 0;
   }
-  
+
   log_warning("SYNTH_RT", "All RT policy attempts failed - continuing without RT");
   return -1;
-  
+
+#elif defined(_WIN32)
+  // Windows: TIME_CRITICAL priority from outside; the worker itself joins the
+  // "Pro Audio" MMCSS class on startup (must be done from within the thread —
+  // see synth_persistent_worker_thread), which is what actually buys low
+  // scheduling latency on Windows 10+.
+  (void)priority;
+  if (SetThreadPriority(thread, THREAD_PRIORITY_TIME_CRITICAL)) {
+    log_startup_detail("SYNTH_RT", "Thread priority set to TIME_CRITICAL");
+    return 0;
+  }
+  log_warning("SYNTH_RT", "SetThreadPriority(TIME_CRITICAL) failed (error %lu)",
+              (unsigned long)GetLastError());
+  return -1;
+
 #else
   log_warning("SYNTH_RT", "RT priorities not supported on this platform");
   return -1;

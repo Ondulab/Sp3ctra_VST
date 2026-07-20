@@ -61,6 +61,19 @@ if(APPLE AND SP3CTRA_ENABLE_TTS)
     )
 endif()
 
+# ---------------------------------------------------------------------------
+# Platform format set: AU is macOS-only. COPY_PLUGIN_AFTER_BUILD would try to
+# write into "C:\Program Files\Common Files\VST3" on Windows (admin-only), so
+# it stays a macOS convenience.
+# ---------------------------------------------------------------------------
+if(APPLE)
+    set(SP3CTRA_PLUGIN_FORMATS VST3 AU Standalone)
+    set(SP3CTRA_COPY_PLUGIN TRUE)
+else()
+    set(SP3CTRA_PLUGIN_FORMATS VST3 Standalone)
+    set(SP3CTRA_COPY_PLUGIN FALSE)
+endif()
+
 # Define the plugin with sources directly
 juce_add_plugin(Sp3ctraVST
     COMPANY_NAME "Ondulab"
@@ -69,10 +82,10 @@ juce_add_plugin(Sp3ctraVST
     NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
-    COPY_PLUGIN_AFTER_BUILD TRUE
+    COPY_PLUGIN_AFTER_BUILD ${SP3CTRA_COPY_PLUGIN}
     PLUGIN_MANUFACTURER_CODE "Ondu"
     PLUGIN_CODE "Sp3c"
-    FORMATS VST3 AU Standalone
+    FORMATS ${SP3CTRA_PLUGIN_FORMATS}
     PRODUCT_NAME "Sp3ctra"
     # App/bundle icon (dock + Finder). JUCE's juceaide builds the .icns from
     # this PNG and sets CFBundleIconFile on the Standalone .app. Source: the
@@ -154,22 +167,21 @@ target_sources(Sp3ctraVST
         source/ui/setup/ScoreSetupPanel.h
 
         # M9 — IMAGE / VIDEO / CAMERA source modules (engines + service + UI)
+        # (VideoFileReader impl is platform-specific — see block below)
         source/sources/MediaSourceEngines.cpp
         source/sources/MediaSourceEngines.h
         source/sources/MediaSourceService.h
         source/sources/VideoFileReader.h
-        source/sources/VideoFileReader.mm
         source/sources/ui/MediaSourcePage.cpp
         source/sources/ui/MediaSourcePage.h
         source/sources/ui/MediaSourceSetupPanel.cpp
         source/sources/ui/MediaSourceSetupPanel.h
 
         # VOICE module — offline TTS (Piper voices via sherpa-onnx) + AUTO
-        # language detection (NLLanguageRecognizer) + generation job + page
+        # language detection (impl platform-specific — see block below)
         source/tts/PiperTts.cpp
         source/tts/PiperTts.h
         source/tts/LanguageDetector.h
-        source/tts/LanguageDetector.mm
         source/tts/VoiceGenJob.h
         source/image/VoiceGenTabComponent.h
 
@@ -294,6 +306,50 @@ target_sources(Sp3ctraVST
         source/ui/VideoMixerColumn.cpp
         source/ui/VideoMixerColumn.h
 )
+
+# ---------------------------------------------------------------------------
+# Platform-specific implementations: AVFoundation / NaturalLanguage on macOS,
+# graceful stubs elsewhere (VIDEO source disabled, AUTO language undecided).
+# ---------------------------------------------------------------------------
+if(APPLE)
+    target_sources(Sp3ctraVST PRIVATE
+        source/sources/VideoFileReader.mm
+        source/tts/LanguageDetector.mm
+    )
+else()
+    target_sources(Sp3ctraVST PRIVATE
+        source/sources/VideoFileReaderStub.cpp
+        source/tts/LanguageDetectorStub.cpp
+    )
+endif()
+
+# ---------------------------------------------------------------------------
+# Windows port: the C core is written against POSIX (pthread, unistd,
+# sys/time, BSD sockets). source/compat/win32 mirrors those headers onto
+# Win32 primitives (SRWLOCK/CONDITION_VARIABLE/_beginthreadex/Winsock2) so
+# the C sources compile unchanged. Requires clang-cl (VS toolset -T ClangCL):
+# the C sources use C11 <stdatomic.h> and __builtin_prefetch, which plain
+# MSVC cl does not support.
+# ---------------------------------------------------------------------------
+if(WIN32)
+    target_include_directories(Sp3ctraVST PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/compat/win32)
+    target_compile_definitions(Sp3ctraVST PRIVATE
+        _CRT_SECURE_NO_WARNINGS      # snprintf/getenv/strerror & co
+        _CRT_NONSTDC_NO_DEPRECATE    # strdup/_mkdir POSIX-name warnings
+        _USE_MATH_DEFINES            # M_PI in the DSP code
+        NOMINMAX                     # keep std::min/max usable
+    )
+    target_link_libraries(Sp3ctraVST PRIVATE
+        ws2_32   # Winsock2 (UDP device stream)
+        avrt     # MMCSS "Pro Audio" scheduling for RT threads
+    )
+    if(MSVC)
+        # /utf-8: sources contain UTF-8 literals & comments; /bigobj: large
+        # JUCE-heavy translation units (PluginProcessor.cpp).
+        target_compile_options(Sp3ctraVST PRIVATE /utf-8 /bigobj)
+    endif()
+endif()
 
 # ✨ BRICK 1: UDP Reception - Add C sources
 # Only include what's needed for UDP + buffers (no synthesis yet)
