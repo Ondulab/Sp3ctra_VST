@@ -166,7 +166,7 @@ void SlotGridComponent::resized()
 void SlotGridComponent::paint(juce::Graphics& g)
 {
     auto* fs  = processor.getSampler(samplerIndex_);
-    auto* seq = processor.getFrameSequencer();
+    auto* seq = processor.getFrameSequencer(samplerIndex_);
     const int n = numBanks();
 
     // Determine which bank is currently sequencer-active

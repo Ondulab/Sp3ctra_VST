@@ -198,6 +198,11 @@ void luxwave_engine_process(LuxWaveEngine *engine, int num_samples,
 int  luxwave_engine_note_on(LuxWaveEngine *engine, uint8_t note, uint8_t velocity);
 int  luxwave_engine_note_off(LuxWaveEngine *engine, uint8_t note);
 
+/* Release every active voice (ADSR release, click-free). RT-safe; call from
+ * the audio thread. Used when the engine's last enabled OUT send goes away,
+ * so voices drain before the render gate closes. */
+void luxwave_engine_all_notes_off(LuxWaveEngine *engine);
+
 #ifdef __cplusplus
 }
 #endif

@@ -8,7 +8,12 @@
 class Sp3ctraAudioProcessor;
 
 /**
- * @brief Step sequencer grid — 16 steps in 2 rows of 8, square cells.
+ * @brief Step sequencer grid — square cells, ONLY the active steps are shown
+ *        (SeqNumSteps tiles, default 8): 1 row up to 8 steps, 2 rows of 8
+ *        beyond, 16 displayable max.
+ *
+ * Bound to ONE sampler engine (the sequencer is internal to its sampler):
+ * steps cycle through THIS engine's non-empty banks only.
  *
  * Each cell displays a mini spectral thumbnail of its assigned bank's
  * ACTIVE zone (content between start and end bounds), so the user can
@@ -19,9 +24,9 @@ class Sp3ctraAudioProcessor;
  *   Right click  → previous assignable value (−1)
  *   Drag up/down → increment / decrement continuously
  *
- * Assignable values cycle EMPTY → every non-empty bank of every sampler
- * engine across all chains (A1.., B1..) → LIVE; empty banks are skipped,
- * content is the only filter (see cycleStep in the .cpp).
+ * Assignable values cycle EMPTY → every non-empty bank of the bound
+ * engine → LIVE; empty banks are skipped, content is the only filter
+ * (see cycleStep in the .cpp).
  */
 class SequencerComponent : public juce::Component,
                            private juce::Timer
@@ -29,6 +34,9 @@ class SequencerComponent : public juce::Component,
 public:
     explicit SequencerComponent(Sp3ctraAudioProcessor& proc);
     ~SequencerComponent() override;
+
+    /** Bind the grid to sampler engine @p i (its own sequencer + banks). */
+    void setSamplerIndex(int i);
 
     void paint  (juce::Graphics& g) override;
     void resized() override;
@@ -252,6 +260,7 @@ private:
     void updateButton(int i);
 
     Sp3ctraAudioProcessor& processor;
+    int samplerIndex_ = 0;   // engine whose sequencer/banks this grid edits
     StepCell stepBtns[FrameSequencer::MAX_STEPS];
     int cachedNumSteps = -1;
 

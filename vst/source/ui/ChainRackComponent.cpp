@@ -52,7 +52,6 @@ ModuleType chainBlockToModuleType(ChainBlockId id) noexcept
         case ChainBlockId::Timbre:   return ModuleType::Timbre;
         case ChainBlockId::MidiScore:return ModuleType::MidiScore;
         case ChainBlockId::Voice:    return ModuleType::Voice;
-        case ChainBlockId::Sequencer:return ModuleType::Sequencer;
         case ChainBlockId::LuxStral: return ModuleType::LuxStral;
         case ChainBlockId::LuxSynth: return ModuleType::LuxSynth;
         case ChainBlockId::LuxWave:  return ModuleType::LuxWave;
@@ -465,7 +464,6 @@ ChainBlockId ChainRackComponent::instanceToBlockId(ModuleType type, int chainIdx
         case ModuleType::Timbre:   return ChainBlockId::Timbre;
         case ModuleType::MidiScore:return ChainBlockId::MidiScore;
         case ModuleType::Voice:    return ChainBlockId::Voice;
-        case ModuleType::Sequencer:return ChainBlockId::Sequencer;
         case ModuleType::LuxStral: return ChainBlockId::LuxStral;
         case ModuleType::LuxSynth: return ChainBlockId::LuxSynth;
         case ModuleType::LuxWave:  return ChainBlockId::LuxWave;
@@ -1219,7 +1217,7 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const j
         }
 
         default:
-            break;   // Sequencer (owned elsewhere) etc. → neutral
+            break;   // types without a rack LED → neutral
     }
     return LedState::Off;
 }

@@ -10,6 +10,7 @@
 #include "ui/ChainModel.h"      // M6 Phase 2 — editable chain topology (owned here)
 #include "midi/MidiMappingEngine.h" // MIDI CC/Note → any play param (MIDI learn)
 #include <map>                  // chainPoolSlots_ (stable chain → pool-slot binding)
+#include <vector>               // activeVideoSlots()
 
 // M9 — IMAGE / VIDEO / CAMERA source engines (owned here, UI binds to them)
 class ImageSourceEngine;
@@ -165,7 +166,11 @@ public:
     {
         return samplers_[(size_t) juce::jlimit(0, LuxSampler::kMaxEngines - 1, i)].get();
     }
-    FrameSequencer*  getFrameSequencer()  { return frameSequencer.get();  }
+    /** Per-engine step sequencer (internal to sampler @p e). Out-of-range clamps. */
+    FrameSequencer*  getFrameSequencer(int e) const
+    {
+        return frameSequencers_[(size_t) juce::jlimit(0, LuxSampler::kMaxEngines - 1, e)].get();
+    }
 
     // ── P5-M4 — per-instance score playback ─────────────────────────────────
     /** The score channel of the FIRST placed instance of score-family type
@@ -503,7 +508,10 @@ private:
     /** Pool slots present in the model at the LAST derivation — the diff
      *  discards a removed instance's frames (per-slot teardown). */
     uint8_t scoreSlotsPresentMask_ = 0;
-    std::unique_ptr<FrameSequencer> frameSequencer;
+    /** One step sequencer PER sampler engine — internal to the sampler since
+     *  the SEQUENCER rack module was retired (each addresses only its own
+     *  engine's banks; params live in the luxSampler{N}_Seq* banks). */
+    std::array<std::unique_ptr<FrameSequencer>, LuxSampler::kMaxEngines> frameSequencers_;
 
     // M9 — IMAGE / VIDEO / CAMERA source engines + the single service thread
     // that ticks them and pumps the chains when the device is not streaming.
@@ -566,14 +574,11 @@ private:
     static constexpr const char* PARAM_FS_OCT_OFFSET   = "luxSamplerOctaveOffset";
     static constexpr const char* PARAM_FS_MAX_DUR      = "luxSamplerMaxDuration";
 
-    // FrameSequencer parameter IDs
-    static constexpr const char* PARAM_SEQ_ENABLED  = "seqEnabled";
-    static constexpr const char* PARAM_SEQ_BPM      = "seqBpm";
-    static constexpr const char* PARAM_SEQ_NSTEPS   = "seqNumSteps";
-    static constexpr const char* PARAM_SEQ_LOOP     = "seqLoop";
-    static constexpr const char* PARAM_SEQ_DAW_SYNC = "seqDawSync";
-    static constexpr const char* PARAM_SEQ_BPS      = "seqBeatsPerStep";
-    static constexpr const char* PARAM_SEQ_TRANSPORT = "seqTransport"; // 0=Stop 1=Play 2=Hold
+    // FrameSequencer parameter IDs — per sampler engine since the sequencer
+    // became internal to the sampler: fsEngineParam(e, "SeqBpm" / "SeqNumSteps"
+    // / "SeqLoop" / "SeqDawSync" / "SeqBeatsPerStep" / "SeqTransport").
+    // The retired GLOBAL ids ("seqBpm"…) only survive in old state blobs and
+    // are migrated in setStateInformation via the legacy SEQ pattern tree.
 
     // SCORE playback transport parameter IDs (relayed to LuxSampler)
     static constexpr const char* PARAM_SCORE_PLAYING = "scorePlaying";
@@ -764,6 +769,24 @@ private:
     // render is skipped (no CPU) and its AUDIO MIX strip is hidden.
     std::atomic<int> sendCountLuxStral_ { 0 }, sendCountLuxSynth_ { 0 },
                      sendCountLuxWave_  { 0 }, sendCountLuxGrain_ { 0 };
+    // Per-engine bitmask of the OUT sends' bank slots present in the model
+    // (message thread writes in deriveAndPublishChainPlan; processBlock reads).
+    // ANDed each block with the banks' `enabled` flags (g_sp3ctra_config) so a
+    // send DISABLED via its rack LED starves the engine exactly like a removed
+    // one: OFF = silence, uniformly — freeze stays a transport (HOLD) feature.
+    std::atomic<uint32_t> sendSlotsLuxStral_ { 0 }, sendSlotsLuxSynth_ { 0 },
+                          sendSlotsLuxWave_  { 0 }, sendSlotsLuxGrain_ { 0 };
+    // Zero-CPU drain (audio thread only), indexed LuxStral/LuxSynth/LuxWave/
+    // LuxGrain. When an engine stops being fed, its render gate is held open
+    // for a drain window so the feeds' no-send contract (50-tick debounce +
+    // silence push + latch/crossfade) and the voices' release complete BEFORE
+    // the render collapses — closing instantly froze spectrum+voices, which
+    // resurrected as a stale "last sound" on re-enable. Blocks, not samples:
+    // the feed debounce also counts one tick per block.
+    static constexpr int kEngineDrainBlocks = 64;
+    int  engineDrainBlocks_[4] { 0, 0, 0, 0 };
+    bool engineFed_[4]  { false, false, false, false };   // this block
+    bool engineGate_[4] { false, false, false, false };   // fed OR draining
     // Per-engine sampler presence in the model (message thread, set in
     // deriveChainRouting) — combined with EACH engine's own enable param
     // (fsEngineParam(e,"Enabled")) to drive that engine's setEnabled().

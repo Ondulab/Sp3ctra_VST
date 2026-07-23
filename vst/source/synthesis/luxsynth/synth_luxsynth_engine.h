@@ -225,6 +225,13 @@ int luxsynth_engine_note_on(LuxSynthEngine *engine, uint8_t note, uint8_t veloci
 int luxsynth_engine_note_off(LuxSynthEngine *engine, uint8_t note);
 
 /**
+ * @brief Release every non-idle voice (ADSR release, click-free). RT-safe;
+ * call from the audio thread. Used when the engine's last enabled OUT send
+ * goes away, so voices drain before the render gate closes.
+ */
+void luxsynth_engine_all_notes_off(LuxSynthEngine *engine);
+
+/**
  * @brief Convert MIDI note to frequency (Hz). RT-safe.
  */
 float luxsynth_midi_to_freq(uint8_t note);

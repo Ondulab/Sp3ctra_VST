@@ -15,11 +15,19 @@ class Sp3ctraAudioProcessor;
  *
  *   • Start / End vertical bars  — drag to set the play region [start, end]
  *     (grab anywhere BELOW the top fade strip). The region outside is dimmed.
- *   • Fade handles (Reaper-style) — live in the thin strip along the TOP edge:
- *       top-left  = fade-in  (attack) length,
- *       top-right = fade-out (release) length.
- *     Drag horizontally to set the length; the fade curve is drawn in the strip
- *     and the image is whitened accordingly (visual fade-in / fade-out).
+ *   • Fade curves — drawn full-height ON the image, edited with two handles
+ *     each (no widget row, no top strip):
+ *       – END handle (top, coloured): drag horizontally = fade length;
+ *       – MID handle (white, on the curve): drag vertically = shape — below
+ *         the straight line → EXP, above → LOG, near it → LIN (power derived
+ *         so the curve passes through the mouse); with an S curve the drag
+ *         adjusts its power instead. Right-click a handle → LIN/EXP/LOG/S
+ *         menu; double-click the MID handle → reset to LIN.
+ *     Fires onFadeChanged so the owner's info labels (under the view) follow.
+ *   • Rotation arrows ↺ ↻ — translucent overlay centred at the TOP OF THE
+ *     IMAGE, shown only for image-loaded banks: re-render the content from
+ *     the source picture ±90° (lossless, duration kept). Fires
+ *     onContentRotated for the owner.
  *   • Playhead — vertical line while PLAYING.
  *
  * The per-fade curve TYPE and POWER, and the EQ, are edited elsewhere
@@ -40,6 +48,14 @@ public:
     void setSelectedSlot(int idx);
     void setSamplerIndex(int i);
     void markDirty() noexcept { imageDirty_ = true; repaint(); }
+
+    /** Fired after a successful ↺/↻ rotation — the owner refreshes the views
+     *  that mirror the slot content (sliders, loop buttons…). */
+    std::function<void()> onContentRotated;
+
+    /** Fired on every fade edit (length, shape, type) — the owner keeps its
+     *  fade info labels (under the view) in sync. */
+    std::function<void()> onFadeChanged;
 
     void paint    (juce::Graphics& g)         override;
     void resized  ()                          override;
@@ -68,13 +84,25 @@ private:
     bool        imageDirty_ = true;
     int         builtW_ = 0, builtH_ = 0;
 
-    enum class Mode { None, Start, End, Attack, Decay };
+    enum class Mode { None, Start, End, Attack, Decay,
+                      AttackShape, DecayShape };   // Shape = mid-curve handle
     Mode mode_ = Mode::None;
-    int  fadeHover_ = 0; // 0 = none, 1 = fade-in handle, 2 = fade-out handle
+    int  fadeHover_ = 0; // 0=none, 1=in end, 2=out end, 3=in mid, 4=out mid
 
-    static constexpr int kTopStrip = 18; // reserved for fade handles (no overlap)
+    // Fade handle geometry (full-height overlay). in=true → fade-in.
+    // Both return (-1,-1) when unavailable (no content / zero span for mid).
+    juce::Point<float> fadeEndPoint(bool in) const;
+    juce::Point<float> fadeMidPoint(bool in) const;
+    void showFadeTypeMenu(bool in);
+
+    // Rotation arrows (top-centre of the fade strip) — visible only when the
+    // bank was loaded from an image (visibility driven by the timer).
+    juce::TextButton rotCcwBtn_, rotCwBtn_;
+
+    static constexpr int kTopStrip = 0;  // fades live ON the image now
     static constexpr int kSnap     = 12; // px tolerance for time bars
     static constexpr int kHandleR  = 4;  // fade handle radius (matches EQ nodes)
+    static constexpr int kGrabR    = 9;  // fade handle grab radius (px)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SlotSpectralEditorComponent)
 };

@@ -415,9 +415,11 @@ public:
             y += ch + 3;
         };
 
+        // Switch (~38 px) + 8 px gap + "Active" at 11 px needs ~84 px to render untruncated.
+        const int togW = 84;
         presetLabel.setBounds(pad, y, 60, ch);
-        presetCombo.setBounds(pad + 60 + gap, y, colW - 60 - gap - 70, ch);
-        activeToggle.setBounds(pad + colW - 66, y, 66, ch);
+        presetCombo.setBounds(pad + 60 + gap, y, colW - 60 - gap - togW - gap, ch);
+        activeToggle.setBounds(pad + colW - togW, y, togW, ch);
         y += ch + gap;
 
         row(noteLabel,     noteSlider);

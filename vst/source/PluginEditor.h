@@ -21,7 +21,6 @@
 #include "image/VisualizerMode.h"
 #include "video/VideoScrollPage.h"
 #include "sampler/SamplerPageComponent.h"
-#include "sampler/SequencerPageComponent.h"
 #include "ui/ChainRackComponent.h"
 #include "ui/KeyboardRulerComponent.h"
 #include "ui/EngineAudioPanels.h"
@@ -543,7 +542,6 @@ private:
     std::unique_ptr<LuxStralTabComponent> imgLuxStralPage;
     std::unique_ptr<LuxSynthTabComponent> imgLuxSynthPage;
     std::unique_ptr<SamplerPageComponent> samplerPage;
-    std::unique_ptr<SequencerPageComponent> sequencerPage;
     std::unique_ptr<ScoreGenTabComponent> scorePage;
     std::unique_ptr<TimbreGenTabComponent> timbrePage;      // UTILS > TIMBRE
     std::unique_ptr<MidiScoreGenTabComponent> midiScorePage; // UTILS > MIDI SCORE

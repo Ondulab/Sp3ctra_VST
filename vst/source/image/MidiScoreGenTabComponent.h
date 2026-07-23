@@ -100,15 +100,6 @@ public:
         };
         addAndMakeVisible(presetCombo);
 
-        activeToggle.setButtonText("Active");
-        activeToggle.onClick = [this]
-        {
-            cur().enabled = activeToggle.getToggleState();
-            voiceTabs[(size_t) selectedVoice]->repaint();
-            markDirty();
-        };
-        addAndMakeVisible(activeToggle);
-
         auto timbral = [this](juce::Slider& s, auto setter)
         {
             s.onValueChange = [this, &s, setter]
@@ -375,7 +366,7 @@ public:
         {
             g.setColour(juce::Colour(0xff55606f));
             g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
-            g.drawText(data.ok ? "Enable at least one voice"
+            g.drawText(data.ok ? "No notes in this MIDI file"
                                : "Load a MIDI file to generate its score",
                        previewArea, juce::Justification::centred);
         }
@@ -461,8 +452,7 @@ public:
         };
 
         presetLabel.setBounds(pad, y, 60, ch);
-        presetCombo.setBounds(pad + 60 + gap, y, colW - 60 - gap - 70, ch);
-        activeToggle.setBounds(pad + colW - 66, y, 66, ch);
+        presetCombo.setBounds(pad + 60 + gap, y, colW - 60 - gap, ch);
         y += ch + gap;
 
         row(partialsLabel, partialsSlider);
@@ -752,7 +742,6 @@ private:
         presetCombo.setSelectedId(q.preset >= 0 ? q.preset + 1
                                                 : timbregen::numPresets() + 1,
                                   juce::dontSendNotification);
-        activeToggle .setToggleState(q.enabled, juce::dontSendNotification);
         partialsSlider.setValue(q.numPartials,  juce::dontSendNotification);
         slopeSlider  .setValue(q.slopeDbPerOct, juce::dontSendNotification);
         oddSlider    .setValue(q.oddBias,       juce::dontSendNotification);
@@ -935,6 +924,94 @@ private:
         return true;
     }
 
+    //==========================================================================
+    // Live audition: a param tweak while OUR piece is playing re-renders the
+    // strip on a background thread (renderStrip is pure/thread-safe) and
+    // hot-swaps the player's frames at the same musical position — no
+    // STOP/PLAY round-trip to hear the change. Debounced above the preview's
+    // 200 ms so a slider drag settles before the full-height render fires.
+    static constexpr juce::uint32 kLiveReloadDebounceMs = 400;
+
+    void maybeStartLiveReload()
+    {
+        if (! playDirty || liveRenderBusy_ || ! framesAreOurs
+            || ! data.ok || data.notes.empty())
+            return;
+        if (juce::Time::getMillisecondCounter() - lastEditMs < kLiveReloadDebounceMs)
+            return;
+        auto* fs = boundChannel();
+        if (fs == nullptr || ! fs->isScorePlaying()
+            || fs->getScoreFrameCount() != loadedFrameCount)
+            return;   // stopped or channel reclaimed → next PLAY reloads
+
+        const auto s = settingsWithTuning();
+        const double dur = juce::jmax(0.05, data.durationSec);
+        double pxPerSec = (s.printerDpi / 2.54) * s.writingSpeed;
+        if (dur * pxPerSec > (double) kMaxPlayFrames)
+            pxPerSec = (double) kMaxPlayFrames / dur;
+
+        playDirty       = false;   // edits landing during the render re-arm it
+        liveRenderBusy_ = true;
+
+        juce::Thread::launch(
+            [safe = juce::Component::SafePointer<MidiScoreGenTabComponent>(this),
+             dataCopy = data, voicesCopy = voices, s, dur, pxPerSec]
+            {
+                auto r = midiscoregen::renderStrip(dataCopy, voicesCopy, s,
+                                                   0.0, dur, pxPerSec, 400.0);
+                juce::MessageManager::callAsync(
+                    [safe, r = std::move(r), lo = s.minFreq, hi = s.maxFreq]
+                    {
+                        if (auto* self = safe.getComponent())
+                            self->applyLiveReload(r, lo, hi);
+                    });
+            });
+    }
+
+    void applyLiveReload(const scoregen::RenderResult& r,
+                         double minFreq, double maxFreq)
+    {
+        liveRenderBusy_ = false;
+        auto* fs = boundChannel();
+        // The transport stopped or the channel changed hands (other page /
+        // instance rebind) during the render — don't hot-swap a player that
+        // is no longer ours; re-arm so the next PLAY reloads instead.
+        if (fs == nullptr || ! framesAreOurs || ! fs->isScorePlaying()
+            || fs->getScoreFrameCount() != loadedFrameCount)
+        {
+            playDirty = true;
+            return;
+        }
+        if (! (r.ok && r.image.isValid()))
+        {
+            logLabel.setText("Failed: " + r.log, juce::dontSendNotification);
+            return;
+        }
+
+        // Same recipe as the SCORE page's EQ hot-reload: capture the head
+        // BEFORE the load (it stops playback and zeroes it) and resume at the
+        // same musical position — as a fraction, because the frame count
+        // moves with the writing speed.
+        const int oldCount  = juce::jmax(1, fs->getScoreFrameCount());
+        const int savedHead = fs->getScorePlayHead();
+        fs->loadScoreFramesFromImage(r.image, r.spectroBand, minFreq, maxFreq, false);
+        const int newCount = fs->getScoreFrameCount();
+        if (newCount <= 0)
+        {
+            framesAreOurs = false;
+            return;
+        }
+        const int head = juce::jlimit(0, newCount - 1,
+            juce::roundToInt((double) savedHead * newCount / oldCount));
+        fs->setScoreResumeHead(head);
+        fs->uiPlayScore();
+        loadedFrameCount = newCount;
+        logLabel.setText(juce::String::fromUTF8("Live update — ")
+                             + juce::String(newCount) + " frames",
+                         juce::dontSendNotification);
+        repaint(previewArea);
+    }
+
     void togglePlay()
     {
         auto* fs = boundChannel();
@@ -987,6 +1064,10 @@ private:
             refreshFileLabel();   // page count follows the writing speed
             persistState();
         }
+
+        // Longer debounce than the preview: full-height re-render + hot-swap
+        // of the playing frames, only while OUR piece is audible.
+        maybeStartLiveReload();
 
         auto* fs = boundChannel();
         if (fs != nullptr && framesAreOurs)
@@ -1160,7 +1241,9 @@ private:
                 auto& q = voices[(size_t) i];
                 auto get = [&](const char* k, double d)
                 { return so->hasProperty(k) ? (double) so->getProperty(k) : d; };
-                q.enabled       = (bool) so->getProperty("en");
+                // "en" is ignored: the per-voice Active toggle is gone, every
+                // voice always prints/plays (a state saved before its removal
+                // must not leave a voice muted with no UI to unmute it).
                 q.preset        = (int) get("preset", q.preset);
                 q.numPartials   = juce::jlimit(1, 64, (int) get("part", q.numPartials));
                 q.slopeDbPerOct = get("slope", q.slopeDbPerOct);
@@ -1240,7 +1323,7 @@ private:
                    vibLifeLabel, levelLabel, wsLabel, lineLabel, velLabel, dpiLabel,
                    speedLabel, playHint, logLabel, fileLabel;
     juce::ComboBox presetCombo, dpiCombo;
-    juce::ToggleButton activeToggle, labelsToggle;
+    juce::ToggleButton labelsToggle;
     MidiScoreIconToggle loopBtn    { MidiScoreIconToggle::Glyph::Loop };
     MidiScoreIconToggle reverseBtn { MidiScoreIconToggle::Glyph::Inverse };
     juce::Slider   partialsSlider, slopeSlider, oddSlider, inharmSlider,
@@ -1258,6 +1341,7 @@ private:
     juce::Image previewImage;            // whole-piece overview strip (live)
 
     bool previewDirty = false, playDirty = true, stateDirty = false;
+    bool liveRenderBusy_ = false;        // one background strip render at a time
     juce::uint32 lastEditMs = 0;
 
     bool framesAreOurs = false;          // our piece currently sits in the score player

@@ -21,7 +21,10 @@ namespace
     // v1 (single engine) is still readable; new saves are always v2.
     // v3 (P6): all kMaxEngines sample banks, written engine 0..7 in order.
     // v2: engines A+B. v1: engine A only.
-    constexpr uint16_t kSessionVersion = 0x0003u;
+    // v4: one <Sequencer engine="e"> block per engine (sequencer internal to
+    //     the sampler). ≤v3 carried a single engine-less <Sequencer> whose
+    //     steps encoded (engine, slot) globally — split on load.
+    constexpr uint16_t kSessionVersion = 0x0004u;
     constexpr uint32_t kSessionEof     = 0xDEADBEEFu;
 
 } // namespace
@@ -33,7 +36,9 @@ namespace
 SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
     : processor(proc),
       slotGrid  (proc),
-      slotEditor(proc)
+      slotEditor(proc),
+      sequencer (proc),
+      seqTransport(proc)
 {
     slotGrid.onSlotSelected = [this](int idx) { onSlotSelected(idx); };
     slotGrid  .setSelectedSlot(0);
@@ -41,6 +46,8 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
 
     addAndMakeVisible(slotGrid);
     addAndMakeVisible(slotEditor);
+    addAndMakeVisible(sequencer);
+    addAndMakeVisible(seqTransport);
 
     // ── Style helper ─────────────────────────────────────────────────────────
     auto styleBtn = [](juce::TextButton& btn, juce::Colour bg, juce::Colour fg)
@@ -74,14 +81,15 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
                 const juce::String name = enteredName.trim();
                 if (name.isEmpty()) return;
 
-                // Stop the sequencer first (message thread → atomic command)
-                if (auto* seq = processor.getFrameSequencer())
-                {
-                    seq->uiStop();
-                    // Reset all step assignments to empty
-                    for (int i = 0; i < FrameSequencer::MAX_STEPS; ++i)
-                        seq->setStep(i, FrameSequencer::STEP_EMPTY);
-                }
+                // Stop every engine's sequencer first (message thread →
+                // atomic command) and reset all step assignments to empty.
+                for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+                    if (auto* seq = processor.getFrameSequencer(e))
+                    {
+                        seq->uiStop();
+                        for (int i = 0; i < FrameSequencer::MAX_STEPS; ++i)
+                            seq->setStep(i, FrameSequencer::STEP_EMPTY);
+                    }
 
                 // Clear all recorded slots and reset play params to defaults —
                 // on BOTH engines: SAVE SESSION always writes banks A AND B, so
@@ -290,13 +298,18 @@ void SamplerPageComponent::resized()
     slotEditor.setBounds(pad, editY, w - 2 * pad, editH);
 
     // ── Session toolbar (NEW SESSION / SAVE SESSION / LOAD SESSION) ───────────
-    // The step sequencer + its transport bar now live in the SEQUENCER module.
     const int sessY  = editY + editH + gap;
     const int btnGap = 4;
     const int bW3    = (w - 2 * pad - 2 * btnGap) / 3;
     newSessionBtn .setBounds(pad,                      sessY, bW3, bankH);
     saveSessionBtn.setBounds(pad + bW3 + btnGap,       sessY, bW3, bankH);
     loadSessionBtn.setBounds(pad + 2 * (bW3 + btnGap), sessY, bW3, bankH);
+
+    // ── Step sequencer (internal to this engine): grid + transport bar ────────
+    const int seqY   = sessY + bankH + gap;
+    sequencer.setBounds(pad, seqY, w - 2 * pad, kSeqH);
+    const int transH = TransportBarComponent::requiredHeight(w - 2 * pad);
+    seqTransport.setBounds(pad, seqY + kSeqH + gap, w - 2 * pad, transH);
 }
 
 // =============================================================================
@@ -311,8 +324,6 @@ void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
     LuxSampler* engines[LuxSampler::kMaxEngines];
     for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
         if ((engines[e] = processor.getSampler(e)) == nullptr) return;
-    auto* seq = processor.getFrameSequencer();
-    if (!seq) return;
 
     // ── Build XML ─────────────────────────────────────────────────────────────
     juce::XmlElement root("Sp3ctraSession");
@@ -333,9 +344,16 @@ void SamplerPageComponent::doSaveSession(const juce::File& sessionFile)
         }
     }
 
-    // Sequencer state (uses FrameSequencer's own serialisation)
-    auto* seqXml = root.createNewChildElement("Sequencer");
-    seq->saveToXml(*seqXml);
+    // Sequencer state — one block per engine (v4; the sequencer is internal
+    // to its sampler). Older files carry a single engine-less block whose
+    // steps encoded (engine, slot) globally.
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+        if (auto* seq = processor.getFrameSequencer(e))
+        {
+            auto* seqXml = root.createNewChildElement("Sequencer");
+            seqXml->setAttribute("engine", e);
+            seq->saveToXml(*seqXml);
+        }
 
     // ── Save audio frames to temporary .fsmp files (one per engine) ──────────
     juce::MemoryBlock fsmpBlobs[LuxSampler::kMaxEngines];
@@ -463,8 +481,6 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile, bool isA
     LuxSampler* engines[LuxSampler::kMaxEngines];
     for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
         if ((engines[e] = processor.getSampler(e)) == nullptr) return;
-    auto* seq = processor.getFrameSequencer();
-    if (!seq) return;
 
     juce::FileInputStream in(sessionFile);
     if (!in.openedOk())
@@ -586,27 +602,53 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile, bool isA
         }
     }
 
-    // ── Apply sequencer state ─────────────────────────────────────────────────
+    // ── Apply sequencer state — per engine ────────────────────────────────────
+    // v4: one <Sequencer engine="e"> block per engine. ≤v3: a single
+    // engine-less block whose steps encoded (engine, slot) globally — split
+    // it across the per-engine sequencers.
     if (! skipSequencer)
     {
-        if (auto* seqXml = xmlDoc->getChildByName("Sequencer"))
+        auto& apvts = processor.getAPVTS();
+        auto syncEngineParams = [&apvts](int e, const FrameSequencer& fs)
         {
-            seq->loadFromXml(*seqXml);
-            // Keep the APVTS transport params (UI + host source of truth) in
-            // sync with the values the sequencer just adopted — otherwise the
-            // attached controls display stale values that silently reassert
-            // themselves on the next parameter edit.
-            auto& apvts = processor.getAPVTS();
-            auto syncParam = [&apvts](const char* id, float denorm)
+            // Keep the APVTS params (UI + host source of truth) in sync with
+            // the values the sequencer just adopted — otherwise the attached
+            // controls display stale values that silently reassert themselves
+            // on the next parameter edit.
+            auto syncParam = [&apvts](const juce::String& id, float denorm)
             {
                 if (auto* p = apvts.getParameter(id))
                     p->setValueNotifyingHost(p->convertTo0to1(denorm));
             };
-            syncParam("seqBpm",          seq->getBpm());
-            syncParam("seqNumSteps",     (float) seq->getNumSteps());
-            syncParam("seqLoop",         seq->isLooping() ? 1.0f : 0.0f);
-            syncParam("seqDawSync",      seq->isDawSync() ? 1.0f : 0.0f);
-            syncParam("seqBeatsPerStep", (float) seq->getBeatsPerStep());
+            syncParam(fsEngineParam(e, "SeqBpm"),          fs.getBpm());
+            syncParam(fsEngineParam(e, "SeqNumSteps"),     (float) fs.getNumSteps());
+            syncParam(fsEngineParam(e, "SeqLoop"),         fs.isLooping() ? 1.0f : 0.0f);
+            syncParam(fsEngineParam(e, "SeqDawSync"),      fs.isDawSync() ? 1.0f : 0.0f);
+            syncParam(fsEngineParam(e, "SeqBeatsPerStep"), (float) fs.getBeatsPerStep());
+        };
+
+        bool sawPerEngine = false;
+        for (auto* seqXml : xmlDoc->getChildWithTagNameIterator("Sequencer"))
+        {
+            if (! seqXml->hasAttribute("engine")) continue;
+            sawPerEngine = true;
+            const int e = seqXml->getIntAttribute("engine", -1);
+            if (e < 0 || e >= LuxSampler::kMaxEngines) continue;
+            if (auto* fs = processor.getFrameSequencer(e))
+            {
+                fs->loadFromXml(*seqXml);
+                syncEngineParams(e, *fs);
+            }
+        }
+        if (! sawPerEngine)
+        {
+            if (auto* seqXml = xmlDoc->getChildByName("Sequencer"))
+                for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+                    if (auto* fs = processor.getFrameSequencer(e))
+                    {
+                        fs->loadFromLegacyGlobalXml(*seqXml, e);
+                        syncEngineParams(e, *fs);
+                    }
         }
     }
 
@@ -662,8 +704,15 @@ void SamplerPageComponent::doLoadSession(const juce::File& sessionFile, bool isA
 
     // Bank load restored labels from the .fsmp headers — on auto-restore the
     // DAW state carries the newer per-slot values, so re-apply them on top.
+    // (applySamplerParamsFromState also re-renders image-bound banks from
+    // their source picture, making the saved rotation authoritative.)
     if (skipSlotParams)
         processor.applySamplerParamsFromState();
+    else
+        // Manual load: the .sp3s params were applied above — give image-bound
+        // banks the same re-render so a stale session picture cannot survive.
+        for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+            engines[e]->rebuildImageBoundSlots();
 
     // ── Memorise path — auto-save + DAW/Standalone auto-reload ───────────────
     currentSessionFile = sessionFile;

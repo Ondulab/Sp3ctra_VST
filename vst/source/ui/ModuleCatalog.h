@@ -10,7 +10,8 @@
  * Categories (left catalogue sections):
  *   SRC   — SP3CTRA / IMAGE / VIDEO   (chain input, optional, at most one)
  *   MIDI  — PITCH / MASK              (image-space processors, order matters)
- *   UTILS — SAMPLER / SCORE / SEQUENCER (advanced frame players + step driver)
+ *   UTILS — SAMPLER / SCORE          (advanced frame players; the sampler's
+ *           step sequencer is INTERNAL to each engine — no rack module)
  *   SYNTH — LUXSTRAL / LUXSYNTH / LUXWAVE (audio engines)
  *   OUT   — VIDEO SCROLL              (video output taps — multi-instance, slotted)
  *
@@ -30,7 +31,8 @@ enum class ModuleType
 {
     Sp3ctra = 0, Image, Video,     // SRC
     Pitch, Mask,                   // MIDI
-    Sampler, Score, Sequencer,     // UTILS
+    Sampler, Score,                // UTILS (the retired "Sequencer" rack module
+                                   //        is dropped on load by its string id)
     LuxStral, LuxSynth, LuxWave,   // SYNTH
     VideoScroll,                   // VIDEO (waterfall probe — pass-through, slotted)
     Camera,                        // SRC (appended to keep table indices stable)
@@ -83,9 +85,9 @@ struct ModuleDesc
 //==============================================================================
 /** The whole catalogue. Table order MUST match the enum order (descFor indexes
  *  by ordinal); the catalogue panel buckets rows by category for display. */
-inline const std::array<ModuleDesc, 21>& moduleTable()
+inline const std::array<ModuleDesc, 20>& moduleTable()
 {
-    static const std::array<ModuleDesc, 21> table = {{
+    static const std::array<ModuleDesc, 20> table = {{
         // type                  category          role                  name                       colour       enableParam          id
         { ModuleType::Sp3ctra,     ModuleCat::SRC,   ModuleRole::Source,   "SP3CTRA",                 0xff68788f,  "",                  "Sp3ctra"  },
         // Media sources are engine singletons (V1 decision C): one global
@@ -99,7 +101,6 @@ inline const std::array<ModuleDesc, 21>& moduleTable()
         { ModuleType::Mask,        ModuleCat::MIDI,  ModuleRole::Processor,"MASK",                    0xff6be0d0,  "",                  "Mask"     },
         { ModuleType::Sampler,     ModuleCat::UTILS, ModuleRole::Util,     "SAMPLER",                 0xffe09040,  "luxSamplerEnabled", "Sampler"  },
         { ModuleType::Score,       ModuleCat::UTILS, ModuleRole::Util,     "SCORE",                   0xffe0a24a,  "",                  "Score"    },
-        { ModuleType::Sequencer,   ModuleCat::UTILS, ModuleRole::Util,     "SEQUENCER",               0xff7ac0e0,  "seqEnabled",        "Sequencer" },
         // Synth-split P2 — the three synths are OUT/send modules in the rack
         // (the flux leaves the chain toward the global engine, which lives in
         // the ZONE-5 dock): OUT category, arrow-prefixed names.

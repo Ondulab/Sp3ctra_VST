@@ -82,6 +82,11 @@ public:
     void setPosition(float frac);              ///< manual / automated line seek
     void setDurationS(float s)     { durS_.store(juce::jlimit(0.05f, 600.f, s)); }
     void setLoopMode(int m)        { loopMode_.store(juce::jlimit(0, 3, m)); }
+    // Orientation: 0..3 quarter turns clockwise. The strip + preview are
+    // rebuilt from the kept source image on the service thread (tick), so the
+    // setter stays cheap/wait-free for host automation.
+    void setRotation(int quarterTurns);
+    int  getRotation() const       { return rot_.load(); }
     // Scan bounds: the transport reads only [start, end] of the image (manual
     // seeks stay free). Crossed markers are normalised at tick time.
     void setScanStart(float f)     { scanStart_.store(juce::jlimit(0.f, 1.f, f)); }
@@ -100,12 +105,14 @@ public:
 private:
     void updateActive();
     void publishRow(double frac);
+    void applyImage(const juce::Image& oriented);   ///< (re)build strips+preview
 
-    mutable std::mutex     mediaMutex_;   // strip + preview + file
+    mutable std::mutex     mediaMutex_;   // strip + preview + file + source
     std::vector<uint8_t>   stripR_, stripG_, stripB_;   // rows_ × width_ planar
     int                    rows_ = 0, width_ = 0;
     juce::File             file_;
     juce::Image            preview_;
+    juce::Image            source_;      // original decode — rotation rebuilds
 
     int                slot_ { 0 };   // P5-M3 — (IMAGE, slot) pool line
     std::atomic<bool>  present_  { false };
@@ -117,6 +124,8 @@ private:
     std::atomic<float> scanStart_{ 0.0f };
     std::atomic<float> scanEnd_  { 1.0f };
     std::atomic<int>   loopMode_ { MediaSrc::Loop };
+    std::atomic<int>   rot_     { 0 };
+    std::atomic<bool>  rotDirty_{ false };
     std::atomic<bool>  playing_  { false };
     std::atomic<bool>  justStarted_{ false };
     std::atomic<float> headPub_  { 0.5f };

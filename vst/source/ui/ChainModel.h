@@ -176,9 +176,8 @@ public:
      *  empty residue but always keeps ≥1 chain. Safe to call after load. */
     void validateAndRepair();
 
-    /** The legacy fixed topology — used on a fresh session / failed load:
-     *  Chain 1: SP3CTRA→PITCH→MASK→SAMPLER→SCORE→LUXSTRAL
-     *  Chain 2: SP3CTRA→LUXSYNTH→LUXWAVE */
+    /** Fresh-session topology — used on a fresh session / failed load:
+     *  two empty chains, the rack is built by the user from the catalogue. */
     static ChainModel makeDefault();
 
     //── ValueTree identifiers (shared with persistence) ───────────────────────
@@ -194,11 +193,14 @@ public:
 
     /** CHAINS schema version written by toValueTree(). Migrations gate on the
      *  version read back from a loaded tree:
-     *   1 — pre-SEQUENCER-module era (a missing Sequencer means "old save")
-     *   2 — Sequencer is a chain block; a missing Sequencer means the user
+     *   1 — pre-SEQUENCER-module era (a missing Sequencer meant "old save")
+     *   2 — Sequencer was a chain block; a missing Sequencer meant the user
      *       deleted it and it must NOT be re-injected on load.
      *   3 — each MODULE may carry a VALUES child (its settings at rest) —
      *       the chain owns its modules' settings; projected onto the runtime
-     *       banks at load. */
+     *       banks at load.
+     *  The SEQUENCER rack module was retired (the sequencer is internal to
+     *  each sampler engine): "Sequencer" MODULE entries in old trees no longer
+     *  resolve to a type and are silently dropped by fromValueTree(). */
     static constexpr int kSchemaVersion = 3;
 };

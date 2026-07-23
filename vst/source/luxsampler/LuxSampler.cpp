@@ -644,6 +644,9 @@ void LuxSampler::uiToggleRecord(int slotIndex) noexcept
     atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::RECORDING),
                                             std::memory_order_release);
     atomicState.startRecCmd[slotIndex].store(true, std::memory_order_release);
+    // The take replaces any image-loaded content — its source is gone.
+    slotSrcPath_[slotIndex].clear();
+    slotSrcRot_ [slotIndex] = 0;
     log_info("FS", "Slot %d: UI start record", slotIndex);
 }
 
@@ -822,6 +825,8 @@ void LuxSampler::clearSlot(int i)
         std::lock_guard<std::mutex> lk(slotsMutex_);
         slots[i].clear();
     }
+    slotSrcPath_[i].clear();   // no content → no source image either
+    slotSrcRot_ [i] = 0;
     // Also reset the vertical (HF/LF frequency) filter — see uiClearSlot.
     resetSlotFreqCurve(i);
     resetSlotEditHandles(i);   // start/end/fades/floor back to defaults
@@ -851,6 +856,8 @@ void LuxSampler::resetSlotPlayParams(int i) noexcept
     setSlotFadeCurveType (i, FadeCurveType::LINEAR); // writes attack+decay too
     setSlotFadeCurvePower(i, 1.0f);
     setSlotLabel         (i, "");
+    slotSrcPath_[i].clear();    // factory bank: no source image binding
+    slotSrcRot_ [i] = 0;
     resetSlotEditHandles (i);   // start/end/attack/decay/floor
     resetSlotFreqCurve   (i);   // flat EQ (clears state + republishes the LUT)
 }
@@ -926,7 +933,196 @@ void LuxSampler::copySlotTo(int srcIdx, int dstIdx)
     setSlotEq            (dstIdx, getSlotEq            (srcIdx));
     setSlotEqFloor       (dstIdx, getSlotEqFloor       (srcIdx));
 
+    // The duplicate keeps the source image binding (rotation stays possible).
+    slotSrcPath_[dstIdx] = slotSrcPath_[srcIdx];
+    slotSrcRot_ [dstIdx] = slotSrcRot_ [srcIdx];
+
     log_info("FS", "copySlotTo: slot %d → %d (%d frames)", srcIdx, dstIdx, count);
+}
+
+// ============================================================================
+// Image → slot — Non-RT ingestion (message thread only).
+// LOAD path for picture files: the image becomes the bank's spectral content,
+// one image row per CapturedFrame (planar RGB, MAX_PIXELS wide), timestamps
+// spread evenly so the bank plays the picture top→bottom in durationUs.
+// ============================================================================
+namespace
+{
+    /** Rotate an image by 0..3 quarter turns CLOCKWISE (pixel-exact). */
+    juce::Image rotateImageQuarters(const juce::Image& src, int quarters)
+    {
+        quarters &= 3;
+        if (quarters == 0 || ! src.isValid())
+            return src;
+
+        const int w = src.getWidth(), h = src.getHeight();
+        const bool swap = (quarters & 1) != 0;
+        juce::Image out(juce::Image::ARGB, swap ? h : w, swap ? w : h, true);
+
+        juce::Graphics g(out);
+        juce::AffineTransform t;
+        switch (quarters)
+        {
+            case 1: t = juce::AffineTransform::rotation(juce::MathConstants<float>::halfPi)
+                            .translated((float) h, 0.0f);        break;
+            case 2: t = juce::AffineTransform::rotation(juce::MathConstants<float>::pi)
+                            .translated((float) w, (float) h);   break;
+            case 3: t = juce::AffineTransform::rotation(-juce::MathConstants<float>::halfPi)
+                            .translated(0.0f, (float) w);        break;
+        }
+        g.drawImageTransformed(src, t);
+        return out;
+    }
+}
+
+bool LuxSampler::loadSlotFromImageFile(int slotIndex, const juce::File& imageFile,
+                                       int rotQuarters, uint64_t durationUs)
+{
+    using namespace LuxSamplerConstants;
+    if (slotIndex < 0 || slotIndex >= NUM_SLOTS) return false;
+
+    juce::Image img = juce::ImageFileFormat::loadFrom(imageFile);
+    if (! img.isValid())
+    {
+        log_warning("FS", "loadSlotFromImageFile: cannot decode '%s'",
+                    imageFile.getFullPathName().toRawUTF8());
+        return false;
+    }
+
+    rotQuarters = ((rotQuarters % 4) + 4) % 4;
+    img = rotateImageQuarters(img, rotQuarters);
+
+    // One image row per frame, resampled to the CIS width — same recipe as
+    // the IMAGE source module (aspect-preserving row count, capped).
+    const int width = MAX_PIXELS;
+    int rows = (int) std::lround((double) img.getHeight() * width
+                                 / (double) juce::jmax(1, img.getWidth()));
+    rows = juce::jlimit(1, 8192, rows);
+    juce::Image resized = img.rescaled(width, rows,
+                                       juce::Graphics::highResamplingQuality);
+
+    if (durationUs == 0)
+        durationUs = 5000000;   // 5 s — the IMAGE module's default scan time
+
+    // Stop any ongoing activity on the destination (atomics only — no lock needed)
+    atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::IDLE),
+                                           std::memory_order_release);
+    if (atomicState.activePlaySlot.load(std::memory_order_acquire) == slotIndex)
+        atomicState.activePlaySlot.store(-1, std::memory_order_release);
+    waitForPlayerRelease(slotIndex);
+
+    int count = 0;
+    {
+        std::lock_guard<std::mutex> lk(slotsMutex_);
+
+        FrameSlot& dst = slots[slotIndex];
+        dst.allocate(); // resets frame_count, keeps existing heap if allocated
+
+        count = juce::jmin(rows, dst.capacity);
+        juce::Image::BitmapData bd(resized, juce::Image::BitmapData::readOnly);
+        const int ps = bd.pixelStride;
+        for (int y = 0; y < count; ++y)
+        {
+            CapturedFrame& fr = dst.frames[y];
+            fr.timestamp_us = static_cast<uint64_t>(
+                (double) durationUs * (double) y / (double) count);
+            fr.line_id      = static_cast<uint32_t>(y);
+            fr.pixel_count  = static_cast<uint16_t>(width);
+            const uint8_t* line = bd.getLinePointer(y);
+            for (int x = 0; x < width; ++x)
+            {
+                const uint8_t* p = line + (size_t) x * (size_t) ps;
+                if (ps == 1) { fr.R[x] = fr.G[x] = fr.B[x] = p[0]; }
+                else         { fr.B[x] = p[0]; fr.G[x] = p[1]; fr.R[x] = p[2]; }
+            }
+        }
+        dst.frame_count = count;
+        dst.duration_us = durationUs;
+        dst.has_content = true;
+        const juce::String name = imageFile.getFileNameWithoutExtension();
+        std::strncpy(dst.label, name.toRawUTF8(), sizeof(dst.label) - 1);
+        dst.label[sizeof(dst.label) - 1] = '\0';
+    }
+
+    // Remember the source so the bank can be re-rotated LOSSLESSLY later —
+    // serialised with the slot params (srcImagePath / srcImageRot).
+    slotSrcPath_[slotIndex] = imageFile.getFullPathName();
+    slotSrcRot_ [slotIndex] = rotQuarters;
+
+    // Old trim bounds would silently cut the new content — reset to full.
+    setSlotStartFrac(slotIndex, 0.0f);
+    setSlotEndFrac  (slotIndex, 1.0f);
+
+    log_info("FS", "loadSlotFromImageFile: slot %d <- '%s' rot %d deg (%d lines, %.2f s)",
+             slotIndex, imageFile.getFileName().toRawUTF8(), rotQuarters * 90,
+             count, (double) durationUs * 1e-6);
+    return true;
+}
+
+bool LuxSampler::rotateSlotImage(int slotIndex, int deltaQuarters)
+{
+    if (slotIndex < 0 || slotIndex >= LuxSamplerConstants::NUM_SLOTS) return false;
+
+    const juce::String path = slotSrcPath_[slotIndex];
+    if (path.isEmpty())
+        return false;   // recorded / .fslot-only bank: no source image
+
+    const juce::File f(path);
+    if (! f.existsAsFile())
+    {
+        log_warning("FS", "rotateSlotImage: source image gone: '%s'",
+                    path.toRawUTF8());
+        return false;
+    }
+
+    const int newRot = ((slotSrcRot_[slotIndex] + deltaQuarters) % 4 + 4) % 4;
+    return loadSlotFromImageFile(slotIndex, f, newRot,
+                                 getSlotDurationUs(slotIndex));
+}
+
+void LuxSampler::rebuildImageBoundSlots()
+{
+    using namespace LuxSamplerConstants;
+    for (int i = 0; i < NUM_SLOTS; ++i)
+    {
+        const juce::String path = slotSrcPath_[i];
+        if (path.isEmpty())
+            continue;
+        const juce::File f(path);
+        if (! f.existsAsFile())
+        {
+            log_warning("FS", "rebuildImageBoundSlots: slot %d source gone: '%s'",
+                        i, path.toRawUTF8());
+            continue;
+        }
+
+        // Re-render at the bound rotation, preserving what the restore just
+        // applied around the frames (trim, label; duration when known —
+        // otherwise loadSlotFromImageFile falls back to the 5 s default).
+        const float        sf  = getSlotStartFrac(i);
+        const float        ef  = getSlotEndFrac(i);
+        const juce::String lbl (getSlotLabel(i));
+        const uint64_t     dur = slotHasContent(i) ? getSlotDurationUs(i) : 0;
+
+        if (! loadSlotFromImageFile(i, f, slotSrcRot_[i], dur))
+            continue;
+
+        setSlotStartFrac(i, sf);
+        setSlotEndFrac  (i, ef);
+        if (lbl.isNotEmpty())
+            setSlotLabel(i, lbl.toRawUTF8());
+    }
+}
+
+juce::String LuxSampler::getSlotSourcePath(int i) const
+{
+    return (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS) ? slotSrcPath_[i]
+                                                          : juce::String();
+}
+
+int LuxSampler::getSlotSourceRot(int i) const
+{
+    return (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS) ? slotSrcRot_[i] : 0;
 }
 
 // ============================================================================
@@ -998,6 +1194,12 @@ void LuxSampler::cropSlotToBounds(int slotIndex)
     // The kept region is now the entire buffer.
     setSlotStartFrac(slotIndex, 0.0f);
     setSlotEndFrac  (slotIndex, 1.0f);
+
+    // The cropped take no longer matches the source picture — drop the image
+    // binding, otherwise a later ↺/↻ rotation would silently resurrect the
+    // FULL uncropped image over this content.
+    slotSrcPath_[slotIndex].clear();
+    slotSrcRot_ [slotIndex] = 0;
 
     log_info("FS", "Slot %d: cropped [%d..%d] → %d frames, %.2f s",
              slotIndex, startFrame, endFrame, count,
@@ -1722,6 +1924,11 @@ void LuxSampler::slotParamsToXml(int slotIndex, juce::XmlElement& xml) const
     xml.setAttribute("decayCurveType",   static_cast<int>(getSlotDecayCurveType(slotIndex)));
     xml.setAttribute("decayCurvePower",  static_cast<double>(getSlotDecayCurvePower(slotIndex)));
     xml.setAttribute("label",          juce::String(getSlotLabel(slotIndex)));
+    // Source image binding (image-loaded banks): lets a restored bank keep its
+    // lossless re-rotation ability. Written unconditionally so a stale binding
+    // never survives a round-trip.
+    xml.setAttribute("srcImagePath", slotSrcPath_[slotIndex]);
+    xml.setAttribute("srcImageRot",  slotSrcRot_[slotIndex]);
 }
 
 void LuxSampler::slotParamsFromXml(int slotIndex, const juce::XmlElement& xml)
@@ -1767,6 +1974,10 @@ void LuxSampler::slotParamsFromXml(int slotIndex, const juce::XmlElement& xml)
     if (xml.hasAttribute("label"))
         setSlotLabel(slotIndex,
                      xml.getStringAttribute("label", "").toRawUTF8());
+    // Source image binding — read unconditionally: legacy files (attribute
+    // absent) must CLEAR any stale binding left by the previous content.
+    slotSrcPath_[slotIndex] = xml.getStringAttribute("srcImagePath", "");
+    slotSrcRot_ [slotIndex] = ((xml.getIntAttribute("srcImageRot", 0) % 4) + 4) % 4;
 }
 
 bool LuxSampler::saveSlotToFile(int slotIndex, const juce::File& file) const
@@ -2035,6 +2246,13 @@ bool LuxSampler::loadSlotFromFile(int slotIndex, const juce::File& file)
         }
     }
 
+    // The frames were replaced wholesale — drop any previous image binding
+    // FIRST; the embedded params below re-set it when the file carries one.
+    // (Legacy .fslot without the XML block must not keep a stale binding:
+    // rotating would overwrite this content with an unrelated picture.)
+    slotSrcPath_[slotIndex].clear();
+    slotSrcRot_ [slotIndex] = 0;
+
     // ── Apply embedded params (if present) ───────────────────────────────────
     if (paramsXmlStr.isNotEmpty())
     {
@@ -2219,7 +2437,9 @@ bool FramePlayerThread::tickVoice(VoiceCtx& v, FrameSlot& slot,
     // ── Re-read play params every tick (on-the-fly) ──────────────────────────
     const float    p_start = sampler.getSlotStartFrac(slotIdx);
     const float    p_end   = sampler.getSlotEndFrac(slotIdx);
-    const float    p_speed = juce::jlimit(0.01f, 32.0f,
+    // 0 is legal: the head freezes and the current frame sustains (drone);
+    // requestSlotSeek() is then the only way the head moves.
+    const float    p_speed = juce::jlimit(0.0f, 32.0f,
                                  sampler.getSlotSpeed(slotIdx));
     const LoopMode p_loop  = sampler.getSlotLoopMode(slotIdx);
 
@@ -2275,6 +2495,20 @@ bool FramePlayerThread::tickVoice(VoiceCtx& v, FrameSlot& slot,
         }
 
         v.frameAcc = 0.0f;
+    }
+
+    // ── Manual play-head seek (timeline scrub while PLAYING) ─────────────────
+    // Absolute slot frac from the UI, clamped into the active [start, end)
+    // region. Consumed AFTER the range-change block so it is not overridden
+    // by the range clamp, and BEFORE the advance so the jump lands this tick.
+    {
+        const float sk = sampler.consumeSlotSeek(slotIdx);
+        if (sk >= 0.0f)
+        {
+            slot.play_head = juce::jlimit(startFrame, endFrame - 1,
+                static_cast<int>(sk * static_cast<float>(slot.frame_count)));
+            v.frameAcc = 0.0f;
+        }
     }
 
     // ── Advance play_head by fractional speed per tick ───────────────────────

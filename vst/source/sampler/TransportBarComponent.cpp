@@ -2,6 +2,7 @@
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "../IconPaths.h"
+#include "../ui/ModuleParamManifest.h"   // fsEngineParam — per-engine seq bank ids
 
 // ─────────────────────────────────────────────────────────────────────────────
 // IconTextButton::paintButton
@@ -35,15 +36,14 @@ void IconTextButton::paintButton(juce::Graphics& g, bool isHighlighted, bool isD
 TransportBarComponent::TransportBarComponent(Sp3ctraAudioProcessor& proc)
     : processor(proc)
 {
-    auto& apvts = processor.getAPVTS();
-
     // ── Play / Hold / Stop ────────────────────────────────────────────────────
-    // These buttons drive ONLY the FrameSequencer.  They do NOT write
-    // samplerFreezeMode — that parameter is owned exclusively by the
+    // These buttons drive ONLY this engine's FrameSequencer.  They do NOT
+    // write samplerFreezeMode — that parameter is owned exclusively by the
     // IMAGE page's S–Sampler transport (SourcesTabComponent).
     // The sequencer overrides freeze_mode internally via seqControlledPlay.
-    // They go through the seqTransport param (0=Stop 1=Play 2=Hold) so the DAW
-    // can automate / MIDI-map the transport; the processor relays to the engine.
+    // They go through the engine's SeqTransport param (0=Stop 1=Play 2=Hold)
+    // so the DAW can automate / MIDI-map the transport; the processor relays
+    // to the engine's sequencer.
     seqPlayBtn.setIconPath(Icons::play());
     seqPlayBtn.onClick = [this] { requestTransport(1); };
     addAndMakeVisible(seqPlayBtn);
@@ -59,79 +59,102 @@ TransportBarComponent::TransportBarComponent(Sp3ctraAudioProcessor& proc)
     updateTransportButtons();
 
     // ── BPM ──────────────────────────────────────────────────────────────────
-    // textBoxHeight = 28 matches all other interactive controls in this bar.
     bpmSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     bpmSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
                               Sp3ctraTheme::kTbWide, Sp3ctraTheme::kTextBoxH);
     bpmSlider.setTextValueSuffix(" BPM");
     addAndMakeVisible(bpmSlider);
-    bpmAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "seqBpm", bpmSlider);
     bpmLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
     bpmLabel.setJustificationType(juce::Justification::centredRight);
     addAndMakeVisible(bpmLabel);
 
     // ── Steps ─────────────────────────────────────────────────────────────────
-    // Draggable value bar over the FULL seqNumSteps range (2..16) — max 16
+    // Draggable value bar over the FULL SeqNumSteps range (2..16) — max 16
     // matches the 8×2 display grid in SequencerComponent. The attachment sets
     // range/interval from the int param and relays edits; the processor's
     // parameter listener forwards them to FrameSequencer::setNumSteps.
     stepsSlider.setSliderStyle(juce::Slider::LinearBar);
     addAndMakeVisible(stepsSlider);
-    stepsAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        apvts, "seqNumSteps", stepsSlider);
     stepsLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
     stepsLabel.setJustificationType(juce::Justification::centredRight);
     addAndMakeVisible(stepsLabel);
 
     // ── Loop / DAW sync ───────────────────────────────────────────────────────
     addAndMakeVisible(loopToggle);
-    loopAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        apvts, "seqLoop", loopToggle);
-
     addAndMakeVisible(dawSyncToggle);
-    dawSyncAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        apvts, "seqDawSync", dawSyncToggle);
 
-    // Right-click MIDI Learn (SEQUENCER is a singleton). The three transport
-    // buttons share the seqTransport param (one CC spans 0=Stop / 1=Play /
-    // 2=Hold), so each carries the same mapping badge.
-    {
-        auto& mm = processor.getMidiMap();
-        auto learn = [&](juce::Component& c, const char* id)
-        {
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, c, id));
-        };
-        learn(seqPlayBtn,    "seqTransport");
-        learn(seqHoldBtn,    "seqTransport");
-        learn(seqStopBtn,    "seqTransport");
-        learn(bpmSlider,     "seqBpm");
-        learn(stepsSlider,   "seqNumSteps");
-        learn(loopToggle,    "seqLoop");
-        learn(dawSyncToggle, "seqDawSync");
-    }
+    rebindAttachments();   // engine 0 by default
 
     startTimer(200);
 }
 
 TransportBarComponent::~TransportBarComponent() { stopTimer(); }
 
+void TransportBarComponent::setSamplerIndex(int i)
+{
+    if (samplerIndex_ == i) return;
+    samplerIndex_ = i;
+    rebindAttachments();
+    updateTransportButtons();
+}
+
+// (Re)bind every attachment to samplerIndex_'s sequencer bank. Reset-first:
+// destroy ALL old attachments before creating the new ones, so no stale
+// attachment can push its param value into a control now bound elsewhere.
+void TransportBarComponent::rebindAttachments()
+{
+    bpmAttach.reset();
+    stepsAttach.reset();
+    loopAttach.reset();
+    dawSyncAttach.reset();
+    learnAtts_.clear();
+
+    auto& apvts   = processor.getAPVTS();
+    const int e   = samplerIndex_;
+
+    bpmAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, fsEngineParam(e, "SeqBpm"), bpmSlider);
+    stepsAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, fsEngineParam(e, "SeqNumSteps"), stepsSlider);
+    loopAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, fsEngineParam(e, "SeqLoop"), loopToggle);
+    dawSyncAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, fsEngineParam(e, "SeqDawSync"), dawSyncToggle);
+
+    // Right-click MIDI Learn — per-engine bank. The three transport buttons
+    // share the engine's SeqTransport param (one CC spans 0=Stop / 1=Play /
+    // 2=Hold), so each carries the same mapping badge.
+    auto& mm = processor.getMidiMap();
+    auto learn = [&](juce::Component& c, const juce::String& id)
+    {
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, c, id));
+    };
+    learn(seqPlayBtn,    fsEngineParam(e, "SeqTransport"));
+    learn(seqHoldBtn,    fsEngineParam(e, "SeqTransport"));
+    learn(seqStopBtn,    fsEngineParam(e, "SeqTransport"));
+    learn(bpmSlider,     fsEngineParam(e, "SeqBpm"));
+    learn(stepsSlider,   fsEngineParam(e, "SeqNumSteps"));
+    learn(loopToggle,    fsEngineParam(e, "SeqLoop"));
+    learn(dawSyncToggle, fsEngineParam(e, "SeqDawSync"));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// requestTransport — route a Play/Hold/Stop press through the seqTransport
-// param so the host records/sees it. Re-pressing the current mode cannot
-// change the param (no callback fires), so that case falls through to the
-// engine directly — notably Play-while-playing restarts from step 0.
+// requestTransport — route a Play/Hold/Stop press through this engine's
+// SeqTransport param so the host records/sees it. Re-pressing the current mode
+// cannot change the param (no callback fires), so that case falls through to
+// the engine directly — notably Play-while-playing restarts from step 0.
 // ─────────────────────────────────────────────────────────────────────────────
 void TransportBarComponent::requestTransport(int mode)
 {
-    if (auto* p = processor.getAPVTS().getParameter("seqTransport"))
+    if (auto* p = processor.getAPVTS().getParameter(
+            fsEngineParam(samplerIndex_, "SeqTransport")))
     {
         const float norm = p->convertTo0to1(static_cast<float>(mode));
         if (! juce::approximatelyEqual(p->getValue(), norm))
         {
             p->setValueNotifyingHost(norm);  // parameterChanged drives the engine
         }
-        else if (auto* seq = processor.getFrameSequencer())
+        else if (auto* seq = processor.getFrameSequencer(samplerIndex_))
         {
             if (mode == 1)      { if (seq->isHeld()) seq->uiResume(); else seq->uiPlay(); }
             else if (mode == 2) seq->uiHold();
@@ -148,69 +171,93 @@ void TransportBarComponent::paint(juce::Graphics& g)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// resized — all interactive controls share ctrlH for visual consistency.
+// Layout metrics — shared by resized() and the static size helpers so the
+// host page can reserve the right height before the bar is laid out.
+// ─────────────────────────────────────────────────────────────────────────────
+namespace
+{
+    constexpr int kPadX      = Sp3ctraTheme::kGap;         // 6
+    constexpr int kGapX      = Sp3ctraTheme::kGap;         // 6
+    constexpr int kCtrlH     = Sp3ctraTheme::kControlH;    // unified control height
+    constexpr int kIconBtnW  = Sp3ctraTheme::kIconBtnSize; // square icon button
+    constexpr int kBpmLabelW = 32;
+    constexpr int kBpmBoxW   = Sp3ctraTheme::kTbWide;      // BPM text-box
+    constexpr int kStepsLW   = 40;
+    constexpr int kStepsComW = 60;
+    constexpr int kLoopW     = 76;
+    constexpr int kDawW      = 90;
+    constexpr int kMinTrackW = 60;   // BPM slider track never shrinks below this
+
+    // Fixed total for the single-row layout — everything but the BPM track.
+    constexpr int kSingleRowFixedW = kPadX
+        + (kIconBtnW + kGapX) * 3 + kGapX  // play/hold/stop + extra gap before BPM
+        + kBpmLabelW + kGapX
+        + kBpmBoxW + kGapX * 2
+        + kStepsLW + kGapX
+        + kStepsComW + kGapX * 2
+        + kLoopW + kGapX
+        + kDawW + kPadX;
+
+    // Tail of row 1 in single-row mode (Steps section onward, incl. leading gaps).
+    constexpr int kTailW = kGapX * 2 + kStepsLW + kGapX + kStepsComW + kGapX * 2
+        + kLoopW + kGapX + kDawW;
+}
+
+int TransportBarComponent::singleRowMinWidth() noexcept
+{
+    return kSingleRowFixedW + kMinTrackW;
+}
+
+int TransportBarComponent::requiredHeight(int width) noexcept
+{
+    return width < singleRowMinWidth() ? kTwoRowH : kOneRowH;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// resized — all interactive controls share kCtrlH for visual consistency.
 //
-//  [▶] [⏸] [■]   BPM [── slider ─── 000.0 BPM]   Steps [drag-bar]  [Loop]  [DAW Sync]
+// Wide:    [▶] [⏸] [■]  BPM [── slider ── 000 BPM]  Steps [bar] [Loop] [DAW Sync]
+// Narrow:  [▶] [⏸] [■]  BPM [── slider ── 000 BPM]
+//          Steps [bar] [Loop] [DAW Sync]
 // ─────────────────────────────────────────────────────────────────────────────
 void TransportBarComponent::resized()
 {
-    const int W      = getWidth();
-    const int h      = getHeight();
-    constexpr int pad    = Sp3ctraTheme::kGap;      // 6
-    constexpr int gap    = Sp3ctraTheme::kGap;      // 6
-    constexpr int ctrlH  = Sp3ctraTheme::kControlH; // unified control height
+    const int W = getWidth();
+    const int h = getHeight();
 
-    // Fixed widths
-    constexpr int iconBtnW  = Sp3ctraTheme::kIconBtnSize; // square icon button
-    constexpr int bpmLabelW = 32;
-    constexpr int bpmBoxW   = Sp3ctraTheme::kTbWide;      // BPM text-box
-    const int stepsLW   = 40;
-    const int stepsComW = 60;
-    const int loopW     = 76;
-    const int dawW      = 90;
+    const bool twoRows = W < singleRowMinWidth();
+    const int  rowH    = twoRows ? h / 2 : h;
 
-    // Fixed total for 3 transport buttons + all other elements (BPM slider excluded)
-    const int fixedW = pad
-        + iconBtnW + gap   // play
-        + iconBtnW + gap   // hold
-        + iconBtnW + gap * 2  // stop + extra gap before BPM
-        + bpmLabelW + gap
-        + bpmBoxW
-        + gap * 2
-        + stepsLW + gap
-        + stepsComW + gap * 2
-        + loopW + gap
-        + dawW + pad;
-
-    const int sliderTrackW = juce::jmax(60, W - fixedW);
-
-    int cx = pad;
+    int cx   = kPadX;
+    int rowY = 0;
     auto place = [&](juce::Component& c, int w)
     {
-        c.setBounds(cx, (h - ctrlH) / 2, w, ctrlH);
-        cx += w + gap;
+        c.setBounds(cx, rowY + (rowH - kCtrlH) / 2, w, kCtrlH);
+        cx += w + kGapX;
     };
 
-    // Transport: Play / Hold / Stop
-    place(seqPlayBtn, iconBtnW);
-    place(seqHoldBtn, iconBtnW);
-    place(seqStopBtn, iconBtnW); cx += gap; // extra gap before BPM section
+    // Row 1 — Play / Hold / Stop + BPM (the slider track absorbs the slack)
+    place(seqPlayBtn, kIconBtnW);
+    place(seqHoldBtn, kIconBtnW);
+    place(seqStopBtn, kIconBtnW); cx += kGapX; // extra gap before BPM section
 
-    // BPM label (vertically centred, narrower height)
-    bpmLabel.setBounds(cx, (h - 20) / 2, bpmLabelW, 20);
-    cx += bpmLabelW + gap;
+    bpmLabel.setBounds(cx, rowY + (rowH - 20) / 2, kBpmLabelW, 20);
+    cx += kBpmLabelW + kGapX;
 
-    // BPM slider: track + textbox together at ctrlH
-    bpmSlider.setBounds(cx, (h - ctrlH) / 2, sliderTrackW + bpmBoxW, ctrlH);
-    cx += sliderTrackW + bpmBoxW + gap * 2;
+    const int tailW  = twoRows ? 0 : kTailW;
+    const int trackW = juce::jmax(kMinTrackW, W - cx - kBpmBoxW - tailW - kPadX);
+    bpmSlider.setBounds(cx, rowY + (rowH - kCtrlH) / 2, trackW + kBpmBoxW, kCtrlH);
+    cx += trackW + kBpmBoxW + kGapX * 2;
 
-    // Steps label + combo
-    stepsLabel.setBounds(cx, (h - 20) / 2, stepsLW, 20);
-    cx += stepsLW + gap;
+    // Row 2 (narrow) or tail of row 1 (wide) — Steps / Loop / DAW Sync
+    if (twoRows) { cx = kPadX; rowY = rowH; }
 
-    place(stepsSlider, stepsComW); cx += gap;
-    place(loopToggle, loopW);
-    place(dawSyncToggle, dawW);
+    stepsLabel.setBounds(cx, rowY + (rowH - 20) / 2, kStepsLW, 20);
+    cx += kStepsLW + kGapX;
+
+    place(stepsSlider, kStepsComW); cx += kGapX;
+    place(loopToggle, kLoopW);
+    place(dawSyncToggle, kDawW);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -236,7 +283,7 @@ void TransportBarComponent::updateTransportButtons()
 
     bool playing = false;
     bool held    = false;
-    if (auto* seq = processor.getFrameSequencer())
+    if (auto* seq = processor.getFrameSequencer(samplerIndex_))
     {
         playing = seq->isPlaying();
         held    = seq->isHeld();

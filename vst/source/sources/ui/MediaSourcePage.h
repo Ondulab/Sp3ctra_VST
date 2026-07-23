@@ -61,6 +61,9 @@ private:
     void refreshDevices();
     void openSelectedDevice();
 
+    // IMAGE only — cycle imgSrcRotate (0° → 90° → 180° → 270°)
+    void cycleRotation();
+
     //==========================================================================
     /** The media preview + draggable line cursor. */
     class PreviewComponent : public juce::Component
@@ -97,6 +100,8 @@ private:
     // Source picker row (top): IMAGE/VIDEO — LOAD/CLEAR; CAMERA — device combo
     juce::TextButton loadButton  { "LOAD..." };
     juce::TextButton clearButton { "CLEAR" };
+    // IMAGE only: orientation cycle
+    juce::TextButton rotateButton { "ROT" };
     juce::ComboBox   deviceCombo;                 // CAMERA only
     juce::TextButton refreshButton { "REFRESH" };
     // ACTIVE — source on/off (all kinds): off feeds NOTHING into the chain

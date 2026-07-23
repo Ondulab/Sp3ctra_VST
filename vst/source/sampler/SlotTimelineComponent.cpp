@@ -261,6 +261,10 @@ void SlotTimelineComponent::updateCursor(const juce::MouseEvent& e)
     if (std::abs(e.x - sx) <= kSnap || std::abs(e.x - ex) <= kSnap)
         { setMouseCursor(juce::MouseCursor::LeftRightResizeCursor); return; }
 
+    // PLAYING: everywhere else scrubs the play head.
+    if (fs->getSlotState(selectedSlot) == SlotState::PLAYING)
+        { setMouseCursor(juce::MouseCursor::IBeamCursor); return; }
+
     setMouseCursor(juce::MouseCursor::NormalCursor);
 }
 
@@ -307,6 +311,14 @@ void SlotTimelineComponent::mouseDown(const juce::MouseEvent& e)
         dragging = DragTarget::Start;
     else if (std::abs(e.x - endX) <= kSnap)
         dragging = DragTarget::End;
+    else if (fs->getSlotState(selectedSlot) == SlotState::PLAYING)
+    {
+        // PLAYING: a click away from every handle scrubs the play head (the
+        // primary gesture with speed 0 — the frozen head follows the mouse).
+        dragging = DragTarget::Playhead;
+        fs->requestSlotSeek(selectedSlot, xToFrac(e.x));
+        repaint();
+    }
     else
     {
         const float mid = (sf + ef) * 0.5f;
@@ -319,6 +331,16 @@ void SlotTimelineComponent::mouseDrag(const juce::MouseEvent& e)
     auto* fs = processor.getSampler(samplerIndex_);
     if (!fs) return;
 
+    if (dragging == DragTarget::Playhead)
+    {
+        // Scrub while playing only — the player consumes the seek each tick.
+        if (fs->getSlotState(selectedSlot) == SlotState::PLAYING)
+        {
+            fs->requestSlotSeek(selectedSlot, xToFrac(e.x));
+            repaint();
+        }
+        return;
+    }
     if (dragging == DragTarget::Attack)
     {
         const int sx2  = fracToX(fs->getSlotStartFrac(selectedSlot));

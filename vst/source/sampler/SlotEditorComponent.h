@@ -355,16 +355,15 @@ private:
     // of erasing it (tape-style "continue recording").
     juce::ToggleButton overdubToggle { "Overdub (extend REC)" };
 
-    // ── Per-fade curve controls (independent attack / decay) ──────────────────
-    juce::Label    fadeInLabel  { {}, "In" };
-    juce::ComboBox fadeInCurveBox;
-    juce::Slider   fadeInPowerSlider;   // 0.1–10.0
-    juce::Label    fadeOutLabel { {}, "Out" };
-    juce::ComboBox fadeOutCurveBox;
-    juce::Slider   fadeOutPowerSlider;  // 0.1–10.0
+    // ── Fade info labels — thin strip UNDER the image view ────────────────────
+    // The fade curves are edited directly ON the image (drag the end handle
+    // for the length, the mid-curve handle for the shape — see
+    // SlotSpectralEditorComponent); these labels mirror the live type/power.
+    // Right-click = MIDI-learn of the fade POWER.
+    juce::Label fadeInInfo_, fadeOutInfo_;
 
-    /** Populate a fade curve-type ComboBox with LIN/EXP/LOG/S. */
-    static void fillCurveBox(juce::ComboBox& box);
+    /** Refresh the fade info labels from the engine (type · power). */
+    void refreshFadeInfo();
 
     // ── Unified MIDI-Learn (right-click any play control / action button) ──────
     // Recreated on every slot / engine rebind so the synthetic target ids track

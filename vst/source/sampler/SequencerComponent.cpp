@@ -3,12 +3,11 @@
 #include "../UITheme.h"
 
 // ─── Helper ──────────────────────────────────────────────────────────────────
-// Cycle a step through: EMPTY → every NON-EMPTY bank of every sampler engine
-// (all chains, in A1.., B1.. order) → LIVE. Empty banks are skipped so the
-// user only ever lands on real recorded samples. Content is the ONLY filter —
-// no isEnabled() gate: the engine enable (module presence × rack LED) is
-// restored as-saved and can lag the visible rack state, which silently hid
-// every recorded bank from this cycle.
+// Cycle a step through: EMPTY → every NON-EMPTY bank of THIS engine → LIVE.
+// Empty banks are skipped so the user only ever lands on real recorded
+// samples. Content is the ONLY filter — no isEnabled() gate: the engine
+// enable (module presence × rack LED) is restored as-saved and can lag the
+// visible rack state, which silently hid every recorded bank from this cycle.
 static void cycleStep(FrameSequencer* seq, int stepIdx, int delta)
 {
     if (!seq) return;
@@ -16,18 +15,14 @@ static void cycleStep(FrameSequencer* seq, int stepIdx, int delta)
 
     juce::Array<int> options;
     options.add(FrameSequencer::STEP_EMPTY);
-    for (int s = 0; s < seq->getNumSamplers(); ++s)
-    {
-        LuxSampler* fs = seq->getSampler(s);
-        if (fs == nullptr) continue;
+    if (LuxSampler* fs = seq->getSampler())
         for (int slot = 0; slot < LuxSamplerConstants::NUM_SLOTS; ++slot)
             if (fs->slotHasContent(slot))
-                options.add(FrameSequencer::encodeStep(s, slot));
-    }
+                options.add(slot);
     options.add(FrameSequencer::STEP_LIVE);
 
-    // A step may hold a value no longer offered (bank cleared / module removed
-    // from its chain since assignment) — restart the cycle from EMPTY.
+    // A step may hold a value no longer offered (bank cleared since
+    // assignment) — restart the cycle from EMPTY.
     const int n   = options.size();
     int       pos = options.indexOf(seq->getStep(stepIdx));
     if (pos < 0) pos = 0;
@@ -48,7 +43,7 @@ SequencerComponent::SequencerComponent(Sp3ctraAudioProcessor& proc)
         stepBtns[i].setButtonText("-");
         stepBtns[i].onStep = [this, i](int delta)
         {
-            cycleStep(processor.getFrameSequencer(), i, delta);
+            cycleStep(processor.getFrameSequencer(samplerIndex_), i, delta);
             updateButton(i);
         };
         addAndMakeVisible(stepBtns[i]);
@@ -57,6 +52,17 @@ SequencerComponent::SequencerComponent(Sp3ctraAudioProcessor& proc)
 }
 
 SequencerComponent::~SequencerComponent() { stopTimer(); }
+
+void SequencerComponent::setSamplerIndex(int i)
+{
+    if (samplerIndex_ == i) return;
+    samplerIndex_ = i;
+    cachedNumSteps = -1;   // the new engine may expose a different step count
+    resized();             // ...so re-derive the visible tiles right away
+    for (int s = 0; s < kDisplaySteps; ++s)
+        updateButton(s);
+    repaint();
+}
 
 // =============================================================================
 // updateButton — refresh colours, label, bankSlot and luxSampler pointer
@@ -67,13 +73,12 @@ void SequencerComponent::updateButton(int i)
 {
     if (i >= kDisplaySteps) return; // only first 16 are visible
 
-    auto* seq = processor.getFrameSequencer();
+    auto* seq = processor.getFrameSequencer(samplerIndex_);
     if (!seq) return;
 
-    const int  nSteps    = seq->getNumSteps();
-    const int  curStep   = seq->getCurrentStep();
-    const bool seqActive = seq->isEnabled();
-    const bool isActive  = (i < nSteps);
+    const int  nSteps   = seq->getNumSteps();
+    const int  curStep  = seq->getCurrentStep();
+    const bool isActive = (i < nSteps);
 
     if (!isActive)
     {
@@ -108,28 +113,21 @@ void SequencerComponent::updateButton(int i)
     else
     {
         // Normal bank: slightly brightened when current (the thumbnail
-        // provides the main visual identity; the tag is just an A1..B12 label).
+        // provides the main visual identity; the tag is just the bank number
+        // — the grid is bound to ONE engine, no cross-engine addressing).
         bg    = isCurrent ? juce::Colour(0xff1a6a1a) : juce::Colour(0xff1e3028);
         txt   = isCurrent ? juce::Colours::white     : juce::Colour(0xff66cc88);
-        const int samplerIdx = FrameSequencer::decodeSampler(bank); // 0=A, 1=B, …
-        const int slot       = FrameSequencer::decodeSlot(bank);    // 0..11
-        label = juce::String::charToString(
-                    static_cast<juce::juce_wchar>('A' + samplerIdx))
-                + juce::String(slot + 1);
+        label = juce::String(bank + 1);
     }
-
-    if (!seqActive) { bg = bg.withAlpha(0.4f); txt = txt.withAlpha(0.4f); }
 
     stepBtns[i].setButtonText(label);
     stepBtns[i].setColour(juce::TextButton::buttonColourId,  bg);
     stepBtns[i].setColour(juce::TextButton::textColourOffId, txt);
 
-    // Hand off the DECODED slot + its resolved engine so paintButton can render
-    // the spectral thumbnail. Sentinels keep a negative bankSlot (no thumbnail).
-    stepBtns[i].bankSlot   = FrameSequencer::decodeSlot(bank);
-    stepBtns[i].luxSampler = (bank >= 0)
-        ? seq->getSampler(FrameSequencer::decodeSampler(bank))
-        : nullptr;
+    // Hand off the slot + the bound engine so paintButton can render the
+    // spectral thumbnail. Sentinels keep a negative bankSlot (no thumbnail).
+    stepBtns[i].bankSlot   = bank;
+    stepBtns[i].luxSampler = (bank >= 0) ? seq->getSampler() : nullptr;
 }
 
 // =============================================================================
@@ -155,33 +153,46 @@ void SequencerComponent::paint(juce::Graphics& g)
 }
 
 // =============================================================================
-// resized — header + 2 rows of square cells
+// resized — header + the ACTIVE steps only: the grid shows exactly
+// SeqNumSteps tiles (1 row up to 8 steps, 2 rows beyond).
 // =============================================================================
 
 void SequencerComponent::resized()
 {
-    constexpr int cols    = kDisplayCols; // 8
     constexpr int gap     = 3;
     constexpr int headerH = 30; // 4 top + 22 title + 4 gap
 
-    const int w = getWidth();
+    auto* seq = processor.getFrameSequencer(samplerIndex_);
+    const int nSteps = juce::jlimit(1, kDisplaySteps,
+                                    seq != nullptr ? seq->getNumSteps()
+                                                   : kDisplaySteps);
+    const int rows = (nSteps + kDisplayCols - 1) / kDisplayCols;
 
-    // Square cells
-    const int cellW = (w - 8 - (cols - 1) * gap) / cols;
-    const int cellH = cellW;
+    const int w = getWidth();
+    const int h = getHeight();
+
+    // Square cells sized on the FULL 8-column budget (stable tile size while
+    // the step count changes) and bounded by the height left under the
+    // header, so the last row is never clipped on short windows.
+    const int cellFromW = (w - 8 - (kDisplayCols - 1) * gap) / kDisplayCols;
+    const int cellFromH = (h - headerH - 8 - (rows - 1) * gap) / rows;
+    const int cell      = juce::jmax(12, juce::jmin(cellFromW, cellFromH));
+
+    // Tiles flow from the LEFT margin (reads like a timeline: step 1 first).
+    const int x0 = 4;
 
     for (int i = 0; i < FrameSequencer::MAX_STEPS; ++i)
     {
-        if (i >= kDisplaySteps)
+        if (i >= nSteps || i >= kDisplaySteps)
         {
             stepBtns[i].setVisible(false);
             continue;
         }
-        const int col = i % cols;
-        const int row = i / cols;
-        stepBtns[i].setBounds(4 + col * (cellW + gap),
-                              headerH + 4 + row * (cellH + gap),
-                              cellW, cellH);
+        const int col = i % kDisplayCols;
+        const int row = i / kDisplayCols;
+        stepBtns[i].setBounds(x0 + col * (cell + gap),
+                              headerH + 4 + row * (cell + gap),
+                              cell, cell);
         stepBtns[i].setVisible(true);
     }
 }
@@ -192,7 +203,7 @@ void SequencerComponent::resized()
 
 void SequencerComponent::timerCallback()
 {
-    auto* seq = processor.getFrameSequencer();
+    auto* seq = processor.getFrameSequencer(samplerIndex_);
     if (!seq) return;
 
     const int nSteps = seq->getNumSteps();

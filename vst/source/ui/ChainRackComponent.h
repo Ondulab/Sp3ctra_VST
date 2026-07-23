@@ -38,7 +38,11 @@
 enum class ChainBlockId
 {
     Chain1Source = 0, Pitch, Mask, Sampler, Score, LuxStral,
-    Chain2Source, LuxSynth, LuxWave, Sequencer, VideoScroll,
+    Chain2Source, LuxSynth, LuxWave,
+    RetiredSequencer,                  // retired rack module (sequencer is internal
+                                       // to the sampler now) — slot kept so the
+                                       // persisted selBlock ordinals stay stable
+    VideoScroll,
     ImageSrc, VideoSrc, CameraSrc,     // M9 — media SRC modules (own pages)
     Reverb, Echo,                      // FX — image-line effect inserts
     Timbre,                            // UTILS — parametric timbre-spectrum generator

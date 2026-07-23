@@ -222,8 +222,6 @@ target_sources(Sp3ctraVST
         source/sampler/TransportBarComponent.h
         source/sampler/SamplerPageComponent.cpp
         source/sampler/SamplerPageComponent.h
-        source/sampler/SequencerPageComponent.cpp
-        source/sampler/SequencerPageComponent.h
 
         # 🎵 PHASE 3: LuxStral Synthesis Engine (VST-adapted)
         source/synthesis/luxstral/vst_adapters.cpp

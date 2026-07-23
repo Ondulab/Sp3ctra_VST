@@ -54,22 +54,47 @@ void MediaSrc::extractLineFromImage(const juce::Image& img, float frac,
 //==============================================================================
 // ImageSourceEngine
 //==============================================================================
-bool ImageSourceEngine::loadFile(const juce::File& f, juce::String& error)
+namespace
 {
-    juce::Image img = juce::ImageFileFormat::loadFrom(f);
-    if (! img.isValid())
+    /** Rotate an image by 0..3 quarter turns CLOCKWISE (pixel-exact). */
+    juce::Image rotateQuarters(const juce::Image& src, int quarters)
     {
-        error = "Cannot decode image: " + f.getFileName();
-        return false;
+        quarters &= 3;
+        if (quarters == 0 || ! src.isValid())
+            return src;
+
+        const int w = src.getWidth(), h = src.getHeight();
+        const bool swap = (quarters & 1) != 0;
+        juce::Image out(juce::Image::ARGB, swap ? h : w, swap ? w : h, true);
+
+        juce::Graphics g(out);
+        juce::AffineTransform t;
+        switch (quarters)
+        {
+            case 1: t = juce::AffineTransform::rotation(juce::MathConstants<float>::halfPi)
+                            .translated((float) h, 0.0f);        break;
+            case 2: t = juce::AffineTransform::rotation(juce::MathConstants<float>::pi)
+                            .translated((float) w, (float) h);   break;
+            case 3: t = juce::AffineTransform::rotation(-juce::MathConstants<float>::halfPi)
+                            .translated(0.0f, (float) w);        break;
+        }
+        g.drawImageTransformed(src, t);
+        return out;
     }
+}
+
+void ImageSourceEngine::applyImage(const juce::Image& oriented)
+{
+    if (! oriented.isValid())
+        return;
 
     const int width = INTERNAL_SRC_MAX_PIXELS;
-    int rows = (int) std::lround((double) img.getHeight() * width
-                                 / (double) juce::jmax(1, img.getWidth()));
+    int rows = (int) std::lround((double) oriented.getHeight() * width
+                                 / (double) juce::jmax(1, oriented.getWidth()));
     rows = juce::jlimit(1, 8192, rows);
 
     // Resample to the chain width once; each row is then a ready-to-publish line.
-    juce::Image resized = img.rescaled(width, rows, juce::Graphics::highResamplingQuality);
+    juce::Image resized = oriented.rescaled(width, rows, juce::Graphics::highResamplingQuality);
 
     std::vector<uint8_t> sr((size_t) rows * width);
     std::vector<uint8_t> sg((size_t) rows * width);
@@ -90,10 +115,10 @@ bool ImageSourceEngine::loadFile(const juce::File& f, juce::String& error)
         }
     }
 
-    const int prevW = juce::jmin(720, img.getWidth());
-    const int prevH = juce::jmax(1, (int) std::lround((double) img.getHeight() * prevW
-                                                      / (double) juce::jmax(1, img.getWidth())));
-    juce::Image preview = img.rescaled(prevW, prevH, juce::Graphics::highResamplingQuality);
+    const int prevW = juce::jmin(720, oriented.getWidth());
+    const int prevH = juce::jmax(1, (int) std::lround((double) oriented.getHeight() * prevW
+                                                      / (double) juce::jmax(1, oriented.getWidth())));
+    juce::Image preview = oriented.rescaled(prevW, prevH, juce::Graphics::highResamplingQuality);
 
     {
         std::lock_guard<std::mutex> lk(mediaMutex_);
@@ -102,8 +127,24 @@ bool ImageSourceEngine::loadFile(const juce::File& f, juce::String& error)
         stripB_  = std::move(sb);
         rows_    = rows;
         width_   = width;
-        file_    = f;
         preview_ = preview;
+    }
+}
+
+bool ImageSourceEngine::loadFile(const juce::File& f, juce::String& error)
+{
+    juce::Image img = juce::ImageFileFormat::loadFrom(f);
+    if (! img.isValid())
+    {
+        error = "Cannot decode image: " + f.getFileName();
+        return false;
+    }
+
+    applyImage(rotateQuarters(img, rot_.load()));
+    {
+        std::lock_guard<std::mutex> lk(mediaMutex_);
+        source_ = img;
+        file_   = f;
     }
     loaded_.store(true, std::memory_order_release);
     seekPending_.store(true);
@@ -121,8 +162,16 @@ void ImageSourceEngine::unload()
         rows_ = width_ = 0;
         file_ = juce::File();
         preview_ = {};
+        source_  = {};
     }
     updateActive();
+}
+
+void ImageSourceEngine::setRotation(int quarterTurns)
+{
+    const int q = ((quarterTurns % 4) + 4) % 4;
+    if (rot_.exchange(q) != q)
+        rotDirty_.store(true);   // rebuilt on the service thread (tick)
 }
 
 juce::File ImageSourceEngine::getFile() const
@@ -179,6 +228,25 @@ void ImageSourceEngine::publishRow(double frac)
 
 void ImageSourceEngine::tick(double nowMs)
 {
+    // Rotation changed → rebuild the strip + preview from the kept source.
+    // Heavy, so it runs HERE and not in the parameter callback — and BEFORE
+    // the activity guard: the page preview must follow the ROT button even
+    // while the source is disabled or unrouted.
+    bool rotated = false;
+    if (loaded_.load(std::memory_order_acquire) && rotDirty_.exchange(false))
+    {
+        juce::Image src;
+        {
+            std::lock_guard<std::mutex> lk(mediaMutex_);
+            src = source_;
+        }
+        if (src.isValid())
+        {
+            applyImage(rotateQuarters(src, rot_.load()));
+            rotated = true;   // republish the line from the rotated strip
+        }
+    }
+
     if (! present_.load() || ! loaded_.load() || ! enabled_.load())
     {
         lastMs_ = nowMs;
@@ -189,7 +257,7 @@ void ImageSourceEngine::tick(double nowMs)
                                       : 0.0;
     lastMs_ = nowMs;
 
-    bool doPublish = false;
+    bool doPublish = rotated;
 
     if (seekPending_.exchange(false))
     {

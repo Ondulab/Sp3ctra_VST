@@ -200,6 +200,7 @@ namespace module_param_manifest_detail
     };
     inline const char* const kImage[] = {
         "Pos", "Duration", "Loop", "Play", "Enabled", "ScanStart", "ScanEnd",
+        "Rotate",
     };
     inline const char* const kVideo[] = {
         "Line", "Speed", "Loop", "Play", "Enabled",
@@ -300,7 +301,7 @@ inline const ModuleParamManifest kModuleParamManifest[] = {
 };
 
 /** Manifest entry for a module type, or nullptr when the type carries no
- *  per-instance bank (the SP3CTRA source, Score/Sequencer/Timbre). */
+ *  per-instance bank (the SP3CTRA source, Score/Timbre). */
 inline const ModuleParamManifest* moduleParamManifest(ModuleType t)
 {
     for (const auto& m : kModuleParamManifest)

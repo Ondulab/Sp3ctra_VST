@@ -124,6 +124,9 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     addAndMakeVisible(saveBtn);
 
     // ── LOAD button — file chooser, loads into selected slot ──────────────────
+    // Accepts BOTH the app's own .fslot format and plain images: a picture
+    // becomes the bank's spectral content (one image row per frame, 5 s span),
+    // re-rotatable afterwards from the bank tile's ↺ ↻ arrows.
     loadBtn.onClick = [this]
     {
         auto* fs = processor.getSampler(samplerIndex_);
@@ -131,9 +134,9 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
 
         const juce::File startDir = resolveSaveDirectory();
         fileChooser = std::make_unique<juce::FileChooser>(
-            "Load slot (.fslot)",
+            "Load slot (.fslot) or image",
             startDir,
-            "*.fslot");
+            "*.fslot;*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.tiff;*.tif");
 
         const int flags = juce::FileBrowserComponent::openMode
                           | juce::FileBrowserComponent::canSelectFiles;
@@ -145,7 +148,10 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
             auto* sampler = processor.getSampler(samplerIndex_);
             if (sampler == nullptr) return;
 
-            if (sampler->loadSlotFromFile(selectedSlot, picked))
+            const bool ok = picked.hasFileExtension("fslot")
+                ? sampler->loadSlotFromFile(selectedSlot, picked)
+                : sampler->loadSlotFromImageFile(selectedSlot, picked, 0);
+            if (ok)
             {
                 spectralEditor.markDirty();
                 refreshSliderValues();
@@ -154,6 +160,14 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
         });
     };
     addAndMakeVisible(loadBtn);
+
+    // ↺ / ↻ in the spectral view rewrote the frames — mirror the LOAD refresh
+    // (the spectral editor already marked itself dirty).
+    spectralEditor.onContentRotated = [this]
+    {
+        refreshSliderValues();
+        refreshLoopButtons();
+    };
 
     // ── Labels ────────────────────────────────────────────────────────────────
     for (auto* lbl : { &speedLabel, &loopLabel })
@@ -194,14 +208,18 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     addAndMakeVisible(floorSlider);
 
     // ── Speed slider ──────────────────────────────────────────────────────────
-    // Range 0.01–32.0×; skewed so that 1.0× sits at the physical centre.
+    // Range 0–32.0×; skewed so that 1.0× sits at the physical centre.
+    // 0 freezes the play head (the current frame sustains as a drone) — move
+    // it by dragging the playhead on the timeline while the bank plays.
     speedSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     speedSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
                                  Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
     // Step 0.001 gives 10× finer resolution than 0.01 — especially important
     // at slow playback rates (0.01–0.10×) where the skewed slider compresses
     // the physical space. Display is clamped to 2 decimal places.
-    speedSlider.setRange(0.01, 32.0, 0.001);
+    speedSlider.setRange(0.0, 32.0, 0.001);
+    speedSlider.setTooltip("Playback speed; 0 freezes the play head (drag it "
+                           "on the timeline while playing)");
     speedSlider.setNumDecimalPlacesToDisplay(2);
     speedSlider.setTextValueSuffix("x");
     speedSlider.setSkewFactorFromMidPoint(1.0); // 1.0× at slider centre
@@ -257,59 +275,23 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     };
     addAndMakeVisible(overdubToggle);
 
-    // ── Per-fade curve controls (independent attack / decay) ──────────────────
-    for (auto* lbl : { &fadeInLabel, &fadeOutLabel })
+    // ── Fade info labels — thin strip under the image view ────────────────────
+    // The curves are edited directly ON the image; these mirror type · power.
+    fadeInInfo_.setColour(juce::Label::textColourId,
+                          juce::Colour(0xff44ee88).withAlpha(0.8f));
+    fadeInInfo_.setJustificationType(juce::Justification::centredLeft);
+    fadeOutInfo_.setColour(juce::Label::textColourId,
+                           juce::Colour(0xffff6633).withAlpha(0.8f));
+    fadeOutInfo_.setJustificationType(juce::Justification::centredRight);
+    for (auto* lbl : { &fadeInInfo_, &fadeOutInfo_ })
     {
         lbl->setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
-        lbl->setColour(juce::Label::textColourId, juce::Colour(0xff888899));
-        lbl->setJustificationType(juce::Justification::centredRight);
+        lbl->setInterceptsMouseClicks(true, false);   // right-click MIDI learn
         addAndMakeVisible(lbl);
     }
-    fillCurveBox(fadeInCurveBox);
-    fillCurveBox(fadeOutCurveBox);
 
-    fadeInCurveBox.onChange = [this]
-    {
-        if (auto* fs = processor.getSampler(samplerIndex_))
-            fs->setSlotAttackCurveType(selectedSlot,
-                static_cast<FadeCurveType>(fadeInCurveBox.getSelectedId() - 1));
-        spectralEditor.markDirty();
-    };
-    fadeOutCurveBox.onChange = [this]
-    {
-        if (auto* fs = processor.getSampler(samplerIndex_))
-            fs->setSlotDecayCurveType(selectedSlot,
-                static_cast<FadeCurveType>(fadeOutCurveBox.getSelectedId() - 1));
-        spectralEditor.markDirty();
-    };
-    addAndMakeVisible(fadeInCurveBox);
-    addAndMakeVisible(fadeOutCurveBox);
-
-    for (auto* s : { &fadeInPowerSlider, &fadeOutPowerSlider })
-    {
-        s->setSliderStyle(juce::Slider::LinearHorizontal);
-        s->setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                           Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
-        s->setRange(0.1, 10.0, 0.01);
-        s->setNumDecimalPlacesToDisplay(2);
-        s->setSkewFactorFromMidPoint(1.0);
-        s->setValue(1.0, juce::dontSendNotification);
-        addAndMakeVisible(s);
-    }
-    fadeInPowerSlider.onValueChange = [this]
-    {
-        if (auto* fs = processor.getSampler(samplerIndex_))
-            fs->setSlotAttackCurvePower(selectedSlot,
-                static_cast<float>(fadeInPowerSlider.getValue()));
-        spectralEditor.markDirty();
-    };
-    fadeOutPowerSlider.onValueChange = [this]
-    {
-        if (auto* fs = processor.getSampler(samplerIndex_))
-            fs->setSlotDecayCurvePower(selectedSlot,
-                static_cast<float>(fadeOutPowerSlider.getValue()));
-        spectralEditor.markDirty();
-    };
+    // Fade handles dragged on the image → keep the labels live.
+    spectralEditor.onFadeChanged = [this] { refreshFadeInfo(); };
 
     // Purge stale MIDI action pulses latched while NO editor was open: the MIDI
     // engine keeps latching them, nobody drains them, and acting on a press
@@ -399,19 +381,8 @@ void SlotEditorComponent::refreshSliderValues()
     // Overdub is engine-wide (not per-slot) — mirror the engine flag.
     overdubToggle.setToggleState(fs->getOverdubMode(),
                                  juce::dontSendNotification);
-    // Per-fade curve controls (independent attack / decay).
-    fadeInCurveBox.setSelectedId(
-        static_cast<int>(fs->getSlotAttackCurveType(selectedSlot)) + 1,
-        juce::dontSendNotification);
-    fadeInPowerSlider.setValue(
-        static_cast<double>(fs->getSlotAttackCurvePower(selectedSlot)),
-        juce::dontSendNotification);
-    fadeOutCurveBox.setSelectedId(
-        static_cast<int>(fs->getSlotDecayCurveType(selectedSlot)) + 1,
-        juce::dontSendNotification);
-    fadeOutPowerSlider.setValue(
-        static_cast<double>(fs->getSlotDecayCurvePower(selectedSlot)),
-        juce::dontSendNotification);
+    // Fade info labels (the curves themselves are edited on the image).
+    refreshFadeInfo();
     refreshFreqCurve();
 }
 
@@ -429,13 +400,28 @@ void SlotEditorComponent::refreshFreqCurve()
     spectralEditor.markDirty();
 }
 
-void SlotEditorComponent::fillCurveBox(juce::ComboBox& box)
+void SlotEditorComponent::refreshFadeInfo()
 {
-    box.addItem("LIN", 1);
-    box.addItem("EXP", 2);
-    box.addItem("LOG", 3);
-    box.addItem("S",   4);
-    box.setSelectedId(1, juce::dontSendNotification);
+    auto* fs = processor.getSampler(samplerIndex_);
+    if (fs == nullptr) return;
+
+    static const char* kCurveNames[] = { "LIN", "EXP", "LOG", "S" };
+    const auto nameOf = [](FadeCurveType t)
+    {
+        const int i = juce::jlimit(0, kNumFadeCurveTypes - 1, static_cast<int>(t));
+        return juce::String(kCurveNames[i]);
+    };
+
+    fadeInInfo_.setText(
+        "fade in   "
+            + nameOf(fs->getSlotAttackCurveType(selectedSlot)) + "  "
+            + juce::String(fs->getSlotAttackCurvePower(selectedSlot), 2),
+        juce::dontSendNotification);
+    fadeOutInfo_.setText(
+        "fade out   "
+            + nameOf(fs->getSlotDecayCurveType(selectedSlot)) + "  "
+            + juce::String(fs->getSlotDecayCurvePower(selectedSlot), 2),
+        juce::dontSendNotification);
 }
 
 void SlotEditorComponent::refreshLoopButtons()
@@ -485,10 +471,11 @@ void SlotEditorComponent::rebindMidiLearn()
     add(floorSlider,        K::Floor);
     add(resumeToggle,       K::Resume);
     add(overdubToggle,      K::Overdub);          // engine-wide (slot ignored)
-    add(fadeInCurveBox,     K::FadeInType);
-    add(fadeInPowerSlider,  K::FadeInPow);
-    add(fadeOutCurveBox,    K::FadeOutType);
-    add(fadeOutPowerSlider, K::FadeOutPow);
+    // Fade curves are edited on the image; the info labels under it carry the
+    // POWER learn targets. (FadeInType/FadeOutType stay valid mapping targets
+    // for existing maps — the type is now picked by right-clicking a handle.)
+    add(fadeInInfo_,  K::FadeInPow);
+    add(fadeOutInfo_, K::FadeOutPow);
     // Loop mode is 4 radio buttons — right-click ANY of them maps the one
     // discrete "loop mode" target (Note cycles NONE→LOOP→INV→PING).
     for (int k = 0; k < 4; ++k)
@@ -654,7 +641,7 @@ static constexpr int kEdGap      = 6;
 static constexpr int kEdColGap   = 8;
 static constexpr int kEdTitleH   = 22;
 static constexpr int kEdParamTop = 30;   // first param row Y
-static constexpr int kEdRows     = 5;    // rows per column (incl. button row)
+static constexpr int kEdRows     = 4;    // rows per column (incl. button row)
 
 static int edStep()        { return Sp3ctraTheme::kControlH + 4; }
 static int edParamBottom() { return kEdParamTop + kEdRows * edStep(); }
@@ -717,7 +704,8 @@ void SlotEditorComponent::paint(juce::Graphics& g)
 //
 // Two parameter columns below the title badge, then the merged editor:
 //   Left column  : [REC][PLAY][CLEAR] · Speed · Loop · Floor
-//   Right column : [CROP][SAVE][LOAD] · Resume · Overdub · Curve · Power
+//   Right column : [CROP][SAVE][LOAD] · Resume · Overdub
+//   (fade curves are edited ON the image; their info labels sit under it)
 //   Bottom       : SlotSpectralEditorComponent (fills the remaining height)
 // (IMG removed — the bank level lives in the grid's per-bank mixer.)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -784,28 +772,22 @@ void SlotEditorComponent::resized()
         ry += step;
 
         overdubToggle.setBounds(rightX, ry, colW, rowH);
-        ry += step;
-
-        // Per-fade rows: label · curve combo · power slider.
-        const int curveW = 74;
-        const int powerX = ctrlX + curveW + 4;
-        const int powerW = ctrlW - curveW - 4;
-        fadeInLabel      .setBounds(rightX, ry, lW, rowH);
-        fadeInCurveBox   .setBounds(ctrlX,  ry, curveW, rowH);
-        fadeInPowerSlider.setBounds(powerX, ry, powerW, rowH);
-        ry += step;
-
-        fadeOutLabel      .setBounds(rightX, ry, lW, rowH);
-        fadeOutCurveBox   .setBounds(ctrlX,  ry, curveW, rowH);
-        fadeOutPowerSlider.setBounds(powerX, ry, powerW, rowH);
     }
 
-    // ── Image editor (middle) + SCORE-style EQ panel (bottom) ─────────────────
-    const int edY  = edParamBottom() + kEdGap;
-    const int eqH  = juce::jmin(ScoreEqComponent::kPreferredH, (H - edY) / 2);
-    const int eqY  = H - kEdPad - eqH;
-    const int imgH = juce::jmax(60, eqY - kEdGap - edY);
+    // ── Image editor (middle) + fade info strip + EQ panel (bottom) ───────────
+    const int edY   = edParamBottom() + kEdGap;
+    const int eqH   = juce::jmin(ScoreEqComponent::kPreferredH, (H - edY) / 2);
+    const int eqY   = H - kEdPad - eqH;
+    const int infoH = 15;   // fade in/out labels UNDER the visualisation
+    const int imgH  = juce::jmax(60, eqY - kEdGap - edY - infoH);
     spectralEditor.setBounds(kEdPad, edY, W - 2 * kEdPad, imgH);
+    {
+        const int infoY = edY + imgH;
+        const int halfW = (W - 2 * kEdPad) / 2;
+        fadeInInfo_ .setBounds(kEdPad + 2,         infoY, halfW - 2, infoH);
+        fadeOutInfo_.setBounds(kEdPad + halfW,     infoY,
+                               (W - 2 * kEdPad) - halfW - 2, infoH);
+    }
     eqEditor      .setBounds(kEdPad, eqY, W - 2 * kEdPad, eqH);
 }
 

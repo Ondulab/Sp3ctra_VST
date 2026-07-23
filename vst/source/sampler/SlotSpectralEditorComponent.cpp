@@ -10,6 +10,35 @@ SlotSpectralEditorComponent::SlotSpectralEditorComponent(Sp3ctraAudioProcessor& 
     : processor(proc)
 {
     setMouseCursor(juce::MouseCursor::NormalCursor);
+
+    // ── Rotation arrows — translucent overlay top-centre OF THE IMAGE (image
+    // banks only). Deliberately OUTSIDE the fade strip: its handles can
+    // legitimately travel to the centre (full fades), so anything living in
+    // the strip would end up fighting them for the mouse.
+    const auto initRot = [this](juce::TextButton& b, const char* glyph,
+                                int delta, const char* tip)
+    {
+        b.setButtonText(juce::String::fromUTF8(glyph));
+        b.setTooltip(tip);
+        b.setColour(juce::TextButton::buttonColourId, juce::Colour(0x99101418));
+        b.setColour(juce::TextButton::textColourOffId,
+                    juce::Colours::white.withAlpha(0.85f));
+        b.onClick = [this, delta]
+        {
+            if (auto* fs = processor.getSampler(samplerIndex_))
+                if (fs->rotateSlotImage(selectedSlot_, delta))
+                {
+                    markDirty();
+                    if (onContentRotated) onContentRotated();
+                }
+        };
+        addChildComponent(b);   // visibility follows the bank (timer)
+    };
+    initRot(rotCcwBtn_, "\xe2\x86\xba", -1,   // ↺
+            "Rotate the source image 90 deg counter-clockwise (lossless)");
+    initRot(rotCwBtn_,  "\xe2\x86\xbb", +1,   // ↻
+            "Rotate the source image 90 deg clockwise (lossless)");
+
     startTimer(60);
 }
 
@@ -205,8 +234,9 @@ void SlotSpectralEditorComponent::paint(juce::Graphics& g)
     g.drawRoundedRectangle(bf.reduced(0.5f), 4.0f, 0.5f);
 }
 
-// Reaper-style fade handles in the top strip: top-left = fade-in, top-right = out.
-// Each fade is drawn as a filled, curve-shaped ramp with a polished handle.
+// Fade curves drawn full-height ON the image (no widget row, no top strip).
+// Each fade has two handles: END (coloured, at the peak) = length; MID
+// (white, on the curve) = shape — drag bends the curve through the mouse.
 void SlotSpectralEditorComponent::drawFades(juce::Graphics& g, juce::Rectangle<float> img)
 {
     auto* fs = processor.getSampler(samplerIndex_);
@@ -218,18 +248,18 @@ void SlotSpectralEditorComponent::drawFades(juce::Graphics& g, juce::Rectangle<f
     const float dec  = fs->getSlotDecayLen(selectedSlot_);
     const float sx   = fracToX(sf);
     const float ex   = fracToX(ef);
-    const float top  = plotArea().getY() + 1.0f;
-    const float sBot = img.getY() - 1.0f;          // strip bottom = image top
-    const float hy   = top + (float) kHandleR + 1.0f; // handle centre / curve peak
+    const float hy   = img.getY() + (float) kHandleR + 2.0f;  // curve peak (gain 1)
+    const float sBot = img.getBottom() - 1.0f;                // curve foot (gain 0)
     const float H    = juce::jmax(1.0f, sBot - hy);
 
     const juce::Colour cIn (0xff44ee88);
     const juce::Colour cOut(0xffff6633);
 
-    // Draw one curve-shaped fade ramp + handle.
+    // Draw one curve-shaped fade ramp + END handle + MID (shape) handle.
     //  gain(p): 0 at the silent edge → 1 at full; rising=true for fade-in.
     const auto drawOne = [&](float x0, float x1, FadeCurveType type, float power,
-                             juce::Colour col, bool rising, bool active, bool hover)
+                             juce::Colour col, bool rising, bool active, bool hover,
+                             bool midActive, bool midHover)
     {
         const int steps = juce::jmax(2, (int) std::abs(x1 - x0));
         if (x1 > x0 + 0.5f)
@@ -265,20 +295,114 @@ void SlotSpectralEditorComponent::drawFades(juce::Graphics& g, juce::Rectangle<f
         g.fillEllipse(hx - r, hy - r, 2 * r, 2 * r);
         g.setColour(active ? juce::Colours::white : col.withAlpha(0.9f));
         g.drawEllipse(hx - r, hy - r, 2 * r, 2 * r, 1.4f);
+
+        // MID (shape) handle — white node ON the curve at mid-span. Hidden
+        // for near-zero fades (nothing to bend).
+        if (x1 > x0 + 8.0f)
+        {
+            const float mx = (x0 + x1) * 0.5f;
+            const float mg = applyFadeCurve(0.5f, type, power);
+            const float my = sBot - mg * H;
+            const float mr = (midActive || midHover) ? (float) kHandleR + 1.5f
+                                                     : (float) kHandleR + 0.5f;
+            if (midActive || midHover)
+            {
+                g.setColour(juce::Colours::white.withAlpha(0.25f));
+                g.fillEllipse(mx - mr - 2.5f, my - mr - 2.5f,
+                              2 * (mr + 2.5f), 2 * (mr + 2.5f));
+            }
+            g.setColour(juce::Colour(0xff20202a));
+            g.fillEllipse(mx - mr, my - mr, 2 * mr, 2 * mr);
+            g.setColour(midActive ? col.brighter(0.5f)
+                                  : juce::Colours::white.withAlpha(0.9f));
+            g.drawEllipse(mx - mr, my - mr, 2 * mr, 2 * mr, 1.6f);
+        }
     };
 
     drawOne(sx, fracToX(sf + atk * (ef - sf)),
             fs->getSlotAttackCurveType(selectedSlot_), fs->getSlotAttackCurvePower(selectedSlot_),
-            cIn,  /*rising=*/true,  mode_ == Mode::Attack, fadeHover_ == 1);
+            cIn,  /*rising=*/true,  mode_ == Mode::Attack, fadeHover_ == 1,
+            mode_ == Mode::AttackShape, fadeHover_ == 3);
     drawOne(fracToX(ef - dec * (ef - sf)), ex,
             fs->getSlotDecayCurveType(selectedSlot_), fs->getSlotDecayCurvePower(selectedSlot_),
-            cOut, /*rising=*/false, mode_ == Mode::Decay, fadeHover_ == 2);
+            cOut, /*rising=*/false, mode_ == Mode::Decay, fadeHover_ == 2,
+            mode_ == Mode::DecayShape, fadeHover_ == 4);
+    // (captions moved to the owner's info labels UNDER the view)
+}
 
-    // Strip captions (dim, out of the way).
-    g.setColour(juce::Colour(0xff55606f));
-    g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
-    g.drawText("fade in",  (int) img.getX() + 4, (int) top - 1, 60, 11, juce::Justification::left, false);
-    g.drawText("fade out", (int) img.getRight() - 64, (int) top - 1, 60, 11, juce::Justification::right, false);
+//──────────────────────────────────────────────────────────────────────────────
+// Fade handle geometry + curve-type menu
+//──────────────────────────────────────────────────────────────────────────────
+juce::Point<float> SlotSpectralEditorComponent::fadeEndPoint(bool in) const
+{
+    auto* fs = processor.getSampler(samplerIndex_);
+    if (!fs || !fs->slotHasContent(selectedSlot_)) return { -1.0f, -1.0f };
+    const float sf = fs->getSlotStartFrac(selectedSlot_);
+    const float ef = fs->getSlotEndFrac(selectedSlot_);
+    const auto  im = imageArea();
+    const float x  = in ? fracToX(sf + fs->getSlotAttackLen(selectedSlot_) * (ef - sf))
+                        : fracToX(ef - fs->getSlotDecayLen(selectedSlot_)  * (ef - sf));
+    return { x, im.getY() + (float) kHandleR + 2.0f };
+}
+
+juce::Point<float> SlotSpectralEditorComponent::fadeMidPoint(bool in) const
+{
+    auto* fs = processor.getSampler(samplerIndex_);
+    if (!fs || !fs->slotHasContent(selectedSlot_)) return { -1.0f, -1.0f };
+    const float sf = fs->getSlotStartFrac(selectedSlot_);
+    const float ef = fs->getSlotEndFrac(selectedSlot_);
+
+    float x0, x1; FadeCurveType type; float power;
+    if (in)
+    {
+        x0 = fracToX(sf);
+        x1 = fracToX(sf + fs->getSlotAttackLen(selectedSlot_) * (ef - sf));
+        type  = fs->getSlotAttackCurveType(selectedSlot_);
+        power = fs->getSlotAttackCurvePower(selectedSlot_);
+    }
+    else
+    {
+        x0 = fracToX(ef - fs->getSlotDecayLen(selectedSlot_) * (ef - sf));
+        x1 = fracToX(ef);
+        type  = fs->getSlotDecayCurveType(selectedSlot_);
+        power = fs->getSlotDecayCurvePower(selectedSlot_);
+    }
+    if (x1 - x0 <= 8.0f)
+        return { -1.0f, -1.0f };   // near-zero fade: no shape handle
+
+    const auto  im   = imageArea();
+    const float peak = im.getY() + (float) kHandleR + 2.0f;
+    const float bot  = im.getBottom() - 1.0f;
+    const float mg   = applyFadeCurve(0.5f, type, power);
+    return { (x0 + x1) * 0.5f, bot - mg * juce::jmax(1.0f, bot - peak) };
+}
+
+void SlotSpectralEditorComponent::showFadeTypeMenu(bool in)
+{
+    auto* fs = processor.getSampler(samplerIndex_);
+    if (fs == nullptr) return;
+    const auto cur = in ? fs->getSlotAttackCurveType(selectedSlot_)
+                        : fs->getSlotDecayCurveType(selectedSlot_);
+
+    juce::PopupMenu m;
+    m.addSectionHeader(in ? "Fade in curve" : "Fade out curve");
+    static const char* kNames[] = { "LIN", "EXP", "LOG", "S" };
+    for (int i = 0; i < kNumFadeCurveTypes; ++i)
+        m.addItem(i + 1, kNames[i], true, static_cast<int>(cur) == i);
+
+    juce::Component::SafePointer<SlotSpectralEditorComponent> safe(this);
+    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this),
+        [safe, in](int result)
+        {
+            if (safe == nullptr || result <= 0) return;
+            auto* fs2 = safe->processor.getSampler(safe->samplerIndex_);
+            if (fs2 == nullptr) return;
+            const auto t = static_cast<FadeCurveType>(result - 1);
+            if (in) fs2->setSlotAttackCurveType(safe->selectedSlot_, t);
+            else    fs2->setSlotDecayCurveType (safe->selectedSlot_, t);
+            safe->markDirty();
+            if (safe->onFadeChanged) safe->onFadeChanged();
+        });
 }
 
 void SlotSpectralEditorComponent::drawTimeBars(juce::Graphics& g, juce::Rectangle<float> img)
@@ -323,10 +447,20 @@ void SlotSpectralEditorComponent::drawTimeBars(juce::Graphics& g, juce::Rectangl
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-void SlotSpectralEditorComponent::resized() { imageDirty_ = true; }
+void SlotSpectralEditorComponent::resized()
+{
+    imageDirty_ = true;
+    // Rotation arrows — overlay centred at the top OF THE IMAGE, just under
+    // the fade strip (which stays 100% owned by the fade handles).
+    const auto img = imageArea();
+    const int  cx  = (int) img.getCentreX();
+    const int  y   = (int) img.getY() + 4;
+    rotCcwBtn_.setBounds(cx - 24, y, 22, 18);
+    rotCwBtn_ .setBounds(cx + 2,  y, 22, 18);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Mouse — top strip = fade handles; below = Start/End bars (no overlap).
+// Mouse — fade handles (END = length, MID = shape) first, then Start/End bars.
 // ─────────────────────────────────────────────────────────────────────────────
 void SlotSpectralEditorComponent::mouseMove(const juce::MouseEvent& e)
 {
@@ -335,17 +469,17 @@ void SlotSpectralEditorComponent::mouseMove(const juce::MouseEvent& e)
         { setMouseCursor(juce::MouseCursor::NormalCursor);
           if (fadeHover_ != 0) { fadeHover_ = 0; repaint(); } return; }
 
-    const bool inStrip = e.position.y < plotArea().getY() + (float) kTopStrip;
+    const auto near = [&](juce::Point<float> p)
+    { return p.x >= 0.0f && e.position.getDistanceFrom(p) <= (float) kGrabR; };
+
     int newHover = 0;
-    if (inStrip)
-    {
-        const float sf = fs->getSlotStartFrac(selectedSlot_);
-        const float ef = fs->getSlotEndFrac(selectedSlot_);
-        const float inX  = fracToX(sf + fs->getSlotAttackLen(selectedSlot_) * (ef - sf));
-        const float outX = fracToX(ef - fs->getSlotDecayLen(selectedSlot_)  * (ef - sf));
-        newHover = (std::abs(e.position.x - inX) <= std::abs(e.position.x - outX)) ? 1 : 2;
-        setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
-    }
+    if      (near(fadeEndPoint(true)))  newHover = 1;
+    else if (near(fadeEndPoint(false))) newHover = 2;
+    else if (near(fadeMidPoint(true)))  newHover = 3;
+    else if (near(fadeMidPoint(false))) newHover = 4;
+
+    if (newHover != 0)
+        setMouseCursor(juce::MouseCursor::PointingHandCursor);
     else
     {
         const float sx = fracToX(fs->getSlotStartFrac(selectedSlot_));
@@ -362,22 +496,50 @@ void SlotSpectralEditorComponent::mouseDown(const juce::MouseEvent& e)
     auto* fs = processor.getSampler(samplerIndex_);
     if (!fs || !fs->slotHasContent(selectedSlot_)) { mode_ = Mode::None; return; }
 
-    const float sf = fs->getSlotStartFrac(selectedSlot_);
-    const float ef = fs->getSlotEndFrac(selectedSlot_);
-    const float sx = fracToX(sf), ex = fracToX(ef);
-    const bool  inStrip = e.position.y < plotArea().getY() + (float) kTopStrip;
+    const auto near = [&](juce::Point<float> p)
+    { return p.x >= 0.0f && e.position.getDistanceFrom(p) <= (float) kGrabR; };
+    const bool endIn  = near(fadeEndPoint(true));
+    const bool endOut = near(fadeEndPoint(false));
+    const bool midIn  = near(fadeMidPoint(true));
+    const bool midOut = near(fadeMidPoint(false));
 
-    if (inStrip)
+    // Right-click a fade handle → curve type menu (LIN/EXP/LOG/S).
+    if (e.mods.isRightButtonDown())
     {
-        // Fade handles: nearest of fade-in-end / fade-out-start, else by side.
-        const float inX  = fracToX(sf + fs->getSlotAttackLen(selectedSlot_) * (ef - sf));
-        const float outX = fracToX(ef - fs->getSlotDecayLen(selectedSlot_)  * (ef - sf));
-        const float dIn  = std::abs(e.position.x - inX);
-        const float dOut = std::abs(e.position.x - outX);
-        mode_ = (dIn <= dOut) ? Mode::Attack : Mode::Decay;
+        mode_ = Mode::None;
+        if (endIn || midIn)        showFadeTypeMenu(true);
+        else if (endOut || midOut) showFadeTypeMenu(false);
+        return;
     }
+
+    // Double-click the MID handle → back to a straight (LIN) fade.
+    if ((midIn || midOut) && e.getNumberOfClicks() >= 2)
+    {
+        if (midIn)
+        {
+            fs->setSlotAttackCurveType (selectedSlot_, FadeCurveType::LINEAR);
+            fs->setSlotAttackCurvePower(selectedSlot_, 1.0f);
+        }
+        else
+        {
+            fs->setSlotDecayCurveType (selectedSlot_, FadeCurveType::LINEAR);
+            fs->setSlotDecayCurvePower(selectedSlot_, 1.0f);
+        }
+        mode_ = Mode::None;
+        markDirty();
+        if (onFadeChanged) onFadeChanged();
+        return;
+    }
+
+    if      (endIn)  mode_ = Mode::Attack;
+    else if (endOut) mode_ = Mode::Decay;
+    else if (midIn)  mode_ = Mode::AttackShape;
+    else if (midOut) mode_ = Mode::DecayShape;
     else
     {
+        const float sf = fs->getSlotStartFrac(selectedSlot_);
+        const float ef = fs->getSlotEndFrac(selectedSlot_);
+        const float sx = fracToX(sf), ex = fracToX(ef);
         if (std::abs(e.position.x - sx) <= kSnap)      mode_ = Mode::Start;
         else if (std::abs(e.position.x - ex) <= kSnap) mode_ = Mode::End;
         else mode_ = (xToFrac(e.position.x) <= (sf + ef) * 0.5f) ? Mode::Start : Mode::End;
@@ -410,9 +572,54 @@ void SlotSpectralEditorComponent::mouseDrag(const juce::MouseEvent& e)
             fs->setSlotDecayLen(selectedSlot_,
                 juce::jlimit(0.0f, 1.0f, (ef - xToFrac(e.position.x)) / span));
             break;
+        case Mode::AttackShape:
+        case Mode::DecayShape:
+        {
+            // Bend the curve so its mid-point passes through the mouse:
+            // below the diagonal → EXP, above → LOG, close to it → LIN
+            // (FadeCurve.h maps the exponent as 1 + power); an S curve keeps
+            // its type and takes the power instead (smoothstep(0.5) = 0.5).
+            const bool  in   = (mode_ == Mode::AttackShape);
+            const auto  img  = imageArea();
+            const float peak = img.getY() + (float) kHandleR + 2.0f;
+            const float bot  = img.getBottom() - 1.0f;
+            const float gv   = juce::jlimit(0.02f, 0.98f,
+                (bot - e.position.y) / juce::jmax(1.0f, bot - peak));
+            const float lg   = std::log(gv) / std::log(0.5f); // exponent giving gv at t=0.5
+
+            const auto cur = in ? fs->getSlotAttackCurveType(selectedSlot_)
+                                : fs->getSlotDecayCurveType(selectedSlot_);
+            FadeCurveType type;
+            float         power;
+            if (cur == FadeCurveType::SCURVE)
+            { type = FadeCurveType::SCURVE;      power = juce::jlimit(0.1f, 10.0f, lg); }
+            else if (std::abs(gv - 0.5f) < 0.015f)
+            { type = FadeCurveType::LINEAR;      power = 1.0f; }
+            else if (gv < 0.5f)
+            { type = FadeCurveType::EXPONENTIAL; power = juce::jlimit(0.1f, 10.0f, lg - 1.0f); }
+            else
+            { type = FadeCurveType::LOGARITHMIC; power = juce::jlimit(0.1f, 10.0f, 1.0f / lg - 1.0f); }
+
+            if (in)
+            {
+                fs->setSlotAttackCurveType (selectedSlot_, type);
+                fs->setSlotAttackCurvePower(selectedSlot_, power);
+            }
+            else
+            {
+                fs->setSlotDecayCurveType (selectedSlot_, type);
+                fs->setSlotDecayCurvePower(selectedSlot_, power);
+            }
+            break;
+        }
         default: break;
     }
     markDirty();   // rebuild the preview with the new edit
+
+    if (onFadeChanged
+        && (mode_ == Mode::Attack || mode_ == Mode::Decay
+            || mode_ == Mode::AttackShape || mode_ == Mode::DecayShape))
+        onFadeChanged();
 }
 
 void SlotSpectralEditorComponent::mouseUp(const juce::MouseEvent& e)
@@ -425,6 +632,13 @@ void SlotSpectralEditorComponent::timerCallback()
 {
     auto* fs = processor.getSampler(samplerIndex_);
     if (fs == nullptr) return;
+
+    // Rotation arrows only make sense for image-loaded banks.
+    const bool rotatable = fs->slotHasContent(selectedSlot_)
+                        && fs->getSlotSourcePath(selectedSlot_).isNotEmpty();
+    rotCcwBtn_.setVisible(rotatable);
+    rotCwBtn_ .setVisible(rotatable);
+
     if (fs->getSlotState(selectedSlot_) == SlotState::PLAYING) repaint();
     else if (imageDirty_)                                      repaint();
 }

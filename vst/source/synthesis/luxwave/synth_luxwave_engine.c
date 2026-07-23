@@ -367,6 +367,21 @@ int luxwave_engine_note_off(LuxWaveEngine *engine, uint8_t note)
     return -1;
 }
 
+void luxwave_engine_all_notes_off(LuxWaveEngine *engine)
+{
+    if (!engine || !engine->initialized) return;
+    for (int i = 0; i < LUXWAVE_MAX_VOICES; ++i)
+    {
+        LuxWaveVoice *v = &engine->voices[i];
+        if (v->active || v->volume_env.stage != LW_ADSR_IDLE)
+        {
+            lw_adsr_gate_off(&v->volume_env);
+            lw_adsr_gate_off(&v->filter_env);
+            v->active = false;
+        }
+    }
+}
+
 /* ============================================================================
  * AUDIO GENERATION — inline in processBlock (RT-safe)
  *

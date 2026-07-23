@@ -165,11 +165,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     // ── Gameplay — Envelope (ms) ─────────────────────────────────────────────
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxstralAttackMs", 1}, "Attack",
-        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 0.5f,
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 15.0f,
         juce::AudioParameterFloatAttributes{}.withLabel("ms")));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"luxstralReleaseMs", 1}, "Release",
-        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 0.5f,
+        juce::NormalisableRange<float>(0.5f, 5000.0f, 0.1f, 0.3f), 60.0f,
         juce::AudioParameterFloatAttributes{}.withLabel("ms")));
 
     // (Purge 2026-07-12: the legacy pre-split conditioning params —
@@ -821,10 +821,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             params.push_back(std::make_unique<juce::AudioParameterBool>(
                 id("Enabled"), tag + "Enabled", false));
             params.push_back(std::make_unique<juce::AudioParameterBool>(
-                id("Polyphony"), tag + "Polyphony", false));
+                id("Polyphony"), tag + "Polyphony", true));
             params.push_back(std::make_unique<juce::AudioParameterChoice>(
                 id("BackgroundMode"), tag + "Background",
-                juce::StringArray{"Black", "White"}, 0));
+                juce::StringArray{"Black", "White"}, 1));
             params.push_back(std::make_unique<juce::AudioParameterChoice>(
                 id("CouplingMode"), tag + "Coupling",
                 juce::StringArray{"LuxStral", "Free"}, 0, kHiddenChoice));
@@ -899,10 +899,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             params.push_back(std::make_unique<juce::AudioParameterBool>(
                 id("Enabled"), tag + "Enabled", false));
             params.push_back(std::make_unique<juce::AudioParameterBool>(
-                id("Polyphony"), tag + "Polyphony", false));
+                id("Polyphony"), tag + "Polyphony", true));
             params.push_back(std::make_unique<juce::AudioParameterChoice>(
                 id("BackgroundMode"), tag + "Background",
-                juce::StringArray{"Black", "White"}, 0));
+                juce::StringArray{"Black", "White"}, 1));
             params.push_back(std::make_unique<juce::AudioParameterChoice>(
                 id("CouplingMode"), tag + "Coupling",
                 juce::StringArray{"LuxStral", "Free"}, 0, kHiddenChoice));
@@ -997,7 +997,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             juce::AudioParameterFloatAttributes{}.withLabel("%")));
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             id("BackgroundMode"), tag + "Background",
-            juce::StringArray{"Auto", "Black", "White"}, 0));
+            juce::StringArray{"Auto", "Black", "White"}, 2));
     }
     for (int n = 0; n < 8; ++n)
     {
@@ -1020,7 +1020,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             juce::AudioParameterFloatAttributes{}.withLabel("%")));
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             id("BackgroundMode"), tag + "Background",
-            juce::StringArray{"Auto", "Black", "White"}, 0));
+            juce::StringArray{"Auto", "Black", "White"}, 2));
     }
     for (int n = 0; n < 8; ++n)
     {
@@ -1043,7 +1043,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         }
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             id("BackgroundMode"), tag + "Background",
-            juce::StringArray{"Auto", "Black", "White"}, 0));
+            juce::StringArray{"Auto", "Black", "White"}, 2));
     }
     for (int n = 0; n < 8; ++n)
     {
@@ -1083,7 +1083,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             juce::AudioParameterIntAttributes{}.withLabel("lines")));
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             id("BackgroundMode"), tag + "Background",
-            juce::StringArray{"Auto", "Black", "White"}, 0));
+            juce::StringArray{"Auto", "Black", "White"}, 2));
     }
 
     // Fade-in duration [ms] — applied when restarting the live stream after Stop.
@@ -1255,30 +1255,44 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             formats, 0, kHiddenChoice));
     }
 
-    // ── FrameSequencer parameters ─────────────────────────────────────────────
+    // ── FrameSequencer parameters — one bank PER sampler engine ──────────────
+    // The sequencer is internal to its sampler (no more global SEQUENCER
+    // module): each engine owns its own timing + transport bank, addressed
+    // like every other per-engine sampler param (fsEngineParam ids). The
+    // retired global ids ("seqBpm"…) are migrated from old state blobs via
+    // the legacy SEQ pattern tree in setStateInformation.
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+    {
+        const juce::String nm = (e == 0) ? juce::String("LuxSampler ")
+                              : (e == 1) ? juce::String("LuxSampler B ")
+                              : "LuxSampler " + juce::String(e + 1) + " ";
 
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"seqEnabled",  1}, "Sequencer Enabled", false));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"seqBpm",      1}, "Seq BPM",
-        juce::NormalisableRange<float>(40.0f, 240.0f, 0.5f), 120.0f));
-    // 2..16: the sequencer grid displays at most 16 cells (8×2) and a single
-    // step is not a sequence — the whole span is MIDI/automation-addressable.
-    params.push_back(std::make_unique<juce::AudioParameterInt>(
-        juce::ParameterID{"seqNumSteps", 1}, "Seq Steps", 2, 16, 16));
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"seqLoop",     1}, "Seq Loop",    true));
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"seqDawSync",  1}, "Seq DAW Sync", true));
-    params.push_back(std::make_unique<juce::AudioParameterInt>(
-        juce::ParameterID{"seqBeatsPerStep", 1}, "Seq Beats/Step", 1, 8, 1));
-    // Transport as an automatable param (0=Stop, 1=Play, 2=Hold) so the DAW can
-    // drive / MIDI-map the PLAY-HOLD-STOP buttons. parameterChanged() maps it to
-    // FrameSequencer::uiStop/uiPlay(uiResume)/uiHold (all RT-safe atomics).
-    // Forced back to Stop on session restore — never auto-run on open.
-    params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID{"seqTransport", 1}, "Seq Transport",
-        juce::StringArray{"Stop", "Play", "Hold"}, 0));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{fsEngineParam(e, "SeqBpm"), 1}, nm + "Seq BPM",
+            juce::NormalisableRange<float>(40.0f, 240.0f, 0.5f), 120.0f));
+        // 2..16: the sequencer grid displays at most 16 cells (8×2) and a single
+        // step is not a sequence — the whole span is MIDI/automation-addressable.
+        // Default 8 = one full row (the grid only shows the active steps).
+        params.push_back(std::make_unique<juce::AudioParameterInt>(
+            juce::ParameterID{fsEngineParam(e, "SeqNumSteps"), 1},
+            nm + "Seq Steps", 2, 16, 8));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{fsEngineParam(e, "SeqLoop"), 1},
+            nm + "Seq Loop", true));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{fsEngineParam(e, "SeqDawSync"), 1},
+            nm + "Seq DAW Sync", true));
+        params.push_back(std::make_unique<juce::AudioParameterInt>(
+            juce::ParameterID{fsEngineParam(e, "SeqBeatsPerStep"), 1},
+            nm + "Seq Beats/Step", 1, 8, 1));
+        // Transport as an automatable param (0=Stop, 1=Play, 2=Hold) so the DAW
+        // can drive / MIDI-map the PLAY-HOLD-STOP buttons. parameterChanged()
+        // maps it to FrameSequencer::uiStop/uiPlay(uiResume)/uiHold (all RT-safe
+        // atomics). Forced back to Stop on session restore — never auto-run.
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{fsEngineParam(e, "SeqTransport"), 1},
+            nm + "Seq Transport", juce::StringArray{"Stop", "Play", "Hold"}, 0));
+    }
 
     // ── SCORE playback transport (LuxSampler score slot) ─────────────────────
     // The SCORE generator itself stays out of the APVTS (offline settings), but
@@ -1332,6 +1346,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     // media/params are kept, on resumes instantly. Automatable/MIDI-learnable.
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"imgSrcEnabled", 1}, "Image Src Active", true));
+    // Orientation (quarter turns CW) — lets the scan read the image in any
+    // direction; strips + preview are rebuilt by the engine.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"imgSrcRotate", 1}, "Image Src Rotate",
+        juce::StringArray{"0", "90", "180", "270"}, 0));
 
     // P5-M3 — IMAGE instance banks, slots 1..7 (slot 0 = the legacy ids
     // above, so old sessions/automation load unchanged).
@@ -1359,6 +1378,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             juce::ParameterID{imgSrcParam(s, "Play"), 1}, nm + "Play", false));
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID{imgSrcParam(s, "Enabled"), 1}, nm + "Active", true));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{imgSrcParam(s, "Rotate"), 1}, nm + "Rotate",
+            juce::StringArray{"0", "90", "180", "270"}, 0));
     }
 
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -1575,7 +1597,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID{p + "invert", 1}, tag + "Invert Color", false));
         params.push_back(std::make_unique<juce::AudioParameterBool>(
-            juce::ParameterID{p + "colorMode", 1}, tag + "Color (RGB)", false));
+            juce::ParameterID{p + "colorMode", 1}, tag + "Color (RGB)", true));
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID{p + "paused", 1}, tag + "Paused", false));
         // Per-instance output enable (the rack block's LED toggles this). Default
@@ -1819,13 +1841,12 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     score_settings_defaults(&scoreSettings_);
     scoreSettings_.writingSpeed = 2.5;   // page maps to a sensible default duration
 
-    // Create FrameSequencer and wire it to the ordered sampler engines (A, B).
-    frameSequencer = std::make_unique<FrameSequencer>();
+    // One FrameSequencer per sampler engine — the sequencer is internal to its
+    // sampler and addresses only that engine's banks.
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
     {
-        LuxSampler* engines[LuxSampler::kMaxEngines];
-        for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
-            engines[e] = samplers_[(size_t) e].get();
-        frameSequencer->setSamplers(engines, LuxSampler::kMaxEngines);
+        frameSequencers_[(size_t) e] = std::make_unique<FrameSequencer>();
+        frameSequencers_[(size_t) e]->setLuxSampler(samplers_[(size_t) e].get());
     }
 
     // ── M9 / P5-M3: IMAGE ×8 + VIDEO / CAMERA source engines + service ──────
@@ -1847,6 +1868,7 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
         eng->setScanStart(apvts.getRawParameterValue(imgSrcParam(s, "ScanStart"))->load());
         eng->setScanEnd  (apvts.getRawParameterValue(imgSrcParam(s, "ScanEnd"))->load());
         eng->setEnabled  (apvts.getRawParameterValue(imgSrcParam(s, "Enabled"))->load() > 0.5f);
+        eng->setRotation ((int) apvts.getRawParameterValue(imgSrcParam(s, "Rotate"))->load());
     }
     for (int s = 0; s < 8; ++s)
     {
@@ -1889,13 +1911,16 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
         apvts.addParameterListener(fsEngineParam(e, "MaxDuration"),  this);
     }
 
-    apvts.addParameterListener(PARAM_SEQ_ENABLED,  this);
-    apvts.addParameterListener(PARAM_SEQ_BPM,      this);
-    apvts.addParameterListener(PARAM_SEQ_NSTEPS,   this);
-    apvts.addParameterListener(PARAM_SEQ_LOOP,     this);
-    apvts.addParameterListener(PARAM_SEQ_DAW_SYNC, this);
-    apvts.addParameterListener(PARAM_SEQ_BPS,      this);
-    apvts.addParameterListener(PARAM_SEQ_TRANSPORT, this);
+    // Per-engine sequencer banks (the sequencer is internal to its sampler).
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+    {
+        apvts.addParameterListener(fsEngineParam(e, "SeqBpm"),          this);
+        apvts.addParameterListener(fsEngineParam(e, "SeqNumSteps"),     this);
+        apvts.addParameterListener(fsEngineParam(e, "SeqLoop"),         this);
+        apvts.addParameterListener(fsEngineParam(e, "SeqDawSync"),      this);
+        apvts.addParameterListener(fsEngineParam(e, "SeqBeatsPerStep"), this);
+        apvts.addParameterListener(fsEngineParam(e, "SeqTransport"),    this);
+    }
 
     // SCORE playback transport (relayed to LuxSampler in parameterChanged)
     apvts.addParameterListener(PARAM_SCORE_PLAYING, this);
@@ -1916,6 +1941,21 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     samplers_[0]->setOctaveOffset(
         static_cast<int>(*apvts.getRawParameterValue(PARAM_FS_OCT_OFFSET)) - 2);
     samplers_[0]->setMaxDuration(*apvts.getRawParameterValue(PARAM_FS_MAX_DUR));
+
+    // Sync each engine's sequencer timing with the initial APVTS values.
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+        if (auto* fs = frameSequencers_[(size_t) e].get())
+        {
+            fs->setBpm(apvts.getRawParameterValue(fsEngineParam(e, "SeqBpm"))->load());
+            fs->setNumSteps(static_cast<int>(
+                apvts.getRawParameterValue(fsEngineParam(e, "SeqNumSteps"))->load()));
+            fs->setLooping(
+                *apvts.getRawParameterValue(fsEngineParam(e, "SeqLoop")) > 0.5f);
+            fs->setDawSync(
+                *apvts.getRawParameterValue(fsEngineParam(e, "SeqDawSync")) > 0.5f);
+            fs->setBeatsPerStep(static_cast<int>(
+                apvts.getRawParameterValue(fsEngineParam(e, "SeqBeatsPerStep"))->load()));
+        }
 
     // SCORE transport params → every score-player slot (shared until M5).
     if (scorePlayerService_ != nullptr)
@@ -2584,10 +2624,68 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         }
     }
 
+    // ── Enabled-aware engine gates + zero-CPU drain ──────────────────────────
+    // "Fed" = engine globally enabled AND ≥1 OUT send whose bank is ENABLED —
+    // a send switched OFF via its rack LED starves the engine exactly like a
+    // removed one (OFF = silence, uniformly; freeze is a transport feature,
+    // not a side effect of the power button). The gate then stays open
+    // kEngineDrainBlocks past the last fed block so the feeds' no-send
+    // contract (50-tick debounce + silence push + latch/crossfade) and the
+    // released voices complete BEFORE the render collapses to zero CPU —
+    // closing instantly froze spectrum+voices, which resurrected as a stale
+    // "last sound" on re-enable.
+    {
+        const auto anyEnabled = [](uint32_t mask,
+                                   const lux_out_params_t* banks) noexcept {
+            for (int s = 0; mask != 0u && s < LUX_OUT_MAX_SLOTS;
+                 ++s, mask >>= 1)
+                if ((mask & 1u) && banks[s].enabled)
+                    return true;
+            return false;
+        };
+        const bool fed[4] = {
+            (deviceEnabledParam == nullptr
+             || deviceEnabledParam->load() >= 0.5f)
+                && anyEnabled(sendSlotsLuxStral_.load(std::memory_order_relaxed),
+                              g_sp3ctra_config.luxstral_out),
+            luxsynthEnabledParam->load() > 0.5f
+                && anyEnabled(sendSlotsLuxSynth_.load(std::memory_order_relaxed),
+                              g_sp3ctra_config.luxsynth_out),
+            luxwaveEnabledParam->load() > 0.5f
+                && anyEnabled(sendSlotsLuxWave_.load(std::memory_order_relaxed),
+                              g_sp3ctra_config.luxwave_out),
+            luxgrainEnabledParam != nullptr
+                && luxgrainEnabledParam->load() > 0.5f
+                && anyEnabled(sendSlotsLuxGrain_.load(std::memory_order_relaxed),
+                              g_sp3ctra_config.luxgrain_out),
+        };
+        for (int e = 0; e < 4; ++e)
+        {
+            // Falling edge → release every voice: the tails drain (inaudibly —
+            // the feed zeroes the spectrum/wavetable meanwhile) inside the
+            // drain window, so the gate closes on idle voices and a later
+            // re-enable cannot resurrect stale notes.
+            if (! fed[e] && engineFed_[e])
+            {
+                if (e == 1 && g_luxsynth_engine.initialized)
+                    luxsynth_engine_all_notes_off(&g_luxsynth_engine);
+                else if (e == 2 && g_luxwave_engine.initialized)
+                    luxwave_engine_all_notes_off(&g_luxwave_engine);
+            }
+            engineFed_[e] = fed[e];
+            if (fed[e])
+                engineDrainBlocks_[e] = kEngineDrainBlocks;
+            else if (engineDrainBlocks_[e] > 0)
+                --engineDrainBlocks_[e];
+            engineGate_[e] = fed[e] || engineDrainBlocks_[e] > 0;
+        }
+    }
+
     // ── LuxSynth MIDI (RT-safe: push into lock-free ring buffer) ─────────────
     {
-        const bool lxEnabled = luxsynthEnabledParam->load() > 0.5f
-                               && sendCountLuxSynth_.load(std::memory_order_relaxed) > 0;
+        // Strictly "fed" (no drain): with the send OFF a key press must stay
+        // silent — during the drain the spectrum may not be zeroed yet.
+        const bool lxEnabled = engineFed_[1];
         if (lxEnabled && g_luxsynth_engine.initialized)
         {
             const int lxCh  = static_cast<int>(luxsynthMidiChannelParam->load()) + 1;
@@ -2608,8 +2706,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 
     // ── LuxWave MIDI (RT-safe: push into lock-free ring buffer) ──────────────
     {
-        const bool lwEnabled = luxwaveEnabledParam->load() > 0.5f
-                               && sendCountLuxWave_.load(std::memory_order_relaxed) > 0;
+        // Strictly "fed" (no drain) — same contract as LuxSynth above.
+        const bool lwEnabled = engineFed_[2];
         if (lwEnabled && g_luxwave_engine.initialized)
         {
             const int lwCh  = static_cast<int>(luxwaveMidiChannelParam->load()) + 1;
@@ -2628,11 +2726,12 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         }
     }
 
-    // ── FrameSequencer: advance step if sequencer is running ─────────────────
-    if (frameSequencer != nullptr)
-        frameSequencer->processBlock(getPlayHead(),
-                                     buffer.getNumSamples(),
-                                     getSampleRate());
+    // ── FrameSequencers: advance each engine's sequencer if it is running ────
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+        if (auto* fs = frameSequencers_[(size_t) e].get())
+            fs->processBlock(getPlayHead(),
+                             buffer.getNumSamples(),
+                             getSampleRate());
 
     // ── Acquisition gate: brake the live frame-advance rate ──────────────────
     // "Vitesse d'acquisition" — drive the gate clock once per block.  When Off
@@ -2660,33 +2759,23 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                          buffer.getNumSamples(), getSampleRate(), getPlayHead());
     }
 
-    // ── Sequencer-gated recording: route the gate slot to the RIGHT engine ──
-    // getStep() encodes (sampler,slot): slot = enc % NUM_SLOTS, sampler = enc /
-    // NUM_SLOTS. Gate engine A or B with the decoded slot; ungate the other.
-    // Sentinels (< 0) ungate both.
+    // ── Sequencer-gated recording — per engine: each sampler's OWN sequencer
+    // gates its recording (slot of the current step; sentinels < 0 ungate).
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
     {
-        int gate[LuxSampler::kMaxEngines];
-        for (int e = 0; e < LuxSampler::kMaxEngines; ++e) gate[e] = -1;
-        if (frameSequencer != nullptr
-            && frameSequencer->isEnabled()
-            && frameSequencer->isPlaying())
+        if (! samplers_[(size_t) e]) continue;
+        int gate = -1;
+        if (auto* fs = frameSequencers_[(size_t) e].get();
+            fs != nullptr && fs->isPlaying())
         {
-            const int curStep = frameSequencer->getCurrentStep();
+            const int curStep = fs->getCurrentStep();
             if (curStep >= 0)
             {
-                const int enc = frameSequencer->getStep(curStep);
-                if (enc >= 0)
-                {
-                    const int smp  = enc / LuxSamplerConstants::NUM_SLOTS;
-                    const int slot = enc % LuxSamplerConstants::NUM_SLOTS;
-                    if (smp >= 0 && smp < LuxSampler::kMaxEngines)
-                        gate[smp] = slot;
-                }
+                const int slot = fs->getStep(curStep);
+                if (slot >= 0) gate = slot;
             }
         }
-        for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
-            if (samplers_[(size_t) e])
-                samplers_[(size_t) e]->setSeqGateSlot(gate[e]);
+        samplers_[(size_t) e]->setSeqGateSlot(gate);
     }
 
     // ========================================================================
@@ -2713,21 +2802,16 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     const bool luxstralEnabled = (deviceEnabledParam == nullptr || deviceEnabledParam->load() >= 0.5f);
 
     // ── Zero-CPU contract — publish per-engine render gates to the synth
-    // thread (multithreading.c): enabled && ≥1 OUT send. A cleared LuxStral
-    // bit collapses synth_AudioProcess to a cheap silence commit (the
-    // producer/consumer pacing stays intact); a cleared LuxSynth/LuxWave/
-    // LuxGrain bit skips that engine's feed tick.
+    // thread (multithreading.c): the enabled-aware gates computed above
+    // (fed OR draining). A cleared LuxStral bit collapses synth_AudioProcess
+    // to a cheap silence commit (the producer/consumer pacing stays intact);
+    // a cleared LuxSynth/LuxWave/LuxGrain bit skips that engine's feed tick.
     {
         extern volatile uint32_t g_engine_render_gates;
-        const uint32_t gates =
-              (luxstralEnabled
-               && sendCountLuxStral_.load(std::memory_order_relaxed) > 0 ? 1u : 0u)
-            | (luxsynthEnabledParam->load() > 0.5f
-               && sendCountLuxSynth_.load(std::memory_order_relaxed) > 0 ? 2u : 0u)
-            | (luxwaveEnabledParam->load() > 0.5f
-               && sendCountLuxWave_.load(std::memory_order_relaxed) > 0 ? 4u : 0u)
-            | (luxgrainEnabledParam && luxgrainEnabledParam->load() > 0.5f
-               && sendCountLuxGrain_.load(std::memory_order_relaxed) > 0 ? 8u : 0u);
+        const uint32_t gates = (engineGate_[0] ? 1u : 0u)
+                             | (engineGate_[1] ? 2u : 0u)
+                             | (engineGate_[2] ? 4u : 0u)
+                             | (engineGate_[3] ? 8u : 0u);
         __atomic_store_n(&g_engine_render_gates, gates, __ATOMIC_RELEASE);
     }
     if (sharedCore && sharedCore->isReady() && luxstral_are_audio_buffers_ready()) {
@@ -2839,8 +2923,10 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // ========================================================================
     if (sharedCore && sharedCore->isReady() && g_luxsynth_engine.initialized)
     {
-        const bool lxEnabled = luxsynthEnabledParam->load() > 0.5f
-                               && sendCountLuxSynth_.load(std::memory_order_relaxed) > 0;
+        // Gate incl. drain: the render keeps running after the last enabled
+        // send drops so the feed's silence push latches and the released
+        // voices fade out before the gate closes.
+        const bool lxEnabled = engineGate_[1];
         if (lxEnabled)
         {
             struct timeval lxT0, lxT1;
@@ -2998,8 +3084,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // ========================================================================
     if (sharedCore && sharedCore->isReady() && g_luxwave_engine.initialized)
     {
-        const bool lwEnabled = luxwaveEnabledParam->load() > 0.5f
-                               && sendCountLuxWave_.load(std::memory_order_relaxed) > 0;
+        // Gate incl. drain — see the LuxSynth render gate above.
+        const bool lwEnabled = engineGate_[2];
         if (lwEnabled)
         {
             struct timeval lwT0, lwT1;
@@ -3079,9 +3165,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // ========================================================================
     if (sharedCore && sharedCore->isReady() && g_luxgrain_engine.initialized)
     {
-        const bool lgEnabled = luxgrainEnabledParam
-                               && luxgrainEnabledParam->load() > 0.5f
-                               && sendCountLuxGrain_.load(std::memory_order_relaxed) > 0;
+        // Gate incl. drain — see the LuxSynth render gate above.
+        const bool lgEnabled = engineGate_[3];
         if (lgEnabled && numSamples <= LUXGRAIN_MAX_BUFFER_SIZE)
         {
             struct timeval lgT0, lgT1;
@@ -3252,7 +3337,14 @@ void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
         if (stale.isValid())
             state.removeChild(stale, nullptr);
     }
-    replaceChild(seqStateToTree());          // sequencer pattern (steps A/B)
+    replaceChild(seqStateToTree());          // per-engine sequencer patterns
+    // Drop any stale legacy GLOBAL pattern ("SEQ") restored from an old blob —
+    // new saves only write the per-engine "SEQS" tree.
+    {
+        auto staleSeq = state.getChildWithName("SEQ");
+        if (staleSeq.isValid())
+            state.removeChild(staleSeq, nullptr);
+    }
     replaceChild(samplerSlotsStateToTree()); // per-slot params, engines A + B
     replaceChild(mediaSourcesStateToTree()); // M9 — IMAGE/VIDEO paths + camera
     // CHAINS — snapshot the LIVE model, never trust the copy restored/edited
@@ -3325,7 +3417,8 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
             forceRestoredParam("videoScrollPaused", 0.0);       // legacy global
             for (int s = 0; s < CHAIN_MAX_CHAINS; ++s)
                 forceRestoredParam(vsParam(s, "paused"), 0.0);  // per-instance: run
-            forceRestoredParam(PARAM_SEQ_TRANSPORT, 0.0);       // Stop
+            for (int e = 0; e < LuxSampler::kMaxEngines; ++e)   // Stop
+                forceRestoredParam(fsEngineParam(e, "SeqTransport"), 0.0);
             forceRestoredParam(PARAM_SCORE_PLAYING, 0.0);
             for (int s = 0; s < 8; ++s)                          // M9 sources
             {
@@ -3502,7 +3595,8 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
                 forceTo("videoScrollPaused", 0.0f);
                 for (int s = 0; s < CHAIN_MAX_CHAINS; ++s)
                     forceTo(vsParam(s, "paused"), 0.0f);
-                forceTo(PARAM_SEQ_TRANSPORT, 0.0f);
+                for (int s = 0; s < LuxSampler::kMaxEngines; ++s)
+                    forceTo(fsEngineParam(s, "SeqTransport"), 0.0f);
                 forceTo(PARAM_SCORE_PLAYING, 0.0f);
                 for (int s = 0; s < 8; ++s)
                 {
@@ -3559,6 +3653,7 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
                     eng->setScanStart(apvts.getRawParameterValue(imgSrcParam(s, "ScanStart"))->load());
                     eng->setScanEnd  (apvts.getRawParameterValue(imgSrcParam(s, "ScanEnd"))->load());
                     eng->setEnabled  (apvts.getRawParameterValue(imgSrcParam(s, "Enabled"))->load() > 0.5f);
+                    eng->setRotation ((int) apvts.getRawParameterValue(imgSrcParam(s, "Rotate"))->load());
                 }
             for (int s = 0; s < 8; ++s)
             {
@@ -3624,16 +3719,55 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
                 }
             }
 
-            // Sequencer pattern — steps are not APVTS params, only their
+            // Sequencer patterns — steps are not APVTS params, only their
             // transport/timing is. Timing attrs in the tree were captured
             // together with the APVTS values, so applying both is consistent.
+            // New blobs: per-engine <SEQS>. Old blobs: one GLOBAL <SEQ> whose
+            // steps encoded (engine, slot) — split it across the per-engine
+            // sequencers and push the migrated timing into the new per-engine
+            // params (absent from the old blob, they hold defaults otherwise).
             seqRestoredFromState_ = false;
-            if (auto seqTree = apvts.state.getChildWithName("SEQ");
-                seqTree.isValid() && frameSequencer != nullptr)
+            if (auto seqsTree = apvts.state.getChildWithName("SEQS");
+                seqsTree.isValid())
+            {
+                if (auto seqsXml = seqsTree.createXml())
+                {
+                    for (auto* seqXml : seqsXml->getChildWithTagNameIterator("SEQ"))
+                    {
+                        const int e = seqXml->getIntAttribute("idx", -1);
+                        if (e < 0 || e >= LuxSampler::kMaxEngines) continue;
+                        if (auto* fs = frameSequencers_[(size_t) e].get())
+                        {
+                            fs->loadFromXml(*seqXml);
+                            seqRestoredFromState_ = true;
+                        }
+                    }
+                }
+            }
+            else if (auto seqTree = apvts.state.getChildWithName("SEQ");
+                     seqTree.isValid())
             {
                 if (auto seqXml = seqTree.createXml())
                 {
-                    frameSequencer->loadFromXml(*seqXml);
+                    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+                    {
+                        auto* fs = frameSequencers_[(size_t) e].get();
+                        if (fs == nullptr) continue;
+                        fs->loadFromLegacyGlobalXml(*seqXml, e);
+                        // Keep the new per-engine timing params in sync with
+                        // the migrated values (UI + host source of truth).
+                        auto syncParam = [this](const juce::String& id, float denorm)
+                        {
+                            if (auto* p = apvts.getParameter(id))
+                                p->setValueNotifyingHost(p->convertTo0to1(denorm));
+                        };
+                        syncParam(fsEngineParam(e, "SeqBpm"),      fs->getBpm());
+                        syncParam(fsEngineParam(e, "SeqNumSteps"), (float) fs->getNumSteps());
+                        syncParam(fsEngineParam(e, "SeqLoop"),     fs->isLooping() ? 1.0f : 0.0f);
+                        syncParam(fsEngineParam(e, "SeqDawSync"),  fs->isDawSync() ? 1.0f : 0.0f);
+                        syncParam(fsEngineParam(e, "SeqBeatsPerStep"),
+                                  (float) fs->getBeatsPerStep());
+                    }
                     seqRestoredFromState_ = true;
                 }
             }
@@ -3905,22 +4039,8 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
     // ── PLAY transports — DAW-automatable commands relayed to the engines ────
     // Host automation may deliver these on the audio thread; every engine call
     // below is a lock-free atomic write (uiPlay/uiHold/uiStop, score setters).
-    // seqTransport must be matched BEFORE the generic startsWith("seq") branch.
-    if (parameterID == PARAM_SEQ_TRANSPORT)
-    {
-        if (frameSequencer != nullptr)
-        {
-            const int mode = static_cast<int>(newValue + 0.5f); // 0=Stop 1=Play 2=Hold
-            if (mode == 1)
-            {
-                if (frameSequencer->isHeld()) frameSequencer->uiResume();
-                else                          frameSequencer->uiPlay();
-            }
-            else if (mode == 2) frameSequencer->uiHold();
-            else                frameSequencer->uiStop();
-        }
-        return;
-    }
+    // (The per-engine sequencer transports route through the "luxSampler"
+    // branch below — the sequencer is internal to its sampler.)
     if (parameterID == PARAM_SCORE_PLAYING)
     {
         // P5-M4: the automatable scorePlaying param drives the SCORE module's
@@ -3986,6 +4106,8 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
             { eng->setPlaying(newValue > 0.5f); return; }
             if (parameterID == imgSrcParam(s, "Enabled"))
             { eng->setEnabled(newValue > 0.5f); return; }
+            if (parameterID == imgSrcParam(s, "Rotate"))
+            { eng->setRotation((int) (newValue + 0.5f)); return; }
         }
         return;
     }
@@ -4039,6 +4161,36 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
                  && juce::CharacterFunctions::isDigit(parameterID[10]))
             e = juce::jlimit(0, LuxSampler::kMaxEngines - 1,
                              parameterID.substring(10).getIntValue());
+        // Per-engine sequencer bank — relay to THIS engine's FrameSequencer
+        // (internal to the sampler). Transport first: Play/Hold/Stop commands,
+        // then the timing params as one grouped refresh.
+        if (auto* fs = frameSequencers_[(size_t) e].get();
+            fs != nullptr && parameterID.contains("Seq"))
+        {
+            if (parameterID == fsEngineParam(e, "SeqTransport"))
+            {
+                const int mode = static_cast<int>(newValue + 0.5f); // 0=Stop 1=Play 2=Hold
+                if (mode == 1)
+                {
+                    if (fs->isHeld()) fs->uiResume();
+                    else              fs->uiPlay();
+                }
+                else if (mode == 2) fs->uiHold();
+                else                fs->uiStop();
+                return;
+            }
+            fs->setBpm(
+                apvts.getRawParameterValue(fsEngineParam(e, "SeqBpm"))->load());
+            fs->setNumSteps(static_cast<int>(
+                apvts.getRawParameterValue(fsEngineParam(e, "SeqNumSteps"))->load()));
+            fs->setLooping(
+                *apvts.getRawParameterValue(fsEngineParam(e, "SeqLoop")) > 0.5f);
+            fs->setDawSync(
+                *apvts.getRawParameterValue(fsEngineParam(e, "SeqDawSync")) > 0.5f);
+            fs->setBeatsPerStep(static_cast<int>(
+                apvts.getRawParameterValue(fsEngineParam(e, "SeqBeatsPerStep"))->load()));
+            return;
+        }
         LuxSampler* engine = samplers_[(size_t) e].get();
         if (engine != nullptr)
         {
@@ -4054,24 +4206,6 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
                 static_cast<int>(*apvts.getRawParameterValue(fsEngineParam(e, "OctaveOffset"))) - 2);
             engine->setMaxDuration(*apvts.getRawParameterValue(fsEngineParam(e, "MaxDuration")));
         }
-        return;
-    }
-
-    // ── FrameSequencer parameters ─────────────────────────────────────────────
-    if (parameterID.startsWith("seq") && frameSequencer != nullptr)
-    {
-        frameSequencer->setEnabled (
-            *apvts.getRawParameterValue(PARAM_SEQ_ENABLED)  > 0.5f);
-        frameSequencer->setBpm(
-            apvts.getRawParameterValue(PARAM_SEQ_BPM)->load());
-        frameSequencer->setNumSteps(
-            static_cast<int>(apvts.getRawParameterValue(PARAM_SEQ_NSTEPS)->load()));
-        frameSequencer->setLooping(
-            *apvts.getRawParameterValue(PARAM_SEQ_LOOP)     > 0.5f);
-        frameSequencer->setDawSync(
-            *apvts.getRawParameterValue(PARAM_SEQ_DAW_SYNC) > 0.5f);
-        frameSequencer->setBeatsPerStep(
-            static_cast<int>(apvts.getRawParameterValue(PARAM_SEQ_BPS)->load()));
         return;
     }
 
@@ -4280,31 +4414,9 @@ void Sp3ctraAudioProcessor::loadChainModelFromState()
                 && m.values.hasProperty("paused"))
                 m.values.setProperty("paused", 0.0, nullptr);
 
-    // Migration: the step sequencer became a dedicated SEQUENCER module. A model
-    // saved before that has no Sequencer block — inject one so the sequencer
-    // stays reachable in the UI (same spirit as "always keep ≥1 chain").
-    // GATED so a deliberate deletion survives reload: from schema v2 on, a
-    // missing Sequencer means the user removed it. A v1 tree is only "old"
-    // when the session has no SEQ pattern tree either — SEQ serialization
-    // shipped together with the sequencer-module era, so its presence proves
-    // the save could already contain (or deliberately omit) a Sequencer block.
-    {
-        const int savedVersion = t.isValid()
-            ? (int) t.getProperty(ChainModel::kVersionProp, 1)
-            : ChainModel::kSchemaVersion;   // fresh default — already has one
-        const bool preSequencerEra =
-            savedVersion < 2 && ! state.getChildWithName("SEQ").isValid();
-        if (preSequencerEra)
-        {
-            bool hasSeq = false;
-            for (const auto& ch : chainModel_.chains)
-                for (const auto& mod : ch.modules)
-                    if (mod.type == ModuleType::Sequencer) { hasSeq = true; break; }
-            if (! hasSeq && ! chainModel_.chains.empty())
-                chainModel_.insert(0, ModuleType::Sequencer,
-                                   (int) chainModel_.chains[0].modules.size());
-        }
-    }
+    // (The SEQUENCER rack module was retired — the sequencer is internal to
+    // each sampler now. Old models still carrying a "Sequencer" MODULE entry
+    // simply drop it at fromValueTree(): its type id no longer resolves.)
 
     // Presence baseline so the enable bridge only fires on real transitions.
     chainActiveTypes_.clear();
@@ -5262,20 +5374,32 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
     // ── AUDIO MIX / zero-CPU contract — per-engine OUT send counts ──────────
     // 0 sends → processBlock skips that engine's render entirely and the
     // AUDIO MIX panel hides its strip. (LuxStral: matches plan.num_ls_sends.)
+    // The slot masks feed the enabled-aware render gates: presence (counts,
+    // UI-facing) stays distinct from "actually feeding" (mask ∧ bank enabled).
     {
-        int n[4] = { 0, 0, 0, 0 };
+        int      n[4]    = { 0, 0, 0, 0 };
+        uint32_t mask[4] = { 0, 0, 0, 0 };
         for (const auto& ch : chainModel_.chains)
             for (const auto& m : ch.modules)
             {
-                if      (m.type == ModuleType::LuxStral) ++n[0];
-                else if (m.type == ModuleType::LuxSynth) ++n[1];
-                else if (m.type == ModuleType::LuxWave)  ++n[2];
-                else if (m.type == ModuleType::LuxGrain) ++n[3];
+                int e = -1;
+                if      (m.type == ModuleType::LuxStral) e = 0;
+                else if (m.type == ModuleType::LuxSynth) e = 1;
+                else if (m.type == ModuleType::LuxWave)  e = 2;
+                else if (m.type == ModuleType::LuxGrain) e = 3;
+                if (e < 0) continue;
+                ++n[e];
+                if (m.slot >= 0 && m.slot < ChainModel::kMaxEngineSends)
+                    mask[e] |= 1u << m.slot;
             }
         sendCountLuxStral_.store(n[0], std::memory_order_relaxed);
         sendCountLuxSynth_.store(n[1], std::memory_order_relaxed);
         sendCountLuxWave_ .store(n[2], std::memory_order_relaxed);
         sendCountLuxGrain_.store(n[3], std::memory_order_relaxed);
+        sendSlotsLuxStral_.store(mask[0], std::memory_order_relaxed);
+        sendSlotsLuxSynth_.store(mask[1], std::memory_order_relaxed);
+        sendSlotsLuxWave_ .store(mask[2], std::memory_order_relaxed);
+        sendSlotsLuxGrain_.store(mask[3], std::memory_order_relaxed);
     }
 
     chain_plan_publish(&plan);
@@ -5654,11 +5778,19 @@ void Sp3ctraAudioProcessor::restoreLuxstralWavetableFromTree(const juce::ValueTr
 
 juce::ValueTree Sp3ctraAudioProcessor::seqStateToTree() const
 {
-    if (frameSequencer == nullptr)
-        return {};
-    juce::XmlElement xml("SEQ");
-    frameSequencer->saveToXml(xml);
-    return juce::ValueTree::fromXml(xml);
+    // Per-engine patterns: <SEQS><SEQ idx="e" seq_bpm=… seq_step_i=…/>…</SEQS>.
+    // (The legacy single-<SEQ> global tree is migrated on load.)
+    juce::XmlElement root("SEQS");
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+    {
+        const FrameSequencer* fs = frameSequencers_[(size_t) e].get();
+        if (fs == nullptr)
+            continue;
+        auto* xml = root.createNewChildElement("SEQ");
+        xml->setAttribute("idx", e);
+        fs->saveToXml(*xml);
+    }
+    return juce::ValueTree::fromXml(root);
 }
 
 juce::ValueTree Sp3ctraAudioProcessor::samplerSlotsStateToTree() const
@@ -5706,13 +5838,22 @@ void Sp3ctraAudioProcessor::applySamplerParamsFromState()
                 // not loaded yet (they live in the .sp3s, not the DAW blob) —
                 // the auto-load refills the banks and re-runs this overlay,
                 // so content-bearing banks do get their saved settings back.
+                // EXCEPTION: an image-bound bank (srcImagePath) IS its
+                // settings — keep them even while empty; the rebuild below
+                // re-renders the content from the picture.
                 if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS
-                    && ! engine->slotHasContent(i))
+                    && ! engine->slotHasContent(i)
+                    && slotXml->getStringAttribute("srcImagePath", "").isEmpty())
                     engine->resetSlotPlayParams(i);
                 else
                     engine->slotParamsFromXml(i, *slotXml);
             }
         }
+        // Image-bound banks: the persisted binding (path + rotation) is the
+        // truth — re-render the frames from the picture. This makes the last
+        // rotation survive a restart even when the .sp3s session frames are
+        // stale (or when no session file was ever saved).
+        engine->rebuildImageBoundSlots();
     }
 }
 
@@ -5839,7 +5980,7 @@ void Sp3ctraAudioProcessor::applyChainEnableBridge()
     // Pitch/Mask/Reverb/Echo are handled PER INSTANCE in
     // updateInsertParamMemory() (their enable lives in the per-slot bank).
     static const ModuleType kEnableTypes[] = {
-        ModuleType::Sampler, ModuleType::Sequencer,
+        ModuleType::Sampler,
         ModuleType::LuxSynth, ModuleType::LuxWave, ModuleType::LuxGrain
     };
     for (auto t : kEnableTypes)

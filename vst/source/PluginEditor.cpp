@@ -121,8 +121,6 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
 
     // SEQUENCER — step sequencer extracted from the sampler page into its own
     // module page (grid + transport/config bar).
-    sequencerPage = std::make_unique<SequencerPageComponent>(audioProcessor);
-    zone3Content.addChildComponent(sequencerPage.get());
 
     // SCORE — offline printable-spectrogram export tool (no SETUP face)
     scorePage = std::make_unique<ScoreGenTabComponent>(audioProcessor);
@@ -345,11 +343,10 @@ bool Sp3ctraAudioProcessorEditor::blockHasSetup(ChainBlockId id) noexcept
 {
     // Every block has a SETUP face — the SP3CTRA source hosts the network/CIS
     // configuration there (formerly the gear-wheel Network tab) — EXCEPT the
-    // SEQUENCER module, whose controls all live on its single PLAY page, the
     // VIDEO SCROLL output, whose params are all on its PLAY page (no setup),
     // the REVERB / ECHO / EQ FX inserts (single PLAY page too), and the
     // IMAGE / VIDEO / CAMERA media modules (source picking lives on PLAY).
-    return id != ChainBlockId::Sequencer && id != ChainBlockId::VideoScroll
+    return id != ChainBlockId::RetiredSequencer && id != ChainBlockId::VideoScroll
         && id != ChainBlockId::Reverb    && id != ChainBlockId::Echo
         && id != ChainBlockId::Equalizer && id != ChainBlockId::Harmonize
         && id != ChainBlockId::Timbre    && id != ChainBlockId::MidiScore
@@ -381,7 +378,6 @@ void Sp3ctraAudioProcessorEditor::applyZone3Visibility()
     if (pitchPage)       pitchPage      ->setVisible(play && id == ChainBlockId::Pitch);
     if (maskPage)        maskPage       ->setVisible(play && id == ChainBlockId::Mask);
     if (samplerPage)     samplerPage    ->setVisible(play && id == ChainBlockId::Sampler);
-    if (sequencerPage)   sequencerPage  ->setVisible(play && id == ChainBlockId::Sequencer);
     // Synth blocks (P2): engine pages only in ENGINE view (dock); the rack
     // click shows the OUT/send page instead.
     if (imgLuxStralPage) imgLuxStralPage->setVisible(play && engineView_ && id == ChainBlockId::LuxStral);
@@ -638,14 +634,13 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
             sources = { VisualizerMode::GRAIN_GRAY,
                         VisualizerMode::GRAIN_COLOR };
             break;
-        // Score family + SEQUENCER: contextual like every other module —
-        // the stream at their position in their chain (playback included,
-        // published by the player's walk).
+        // Score family: contextual like every other module — the stream at
+        // their position in their chain (playback included, published by the
+        // player's walk).
         case ChainBlockId::Score:
         case ChainBlockId::Timbre:
         case ChainBlockId::MidiScore:
         case ChainBlockId::Voice:
-        case ChainBlockId::Sequencer:
             sources = { VisualizerMode::SELECTED_TAP };
             break;
         // VIDEO SCROLL probe — zone 1 shows the stream AT the probe's position
@@ -674,6 +669,7 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
             sources = { VisualizerMode::SRC_CAMERA };
             break;
         // Empty rack — nothing selected, zone 1 shows its idle state.
+        case ChainBlockId::RetiredSequencer:   // unreachable — retired ordinal
         case ChainBlockId::None:
             break;
     }
@@ -737,7 +733,7 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
         else if (id == ChainBlockId::Harmonize)
             enableId = hmParam(insertSlot, "Enabled");
         // Power follows the enable param alone — blocks without a SETUP face
-        // (Sequencer, the FX inserts) still need their on/off switch here.
+        // (the FX inserts) still need their on/off switch here.
         const bool showPower = enableId.isNotEmpty();
         modulePowerAttachment.reset();   // detach before rebinding to a new param
         if (showPower)
@@ -1121,7 +1117,7 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
             case ChainBlockId::ImageSrc:
             case ChainBlockId::VideoSrc:
             case ChainBlockId::CameraSrc:   // M9 — picking moved to the PLAY page
-            case ChainBlockId::Sequencer:
+            case ChainBlockId::RetiredSequencer:
             case ChainBlockId::VideoScroll:
             case ChainBlockId::Reverb:
             case ChainBlockId::Echo:
@@ -1147,8 +1143,6 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
                 top = maskPage.get();        topMinH = 570; break;  // +100 env editor
             case ChainBlockId::Sampler:
                 top = samplerPage.get();     topMinH = SamplerPageComponent::kPreferredH; break;
-            case ChainBlockId::Sequencer:
-                top = sequencerPage.get();   topMinH = 360; break;  // grid + transport
             // Synth blocks (P2): OUT/send page from the rack, engine page from
             // the dock — same slot in zone 3, view picked by engineView_.
             case ChainBlockId::LuxStral:
@@ -1191,6 +1185,7 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
                 top = videoSrcPage.get();    topMinH = MediaSourcePage::kPreferredH; break;
             case ChainBlockId::CameraSrc:
                 top = cameraSrcPage.get();   topMinH = MediaSourcePage::kPreferredH; break;
+            case ChainBlockId::RetiredSequencer:   // unreachable — retired ordinal
             case ChainBlockId::None:
                 break;   // empty rack — zone 3 stays blank
         }

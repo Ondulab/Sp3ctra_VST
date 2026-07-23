@@ -560,6 +560,15 @@ void luxwave_condition_line(
         img_stage_apply_gamma(line_out, nb_pixels, lw->gamma);
 }
 
+/* No-send contract (parity with luxsynth/luxgrain_feed): a transient no-send
+ * tick must NOT wipe the wavetable (player stop that restages within ms), but
+ * a PERSISTENT one — send disabled or removed — must fade the table to
+ * silence: holding the last image forever made a "disabled" OUT keep sounding
+ * under MIDI, which broke the chain no-signal contract. */
+#define LW_FEED_SILENCE_DEBOUNCE_TICKS 50
+static int s_lw_zero_ticks = 0;
+static int s_lw_silenced   = 0;
+
 void pipeline_luxwave_feed_tick(const ChainPlan *plan)
 {
     static float s_mixed_line[CIS_MAX_PIXELS_NB];   /* audio thread only */
@@ -570,10 +579,36 @@ void pipeline_luxwave_feed_tick(const ChainPlan *plan)
     int nb = 0;
     const int mixed = synth_staging_mix_luxwave(plan, s_mixed_line,
                                                 get_cis_pixels_nb(), &nb);
-    if (mixed <= 0 || nb <= 0)
-        return;   /* no "→ LUXWAVE" send (0) or torn slot (-1) → the wavetable
-                   * keeps its last content (it only sounds under held MIDI
-                   * notes) */
+    if (mixed < 0)
+        return;   /* torn slot (producer mid-staging) → HOLD, retry next tick */
+    if (mixed == 0)
+    {
+        if (s_lw_zero_ticks < LW_FEED_SILENCE_DEBOUNCE_TICKS)
+        {
+            ++s_lw_zero_ticks;
+            return;
+        }
+        if (!s_lw_silenced)
+        {
+            const int n = get_cis_pixels_nb();
+            if (n > 0 && n <= CIS_MAX_PIXELS_NB)
+            {
+                /* Flat midpoint line = zero waveform (the lookup maps
+                 * [0,1] → [-1,1]); reaches the table via the engine's own
+                 * 128-sample crossfade, so the cut is click-free. */
+                for (int i = 0; i < n; ++i)
+                    s_mixed_line[i] = 0.5f;
+                luxwave_engine_set_image_line(&g_luxwave_engine,
+                                              s_mixed_line, n);
+                s_lw_silenced = 1;
+            }
+        }
+        return;
+    }
+    s_lw_zero_ticks = 0;
+    s_lw_silenced   = 0;
+    if (nb <= 0)
+        return;
 
     /* (P4 — 2026-07-14: the global Chain-2 gate is GONE — each "→ LUXWAVE"
      * send is gated at staging time by ITS chain's transport, with the fade

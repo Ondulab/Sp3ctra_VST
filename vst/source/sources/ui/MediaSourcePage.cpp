@@ -75,16 +75,24 @@ void MediaSourcePage::PreviewComponent::paint(juce::Graphics& g)
         g.fillPath(h);
     }
 
-    // Engine playhead (thin, behind the param cursor)
+    // Engine playhead (behind the param cursor) — same yellow as the LINE
+    // cursor (it IS the line being read while the transport runs), over a
+    // dark halo so it reads on white material as well as black. No grab
+    // handles: that is what still tells it apart from the LINE cursor.
     if (playheadFrac >= 0.0f)
     {
         const float py = area.getY() + playheadFrac * area.getHeight();
-        g.setColour(juce::Colours::white.withAlpha(0.45f));
-        g.drawHorizontalLine((int) py, area.getX(), area.getRight());
+        g.setColour(juce::Colours::black.withAlpha(0.6f));
+        g.fillRect(area.getX(), py - 2.0f, area.getWidth(), 4.0f);
+        g.setColour(juce::Colour(0xffe0b84a));
+        g.fillRect(area.getX(), py - 1.0f, area.getWidth(), 2.0f);
     }
 
-    // LINE cursor — the row injected into the chain
+    // LINE cursor — the row injected into the chain (same dark halo: the
+    // yellow alone vanished on white images)
     const float y = area.getY() + lineFrac * area.getHeight();
+    g.setColour(juce::Colours::black.withAlpha(0.6f));
+    g.fillRect(area.getX(), y - 2.0f, area.getWidth(), 4.0f);
     g.setColour(juce::Colour(0xffe0b84a));
     g.fillRect(area.getX(), y - 1.0f, area.getWidth(), 2.0f);
     // grab handles
@@ -175,6 +183,16 @@ MediaSourcePage::MediaSourcePage(Sp3ctraAudioProcessor& p, Kind k)
         addAndMakeVisible(loadButton);
         clearButton.onClick = [this] { clearMedia(); };
         addAndMakeVisible(clearButton);
+    }
+
+    if (kind == Kind::Image)
+    {
+        // Orientation — cycles 0° → 90° → 180° → 270° (imgSrcRotate, per slot);
+        // the engine rebuilds the strip so the scan reads the rotated image.
+        rotateButton.onClick = [this] { cycleRotation(); };
+        addAndMakeVisible(rotateButton);
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
+            processor.getMidiMap(), rotateButton, imgSrcParam(0, "Rotate")));
     }
 
     // ── ACTIVE toggle (all kinds) — the source's on/off ──────────────────────
@@ -360,6 +378,20 @@ void MediaSourcePage::openSelectedDevice()
     }
 }
 
+void MediaSourcePage::cycleRotation()
+{
+    if (kind != Kind::Image)
+        return;
+    if (auto* param = processor.getAPVTS().getParameter(imgSrcParam(slot_, "Rotate")))
+    {
+        const int cur  = (int) std::lround(param->convertFrom0to1(param->getValue()));
+        const int next = (cur + 1) & 3;
+        param->beginChangeGesture();
+        param->setValueNotifyingHost(param->convertTo0to1((float) next));
+        param->endChangeGesture();
+    }
+}
+
 juce::String MediaSourcePage::lineParamId() const
 {
     switch (kind)
@@ -440,6 +472,11 @@ void MediaSourcePage::timerCallback()
                 status = e->getFile().getFileName()
                        + "   (" + juce::String(e->getRowCount()) + " lines)";
         }
+        if (auto* raw = processor.getAPVTS().getRawParameterValue(
+                imgSrcParam(slot_, "Rotate")))
+            rotateButton.setButtonText(
+                "ROT " + juce::String(((int) raw->load()) * 90)
+                       + juce::String::fromUTF8("\xc2\xb0"));
     }
     else if (kind == Kind::Video)
     {
@@ -508,6 +545,11 @@ void MediaSourcePage::resized()
             loadButton.setBounds(row.removeFromLeft(110));
             row.removeFromLeft(kRowGap);
             clearButton.setBounds(row.removeFromLeft(84));
+            if (kind == Kind::Image)
+            {
+                row.removeFromLeft(kRowGap);
+                rotateButton.setBounds(row.removeFromLeft(84));
+            }
         }
         b.removeFromTop(kRowGap);
     }
@@ -588,6 +630,9 @@ void MediaSourcePage::setSlot(int slot)
             mm, speedSlider, speedId));
         learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
             mm, loopCombo,   loopId));
+        if (kind == Kind::Image)
+            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
+                mm, rotateButton, imgSrcParam(slot_, "Rotate")));
     }
     else
         refreshDevices();   // combo mirrors THIS instance's open device

@@ -20,6 +20,11 @@ class Sp3ctraAudioProcessor;
  *   Attack ▷  — white triangle centred at h/2, drags right from Start.
  *   Decay  ◁  — white triangle centred at h/2, drags left  from End.
  *
+ * While the slot is PLAYING, a click/drag anywhere OUTSIDE those handles
+ * scrubs the play head (requestSlotSeek) — the primary gesture with speed 0.
+ * Bounds/fades keep priority near their own handles; the loose-click
+ * fallback that moved the nearest bound only applies when NOT playing.
+ *
  * Cursor feedback on hover (LeftRight for the bars, PointingHand for the fades).
  */
 class SlotTimelineComponent : public juce::Component,
@@ -57,7 +62,7 @@ private:
     bool  thumbnailDirty = true;
     void  rebuildThumbnail();
 
-    enum class DragTarget { None, Start, End, Attack, Decay };
+    enum class DragTarget { None, Start, End, Attack, Decay, Playhead };
     DragTarget dragging = DragTarget::None;
 
     // Hit-test zones

@@ -30,12 +30,13 @@ private:
 // ─────────────────────────────────────────────────────────────────────────────
 // TransportBarComponent
 //
-// Full-width bar at the bottom of the sampler page.
-// APVTS-bound: seqBpm, seqNumSteps, seqLoop, seqDawSync.
-// Play/hold/stop drive the seqTransport param (DAW-automatable/MIDI-mappable);
-// the processor relays it to FrameSequencer. Steps is a draggable value bar
-// covering the full 2..16 param range (was a fixed 4/8/12/16 combo).
-// 200 ms Timer disables BPM slider when DAW sync is active.
+// Full-width bar at the bottom of the sampler page's sequencer section.
+// Bound to ONE sampler engine's sequencer bank (fsEngineParam ids):
+// Seq BPM / NumSteps / Loop / DawSync + the SeqTransport choice param that
+// Play/hold/stop drive (DAW-automatable/MIDI-mappable); the processor relays
+// it to that engine's FrameSequencer. Steps is a draggable value bar covering
+// the full 2..16 param range. 200 ms Timer disables BPM slider when DAW sync
+// is active.
 // ─────────────────────────────────────────────────────────────────────────────
 class TransportBarComponent : public juce::Component,
                               private juce::Timer
@@ -44,15 +45,31 @@ public:
     explicit TransportBarComponent(Sp3ctraAudioProcessor& proc);
     ~TransportBarComponent() override;
 
+    /** Rebind every control to sampler engine @p i's sequencer bank. */
+    void setSamplerIndex(int i);
+
     void paint(juce::Graphics& g) override;
     void resized() override;
+
+    // Bar heights (single source of truth for requiredHeight + page layout).
+    static constexpr int kOneRowH = 44;
+    static constexpr int kTwoRowH = 76;
+
+    /** Width below which the bar wraps onto two rows (Steps / Loop / DAW Sync
+     *  move to the second row instead of being clipped past the right edge). */
+    static int singleRowMinWidth() noexcept;
+    /** Height the bar needs at the given width — one row or two. The host page
+     *  must reserve this before laying the bar out. */
+    static int requiredHeight(int width) noexcept;
 
 private:
     void timerCallback() override;
     void updateTransportButtons();   ///< Refreshes play/hold/stop highlight state.
-    void requestTransport(int mode); ///< Writes seqTransport (0=Stop 1=Play 2=Hold).
+    void requestTransport(int mode); ///< Writes this engine's SeqTransport param.
+    void rebindAttachments();        ///< (Re)creates attachments for samplerIndex_.
 
     Sp3ctraAudioProcessor& processor;
+    int samplerIndex_ = 0;   // engine whose sequencer bank the bar edits
 
     // ── Sequencer play / hold / stop icons ───────────────────────────────────
     IconTextButton     seqPlayBtn;   // ▶ drawn as path

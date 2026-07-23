@@ -108,8 +108,8 @@ private:
             : type(t), name(moduleDisplayName(t)), colour(moduleColour(t))
         {
             setRepaintsOnMouseActivity(true);
-            setTooltip(moduleNeedsMidi(t) ? "Needs MIDI input \xE2\x80\xA2 Drag into a chain"
-                                          : "Drag into a chain");
+            setTooltip(moduleNeedsMidi(t) ? juce::String::fromUTF8("Needs MIDI input \xE2\x80\xA2 Drag into a chain")
+                                          : juce::String("Drag into a chain"));
         }
 
         ModuleType getType() const noexcept { return type; }

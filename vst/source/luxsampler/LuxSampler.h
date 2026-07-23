@@ -503,9 +503,27 @@ public:
     }
     void setSlotSpeed(int i, float v) noexcept
     {
+        // 0 is a legal speed: the play head freezes and the current frame
+        // sustains (drone) — move it manually with requestSlotSeek().
         if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
-            slotParams[i].speed.store(juce::jlimit(0.01f, 32.0f, v),
+            slotParams[i].speed.store(juce::jlimit(0.0f, 32.0f, v),
                                       std::memory_order_relaxed);
+    }
+
+    /** Manual play-head seek (timeline scrub, only honoured while the slot is
+     *  PLAYING — the player consumes it each tick). @p frac is absolute over
+     *  the WHOLE slot [0..1]; the player clamps it into [start, end). */
+    void requestSlotSeek(int i, float frac) noexcept
+    {
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
+            slotParams[i].seekFrac.store(juce::jlimit(0.0f, 1.0f, frac),
+                                         std::memory_order_release);
+    }
+    /** Player thread only: fetch-and-clear the pending seek (<0 = none). */
+    float consumeSlotSeek(int i) noexcept
+    {
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return -1.0f;
+        return slotParams[i].seekFrac.exchange(-1.0f, std::memory_order_acq_rel);
     }
     void setSlotLoopMode(int i, LoopMode m) noexcept
     {
@@ -947,6 +965,40 @@ public:
     bool loadSlotFromFile(int slotIndex, const juce::File& file);
 
     // =========================================================================
+    // Image → slot (Non-RT, message thread only)
+    // =========================================================================
+    /** Replace @p slotIndex's content with an image file: each image row
+     *  becomes one CIS frame (planar RGB, MAX_PIXELS wide), timestamps spread
+     *  evenly over @p durationUs (0 → 5 s, the IMAGE module's default scan
+     *  time). @p rotQuarters rotates the picture CLOCKWISE in quarter turns
+     *  before conversion. The source path + rotation are remembered per slot
+     *  and serialised with the slot params (srcImagePath / srcImageRot) in
+     *  every container (.fslot / .sp3s / DAW state), so the bank can be
+     *  re-rotated LOSSLESSLY later. Trim bounds reset to full.
+     *  @return true on success (decode + conversion). */
+    bool loadSlotFromImageFile(int slotIndex, const juce::File& imageFile,
+                               int rotQuarters, uint64_t durationUs = 0);
+
+    /** Rotate a bank loaded from an image: re-renders the frames from the
+     *  remembered source file at (current + delta) quarter turns, keeping the
+     *  bank's current duration. @return false when the slot has no source
+     *  image (recorded banks) or the file no longer exists. */
+    bool rotateSlotImage(int slotIndex, int deltaQuarters);
+
+    /** Source image behind this bank ("" = recorded/.fslot content). */
+    juce::String getSlotSourcePath(int i) const;
+    /** Applied rotation of the source image, quarter turns CW (0..3). */
+    int          getSlotSourceRot (int i) const;
+
+    /** Re-render every image-bound bank from its remembered source picture
+     *  (path + rotation), preserving trim bounds, label and duration.
+     *  Restore helper: the persisted binding is authoritative over whatever
+     *  frames a session file brought back (stale orientation), and it
+     *  resurrects image banks even when NO session file exists — the bank
+     *  frames themselves only live in the .sp3s. Non-RT (restore thread). */
+    void rebuildImageBoundSlots();
+
+    // =========================================================================
     // Image export — Non-RT only
     // =========================================================================
     /**
@@ -1171,6 +1223,9 @@ private:
         // (removed) BEFORE the EQ, so boosting cannot resurrect the noise floor
         // into black bands. 1.0 = everything removed (total white mask).
         std::atomic<float> eqFloor          { 0.0f };
+        // Pending manual play-head seek (absolute slot frac, <0 = none) —
+        // written by the UI (timeline scrub), consumed by the player thread.
+        std::atomic<float> seekFrac         { -1.0f };
 
         SlotPlayParams() = default;
         SlotPlayParams(const SlotPlayParams&)            = delete;
@@ -1189,6 +1244,13 @@ private:
     //     entirely when the curve is flat.
     // Single-writer (message thread) / single-reader (player thread) publish.
     // -------------------------------------------------------------------------
+    // Source image behind a bank loaded via loadSlotFromImageFile (message
+    // thread only): full path + applied rotation (quarter turns CW). An empty
+    // path marks recorded / .fslot-only content — not re-rotatable. Serialised
+    // with the slot params (srcImagePath / srcImageRot) in every container.
+    juce::String slotSrcPath_[LuxSamplerConstants::NUM_SLOTS];
+    int          slotSrcRot_ [LuxSamplerConstants::NUM_SLOTS] {};
+
     juce::String         eqState_[LuxSamplerConstants::NUM_SLOTS];
     float                freqLut_[LuxSamplerConstants::NUM_SLOTS][2]
                                  [LuxSamplerConstants::FREQ_LUT_N];

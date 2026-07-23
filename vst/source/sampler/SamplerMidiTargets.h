@@ -167,8 +167,9 @@ namespace SamplerMidiTargets
     // feels the same as dragging (1.0× speed / power at knob centre).
     inline const juce::NormalisableRange<float>& speedRange()
     {
+        // Min 0 = frozen play head (drone) — mirrors the SlotEditor slider.
         static const juce::NormalisableRange<float> r = []
-        { juce::NormalisableRange<float> rr(0.01f, 32.0f); rr.setSkewForCentre(1.0f); return rr; }();
+        { juce::NormalisableRange<float> rr(0.0f, 32.0f); rr.setSkewForCentre(1.0f); return rr; }();
         return r;
     }
     inline const juce::NormalisableRange<float>& powerRange()

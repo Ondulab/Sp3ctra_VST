@@ -529,6 +529,20 @@ int luxsynth_engine_note_off(LuxSynthEngine *engine, uint8_t note)
     return best_idx;
 }
 
+void luxsynth_engine_all_notes_off(LuxSynthEngine *engine)
+{
+    if (!engine || !engine->initialized) return;
+    for (int i = 0; i < engine->num_voices; i++)
+    {
+        LuxSynthVoice *v = &engine->voices[i];
+        if (v->volume_env.state != ADSR_STATE_IDLE)
+        {
+            adsr_release(&v->volume_env);
+            adsr_release(&v->filter_env);
+        }
+    }
+}
+
 /* ============================================================================
  * PUBLIC: Audio Processing (RT HOT PATH)
  * ========================================================================== */

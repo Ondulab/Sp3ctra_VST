@@ -164,9 +164,9 @@ bool ChainModel::canInsertIntoNewChain(ModuleType type, const juce::Uuid* moving
     if (isScoreFamily(type) && firstFreeScorePlayerSlot(movingId) < 0)
         return false;   // the family's 8 score-player slots are all placed
 
-    // Remaining singleton: SEQUENCER (engine-backed util driving the sampler
-    // engines — one instance model-wide). Synth-role types are the sends
-    // (their pools above).
+    // Remaining singletons: engine-backed util types outside the pools above
+    // (one instance model-wide). Synth-role types are the sends (their pools
+    // above).
     const ModuleRole role = moduleRole(type);
     if ((role == ModuleRole::Synth || role == ModuleRole::Util)
         && ! isSamplerEngine(type) && ! isEngineSend(type)
@@ -668,22 +668,11 @@ void ChainModel::validateAndRepair()
 //==============================================================================
 ChainModel ChainModel::makeDefault()
 {
-    auto make = [](std::initializer_list<ModuleType> types)
-    {
-        Chain ch;
-        ch.id = juce::Uuid();
-        for (auto t : types)
-            ch.modules.push_back(ModuleInstance{ t, juce::Uuid(), -1, {} });
-        return ch;
-    };
-
+    // A fresh install opens on two empty chains: the user builds their own rack
+    // from the catalogue instead of inheriting the legacy fixed topology.
     ChainModel m;
-    // VideoScroll sits right BEFORE the synth (LuxStral) so deriveAndPublishChainPlan's
-    // upstream-only fill() captures it. Placing it after the synth would never capture.
-    m.chains.push_back(make({ ModuleType::Sp3ctra, ModuleType::Pitch, ModuleType::Mask,
-                              ModuleType::Sampler, ModuleType::Score, ModuleType::Sequencer,
-                              ModuleType::VideoScroll, ModuleType::LuxStral }));
-    m.chains.push_back(make({ ModuleType::Sp3ctra, ModuleType::LuxSynth, ModuleType::LuxWave }));
-    m.validateAndRepair();   // assigns slot 0 to the lone VideoScroll, normalises the rest
+    m.chains.push_back(Chain{ juce::Uuid(), {}, {} });
+    m.chains.push_back(Chain{ juce::Uuid(), {}, {} });
+    m.validateAndRepair();
     return m;
 }
