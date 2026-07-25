@@ -189,8 +189,6 @@ target_sources(Sp3ctraVST
         source/ui/setup/SamplerSetupPanel.h
         source/ui/setup/ScoreSetupPanel.cpp
         source/ui/setup/ScoreSetupPanel.h
-        source/ui/setup/VideoScrollSetupPanel.cpp
-        source/ui/setup/VideoScrollSetupPanel.h
 
         # M9 — IMAGE / VIDEO / CAMERA source modules (engines + service + UI)
         # (VideoFileReader impl is platform-specific — see block below)
@@ -344,20 +342,15 @@ target_sources(Sp3ctraVST
 if(APPLE)
     target_sources(Sp3ctraVST PRIVATE
         source/sources/VideoFileReader.mm
-        # VIDEO MIX + master-audio recorder (AVAssetWriter → HEVC .mov).
-        source/recorder/VideoRecorder.mm
     )
 elseif(WIN32)
     # VIDEO file source via Media Foundation (mirrors the AVFoundation reader).
     target_sources(Sp3ctraVST PRIVATE
         source/sources/VideoFileReaderMF.cpp
-        # Recorder: macOS-only for now → graceful stub (Media Foundation TODO).
-        source/recorder/VideoRecorderStub.cpp
     )
 else()
     target_sources(Sp3ctraVST PRIVATE
         source/sources/VideoFileReaderStub.cpp
-        source/recorder/VideoRecorderStub.cpp
     )
 endif()
 
