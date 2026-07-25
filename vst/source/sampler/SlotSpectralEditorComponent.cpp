@@ -469,14 +469,14 @@ void SlotSpectralEditorComponent::mouseMove(const juce::MouseEvent& e)
         { setMouseCursor(juce::MouseCursor::NormalCursor);
           if (fadeHover_ != 0) { fadeHover_ = 0; repaint(); } return; }
 
-    const auto near = [&](juce::Point<float> p)
+    const auto isNear = [&](juce::Point<float> p)
     { return p.x >= 0.0f && e.position.getDistanceFrom(p) <= (float) kGrabR; };
 
     int newHover = 0;
-    if      (near(fadeEndPoint(true)))  newHover = 1;
-    else if (near(fadeEndPoint(false))) newHover = 2;
-    else if (near(fadeMidPoint(true)))  newHover = 3;
-    else if (near(fadeMidPoint(false))) newHover = 4;
+    if      (isNear(fadeEndPoint(true)))  newHover = 1;
+    else if (isNear(fadeEndPoint(false))) newHover = 2;
+    else if (isNear(fadeMidPoint(true)))  newHover = 3;
+    else if (isNear(fadeMidPoint(false))) newHover = 4;
 
     if (newHover != 0)
         setMouseCursor(juce::MouseCursor::PointingHandCursor);
@@ -496,12 +496,12 @@ void SlotSpectralEditorComponent::mouseDown(const juce::MouseEvent& e)
     auto* fs = processor.getSampler(samplerIndex_);
     if (!fs || !fs->slotHasContent(selectedSlot_)) { mode_ = Mode::None; return; }
 
-    const auto near = [&](juce::Point<float> p)
+    const auto isNear = [&](juce::Point<float> p)
     { return p.x >= 0.0f && e.position.getDistanceFrom(p) <= (float) kGrabR; };
-    const bool endIn  = near(fadeEndPoint(true));
-    const bool endOut = near(fadeEndPoint(false));
-    const bool midIn  = near(fadeMidPoint(true));
-    const bool midOut = near(fadeMidPoint(false));
+    const bool endIn  = isNear(fadeEndPoint(true));
+    const bool endOut = isNear(fadeEndPoint(false));
+    const bool midIn  = isNear(fadeMidPoint(true));
+    const bool midOut = isNear(fadeMidPoint(false));
 
     // Right-click a fade handle → curve type menu (LIN/EXP/LOG/S).
     if (e.mods.isRightButtonDown())
