@@ -52,6 +52,28 @@ jobs:
           --target Sp3ctraVST_VST3 Sp3ctraVST_Standalone
           --parallel
 
+      # Prove the static-CRT switch worked: a clean Windows must not need the
+      # VC++ redistributable, so no module may import VCRUNTIME140*/MSVCP140.
+      - name: Verify self-contained (no dynamic VC++ runtime)
+        shell: pwsh
+        run: |
+          $exe = "build/Sp3ctraVST_artefacts/Release/Standalone/Sp3ctra.exe"
+          $vst3 = Get-ChildItem -Recurse -Filter "Sp3ctra.vst3" `
+                    "build/Sp3ctraVST_artefacts/Release/VST3" |
+                    Where-Object { -not $_.PSIsContainer } | Select-Object -First 1
+          $fail = $false
+          foreach ($bin in @($exe, $vst3.FullName)) {
+            $deps = & dumpbin /dependents $bin 2>$null
+            $bad = $deps | Select-String -Pattern 'VCRUNTIME140|MSVCP140|CONCRT140'
+            if ($bad) {
+              Write-Host "❌ $bin still imports the dynamic VC++ runtime:`n$bad"
+              $fail = $true
+            } else {
+              Write-Host "✅ $bin is self-contained (static CRT)"
+            }
+          }
+          if ($fail) { exit 1 }
+
       - name: Upload VST3
         uses: actions/upload-artifact@v4
         with:

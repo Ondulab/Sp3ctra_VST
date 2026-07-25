@@ -1,5 +1,19 @@
 cmake_minimum_required(VERSION 3.15)
 
+# ---------------------------------------------------------------------------
+# Windows CRT = STATIC (/MT). CMP0091 lets CMAKE_MSVC_RUNTIME_LIBRARY drive the
+# runtime choice instead of hard-coded /MD flags. Static linking bakes the
+# Visual C++ runtime INTO Sp3ctra.exe and Sp3ctra.vst3, so a clean Windows has
+# no VCRUNTIME140.dll / VCRUNTIME140_1.dll / MSVCP140.dll dependency to satisfy.
+# Must be set before project() (policy) and before any target — including the
+# FetchContent JUCE targets below — so JUCE builds /MT too. Requires the
+# sherpa-onnx "MT" archive variant (selected in the TTS block).
+# ---------------------------------------------------------------------------
+cmake_policy(SET CMP0091 NEW)
+if(WIN32)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 # The full version (x.y.z) lives in vst/VERSION. The patch digit z is
 # auto-incremented on every build (bump x/y manually for releases) and
 # injected through the generated header Sp3ctraVersion.h — see the
@@ -47,9 +61,10 @@ if(SP3CTRA_ENABLE_TTS AND (APPLE OR WIN32))
     if(APPLE)
         set(_sherpa_archive sherpa-onnx-v${SP3CTRA_SHERPA_VER}-osx-arm64-static-lib)
         set(_sherpa_hash 57801db2bbb786a5d343f515a38ff210b401842338bdc804fa075312d1cd2404)
-    else() # WIN32 — MD (dynamic CRT, matches clang-cl default), Release, libs only
-        set(_sherpa_archive sherpa-onnx-v${SP3CTRA_SHERPA_VER}-win-x64-static-MD-Release-lib)
-        set(_sherpa_hash b60194bcac6e6bed1f2018e56d52c7cd092be8ef9573d5fc6be9c7fda112ad45)
+    else() # WIN32 — MT (STATIC CRT, matches CMAKE_MSVC_RUNTIME_LIBRARY above so
+           # the app is self-contained: no VC++ redistributable needed), Release
+        set(_sherpa_archive sherpa-onnx-v${SP3CTRA_SHERPA_VER}-win-x64-static-MT-Release-lib)
+        set(_sherpa_hash d81bd1d25112540862d2387072e76b2b6843ef962918d6b5c7db5a19c6276b4c)
     endif()
     FetchContent_Declare(sherpa_onnx_libs
         URL https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SP3CTRA_SHERPA_VER}/${_sherpa_archive}.tar.bz2
@@ -174,6 +189,8 @@ target_sources(Sp3ctraVST
         source/ui/setup/SamplerSetupPanel.h
         source/ui/setup/ScoreSetupPanel.cpp
         source/ui/setup/ScoreSetupPanel.h
+        source/ui/setup/VideoScrollSetupPanel.cpp
+        source/ui/setup/VideoScrollSetupPanel.h
 
         # M9 — IMAGE / VIDEO / CAMERA source modules (engines + service + UI)
         # (VideoFileReader impl is platform-specific — see block below)
@@ -327,15 +344,20 @@ target_sources(Sp3ctraVST
 if(APPLE)
     target_sources(Sp3ctraVST PRIVATE
         source/sources/VideoFileReader.mm
+        # VIDEO MIX + master-audio recorder (AVAssetWriter → HEVC .mov).
+        source/recorder/VideoRecorder.mm
     )
 elseif(WIN32)
     # VIDEO file source via Media Foundation (mirrors the AVFoundation reader).
     target_sources(Sp3ctraVST PRIVATE
         source/sources/VideoFileReaderMF.cpp
+        # Recorder: macOS-only for now → graceful stub (Media Foundation TODO).
+        source/recorder/VideoRecorderStub.cpp
     )
 else()
     target_sources(Sp3ctraVST PRIVATE
         source/sources/VideoFileReaderStub.cpp
+        source/recorder/VideoRecorderStub.cpp
     )
 endif()
 
