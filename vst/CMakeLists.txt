@@ -652,7 +652,11 @@ target_compile_features(Sp3ctraVST PRIVATE cxx_std_17 c_std_11)
 # RT-SAFE OPTIMIZATION: Preserve memory ordering for atomics and barriers
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     if(MSVC)
-        target_compile_options(Sp3ctraVST PRIVATE /O2 /fp:fast /W4)
+        # /fp:precise (IEEE754) — NOT /fp:fast: same RT-SAFE policy as the
+        # non-MSVC branch below (“NO -ffast-math”). fast-math assumes NaN/Inf
+        # don't exist (UB in JUCE's number parsing — the -Wnan-infinity-disabled
+        # flood) and can change DSP results vs macOS.
+        target_compile_options(Sp3ctraVST PRIVATE /O2 /fp:precise /W4)
     else()
         target_compile_options(Sp3ctraVST PRIVATE
             -O2                      # Moderate optimization (safer than -O3 for RT audio)
