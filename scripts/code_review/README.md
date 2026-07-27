@@ -162,7 +162,6 @@ fi
 
 - **VST_Migration_Plan.md** : Plan de migration standalone → VST
 - **vst/NOTES_ARCHITECTURE.md** : Notes d'architecture VST vs Standalone
-- **.clinerules/custom_instructions.md** : Règles de code du projet
 
 ## 🤝 Contribution
 

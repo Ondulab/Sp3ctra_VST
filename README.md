@@ -1,106 +1,102 @@
 # Sp3ctra VST
 
-Sp3ctra est un **instrument synesthésique** : il transforme un flux d'image
-ligne-à-ligne (capteur CIS du device Sp3ctra, image, vidéo, caméra) en son,
-en temps réel. Le projet est un plugin audio **JUCE** (VST3, AU, Standalone)
-avec un cœur de traitement temps réel en **C**.
+Sp3ctra is a **synesthetic instrument**: it turns a line-by-line image stream
+(the Sp3ctra device's CIS sensor, image, video, camera) into sound, in real
+time. The project is a **JUCE** audio plugin (VST3, AU, Standalone) with a
+real-time processing core written in **C**.
 
 ## Architecture (2026)
 
-Tout est construit sur des **chaînes de flux vidéo** (8 max) assemblées dans
-un rack de modules :
+Everything is built on **video-stream chains** (8 max) assembled in a module
+rack:
 
-- **Chaînes** : une chaîne = une source (SP3CTRA / IMAGE / VIDEO / CAMERA) suivie
-  d'une liste ordonnée de modules. Les chaînes manipulent exclusivement le flux
-  image ; chaque chaîne porte les réglages de ses modules et peut être
-  dupliquée ou sauvée en preset `.sp3chain`.
-- **Modules** : processeurs (Pitch, Mask), FX (Reverb, Echo, EQ), joueurs
-  (Sampler ×2, Score, Timbre, Sequencer), sondes (Video Scroll) et **modules
-  OUT** (`→ LUXSTRAL`, `→ LUXSYNTH`, `→ LUXWAVE`) — des sends conditionnés
-  (Negative / DC / Gamma / Contrast / Range dB / Intensity par chaîne).
-- **3 synthèses globales** : LuxStral (additive), LuxSynth (FFT-additive),
-  LuxWave (wavetable). Elles ne sont nourries QUE par les modules OUT ; quand
-  plusieurs chaînes envoient vers le même moteur, les flux sont mixés
-  (pondérés par l'Intensity de chaque send).
-- **Routage** : le modèle de chaînes est compilé en un `ChainPlan` lock-free,
-  seule autorité de routage consommée par les threads temps réel (UDP,
-  feeder de sources internes, player, audio).
+- **Chains**: a chain = a source (SP3CTRA / IMAGE / VIDEO / CAMERA) followed by
+  an ordered list of modules. Chains operate exclusively on the image stream;
+  each chain carries its modules' settings and can be duplicated or saved as a
+  `.sp3chain` preset.
+- **Modules**: processors (Pitch, Mask), FX (Reverb, Echo, EQ), players
+  (Sampler ×2, Score, Timbre, Sequencer), probes (Video Scroll) and **OUT
+  modules** (`→ LUXSTRAL`, `→ LUXSYNTH`, `→ LUXWAVE`) — conditioned sends
+  (Negative / DC / Gamma / Contrast / Range dB / Intensity, per chain).
+- **3 global synths**: LuxStral (additive), LuxSynth (FFT-additive), LuxWave
+  (wavetable). They are fed ONLY by the OUT modules; when several chains send
+  to the same engine, the streams are mixed (weighted by each send's Intensity).
+- **Routing**: the chain model is compiled into a lock-free `ChainPlan`, the
+  single routing authority consumed by the real-time threads (UDP, internal
+  source feeder, player, audio).
 
-La feuille de route et l'état détaillé de cette architecture :
-[`docs/PLAN_P3_CHAIN_SETTINGS.md`](docs/PLAN_P3_CHAIN_SETTINGS.md).
-Charte graphique de l'UI : [`docs/CHARTE_GRAPHIQUE.md`](docs/CHARTE_GRAPHIQUE.md).
+UI style guide: [`docs/CHARTE_GRAPHIQUE.md`](docs/CHARTE_GRAPHIQUE.md).
 
-## Arborescence
+## Source tree
 
 ```
 vst/
-├── CMakeLists.txt           # Build JUCE (VST3 / AU / Standalone)
+├── CMakeLists.txt           # JUCE build (VST3 / AU / Standalone)
 └── source/
-    ├── PluginProcessor.*    # APVTS, banques de params, dérivation du ChainPlan
-    ├── PluginEditor.*       # Layout 4 zones + rack de chaînes
-    ├── ui/                  # ChainModel, rack, presets .sp3chain, manifest params
-    ├── processing/          # Pipeline image C : chain_plan, stages, staging synth,
-    │                        #   pitch/mask/FX, feed spectral LuxSynth
-    ├── synthesis/           # Moteurs C : luxstral, luxsynth, luxwave
-    ├── luxsampler/          # Sampler d'images (2 moteurs A/B) + FramePlayerThread
-    ├── sampler/ image/ video/  # Pages UI (sampler, modules image, video mix)
-    ├── sources/             # Sources internes IMAGE/VIDEO/CAMERA (M9)
-    ├── threading/           # udpThread, feeder tick, exécuteur de chaînes
+    ├── PluginProcessor.*    # APVTS, param banks, ChainPlan derivation
+    ├── PluginEditor.*       # 4-zone layout + chain rack
+    ├── ui/                  # ChainModel, rack, .sp3chain presets, param manifest
+    ├── processing/          # C image pipeline: chain_plan, stages, synth staging,
+    │                        #   pitch/mask/FX, LuxSynth spectral feed
+    ├── synthesis/           # C engines: luxstral, luxsynth, luxwave
+    ├── luxsampler/          # Image sampler (2 engines A/B) + FramePlayerThread
+    ├── sampler/ image/ video/  # UI pages (sampler, image modules, video mix)
+    ├── sources/             # Internal IMAGE/VIDEO/CAMERA sources (M9)
+    ├── threading/           # udpThread, feeder tick, chain executor
     ├── communication/       # UDP device + DMX
-    ├── midi/                # MIDI mapping engine (CC/Note → tout param)
-    └── config/              # g_sp3ctra_config + headers de config
+    ├── midi/                # MIDI mapping engine (CC/Note → any param)
+    └── config/              # g_sp3ctra_config + config headers
 ```
 
-## Installation sans compilation
+## Install without compiling
 
 ```bash
 git clone git@github.com:Ondulab/Sp3ctra_VST.git
 cd Sp3ctra_VST
-./scripts/install_vst.sh     # installe les binaires de prebuilt/
+./scripts/install_vst.sh     # installs the binaries from prebuilt/
 ```
 
-Voir [`QUICKSTART.md`](QUICKSTART.md).
+See [`QUICKSTART.md`](QUICKSTART.md).
 
-## Compilation
+## Building
 
 ```bash
-# Build complet (VST3 + AU + Standalone) + archives dans prebuilt/
+# Full build (VST3 + AU + Standalone) + archives in prebuilt/
 ./scripts/build_vst.sh clean
 
-# Build incrémental du standalone seul
+# Incremental build of the standalone only
 cmake --build vst/build --target Sp3ctraVST_Standalone -j 8
 
-# Lancer le standalone
+# Launch the standalone
 ./scripts/run_standalone.sh
 ```
 
-Dépannage CMake : [`TROUBLESHOOTING_CMAKE.md`](TROUBLESHOOTING_CMAKE.md).
-Distribution : [`DISTRIBUTION_GUIDE.md`](DISTRIBUTION_GUIDE.md).
+CMake troubleshooting: [`TROUBLESHOOTING_CMAKE.md`](TROUBLESHOOTING_CMAKE.md).
+Distribution: [`DISTRIBUTION_GUIDE.md`](DISTRIBUTION_GUIDE.md).
 
-## Device Sp3ctra
+## Sp3ctra device
 
-Le device (capteur CIS) streame ses lignes en **UDP** et expose une API de
-configuration **HTTP REST** (`192.168.100.1`). Le plugin l'intègre via
-`Sp3ctraDeviceClient` (le device est la source de vérité de sa config).
+The device (CIS sensor) streams its lines over **UDP** and exposes an **HTTP
+REST** configuration API (`192.168.100.1`). The plugin integrates it through
+`Sp3ctraDeviceClient` (the device is the source of truth for its own config).
 
-## Limitations connues
+## Known limitations
 
-- Une seule instance du plugin par projet DAW (configuration globale partagée).
-- Presets `.sp3chain` V1 : topologie + réglages des modules du manifest
-  (les slots audio du sampler, l'image SCORE, les chemins media et le pattern
-  du séquenceur ne sont pas embarqués).
+- Only one plugin instance per DAW project (shared global configuration).
+- `.sp3chain` V1 presets: topology + settings of the manifest modules (the
+  sampler's audio slots, the SCORE image, media paths, and the sequencer
+  pattern are not embedded).
 
-## Licence
+## License
 
-Sp3ctra est un logiciel libre distribué sous **GNU GPL v3 ou ultérieure**
-(voir [LICENSE](LICENSE)). Copyright (C) 2024-2026 Ondulab / Patrick Reybaud.
+Sp3ctra is free software distributed under the **GNU GPL v3 or later** (see
+[LICENSE](LICENSE)). Copyright (C) 2024-2026 Ondulab / Patrick Reybaud.
 
-Le binaire lie statiquement **espeak-ng** (GPLv3, phonémisation du module
-VOICE) — c'est le composant qui fixe la licence de l'œuvre combinée. JUCE est
-utilisé sous son option **AGPLv3**, le SDK VST3 sous son option **GPLv3**.
-L'inventaire complet des composants tiers et les obligations de mise à
-disposition des sources sont dans
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+The binary statically links **espeak-ng** (GPLv3, phonemization for the VOICE
+module) — this is the component that sets the license of the combined work.
+JUCE is used under its **AGPLv3** option, the VST3 SDK under its **GPLv3**
+option. The full inventory of third-party components and the source-availability
+obligations are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-Un build sans le moteur TTS (et donc sans code GPL tiers au-delà du SDK VST3)
-reste possible : `cmake -DSP3CTRA_ENABLE_TTS=OFF`.
+A build without the TTS engine (and therefore without third-party GPL code
+beyond the VST3 SDK) remains possible: `cmake -DSP3CTRA_ENABLE_TTS=OFF`.

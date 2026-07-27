@@ -1,70 +1,70 @@
-# Dépannage CMake - Sp3ctra VST
+# CMake Troubleshooting - Sp3ctra VST
 
-Ce guide résout les problèmes de compilation CMake courants, notamment le blocage sur "detecting CXX compile features".
+This guide fixes common CMake build issues, in particular the hang on "detecting CXX compile features".
 
-## Problème : CMake bloque sur "Detecting CXX compile features"
+## Problem: CMake hangs on "Detecting CXX compile features"
 
-### Symptômes
-- La compilation s'arrête pendant la phase de configuration CMake
-- Message affiché : `-- Detecting CXX compile features`
-- Le processus ne progresse plus pendant plusieurs minutes
+### Symptoms
+- The build stops during the CMake configuration phase
+- Message shown: `-- Detecting CXX compile features`
+- The process makes no progress for several minutes
 
-### Causes probables
+### Likely causes
 
-1. **Compilateur C++ manquant ou inaccessible**
-2. **Xcode Command Line Tools non installés (macOS)**
-3. **Licence Xcode non acceptée (macOS)**
-4. **Conflit de chemins du compilateur**
-5. **Cache CMake corrompu**
+1. **Missing or inaccessible C++ compiler**
+2. **Xcode Command Line Tools not installed (macOS)**
+3. **Xcode license not accepted (macOS)**
+4. **Compiler path conflict**
+5. **Corrupted CMake cache**
 
 ---
 
 ## Solutions (macOS)
 
-### Solution 1 : Installer les dépendances automatiquement
+### Solution 1: Install the dependencies automatically
 
-Exécutez le script d'installation fourni :
+Run the provided install script:
 
 ```bash
 bash scripts/install_dependencies.sh
 ```
 
-Ce script va :
-- ✅ Vérifier et installer Xcode Command Line Tools
-- ✅ Installer/mettre à jour CMake
-- ✅ Vérifier que le compilateur est accessible
-- ✅ Installer les dépendances audio (optionnel)
+This script will:
+- ✅ Check and install the Xcode Command Line Tools
+- ✅ Install/update CMake
+- ✅ Verify that the compiler is accessible
+- ✅ Install the audio dependencies (optional)
 
 ---
 
-### Solution 2 : Installation manuelle Xcode Command Line Tools
+### Solution 2: Manually install the Xcode Command Line Tools
 
-Si le script échoue, installez manuellement :
+If the script fails, install them manually:
 
 ```bash
-# Installer Xcode Command Line Tools
+# Install the Xcode Command Line Tools
 xcode-select --install
 ```
 
-Une fenêtre de dialogue apparaîtra. Suivez les instructions d'installation.
+A dialog window will appear. Follow the installation instructions.
 
-**Après l'installation, vérifiez :**
+**After installation, verify:**
 
 ```bash
-# Vérifier l'installation
+# Check the installation
 xcode-select -p
-# Devrait afficher : /Library/Developer/CommandLineTools
+# Should print: /Library/Developer/CommandLineTools
 
-# Vérifier le compilateur
+# Check the compiler
 clang++ --version
-# Devrait afficher la version de clang
+# Should print the clang version
 ```
 
 ---
 
-### Solution 3 : Accepter la licence Xcode
+### Solution 3: Accept the Xcode license
 
-Si Xcode est installé mais la licence n'est pas acceptée :
+If Xcode is installed but the license has not been accepted:
 
 ```bash
 sudo xcodebuild -license accept
@@ -72,48 +72,48 @@ sudo xcodebuild -license accept
 
 ---
 
-### Solution 4 : Réinitialiser Xcode Command Line Tools
+### Solution 4: Reset the Xcode Command Line Tools
 
-Si le compilateur n'est toujours pas détecté :
+If the compiler is still not detected:
 
 ```bash
-# Réinitialiser les outils
+# Reset the tools
 sudo xcode-select --reset
 
-# Puis réinstaller
+# Then reinstall
 xcode-select --install
 ```
 
 ---
 
-### Solution 5 : Nettoyer le cache CMake
+### Solution 5: Clear the CMake cache
 
-Si CMake a déjà tenté de configurer le projet :
+If CMake has already tried to configure the project:
 
 ```bash
-# Supprimer le cache CMake
+# Remove the CMake cache
 cd vst
 rm -rf build/
 mkdir build
 cd build
 
-# Reconfigurer
+# Reconfigure
 cmake ..
 ```
 
 ---
 
-### Solution 6 : Forcer le compilateur
+### Solution 6: Force the compiler
 
-Si CMake ne détecte pas automatiquement le compilateur :
+If CMake does not detect the compiler automatically:
 
 ```bash
 cd vst/build
 
-# Spécifier explicitement le compilateur
+# Specify the compiler explicitly
 cmake .. -DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++
 
-# Ou avec le chemin complet Xcode
+# Or with the full Xcode path
 cmake .. \
   -DCMAKE_C_COMPILER=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang \
   -DCMAKE_CXX_COMPILER=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++
@@ -123,7 +123,7 @@ cmake .. \
 
 ## Solutions (Linux - Debian/Ubuntu)
 
-### Solution 1 : Installer les dépendances automatiquement
+### Solution 1: Install the dependencies automatically
 
 ```bash
 bash scripts/install_dependencies.sh
@@ -131,84 +131,84 @@ bash scripts/install_dependencies.sh
 
 ---
 
-### Solution 2 : Installation manuelle
+### Solution 2: Manual install
 
 ```bash
-# Mettre à jour les paquets
+# Update the packages
 sudo apt update
 
-# Installer build-essential (inclut gcc/g++)
+# Install build-essential (includes gcc/g++)
 sudo apt install -y build-essential
 
-# Installer CMake
+# Install CMake
 sudo apt install -y cmake
 
-# Vérifier le compilateur
+# Check the compiler
 g++ --version
 
-# Vérifier CMake
+# Check CMake
 cmake --version
 ```
 
 ---
 
-### Solution 3 : Installer une version plus récente de CMake
+### Solution 3: Install a more recent version of CMake
 
-Si votre version de CMake est trop ancienne (< 3.15) :
+If your CMake version is too old (< 3.15):
 
 ```bash
-# Désinstaller l'ancienne version
+# Uninstall the old version
 sudo apt remove cmake
 
-# Ajouter le dépôt Kitware (CMake officiel)
+# Add the Kitware repository (official CMake)
 wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | \
   gpg --dearmor - | \
   sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
 
-# Ajouter le dépôt à sources.list
+# Add the repository to sources.list
 echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ focal main' | \
   sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
 
-# Installer CMake récent
+# Install a recent CMake
 sudo apt update
 sudo apt install -y cmake
 
-# Vérifier la version
+# Check the version
 cmake --version
 ```
 
 ---
 
-## Diagnostic complet
+## Full diagnostics
 
-### Vérifier l'environnement de compilation
+### Check the build environment
 
-Exécutez ces commandes pour diagnostiquer votre environnement :
+Run these commands to diagnose your environment:
 
 ```bash
-# 1. Vérifier le système d'exploitation
+# 1. Check the operating system
 uname -a
 
-# 2. Vérifier CMake
+# 2. Check CMake
 cmake --version
 
-# 3. Vérifier le compilateur C++
+# 3. Check the C++ compiler
 which clang++    # macOS
 which g++        # Linux
 clang++ --version   # macOS
 g++ --version       # Linux
 
-# 4. Vérifier Xcode (macOS uniquement)
+# 4. Check Xcode (macOS only)
 xcode-select -p
 
-# 5. Tester une compilation simple
+# 5. Test a simple compilation
 echo 'int main() { return 0; }' > test.cpp
 clang++ test.cpp -o test   # macOS
 g++ test.cpp -o test       # Linux
 ./test && echo "Compilation OK" || echo "Compilation FAILED"
 rm test.cpp test
 
-# 6. Vérifier les variables d'environnement
+# 6. Check the environment variables
 echo $PATH
 echo $CXX
 echo $CC
@@ -216,38 +216,38 @@ echo $CC
 
 ---
 
-## Procédure complète de dépannage
+## Full troubleshooting procedure
 
-### Étape 1 : Nettoyer complètement
+### Step 1: Clean everything
 
 ```bash
-# Supprimer tous les fichiers de build
+# Remove all build files
 cd /Users/zhonx/Documents/Workspaces/Workspace_Ondulab/Sp3ctra_VST
 rm -rf vst/build/
 rm -rf build/
 ```
 
-### Étape 2 : Installer les dépendances
+### Step 2: Install the dependencies
 
 ```bash
-# Exécuter le script d'installation
+# Run the install script
 bash scripts/install_dependencies.sh
 ```
 
-### Étape 3 : Vérifier l'installation
+### Step 3: Verify the installation
 
-Le script affichera un rapport de vérification. Assurez-vous que :
+The script will print a verification report. Make sure that:
 - ✅ CMake version >= 3.15
-- ✅ Compilateur C++ détecté (clang++ ou g++)
-- ✅ Git installé
+- ✅ C++ compiler detected (clang++ or g++)
+- ✅ Git installed
 
-### Étape 4 : Compiler le projet
+### Step 4: Build the project
 
 ```bash
-# Option A : Utiliser le script de build
+# Option A: Use the build script
 bash scripts/build_vst.sh
 
-# Option B : Build manuel
+# Option B: Manual build
 cd vst
 mkdir -p build && cd build
 cmake ..
@@ -256,11 +256,11 @@ cmake --build . --config Release
 
 ---
 
-## Messages d'erreur courants
+## Common error messages
 
 ### "No CMAKE_CXX_COMPILER could be found"
 
-**Solution :** Le compilateur n'est pas installé ou pas dans le PATH.
+**Solution:** The compiler is not installed or not in the PATH.
 
 ```bash
 # macOS
@@ -274,59 +274,59 @@ sudo apt install build-essential
 
 ### "CMake Error: your CXX compiler is not able to compile a simple test program"
 
-**Causes possibles :**
-1. Licence Xcode non acceptée (macOS)
-2. Bibliothèques système manquantes
-3. Compilateur corrompu
+**Possible causes:**
+1. Xcode license not accepted (macOS)
+2. Missing system libraries
+3. Corrupted compiler
 
-**Solutions :**
+**Solutions:**
 
 ```bash
-# macOS : Accepter la licence
+# macOS: Accept the license
 sudo xcodebuild -license accept
 
-# macOS : Réinstaller Command Line Tools
+# macOS: Reinstall the Command Line Tools
 sudo rm -rf /Library/Developer/CommandLineTools
 xcode-select --install
 
-# Linux : Réinstaller build-essential
+# Linux: Reinstall build-essential
 sudo apt install --reinstall build-essential
 ```
 
 ---
 
-### Timeout sur "Detecting CXX compile features"
+### Timeout on "Detecting CXX compile features"
 
-**Causes :**
-- Problème de réseau (si CMake essaie de télécharger des dépendances)
-- Compilateur non fonctionnel
-- Processus bloqué
+**Causes:**
+- Network problem (if CMake is trying to download dependencies)
+- Non-functional compiler
+- Stuck process
 
-**Solutions :**
+**Solutions:**
 
 ```bash
-# 1. Tuer les processus CMake bloqués
+# 1. Kill the stuck CMake processes
 killall cmake
 
-# 2. Nettoyer le cache
+# 2. Clear the cache
 rm -rf vst/build/
 
-# 3. Vérifier que le compilateur fonctionne
-clang++ --version  # Doit afficher une version sans erreur
+# 3. Verify that the compiler works
+clang++ --version  # Must print a version with no error
 
-# 4. Relancer avec mode verbose
+# 4. Re-run in verbose mode
 cd vst/build
 cmake .. --debug-output
 ```
 
 ---
 
-## Compilation réussie
+## Successful build
 
-Lorsque CMake se configure correctement, vous verrez :
+When CMake configures correctly, you will see:
 
 ```
--- The CXX compiler identification is AppleClang X.X.X  (ou GNU X.X.X sur Linux)
+-- The CXX compiler identification is AppleClang X.X.X  (or GNU X.X.X on Linux)
 -- Detecting CXX compiler ABI info
 -- Detecting CXX compiler ABI info - done
 -- Check for working CXX compiler: /usr/bin/clang++ - works
@@ -334,7 +334,7 @@ Lorsque CMake se configure correctement, vous verrez :
 -- Detecting CXX compile features - done
 ```
 
-Ensuite, JUCE sera téléchargé automatiquement :
+Then JUCE will be downloaded automatically:
 
 ```
 -- Fetching JUCE...
@@ -343,55 +343,55 @@ Ensuite, JUCE sera téléchargé automatiquement :
 
 ---
 
-## Support supplémentaire
+## Additional support
 
-Si le problème persiste après avoir suivi ce guide :
+If the problem persists after following this guide:
 
-1. **Collectez les informations de diagnostic** :
+1. **Collect the diagnostic information**:
    ```bash
    cmake --version > diagnostic.txt
-   clang++ --version >> diagnostic.txt  # ou g++ --version
-   xcode-select -p >> diagnostic.txt    # macOS uniquement
+   clang++ --version >> diagnostic.txt  # or g++ --version
+   xcode-select -p >> diagnostic.txt    # macOS only
    uname -a >> diagnostic.txt
    ```
 
-2. **Vérifiez les logs CMake** :
+2. **Check the CMake logs**:
    ```bash
    cd vst/build
    cat CMakeFiles/CMakeError.log
    cat CMakeFiles/CMakeOutput.log
    ```
 
-3. **Partagez ces informations** avec votre équipe de développement
+3. **Share this information** with your development team
 
 ---
 
-## Résumé des commandes rapides
+## Quick command summary
 
-### Diagnostic rapide (macOS)
+### Quick diagnostics (macOS)
 
 ```bash
-# Vérification complète en une commande
+# Full check in one command
 bash scripts/install_dependencies.sh
 ```
 
-### Diagnostic rapide (Linux)
+### Quick diagnostics (Linux)
 
 ```bash
-# Vérification complète en une commande
+# Full check in one command
 bash scripts/install_dependencies.sh
 ```
 
-### Nettoyage et recompilation
+### Clean and rebuild
 
 ```bash
-# Nettoyer
+# Clean
 rm -rf vst/build/
 
-# Recompiler
+# Rebuild
 bash scripts/build_vst.sh
 ```
 
 ---
 
-**Note :** Le framework JUCE est téléchargé automatiquement par CMake via `FetchContent`. Aucune installation manuelle de JUCE n'est nécessaire.
+**Note:** The JUCE framework is downloaded automatically by CMake via `FetchContent`. No manual JUCE installation is required.

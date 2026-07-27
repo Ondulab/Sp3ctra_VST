@@ -1,21 +1,21 @@
-# Guide de Distribution Sp3ctra VST
+# Sp3ctra VST Distribution Guide
 
-Ce guide explique comment distribuer et installer le plugin Sp3ctra VST via Git, **sans avoir besoin de recompiler**.
+This guide explains how to distribute and install the Sp3ctra VST plugin via Git, **without needing to recompile**.
 
-## 📦 Pour les Développeurs : Préparer une Release
+## 📦 For Developers: Preparing a Release
 
-### 1. Compiler le projet en mode Release
+### 1. Build the project in Release mode
 
 ```bash
 ./scripts/build_vst.sh clean
 ```
 
-Le script de build va automatiquement :
-- ✅ Compiler le VST3, AU et Standalone en mode Release
-- ✅ Créer des archives ZIP dans le dossier `prebuilt/`
-- ✅ Préparer les archives pour être commitées dans Git
+The build script will automatically:
+- ✅ Build VST3, AU and Standalone in Release mode
+- ✅ Create ZIP archives in the `prebuilt/` folder
+- ✅ Prepare the archives to be committed into Git
 
-### 2. Vérifier les binaires
+### 2. Check the binaries
 
 ```bash
 ls -la prebuilt/VST3/
@@ -23,12 +23,12 @@ ls -la prebuilt/AU/
 ls -la prebuilt/Standalone/
 ```
 
-Vous devriez voir :
+You should see:
 - `prebuilt/VST3/Sp3ctra.vst3/`
 - `prebuilt/AU/Sp3ctra.component/`
 - `prebuilt/Standalone/Sp3ctra.app/`
 
-### 3. Commiter et pusher
+### 3. Commit and push
 
 ```bash
 git add prebuilt/
@@ -36,58 +36,58 @@ git commit -m "chore: update prebuilt binaries to version X.Y.Z"
 git push
 ```
 
-Les binaires sont maintenant disponibles dans le dépôt Git pour distribution.
+The binaries are now available in the Git repository for distribution.
 
 ---
 
-## 🎵 Pour les Utilisateurs : Installation Rapide
+## 🎵 For Users: Quick Install
 
-### Méthode 1 : Installation Automatique (Recommandée)
+### Method 1: Automatic Install (Recommended)
 
 ```bash
-# Cloner le dépôt
+# Clone the repository
 git clone git@github.com:Ondulab/Sp3ctra_VST.git
 cd Sp3ctra_VST
 
-# Installer le VST
+# Install the VST
 ./scripts/install_vst.sh
 ```
 
-Cette commande installe automatiquement :
-- **VST3** dans `~/Library/Audio/Plug-Ins/VST3/`
-- **AU** dans `/Library/Audio/Plug-Ins/Components/` (nécessite sudo)
+This command automatically installs:
+- **VST3** into `~/Library/Audio/Plug-Ins/VST3/`
+- **AU** into `/Library/Audio/Plug-Ins/Components/` (requires sudo)
 
-### Méthode 2 : Installation Manuelle
+### Method 2: Manual Install
 
 ```bash
 # VST3
 cp -R prebuilt/VST3/Sp3ctra.vst3 ~/Library/Audio/Plug-Ins/VST3/
 
-# Audio Unit (nécessite sudo)
+# Audio Unit (requires sudo)
 sudo cp -R prebuilt/AU/Sp3ctra.component /Library/Audio/Plug-Ins/Components/
 
-# Standalone (peut être lancé directement)
+# Standalone (can be launched directly)
 open prebuilt/Standalone/Sp3ctra.app
 ```
 
-### Méthode 3 : Installation Sélective
+### Method 3: Selective Install
 
 ```bash
-# Installer seulement le VST3
+# Install VST3 only
 ./scripts/install_vst.sh vst3
 
-# Installer seulement l'Audio Unit
+# Install the Audio Unit only
 ./scripts/install_vst.sh au
 
-# Afficher l'emplacement du Standalone
+# Show the Standalone location
 ./scripts/install_vst.sh standalone
 ```
 
 ---
 
-## 🔄 Mise à Jour
+## 🔄 Updating
 
-Pour mettre à jour vers une nouvelle version :
+To update to a new version:
 
 ```bash
 cd Sp3ctra_VST
@@ -95,156 +95,155 @@ git pull
 ./scripts/install_vst.sh
 ```
 
-Les anciens plugins seront automatiquement remplacés.
+The old plugins will be replaced automatically.
 
 ---
 
 ## ❓ FAQ
 
-### Q: Dois-je installer Xcode ou des dépendances pour utiliser le VST ?
+### Q: Do I need to install Xcode or any dependencies to use the VST?
 
-**Non !** Les binaires pré-compilés dans `prebuilt/` fonctionnent directement sur macOS. Vous n'avez besoin d'aucun outil de développement.
+**No!** The pre-compiled binaries in `prebuilt/` work directly on macOS. You don't need any development tools.
 
-### Q: Quelle architecture est supportée ?
+### Q: Which architecture is supported?
 
-Les binaires sont compilés en **Universal Binary**, supportant :
+The binaries are built as a **Universal Binary**, supporting:
 - Apple Silicon (ARM64) - M1/M2/M3
 - Intel (x86_64)
 
-### Q: Quelle version minimale de macOS est requise ?
+### Q: What minimum macOS version is required?
 
-**macOS 10.13 (High Sierra)** ou supérieur.
+**macOS 10.13 (High Sierra)** or later.
 
-### Q: Puis-je utiliser le plugin sans cloner tout le dépôt ?
+### Q: Can I use the plugin without cloning the whole repository?
 
-Techniquement oui, mais le dépôt contient aussi les fichiers de configuration nécessaires (`sp3ctra.ini`, `midi_mapping.ini`). Il est recommandé de cloner le dépôt complet.
+Technically yes, but the repository also contains the necessary configuration files (`sp3ctra.ini`, `midi_mapping.ini`). Cloning the full repository is recommended.
 
-### Q: Comment vérifier que le plugin est bien installé ?
+### Q: How do I check that the plugin is properly installed?
 
 ```bash
-# Vérifier VST3
+# Check VST3
 ls -la ~/Library/Audio/Plug-Ins/VST3/Sp3ctra.vst3
 
-# Vérifier AU
+# Check AU
 ls -la /Library/Audio/Plug-Ins/Components/Sp3ctra.component
 ```
 
-Ensuite, relancez votre DAW et rescannez les plugins. Cherchez "Sp3ctra" par "Ondulab".
+Then restart your DAW and rescan the plugins. Look for "Sp3ctra" by "Ondulab".
 
 ---
 
-## 🛠️ Pour les Développeurs : Workflow Complet
+## 🛠️ For Developers: Full Workflow
 
-### Développement
+### Development
 
 ```bash
-# Build en mode Debug avec sanitizers
+# Build in Debug mode with sanitizers
 ./scripts/build_vst.sh debug run
 
-# Build Release + Installation locale
+# Release build + local install
 ./scripts/build_vst.sh install
 ```
 
 ### Distribution
 
 ```bash
-# Build Release + Copie dans prebuilt/
+# Release build + copy into prebuilt/
 ./scripts/build_vst.sh clean
 
-# Vérifier les binaires
+# Check the binaries
 ls -la prebuilt/
 
-# Commit et push
+# Commit and push
 git add prebuilt/
 git commit -m "chore: update prebuilt binaries"
 git push
 ```
 
-### Avantages de cette approche
+### Benefits of this approach
 
-✅ **Pas de recompilation** : Les utilisateurs peuvent installer directement  
-✅ **Historique Git** : Chaque version est trackée dans Git  
-✅ **Déploiement simple** : Un simple `git pull` pour mettre à jour  
-✅ **Compatible CI/CD** : Peut être automatisé avec GitHub Actions  
-✅ **Taille optimisée** : Seuls les binaires Release sont distribués  
+✅ **No recompilation**: Users can install directly  
+✅ **Git history**: Every version is tracked in Git  
+✅ **Simple deployment**: A single `git pull` to update  
+✅ **CI/CD friendly**: Can be automated with GitHub Actions  
+✅ **Optimized size**: Only the Release binaries are distributed  
 
 ---
 
-## 📝 Notes Techniques
+## 📝 Technical Notes
 
-### Pourquoi stocker les binaires dans Git ?
+### Why store the binaries in Git?
 
-1. **Simplicité** : Pas besoin de système de releases GitHub complexe
-2. **Traçabilité** : Chaque commit de code a son binaire correspondant
-3. **Accessibilité** : Un simple `git clone` suffit pour tout avoir
+1. **Simplicity**: No need for a complex GitHub releases system
+2. **Traceability**: Every code commit has its matching binary
+3. **Accessibility**: A simple `git clone` is enough to get everything
 
-### Pourquoi des archives ZIP ?
+### Why ZIP archives?
 
-Les bundles macOS (.vst3, .component, .app) sont en réalité des **répertoires** contenant des liens symboliques et des structures complexes. Git a des limitations avec ces structures :
+macOS bundles (.vst3, .component, .app) are actually **directories** containing symbolic links and complex structures. Git has limitations with these structures:
 
-1. **Liens symboliques** : Git les stocke comme pointeurs texte (quelques Ko seulement)
-2. **Métadonnées macOS** : Peuvent être perdues lors du clone
-3. **Structure complexe** : Les bundles peuvent ne pas être transférés correctement
+1. **Symbolic links**: Git stores them as text pointers (only a few KB)
+2. **macOS metadata**: Can be lost during a clone
+3. **Complex structure**: Bundles may not be transferred correctly
 
-**Solution** : Les archives ZIP préservent parfaitement :
-- ✅ Tous les liens symboliques
-- ✅ Les métadonnées macOS
-- ✅ La structure complète du bundle
-- ✅ Compression = réduction de la taille Git
+**Solution**: ZIP archives perfectly preserve:
+- ✅ All symbolic links
+- ✅ macOS metadata
+- ✅ The complete bundle structure
+- ✅ Compression = reduced Git size
 
-### Taille du dépôt
+### Repository size
 
-Les archives ZIP sont compressées (quelques MB). Le `.gitignore` est configuré pour :
-- ❌ Ignorer les builds temporaires (`vst/build/`)
-- ❌ Ignorer les bundles extraits (`prebuilt/VST3/`, `prebuilt/AU/`, etc.)
-- ✅ Tracker uniquement les archives ZIP (`prebuilt/*.zip`)
+The ZIP archives are compressed (a few MB). The `.gitignore` is configured to:
+- ❌ Ignore temporary builds (`vst/build/`)
+- ❌ Ignore extracted bundles (`prebuilt/VST3/`, `prebuilt/AU/`, etc.)
+- ✅ Track only the ZIP archives (`prebuilt/*.zip`)
 
-### Sécurité
+### Security
 
-Les binaires sont compilés sur une machine de confiance et signés par l'équipe Ondulab. Vérifiez toujours la source du dépôt Git avant installation.
+The binaries are built on a trusted machine and signed by the Ondulab team. Always verify the source of the Git repository before installing.
 
 ---
 
 ## 🚀 Quick Start
 
 ```bash
-# Installation en 3 commandes
+# Install in 3 commands
 git clone git@github.com:Ondulab/Sp3ctra_VST.git
 cd Sp3ctra_VST
 ./scripts/install_vst.sh
 ```
 
-C'est tout ! Relancez votre DAW et profitez de Sp3ctra 🎵
+That's it! Restart your DAW and enjoy Sp3ctra 🎵
 
 ---
 
-## ⚖️ Conformité licence (GPLv3) — obligatoire à chaque release
+## ⚖️ License compliance (GPLv3) — mandatory for every release
 
-Sp3ctra est distribué sous **GPLv3-or-later** (espeak-ng, lié statiquement dans
-le moteur TTS du module VOICE, l'impose pour l'œuvre combinée ; JUCE est utilisé
-sous AGPLv3, le SDK VST3 sous GPLv3). Voir [LICENSE](LICENSE) et
+Sp3ctra is distributed under **GPLv3-or-later** (espeak-ng, statically linked in
+the VOICE module's TTS engine, imposes it on the combined work; JUCE is used
+under AGPLv3, the VST3 SDK under GPLv3). See [LICENSE](LICENSE) and
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-Checklist par release binaire :
+Checklist per binary release:
 
-1. **Sources correspondantes** : le dépôt public au tag de la release EST la
-   source correspondante du code Sp3ctra. Joindre aussi à la release l'archive
-   source `sherpa-onnx v1.13.4` (contient espeak-ng) — ne pas dépendre de la
-   seule disponibilité future de l'upstream.
-2. **Fichiers joints aux binaires** : `LICENSE` et `THIRD-PARTY-NOTICES.md`
-   doivent accompagner toute archive binaire (les zips de `prebuilt/` vivent
-   dans le dépôt, donc ils voyagent déjà avec — garder ça vrai si les binaires
-   sont un jour distribués hors dépôt).
-3. **Pas de restrictions supplémentaires** : ne pas ajouter d'EULA/conditions
-   qui contrediraient la GPLv3 sur le binaire distribué.
-4. **Voix Piper embarquées** : les voix listées dans l'option CMake
-   `SP3CTRA_EMBED_VOICES` sont copiées dans `Contents/Resources/piper_voices/`
-   de chaque format et donc REDISTRIBUÉES (~79 MB par voix et par format —
-   surveiller la taille des zips `prebuilt/`). N'y mettre que des voix à
-   licence claire (défauts : siwis CC-BY 4.0, ljspeech domaine public — voir
-   THIRD-PARTY-NOTICES.md ; jamais lessac/Blizzard). Les autres voix restent
-   externes via `scripts/install_piper_voices.sh` + le dossier configurable de
-   la page VOICE.
-5. **macOS Gatekeeper** (indépendant de la licence) : pour une distribution
-   sans avertissement de quarantaine, signer Developer ID + notariser les
-   trois formats.
+1. **Corresponding source**: the public repository at the release tag IS the
+   corresponding source of the Sp3ctra code. Also attach the `sherpa-onnx
+   v1.13.4` source archive (contains espeak-ng) to the release — do not rely on
+   upstream's future availability alone.
+2. **Files bundled with the binaries**: `LICENSE` and `THIRD-PARTY-NOTICES.md`
+   must accompany every binary archive (the `prebuilt/` zips live in the
+   repository, so they already travel with it — keep that true if the binaries
+   are ever distributed outside the repository).
+3. **No additional restrictions**: do not add any EULA/terms that would
+   contradict the GPLv3 on the distributed binary.
+4. **Embedded Piper voices**: the voices listed in the CMake option
+   `SP3CTRA_EMBED_VOICES` are copied into each format's
+   `Contents/Resources/piper_voices/` and are therefore REDISTRIBUTED (~79 MB
+   per voice per format — watch the size of the `prebuilt/` zips). Only include
+   voices with a clear license (defaults: siwis CC-BY 4.0, ljspeech public
+   domain — see THIRD-PARTY-NOTICES.md; never lessac/Blizzard). Other voices
+   remain external via `scripts/install_piper_voices.sh` + the configurable
+   folder on the VOICE page.
+5. **macOS Gatekeeper** (license-independent): for distribution without a
+   quarantine warning, sign with Developer ID + notarize all three formats.

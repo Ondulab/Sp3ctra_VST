@@ -7,7 +7,6 @@
  * M1 core of the modular pipeline: the hardcoded Pitch ► Mask invocation
  * becomes a loop over an ordered descriptor (the slot list has since grown
  * FX blocks — Reverb/Echo/EQ — without touching the executor call sites).
- * Current roadmap: docs/PLAN_P3_CHAIN_SETTINGS.md.
  *
  * Threading model:
  *   - image_chain_run() executes on the producer threads only.

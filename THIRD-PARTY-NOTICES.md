@@ -1,73 +1,74 @@
 # Third-party notices
 
-Sp3ctra est distribué sous **GNU GPL v3 ou ultérieure** (voir [LICENSE](LICENSE)).
+Sp3ctra is distributed under the **GNU GPL v3 or later** (see [LICENSE](LICENSE)).
 Copyright (C) 2024-2026 Ondulab / Patrick Reybaud.
 
-Le binaire distribué (Standalone, VST3, AU) est une œuvre combinée qui inclut,
-liés statiquement, les composants ci-dessous. La distribution de l'ensemble se
-fait aux conditions de la GPLv3 (le composant le plus contraignant, espeak-ng,
-l'impose ; toutes les autres licences listées y sont compatibles).
+The distributed binary (Standalone, VST3, AU) is a combined work that includes,
+statically linked, the components below. The whole is distributed under the
+terms of the GPLv3 (the most restrictive component, espeak-ng, imposes it; all
+the other licenses listed are compatible with it).
 
 ## Frameworks
 
-| Composant | Licence | Rôle | Source |
+| Component | License | Role | Source |
 |---|---|---|---|
-| JUCE 8.0.4 | **AGPLv3** (option open-source retenue) | framework plugin/UI/audio | https://github.com/juce-framework/JUCE (tag 8.0.4) |
-| VST3 SDK (embarqué dans JUCE) | **GPLv3** (option open-source de la double licence Steinberg) | format VST3 | https://github.com/steinbergmedia/vst3sdk |
-| AudioUnit SDK (embarqué dans JUCE) | Apache-2.0 | format AU | https://github.com/apple/AudioUnitSDK |
+| JUCE 8.0.4 | **AGPLv3** (open-source option chosen) | plugin/UI/audio framework | https://github.com/juce-framework/JUCE (tag 8.0.4) |
+| VST3 SDK (bundled in JUCE) | **GPLv3** (open-source option of Steinberg's dual license) | VST3 format | https://github.com/steinbergmedia/vst3sdk |
+| AudioUnit SDK (bundled in JUCE) | Apache-2.0 | AU format | https://github.com/apple/AudioUnitSDK |
 
-JUCE embarque ses propres dépendances (HarfBuzz, zlib, FLAC, Ogg/Vorbis, etc.) ;
-leurs notices sont dans l'arbre JUCE (`modules/*/` licences respectives).
+JUCE bundles its own dependencies (HarfBuzz, zlib, FLAC, Ogg/Vorbis, etc.);
+their notices are in the JUCE tree (`modules/*/` respective licenses).
 
-## Moteur TTS du module VOICE (archive statique sherpa-onnx v1.13.4)
+## VOICE module TTS engine (sherpa-onnx v1.13.4 static archive)
 
-Récupérée au configure par CMake (SHA256 épinglé) depuis
-https://github.com/k2-fsa/sherpa-onnx/releases/tag/v1.13.4 — le code source
-exact correspondant est le tag `v1.13.4` de ce dépôt (qui vendorise ou épingle
-chacune des bibliothèques ci-dessous).
+Fetched at configure time by CMake (pinned SHA256) from
+https://github.com/k2-fsa/sherpa-onnx/releases/tag/v1.13.4 — the exact
+corresponding source code is the `v1.13.4` tag of that repository (which vendors
+or pins each of the libraries below).
 
-| Composant | Licence | Rôle |
+| Component | License | Role |
 |---|---|---|
-| sherpa-onnx (core, c-api, fst, fstfar, kaldifst) | Apache-2.0 | runtime TTS |
-| onnxruntime | MIT | inférence des modèles VITS |
-| **espeak-ng** | **GPLv3-or-later** | phonémisation des voix Piper — **c'est ce composant qui place l'œuvre combinée sous GPLv3** |
-| piper-phonemize (+ libucd) | MIT | pont texte→phonèmes Piper |
+| sherpa-onnx (core, c-api, fst, fstfar, kaldifst) | Apache-2.0 | TTS runtime |
+| onnxruntime | MIT | VITS model inference |
+| **espeak-ng** | **GPLv3-or-later** | phonemization of the Piper voices — **this is the component that places the combined work under GPLv3** |
+| piper-phonemize (+ libucd) | MIT | Piper text→phoneme bridge |
 | kaldi-native-fbank, kaldi-decoder | Apache-2.0 | DSP/decoding |
-| ssentencepiece (simple-sentencepiece, k2-fsa) | Apache-2.0 | tokenisation |
+| ssentencepiece (simple-sentencepiece, k2-fsa) | Apache-2.0 | tokenization |
 | KissFFT (`libkissfft-float`) | BSD-3-Clause | FFT |
 
-## Vendorisé dans l'arbre
+## Vendored in the tree
 
-| Composant | Licence | Emplacement |
+| Component | License | Location |
 |---|---|---|
 | KissFFT | BSD-3-Clause | `vst/source/synthesis/luxsynth/kissfft/` |
 
-## Voix Piper embarquées (distribuées dans les bundles)
+## Embedded Piper voices (distributed in the bundles)
 
-Les bundles du plugin embarquent dans `Contents/Resources/piper_voices/` les
-voix listées par l'option CMake `SP3CTRA_EMBED_VOICES`. Par défaut :
+The plugin bundles embed, in `Contents/Resources/piper_voices/`, the voices
+listed by the CMake option `SP3CTRA_EMBED_VOICES`. By default:
 
-| Voix | Langue | Dataset / licence |
+| Voice | Language | Dataset / license |
 |---|---|---|
-| `vits-piper-fr_FR-siwis-medium` | fr-FR | SIWIS — **CC-BY 4.0** (attribution : datashare.is.ed.ac.uk/handle/10283/2353) |
-| `vits-piper-en_US-ljspeech-medium` | en-US | LJ Speech (keithito.com/LJ-Speech-Dataset) — **domaine public** |
+| `vits-piper-fr_FR-siwis-medium` | fr-FR | SIWIS — **CC-BY 4.0** (attribution: datashare.is.ed.ac.uk/handle/10283/2353) |
+| `vits-piper-en_US-ljspeech-medium` | en-US | LJ Speech (keithito.com/LJ-Speech-Dataset) — **public domain** |
 
-Le `MODEL_CARD` de chaque voix embarquée est livré à côté du modèle dans les
-Resources. ⚠ Avant d'ajouter une voix à `SP3CTRA_EMBED_VOICES`, vérifier son
-`MODEL_CARD` : certaines voix ont des licences de dataset restrictives (ex.
-`en_US-lessac` = licence Blizzard 2013 — ne PAS l'embarquer) ; `fr_FR-tom` est
-AGPLv3 (acceptable dans cette distribution copyleft, à documenter ici si ajouté).
+The `MODEL_CARD` of each embedded voice is shipped alongside the model in the
+Resources. ⚠ Before adding a voice to `SP3CTRA_EMBED_VOICES`, check its
+`MODEL_CARD`: some voices have restrictive dataset licenses (e.g.
+`en_US-lessac` = Blizzard 2013 license — do NOT embed it); `fr_FR-tom` is
+AGPLv3 (acceptable in this copyleft distribution, to be documented here if
+added).
 
-## Voix Piper externes (NON distribuées)
+## External Piper voices (NOT distributed)
 
-Les voix supplémentaires restent hors binaire : l'utilisateur les télécharge
-(`scripts/install_piper_voices.sh`) dans son dossier externe (configurable
-depuis la page VOICE). Leur licence (MODEL_CARD) relève de son propre usage.
+Additional voices stay outside the binary: the user downloads them
+(`scripts/install_piper_voices.sh`) into their external folder (configurable
+from the VOICE page). Their license (MODEL_CARD) governs their own use.
 
-## Source correspondante (obligation GPLv3 §6)
+## Corresponding source (GPLv3 §6 obligation)
 
-Chaque release binaire doit donner accès à la « Corresponding Source » :
-- le tag git de ce dépôt correspondant à la release ;
-- l'archive source `sherpa-onnx v1.13.4` (inclut espeak-ng) — en conserver une
-  copie jointe à la release (ne pas dépendre uniquement de la disponibilité
-  future de l'upstream).
+Every binary release must provide access to the "Corresponding Source":
+- the git tag of this repository matching the release;
+- the `sherpa-onnx v1.13.4` source archive (includes espeak-ng) — keep a copy
+  attached to the release (do not rely solely on upstream's future
+  availability).

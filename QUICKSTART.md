@@ -1,37 +1,37 @@
-# 🚀 Installation Rapide - Sp3ctra VST
+# 🚀 Quick Start - Sp3ctra VST
 
-## Installation Sans Compilation (Utilisateurs)
+## Install Without Compiling (Users)
 
 ```bash
-# 1. Cloner le dépôt
+# 1. Clone the repository
 git clone git@github.com:Ondulab/Sp3ctra_VST.git
 cd Sp3ctra_VST
 
-# 2. Installer les plugins
+# 2. Install the plugins
 ./scripts/install_vst.sh
 
-# 3. Relancer votre DAW et scanner les plugins
-# Cherchez "Sp3ctra" par "Ondulab"
+# 3. Restart your DAW and scan for plugins
+# Look for "Sp3ctra" by "Ondulab"
 ```
 
-**C'est tout !** Aucune compilation nécessaire. ✨
+**That's it!** No compilation required. ✨
 
 ---
 
-## Compilation et Distribution (Développeurs)
+## Building and Distribution (Developers)
 
-### 1. Compiler en mode Release
+### 1. Build in Release mode
 
 ```bash
 ./scripts/build_vst.sh clean
 ```
 
-Cette commande :
-- ✅ Compile VST3, AU et Standalone
-- ✅ Crée automatiquement des archives ZIP dans `prebuilt/`
-- ✅ Prépare les archives pour distribution Git
+This command:
+- ✅ Builds VST3, AU and Standalone
+- ✅ Automatically creates ZIP archives in `prebuilt/`
+- ✅ Prepares the archives for Git distribution
 
-### 2. Commiter les binaires
+### 2. Commit the binaries
 
 ```bash
 git add prebuilt/
@@ -39,7 +39,7 @@ git commit -m "chore: update prebuilt binaries v1.0.0"
 git push
 ```
 
-### 3. Les utilisateurs peuvent maintenant installer
+### 3. Users can now install
 
 ```bash
 git pull
@@ -48,22 +48,22 @@ git pull
 
 ---
 
-## Options Avancées
+## Advanced Options
 
-### Installation sélective
+### Selective install
 
 ```bash
-./scripts/install_vst.sh vst3        # VST3 uniquement
-./scripts/install_vst.sh au          # AU uniquement
-./scripts/install_vst.sh standalone  # Info Standalone
+./scripts/install_vst.sh vst3        # VST3 only
+./scripts/install_vst.sh au          # AU only
+./scripts/install_vst.sh standalone  # Standalone info
 ```
 
-### Build et test immédiat
+### Build and test immediately
 
 ```bash
-./scripts/build_vst.sh run           # Build + Lance standalone
-./scripts/build_vst.sh install       # Build + Installe
-./scripts/build_vst.sh debug run     # Debug + Lance
+./scripts/build_vst.sh run           # Build + launch standalone
+./scripts/build_vst.sh install       # Build + install
+./scripts/build_vst.sh debug run     # Debug + launch
 ```
 
 ---
@@ -72,7 +72,7 @@ git pull
 
 ```
 Sp3ctra_VST/
-├── prebuilt/              # Binaires pré-compilés (trackés par Git)
+├── prebuilt/              # Pre-compiled binaries (tracked by Git)
 │   ├── VST3/
 │   │   └── Sp3ctra.vst3/
 │   ├── AU/
@@ -80,21 +80,21 @@ Sp3ctra_VST/
 │   └── Standalone/
 │       └── Sp3ctra.app/
 ├── scripts/
-│   ├── build_vst.sh       # Compilation
+│   ├── build_vst.sh       # Building
 │   └── install_vst.sh     # Installation
-└── DISTRIBUTION_GUIDE.md  # Guide complet
+└── DISTRIBUTION_GUIDE.md  # Full guide
 ```
 
 ---
 
-## Documentation Complète
+## Full Documentation
 
-- **[DISTRIBUTION_GUIDE.md](DISTRIBUTION_GUIDE.md)** - Guide détaillé de distribution
-- **[README.md](README.md)** - Documentation principale du projet
-- **[prebuilt/README.md](prebuilt/README.md)** - Info sur les binaires
+- **[DISTRIBUTION_GUIDE.md](DISTRIBUTION_GUIDE.md)** - Detailed distribution guide
+- **[README.md](README.md)** - Main project documentation
+- **[prebuilt/README.md](prebuilt/README.md)** - Info about the binaries
 
 ---
 
 ## Support
 
-Pour toute question : https://github.com/Ondulab/Sp3ctra_VST/issues
+For any questions: https://github.com/Ondulab/Sp3ctra_VST/issues
