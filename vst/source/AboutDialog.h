@@ -1,8 +1,9 @@
 /**
  * @file AboutDialog.h
  * @brief "About Sp3ctra" overlay — logo, tagline, version, license, credits,
- *        the Ondulab links (website / donate / bug report) and the entry to
- *        the in-app software update (UpdateDialog).
+ *        the project links (source / releases / issues on GitHub), the entry
+ *        to the in-app software update (UpdateDialog) and to the credits
+ *        overlay (CreditsDialog).
  *
  * Same overlay idiom as Sp3ctraDialog: parented to the top-level component,
  * centred, self-deleting on close. Header-only, no separate TU.
@@ -15,6 +16,7 @@
 #include "Sp3ctraVersion.h"
 #include "OndulabLinks.h"
 #include "UpdateDialog.h"
+#include "CreditsDialog.h"
 
 class AboutDialog : public juce::Component
 {
@@ -26,7 +28,7 @@ public:
         if (host == nullptr) host = parent;
 
         auto* dlg = new AboutDialog();
-        dlg->setSize(420, 320);
+        dlg->setSize(420, 340);
         host->addAndMakeVisible(dlg);
         dlg->centreOnParent();
         dlg->toFront(true);
@@ -62,16 +64,17 @@ public:
         g.drawFittedText(
             juce::String::fromUTF8(
                 "© Ondulab — free software under the GNU GPL v3 (or later) license.\n"
-                "Born within Réso-Nance Numérique.\n"
-                "Partners: Réso-Nance Numérique · Universcience · Devisubox"),
-            24, 98, getWidth() - 48, 54, juce::Justification::topLeft, 4);
+                "Made with ♥ in Marseille.\n"
+                "Thanks to Réso-Nance Numérique, Universcience, Devisubox —\n"
+                "and to everyone drawing sound with Sp3ctra."),
+            24, 98, getWidth() - 48, 70, juce::Justification::topLeft, 5);
     }
 
     void resized() override
     {
         // Link rows (left) + CLOSE button (bottom right).
         const int x = 24, w = getWidth() - 48, rowH = 20;
-        int y = 162;
+        int y = 174;
         for (auto* l : links_)
         {
             l->setBounds(x, y, w, rowH);
@@ -95,28 +98,36 @@ private:
                          juce::Colour(0xff88aaff));
             addAndMakeVisible(l);
         };
-        addLink(juce::String::fromUTF8("Website — ondulab.com"), OndulabLinks::kWebsiteUrl);
-
-        // In-app update replaces the old "Downloads" page link: empty URL is
-        // not well-formed so HyperlinkButton::clicked() launches nothing and
-        // only onClick runs.
-        auto* upd = links_.add(new juce::HyperlinkButton(
-            juce::String::fromUTF8("Software update…"), juce::URL()));
-        upd->setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings), false,
-                     juce::Justification::centredLeft);
-        upd->setColour(juce::HyperlinkButton::textColourId, juce::Colour(0xff88aaff));
-        upd->onClick = [this]
+        // Local-action rows (update / credits overlays): empty URL is not
+        // well-formed so HyperlinkButton::clicked() launches nothing and only
+        // onClick runs.
+        auto addAction = [this](const juce::String& text,
+                                std::function<void(juce::Component*)> action)
         {
-            auto* host = getParentComponent();
-            dismiss();
-            UpdateDialog::show(host);
+            auto* l = links_.add(new juce::HyperlinkButton(text, juce::URL()));
+            l->setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings), false,
+                       juce::Justification::centredLeft);
+            l->setColour(juce::HyperlinkButton::textColourId,
+                         juce::Colour(0xff88aaff));
+            l->onClick = [this, action]
+            {
+                auto* host = getParentComponent();
+                dismiss();
+                action(host);
+            };
+            addAndMakeVisible(l);
         };
-        addAndMakeVisible(upd);
 
-        addLink(juce::String::fromUTF8("Donate ♥ (PayPal)"), OndulabLinks::kDonateUrl);
-        addLink(juce::String::fromUTF8("Report a bug — contact@ondulab.com"),
-                OndulabLinks::bugReportUrl());
-        addLink(juce::String::fromUTF8("GNU GPL v3 License"), OndulabLinks::kLicenseUrl);
+        addAction(juce::String::fromUTF8("Software update…"),
+                  [](juce::Component* host) { UpdateDialog::show(host); });
+        addLink(juce::String::fromUTF8("Source code — GitHub"),
+                OndulabLinks::kSourceUrl);
+        addLink(juce::String::fromUTF8("Release notes"),
+                OndulabLinks::kReleasesUrl);
+        addLink(juce::String::fromUTF8("Report an issue — GitHub"),
+                OndulabLinks::kIssuesUrl);
+        addAction(juce::String::fromUTF8("Credits & licenses"),
+                  [](juce::Component* host) { CreditsDialog::show(host); });
 
         closeBtn_.setButtonText("CLOSE");
         closeBtn_.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xff242424));

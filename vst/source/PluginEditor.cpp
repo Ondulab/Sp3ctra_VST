@@ -727,7 +727,8 @@ void Sp3ctraAudioProcessorEditor::showAboutMenu()
     m.addItem(3, updateLabel);
     m.addItem(4, juce::String::fromUTF8("Donate ♥ (PayPal)"));
     m.addSeparator();
-    m.addItem(5, juce::String::fromUTF8("Report a bug…"));
+    m.addItem(5, juce::String::fromUTF8("Report an issue — GitHub"));
+    m.addItem(7, juce::String::fromUTF8("Contact — contact@ondulab.com"));
     m.addItem(6, "License (GNU GPL v3)");
 
     m.showMenuAsync(
@@ -745,8 +746,9 @@ void Sp3ctraAudioProcessorEditor::showAboutMenu()
                 case 2: open(OndulabLinks::kWebsiteUrl);   break;
                 case 3: UpdateDialog::show(self); break;
                 case 4: open(OndulabLinks::kDonateUrl);    break;
-                case 5: open(OndulabLinks::bugReportUrl()); break;
+                case 5: open(OndulabLinks::kIssuesUrl);    break;
                 case 6: open(OndulabLinks::kLicenseUrl);   break;
+                case 7: open(OndulabLinks::contactUrl());  break;
             }
         });
 }
