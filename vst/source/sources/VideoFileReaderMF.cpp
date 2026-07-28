@@ -198,7 +198,11 @@ bool VideoFileReader::pullFrame (juce::Image& target)
 
     const int w = impl->width, h = impl->height;
     if (target.getWidth() != w || target.getHeight() != h || ! target.isValid())
-        target = juce::Image (juce::Image::ARGB, w, h, false);
+        // SoftwareImageType: written row-by-row from the MediaSourceService
+        // thread — JUCE 8's default Windows images are Direct2D/GPU bitmaps,
+        // whose BitmapData access off the message thread crashes (AV in
+        // readFromDirect2DBitmap).
+        target = juce::Image (juce::Image::ARGB, w, h, false, juce::SoftwareImageType());
 
     // MF RGB32 memory order is B,G,R,A — identical to JUCE ARGB on little-endian
     // Windows, so rows copy verbatim. A negative default stride means bottom-up.

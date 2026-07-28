@@ -208,7 +208,10 @@ juce::Image VideoMixerComponent::Renderer::acquireTarget(int w, int h)
             if (im.getReferenceCount() > 1)                 continue;  // being painted
         }
         if (! im.isValid() || im.getWidth() != w || im.getHeight() != h)
-            im = juce::Image(juce::Image::ARGB, w, h, true);
+            // SoftwareImageType: peint/lu sur le thread de rendu VIDEO MIX —
+            // les images Direct2D (défaut JUCE 8 Windows) y crashent (AV
+            // readFromDirect2DBitmap).
+            im = juce::Image(juce::Image::ARGB, w, h, true, juce::SoftwareImageType());
         return im;
     }
     return {};
@@ -336,7 +339,7 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
             if (rawOf(vsParam(l.slot, "enabled"), 1.0f) < 0.5f)
                 continue;
             if (! l.scratch.isValid() || l.scratch.getWidth() != W || l.scratch.getHeight() != H)
-                l.scratch = juce::Image(juce::Image::ARGB, W, H, true);
+                l.scratch = juce::Image(juce::Image::ARGB, W, H, true, juce::SoftwareImageType());
             { juce::Graphics gs(l.scratch); l.core->drawWarp(gs, W, H); }
             blendLayer(target, l.scratch,
                        rawOf(vsMixParam(l.slot, "level"), 1.0f),

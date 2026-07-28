@@ -559,10 +559,13 @@ struct CameraSourceEngine::FrameListener : public juce::CameraDevice::Listener
 
     void imageReceived(const juce::Image& image) override
     {
-        // The macOS implementation hands out a fresh Image per frame, so the
-        // ref-counted copy is safe to keep across the callback.
+        // Force a software copy at the entry point: on Windows the camera can
+        // hand out Direct2D/GPU-backed images whose BitmapData access from the
+        // MediaSourceService thread crashes (JUCE 8 default image type), and
+        // rescaled() preserves the source type. Software images are safe on
+        // any thread; on macOS this is a cheap ref-count-preserving copy path.
         std::lock_guard<std::mutex> lk(owner.frameMutex_);
-        owner.lastFrame_ = image;
+        owner.lastFrame_ = juce::SoftwareImageType().convert(image);
         owner.newFrame_.store(true, std::memory_order_release);
     }
 

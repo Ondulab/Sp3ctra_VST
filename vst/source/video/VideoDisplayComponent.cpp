@@ -222,6 +222,8 @@ void VideoDisplayComponent::paint(juce::Graphics& g)
         apvts.getRawParameterValue("videoScrollFade")->load());
 
     if (warpBuf_.getWidth() != bufW_ || warpBuf_.getHeight() != compH_)
+        // SoftwareImageType: ce buffer est écrit pixel par pixel hors message
+        // thread — les images Direct2D (défaut JUCE 8 Windows) y crashent.
         warpBuf_ = juce::Image(juce::Image::RGB, juce::jmax(1, bufW_),
                                juce::jmax(1, compH_), false, juce::SoftwareImageType());
 
