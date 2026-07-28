@@ -282,7 +282,9 @@ void *synth_persistent_worker_thread(void *arg) {
     if (AvSetMmThreadCharacteristicsW(L"Pro Audio", &mmcss_task_index) != NULL) {
       log_startup_detail("SYNTH", "Worker %d: MMCSS Pro Audio joined", worker->thread_id);
     }
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    // ABOVE_NORMAL, not TIME_CRITICAL: a whole pool at TIME_CRITICAL starves
+    // the WASAPI feeder (field traces 2026-07-28) — MMCSS already elevates.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
   }
 #endif
 

@@ -73,7 +73,9 @@ public:
                 log_startup_detail("LUXSYNTH", "MMCSS Pro Audio joined");
             else
                 log_warning("LUXSYNTH", "MMCSS join failed");
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+            // HIGHEST, not TIME_CRITICAL: only the audio pacer thread gets
+            // TIME_CRITICAL — see synth_luxstral_threading_rt.c rationale.
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
         }
 #endif
 

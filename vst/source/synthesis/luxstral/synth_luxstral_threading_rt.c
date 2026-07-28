@@ -277,16 +277,18 @@ int synth_set_rt_priority(pthread_t thread, int priority) {
   return -1;
 
 #elif defined(_WIN32)
-  // Windows: TIME_CRITICAL priority from outside; the worker itself joins the
-  // "Pro Audio" MMCSS class on startup (must be done from within the thread —
-  // see synth_persistent_worker_thread), which is what actually buys low
-  // scheduling latency on Windows 10+.
+  // Windows: ABOVE_NORMAL for the workers, NOT TIME_CRITICAL. Field traces
+  // (12-core desktop + laptop, 2026-07-28) showed the whole pool at
+  // TIME_CRITICAL starving the WASAPI feeder and the system: load ratcheted
+  // to 150%+ of budget with stale re-outs. The MMCSS "Pro Audio" class the
+  // worker joins on startup already grants elevated scheduling; only the
+  // single audio pacer thread (AudioProcessingThread) keeps TIME_CRITICAL.
   (void)priority;
-  if (SetThreadPriority(thread, THREAD_PRIORITY_TIME_CRITICAL)) {
-    log_startup_detail("SYNTH_RT", "Thread priority set to TIME_CRITICAL");
+  if (SetThreadPriority(thread, THREAD_PRIORITY_ABOVE_NORMAL)) {
+    log_startup_detail("SYNTH_RT", "Worker priority set to ABOVE_NORMAL (+MMCSS)");
     return 0;
   }
-  log_warning("SYNTH_RT", "SetThreadPriority(TIME_CRITICAL) failed (error %lu)",
+  log_warning("SYNTH_RT", "SetThreadPriority(ABOVE_NORMAL) failed (error %lu)",
               (unsigned long)GetLastError());
   return -1;
 

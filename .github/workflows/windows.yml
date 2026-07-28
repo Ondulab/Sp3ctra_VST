@@ -87,3 +87,14 @@ jobs:
           name: Sp3ctra-Standalone-Windows-x64
           path: build/Sp3ctraVST_artefacts/Release/Standalone/
           if-no-files-found: error
+
+      # PDB symbols of THIS exact build — required to symbolicate crash dumps
+      # (Event Viewer offsets / LocalDumps .dmp) from the field.
+      - name: Upload PDB symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sp3ctra-PDB-Windows-x64
+          path: |
+            build/Sp3ctraVST_artefacts/**/*.pdb
+            build/CMakeFiles/**/*.pdb
+          if-no-files-found: error

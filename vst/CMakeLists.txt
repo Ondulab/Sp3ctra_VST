@@ -374,6 +374,7 @@ if(WIN32)
     target_link_libraries(Sp3ctraVST PRIVATE
         ws2_32     # Winsock2 (UDP device stream)
         avrt       # MMCSS "Pro Audio" scheduling for RT threads
+        winmm      # timeBeginPeriod(1) — 1 ms Sleep granularity (Sp3ctraSharedCore)
         mfplat      # Media Foundation — VIDEO file source (VideoFileReaderMF)
         mfreadwrite
         mfuuid

@@ -1,6 +1,11 @@
 #include "Sp3ctraSharedCore.h"
 #include "LuxSynthProcessingThread.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#include <timeapi.h> /* timeBeginPeriod — link winmm */
+#endif
+
 #include <juce_core/juce_core.h>
 
 extern "C"
@@ -31,6 +36,13 @@ std::mutex                       Sp3ctraSharedCore::s_mutex;
 Sp3ctraSharedCore::Sp3ctraSharedCore()
 {
     log_info("SHARED", "Sp3ctraSharedCore: Constructor — creating shared resource owner");
+#ifdef _WIN32
+    // Windows default timer granularity is ~15.6 ms, so every Sleep()-based
+    // backoff in the RT handoffs (usleep→Sleep) overshoots by up to 15 ms and
+    // the producer misses whole audio blocks ("stale re-out" climbing in the
+    // profiler). 1 ms granularity for the lifetime of the shared core.
+    timeBeginPeriod(1);
+#endif
     core = std::make_unique<Sp3ctraCore>();
 }
 
@@ -38,6 +50,9 @@ Sp3ctraSharedCore::~Sp3ctraSharedCore()
 {
     log_info("SHARED", "Sp3ctraSharedCore: Destructor — last instance released, tearing down");
     stopThreads();
+#ifdef _WIN32
+    timeEndPeriod(1); /* pairs with timeBeginPeriod in the constructor */
+#endif
     log_info("SHARED", "Sp3ctraSharedCore: Destructor complete");
 }
 
