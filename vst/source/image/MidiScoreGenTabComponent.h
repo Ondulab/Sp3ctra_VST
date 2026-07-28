@@ -33,6 +33,7 @@
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
 #include "../IconPaths.h"
+#include "../licensing/ActivationDialog.h"
 #include "MidiScoreGenRenderer.h"
 
 class MidiScoreGenTabComponent : public juce::Component,
@@ -2238,6 +2239,8 @@ private:
     // whole strip — with the classic numbered every-page export as fallback.
     void exportNow()
     {
+        if (LicenseGate::blockIfDemo(this, "Export image"))
+            return;
         if (exportJob_ != nullptr)
             return;   // an export is already running — the button shows it
         if (! data.ok || data.notes.empty())

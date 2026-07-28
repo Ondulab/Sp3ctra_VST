@@ -6,6 +6,7 @@
 #include "Sp3ctraDialog.h"   // session-bar prompts (name input / confirm)
 #include "AppUpdater.h"
 #include "UpdateDialog.h"
+#include "licensing/ActivationDialog.h"
 
 //==============================================================================
 Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& p)
@@ -316,6 +317,24 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         sessions != nullptr && sessions->isStandalone())
         AppUpdater::getInstance()->startupCheck();
 
+    // License: silent weekly revalidation (same standalone-only network policy
+    // as the update check) + the once-per-process demo reminder, delayed so it
+    // appears over a settled UI.
+    if (auto* sessions = audioProcessor.sessions();
+        sessions != nullptr && sessions->isStandalone())
+        LicenseManager::getInstance()->startupValidate();
+    // The nag flag is consumed INSIDE the lambda: if this editor is torn down
+    // before the timer fires (session-restore rebuild), the next editor's
+    // timer still shows the reminder instead of losing it to a dead pointer.
+    if (! LicenseManager::isLicensed())
+        juce::Timer::callAfterDelay(1500,
+            [safe = juce::Component::SafePointer<Sp3ctraAudioProcessorEditor>(this)]
+            {
+                if (safe != nullptr && ! LicenseManager::isLicensed()
+                    && LicenseManager::getInstance()->shouldShowStartupNag())
+                    ActivationDialog::show(safe.getComponent());
+            });
+
     // ── Restore persisted layout (survives session reload) ────────────────────
     auto& state = apvts.state;
     zone2Width = (int) state.getProperty("zone2W", kZone2DefaultW);
@@ -565,6 +584,8 @@ void Sp3ctraAudioProcessorEditor::showMidiMenu()
 //==============================================================================
 void Sp3ctraAudioProcessorEditor::exportMidiMappingsFlow()
 {
+    if (LicenseGate::blockIfDemo(this, "Export MIDI mappings"))
+        return;
     auto* s = audioProcessor.sessions();
     const auto dir = s->startDirFor(
         PathKeys::midiMap,
@@ -722,6 +743,9 @@ void Sp3ctraAudioProcessorEditor::showAboutMenu()
     juce::PopupMenu m;
     m.addSectionHeader("Sp3ctra v" SP3CTRA_VERSION_STRING);
     m.addItem(1, juce::String::fromUTF8("About Sp3ctra…"));
+    m.addItem(8, LicenseManager::isLicensed()
+                     ? juce::String::fromUTF8("License — full version…")
+                     : juce::String::fromUTF8("Activate license… (demo)"));
     m.addSeparator();
     m.addItem(2, juce::String::fromUTF8("Website — ondulab.com"));
     m.addItem(3, updateLabel);
@@ -749,6 +773,7 @@ void Sp3ctraAudioProcessorEditor::showAboutMenu()
                 case 5: open(OndulabLinks::kIssuesUrl);    break;
                 case 6: open(OndulabLinks::kLicenseUrl);   break;
                 case 7: open(OndulabLinks::contactUrl());  break;
+                case 8: ActivationDialog::show(self);      break;
             }
         });
 }
@@ -770,6 +795,8 @@ void Sp3ctraAudioProcessorEditor::refreshUpdateBadge()
 
 void Sp3ctraAudioProcessorEditor::runSessionCreateFlow(bool saveAs)
 {
+    if (LicenseGate::blockIfDemo(this, saveAs ? "Save session as" : "New session"))
+        return;
     auto* s = audioProcessor.sessions();
     if (s == nullptr) return;
 

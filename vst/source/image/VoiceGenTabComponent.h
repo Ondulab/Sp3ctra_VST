@@ -29,6 +29,7 @@
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
 #include "../IconPaths.h"
+#include "../licensing/ActivationDialog.h"
 #include "ScoreGenRenderer.h"
 #include "ScoreEqComponent.h"
 #include "WaveformSelectorComponent.h"
@@ -1520,6 +1521,8 @@ private:
     // even if EQ/generate swaps the member.
     void exportNow()
     {
+        if (LicenseGate::blockIfDemo(this, "Export image"))
+            return;
         if (! generatedImage.isValid() || exportBusy_)
             return;
         const bool asPng = exportAsPng_;

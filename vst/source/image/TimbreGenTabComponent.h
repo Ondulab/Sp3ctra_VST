@@ -27,6 +27,7 @@
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
 #include "../IconPaths.h"
+#include "../licensing/ActivationDialog.h"
 #include "TimbreGenRenderer.h"
 
 class TimbreGenTabComponent : public juce::Component,
@@ -1208,6 +1209,8 @@ private:
     // travelling sheen meanwhile. Format (PNG/JPEG) comes from the SETUP face.
     void exportNow()
     {
+        if (LicenseGate::blockIfDemo(this, "Export image"))
+            return;
         if (exportBusy_)
             return;
         const bool asPng = exportAsPng_;

@@ -2,6 +2,7 @@
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "../Sp3ctraDialog.h"     // destructive-action confirmations
+#include "../licensing/ActivationDialog.h"
 #include "SamplerMidiTargets.h"   // synthetic target ids for MIDI-Learn
 
 // Loop row = THREE composable pictogram toggles (forward / backward / repeat),
@@ -563,6 +564,8 @@ void SlotEditorComponent::rebindMidiLearn()
 // ─────────────────────────────────────────────────────────────────────────────
 void SlotEditorComponent::saveSlotToDisk(int slot)
 {
+    if (LicenseGate::blockIfDemo(this, "Save sampler slot"))
+        return;
     auto* fs = processor.getSampler(samplerIndex_);
     if (fs == nullptr || !fs->slotHasContent(slot))
         return;

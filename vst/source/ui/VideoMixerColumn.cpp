@@ -1,4 +1,5 @@
 #include "VideoMixerColumn.h"
+#include "../licensing/ActivationDialog.h"
 
 //==============================================================================
 // MiniButton — header glyphs drawn with paths (ported from WaterfallColumnComponent).
@@ -280,6 +281,8 @@ void VideoMixerColumn::resized()
 //==============================================================================
 void VideoMixerColumn::startRecordingFlow()
 {
+    if (LicenseGate::blockIfDemo(this, "Record VIDEO MIX"))
+        return;
     auto* sessions = processor_.sessions();
     const auto stamp = juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S");
 

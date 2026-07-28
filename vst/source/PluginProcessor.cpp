@@ -2,6 +2,7 @@
 #include "PluginEditor.h"
 #include "session/SessionManager.h"   // working-session (project) persistence
 #include "session/Sp3sImporter.h"     // one-shot legacy .sp3s migration
+#include "licensing/LicenseManager.h" // demo contract: no state into DAW projects
 #include <juce_audio_formats/juce_audio_formats.h>   // SCORE source-audio preview
 #include <iterator>                                  // std::size (insert bank tables)
 #include "sources/MediaSourceEngines.h"              // M9 — IMAGE/VIDEO/CAMERA engines
@@ -3631,6 +3632,17 @@ void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
         return;
     }
 
+    // Demo contract in a DAW: the host saves its project regardless, so the
+    // blob is a stub — reopening the project brings the plugin back virgin.
+    // (The standalone equivalent lives in SessionManager::saveStateNow.)
+    if (! LicenseManager::isLicensed())
+    {
+        juce::XmlElement stub("Sp3ctraDemo");
+        copyXmlToBinary(stub, destData);
+        log_info("VST", "Demo: plugin state NOT saved to the DAW project");
+        return;
+    }
+
     auto state = captureFullState(/*embedBanks*/ true);
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
 
@@ -3655,6 +3667,14 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
                 juce::File(xml->getStringAttribute("activeSessionDir")));
         else
             sessions_->migrateLegacyBlobIntoGlobal(std::move(xml));
+        return;
+    }
+
+    // A demo-era project carries only the stub (see getStateInformation):
+    // keep the defaults silently — this is expected, not a corrupt blob.
+    if (xml != nullptr && xml->hasTagName("Sp3ctraDemo"))
+    {
+        log_info("VST", "Demo state stub in the DAW project — nothing to restore");
         return;
     }
 

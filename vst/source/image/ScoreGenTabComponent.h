@@ -24,6 +24,7 @@
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
 #include "../IconPaths.h"
+#include "../licensing/ActivationDialog.h"
 #include "ScoreGenThread.h"
 #include "ScoreGenRenderer.h"
 #include "ScoreEqComponent.h"
@@ -1376,6 +1377,8 @@ private:
     // the member.
     void exportNow()
     {
+        if (LicenseGate::blockIfDemo(this, "Export image"))
+            return;
         if (! generatedImage.isValid() || exportBusy_)
             return;
         const bool asPng = (bool) processor.getAPVTS().state

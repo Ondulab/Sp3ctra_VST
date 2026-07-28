@@ -134,6 +134,9 @@ target_sources(Sp3ctraVST
         source/AppUpdater.cpp
         source/AppUpdater.h
         source/UpdateDialog.h
+        source/licensing/LicenseManager.cpp
+        source/licensing/LicenseManager.h
+        source/licensing/ActivationDialog.h
         source/OndulabLinks.h
         source/CisVisualizerComponent.cpp
         source/CisVisualizerComponent.h

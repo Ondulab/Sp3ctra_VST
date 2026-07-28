@@ -1,6 +1,7 @@
 #include "SessionManager.h"
 #include "Sp3ctraPaths.h"
 #include "../PluginProcessor.h"
+#include "../licensing/LicenseManager.h"
 #include "../utils/logger.h"
 
 //== Directory layout =========================================================
@@ -235,6 +236,12 @@ bool SessionManager::loadBanksFrom(const juce::File& dir)
 
 void SessionManager::saveStateNow()
 {
+    // Demo contract: the session NEVER persists — the app relaunches as the
+    // user last saved it while licensed (or virgin). Loading stays allowed.
+    // The legacy-blob migration is intentionally NOT behind this gate (it
+    // writes project.sp3ctra directly): rescuing pre-session work is not
+    // "saving new work".
+    if (! LicenseManager::isLicensed()) return;
     if (saving_) return;
     const juce::ScopedValueSetter<bool> guard(saving_, true);
     ensureSkeleton(sessionDir_);
@@ -248,6 +255,7 @@ void SessionManager::saveStateNow()
 
 void SessionManager::saveBanksNow()
 {
+    if (! LicenseManager::isLicensed()) return;   // demo — see saveStateNow
     if (saving_) return;
     const juce::ScopedValueSetter<bool> guard(saving_, true);
     ensureSkeleton(sessionDir_);
@@ -337,6 +345,7 @@ juce::ValueTree SessionManager::makeStandaloneRefState()
 //== User actions =============================================================
 bool SessionManager::newSession(const juce::File& parentDir, const juce::String& name)
 {
+    if (! LicenseManager::isLicensed()) return false;   // demo — UI gates first
     const juce::File dir = parentDir.getChildFile(sanitizeName(name));
     if (! dir.createDirectory())
     {
@@ -365,6 +374,7 @@ bool SessionManager::openSession(const juce::File& dir)
 
 bool SessionManager::saveAs(const juce::File& parentDir, const juce::String& name)
 {
+    if (! LicenseManager::isLicensed()) return false;   // demo — UI gates first
     // Duplicate the active session's content into a new folder, then switch.
     const juce::File dir = parentDir.getChildFile(sanitizeName(name));
     if (! dir.createDirectory())
@@ -426,6 +436,7 @@ void SessionManager::markBanksDirty()
 void SessionManager::autosaveTick(juce::int64 /*nowMsIgnored*/)
 {
     if (! isStandalone() || suppressAutosave_ || saving_) return;
+    if (! LicenseManager::isLicensed()) return;   // demo — see saveStateNow
     const juce::int64 nowMs = (juce::int64) juce::Time::getMillisecondCounter();
 
     // Falling edge of "any slot recording" = a capture just finished → the

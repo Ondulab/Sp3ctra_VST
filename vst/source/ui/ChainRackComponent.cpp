@@ -3,6 +3,7 @@
 #include "../sources/MediaSourceEngines.h"   // M9 — media source LEDs
 #include "ChainPresetIO.h"                   // J4 — .sp3chain presets
 #include "../Sp3ctraDialog.h"
+#include "../licensing/ActivationDialog.h"
 
 // C engine state — read-only here (LED monitoring)
 extern "C" {
@@ -1021,6 +1022,8 @@ void ChainRackComponent::mouseUp(const juce::MouseEvent& e)
 //==============================================================================
 void ChainRackComponent::savePresetFlow(int chainIdx)
 {
+    if (LicenseGate::blockIfDemo(this, "Save chain preset"))
+        return;
     // Presets are reusable across sessions: seed from the last preset folder
     // used (default: Documents/Sp3ctra Chain Presets), not the session dir.
     const auto dir = processor.sessions()->startDirFor(
