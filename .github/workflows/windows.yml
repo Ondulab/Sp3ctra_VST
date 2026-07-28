@@ -138,7 +138,8 @@ jobs:
           Copy-Item -Recurse build/Sp3ctraVST_artefacts/Release/VST3/Sp3ctra.vst3 $vdir/Sp3ctra.vst3
           Copy-Item LICENSE, THIRD-PARTY-NOTICES.md $vdir/
           Compress-Archive -Path $vdir -DestinationPath "$vdir.zip" -Force
-          Set-Content -NoNewline latest-windows.json `
-            "{`"version`":`"$ver`",`"standalone`":`"$sdir.zip`"}"
+          # No -NoNewline: the switch is a filesystem-provider dynamic param
+          # missing on the runner's pwsh, and a trailing newline parses fine.
+          Set-Content latest-windows.json "{`"version`":`"$ver`",`"standalone`":`"$sdir.zip`"}"
           gh release upload $tag "$sdir.zip" "$vdir.zip" --clobber -R "${{ github.repository }}"
           gh release upload $tag latest-windows.json --clobber -R "${{ github.repository }}"
