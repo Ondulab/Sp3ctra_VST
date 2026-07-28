@@ -138,8 +138,17 @@ jobs:
           Copy-Item -Recurse build/Sp3ctraVST_artefacts/Release/VST3/Sp3ctra.vst3 $vdir/Sp3ctra.vst3
           Copy-Item LICENSE, THIRD-PARTY-NOTICES.md $vdir/
           Compress-Archive -Path $vdir -DestinationPath "$vdir.zip" -Force
+          # Setup exe (Inno Setup, preinstalled on the runner): Standalone +
+          # VST3 checkboxes. Zips stay: AppUpdater downloads the Standalone zip.
+          $setup = "$base-Windows-Setup-x64"
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            "/DAppVersion=$ver" `
+            "/DArtefactsDir=$PWD\build\Sp3ctraVST_artefacts\Release" `
+            "/DRepoDir=$PWD" "/DOutDir=$PWD" "/DOutName=$setup" `
+            scripts\package\windows-installer.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           # No -NoNewline: the switch is a filesystem-provider dynamic param
           # missing on the runner's pwsh, and a trailing newline parses fine.
           Set-Content latest-windows.json "{`"version`":`"$ver`",`"standalone`":`"$sdir.zip`"}"
-          gh release upload $tag "$sdir.zip" "$vdir.zip" --clobber -R "${{ github.repository }}"
+          gh release upload $tag "$sdir.zip" "$vdir.zip" "$setup.exe" --clobber -R "${{ github.repository }}"
           gh release upload $tag latest-windows.json --clobber -R "${{ github.repository }}"
