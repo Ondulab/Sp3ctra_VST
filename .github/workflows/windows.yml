@@ -18,6 +18,9 @@ on:
       - 'prebuilt/**'
   workflow_dispatch:
 
+permissions:
+  contents: write   # publish step: update the beta release assets
+
 jobs:
   build:
     runs-on: windows-latest
@@ -98,3 +101,26 @@ jobs:
             build/Sp3ctraVST_artefacts/**/*.pdb
             build/CMakeFiles/**/*.pdb
           if-no-files-found: error
+
+      # Every green master build refreshes the public beta download (constant
+      # URLs — the ondulab.com download page never needs touching). LICENSE +
+      # THIRD-PARTY-NOTICES ride inside each zip (GPLv3 checklist).
+      - name: Publish to release (master → v1.3.0-beta.1)
+        if: github.ref == 'refs/heads/master'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v1.3.0-beta.1"
+          $sdir = "Sp3ctra-1.3.0-beta-Windows-Standalone-x64"
+          New-Item -ItemType Directory -Force $sdir | Out-Null
+          Copy-Item build/Sp3ctraVST_artefacts/Release/Standalone/Sp3ctra.exe $sdir/
+          Copy-Item -Recurse build/Sp3ctraVST_artefacts/Release/Standalone/Resources $sdir/Resources
+          Copy-Item LICENSE, THIRD-PARTY-NOTICES.md $sdir/
+          Compress-Archive -Path $sdir -DestinationPath "$sdir.zip" -Force
+          $vdir = "Sp3ctra-1.3.0-beta-Windows-VST3-x64"
+          New-Item -ItemType Directory -Force $vdir | Out-Null
+          Copy-Item -Recurse build/Sp3ctraVST_artefacts/Release/VST3/Sp3ctra.vst3 $vdir/Sp3ctra.vst3
+          Copy-Item LICENSE, THIRD-PARTY-NOTICES.md $vdir/
+          Compress-Archive -Path $vdir -DestinationPath "$vdir.zip" -Force
+          gh release upload $tag "$sdir.zip" "$vdir.zip" --clobber -R "${{ github.repository }}"

@@ -13,6 +13,9 @@ on:
       - 'prebuilt/**'
   workflow_dispatch:
 
+permissions:
+  contents: write   # publish step: update the beta release assets
+
 jobs:
   build:
     runs-on: macos-latest
@@ -56,3 +59,23 @@ jobs:
           name: Sp3ctra-Standalone-macOS-arm64
           path: build/Sp3ctraVST_artefacts/Release/Standalone/
           if-no-files-found: error
+
+      # Every green master build refreshes the public beta download (constant
+      # URLs). ditto on the runner preserves bundle exec permissions — the
+      # upload-artifact zips above do NOT, hence packaging here. LICENSE +
+      # THIRD-PARTY-NOTICES ride inside each zip (GPLv3 checklist).
+      - name: Publish to release (master → v1.3.0-beta.1)
+        if: github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=v1.3.0-beta.1
+          for fmt in Standalone VST3 AU; do
+            case $fmt in Standalone) b=Sp3ctra.app;; VST3) b=Sp3ctra.vst3;; AU) b=Sp3ctra.component;; esac
+            dir="Sp3ctra-1.3.0-beta-macOS-$fmt-arm64"
+            rm -rf "$dir"; mkdir "$dir"
+            cp -R "build/Sp3ctraVST_artefacts/Release/$fmt/$b" "$dir/"
+            cp LICENSE THIRD-PARTY-NOTICES.md "$dir/"
+            ditto -c -k --keepParent "$dir" "$dir.zip"
+          done
+          gh release upload "$tag" Sp3ctra-1.3.0-beta-macOS-*.zip --clobber -R "$GITHUB_REPOSITORY"
