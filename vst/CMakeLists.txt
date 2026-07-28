@@ -383,6 +383,17 @@ if(WIN32)
         # /utf-8: sources contain UTF-8 literals & comments; /bigobj: large
         # JUCE-heavy translation units (PluginProcessor.cpp).
         target_compile_options(Sp3ctraVST PRIVATE /utf-8 /bigobj)
+        # /Z7 + /DEBUG: emit PDB symbols in Release so field crash dumps can be
+        # symbolicated (CI archives them). Debug info lives in the separate
+        # .pdb — the shipped binaries are unchanged. /OPT:REF,ICF keeps the
+        # usual Release linker dead-stripping that /DEBUG would otherwise
+        # disable.
+        foreach(_t Sp3ctraVST Sp3ctraVST_Standalone Sp3ctraVST_VST3)
+            if(TARGET ${_t})
+                target_compile_options(${_t} PRIVATE /Z7)
+                target_link_options(${_t} PRIVATE /DEBUG /OPT:REF /OPT:ICF)
+            endif()
+        endforeach()
     endif()
 endif()
 
