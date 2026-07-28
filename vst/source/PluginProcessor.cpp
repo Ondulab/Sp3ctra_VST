@@ -118,12 +118,6 @@ LoopMode loopModeFromIds(juce::AudioProcessorValueTreeState& apvts,
 }
 } // namespace
 
-// SCORE module's own loop mode (used by the automatable scorePlaying path).
-static LoopMode scoreLoopModeFromParams(juce::AudioProcessorValueTreeState& apvts)
-{
-    return loopModeFromIds(apvts, "scoreLoop", "scoreReverse");
-}
-
 //==============================================================================
 // Create parameter layout (called once during construction)
 juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::createParameterLayout()
