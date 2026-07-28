@@ -9,6 +9,8 @@
 #include "processing/AcquisitionGate.h" // "Vitesse d'acquisition" — frame-advance brake clock
 #include "ui/ChainModel.h"      // M6 Phase 2 — editable chain topology (owned here)
 #include "midi/MidiMappingEngine.h" // MIDI CC/Note → any play param (MIDI learn)
+#include "session/SessionManager.h" // working-session persistence (sessions())
+#include "session/Sp3ctraPaths.h"   // PathKeys:: + last-dir chooser memory
 #include <map>                  // chainPoolSlots_ (stable chain → pool-slot binding)
 #include <vector>               // activeVideoSlots()
 
@@ -17,6 +19,11 @@ class ImageSourceEngine;
 class VideoSourceEngine;
 class CameraSourceEngine;
 class MediaSourceService;
+class SessionManager;   // working-session (project) persistence — session/SessionManager.h
+
+// VIDEO MIX + master-audio recorder (AVAssetWriter → HEVC .mov). Owned here so
+// the RT audio tap in processBlock can feed it and it outlives the editor.
+class VideoRecorder;
 
 // C headers for RT profiling
 extern "C" {
@@ -82,7 +89,35 @@ public:
     //==============================================================================
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
-    
+
+    /** Build the COMPLETE plugin state as a ValueTree (APVTS + all non-APVTS
+     *  child trees: SCORE, SEQS, SAMPLER_SLOTS, MEDIA_SOURCES, CHAINS,
+     *  POOL_SLOTS, MIDI_MAPPINGS…). Shared by getStateInformation (host blob)
+     *  and the SessionManager (on-disk project.sp3ctra). Read-only snapshot,
+     *  safe to call on the message thread.
+     *  @p embedBanks appends a SAMPLER_BANKS child holding the recorded audio
+     *  (LuxSampler .fsmp blobs) so a DAW project is self-contained. Standalone
+     *  sessions keep the banks as sidecar files → embedBanks=false. */
+    juce::ValueTree captureFullState(bool embedBanks = false);
+
+    /** Recorded sampler audio (all engines) serialized as a SAMPLER_BANKS tree
+     *  (one binary child per engine). Used by captureFullState(true) for DAW. */
+    juce::ValueTree samplerBanksToTree();
+    /** Restore recorded sampler audio from a SAMPLER_BANKS tree (DAW path). */
+    void restoreSamplerBanksFromTree(const juce::ValueTree& banks);
+
+    /** The working-session manager (Standalone persistence). Never null after
+     *  construction; drives project.sp3ctra + sidecar banks + assets. */
+    SessionManager* sessions() const { return sessions_.get(); }
+
+    /** Apply a state tree previously produced by captureFullState(). Runs the
+     *  same staged migrations as setStateInformation, replaces the APVTS state,
+     *  then defers the heavy non-APVTS restore to
+     *  applyRestoredStateOnMessageThread. Shared by setStateInformation (host
+     *  blob) and SessionManager::loadSession (project.sp3ctra from disk).
+     *  Takes ownership of the XML element (may be null → logged failure). */
+    void applyStateXml(std::unique_ptr<juce::XmlElement> xmlState);
+
     //==============================================================================
     // AudioProcessorValueTreeState::Listener interface.
     // Dispatcher only: on the message thread it applies immediately; from the
@@ -127,19 +162,6 @@ public:
     void     requestVideoScrollClear() noexcept { videoScrollClearGen.fetch_add(1, std::memory_order_release); }
     uint32_t getVideoScrollClearGen() const noexcept { return videoScrollClearGen.load(std::memory_order_acquire); }
 
-    /** Path of the last session saved or loaded by SamplerPageComponent.
-     *  Persisted inside the APVTS state blob so the DAW project and
-     *  the Standalone app both restore the session on next launch. */
-    void           setLastSessionPath(const juce::String& p) { lastSessionPath = p; }
-    juce::String   getLastSessionPath()                const { return lastSessionPath; }
-
-    /** Optional output directory chosen by the user in the LuxSampler
-     *  settings.  When non-empty, SAVE SESSION writes the .sp3s file
-     *  (and the optional PNG/JPEG image exports) into this directory
-     *  directly, bypassing the file chooser.  Persisted in the APVTS
-     *  state blob alongside lastSessionPath. */
-    void           setSamplerOutputDir(const juce::String& p) { samplerOutputDir = p; }
-    juce::String   getSamplerOutputDir()              const { return samplerOutputDir; }
     /** Returns the inner Sp3ctraCore owned by the process-wide singleton. */
     Sp3ctraCore* getSp3ctraCore()
     {
@@ -161,6 +183,18 @@ public:
         return sharedCore && sharedCore->isReady();
     }
     LuxSampler*    getLuxSampler()    { return samplers_[0].get(); }
+
+    /** True while ANY sampler slot is actively recording. The session bank
+     *  autosave must NOT call LuxSampler::saveToFile mid-capture (it reads the
+     *  frames being written). Cheap atomic scan; message-thread safe. */
+    bool anySamplerRecording() const noexcept
+    {
+        for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+            for (int s = 0; s < kSmpSlots; ++s)
+                if (smpRecHeld[(size_t) e][s].load(std::memory_order_acquire))
+                    return true;
+        return false;
+    }
     /** Sampler engine by index (0..7 since P6). Out-of-range clamps. */
     LuxSampler*    getSampler(int i) const
     {
@@ -364,6 +398,22 @@ public:
     float meterLuxGrain() const noexcept { return meterLuxGrain_.load(std::memory_order_relaxed); }
     float meterMaster()   const noexcept { return meterMaster_  .load(std::memory_order_relaxed); }
 
+    //==========================================================================
+    // VIDEO MIX recording (macOS). The editor's VideoMixerComponent renders a
+    // fixed-resolution composite and feeds pushRecordVideoFrame(); processBlock
+    // taps the mastered stereo into pushRecordAudio-style pushAudio(). All A/V
+    // muxing happens on the recorder's own writer thread.
+    /** Begin recording a .mov. Video is locked to w×h; audio uses the current
+     *  sample rate / channel count. Returns false + fills err on failure.
+     *  Message thread. */
+    bool startVideoRecording(const juce::File& out, int w, int h, double fps,
+                             juce::String& err);
+    /** Stop + finalise the file (safe if not recording). Message thread. */
+    void stopVideoRecording();
+    bool isVideoRecording() const noexcept;
+    /** Render thread: hand the latest composite to the recorder (no-op if idle). */
+    void pushRecordVideoFrame(const juce::Image& composite, double tSeconds);
+
     /** AUDIO MIX — number of OUT sends placed per engine across all chains
      *  (deriveAndPublishChainPlan). 0 = the engine is hidden from the mixer
      *  AND its render is skipped entirely (zero-CPU contract). */
@@ -438,27 +488,20 @@ public:
     // -------------------------------------------------------------------------
     // Non-APVTS state riding in the session blob (SCORE / SEQ / SAMPLER_SLOTS
     // child trees). Captured in getStateInformation, restored in
-    // setStateInformation; the flags below coordinate the sampler session
-    // auto-load so a stale .sp3s can never clobber the freshly restored state.
+    // setStateInformation; the flags below let the one-shot legacy .sp3s
+    // import (Sp3sImporter) keep the newer state copies of params/pattern.
     // -------------------------------------------------------------------------
-    /** True when setStateInformation restored a sequencer pattern — the session
-     *  auto-load must then skip the (older) pattern stored in the .sp3s. */
+    /** True when setStateInformation restored a sequencer pattern — the legacy
+     *  .sp3s import must then skip the (older) pattern stored in the file. */
     bool wasSeqRestoredFromState() const noexcept { return seqRestoredFromState_; }
 
     /** True when the state blob carried per-slot sampler parameters. */
     bool hasStateSamplerParams() const noexcept { return samplerParamsInState_; }
 
     /** Re-applies the SAMPLER_SLOTS state overlay to both engines (message
-     *  thread). Called after a session auto-load so labels/params restored
+     *  thread). Called after a legacy bank import so labels/params restored
      *  from the bank file are overridden by the newer state values. */
     void applySamplerParamsFromState();
-
-    /** One-shot: true exactly once after setStateInformation restored a
-     *  non-empty lastSessionPath. The first SamplerPageComponent consumes it
-     *  to trigger the session auto-load; later editor re-openings must NOT
-     *  reload the session over live (unsaved) in-RAM edits. */
-    bool consumeSamplerAutoLoadPending() noexcept
-    { return samplerAutoLoadPending_.exchange(false, std::memory_order_acq_rel); }
 
 private:
 
@@ -498,6 +541,25 @@ private:
     std::shared_ptr<Sp3ctraSharedCore> sharedCore;
     // P6 — sampler engines ×8 (0 = A legacy, 1 = B legacy, 2..7).
     std::array<std::unique_ptr<LuxSampler>, LuxSampler::kMaxEngines> samplers_;
+    // Working-session (project) persistence — constructed in the ctor after the
+    // samplers exist. Standalone-facing; owns project.sp3ctra + sidecar banks.
+    std::unique_ptr<SessionManager> sessions_;
+    // Catch-all session-dirty hook: every APVTS param edit lands in the state
+    // tree via JUCE's flush timer (message thread), and every non-APVTS prop
+    // write (layout, persisted trees) hits it directly — one listener covers
+    // them all. MUST be re-attached after apvts.replaceState (new tree object);
+    // restore storms are silenced by the SessionManager suppress flag.
+    struct SessionDirtyListener final : juce::ValueTree::Listener
+    {
+        Sp3ctraAudioProcessor& p;
+        explicit SessionDirtyListener(Sp3ctraAudioProcessor& proc) : p(proc) {}
+        void mark() { if (p.sessions_) p.sessions_->markStateDirty(); }
+        void valueTreePropertyChanged(juce::ValueTree&, const juce::Identifier&) override { mark(); }
+        void valueTreeChildAdded(juce::ValueTree&, juce::ValueTree&) override            { mark(); }
+        void valueTreeChildRemoved(juce::ValueTree&, juce::ValueTree&, int) override     { mark(); }
+        void valueTreeChildOrderChanged(juce::ValueTree&, int, int) override             { mark(); }
+    };
+    std::unique_ptr<SessionDirtyListener> sessionDirtyListener_;
     // P5-M4 — the per-instance score players (8 slots, one 1 kHz thread).
     std::unique_ptr<ScorePlayerService> scorePlayerService_;
     /** First placed pool slot per score-family type (kScoreFamily order),
@@ -764,6 +826,10 @@ private:
     std::atomic<float> meterLuxStral_ { 0.0f }, meterLuxSynth_ { 0.0f },
                        meterLuxWave_  { 0.0f }, meterLuxGrain_ { 0.0f },
                        meterMaster_   { 0.0f };
+    // VIDEO MIX recorder (owned) + RT gate. recActive_ (release/acquire) lets
+    // processBlock skip the audio tap entirely when not recording.
+    std::unique_ptr<VideoRecorder> videoRecorder_;
+    std::atomic<bool>              recActive_ { false };
     // Per-engine OUT send counts (message thread writes in
     // deriveAndPublishChainPlan; UI + processBlock read). 0 → the engine's
     // render is skipped (no CPU) and its AUDIO MIX strip is hidden.
@@ -792,6 +858,7 @@ private:
     // (fsEngineParam(e,"Enabled")) to drive that engine's setEnabled().
     std::array<bool, LuxSampler::kMaxEngines> samplerPresent_ {};
     void deriveChainRouting();              // model → pool bindings + enable bridge + plan
+    void primeScoreTransports();            // push each family type's speed/loop/reverse → its slot
     PoolStale updateModulePoolBindings();   // model → modulePoolSlots_; returns per-type slots to reset
     void deriveAndPublishChainPlan();       // model → RT-safe per-synth ChainPlan
     void persistChainModel();              // model → apvts.state <CHAINS>
@@ -817,7 +884,6 @@ private:
     juce::ValueTree seqStateToTree() const;                   // sequencer pattern + timing
     bool seqRestoredFromState_    = false;
     bool samplerParamsInState_    = false;
-    std::atomic<bool> samplerAutoLoadPending_ { false };
     void teardownAbsentModules(const std::set<ModuleType>& now); // free state of removed modules
 
     // Video-scroll "Stop" pulse: incremented by the UI; each VideoDisplayComponent
@@ -851,16 +917,11 @@ private:
     std::atomic<int>      smpValueTouchWhere_ { -1 };
 
 
-    /** Full path of the last .sp3s session saved or loaded.
-     *  Serialised inside the APVTS state blob (getStateInformation /
-     *  setStateInformation) so it survives DAW project reloads and
-     *  Standalone restarts. */
+    /** LEGACY — full path of the last .sp3s written by the retired sampler
+     *  session feature. Only read once at restore time to migrate the old
+     *  file's audio banks into the project session (Sp3sImporter), then
+     *  cleared forever. Still serialised so pre-migration blobs round-trip. */
     juce::String lastSessionPath;
-
-    /** Optional output directory for LuxSampler SAVE SESSION + image export.
-     *  Empty → fallback to file chooser (legacy behaviour). Persisted in
-     *  the APVTS state blob alongside lastSessionPath. */
-    juce::String samplerOutputDir;
 
     /** WAV last loaded in the SCORE PLAY page (see get/setScoreWavPath). */
     juce::String scoreWavPath;
@@ -905,6 +966,7 @@ private:
     bool configResyncPending_ = false;
     bool freqReinitPending_   = false;
     bool coeffUpdatePending_  = false;
+    bool workerPoolRestartPending_ = false;
     // Apply any pending g_sp3ctra_config resync / wavetable reinit / envelope
     // coefficient rebuild, once, on the message thread. Idempotent.
     void drainPendingConfig();

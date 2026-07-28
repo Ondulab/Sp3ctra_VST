@@ -175,16 +175,47 @@ double pageSeconds(const MidiScoreSettings& s)
 {
     if (s.writingSpeed <= 0.0)
         return 0.0;
-    const double bandWidthMM = SCORE_A4_WIDTH_MM - kLabelMarginMM;
+    const double sheetWidthMM = (s.pageFormat == 1) ? SCORE_A3_WIDTH_MM
+                                                    : SCORE_A4_WIDTH_MM;
+    const double bandWidthMM = sheetWidthMM - kLabelMarginMM;
     return (bandWidthMM / 10.0) / s.writingSpeed;             // mm→cm, cm / (cm/s)
 }
 
 int pageCount(const MidiScoreData& data, const MidiScoreSettings& s)
 {
+    if (! data.ok || data.notes.empty())
+        return 0;
+    if (s.pageFormat == 2)                    // FULL: whole piece on one sheet
+        return 1;
     const double pageSec = pageSeconds(s);
-    if (! data.ok || data.notes.empty() || pageSec <= 0.0)
+    if (pageSec <= 0.0)
         return 0;
     return juce::jmax(1, (int) std::ceil(data.durationSec / pageSec));
+}
+
+//==============================================================================
+// Pan automation
+//==============================================================================
+double panAt(const std::vector<PanPoint>& points, double posFrac)
+{
+    if (points.empty())
+        return 0.0;
+    if (posFrac <= points.front().pos)
+        return points.front().pan;
+    if (posFrac >= points.back().pos)
+        return points.back().pan;
+    for (size_t i = 1; i < points.size(); ++i)
+    {
+        if (posFrac > points[i].pos)
+            continue;
+        const auto& a = points[i - 1];
+        const auto& b = points[i];
+        const double span = b.pos - a.pos;
+        const double t = span > 1.0e-12 ? (posFrac - a.pos) / span : 1.0;
+        const double s = t * t * (3.0 - 2.0 * t);   // S-curve, flat at the handles
+        return a.pan + s * (b.pan - a.pan);
+    }
+    return points.back().pan;
 }
 
 //==============================================================================
@@ -192,6 +223,21 @@ int pageCount(const MidiScoreData& data, const MidiScoreSettings& s)
 //==============================================================================
 namespace
 {
+    bool panActive(const std::vector<PanPoint>& points)
+    {
+        for (const auto& q : points)
+            if (std::abs(q.pan) > 0.001)
+                return true;
+        return false;
+    }
+
+    bool anyPanActive(const std::array<std::vector<PanPoint>, kMaxVoices>& all)
+    {
+        for (const auto& pts : all)
+            if (panActive(pts))
+                return true;
+        return false;
+    }
     /** Per-voice partial set, precomputed once per render: the partial RATIOS
      *  (and relative dBs / decay multipliers) are note-independent, so they are
      *  computed at a reference fundamental and rescaled per note. */
@@ -384,7 +430,8 @@ namespace
                    const MidiScoreData& data,
                    const std::array<VoicePartials, kMaxVoices>& vps,
                    const MidiScoreSettings& s,
-                   double maxDb, double dpiY)
+                   double maxDb, double dpiY,
+                   const std::function<void(double)>* progress = nullptr)
     {
         const double range     = juce::jmax(1.0, s.dynamicRangeDB);
         const double logRatio  = std::log(s.maxFreq / s.minFreq);
@@ -407,8 +454,70 @@ namespace
             if (v < p[0]) p[0] = p[1] = p[2] = v;            // darker (louder) wins
         };
 
+        // Panned ink, SCORE stereo convention: R byte = RIGHT brightness,
+        // B byte = LEFT brightness, G = the darker of the two — left-only ink
+        // is red, right-only blue, centre grey (byte-identical to mono).
+        // Darker-wins per CHANNEL so overlapping notes with different pans
+        // composite exactly like ScoreGen's stereo cells.
+        auto darkenLR = [&](int x, int y, double intL, double intR)
+        {
+            if (x < 0 || x >= imageW || y < g.yTop || y >= g.yBot) return;
+            const auto vL = (juce::uint8) juce::jlimit(0, 255,
+                                (int) (intL * 255.0 + 0.5));
+            const auto vR = (juce::uint8) juce::jlimit(0, 255,
+                                (int) (intR * 255.0 + 0.5));
+            auto* p = reinterpret_cast<juce::PixelRGB*>(
+                bmp.getLinePointer(y) + x * bmp.pixelStride);
+            p->setARGB(255,
+                       juce::jmin(p->getRed(),   vR),
+                       juce::jmin(p->getGreen(), juce::jmin(vL, vR)),
+                       juce::jmin(p->getBlue(),  vL));
+        };
+
+        // ── Pan automation → per-VOICE, per-column L/R attenuations (dB ≤ 0).
+        // Linear balance: centre = 0 dB both sides (grey ink, historical
+        // bytes), panning only attenuates the far side; the reader's stereo
+        // decode rebalances loudness through GREEN, like SCORE stereo.
+        // A voice with no real pan keeps empty arrays (= centre everywhere).
+        const bool hasPan = anyPanActive(s.panPoints) && data.durationSec > 0.0;
+        std::array<std::vector<double>, kMaxVoices> panDbL, panDbR;
+        if (hasPan)
+        {
+            const size_t nCols = (size_t) juce::jmax(0, g.xMax - g.xMin);
+            for (int v = 0; v < kMaxVoices; ++v)
+            {
+                if (! vps[(size_t) v].enabled
+                    || ! panActive(s.panPoints[(size_t) v]))
+                    continue;
+                auto& dbL = panDbL[(size_t) v];
+                auto& dbR = panDbR[(size_t) v];
+                dbL.resize(nCols);
+                dbR.resize(nCols);
+                for (size_t i = 0; i < nCols; ++i)
+                {
+                    const double t = (((double) (g.xMin + (int) i) + 0.5) - g.x0Px)
+                                   / g.pxPerSec + g.t0;
+                    const double p = juce::jlimit(-1.0, 1.0,
+                        panAt(s.panPoints[(size_t) v],
+                              juce::jlimit(0.0, 1.0, t / data.durationSec)));
+                    // Gain orientation fixed EMPIRICALLY (2026-07-24): with
+                    // the "obvious" assignment (gL = 1−p) the rendered tint
+                    // came out mirrored against the UI curve — red curve gave
+                    // blue ink. This orientation is the one verified on
+                    // screen: top/red handle (p = −1) → red ink → left ear.
+                    const double gL = juce::jmin(1.0, 1.0 + p);
+                    const double gR = juce::jmin(1.0, 1.0 - p);
+                    dbL[i] = gL <= 1.0e-6 ? -1.0e9 : 20.0 * std::log10(gL);
+                    dbR[i] = gR <= 1.0e-6 ? -1.0e9 : 20.0 * std::log10(gR);
+                }
+            }
+        }
+
         for (size_t ni = 0; ni < data.notes.size(); ++ni)
         {
+            if (progress != nullptr && (ni & 127u) == 0u)
+                (*progress)((double) ni / (double) data.notes.size());
+
             const auto& n  = data.notes[ni];
             const auto& vp = vps[(size_t) n.voice];
             if (! vp.enabled || vp.rel.empty())
@@ -438,6 +547,12 @@ namespace
                 computeNoteVibrato(vp, n, ni, g, x0, x1, pxPerCent, vibYOff, vibAmDb);
                 vibMarginPx = (int) std::ceil(vp.vibCents * 1.25 * pxPerCent);
             }
+
+            // This VOICE's pan attenuations (nullptr = centred voice).
+            const double* vPanL = panDbL[(size_t) n.voice].empty()
+                                      ? nullptr : panDbL[(size_t) n.voice].data();
+            const double* vPanR = panDbR[(size_t) n.voice].empty()
+                                      ? nullptr : panDbR[(size_t) n.voice].data();
 
             for (const auto& pt : vp.rel)
             {
@@ -485,14 +600,29 @@ namespace
                     if (dB <= -range)
                         continue;
 
+                    const double pdL = vPanL ? vPanL[x - g.xMin] : 0.0;
+                    const double pdR = vPanR ? vPanR[x - g.xMin] : 0.0;
+
                     const int yCiCol = (int) std::round(yCol);
                     for (int dy = -dyMax; dy <= dyMax; ++dy)
                     {
                         const double dd  = ((yCiCol + dy) - yCol) / halfWidth;
                         const double off = -12.0 * dd * dd;          // Gaussian in dB
-                        const double v   = juce::jlimit(0.0, 1.0, -(dB + off) / range);
-                        if (v < 1.0)
-                            darken(x, yCiCol + dy, v);
+                        if (! hasPan)
+                        {
+                            const double v = juce::jlimit(0.0, 1.0, -(dB + off) / range);
+                            if (v < 1.0)
+                                darken(x, yCiCol + dy, v);
+                        }
+                        else
+                        {
+                            const double vL = juce::jlimit(0.0, 1.0,
+                                                  -(dB + off + pdL) / range);
+                            const double vR = juce::jlimit(0.0, 1.0,
+                                                  -(dB + off + pdR) / range);
+                            if (vL < 1.0 || vR < 1.0)
+                                darkenLR(x, yCiCol + dy, vL, vR);
+                        }
                     }
                 }
             }
@@ -551,7 +681,7 @@ scoregen::RenderResult renderStrip(
 
     result.image       = img;
     result.ok          = true;
-    result.stereo      = false;
+    result.stereo      = anyPanActive(settings.panPoints); // colour ink ⇒ stereo load
     result.pixelWidth  = w;
     result.pixelHeight = h;
     result.spectroBand = img.getBounds();
@@ -562,13 +692,15 @@ scoregen::RenderResult renderStrip(
 }
 
 //==============================================================================
-// A4 export page
+// Export sheet (A4 / A3 / FULL) — free start time
 //==============================================================================
-scoregen::RenderResult renderPage(
+scoregen::RenderResult renderSheet(
     const MidiScoreData& data,
     const std::array<timbregen::TimbreSlotParams, kMaxVoices>& voices,
     const MidiScoreSettings& settings,
-    int pageIndex)
+    double t0Sec,
+    const juce::String& pageTag,
+    const std::function<void(double)>& progress)
 {
     scoregen::RenderResult result;
     auto fail = [&](const juce::String& msg) -> scoregen::RenderResult
@@ -585,10 +717,6 @@ scoregen::RenderResult renderPage(
     if (settings.writingSpeed <= 0.0)
         return fail("Writing speed must be > 0");
 
-    const int nPages = pageCount(data, settings);
-    if (pageIndex < 0 || pageIndex >= nPages)
-        return fail("Page index out of range");
-
     const double dpi = (settings.printerDpi >= 72.0) ? settings.printerDpi
                                                      : SCORE_DEFAULT_PRINTER_DPI;
 
@@ -597,11 +725,38 @@ scoregen::RenderResult renderPage(
     if (mx < -1.0e8)
         return fail("No voice enabled (activate at least one voice)");
 
-    // ── Page geometry (A4 portrait, same band placement as SCORE/TIMBRE) ─────
-    const int imageW = (int) mmToPx(SCORE_A4_WIDTH_MM,  dpi);
+    // ── Sheet geometry (same band placement as SCORE/TIMBRE; A4 portrait and
+    //    A3 landscape share the 297 mm height, FULL stretches the width to
+    //    hold the whole piece on one sheet) ─────────────────────────────────
+    const bool   full        = settings.pageFormat == 2;
+    const double pxPerSec    = (dpi / 2.54) * settings.writingSpeed;
+    const double labelMargin = 150.0 * (dpi / 400.0);            // SCORE's left margin
+    double windowSec;
+    int    imageW;
+    if (full)
+    {
+        t0Sec     = 0.0;
+        windowSec = juce::jmax(0.05, data.durationSec);
+        imageW    = (int) std::ceil(labelMargin + windowSec * pxPerSec);
+    }
+    else
+    {
+        t0Sec     = juce::jmax(0.0, t0Sec);
+        windowSec = pageSeconds(settings);
+        imageW    = (int) mmToPx(settings.pageFormat == 1 ? SCORE_A3_WIDTH_MM
+                                                          : SCORE_A4_WIDTH_MM, dpi);
+    }
     const int imageH = (int) mmToPx(SCORE_A4_HEIGHT_MM, dpi);
+    // Only FULL can trip this (A3@800 DPI peaks at ~124 Mpx): its width grows
+    // with duration × writing speed × DPI. SLOWER writing = shorter sheet.
+    // 500 Mpx ≈ 1.5 GB transient RGB — enough for minutes-long pieces at
+    // 400 DPI; beyond that the render/encode would genuinely bog down.
+    if ((juce::int64) imageW * (juce::int64) imageH > (juce::int64) 500'000'000)
+        return fail("Sheet too large (" + juce::String(imageW) + " x "
+                    + juce::String(imageH)
+                    + juce::String::fromUTF8(" px) — FULL holds the whole piece:"
+                                             " lower the DPI or the writing speed"));
 
-    const double labelMargin     = 150.0 * (dpi / 400.0);        // SCORE's left margin
     const double bottomMarginPx  = mmToPx(settings.bottomMarginMM,  dpi);
     const double spectroHeightPx = mmToPx(settings.spectroHeightMM, dpi);
     const double spectroLeft     = labelMargin;
@@ -611,9 +766,7 @@ scoregen::RenderResult renderPage(
     if (spectroTop < 0.0 || spectroWidth <= 0.0)
         return fail("Band does not fit the page at these margins");
 
-    const double pxPerSec = (dpi / 2.54) * settings.writingSpeed;
-    const double pageSec  = pageSeconds(settings);
-    const double t0       = pageIndex * pageSec;
+    const double t0 = t0Sec;
 
     juce::Image img(juce::Image::RGB, imageW, imageH, true);
     {
@@ -630,8 +783,11 @@ scoregen::RenderResult renderPage(
     geom.xMax = juce::jmin(imageW, (int) std::ceil(spectroLeft + spectroWidth));
     geom.yBottom = spectroBottom;  geom.heightPx = spectroHeightPx;
     geom.yTop = yTop;  geom.yBot = yBot;
-    geom.pxPerSec = pxPerSec;  geom.t0 = t0;  geom.t1 = t0 + pageSec;
-    drawNotes(img, geom, data, vps, settings, mx, dpi);
+    geom.pxPerSec = pxPerSec;  geom.t0 = t0;  geom.t1 = t0 + windowSec;
+    drawNotes(img, geom, data, vps, settings, mx, dpi,
+              progress ? &progress : nullptr);
+    if (progress)
+        progress(1.0);
 
     // ── Opt-in writings in the TOP margin (far from the scanned band) ─────────
     if (settings.showLabels)
@@ -641,8 +797,9 @@ scoregen::RenderResult renderPage(
         g.setColour(juce::Colours::black);
         g.setFont(juce::FontOptions(labelH * 0.72f));
         g.drawText(juce::File(data.sourcePath).getFileName()
-                       + juce::String::fromUTF8("  —  page ") + juce::String(pageIndex + 1)
-                       + "/" + juce::String(nPages),
+                       + (pageTag.isNotEmpty()
+                              ? juce::String::fromUTF8("  —  ") + pageTag
+                              : juce::String()),
                    juce::Rectangle<float>((float) spectroLeft,
                                           (float) mmToPx(2.0, dpi),
                                           (float) spectroWidth, labelH),
@@ -655,7 +812,7 @@ scoregen::RenderResult renderPage(
                        + juce::String(settings.maxFreq, 0) + " Hz log  |  band "
                        + juce::String(settings.spectroHeightMM, 3) + " mm  |  "
                        + juce::String(settings.writingSpeed, 1) + " cm/s  |  "
-                       + juce::String(t0, 1) + "-" + juce::String(t0 + pageSec, 1) + " s  |  "
+                       + juce::String(t0, 1) + "-" + juce::String(t0 + windowSec, 1) + " s  |  "
                        + juce::String(dpi, 0) + juce::String::fromUTF8(" DPI — print at 100%"),
                    juce::Rectangle<float>((float) spectroLeft,
                                           (float) mmToPx(6.5, dpi),
@@ -665,18 +822,41 @@ scoregen::RenderResult renderPage(
 
     result.image       = img;
     result.ok          = true;
-    result.stereo      = false;
+    result.stereo      = anyPanActive(settings.panPoints); // colour print (L=red/R=blue)
     result.pixelWidth  = imageW;
     result.pixelHeight = imageH;
     result.spectroBand = juce::Rectangle<int>(
         (int) std::floor(spectroLeft), yTop,
         juce::jmax(1, geom.xMax - (int) std::floor(spectroLeft)),
         juce::jmax(1, yBot - yTop));
-    result.log = "Page " + juce::String(pageIndex + 1) + "/" + juce::String(nPages)
-               + ": " + juce::String(imageW) + " x " + juce::String(imageH)
+    result.log = "Sheet " + juce::String(imageW) + " x " + juce::String(imageH)
                + " px @ " + juce::String(dpi, 0) + " DPI, "
-               + juce::String(t0, 1) + "-" + juce::String(t0 + pageSec, 1) + " s";
+               + juce::String(t0, 1) + "-" + juce::String(t0 + windowSec, 1) + " s"
+               + (pageTag.isNotEmpty() ? " (" + pageTag + ")" : juce::String());
     return result;
+}
+
+scoregen::RenderResult renderPage(
+    const MidiScoreData& data,
+    const std::array<timbregen::TimbreSlotParams, kMaxVoices>& voices,
+    const MidiScoreSettings& settings,
+    int pageIndex,
+    const std::function<void(double)>& progress)
+{
+    const int nPages = pageCount(data, settings);
+    if (nPages > 0 && (pageIndex < 0 || pageIndex >= nPages))
+    {
+        scoregen::RenderResult r;
+        r.ok  = false;
+        r.log = "Page index out of range";
+        return r;
+    }
+    return renderSheet(data, voices, settings,
+                       pageIndex * pageSeconds(settings),
+                       nPages > 1 ? ("page " + juce::String(pageIndex + 1)
+                                     + "/" + juce::String(nPages))
+                                  : juce::String(),
+                       progress);
 }
 
 } // namespace midiscoregen

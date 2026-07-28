@@ -216,6 +216,8 @@ private:
     // J4 — .sp3chain preset flows (async FileChooser, then processor API)
     void savePresetFlow(int chainIdx);
     void loadPresetFlow(int targetChainIdx);  // −1 = load as a NEW chain
+    /** Second half of loadPresetFlow, after the replace-confirmation. */
+    void loadPresetFlowConfirmed(int targetChainIdx);
     void refreshAfterModelEdit(bool notifySelection); // UI-only part (rebuild + selection + relayout)
     void scheduleRefresh(bool notifySelection);  // processor bridge NOW, UI refresh next tick (lifetime-safe)
 

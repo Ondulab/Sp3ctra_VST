@@ -57,6 +57,14 @@ public:
 
     int numActiveOutputs() const noexcept { return (int) voices_.size(); }
 
+    /** VIDEO MIX recording (macOS). Locks the render to a fixed hi-res composite
+     *  (recW×recH derived from the current view aspect × `height`) and streams it
+     *  plus the master audio to a .mov via the processor's recorder. Returns
+     *  false + fills `err` on failure. Message thread. */
+    bool beginRecording(const juce::File& out, int height, juce::String& err);
+    void endRecording();
+    bool isRecording() const noexcept;
+
     void paint(juce::Graphics& g) override;
     void resized() override;
 
@@ -93,6 +101,12 @@ private:
         /** Any thread: blank every waterfall on the next render pass. */
         void requestClear() noexcept { clearGen_.fetch_add(1, std::memory_order_release); }
 
+        /** Message thread: while `on`, the composite is rendered at a FIXED
+         *  w×h (independent of the preview view size / √N budget) and every
+         *  published frame is streamed to the processor's recorder. The preview
+         *  simply downsamples the same hi-res front image. */
+        void setRecordTarget(int w, int h, bool on) noexcept;
+
         /** Message thread: latest published composite (ref-copy under lock). */
         juce::Image frontImage() const;
 
@@ -128,6 +142,16 @@ private:
         juce::Image           pool_[3];
         std::atomic<uint32_t> frameCounter_ { 0 };
         bool                  haveFrame_ { false };
+
+        // ── Recording (fixed hi-res composite streamed to the recorder) ──────
+        std::atomic<bool> recOn_ { false };
+        std::atomic<int>  recW_  { 0 };
+        std::atomic<int>  recH_  { 0 };
+        // Render-thread only: session clock + a ~2 fps heartbeat so the video
+        // timeline keeps pace with the audio even while the waterfall is frozen.
+        bool   lastRecOn_     { false };
+        double recStartMs_    { 0.0 };
+        double lastRecPushMs_ { 0.0 };
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Renderer)
     };

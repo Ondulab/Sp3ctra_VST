@@ -391,7 +391,10 @@ void SlotSpectralEditorComponent::showFadeTypeMenu(bool in)
         m.addItem(i + 1, kNames[i], true, static_cast<int>(cur) == i);
 
     juce::Component::SafePointer<SlotSpectralEditorComponent> safe(this);
-    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this),
+    // withMousePosition() AFTER withTargetComponent(): open at the cursor, not
+    // anchored to this component's top-left corner (same as MidiLearnPopup).
+    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this)
+                                              .withMousePosition(),
         [safe, in](int result)
         {
             if (safe == nullptr || result <= 0) return;
@@ -616,9 +619,9 @@ void SlotSpectralEditorComponent::mouseDrag(const juce::MouseEvent& e)
     }
     markDirty();   // rebuild the preview with the new edit
 
-    if (onFadeChanged
-        && (mode_ == Mode::Attack || mode_ == Mode::Decay
-            || mode_ == Mode::AttackShape || mode_ == Mode::DecayShape))
+    // Every handle drag (crop bars included) — the owner's param-box strip
+    // under the image mirrors ALL of these values, not just the fades.
+    if (onFadeChanged)
         onFadeChanged();
 }
 

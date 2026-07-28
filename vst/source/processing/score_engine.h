@@ -89,7 +89,8 @@ typedef struct ScoreSettings
     double binsPerSecond;       /* time columns/s (used when writingSpeed=0)*/
     int    overlapPreset;       /* 0/1/2 → 0.50/0.85/0.95                    */
     double printerDpi;          /* output resolution        (400)           */
-    int    pageFormat;          /* 0=A4 portrait, 1=A3 landscape            */
+    int    pageFormat;          /* 0=A4 portrait, 1=A3 landscape,
+                                 * 2=Selection (free region on one stretched sheet) */
     double writingSpeed;        /* cm/s ; 0 ⇒ use binsPerSecond directly     */
     double spectroHeightMM;     /* height of the spectro band = CIS length (219.456) */
     int    spectroHeightManual; /* 0 ⇒ locked to SCORE_CIS_HEIGHT_MM; 1 ⇒ user override */
@@ -104,6 +105,8 @@ typedef struct ScoreSettings
     int    enableNormalization; /* 0/1 — normalise to peak 1.0 before FFT    */
     int    fftSize;             /* useful window size; 0 ⇒ auto from bps     */
     double startTimeSec;        /* offset into the WAV where extraction begins */
+    double selectionSec;        /* pageFormat 2: selected region length (s);
+                                 * 0 ⇒ to the end of the file                */
     int    enableStereoMode;    /* 0/1 — generate L/R spectrograms (red=L, blue=R) */
     int    enableMultiRes;      /* 0/1 — multi-resolution STFT: shorter analysis
                                  * windows for the upper octaves (sharper

@@ -185,6 +185,12 @@ void luxwave_engine_reset(LuxWaveEngine *engine);
 void luxwave_engine_set_config(LuxWaveEngine *engine, const LuxWaveConfig *config);
 
 /**
+ * Re-derive sample-rate-dependent state (inv_sample_rate, Nyquist bound) after
+ * a host sample-rate change. Call from prepareToPlay (no concurrent processBlock).
+ */
+void luxwave_engine_set_sample_rate(LuxWaveEngine *engine, float sample_rate);
+
+/**
  * Set the wavetable image line (called from image processing thread).
  * Data is COPIED into an internal double-buffer — no pointer aliasing.
  */

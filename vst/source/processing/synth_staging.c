@@ -23,7 +23,12 @@ uint64_t synth_staging_contention_holds(void)
 }
 
 typedef struct {
-    /* seqlock: odd = writer inside; readers retry on mismatch/odd. */
+    /* seqlock: odd = writer inside; readers retry on mismatch/odd.
+     * seq moves ONLY by atomic fetch_add: writers on one slot are normally
+     * exclusive (chain arbitration), but a transient overlap (ownership
+     * handoff, message-thread set_inactive) must not lose an increment — a
+     * plain seq++ race left seq odd with no writer inside, and the mixer
+     * held its previous output forever (2026-07-24 audio freeze). */
     volatile uint32_t seq;
     volatile int      active;
     int               bank_slot;
@@ -51,7 +56,7 @@ void synth_staging_stage_luxstral(int chain_idx, int bank_slot,
 
     LsSendStaging* s = &s_ls_staging[chain_idx];
 
-    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);   /* → odd */
+    __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);          /* → odd */
     s->bank_slot       = (bank_slot >= 0 && bank_slot < CHAIN_MAX_CHAINS)
                          ? bank_slot : 0;
     s->num_notes       = num_notes;
@@ -66,7 +71,7 @@ void synth_staging_stage_luxstral(int chain_idx, int bank_slot,
                (size_t) num_notes * sizeof(float));
     }
     s->active = 1;
-    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);   /* → even */
+    __atomic_fetch_add(&s->seq, 1, __ATOMIC_RELEASE);          /* → even */
 }
 
 void synth_staging_set_inactive(int chain_idx)
@@ -74,9 +79,9 @@ void synth_staging_set_inactive(int chain_idx)
     if (chain_idx < 0 || chain_idx >= CHAIN_MAX_CHAINS)
         return;
     LsSendStaging* s = &s_ls_staging[chain_idx];
-    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
     s->active = 0;
-    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
 }
 
 /* Consistent snapshot of one slot (bounded retries; ~40 KB memcpy).
@@ -254,7 +259,7 @@ void synth_staging_stage_luxsynth(int chain_idx, int bank_slot,
     if (nb_pixels > CIS_MAX_PIXELS_NB) nb_pixels = CIS_MAX_PIXELS_NB;
 
     LxSendStaging* s = &s_lx_staging[chain_idx];
-    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);   /* → odd */
+    __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);          /* → odd */
     s->bank_slot = (bank_slot >= 0 && bank_slot < CHAIN_MAX_CHAINS)
                    ? bank_slot : 0;
     s->nb_pixels = nb_pixels;
@@ -263,7 +268,7 @@ void synth_staging_stage_luxsynth(int chain_idx, int bank_slot,
     memcpy(s->rgb[1], g,    (size_t) nb_pixels);
     memcpy(s->rgb[2], b,    (size_t) nb_pixels);
     s->active = 1;
-    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);   /* → even */
+    __atomic_fetch_add(&s->seq, 1, __ATOMIC_RELEASE);          /* → even */
 }
 
 void synth_staging_luxsynth_set_inactive(int chain_idx)
@@ -271,9 +276,9 @@ void synth_staging_luxsynth_set_inactive(int chain_idx)
     if (chain_idx < 0 || chain_idx >= CHAIN_MAX_CHAINS)
         return;
     LxSendStaging* s = &s_lx_staging[chain_idx];
-    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
     s->active = 0;
-    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
 }
 
 static int lx_staging_snapshot(const LxSendStaging* s, LxSendStaging* out)
@@ -419,13 +424,13 @@ void synth_staging_stage_luxwave(int chain_idx, int bank_slot,
     if (nb_pixels > CIS_MAX_PIXELS_NB) nb_pixels = CIS_MAX_PIXELS_NB;
 
     LwSendStaging* s = &s_lw_staging[chain_idx];
-    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
     s->bank_slot = (bank_slot >= 0 && bank_slot < CHAIN_MAX_CHAINS)
                    ? bank_slot : 0;
     s->nb_pixels = nb_pixels;
     memcpy(s->line, line, (size_t) nb_pixels * sizeof(float));
     s->active = 1;
-    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
 }
 
 void synth_staging_luxwave_set_inactive(int chain_idx)
@@ -433,9 +438,9 @@ void synth_staging_luxwave_set_inactive(int chain_idx)
     if (chain_idx < 0 || chain_idx >= CHAIN_MAX_CHAINS)
         return;
     LwSendStaging* s = &s_lw_staging[chain_idx];
-    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
     s->active = 0;
-    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
 }
 
 /* Tri-state like staging_snapshot: 1 = data, 0 = inactive, -1 = torn (hold). */
@@ -549,7 +554,7 @@ void synth_staging_stage_luxgrain(int chain_idx, int bank_slot,
     if (nb_pixels > CIS_MAX_PIXELS_NB) nb_pixels = CIS_MAX_PIXELS_NB;
 
     LgSendStaging* s = &s_lg_staging[chain_idx];
-    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
     s->bank_slot = (bank_slot >= 0 && bank_slot < CHAIN_MAX_CHAINS)
                    ? bank_slot : 0;
     s->nb_pixels = nb_pixels;
@@ -567,7 +572,7 @@ void synth_staging_stage_luxgrain(int chain_idx, int bank_slot,
         memset(s->rgb[2], 0, (size_t) nb_pixels);
     }
     s->active = 1;
-    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
 }
 
 void synth_staging_luxgrain_set_inactive(int chain_idx)
@@ -575,9 +580,9 @@ void synth_staging_luxgrain_set_inactive(int chain_idx)
     if (chain_idx < 0 || chain_idx >= CHAIN_MAX_CHAINS)
         return;
     LgSendStaging* s = &s_lg_staging[chain_idx];
-    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
     s->active = 0;
-    __atomic_store_n(&s->seq, s->seq + 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
 }
 
 static int lg_staging_snapshot(const LgSendStaging* s, LgSendStaging* out)

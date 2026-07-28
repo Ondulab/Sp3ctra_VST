@@ -53,6 +53,7 @@ void score_settings_defaults(ScoreSettings *s)
     s->enableNormalization = 1;
     s->fftSize             = SCORE_DEFAULT_FFT_SIZE;  /* match PhonoPaper's 4096 window */
     s->startTimeSec        = 0.0;
+    s->selectionSec        = 0.0;   /* Selection mode: 0 = to the end of file */
     s->enableStereoMode    = 0;
     s->enableMultiRes      = 0;
 }

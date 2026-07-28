@@ -991,3 +991,15 @@ static void synth_shutdown_thread_pool_impl(LuxStralEngine *eng) {
 void synth_shutdown_thread_pool(void) {
   synth_shutdown_thread_pool_impl(&g_luxstral_engine);
 }
+
+/**
+ * @brief  Request a hot rebuild of the worker pool (num_workers changed)
+ * @note   Only raises a flag — the producer thread consumes it at the next
+ *         pass boundary (workers idle at the start barrier), tears the pool
+ *         down and falls through to the lazy re-init, which re-reads
+ *         g_sp3ctra_config.num_workers. Safe from any thread.
+ * @retval None
+ */
+void synth_request_pool_restart(void) {
+  atomic_store(&g_luxstral_engine.pool_restart_requested, 1);
+}

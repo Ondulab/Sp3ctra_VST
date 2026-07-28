@@ -18,6 +18,7 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <cmath>
 #include <vector>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
@@ -29,7 +30,8 @@
 #include "WaveformSelectorComponent.h"
 
 class ScoreGenTabComponent : public juce::Component,
-                             private juce::Timer
+                             private juce::Timer,
+                             private juce::ScrollBar::Listener
 {
 public:
     static constexpr uint32_t kAccentARGB = 0xffe0a24a;   // amber (SCORE identity)
@@ -68,16 +70,23 @@ public:
         progressBar.setPercentageDisplay(true);
         addChildComponent(progressBar);
 
-        // ── Export ─────────────────────────────────────────────────────────
-        exportPngButton.setButtonText("Export PNG");
-        exportPngButton.onClick = [this] { chooseExport(true); };
-        exportPngButton.setEnabled(false);
-        addAndMakeVisible(exportPngButton);
+        // ── Export — format (PNG/JPEG), sheet size and DPI live on the SETUP
+        //    face; this single button writes the generated image. ───────────
+        exportButton.setButtonText("Export image");
+        exportButton.setTooltip("Export the generated score as an image "
+                                "(PNG/JPEG, sheet size and DPI in SETUP).");
+        exportButton.onClick = [this] { exportNow(); };
+        exportButton.setEnabled(false);
+        addAndMakeVisible(exportButton);
 
-        exportJpgButton.setButtonText("Export JPEG");
-        exportJpgButton.onClick = [this] { chooseExport(false); };
-        exportJpgButton.setEnabled(false);
-        addAndMakeVisible(exportJpgButton);
+        // ── Preview zoom scrollbars (visible only while zoomed in) ─────────
+        for (auto* sb : { &previewHScroll, &previewVScroll })
+        {
+            sb->setAutoHide(false);
+            sb->setRangeLimits(0.0, 1.0, juce::dontSendNotification);
+            sb->addListener(this);
+            addChildComponent(sb);
+        }
 
         // ── Playback transport (CHAIN 1) ───────────────────────────────────
         playStopButton.setEnabled(false);
@@ -134,27 +143,10 @@ public:
         playHint.setColour(juce::Label::textColourId, juce::Colour(0xff8890a0));
         addAndMakeVisible(playHint);
 
-        // ── Format options (moved here from SETUP) ──────────────────────────
-        initLabel(pageLabel, "Page");
-        pageCombo.addItem("A4 Portrait", 1);
-        pageCombo.addItem("A3 Landscape", 2);
-        pageCombo.setSelectedId(processor.getScoreSettings().pageFormat == 1 ? 2 : 1,
-                                juce::dontSendNotification);
-        pageCombo.onChange = [this]
-        {
-            processor.getScoreSettings().pageFormat = (pageCombo.getSelectedId() == 2) ? 1 : 0;
-            updateExportWindow();   // A4/A3 changes the page-window length
-        };
-        addAndMakeVisible(pageCombo);
-
-        initLabel(dpiLabel, "DPI");
-        for (int d : { 200, 300, 400, 600, 800 })
-            dpiCombo.addItem(juce::String(d), d);
-        dpiCombo.setSelectedId((int) processor.getScoreSettings().printerDpi,
-                               juce::dontSendNotification);
-        dpiCombo.onChange = [this]
-        { processor.getScoreSettings().printerDpi = (double) juce::jmax(72, dpiCombo.getSelectedId()); };
-        addAndMakeVisible(dpiCombo);
+        // Page format / DPI / PNG-vs-JPEG moved to the SETUP face
+        // (ScoreSetupPanel) — the timer below mirrors a SETUP-side page-format
+        // change into the region-picker window length.
+        shownPageFormat_ = processor.getScoreSettings().pageFormat;
 
         // ── Stereo mode: two spectrograms (left=red, right=blue) ────────────
         // Takes effect on the next GENERATE. Reuses LuxStral's colour-temperature
@@ -193,6 +185,14 @@ public:
         // ── Waveform region picker (which part of the WAV to extract) ───────
         waveform.onStartChange = [this](double startSec)
         { processor.getScoreSettings().startTimeSec = startSec; };
+        // Selection sheet (page format 2): both edges are draggable — persist
+        // the region length too, the sheet stretches to hold it.
+        waveform.onRegionChange = [this](double startSec, double lenSec)
+        {
+            auto& s = processor.getScoreSettings();
+            s.startTimeSec = startSec;
+            s.selectionSec = lenSec;
+        };
         addAndMakeVisible(waveform);
 
         // ── Audition button: play/pause the SELECTED SOURCE region ──────────
@@ -278,11 +278,29 @@ public:
         {
             const auto imgArea = previewImageBounds();
             previewImgArea = imgArea;   // cache for scrub hit-testing / mapping
+            // Zoomed, the image rect overflows the frame on every side — clip
+            // so the strip never bleeds over the surrounding controls.
+            g.saveState();
+            g.reduceClipRegion(previewArea.reduced(1));
             // drawImage() modulates by the current fill's alpha; the 0.35 set
             // for the frame border above would otherwise blit the image at 35%
             // opacity over the dark frame (→ grey floor). Force full opacity.
             g.setOpacity(1.0f);
+            g.setImageResamplingQuality(juce::Graphics::highResamplingQuality);
             g.drawImage(previewImage, imgArea);
+
+            // Hi-res tile of the visible window (cut from the FULL-resolution
+            // generatedImage in the background once the zoom settles) —
+            // overlaid on the ≤1800 px base thumbnail, white-point matched.
+            if (hiResTile_.isValid() && previewZoom_ > 1.001
+                && tileFx1_ > tileFx0_ && tileFy1_ > tileFy0_)
+            {
+                g.drawImage(hiResTile_, juce::Rectangle<float>(
+                    imgArea.getX() + (float) tileFx0_ * imgArea.getWidth(),
+                    imgArea.getY() + (float) tileFy0_ * imgArea.getHeight(),
+                    (float) (tileFx1_ - tileFx0_) * imgArea.getWidth(),
+                    (float) (tileFy1_ - tileFy0_) * imgArea.getHeight()));
+            }
 
             // ── Reading head: vertical line at the played column (live) or, when
             //    stopped, at the manually-placed scrub position. ───────────────
@@ -299,6 +317,19 @@ public:
                 g.setColour(accent.withAlpha(playing ? 0.9f : 0.6f));
                 g.fillRect(lx - 0.75f, imgArea.getY(), 1.5f, imgArea.getHeight());
             }
+            g.restoreState();
+
+            if (previewZoom_ > 1.001)
+            {
+                g.setColour(juce::Colour(0xcc10131a));
+                g.fillRoundedRectangle((float) previewArea.getX() + 4.f,
+                                       (float) previewArea.getY() + 4.f, 46.f, 15.f, 3.f);
+                g.setColour(accent.withAlpha(0.85f));
+                g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
+                g.drawText(juce::String(previewZoom_, 1) + "x",
+                           previewArea.getX() + 4, previewArea.getY() + 4, 46, 15,
+                           juce::Justification::centred);
+            }
         }
         else
         {
@@ -309,21 +340,336 @@ public:
         }
     }
 
-    /** Destination rectangle where the preview image is blitted inside previewArea.
-     *  Keeps aspect ratio and scales UP to fill (so the image follows window
-     *  resizes without needing a regenerate). */
+    juce::Rectangle<float> previewDestArea() const
+    {
+        return juce::Rectangle<float>(
+            (float) previewArea.getX() + 2, (float) previewArea.getY() + 2,
+            (float) previewArea.getWidth() - 4, (float) previewArea.getHeight() - 4);
+    }
+
+    /** The image rect at zoom 1 — whole band fitted in the frame (keeps aspect
+     *  ratio, may enlarge on window resizes). Zoom scales THIS rect. */
+    juce::Rectangle<float> fittedPreviewRect() const
+    {
+        const juce::RectanglePlacement place(juce::RectanglePlacement::centred);
+        return place.appliedTo(
+            juce::Rectangle<float>(0.f, 0.f,
+                (float) previewImage.getWidth(), (float) previewImage.getHeight()),
+            previewDestArea());
+    }
+
+    /** Destination rectangle where the preview image is blitted inside
+     *  previewArea — the zoom 1 fit, or the scaled/panned rect while zoomed
+     *  (centred while it fits, clamped edge-to-edge once it overflows). */
     juce::Rectangle<float> previewImageBounds() const
     {
         if (! previewImage.isValid() || previewArea.isEmpty())
             return {};
-        const juce::Rectangle<float> dest(
-            (float) previewArea.getX() + 2, (float) previewArea.getY() + 2,
-            (float) previewArea.getWidth() - 4, (float) previewArea.getHeight() - 4);
-        const juce::RectanglePlacement place(juce::RectanglePlacement::centred); // may enlarge
-        return place.appliedTo(
-            juce::Rectangle<float>(0.f, 0.f,
-                (float) previewImage.getWidth(), (float) previewImage.getHeight()),
-            dest);
+        const auto fit = fittedPreviewRect();
+        if (previewZoom_ <= 1.001)
+            return fit;
+
+        const auto  dest = previewDestArea();
+        const float w = fit.getWidth()  * (float) previewZoom_;
+        const float h = fit.getHeight() * (float) previewZoom_;
+        float x = dest.getCentreX() - (float) previewCx_ * w;
+        float y = dest.getCentreY() - (float) previewCy_ * h;
+        x = (w <= dest.getWidth())  ? dest.getCentreX() - w * 0.5f
+                                    : juce::jlimit(dest.getRight()  - w, dest.getX(), x);
+        y = (h <= dest.getHeight()) ? dest.getCentreY() - h * 0.5f
+                                    : juce::jlimit(dest.getBottom() - h, dest.getY(), y);
+        return { x, y, w, h };
+    }
+
+    //==========================================================================
+    // Preview zoom (mouse wheel / pinch) + overlay scrollbars — same behaviour
+    // as the MIDI SCORE page. Zoom 1 = whole band fitted; previewCx_/Cy_ =
+    // image fraction shown at the frame centre while zoomed.
+    static constexpr double kMaxPreviewZoom = 16.0;
+
+    void zoomPreviewAt(juce::Point<float> pos, double factor)
+    {
+        if (! previewImage.isValid())
+            return;
+        const double target = juce::jlimit(1.0, kMaxPreviewZoom,
+                                           previewZoom_ * factor);
+        if (juce::approximatelyEqual(target, previewZoom_))
+            return;
+
+        const auto before = previewImageBounds();
+        const double fx = before.getWidth()  > 0.f
+            ? juce::jlimit(0.0, 1.0, (double) ((pos.x - before.getX()) / before.getWidth()))
+            : 0.5;
+        const double fy = before.getHeight() > 0.f
+            ? juce::jlimit(0.0, 1.0, (double) ((pos.y - before.getY()) / before.getHeight()))
+            : 0.5;
+
+        previewZoom_ = target;
+        const auto  dest = previewDestArea();
+        const auto  fit  = fittedPreviewRect();
+        const double w = fit.getWidth()  * previewZoom_;
+        const double h = fit.getHeight() * previewZoom_;
+        if (w > 0.0) previewCx_ = fx + (dest.getCentreX() - pos.x) / w;
+        if (h > 0.0) previewCy_ = fy + (dest.getCentreY() - pos.y) / h;
+        clampPreviewView();
+        updatePreviewScrollbars();
+        lastViewChangeMs_ = juce::Time::getMillisecondCounter();
+        repaint(previewArea);
+    }
+
+    void clampPreviewView()
+    {
+        const auto dest = previewDestArea();
+        const auto fit  = previewImage.isValid() ? fittedPreviewRect()
+                                                 : juce::Rectangle<float>();
+        const double w = fit.getWidth()  * previewZoom_;
+        const double h = fit.getHeight() * previewZoom_;
+        const double visW = w > 0.0 ? juce::jmin(1.0, dest.getWidth()  / w) : 1.0;
+        const double visH = h > 0.0 ? juce::jmin(1.0, dest.getHeight() / h) : 1.0;
+        previewCx_ = visW >= 1.0 ? 0.5
+                                 : juce::jlimit(visW * 0.5, 1.0 - visW * 0.5, previewCx_);
+        previewCy_ = visH >= 1.0 ? 0.5
+                                 : juce::jlimit(visH * 0.5, 1.0 - visH * 0.5, previewCy_);
+    }
+
+    void updatePreviewScrollbars()
+    {
+        const auto dest = previewDestArea();
+        const bool zoomed = previewZoom_ > 1.001 && previewImage.isValid();
+        const auto fit = previewImage.isValid() ? fittedPreviewRect()
+                                                : juce::Rectangle<float>();
+        const double w = fit.getWidth()  * previewZoom_;
+        const double h = fit.getHeight() * previewZoom_;
+        const double visW = w > 0.0 ? juce::jmin(1.0, dest.getWidth()  / w) : 1.0;
+        const double visH = h > 0.0 ? juce::jmin(1.0, dest.getHeight() / h) : 1.0;
+
+        const bool showH = zoomed && visW < 1.0;
+        const bool showV = zoomed && visH < 1.0;
+        previewHScroll.setVisible(showH);
+        previewVScroll.setVisible(showV);
+        if (showH)
+            previewHScroll.setCurrentRange(previewCx_ - visW * 0.5, visW,
+                                           juce::dontSendNotification);
+        if (showV)
+            previewVScroll.setCurrentRange(previewCy_ - visH * 0.5, visH,
+                                           juce::dontSendNotification);
+    }
+
+    /** Anchors the zoom scrollbars to the VISIBLE slice of the preview frame —
+     *  the page can be taller than the zone-3 viewport, and a bar glued to the
+     *  page's far bottom would sit below the fold. Re-run from the timer:
+     *  scrolling the outer viewport moves the visible window silently. */
+    void layoutPreviewScrollbars()
+    {
+        const int sb = 10;
+        juce::Rectangle<int> vis = previewArea;
+        if (auto* vp = findParentComponentOfClass<juce::Viewport>())
+        {
+            const auto seen = previewArea.getIntersection(
+                getLocalArea(vp, vp->getLocalBounds()));
+            if (! seen.isEmpty())
+                vis = seen;
+        }
+        previewHScroll.setBounds(vis.getX() + 1, vis.getBottom() - sb - 1,
+                                 vis.getWidth() - sb - 2, sb);
+        previewVScroll.setBounds(previewArea.getRight() - sb - 1, vis.getY() + 1,
+                                 sb, vis.getHeight() - sb - 2);
+    }
+
+    void scrollBarMoved(juce::ScrollBar* bar, double newRangeStart) override
+    {
+        if (bar == &previewHScroll)
+            previewCx_ = newRangeStart + bar->getCurrentRangeSize() * 0.5;
+        else if (bar == &previewVScroll)
+            previewCy_ = newRangeStart + bar->getCurrentRangeSize() * 0.5;
+        else
+            return;
+        lastViewChangeMs_ = juce::Time::getMillisecondCounter();
+        repaint(previewArea);
+    }
+
+    void mouseWheelMove(const juce::MouseEvent& e,
+                        const juce::MouseWheelDetails& wheel) override
+    {
+        if (previewImage.isValid() && previewArea.contains(e.getPosition()))
+        {
+            if (wheel.deltaY != 0.f)
+                zoomPreviewAt(e.position, std::exp((double) wheel.deltaY * 2.2));
+            return;   // consumed — never scrolls the page viewport underneath
+        }
+        juce::Component::mouseWheelMove(e, wheel);
+    }
+
+    void mouseMagnify(const juce::MouseEvent& e, float scaleFactor) override
+    {
+        if (previewImage.isValid() && previewArea.contains(e.getPosition()))
+            zoomPreviewAt(e.position, (double) scaleFactor);
+    }
+
+    //==========================================================================
+    // Hi-res zoom tile. The preview thumbnail is capped at 1800 px, so zooming
+    // it is pure upscale blur — but here the FULL-resolution generatedImage
+    // already exists (it is the export source). Once the view settles, the
+    // visible band window (+25% margin) is cropped from it, rescaled to the
+    // screen's physical density and white-point-matched on a background
+    // thread, then overlaid in paint(). juce::Image is COW, so the captured
+    // reference stays valid even if a re-generate swaps the member meanwhile.
+    struct TileSpec
+    {
+        double fx0 = 0.0, fx1 = 0.0, fy0 = 0.0, fy1 = 0.0;  ///< band fractions
+        double vx0 = 0.0, vx1 = 0.0, vy0 = 0.0, vy1 = 0.0;  ///< visible (coverage)
+        int    w = 0, h = 0;                                 ///< tile pixels
+        bool   valid = false;
+    };
+
+    TileSpec desiredTileSpec() const
+    {
+        TileSpec ts;
+        if (previewZoom_ <= 1.001 || ! previewImage.isValid()
+            || ! generatedImage.isValid())
+            return ts;
+        const auto imgArea = previewImageBounds();
+        const auto vis = imgArea.getIntersection(previewArea.toFloat());
+        if (vis.isEmpty() || imgArea.getWidth() <= 0.f || imgArea.getHeight() <= 0.f)
+            return ts;
+
+        auto frac = [](float a, float lo, float span)
+        { return juce::jlimit(0.0, 1.0, (double) ((a - lo) / span)); };
+        ts.vx0 = frac(vis.getX(),      imgArea.getX(), imgArea.getWidth());
+        ts.vx1 = frac(vis.getRight(),  imgArea.getX(), imgArea.getWidth());
+        ts.vy0 = frac(vis.getY(),      imgArea.getY(), imgArea.getHeight());
+        ts.vy1 = frac(vis.getBottom(), imgArea.getY(), imgArea.getHeight());
+        const double mx = 0.25 * (ts.vx1 - ts.vx0), my = 0.25 * (ts.vy1 - ts.vy0);
+        ts.fx0 = juce::jlimit(0.0, 1.0, ts.vx0 - mx);
+        ts.fx1 = juce::jlimit(0.0, 1.0, ts.vx1 + mx);
+        ts.fy0 = juce::jlimit(0.0, 1.0, ts.vy0 - my);
+        ts.fy1 = juce::jlimit(0.0, 1.0, ts.vy1 + my);
+        if (ts.fx1 - ts.fx0 < 1.0e-4 || ts.fy1 - ts.fy0 < 1.0e-4)
+            return ts;
+
+        double scale = 2.0;   // physical px per logical px (Retina default)
+        if (auto* d = juce::Desktop::getInstance().getDisplays()
+                          .getDisplayForRect(getScreenBounds()))
+            scale = d->scale;
+
+        // Screen density, capped at the band's NATIVE resolution (rescaling
+        // above it would waste memory for zero extra detail).
+        const juce::Rectangle<int> band = tileSourceBand();
+        double w = (ts.fx1 - ts.fx0) * imgArea.getWidth()  * scale;
+        double h = (ts.fy1 - ts.fy0) * imgArea.getHeight() * scale;
+        w = juce::jmin(w, (ts.fx1 - ts.fx0) * band.getWidth());
+        h = juce::jmin(h, (ts.fy1 - ts.fy0) * band.getHeight());
+        constexpr double kBudgetPx = 24.0e6;
+        if (w * h > kBudgetPx)
+        {
+            const double k = std::sqrt(kBudgetPx / (w * h));
+            w *= k;
+            h *= k;
+        }
+        ts.w = (int) std::lround(w);
+        ts.h = (int) std::lround(h);
+        ts.valid = ts.w >= 2 && ts.h >= 2;
+        return ts;
+    }
+
+    /** The band rect the preview thumbnail was cut from (same fallback rules
+     *  as buildPreview so tile fractions and thumbnail fractions line up). */
+    juce::Rectangle<int> tileSourceBand() const
+    {
+        juce::Rectangle<int> band =
+            (spectroBand.getWidth() > 0 && spectroBand.getHeight() > 0)
+                ? spectroBand.getIntersection(generatedImage.getBounds())
+                : generatedImage.getBounds();
+        return band.isEmpty() ? generatedImage.getBounds() : band;
+    }
+
+    static constexpr juce::uint32 kTileDebounceMs = 180;
+
+    void maybeStartTileRender()
+    {
+        if (previewZoom_ <= 1.001)
+        {
+            if (hiResTile_.isValid() && ! tileRenderBusy_)
+            {
+                hiResTile_ = juce::Image();   // dezoomed: drop the tile
+                tileFx0_ = tileFx1_ = tileFy0_ = tileFy1_ = 0.0;
+            }
+            return;
+        }
+        if (tileRenderBusy_
+            || juce::Time::getMillisecondCounter() - lastViewChangeMs_ < kTileDebounceMs)
+            return;
+        const auto ts = desiredTileSpec();
+        if (! ts.valid)
+            return;
+        // Still covering the visible window at a comparable density? Keep it.
+        const double density = ts.w / juce::jmax(1.0e-6, ts.fx1 - ts.fx0);
+        if (hiResTile_.isValid()
+            && ts.vx0 >= tileFx0_ - 1.0e-6 && ts.vx1 <= tileFx1_ + 1.0e-6
+            && ts.vy0 >= tileFy0_ - 1.0e-6 && ts.vy1 <= tileFy1_ + 1.0e-6
+            && tileDensity_ > 0.0
+            && std::abs(density / tileDensity_ - 1.0) < 0.25)
+            return;
+
+        tileRenderBusy_ = true;
+        const juce::Rectangle<int> band = tileSourceBand();
+        juce::Thread::launch(
+            [safe = juce::Component::SafePointer<ScoreGenTabComponent>(this),
+             full = generatedImage, band, ts, stereo = generatedStereo,
+             wp = previewWp_, epoch = tileEpoch_]
+            {
+                const juce::Rectangle<int> crop(
+                    band.getX() + (int) std::floor(ts.fx0 * band.getWidth()),
+                    band.getY() + (int) std::floor(ts.fy0 * band.getHeight()),
+                    juce::jmax(1, (int) std::ceil((ts.fx1 - ts.fx0) * band.getWidth())),
+                    juce::jmax(1, (int) std::ceil((ts.fy1 - ts.fy0) * band.getHeight())));
+                juce::Image tile = full.getClippedImage(crop.getIntersection(full.getBounds()))
+                                       .rescaled(ts.w, ts.h,
+                                                 juce::Graphics::highResamplingQuality);
+                // Same display-only white-point lift as the thumbnail — the
+                // overlay must not read darker than the base around it.
+                if (! stereo && wp < 0.999 && wp > 0.0)
+                {
+                    juce::uint8 lut[256];
+                    for (int v = 0; v < 256; ++v)
+                        lut[v] = (juce::uint8) juce::jlimit(0, 255,
+                            (int) std::lround(juce::jmin(1.0, v / 255.0 / wp) * 255.0));
+                    juce::Image::BitmapData bd(tile, juce::Image::BitmapData::readWrite);
+                    for (int y = 0; y < tile.getHeight(); ++y)
+                        for (int x = 0; x < tile.getWidth(); ++x)
+                        {
+                            auto* p = bd.getPixelPointer(x, y);
+                            p[0] = p[1] = p[2] = lut[p[0]];
+                        }
+                }
+                juce::MessageManager::callAsync(
+                    [safe, tile = std::move(tile), ts, epoch]() mutable
+                    {
+                        if (auto* self = safe.getComponent())
+                            self->applyTileRender(tile, ts, epoch);
+                    });
+            });
+    }
+
+    void applyTileRender(const juce::Image& tile, const TileSpec& ts, int epoch)
+    {
+        tileRenderBusy_ = false;
+        // Content changed while this tile was being cut — it shows the OLD
+        // image, never display it.
+        if (epoch != tileEpoch_)
+            return;
+        if (! tile.isValid())
+            return;
+        if (previewZoom_ <= 1.001)
+        {
+            hiResTile_ = juce::Image();  // dezoomed while rendering
+            return;
+        }
+        hiResTile_ = tile;
+        tileFx0_ = ts.fx0;  tileFx1_ = ts.fx1;
+        tileFy0_ = ts.fy0;  tileFy1_ = ts.fy1;
+        tileDensity_ = ts.w / juce::jmax(1.0e-6, ts.fx1 - ts.fx0);
+        repaint(previewArea);
     }
 
     //==========================================================================
@@ -396,16 +742,7 @@ public:
             y += ch + gap + 4;
         }
 
-        // ── Format row: Page + DPI (moved here from SETUP) ──────────────────
-        {
-            const int half = (colW - gap) / 2;
-            pageLabel.setBounds(pad, y, 40, ch);
-            pageCombo.setBounds(pad + 40 + gap, y, half - 40 - gap, ch);
-            dpiLabel.setBounds(pad + half + gap, y, 34, ch);
-            dpiCombo.setBounds(pad + half + gap + 34 + gap, y, half - 34 - gap, ch);
-            y += ch + gap + 4;
-        }
-
+        // Page / DPI / image format moved to the SETUP face (ScoreSetupPanel).
         {
             const int half = (colW - gap) / 2;
             stereoToggle.setBounds(pad, y, half, ch);
@@ -415,8 +752,7 @@ public:
 
         generateButton.setBounds(pad, y, colW, ch + 4); y += ch + 8;
         progressBar.setBounds(pad, y, colW, ch);        y += ch + gap;
-        exportPngButton.setBounds(pad, y, (colW - gap) / 2, ch);
-        exportJpgButton.setBounds(pad + (colW - gap) / 2 + gap, y, (colW - gap) / 2, ch);
+        exportButton.setBounds(pad, y, colW, ch);
         y += ch + gap + 6;
 
         // ── Playback transport ─────────────────────────────────────────────
@@ -467,9 +803,66 @@ public:
         previewArea = juce::Rectangle<int>(previewX, contentTop,
                                            juce::jmax(80, getWidth() - previewX - pad),
                                            juce::jmax(80, contentBottom - contentTop));
+        layoutPreviewScrollbars();
+        clampPreviewView();
+        updatePreviewScrollbars();
     }
 
 private:
+    //==========================================================================
+    /** Export button that shows its running job: a plain themed TextButton
+     *  until an export starts, then an amber bar + travelling sheen while the
+     *  image is encoded/written on the background thread (sibling of MIDI
+     *  SCORE's ExportImageButton — same visual language, SCORE accent). */
+    class ScoreExportButton : public juce::TextButton
+    {
+    public:
+        void setJobState(bool active, float frac, bool writing)
+        {
+            const bool repaintNeeded = active || active != active_;
+            active_  = active;
+            frac_    = frac;
+            writing_ = writing;
+            if (repaintNeeded)
+                repaint();
+        }
+
+        void paintButton(juce::Graphics& g, bool over, bool down) override
+        {
+            juce::TextButton::paintButton(g, over, down);
+            if (! active_)
+                return;
+
+            const auto b = getLocalBounds().toFloat().reduced(1.5f);
+            const juce::Colour accent(kAccentARGB);
+
+            g.setColour(accent.withAlpha(0.30f));
+            g.fillRoundedRectangle(
+                b.withWidth(b.getWidth() * juce::jlimit(0.f, 1.f, frac_)), 3.f);
+
+            if (writing_)
+            {
+                const float t = (float) (juce::Time::getMillisecondCounter() % 1200u)
+                              / 1200.f;
+                const float bandW = b.getWidth() * 0.18f;
+                const float x = b.getX() + t * (b.getWidth() + bandW) - bandW;
+                juce::ColourGradient sheen(accent.withAlpha(0.f), x, 0.f,
+                                           accent.withAlpha(0.f), x + bandW, 0.f,
+                                           false);
+                sheen.addColour(0.5, accent.withAlpha(0.35f));
+                g.setGradientFill(sheen);
+                g.fillRoundedRectangle(b, 3.f);
+            }
+
+            g.setColour(accent.withAlpha(0.9f));
+            g.drawRoundedRectangle(b, 3.f, 1.2f);
+        }
+
+    private:
+        bool  active_  = false, writing_ = false;
+        float frac_    = 0.f;
+    };
+
     //==========================================================================
     /** Square transport button for the score player. Draws a ▶ play triangle
      *  while stopped (green = "press to start") and a ⏹ stop square while playing
@@ -639,7 +1032,7 @@ private:
                   const char* suffix = nullptr)
     {
         s.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-        s.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 52, 14);
+        s.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 52, 22);
         s.setColour(juce::Slider::textBoxOutlineColourId,    juce::Colours::transparentBlack);
         s.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
         s.setColour(juce::Slider::textBoxTextColourId,       juce::Colour(0xffa0c4e8));
@@ -652,7 +1045,12 @@ private:
     //==========================================================================
     void chooseWav()
     {
-        const juce::File start = startDir();
+        // Import: seed from the last WAV directory used (never the session).
+        const juce::File start = processor.sessions()->startDirFor(
+            PathKeys::wavImport,
+            loadedWav.existsAsFile()
+                ? loadedWav.getParentDirectory()
+                : juce::File::getSpecialLocation(juce::File::userDocumentsDirectory));
         fileChooser = std::make_unique<juce::FileChooser>(
             "Select an audio file", start, "*.wav;*.aif;*.aiff;*.flac");
         fileChooser->launchAsync(
@@ -664,7 +1062,10 @@ private:
                 if (self == nullptr) return;
                 const auto f = fc.getResult();
                 if (f.existsAsFile())
+                {
+                    self->processor.sessions()->rememberDirFor(PathKeys::wavImport, f);
                     self->setLoadedFile(f);
+                }
             });
     }
 
@@ -706,12 +1107,16 @@ private:
         }
     }
 
-    /** Resize the export window (seconds-per-page) and sync the start offset. */
+    /** Resize the export window (seconds-per-page) and sync the start offset.
+     *  Page format 2 = Selection: the picker switches to FREE mode (both
+     *  edges draggable) and shows the persisted selection length. */
     void updateExportWindow()
     {
-        waveform.setWindowSeconds(scoregen::pageWindowSeconds(processor.getScoreSettings()));
+        auto& s = processor.getScoreSettings();
+        waveform.setFreeSelection(s.pageFormat == 2);
+        waveform.setWindowSeconds(scoregen::pageWindowSeconds(s));
         // setWindowSeconds may have re-clamped the start (e.g. window grew).
-        processor.getScoreSettings().startTimeSec = waveform.getStartSeconds();
+        s.startTimeSec = waveform.getStartSeconds();
     }
 
     void startGenerate()
@@ -735,8 +1140,7 @@ private:
         busy = true;
         progress = 0.0;
         generateButton.setEnabled(false);
-        exportPngButton.setEnabled(false);
-        exportJpgButton.setEnabled(false);
+        exportButton.setEnabled(false);
         if (auto* fs = boundChannel())
             fs->uiStopScore();
         processor.stopScorePreview();   // don't let a source preview run during render
@@ -774,8 +1178,7 @@ private:
 
             applyEqToImageAndReload();   // builds generatedImage (+EQ), preview, loads frames
 
-            exportPngButton.setEnabled(true);
-            exportJpgButton.setEnabled(true);
+            exportButton.setEnabled(true);
             logLabel.setText(r.log + "\n" + previewStats, juce::dontSendNotification);
             scrubHead = -1;             // fresh score → play head sits at the start
             setTransportEnabled(true);
@@ -884,6 +1287,14 @@ private:
 
     void buildPreview()
     {
+        // The content changed (generate / EQ): whatever the hi-res zoom tile
+        // shows is stale — drop it, the timer re-cuts the visible window. The
+        // epoch bump also voids any tile still in flight on the worker.
+        hiResTile_ = juce::Image();
+        tileFx0_ = tileFx1_ = tileFy0_ = tileFy1_ = 0.0;
+        ++tileEpoch_;
+        previewWp_ = 1.0;
+
         if (! generatedImage.isValid())
         {
             previewImage = generatedImage;
@@ -940,6 +1351,7 @@ private:
                 }
             const double meanN = total > 0 ? (double) sum / total / 255.0 : 1.0;
             const double wp = juce::jlimit(0.45, 0.98, meanN);   // white point
+            previewWp_ = wp;   // the hi-res zoom tile applies the SAME lift
             for (int y = 0; y < ph; ++y)
                 for (int x = 0; x < pw; ++x)
                 {
@@ -956,33 +1368,72 @@ private:
         previewImage = tmp;
     }
 
-    void chooseExport(bool asPng)
+    // Export runs on a BACKGROUND thread (encode + DPI stamp + write of the
+    // already-generated image) so the UI stays live; the button shows an
+    // amber bar with a travelling sheen meanwhile. Format (PNG/JPEG) comes
+    // from the SETUP face ("scoreExportPng" state property). juce::Image is
+    // COW, so the captured reference stays valid even if EQ/generate swaps
+    // the member.
+    void exportNow()
     {
-        if (! generatedImage.isValid())
+        if (! generatedImage.isValid() || exportBusy_)
             return;
+        const bool asPng = (bool) processor.getAPVTS().state
+                               .getProperty("scoreExportPng", true);
         const juce::String ext = asPng ? "png" : "jpg";
-        const juce::File suggested = startDir()
-            .getChildFile(loadedWav.getFileNameWithoutExtension() + "_score." + ext);
-        fileChooser = std::make_unique<juce::FileChooser>(
-            "Export Score Image", suggested, "*." + ext);
-        fileChooser->launchAsync(
-            juce::FileBrowserComponent::saveMode
-                | juce::FileBrowserComponent::canSelectFiles
-                | juce::FileBrowserComponent::warnAboutOverwriting,
-            [safe = juce::Component::SafePointer<ScoreGenTabComponent>(this), asPng, ext]
-            (const juce::FileChooser& fc)
+        const juce::File dest = exportDir().getNonexistentChildFile(
+            loadedWav.getFileNameWithoutExtension() + "_score", "." + ext, false);
+        // Embed band + frequency range (+ stereo) so a re-load into the
+        // SAMPLER reproduces the EXACT score calage.
+        scoregen::SpectroCalibration cal;
+        cal.band   = spectroBand;
+        cal.minHz  = genMinFreq;
+        cal.maxHz  = genMaxFreq;
+        cal.stereo = generatedStereo;
+        cal.valid  = spectroBand.getWidth() > 0
+                  && spectroBand.getHeight() > 0
+                  && genMaxFreq > genMinFreq
+                  && genMinFreq > 0.0;
+
+        // libjpeg hard-caps both dimensions at 65500 px — a FULL sheet can be
+        // wider. Only PNG can hold it.
+        if (! asPng && (generatedImage.getWidth()  > 65500
+                     || generatedImage.getHeight() > 65500))
+        {
+            logLabel.setText("Too large for JPEG (65500 px max per side) "
+                             + juce::String::fromUTF8("— switch the format to PNG in SETUP"),
+                             juce::dontSendNotification);
+            return;
+        }
+
+        exportBusy_ = true;
+        exportButton.setButtonText(juce::String::fromUTF8("Writing…"));
+        exportButton.setJobState(true, 1.f, true);
+
+        juce::Thread::launch(
+            [safe = juce::Component::SafePointer<ScoreGenTabComponent>(this),
+             img = generatedImage, dest, asPng, cal, dpi = genDpi,
+             session = processor.sessions()->sessionName()]
             {
-                auto* self = safe.getComponent();
-                if (self == nullptr) return;
-                auto dest = fc.getResult();
-                if (dest.getFullPathName().isEmpty()) return;
-                dest = dest.withFileExtension(ext);
-                const bool ok = scoregen::exportImage(self->generatedImage, dest, asPng,
-                                                      self->genDpi);
-                self->logLabel.setText(ok ? ("Exported: " + dest.getFileName())
-                                          : "Export failed",
-                                       juce::dontSendNotification);
+                const bool ok = scoregen::exportImage(img, dest, asPng, dpi, &cal);
+                const juce::String msg = ok
+                    ? "Exported: " + dest.getFileName()
+                          + juce::String::fromUTF8(" → ") + session + "/exports"
+                    : "Export failed: " + dest.getFileName();
+                juce::MessageManager::callAsync([safe, msg]
+                {
+                    if (auto* self = safe.getComponent())
+                        self->finishExport(msg);
+                });
             });
+    }
+
+    void finishExport(const juce::String& msg)
+    {
+        exportBusy_ = false;
+        exportButton.setJobState(false, 0.f, false);
+        exportButton.setButtonText("Export image");
+        logLabel.setText(msg, juce::dontSendNotification);
     }
 
     //==========================================================================
@@ -1074,6 +1525,26 @@ private:
 
     void timerCallback() override
     {
+        // Zoomed: keep the scrollbars pinned to the VISIBLE slice of the
+        // preview while the outer zone-3 viewport scrolls (no notification),
+        // and sharpen the visible window once the view settles.
+        if (previewZoom_ > 1.001)
+            layoutPreviewScrollbars();
+        maybeStartTileRender();
+
+        // Running export: animate the sheen on the button.
+        if (exportBusy_)
+            exportButton.setJobState(true, 1.f, true);
+
+        // Mirror a SETUP-side page-format change (A4/A3/FULL) into the
+        // region-picker window length — the two faces share ScoreSettings
+        // but only this page owns the waveform widget.
+        if (shownPageFormat_ != processor.getScoreSettings().pageFormat)
+        {
+            shownPageFormat_ = processor.getScoreSettings().pageFormat;
+            updateExportWindow();
+        }
+
         // Reapply the EQ to the image once the user releases a node (deferred so
         // the heavy per-pixel pass + frame reload don't run on every drag tick).
         if (eqDirty && ! eqEditor.isDragging())
@@ -1111,14 +1582,14 @@ private:
         refreshPreviewButton();
     }
 
-    juce::File startDir() const
+    juce::File exportDir() const
     {
-        const auto out = processor.getSamplerOutputDir();
-        if (out.isNotEmpty() && juce::File(out).isDirectory())
-            return juce::File(out);
-        if (loadedWav.existsAsFile())
-            return loadedWav.getParentDirectory();
-        return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+        // Image exports never ask where to save: they land in the active
+        // session's exports/ folder — the built-in Global session when hosted
+        // in a DAW (no session UI) or before any session is named.
+        const juce::File dir = processor.sessions()->exportsDir();
+        dir.createDirectory();
+        return dir;
     }
 
     //==========================================================================
@@ -1154,7 +1625,10 @@ private:
 
     Sp3ctraAudioProcessor& processor;
 
-    juce::TextButton loadButton, generateButton, exportPngButton, exportJpgButton;
+    juce::TextButton loadButton, generateButton;
+    ScoreExportButton exportButton;
+    bool exportBusy_ = false;          // one export at a time
+    int  shownPageFormat_ = 0;         // mirrors SETUP edits into the region picker
     juce::Label      fileLabel, logLabel;
 
     // Writing Speed — essential generation control kept on the PLAY page.
@@ -1175,9 +1649,22 @@ private:
     bool                scrubAuditioning { false }; // true while a stopped-score scrub plays audio
     juce::Rectangle<float> previewImgArea;  // where the preview image is blitted (for scrubbing)
 
-    // Format options (moved from SETUP) + image EQ + waveform region picker.
-    juce::Label      pageLabel, dpiLabel;
-    juce::ComboBox   pageCombo, dpiCombo;
+    // Preview zoom state — 1 = whole band fitted; Cx/Cy = image fraction at
+    // the frame centre while zoomed (wheel/pinch zoom, scrollbars navigate).
+    double previewZoom_ = 1.0, previewCx_ = 0.5, previewCy_ = 0.5;
+    juce::ScrollBar previewHScroll { false }, previewVScroll { true };
+
+    // Hi-res tile of the visible band window while zoomed (see desiredTileSpec).
+    juce::Image  hiResTile_;
+    double       tileFx0_ = 0.0, tileFx1_ = 0.0, tileFy0_ = 0.0, tileFy1_ = 0.0;
+    double       tileDensity_ = 0.0;    // tile px per band fraction (renew test)
+    double       previewWp_ = 1.0;      // thumbnail white-point (tile matches it)
+    bool         tileRenderBusy_ = false;
+    int          tileEpoch_ = 0;        // bumped on content change → voids in-flight tiles
+    juce::uint32 lastViewChangeMs_ = 0;
+
+    // Generation toggles + image EQ + waveform region picker (page format,
+    // DPI and image format live on the SETUP face).
     juce::ToggleButton stereoToggle;          // generate L/R spectrograms (red=L, blue=R)
     juce::ToggleButton multiResToggle;        // multi-resolution STFT (encoder-only)
     ScoreEqComponent eqEditor { juce::Colour(kAccentARGB) };

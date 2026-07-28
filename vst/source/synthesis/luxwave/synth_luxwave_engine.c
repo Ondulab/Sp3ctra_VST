@@ -276,6 +276,22 @@ void luxwave_engine_set_config(LuxWaveEngine *engine, const LuxWaveConfig *confi
     engine->config.sample_rate = engine->sample_rate;
 }
 
+void luxwave_engine_set_sample_rate(LuxWaveEngine *engine, float sample_rate)
+{
+    if (!engine || !engine->initialized || sample_rate <= 0.0f)
+        return;
+    if (engine->sample_rate == sample_rate)
+        return;
+
+    engine->sample_rate     = sample_rate;
+    engine->inv_sample_rate = 1.0f / sample_rate;
+    engine->f_max           = sample_rate * 0.5f;
+    engine->config.sample_rate = sample_rate;
+
+    /* Voice phase increments, ADSR rates and filter/LFO coefficients are all
+     * derived from inv_sample_rate at render time — nothing else is cached. */
+}
+
 /**
  * Called from image processing thread. Copies data into the write buffer
  * then atomically signals the RT thread that new data is available.

@@ -909,10 +909,12 @@ static void chain_execute_span(const SynthChainPlan *sp, int chain_idx,
  *                  engine, or score-player slot when score_owns); -1: any
  *                  DRIVING marker (producers, which only know "some player
  *                  owns this stream").
- * KNOWN GAP (pre-existing arbitration hole, see PLAN_P4 M3 / P5-M4): a chain
- * hosting SEVERAL simultaneously-driving players (score slot + sampler
- * engine, or two feeding score slots) is not arbitrated — each player walks
- * from its own marker and they double-stage the shared OUTs below both.
+ * Multi-player chains (score slot + sampler engine, or two feeding score
+ * slots): each player's walk STOPS at the next driving marker below its own
+ * (arbitration in chain_player_execute_owned, 2026-07-24) — the lowest
+ * driving player owns the shared OUTs; double-staging them from two threads
+ * corrupted the single-writer staging seqlock (parity stuck odd → the mixer
+ * held its previous output forever → perceived audio freeze).
  * Cross-chain there is no overlap by construction (per-slot ownership). */
 static int chain_owning_marker_pos(const SynthChainPlan *sp, int score_owns,
                                    int engine_slot)
@@ -999,6 +1001,27 @@ int chain_player_execute_owned(int is_score, int engine_slot, int force_play,
         if (own_mk < 0)
             continue;
 
+        /* Arbitration below the split point (closes the KNOWN GAP of
+         * chain_owning_marker_pos): the stream below the NEXT driving marker
+         * belongs to THAT player — replacer doctrine. This walk includes the
+         * marker itself (its input record/cache is this player's bounce into
+         * it) and stops there: walking further double-stages the shared OUTs
+         * from two threads, and the staging seqlock is single-writer. */
+        int span_to = sp->num_inserts;
+        for (int i = own_mk + 1; i < sp->num_inserts; i++)
+        {
+            const int id   = sp->insert_id[i];
+            const int slot = sp->insert_state_idx[i];
+            if (id == IMAGE_CHAIN_INSERT_SAMPLER
+                && !(!is_score && slot == engine_slot)
+                && lux_sampler_engine_is_driving(slot))
+            { span_to = i + 1; break; }
+            if (id == IMAGE_CHAIN_INSERT_SCORE
+                && !(is_score && slot == engine_slot)
+                && score_player_slot_is_playing(slot))
+            { span_to = i + 1; break; }
+        }
+
         ChainExecCtx cx = {
             .viz_bus            = viz_bus,
             .pp_scratch         = &s_pp_player,
@@ -1011,7 +1034,7 @@ int chain_player_execute_owned(int is_score, int engine_slot, int force_play,
             .publish_tap_at_end = 1,
         };
         ChainExecOut ex;
-        chain_execute_span(sp, c, own_mk + 1, sp->num_inserts, &cx,
+        chain_execute_span(sp, c, own_mk + 1, span_to, &cx,
                            r, g, b, nb_pixels, &ex);
 
         if (dispR == NULL && ex.ls_staged)

@@ -214,6 +214,10 @@ void luxgrain_engine_reset(LuxGrainEngine *engine);
 LuxGrainConfig luxgrain_config_default(void);
 
 /* UI/message thread: stage a new config (latched at next block start). */
+/* Re-derive sample-rate-dependent state after a host sample-rate change
+ * (grain pitch, durations, sample playback ratio). Call from prepareToPlay. */
+void luxgrain_engine_set_sample_rate(LuxGrainEngine *engine, float sample_rate);
+
 void luxgrain_engine_set_config(LuxGrainEngine *engine,
                                 const LuxGrainConfig *config);
 

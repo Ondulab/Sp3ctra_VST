@@ -5,6 +5,7 @@
 #include "../UITheme.h"
 #include "VideoMixerComponent.h"
 #include <functional>
+#include <memory>
 
 /**
  * @brief ZONE 4 — right-band VIDEO MIX column (replaces the old waterfall column).
@@ -66,15 +67,54 @@ private:
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportButton)
     };
 
+    /** REC — red dot when idle, blinking red square while recording. Left-click
+     *  toggles recording (wired in the column); right-click fires onRightClick
+     *  (resolution menu). */
+    class RecordButton : public juce::Button, private juce::Timer
+    {
+    public:
+        RecordButton() : juce::Button("rec") {}
+        void setRecording(bool r)
+        {
+            if (r == recording) return;
+            recording = r; blinkOn = true;
+            if (r) startTimerHz(2); else stopTimer();
+            repaint();
+        }
+        bool isRecording() const noexcept { return recording; }
+        std::function<void()> onRightClick;
+        void paintButton(juce::Graphics& g, bool isMouseOver, bool isButtonDown) override;
+    protected:
+        void mouseDown(const juce::MouseEvent& e) override
+        {
+            if (e.mods.isPopupMenu()) { if (onRightClick) onRightClick(); return; }
+            juce::Button::mouseDown(e);
+        }
+    private:
+        void timerCallback() override { blinkOn = ! blinkOn; repaint(); }
+        bool recording { false };
+        bool blinkOn   { true };
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RecordButton)
+    };
+
     //==========================================================================
+    void startRecordingFlow();   // file chooser → mixer_.beginRecording()
+
+    Sp3ctraAudioProcessor& processor_;   // session paths (recordings → session)
     VideoMixerComponent    mixer_;
 
     TransportButton playBtn_  { TransportButton::Glyph::PlayPause };
     TransportButton stopBtn_  { TransportButton::Glyph::Stop };
+    RecordButton    recBtn_;
     MiniButton      detachBtn_     { MiniButton::Glyph::Detach };
     MiniButton      fullscreenBtn_ { MiniButton::Glyph::Fullscreen };
     MiniButton      collapseBtn_   { MiniButton::Glyph::Collapse };
     MiniButton      expandBtn_     { MiniButton::Glyph::Expand };
+
+    // Recording: chosen vertical resolution (right-click menu) + the async
+    // "Save As" chooser kept alive across its launchAsync callback.
+    int  recordHeight_ { 1440 };
+    std::unique_ptr<juce::FileChooser> fileChooser_;
 
     bool collapsed_ { false };
 

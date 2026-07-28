@@ -47,7 +47,7 @@ public:
     {
         g.fillAll(juce::Colour(0xff14141c));
 
-        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontTiny)).boldened());
+        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSubTab)).boldened());
         for (const auto& s : sections)
         {
             g.setColour(juce::Colour(0xff66cc88));

@@ -141,14 +141,47 @@ enum class SlotState : int
 
 // ============================================================================
 // LoopMode — per-slot playback loop behaviour
+//
+// The sampler UI presents this as THREE composable toggles (forward →,
+// backward ←, repeat ⟲) rather than exclusive modes — see composeLoopMode /
+// decomposeLoopMode below. The enum stays the persisted value (XML "loopMode"
+// int, values 0..3 unchanged for old sessions).
 // ============================================================================
 enum class LoopMode : int
 {
-    NONE     = 0, // Play once, then stop and restore passthrough
-    LOOP     = 1, // Loop forward: wrap play_head back to startFrame on overflow
-    INVERSE  = 2, // Loop backward: play in reverse, wrap back to endFrame
-    PINGPONG = 3  // Alternate forward / backward each time a boundary is reached
+    NONE           = 0, // Play once forward, then stop and restore passthrough
+    LOOP           = 1, // Loop forward: wrap play_head back to startFrame on overflow
+    INVERSE        = 2, // Loop backward: play in reverse, wrap back to endFrame
+    PINGPONG       = 3, // Alternate forward / backward each time a boundary is reached
+    ONCE_BACKWARD  = 4, // Play once backward (end → start), then stop
+    ONCE_ROUNDTRIP = 5  // Play forward then backward ONCE (one bounce), then stop
 };
+
+/** Toggle combo (fwd, bwd, repeat) → LoopMode. Callers guarantee at least one
+ *  direction is on (the UI / MIDI apply ignore edits that would clear both). */
+inline LoopMode composeLoopMode(bool fwd, bool bwd, bool repeat) noexcept
+{
+    if (repeat)
+        return (fwd && bwd) ? LoopMode::PINGPONG
+                            : (bwd ? LoopMode::INVERSE : LoopMode::LOOP);
+    return (fwd && bwd) ? LoopMode::ONCE_ROUNDTRIP
+                        : (bwd ? LoopMode::ONCE_BACKWARD : LoopMode::NONE);
+}
+
+/** LoopMode → toggle combo (inverse of composeLoopMode). */
+inline void decomposeLoopMode(LoopMode m, bool& fwd, bool& bwd, bool& repeat) noexcept
+{
+    switch (m)
+    {
+        case LoopMode::NONE:           fwd = true;  bwd = false; repeat = false; break;
+        case LoopMode::LOOP:           fwd = true;  bwd = false; repeat = true;  break;
+        case LoopMode::INVERSE:        fwd = false; bwd = true;  repeat = true;  break;
+        case LoopMode::PINGPONG:       fwd = true;  bwd = true;  repeat = true;  break;
+        case LoopMode::ONCE_BACKWARD:  fwd = false; bwd = true;  repeat = false; break;
+        case LoopMode::ONCE_ROUNDTRIP: fwd = true;  bwd = true;  repeat = false; break;
+        default:                       fwd = true;  bwd = false; repeat = true;  break;
+    }
+}
 
 // ============================================================================
 // SlotMixMode — how one bank's playback frame is composited into the master
@@ -886,6 +919,21 @@ public:
         return (d < 0) ? -1 : 1;
     }
 
+    /** One-shot force-resume (module re-enable): the NEXT voice start for this
+     *  slot resumes from lastPlayHead even when the slot's own Resume mode is
+     *  OFF. Armed by setEnabled(true) for the banks it restarts, consumed by
+     *  tickVoice's first range init. */
+    void armForceResume(int i) noexcept
+    {
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
+            forceResumeOnce_[i].store(true, std::memory_order_release);
+    }
+    bool consumeForceResume(int i) noexcept
+    {
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return false;
+        return forceResumeOnce_[i].exchange(false, std::memory_order_acq_rel);
+    }
+
     /** Clear all recorded frames from a slot and reset it to IDLE.
      *  Stops any ongoing recording or playback on that slot first. */
     void uiClearSlot(int slotIndex) noexcept;
@@ -1275,6 +1323,11 @@ private:
     std::atomic<int> lastPlayHead[LuxSamplerConstants::NUM_SLOTS];
     // Last playback direction (+1 / -1) — used to restore PINGPONG sense on resume.
     std::atomic<int> lastDirection[LuxSamplerConstants::NUM_SLOTS];
+    // One-shot force-resume flags (module re-enable) — see armForceResume().
+    std::atomic<bool> forceResumeOnce_[LuxSamplerConstants::NUM_SLOTS] {};
+    // Banks that were PLAYING when the module was disabled — restarted (with
+    // force-resume) on re-enable. Message thread only (setEnabled).
+    uint32_t resumeOnEnableMask_ = 0;
 
     // -------------------------------------------------------------------------
     // Live frame cache — updated by UDP thread (onFrameAssembled), read by

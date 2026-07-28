@@ -21,6 +21,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <array>
+#include <cmath>
 #include <vector>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
@@ -29,7 +30,8 @@
 #include "TimbreGenRenderer.h"
 
 class TimbreGenTabComponent : public juce::Component,
-                              private juce::Timer
+                              private juce::Timer,
+                              private juce::ScrollBar::Listener
 {
 public:
     static constexpr uint32_t kAccentARGB = 0xffd97b52;   // terracotta (TIMBRE identity)
@@ -192,26 +194,21 @@ public:
         };
         addAndMakeVisible(labelsToggle);
 
-        initLabel(dpiLabel, "DPI");
-        for (int d : { 200, 300, 400, 600, 800 })
-            dpiCombo.addItem(juce::String(d), d);
-        dpiCombo.setSelectedId((int) pageSettings.printerDpi, juce::dontSendNotification);
-        dpiCombo.onChange = [this]
+        // ── Export — format (PNG/JPEG) and DPI live on the SETUP face ───────
+        exportButton.setButtonText("Export image");
+        exportButton.setTooltip("Export the A4 page as an image (PNG/JPEG and "
+                                "DPI in SETUP).");
+        exportButton.onClick = [this] { exportNow(); };
+        addAndMakeVisible(exportButton);
+
+        // ── Preview zoom scrollbars (visible only while zoomed in) ──────────
+        for (auto* sb : { &previewHScroll, &previewVScroll })
         {
-            pageSettings.printerDpi = (double) juce::jmax(72, dpiCombo.getSelectedId());
-            fullDirty  = true;      // export/play resolution only — preview unchanged
-            stateDirty = true;
-        };
-        addAndMakeVisible(dpiCombo);
-
-        // ── Export ───────────────────────────────────────────────────────────
-        exportPngButton.setButtonText("Export PNG");
-        exportPngButton.onClick = [this] { chooseExport(true); };
-        addAndMakeVisible(exportPngButton);
-
-        exportJpgButton.setButtonText("Export JPEG");
-        exportJpgButton.onClick = [this] { chooseExport(false); };
-        addAndMakeVisible(exportJpgButton);
+            sb->setAutoHide(false);
+            sb->setRangeLimits(0.0, 1.0, juce::dontSendNotification);
+            sb->addListener(this);
+            addChildComponent(sb);
+        }
 
         // ── Audition transport (shared SCORE player channel) ────────────────
         playStopButton.setTooltip("Play / stop the timbre page through the score player");
@@ -221,16 +218,16 @@ public:
         loopBtn.setTooltip("Loop playback");
         addAndMakeVisible(loopBtn);
         loopAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            processor.getAPVTS(), "scoreLoop", loopBtn);
+            processor.getAPVTS(), "timbreLoop", loopBtn);
 
         reverseBtn.setTooltip("Reverse (play the timbre page backward)");
         addAndMakeVisible(reverseBtn);
         reverseAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            processor.getAPVTS(), "scoreReverse", reverseBtn);
+            processor.getAPVTS(), "timbreReverse", reverseBtn);
 
         initLabel(speedLabel, "Speed");
         speedSlider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-        speedSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 52, 14);
+        speedSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 52, 22);
         speedSlider.setColour(juce::Slider::textBoxOutlineColourId,    juce::Colours::transparentBlack);
         speedSlider.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
         speedSlider.setColour(juce::Slider::textBoxTextColourId,       juce::Colour(0xffa0c4e8));
@@ -239,15 +236,15 @@ public:
         speedSlider.setSkewFactorFromMidPoint(1.0);
         addAndMakeVisible(speedSlider);
         speedAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-            processor.getAPVTS(), "scoreSpeed", speedSlider);
+            processor.getAPVTS(), "timbreSpeed", speedSlider);
 
-        // Right-click MIDI Learn on the shared SCORE transport params.
+        // Right-click MIDI Learn — TIMBRE's own transport (play/loop/reverse/speed).
         {
             auto& mm = processor.getMidiMap();
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, playStopButton, "scorePlaying"));
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, loopBtn,        "scoreLoop"));
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, reverseBtn,     "scoreReverse"));
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, speedSlider,    "scoreSpeed"));
+            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, playStopButton, "timbrePlaying"));
+            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, loopBtn,        "timbreLoop"));
+            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, reverseBtn,     "timbreReverse"));
+            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, speedSlider,    "timbreSpeed"));
         }
 
         playHint.setText("PLAY loads the page into the score player "
@@ -290,8 +287,26 @@ public:
         {
             const auto imgArea = previewImageBounds();
             previewImgArea = imgArea;
+            // Zoomed, the image rect overflows the frame on every side — clip
+            // so the band never bleeds over the surrounding controls.
+            g.saveState();
+            g.reduceClipRegion(previewArea.reduced(1));
             g.setOpacity(1.0f);
+            g.setImageResamplingQuality(juce::Graphics::highResamplingQuality);
             g.drawImage(previewImage, imgArea);
+
+            // Hi-res tile of the visible window (cut from the FULL-resolution
+            // page in the background once the zoom settles) — overlaid on the
+            // 150 DPI base band.
+            if (hiResTile_.isValid() && previewZoom_ > 1.001
+                && tileFx1_ > tileFx0_ && tileFy1_ > tileFy0_)
+            {
+                g.drawImage(hiResTile_, juce::Rectangle<float>(
+                    imgArea.getX() + (float) tileFx0_ * imgArea.getWidth(),
+                    imgArea.getY() + (float) tileFy0_ * imgArea.getHeight(),
+                    (float) (tileFx1_ - tileFx0_) * imgArea.getWidth(),
+                    (float) (tileFy1_ - tileFy0_) * imgArea.getHeight()));
+            }
 
             // Selected-slot highlight (fractions are DPI-independent).
             {
@@ -322,6 +337,19 @@ public:
                     g.fillRect(lx - 0.75f, imgArea.getY(), 1.5f, imgArea.getHeight());
                 }
             }
+            g.restoreState();
+
+            if (previewZoom_ > 1.001)
+            {
+                g.setColour(juce::Colour(0xcc10131a));
+                g.fillRoundedRectangle((float) previewArea.getX() + 4.f,
+                                       (float) previewArea.getY() + 4.f, 46.f, 15.f, 3.f);
+                g.setColour(accent.withAlpha(0.85f));
+                g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
+                g.drawText(juce::String(previewZoom_, 1) + "x",
+                           previewArea.getX() + 4, previewArea.getY() + 4, 46, 15,
+                           juce::Justification::centred);
+            }
         }
         else
         {
@@ -332,18 +360,334 @@ public:
         }
     }
 
-    juce::Rectangle<float> previewImageBounds() const
+    juce::Rectangle<float> previewDestArea() const
     {
-        if (! previewImage.isValid() || previewArea.isEmpty())
-            return {};
-        const juce::Rectangle<float> dest(
+        return juce::Rectangle<float>(
             (float) previewArea.getX() + 2, (float) previewArea.getY() + 2,
             (float) previewArea.getWidth() - 4, (float) previewArea.getHeight() - 4);
+    }
+
+    /** The image rect at zoom 1 — whole band fitted in the frame. */
+    juce::Rectangle<float> fittedPreviewRect() const
+    {
         const juce::RectanglePlacement place(juce::RectanglePlacement::centred);
         return place.appliedTo(
             juce::Rectangle<float>(0.f, 0.f,
                 (float) previewImage.getWidth(), (float) previewImage.getHeight()),
-            dest);
+            previewDestArea());
+    }
+
+    juce::Rectangle<float> previewImageBounds() const
+    {
+        if (! previewImage.isValid() || previewArea.isEmpty())
+            return {};
+        const auto fit = fittedPreviewRect();
+        if (previewZoom_ <= 1.001)
+            return fit;
+
+        const auto  dest = previewDestArea();
+        const float w = fit.getWidth()  * (float) previewZoom_;
+        const float h = fit.getHeight() * (float) previewZoom_;
+        float x = dest.getCentreX() - (float) previewCx_ * w;
+        float y = dest.getCentreY() - (float) previewCy_ * h;
+        x = (w <= dest.getWidth())  ? dest.getCentreX() - w * 0.5f
+                                    : juce::jlimit(dest.getRight()  - w, dest.getX(), x);
+        y = (h <= dest.getHeight()) ? dest.getCentreY() - h * 0.5f
+                                    : juce::jlimit(dest.getBottom() - h, dest.getY(), y);
+        return { x, y, w, h };
+    }
+
+    //==========================================================================
+    // Preview zoom (mouse wheel / pinch) + overlay scrollbars — same behaviour
+    // as the SCORE / MIDI SCORE pages.
+    static constexpr double kMaxPreviewZoom = 16.0;
+
+    void zoomPreviewAt(juce::Point<float> pos, double factor)
+    {
+        if (! previewImage.isValid())
+            return;
+        const double target = juce::jlimit(1.0, kMaxPreviewZoom,
+                                           previewZoom_ * factor);
+        if (juce::approximatelyEqual(target, previewZoom_))
+            return;
+
+        const auto before = previewImageBounds();
+        const double fx = before.getWidth()  > 0.f
+            ? juce::jlimit(0.0, 1.0, (double) ((pos.x - before.getX()) / before.getWidth()))
+            : 0.5;
+        const double fy = before.getHeight() > 0.f
+            ? juce::jlimit(0.0, 1.0, (double) ((pos.y - before.getY()) / before.getHeight()))
+            : 0.5;
+
+        previewZoom_ = target;
+        const auto  dest = previewDestArea();
+        const auto  fit  = fittedPreviewRect();
+        const double w = fit.getWidth()  * previewZoom_;
+        const double h = fit.getHeight() * previewZoom_;
+        if (w > 0.0) previewCx_ = fx + (dest.getCentreX() - pos.x) / w;
+        if (h > 0.0) previewCy_ = fy + (dest.getCentreY() - pos.y) / h;
+        clampPreviewView();
+        updatePreviewScrollbars();
+        lastViewChangeMs_ = juce::Time::getMillisecondCounter();
+        repaint(previewArea);
+    }
+
+    void clampPreviewView()
+    {
+        const auto dest = previewDestArea();
+        const auto fit  = previewImage.isValid() ? fittedPreviewRect()
+                                                 : juce::Rectangle<float>();
+        const double w = fit.getWidth()  * previewZoom_;
+        const double h = fit.getHeight() * previewZoom_;
+        const double visW = w > 0.0 ? juce::jmin(1.0, dest.getWidth()  / w) : 1.0;
+        const double visH = h > 0.0 ? juce::jmin(1.0, dest.getHeight() / h) : 1.0;
+        previewCx_ = visW >= 1.0 ? 0.5
+                                 : juce::jlimit(visW * 0.5, 1.0 - visW * 0.5, previewCx_);
+        previewCy_ = visH >= 1.0 ? 0.5
+                                 : juce::jlimit(visH * 0.5, 1.0 - visH * 0.5, previewCy_);
+    }
+
+    void updatePreviewScrollbars()
+    {
+        const auto dest = previewDestArea();
+        const bool zoomed = previewZoom_ > 1.001 && previewImage.isValid();
+        const auto fit = previewImage.isValid() ? fittedPreviewRect()
+                                                : juce::Rectangle<float>();
+        const double w = fit.getWidth()  * previewZoom_;
+        const double h = fit.getHeight() * previewZoom_;
+        const double visW = w > 0.0 ? juce::jmin(1.0, dest.getWidth()  / w) : 1.0;
+        const double visH = h > 0.0 ? juce::jmin(1.0, dest.getHeight() / h) : 1.0;
+
+        const bool showH = zoomed && visW < 1.0;
+        const bool showV = zoomed && visH < 1.0;
+        previewHScroll.setVisible(showH);
+        previewVScroll.setVisible(showV);
+        if (showH)
+            previewHScroll.setCurrentRange(previewCx_ - visW * 0.5, visW,
+                                           juce::dontSendNotification);
+        if (showV)
+            previewVScroll.setCurrentRange(previewCy_ - visH * 0.5, visH,
+                                           juce::dontSendNotification);
+    }
+
+    /** Anchors the zoom scrollbars to the VISIBLE slice of the preview frame
+     *  (the page can be taller than the zone-3 viewport). Re-run from the
+     *  timer: scrolling the outer viewport moves the window silently. */
+    void layoutPreviewScrollbars()
+    {
+        const int sb = 10;
+        juce::Rectangle<int> vis = previewArea;
+        if (auto* vp = findParentComponentOfClass<juce::Viewport>())
+        {
+            const auto seen = previewArea.getIntersection(
+                getLocalArea(vp, vp->getLocalBounds()));
+            if (! seen.isEmpty())
+                vis = seen;
+        }
+        previewHScroll.setBounds(vis.getX() + 1, vis.getBottom() - sb - 1,
+                                 vis.getWidth() - sb - 2, sb);
+        previewVScroll.setBounds(previewArea.getRight() - sb - 1, vis.getY() + 1,
+                                 sb, vis.getHeight() - sb - 2);
+    }
+
+    void scrollBarMoved(juce::ScrollBar* bar, double newRangeStart) override
+    {
+        if (bar == &previewHScroll)
+            previewCx_ = newRangeStart + bar->getCurrentRangeSize() * 0.5;
+        else if (bar == &previewVScroll)
+            previewCy_ = newRangeStart + bar->getCurrentRangeSize() * 0.5;
+        else
+            return;
+        lastViewChangeMs_ = juce::Time::getMillisecondCounter();
+        repaint(previewArea);
+    }
+
+    void mouseWheelMove(const juce::MouseEvent& e,
+                        const juce::MouseWheelDetails& wheel) override
+    {
+        if (previewImage.isValid() && previewArea.contains(e.getPosition()))
+        {
+            if (wheel.deltaY != 0.f)
+                zoomPreviewAt(e.position, std::exp((double) wheel.deltaY * 2.2));
+            return;   // consumed — never scrolls the page viewport underneath
+        }
+        juce::Component::mouseWheelMove(e, wheel);
+    }
+
+    void mouseMagnify(const juce::MouseEvent& e, float scaleFactor) override
+    {
+        if (previewImage.isValid() && previewArea.contains(e.getPosition()))
+            zoomPreviewAt(e.position, (double) scaleFactor);
+    }
+
+    //==========================================================================
+    // Hi-res zoom tile. The preview band is a 150 DPI render, so zooming it is
+    // upscale blur — but the FULL-resolution page (export DPI) either sits in
+    // the fullImage cache or can be re-rendered cheaply (pure drawing, no
+    // FFT). Once the view settles, the visible band window (+25% margin) is
+    // cropped from it on a background thread — which also refreshes the
+    // fullImage cache when it had to re-render (PLAY/EXPORT reuse it).
+    struct TileSpec
+    {
+        double fx0 = 0.0, fx1 = 0.0, fy0 = 0.0, fy1 = 0.0;  ///< band fractions
+        double vx0 = 0.0, vx1 = 0.0, vy0 = 0.0, vy1 = 0.0;  ///< visible (coverage)
+        int    w = 0, h = 0;                                 ///< tile pixels
+        bool   valid = false;
+    };
+
+    TileSpec desiredTileSpec() const
+    {
+        TileSpec ts;
+        if (previewZoom_ <= 1.001 || ! previewImage.isValid())
+            return ts;
+        const auto imgArea = previewImageBounds();
+        const auto vis = imgArea.getIntersection(previewArea.toFloat());
+        if (vis.isEmpty() || imgArea.getWidth() <= 0.f || imgArea.getHeight() <= 0.f)
+            return ts;
+
+        auto frac = [](float a, float lo, float span)
+        { return juce::jlimit(0.0, 1.0, (double) ((a - lo) / span)); };
+        ts.vx0 = frac(vis.getX(),      imgArea.getX(), imgArea.getWidth());
+        ts.vx1 = frac(vis.getRight(),  imgArea.getX(), imgArea.getWidth());
+        ts.vy0 = frac(vis.getY(),      imgArea.getY(), imgArea.getHeight());
+        ts.vy1 = frac(vis.getBottom(), imgArea.getY(), imgArea.getHeight());
+        const double mx = 0.25 * (ts.vx1 - ts.vx0), my = 0.25 * (ts.vy1 - ts.vy0);
+        ts.fx0 = juce::jlimit(0.0, 1.0, ts.vx0 - mx);
+        ts.fx1 = juce::jlimit(0.0, 1.0, ts.vx1 + mx);
+        ts.fy0 = juce::jlimit(0.0, 1.0, ts.vy0 - my);
+        ts.fy1 = juce::jlimit(0.0, 1.0, ts.vy1 + my);
+        if (ts.fx1 - ts.fx0 < 1.0e-4 || ts.fy1 - ts.fy0 < 1.0e-4)
+            return ts;
+
+        double scale = 2.0;   // physical px per logical px (Retina default)
+        if (auto* d = juce::Desktop::getInstance().getDisplays()
+                          .getDisplayForRect(getScreenBounds()))
+            scale = d->scale;
+
+        double w = (ts.fx1 - ts.fx0) * imgArea.getWidth()  * scale;
+        double h = (ts.fy1 - ts.fy0) * imgArea.getHeight() * scale;
+        constexpr double kBudgetPx = 24.0e6;
+        if (w * h > kBudgetPx)
+        {
+            const double k = std::sqrt(kBudgetPx / (w * h));
+            w *= k;
+            h *= k;
+        }
+        ts.w = (int) std::lround(w);
+        ts.h = (int) std::lround(h);
+        ts.valid = ts.w >= 2 && ts.h >= 2;
+        return ts;
+    }
+
+    static constexpr juce::uint32 kTileDebounceMs = 180;
+
+    void maybeStartTileRender()
+    {
+        if (previewZoom_ <= 1.001)
+        {
+            if (hiResTile_.isValid() && ! tileRenderBusy_)
+            {
+                hiResTile_ = juce::Image();
+                tileFx0_ = tileFx1_ = tileFy0_ = tileFy1_ = 0.0;
+            }
+            return;
+        }
+        if (tileRenderBusy_
+            || juce::Time::getMillisecondCounter() - lastViewChangeMs_ < kTileDebounceMs)
+            return;
+        const auto ts = desiredTileSpec();
+        if (! ts.valid)
+            return;
+        const double density = ts.w / juce::jmax(1.0e-6, ts.fx1 - ts.fx0);
+        if (hiResTile_.isValid()
+            && ts.vx0 >= tileFx0_ - 1.0e-6 && ts.vx1 <= tileFx1_ + 1.0e-6
+            && ts.vy0 >= tileFy0_ - 1.0e-6 && ts.vy1 <= tileFy1_ + 1.0e-6
+            && tileDensity_ > 0.0
+            && std::abs(density / tileDensity_ - 1.0) < 0.25)
+            return;
+
+        tileRenderBusy_ = true;
+        const bool needRender = fullDirty || ! fullImage.isValid();
+        juce::Thread::launch(
+            [safe = juce::Component::SafePointer<TimbreGenTabComponent>(this),
+             slotsCopy = slots, s = settingsForDpi(pageSettings.printerDpi),
+             page = fullImage, band = fullBand, needRender, ts,
+             epoch = tileEpoch_]() mutable
+            {
+                if (needRender)
+                {
+                    const auto r = timbregen::renderTimbrePage(slotsCopy, s);
+                    if (! (r.ok && r.image.isValid()))
+                    {
+                        juce::MessageManager::callAsync([safe]
+                        {
+                            if (auto* self = safe.getComponent())
+                                self->tileRenderBusy_ = false;
+                        });
+                        return;
+                    }
+                    page = r.image;
+                    band = r.spectroBand;
+                }
+                juce::Rectangle<int> b =
+                    (band.getWidth() > 0 && band.getHeight() > 0)
+                        ? band.getIntersection(page.getBounds())
+                        : page.getBounds();
+                if (b.isEmpty())
+                    b = page.getBounds();
+                const juce::Rectangle<int> crop(
+                    b.getX() + (int) std::floor(ts.fx0 * b.getWidth()),
+                    b.getY() + (int) std::floor(ts.fy0 * b.getHeight()),
+                    juce::jmax(1, (int) std::ceil((ts.fx1 - ts.fx0) * b.getWidth())),
+                    juce::jmax(1, (int) std::ceil((ts.fy1 - ts.fy0) * b.getHeight())));
+                const auto src = page.getClippedImage(crop.getIntersection(page.getBounds()));
+                // Never upscale past the native resolution — no extra detail.
+                juce::Image tile = src.rescaled(juce::jmin(ts.w, src.getWidth()),
+                                                juce::jmin(ts.h, src.getHeight()),
+                                                juce::Graphics::highResamplingQuality);
+                juce::MessageManager::callAsync(
+                    [safe, tile = std::move(tile), ts, epoch,
+                     freshPage = needRender ? page : juce::Image(),
+                     freshBand = band, lo = s.minFreq, hi = s.maxFreq]() mutable
+                    {
+                        if (auto* self = safe.getComponent())
+                            self->applyTileRender(tile, ts, epoch,
+                                                  freshPage, freshBand, lo, hi);
+                    });
+            });
+    }
+
+    void applyTileRender(const juce::Image& tile, const TileSpec& ts, int epoch,
+                         const juce::Image& freshPage,
+                         juce::Rectangle<int> freshBand, double lo, double hi)
+    {
+        tileRenderBusy_ = false;
+        // Content changed while this tile was being cut — never show (or
+        // cache) the old bytes.
+        if (epoch != tileEpoch_)
+            return;
+        // Side product: the tile render also produced a fresh full page —
+        // adopt it so the next PLAY/EXPORT reuses it instead of re-rendering.
+        if (freshPage.isValid())
+        {
+            fullImage   = freshPage;
+            fullBand    = freshBand;
+            fullMinFreq = lo;
+            fullMaxFreq = hi;
+            fullDirty   = false;
+        }
+        if (! tile.isValid())
+            return;
+        if (previewZoom_ <= 1.001)
+        {
+            hiResTile_ = juce::Image();
+            return;
+        }
+        hiResTile_ = tile;
+        tileFx0_ = ts.fx0;  tileFx1_ = ts.fx1;
+        tileFy0_ = ts.fy0;  tileFy1_ = ts.fy1;
+        tileDensity_ = ts.w / juce::jmax(1.0e-6, ts.fx1 - ts.fx0);
+        repaint(previewArea);
     }
 
     //==========================================================================
@@ -371,6 +715,9 @@ public:
     }
     void mouseDoubleClick(const juce::MouseEvent& e) override
     {
+        // Zoomed, the virtual image rect overflows the frame: only clicks
+        // INSIDE the frame may select a slot.
+        if (! previewArea.contains(e.getPosition())) return;
         const auto area = previewImgArea.isEmpty() ? previewImageBounds() : previewImgArea;
         if (area.getWidth() <= 0.f || ! area.contains(e.position)) return;
         const double fx = juce::jlimit(0.0, 1.0,
@@ -441,12 +788,8 @@ public:
         labelsToggle.setBounds(pad, y, colW, ch);
         y += ch + 3;
 
-        dpiLabel.setBounds(pad, y, 34, ch);
-        dpiCombo.setBounds(pad + 34 + gap, y, 90, ch);
-        exportPngButton.setBounds(pad + 34 + gap + 90 + gap, y,
-                                  (colW - 34 - 2 * gap - 90 - gap) / 2, ch);
-        exportJpgButton.setBounds(exportPngButton.getRight() + gap, y,
-                                  colW - (exportPngButton.getRight() + gap - pad), ch);
+        // Format / DPI live on the SETUP face — one button here.
+        exportButton.setBounds(pad, y, colW, ch);
         y += ch + gap + 4;
 
         // ── Transport bar ────────────────────────────────────────────────────
@@ -477,9 +820,66 @@ public:
         previewArea = juce::Rectangle<int>(previewX, contentTop,
                                            juce::jmax(80, getWidth() - previewX - pad),
                                            juce::jmax(80, getHeight() - pad - contentTop));
+        layoutPreviewScrollbars();
+        clampPreviewView();
+        updatePreviewScrollbars();
     }
 
 private:
+    //==========================================================================
+    /** Export button that shows its running job: a plain themed TextButton
+     *  until an export starts, then a terracotta bar + travelling sheen while
+     *  the page is rendered/encoded/written on the background thread (sibling
+     *  of the SCORE / MIDI SCORE export buttons — same visual language). */
+    class TimbreExportButton : public juce::TextButton
+    {
+    public:
+        void setJobState(bool active, float frac, bool writing)
+        {
+            const bool repaintNeeded = active || active != active_;
+            active_  = active;
+            frac_    = frac;
+            writing_ = writing;
+            if (repaintNeeded)
+                repaint();
+        }
+
+        void paintButton(juce::Graphics& g, bool over, bool down) override
+        {
+            juce::TextButton::paintButton(g, over, down);
+            if (! active_)
+                return;
+
+            const auto b = getLocalBounds().toFloat().reduced(1.5f);
+            const juce::Colour accent(kAccentARGB);
+
+            g.setColour(accent.withAlpha(0.30f));
+            g.fillRoundedRectangle(
+                b.withWidth(b.getWidth() * juce::jlimit(0.f, 1.f, frac_)), 3.f);
+
+            if (writing_)
+            {
+                const float t = (float) (juce::Time::getMillisecondCounter() % 1200u)
+                              / 1200.f;
+                const float bandW = b.getWidth() * 0.18f;
+                const float x = b.getX() + t * (b.getWidth() + bandW) - bandW;
+                juce::ColourGradient sheen(accent.withAlpha(0.f), x, 0.f,
+                                           accent.withAlpha(0.f), x + bandW, 0.f,
+                                           false);
+                sheen.addColour(0.5, accent.withAlpha(0.35f));
+                g.setGradientFill(sheen);
+                g.fillRoundedRectangle(b, 3.f);
+            }
+
+            g.setColour(accent.withAlpha(0.9f));
+            g.drawRoundedRectangle(b, 3.f, 1.2f);
+        }
+
+    private:
+        bool  active_  = false, writing_ = false;
+        float frac_    = 0.f;
+    };
+
     //==========================================================================
     /** Square play/stop transport button (same visual language as SCORE's). */
     class TimbrePlayButton : public juce::Button
@@ -760,6 +1160,12 @@ private:
     void regenPreview()
     {
         previewDirty = false;
+        // The page changed: the hi-res zoom tile shows the OLD content — drop
+        // it, the timer re-cuts the visible window. The epoch bump also voids
+        // any tile still in flight on the worker.
+        hiResTile_ = juce::Image();
+        tileFx0_ = tileFx1_ = tileFy0_ = tileFy1_ = 0.0;
+        ++tileEpoch_;
         constexpr double kPreviewDpi = 150.0;
         const auto r = timbregen::renderTimbrePage(slots, settingsForDpi(kPreviewDpi));
         if (r.ok && r.image.isValid())
@@ -797,40 +1203,67 @@ private:
     }
 
     //==========================================================================
-    void chooseExport(bool asPng)
+    // Export runs on a BACKGROUND thread (render-if-dirty + encode + DPI stamp
+    // + write) so the UI stays live; the button shows a terracotta bar with a
+    // travelling sheen meanwhile. Format (PNG/JPEG) comes from the SETUP face.
+    void exportNow()
     {
-        if (! ensureFullImage())
+        if (exportBusy_)
             return;
+        const bool asPng = exportAsPng_;
         const juce::String ext = asPng ? "png" : "jpg";
-        const juce::File suggested = startDir().getChildFile("timbres_A4." + ext);
-        fileChooser = std::make_unique<juce::FileChooser>(
-            "Export Timbre Page", suggested, "*." + ext);
-        fileChooser->launchAsync(
-            juce::FileBrowserComponent::saveMode
-                | juce::FileBrowserComponent::canSelectFiles
-                | juce::FileBrowserComponent::warnAboutOverwriting,
-            [safe = juce::Component::SafePointer<TimbreGenTabComponent>(this), asPng, ext]
-            (const juce::FileChooser& fc)
+        const juce::File dest = exportDir().getNonexistentChildFile(
+            "timbres_A4", "." + ext, false);
+
+        exportBusy_ = true;
+        exportButton.setButtonText(juce::String::fromUTF8("Writing…"));
+        exportButton.setJobState(true, 1.f, true);
+
+        juce::Thread::launch(
+            [safe = juce::Component::SafePointer<TimbreGenTabComponent>(this),
+             slotsCopy = slots, s = settingsForDpi(pageSettings.printerDpi),
+             page = fullImage, needRender = (fullDirty || ! fullImage.isValid()),
+             dest, asPng, dpi = pageSettings.printerDpi,
+             session = processor.sessions()->sessionName()]() mutable
             {
-                auto* self = safe.getComponent();
-                if (self == nullptr) return;
-                auto dest = fc.getResult();
-                if (dest.getFullPathName().isEmpty()) return;
-                dest = dest.withFileExtension(ext);
-                const bool ok = scoregen::exportImage(self->fullImage, dest, asPng,
-                                                      self->pageSettings.printerDpi);
-                self->logLabel.setText(ok ? ("Exported: " + dest.getFileName())
-                                          : "Export failed",
-                                       juce::dontSendNotification);
+                juce::String msg;
+                if (needRender)
+                {
+                    const auto r = timbregen::renderTimbrePage(slotsCopy, s);
+                    if (r.ok && r.image.isValid())
+                        page = r.image;
+                    else
+                        msg = "Failed: " + r.log;
+                }
+                if (msg.isEmpty())
+                    msg = scoregen::exportImage(page, dest, asPng, dpi)
+                        ? "Exported: " + dest.getFileName()
+                              + juce::String::fromUTF8(" → ") + session + "/exports"
+                        : "Export failed: " + dest.getFileName();
+                juce::MessageManager::callAsync([safe, msg]
+                {
+                    if (auto* self = safe.getComponent())
+                        self->finishExport(msg);
+                });
             });
     }
 
-    juce::File startDir() const
+    void finishExport(const juce::String& msg)
     {
-        const auto out = processor.getSamplerOutputDir();
-        if (out.isNotEmpty() && juce::File(out).isDirectory())
-            return juce::File(out);
-        return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+        exportBusy_ = false;
+        exportButton.setJobState(false, 0.f, false);
+        exportButton.setButtonText("Export image");
+        logLabel.setText(msg, juce::dontSendNotification);
+    }
+
+    juce::File exportDir() const
+    {
+        // Image exports never ask where to save: they land in the active
+        // session's exports/ folder — the built-in Global session when hosted
+        // in a DAW (no session UI) or before any session is named.
+        const juce::File dir = processor.sessions()->exportsDir();
+        dir.createDirectory();
+        return dir;
     }
 
     //==========================================================================
@@ -856,12 +1289,16 @@ private:
         else
             scrubHead = -1;
 
-        // P5-M4: drive THIS instance's own player slot directly. The
-        // scorePlaying param now belongs to the SCORE module's transport —
-        // routing through it here would start the WRONG player (per-instance
-        // automatable transports are M5).
-        if (play) fs->uiPlayScore();
-        else      fs->uiStopScore();
+        // Route through TIMBRE's own play param so the DAW sees the transport;
+        // the processor pushes speed/loop and starts/stops its slot.
+        if (auto* p = processor.getAPVTS().getParameter("timbrePlaying"))
+        {
+            const float norm = play ? 1.0f : 0.0f;
+            if (! juce::approximatelyEqual(p->getValue(), norm))
+                p->setValueNotifyingHost(norm);
+            else if (play) fs->uiPlayScore();
+            else           fs->uiStopScore();
+        }
         repaint(previewArea);
     }
 
@@ -882,6 +1319,17 @@ private:
 
     void timerCallback() override
     {
+        // Zoomed: keep the scrollbars pinned to the VISIBLE slice of the
+        // preview while the outer zone-3 viewport scrolls (no notification),
+        // and sharpen the visible window once the view settles.
+        if (previewZoom_ > 1.001)
+            layoutPreviewScrollbars();
+        maybeStartTileRender();
+
+        // Running export: animate the sheen on the button.
+        if (exportBusy_)
+            exportButton.setJobState(true, 1.f, true);
+
         // Debounced live regeneration (drag-friendly).
         if (previewDirty
             && juce::Time::getMillisecondCounter() - lastEditMs > 200)
@@ -910,6 +1358,16 @@ private:
         }
         else
             playStopButton.setPlaying(false);
+
+        // Mirror TIMBRE's play param on the real engine state (DAW lane truthful
+        // when a one-shot ends / an internal reload stops playback).
+        if (auto* p = processor.getAPVTS().getParameter("timbrePlaying"))
+        {
+            const float norm = (fs != nullptr && fs->isScorePlaying() && framesAreOurs)
+                                 ? 1.0f : 0.0f;
+            if (! juce::approximatelyEqual(p->getValue(), norm))
+                p->setValueNotifyingHost(norm);
+        }
     }
 
     //==========================================================================
@@ -944,6 +1402,7 @@ private:
         root->setProperty("line",   pageSettings.lineWidthMM);
         root->setProperty("dpi",    pageSettings.printerDpi);
         root->setProperty("labels", pageSettings.showLabels);
+        root->setProperty("png",    exportAsPng_);
         processor.getAPVTS().state.setProperty(
             "timbreGenState", juce::JSON::toString(juce::var(root), true), nullptr);
     }
@@ -961,6 +1420,7 @@ private:
         if (o->hasProperty("line"))   pageSettings.lineWidthMM  = (double) o->getProperty("line");
         if (o->hasProperty("dpi"))    pageSettings.printerDpi   = (double) o->getProperty("dpi");
         if (o->hasProperty("labels")) pageSettings.showLabels   = (bool)   o->getProperty("labels");
+        if (o->hasProperty("png"))    exportAsPng_              = (bool)   o->getProperty("png");
 
         const auto* arr = o->getProperty("slots").getArray();
         if (arr == nullptr) return;
@@ -1011,6 +1471,32 @@ public:
         repaint();
     }
 
+    //==========================================================================
+    // SETUP face access (TimbreSetupPanel) — export preferences. Export-only:
+    // the preview never changes; a DPI change re-renders the full page (and
+    // the zoom tile) at the new resolution on the next use.
+    bool exportFormatIsPng() const { return exportAsPng_; }
+    void setExportFormatPng(bool png)
+    {
+        if (png == exportAsPng_)
+            return;
+        exportAsPng_ = png;
+        persistState();
+    }
+
+    int  exportDpi() const { return (int) pageSettings.printerDpi; }
+    void setExportDpi(int dpi)
+    {
+        dpi = juce::jmax(72, dpi);
+        if ((double) dpi == pageSettings.printerDpi)
+            return;
+        pageSettings.printerDpi = (double) dpi;
+        fullDirty = true;                 // full page + tile follow on next use
+        hiResTile_ = juce::Image();
+        ++tileEpoch_;
+        persistState();
+    }
+
 private:
     /** The bound score channel: the selected instance's slot while it is
      *  still in the rack, else the first placed instance of this type. */
@@ -1033,16 +1519,18 @@ private:
 
     juce::Label    presetLabel, noteLabel, partialsLabel, slopeLabel, oddLabel,
                    inharmLabel, combLabel, combPosLabel, attackLabel, decayLabel,
-                   hfDampLabel, levelLabel, wsLabel, lineLabel, dpiLabel,
+                   hfDampLabel, levelLabel, wsLabel, lineLabel,
                    speedLabel, playHint, logLabel;
-    juce::ComboBox presetCombo, dpiCombo;
+    juce::ComboBox presetCombo;
     juce::ToggleButton activeToggle, labelsToggle;
     TimbreIconToggle   loopBtn    { TimbreIconToggle::Glyph::Loop };
     TimbreIconToggle   reverseBtn { TimbreIconToggle::Glyph::Inverse };
     juce::Slider   noteSlider, partialsSlider, slopeSlider, oddSlider, inharmSlider,
                    combSlider, combPosSlider, attackSlider, decaySlider, hfDampSlider,
                    levelSlider, wsSlider, lineSlider, speedSlider;
-    juce::TextButton exportPngButton, exportJpgButton;
+    TimbreExportButton exportButton;
+    bool exportAsPng_ = true;            // SETUP face: PNG (true) / JPEG
+    bool exportBusy_  = false;           // one export at a time
     TimbrePlayButton playStopButton;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> loopAttach, reverseAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> speedAttach;
@@ -1055,6 +1543,19 @@ private:
     juce::Rectangle<int> fullBand;
     double fullMinFreq = 0.0, fullMaxFreq = 0.0;
 
+    // Preview zoom state — 1 = whole band fitted; Cx/Cy = image fraction at
+    // the frame centre while zoomed (wheel/pinch zoom, scrollbars navigate).
+    double previewZoom_ = 1.0, previewCx_ = 0.5, previewCy_ = 0.5;
+    juce::ScrollBar previewHScroll { false }, previewVScroll { true };
+
+    // Hi-res tile of the visible band window while zoomed (see desiredTileSpec).
+    juce::Image  hiResTile_;
+    double       tileFx0_ = 0.0, tileFx1_ = 0.0, tileFy0_ = 0.0, tileFy1_ = 0.0;
+    double       tileDensity_ = 0.0;    // tile px per band fraction (renew test)
+    bool         tileRenderBusy_ = false;
+    int          tileEpoch_ = 0;        // bumped on content change → voids in-flight tiles
+    juce::uint32 lastViewChangeMs_ = 0;
+
     bool previewDirty = false, fullDirty = true, stateDirty = false;
     juce::uint32 lastEditMs = 0;
 
@@ -1062,8 +1563,6 @@ private:
     int  loadedFrameCount = 0;
     int  scrubHead = -1;
     bool scrubbing = false, scrubAuditioning = false;
-
-    std::unique_ptr<juce::FileChooser> fileChooser;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TimbreGenTabComponent)
 };

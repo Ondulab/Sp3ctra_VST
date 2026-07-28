@@ -112,17 +112,18 @@ namespace Sp3ctraTheme
     /// Section badge / component header label ("LUXSTRAL", "STEP SEQUENCER").
     constexpr float kFontBadge       = 12.0f;
 
-    /// Small auxiliary text (editor row labels, slot editor panel labels).
-    constexpr float kFontSmall       = 11.0f;
+    /// Small auxiliary text (editor row labels, slot editor panel labels,
+    /// popup-menu items, header nav buttons, range-info labels).
+    constexpr float kFontSmall       = 14.0f;
 
-    /// Tiny text (transport bar captions, sequencer hint text).
-    constexpr float kFontTiny        = 10.0f;
+    /// Tiny text (transport bar captions, hint text, log lines).
+    constexpr float kFontTiny        = 13.0f;
 
     /// Micro text — smallest legible label (note names in slot cells).
     constexpr float kFontMicro       = 9.0f;
 
     /// Button label font — used by Sp3ctraLookAndFeel::drawButtonText.
-    constexpr float kFontBtn         = 11.0f;
+    constexpr float kFontBtn         = 13.0f;
 
     // ──────────────────────────────────────────────────────────────────────────
     // COLOURS — dark theme
@@ -210,10 +211,10 @@ namespace Sp3ctraTheme
     /// Corner radius for tab shapes.
     constexpr float kTabCornerR     = 4.0f;
 
-    /// Font size for main tab labels.
-    constexpr float kFontTab        = 12.0f;
+    /// Primary face-switch tab labels (FaceSwitchBar "PLAY | SETUP").
+    constexpr float kFontTab        = 14.0f;
 
-    /// Font size for sub-tab labels.
-    constexpr float kFontSubTab     = 11.0f;
+    /// Sub-navigation labels (module-catalogue category headers SRC/SYNTH/UTILS).
+    constexpr float kFontSubTab     = 13.0f;
 
 } // namespace Sp3ctraTheme

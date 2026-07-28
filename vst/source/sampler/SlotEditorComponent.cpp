@@ -1,21 +1,21 @@
 #include "SlotEditorComponent.h"
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "../Sp3ctraDialog.h"     // destructive-action confirmations
 #include "SamplerMidiTargets.h"   // synthetic target ids for MIDI-Learn
 
-// Loop-mode buttons are now pictograms (see LoopModeButton). Order matches the
-// LoopMode enum: NONE / LOOP / INVERSE / PINGPONG.
-static const LoopModeButton::Glyph kLoopGlyphs[4] = {
-    LoopModeButton::Glyph::None,
-    LoopModeButton::Glyph::Loop,
-    LoopModeButton::Glyph::Inverse,
-    LoopModeButton::Glyph::PingPong
+// Loop row = THREE composable pictogram toggles (forward / backward / repeat),
+// combined into the persisted LoopMode enum by composeLoopMode(). Both arrows
+// lit = round trip; + repeat = infinite ping-pong.
+static const LoopModeButton::Glyph kLoopGlyphs[3] = {
+    LoopModeButton::Glyph::None,       // straight → arrow (play forward)
+    LoopModeButton::Glyph::ArrowLeft,  // mirrored ← arrow (play backward)
+    LoopModeButton::Glyph::Loop        // racetrack (repeat)
 };
-static const char* kLoopTips[4] = {
-    "No loop (play once, then stop)",
-    "Loop forward",
-    "Inverse (loop backward)",
-    "Ping-pong (bounce forward / backward)"
+static const char* kLoopTips[3] = {
+    "Play forward (left to right)",
+    "Play backward (right to left)",
+    "Repeat - both arrows lit = infinite ping-pong"
 };
 // (Note names removed — banks are numbered, no more note addressing.)
 
@@ -92,14 +92,30 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
 
     clearBtn.onClick = [this]
     {
-        if (auto* fs = processor.getSampler(samplerIndex_))
-        {
-            fs->uiClearSlot(selectedSlot);
-            // CLEAR reset the EQ AND the edit handles (start/end/fades/floor) —
-            // refresh every control so the UI reflects the fresh slot.
-            refreshSliderValues();     // also calls refreshFreqCurve() + markDirty
-            spectralEditor.markDirty();
-        }
+        auto* fs = processor.getSampler(samplerIndex_);
+        if (fs == nullptr) return;
+        if (! fs->slotHasContent(selectedSlot))
+            return;   // nothing to lose — no dialog
+        Sp3ctraDialog::showConfirm(
+            this, "Clear bank",
+            ("Clear bank " + juce::String(selectedSlot + 1)
+             + "? The recorded audio is discarded.").toRawUTF8(),
+            "Clear", "Cancel",
+            [safe = juce::Component::SafePointer<SlotEditorComponent>(this)](bool ok)
+            {
+                if (! ok) return;
+                auto* self = safe.getComponent();
+                if (self == nullptr) return;
+                if (auto* s = self->processor.getSampler(self->samplerIndex_))
+                {
+                    s->uiClearSlot(self->selectedSlot);
+                    // CLEAR reset the EQ AND the edit handles — refresh every
+                    // control so the UI reflects the fresh slot.
+                    self->refreshSliderValues();   // + refreshFreqCurve + markDirty
+                    self->spectralEditor.markDirty();
+                    self->processor.sessions()->markBanksDirty();
+                }
+            });
     };
     addAndMakeVisible(clearBtn);
 
@@ -113,6 +129,8 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
             fs->cropSlotToBounds(selectedSlot);
             spectralEditor.markDirty();   // image + bounds changed
             refreshSliderValues();
+            // Crop rewrites the recorded frames — persist the banks.
+            processor.sessions()->markBanksDirty();
         }
     };
     addAndMakeVisible(cropBtn);
@@ -132,7 +150,10 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
         auto* fs = processor.getSampler(samplerIndex_);
         if (fs == nullptr) return;
 
-        const juce::File startDir = resolveSaveDirectory();
+        // Import: seed from the last slot-import directory used.
+        const juce::File startDir = processor.sessions()->startDirFor(
+            PathKeys::slotImport,
+            juce::File::getSpecialLocation(juce::File::userDocumentsDirectory));
         fileChooser = std::make_unique<juce::FileChooser>(
             "Load slot (.fslot) or image",
             startDir,
@@ -148,6 +169,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
             auto* sampler = processor.getSampler(samplerIndex_);
             if (sampler == nullptr) return;
 
+            processor.sessions()->rememberDirFor(PathKeys::slotImport, picked);
             const bool ok = picked.hasFileExtension("fslot")
                 ? sampler->loadSlotFromFile(selectedSlot, picked)
                 : sampler->loadSlotFromImageFile(selectedSlot, picked, 0);
@@ -156,6 +178,8 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
                 spectralEditor.markDirty();
                 refreshSliderValues();
                 refreshLoopButtons();
+                // Imported audio is session content — persist the banks.
+                processor.sessions()->markBanksDirty();
             }
         });
     };
@@ -232,12 +256,25 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     };
     addAndMakeVisible(speedSlider);
 
-    // ── Loop mode buttons (pictograms) ────────────────────────────────────────
-    for (int k = 0; k < 4; ++k)
+    // ── Loop toggles (pictograms: → / ← / repeat) ─────────────────────────────
+    // Each click flips ONE bit of the current mode; the last lit direction
+    // cannot be turned off (the click is ignored — no invalid combo).
+    for (int k = 0; k < 3; ++k)
     {
         loopBtns[k].setGlyph(kLoopGlyphs[k]);
         loopBtns[k].setTooltip(kLoopTips[k]);
-        loopBtns[k].onClick = [this, k] { applyLoopMode(static_cast<LoopMode>(k)); };
+        loopBtns[k].onClick = [this, k]
+        {
+            auto* fs = processor.getSampler(samplerIndex_);
+            if (fs == nullptr) return;
+            bool f, b, r;
+            decomposeLoopMode(fs->getSlotLoopMode(selectedSlot), f, b, r);
+            if      (k == 0) f = !f;
+            else if (k == 1) b = !b;
+            else             r = !r;
+            if (!f && !b) return;   // keep at least one direction lit
+            applyLoopMode(composeLoopMode(f, b, r));
+        };
         addAndMakeVisible(loopBtns[k]);
     }
     refreshLoopButtons();
@@ -275,23 +312,58 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     };
     addAndMakeVisible(overdubToggle);
 
-    // ── Fade info labels — thin strip under the image view ────────────────────
-    // The curves are edited directly ON the image; these mirror type · power.
-    fadeInInfo_.setColour(juce::Label::textColourId,
-                          juce::Colour(0xff44ee88).withAlpha(0.8f));
-    fadeInInfo_.setJustificationType(juce::Justification::centredLeft);
-    fadeOutInfo_.setColour(juce::Label::textColourId,
-                           juce::Colour(0xffff6633).withAlpha(0.8f));
-    fadeOutInfo_.setJustificationType(juce::Justification::centredRight);
-    for (auto* lbl : { &fadeInInfo_, &fadeOutInfo_ })
+    // ── Param boxes — two-row strip under the image view ──────────────────────
+    // Crop bounds + fade width/type/power chips. Each box edits ONE
+    // SamplerMidiTargets Kind through the SAME read/apply path a mapped MIDI CC
+    // uses, always addressing the CURRENT (engine, slot) — no rebind needed.
     {
-        lbl->setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
-        lbl->setInterceptsMouseClicks(true, false);   // right-click MIDI learn
-        addAndMakeVisible(lbl);
+        using K = SamplerMidiTargets::Kind;
+        const auto pct = [](float n)
+        { return juce::String(juce::roundToInt(n * 100.0f)) + "%"; };
+        const auto pow2 = [](float n)
+        { return juce::String(SamplerMidiTargets::powerRange().convertFrom0to1(n), 2); };
+        const auto curve = [](float n)
+        {
+            static const char* kNames[] = { "LIN", "EXP", "LOG", "S" };
+            return juce::String(kNames[juce::jlimit(0, kNumFadeCurveTypes - 1,
+                                                    (int) std::lround(n * 3.0f))]);
+        };
+
+        auto setup = [this](SamplerValueBox& b, K kind,
+                            std::function<juce::String(float)> fmt)
+        {
+            b.readNorm = [this, kind]
+            {
+                auto* fs = processor.getSampler(samplerIndex_);
+                return fs != nullptr
+                     ? SamplerMidiTargets::read(*fs, selectedSlot, kind) : 0.0f;
+            };
+            b.applyNorm = [this, kind](float n)
+            {
+                if (auto* fs = processor.getSampler(samplerIndex_))
+                {
+                    SamplerMidiTargets::apply(*fs, selectedSlot, kind, n);
+                    spectralEditor.markDirty();   // curves/crop live on the image
+                    refreshParamBoxes();          // crop chips are coupled (min span)
+                }
+            };
+            b.format = std::move(fmt);
+            addAndMakeVisible(b);
+        };
+        setup(cropStartBox_,   K::CropStart,   pct);
+        setup(cropEndBox_,     K::CropEnd,     pct);
+        setup(fadeInLenBox_,   K::FadeInLen,   pct);
+        setup(fadeInTypeBox_,  K::FadeInType,  curve);
+        setup(fadeInPowBox_,   K::FadeInPow,   pow2);
+        setup(fadeOutLenBox_,  K::FadeOutLen,  pct);
+        setup(fadeOutTypeBox_, K::FadeOutType, curve);
+        setup(fadeOutPowBox_,  K::FadeOutPow,  pow2);
+        fadeInTypeBox_ .setChoices({ "LIN", "EXP", "LOG", "S" });
+        fadeOutTypeBox_.setChoices({ "LIN", "EXP", "LOG", "S" });
     }
 
-    // Fade handles dragged on the image → keep the labels live.
-    spectralEditor.onFadeChanged = [this] { refreshFadeInfo(); };
+    // Handles dragged on the image (crop bars / fades) → keep the chips live.
+    spectralEditor.onFadeChanged = [this] { refreshParamBoxes(); };
 
     // Purge stale MIDI action pulses latched while NO editor was open: the MIDI
     // engine keeps latching them, nobody drains them, and acting on a press
@@ -381,8 +453,8 @@ void SlotEditorComponent::refreshSliderValues()
     // Overdub is engine-wide (not per-slot) — mirror the engine flag.
     overdubToggle.setToggleState(fs->getOverdubMode(),
                                  juce::dontSendNotification);
-    // Fade info labels (the curves themselves are edited on the image).
-    refreshFadeInfo();
+    // Crop / fade chips (the curves can also be edited on the image).
+    refreshParamBoxes();
     refreshFreqCurve();
 }
 
@@ -400,39 +472,25 @@ void SlotEditorComponent::refreshFreqCurve()
     spectralEditor.markDirty();
 }
 
-void SlotEditorComponent::refreshFadeInfo()
+void SlotEditorComponent::refreshParamBoxes()
 {
-    auto* fs = processor.getSampler(samplerIndex_);
-    if (fs == nullptr) return;
-
-    static const char* kCurveNames[] = { "LIN", "EXP", "LOG", "S" };
-    const auto nameOf = [](FadeCurveType t)
-    {
-        const int i = juce::jlimit(0, kNumFadeCurveTypes - 1, static_cast<int>(t));
-        return juce::String(kCurveNames[i]);
-    };
-
-    fadeInInfo_.setText(
-        "fade in   "
-            + nameOf(fs->getSlotAttackCurveType(selectedSlot)) + "  "
-            + juce::String(fs->getSlotAttackCurvePower(selectedSlot), 2),
-        juce::dontSendNotification);
-    fadeOutInfo_.setText(
-        "fade out   "
-            + nameOf(fs->getSlotDecayCurveType(selectedSlot)) + "  "
-            + juce::String(fs->getSlotDecayCurvePower(selectedSlot), 2),
-        juce::dontSendNotification);
+    // The chips read the engine inside paint() — a repaint IS the refresh.
+    for (auto* b : { &cropStartBox_, &cropEndBox_,
+                     &fadeInLenBox_,  &fadeInTypeBox_,  &fadeInPowBox_,
+                     &fadeOutLenBox_, &fadeOutTypeBox_, &fadeOutPowBox_ })
+        b->repaint();
 }
 
 void SlotEditorComponent::refreshLoopButtons()
 {
     auto* fs = processor.getSampler(samplerIndex_);
-    const int curMode = (fs != nullptr)
-                        ? static_cast<int>(fs->getSlotLoopMode(selectedSlot))
-                        : 1; // default LOOP
-
-    for (int k = 0; k < 4; ++k)
-        loopBtns[k].setActive(k == curMode);
+    const LoopMode m = (fs != nullptr) ? fs->getSlotLoopMode(selectedSlot)
+                                       : LoopMode::LOOP;
+    bool f, b, r;
+    decomposeLoopMode(m, f, b, r);
+    loopBtns[0].setActive(f);
+    loopBtns[1].setActive(b);
+    loopBtns[2].setActive(r);
 }
 
 void SlotEditorComponent::applyLoopMode(LoopMode m)
@@ -471,15 +529,22 @@ void SlotEditorComponent::rebindMidiLearn()
     add(floorSlider,        K::Floor);
     add(resumeToggle,       K::Resume);
     add(overdubToggle,      K::Overdub);          // engine-wide (slot ignored)
-    // Fade curves are edited on the image; the info labels under it carry the
-    // POWER learn targets. (FadeInType/FadeOutType stay valid mapping targets
-    // for existing maps — the type is now picked by right-clicking a handle.)
-    add(fadeInInfo_,  K::FadeInPow);
-    add(fadeOutInfo_, K::FadeOutPow);
-    // Loop mode is 4 radio buttons — right-click ANY of them maps the one
-    // discrete "loop mode" target (Note cycles NONE→LOOP→INV→PING).
-    for (int k = 0; k < 4; ++k)
-        add(loopBtns[k], K::LoopMode);
+    // Crop / fade chips under the image — one learn target per box, so every
+    // strip parameter (bounds, widths, curve types, powers) is CC-mappable.
+    add(cropStartBox_,   K::CropStart);
+    add(cropEndBox_,     K::CropEnd);
+    add(fadeInLenBox_,   K::FadeInLen);
+    add(fadeInTypeBox_,  K::FadeInType);
+    add(fadeInPowBox_,   K::FadeInPow);
+    add(fadeOutLenBox_,  K::FadeOutLen);
+    add(fadeOutTypeBox_, K::FadeOutType);
+    add(fadeOutPowBox_,  K::FadeOutPow);
+    // Loop toggles — each maps its OWN 2-state target (a controller pad per
+    // toggle). The legacy "loopmode" cycle target stays resolvable for
+    // existing mappings (now 6 states).
+    add(loopBtns[0], K::LoopFwd);
+    add(loopBtns[1], K::LoopBwd);
+    add(loopBtns[2], K::LoopRepeat);
 
     // Action buttons — momentary REC / PLAY, one-shot SAVE / CLEAR.
     add(recBtn,   K::Rec);
@@ -748,9 +813,9 @@ void SlotEditorComponent::resized()
 
         {
             const int bGap = 3;
-            const int bW   = (ctrlW - 3 * bGap) / 4;
+            const int bW   = (ctrlW - 2 * bGap) / 3;
             loopLabel.setBounds(leftX, ry, lW, rowH);
-            for (int k = 0; k < 4; ++k)
+            for (int k = 0; k < 3; ++k)
                 loopBtns[k].setBounds(ctrlX + k * (bW + bGap), ry, bW, rowH);
         }
         ry += step;
@@ -774,19 +839,40 @@ void SlotEditorComponent::resized()
         overdubToggle.setBounds(rightX, ry, colW, rowH);
     }
 
-    // ── Image editor (middle) + fade info strip + EQ panel (bottom) ───────────
+    // ── Image editor (middle) + param-box strip + EQ panel (bottom) ───────────
     const int edY   = edParamBottom() + kEdGap;
     const int eqH   = juce::jmin(ScoreEqComponent::kPreferredH, (H - edY) / 2);
     const int eqY   = H - kEdPad - eqH;
-    const int infoH = 15;   // fade in/out labels UNDER the visualisation
+    const int chipH = 16, chipGap = 2;
+    const int infoH = 2 * chipH + chipGap + 2;  // two chip rows UNDER the image
     const int imgH  = juce::jmax(60, eqY - kEdGap - edY - infoH);
     spectralEditor.setBounds(kEdPad, edY, W - 2 * kEdPad, imgH);
     {
-        const int infoY = edY + imgH;
-        const int halfW = (W - 2 * kEdPad) / 2;
-        fadeInInfo_ .setBounds(kEdPad + 2,         infoY, halfW - 2, infoH);
-        fadeOutInfo_.setBounds(kEdPad + halfW,     infoY,
-                               (W - 2 * kEdPad) - halfW - 2, infoH);
+        const int stripW = W - 2 * kEdPad;
+        const int halfW  = (stripW - chipGap) / 2;
+        int y = edY + imgH + 2;
+
+        // Row 1 — crop bounds, two half-width chips.
+        cropStartBox_.setBounds(kEdPad, y, halfW, chipH);
+        cropEndBox_  .setBounds(kEdPad + halfW + chipGap, y,
+                                stripW - halfW - chipGap, chipH);
+        y += chipH + chipGap;
+
+        // Row 2 — [len][type][pow] per fade, in on the left / out on the right.
+        const int typeW = 40;   // LIN/EXP/LOG/S chip
+        auto fadeGroup = [&](int x0, int w, SamplerValueBox& len,
+                             SamplerValueBox& type, SamplerValueBox& pow)
+        {
+            const int valW = (w - typeW - 2 * chipGap) / 2;
+            len .setBounds(x0, y, valW, chipH);
+            type.setBounds(x0 + valW + chipGap, y, typeW, chipH);
+            pow .setBounds(x0 + valW + typeW + 2 * chipGap, y,
+                           w - valW - typeW - 2 * chipGap, chipH);
+        };
+        fadeGroup(kEdPad, halfW,
+                  fadeInLenBox_, fadeInTypeBox_, fadeInPowBox_);
+        fadeGroup(kEdPad + halfW + chipGap, stripW - halfW - chipGap,
+                  fadeOutLenBox_, fadeOutTypeBox_, fadeOutPowBox_);
     }
     eqEditor      .setBounds(kEdPad, eqY, W - 2 * kEdPad, eqH);
 }
@@ -817,8 +903,9 @@ void SlotEditorComponent::timerCallback()
             lastValueTouchGen_ = g;
             if (processor.smpValueTouchWhere() == ((samplerIndex_ << 8) | selectedSlot))
             {
-                refreshSliderValues();   // also refreshFreqCurve() + markDirty()
+                refreshSliderValues();   // also refreshParamBoxes() + refreshFreqCurve()
                 refreshLoopButtons();
+                spectralEditor.markDirty();   // CC on crop/fade moves the overlay
             }
         }
     }
@@ -908,21 +995,17 @@ void SlotEditorComponent::timerCallback()
 // ─────────────────────────────────────────────────────────────────────────────
 // resolveSaveDirectory — build the destination folder for SAVE.
 // Order of resolution:
-//   1. processor.getSamplerOutputDir() (user-configured Sampler Output Dir)
-//   2. ~/Documents
+//   1. active session exports/ folder (Standalone)
+//   2. last export directory used
+//   3. ~/Documents
 // Creates the directory if it does not yet exist.
 // ─────────────────────────────────────────────────────────────────────────────
 juce::File SlotEditorComponent::resolveSaveDirectory() const
 {
-    juce::File dir;
-
-    const juce::String configured = processor.getSamplerOutputDir();
-    if (configured.isNotEmpty())
-        dir = juce::File(configured);
-
-    if (dir == juce::File())
-        dir = juce::File::getSpecialLocation(
-                  juce::File::userDocumentsDirectory);
+    juce::File dir = processor.sessions()->startDirFor(
+        PathKeys::exportDir,
+        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+        /*isExport*/ true);
 
     if (!dir.isDirectory())
         dir.createDirectory();

@@ -175,6 +175,13 @@ juce::Image VideoMixerComponent::Renderer::frontImage() const
     return front_;
 }
 
+void VideoMixerComponent::Renderer::setRecordTarget(int w, int h, bool on) noexcept
+{
+    recW_.store(w, std::memory_order_release);
+    recH_.store(h, std::memory_order_release);
+    recOn_.store(on, std::memory_order_release);   // run() picks up the rec-start edge
+}
+
 void VideoMixerComponent::Renderer::run()
 {
     double last = juce::Time::getMillisecondCounterHiRes();
@@ -234,6 +241,32 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
 
     if (layers_.empty())
     {
+        // While recording with no outputs, keep the stream valid by publishing
+        // blank white paper at the fixed record size (~2 fps heartbeat).
+        if (recOn_.load(std::memory_order_acquire))
+        {
+            if (! lastRecOn_) { lastRecOn_ = true; recStartMs_ = nowMs; lastRecPushMs_ = -1.0e12; }
+            const int rW = recW_.load(std::memory_order_acquire);
+            const int rH = recH_.load(std::memory_order_acquire);
+            if (rW > 0 && rH > 0
+                && (lastRecPushMs_ < 0.0 || (nowMs - lastRecPushMs_) > 500.0))
+            {
+                juce::Image target = acquireTarget(rW, rH);
+                if (target.isValid())
+                {
+                    target.clear(target.getBounds(), juce::Colours::white);
+                    { const juce::ScopedLock fl(frontLock_); front_ = target; }
+                    haveFrame_ = true;
+                    frameCounter_.fetch_add(1, std::memory_order_release);
+                    processor_.pushRecordVideoFrame(target, (nowMs - recStartMs_) / 1000.0);
+                    lastRecPushMs_ = nowMs;
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (lastRecOn_) lastRecOn_ = false;
+
         if (haveFrame_)
         {
             { const juce::ScopedLock fl(frontLock_); front_ = juce::Image(); }
@@ -245,20 +278,33 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
     }
 
     const uint64_t vs = viewState_.load(std::memory_order_acquire);
-    const bool visible = (vs & 1u) != 0;
+    bool visible = (vs & 1u) != 0;
     int W = (int) ((vs >> 25) & 0xffffff);
     int H = (int) ((vs >> 1)  & 0xffffff);
+
+    // Recording overrides the view: render ONE fixed hi-res composite (no √N
+    // budget) and force it visible so frames flow even when the preview is
+    // hidden/collapsed. The preview downsamples the same front image.
+    const bool rec = recOn_.load(std::memory_order_acquire);
+    if (rec && ! lastRecOn_) { lastRecOn_ = true; recStartMs_ = nowMs; lastRecPushMs_ = -1.0e12; }
+    else if (! rec && lastRecOn_) lastRecOn_ = false;
+    if (rec) { W = recW_.load(std::memory_order_acquire);
+               H = recH_.load(std::memory_order_acquire); visible = true; }
+
     if (W <= 0 || H <= 0)
         return false;
 
-    // Per-output render budget (see kMaxRenderDim above).
-    const int n = (int) layers_.size();
-    int cap = kMaxRenderDim;
-    if (n > 1)
-        cap = juce::jmax(kMinRenderDim, (int) ((double) kMaxRenderDim / std::sqrt((double) n)));
-    const int big = juce::jmax(W, H);
-    if (big > cap) { W = juce::jmax(1, W * cap / big);
-                     H = juce::jmax(1, H * cap / big); }
+    if (! rec)
+    {
+        // Per-output render budget (see kMaxRenderDim above).
+        const int n = (int) layers_.size();
+        int cap = kMaxRenderDim;
+        if (n > 1)
+            cap = juce::jmax(kMinRenderDim, (int) ((double) kMaxRenderDim / std::sqrt((double) n)));
+        const int big = juce::jmax(W, H);
+        if (big > cap) { W = juce::jmax(1, W * cap / big);
+                         H = juce::jmax(1, H * cap / big); }
+    }
 
     // Advance every output's waterfall (real-dt scroll + ring drain). This runs
     // even when no view is visible so the history stays truthful and the rings
@@ -301,6 +347,11 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
         sig.push_back(rawOf(vsParam(l.slot, "mode"),     0.0f));
     }
     if (sig != lastSig_) { lastSig_ = std::move(sig); changed = true; }
+
+    // Recording heartbeat: guarantee the first frame and ≥~2 fps so the video
+    // track's duration tracks the (continuous) audio even while frozen.
+    if (rec && (lastRecPushMs_ < 0.0 || (nowMs - lastRecPushMs_) > 500.0))
+        changed = true;
 
     if (! changed && haveFrame_)
         return false;
@@ -350,6 +401,12 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
     { const juce::ScopedLock fl(frontLock_); front_ = target; }
     haveFrame_ = true;
     frameCounter_.fetch_add(1, std::memory_order_release);
+
+    if (rec)
+    {
+        processor_.pushRecordVideoFrame(target, (nowMs - recStartMs_) / 1000.0);
+        lastRecPushMs_ = nowMs;
+    }
     return true;
 }
 
@@ -369,6 +426,7 @@ VideoMixerComponent::VideoMixerComponent(Sp3ctraAudioProcessor& proc)
 
 VideoMixerComponent::~VideoMixerComponent()
 {
+    if (isRecording()) endRecording();   // never leave a writer without a source
     stopTimer();
     window_.reset();
     renderer_.reset();   // joins the render thread before members are destroyed
@@ -553,6 +611,41 @@ void VideoMixerComponent::stopAll()
 {
     setAllPaused(true);
     renderer_->requestClear();   // consumed by the render thread on its next pass
+}
+
+//==============================================================================
+bool VideoMixerComponent::beginRecording(const juce::File& out, int height, juce::String& err)
+{
+    if (isRecording()) { err = "Already recording"; return false; }
+
+    // Record aspect = the current view aspect (detached window content if open,
+    // else the square preview). `height` is the chosen vertical resolution.
+    double aspect = 1.0;
+    if (window_ != nullptr && window_->isVisible())
+        if (auto* c = window_->getContentComponent())
+            if (c->getWidth() > 0 && c->getHeight() > 0)
+                aspect = (double) c->getWidth() / (double) c->getHeight();
+
+    const int H = juce::jmax(2, height) & ~1;
+    int       W = juce::jlimit(2, 7680, juce::roundToInt((double) H * aspect)) & ~1;
+
+    // Arm the recorder FIRST (AVAssetWriter live), then let the render thread
+    // start streaming the fixed-size composite.
+    if (! processor_.startVideoRecording(out, W, H, 60.0, err))
+        return false;
+    renderer_->setRecordTarget(W, H, true);
+    return true;
+}
+
+void VideoMixerComponent::endRecording()
+{
+    renderer_->setRecordTarget(0, 0, false);   // stop pushing frames first
+    processor_.stopVideoRecording();           // finalise + close the file
+}
+
+bool VideoMixerComponent::isRecording() const noexcept
+{
+    return processor_.isVideoRecording();
 }
 
 //==============================================================================

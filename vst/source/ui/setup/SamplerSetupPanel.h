@@ -11,11 +11,12 @@
  * (MIDI Channel / Octave Offset removed 2026-07-13 with the note-triggered
  *  play path — banks are no longer note-addressed. REC / PLAY / SAVE
  *  triggering lives in the unified right-click MIDI-Learn.)
- * Shared (session-level, not per-engine):
+ * Shared (not per-engine):
  *   - Image export toggle + format       (luxSamplerExportImages/-Format)
- *   - Output directory browse / clear    (processor get/setSamplerOutputDir)
  *   - Bank status grid (state, duration, clear) — shows the first N banks,
  *     refreshed at 10 Hz
+ * (The Output Directory control was retired with the project-session model:
+ *  slot saves/exports land in the working session's exports/ folder.)
  */
 #pragma once
 
@@ -74,7 +75,7 @@ private:
     juce::ComboBox playModeCombo;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> playModeAttachment;
 
-    // Image export on Save Session
+    // Image export on slot SAVE
     juce::Label        exportImagesLabel;
     juce::ToggleButton exportImagesToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> exportImagesAttachment;
@@ -82,14 +83,6 @@ private:
     juce::Label    exportFormatLabel;
     juce::ComboBox exportFormatCombo;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> exportFormatAttachment;
-
-    // Output directory (shared by SAVE SESSION and image export). When set,
-    // bypasses the file chooser and writes directly into this directory.
-    juce::Label      outputDirLabel;
-    juce::Label      outputDirValueLabel;
-    juce::TextButton outputDirBrowseBtn;
-    juce::TextButton outputDirClearBtn;
-    std::unique_ptr<juce::FileChooser> outputDirChooser;
 
     // Per-slot displays (12 rows)
     static constexpr int NUM_SLOTS = 12;

@@ -117,8 +117,40 @@ void VideoMixerColumn::TransportButton::paintButton(juce::Graphics& g,
 }
 
 //==============================================================================
+// RecordButton — red REC dot (idle) / blinking red square (recording).
+//==============================================================================
+void VideoMixerColumn::RecordButton::paintButton(juce::Graphics& g,
+                                                 bool isMouseOver,
+                                                 bool isButtonDown)
+{
+    const auto b = getLocalBounds().toFloat().reduced(1.f);
+
+    const juce::Colour bg(0xff222230);
+    g.setColour(isButtonDown ? bg.brighter(0.30f)
+              : isMouseOver  ? bg.brighter(0.12f)
+              :                bg);
+    g.fillRoundedRectangle(b, 3.f);
+
+    const auto  inner = b.reduced(4.5f);
+    const float s     = juce::jmin(inner.getWidth(), inner.getHeight());
+
+    if (recording)
+    {
+        // Blinking filled red square — "recording, click to stop".
+        g.setColour(juce::Colour(0xffff3b30).withAlpha(blinkOn ? 1.0f : 0.30f));
+        g.fillRoundedRectangle(inner.withSizeKeepingCentre(s, s), 1.5f);
+    }
+    else
+    {
+        // Idle red REC dot.
+        g.setColour(isMouseOver ? juce::Colour(0xffff5b52) : juce::Colour(0xffd9433a));
+        g.fillEllipse(inner.withSizeKeepingCentre(s, s));
+    }
+}
+
+//==============================================================================
 VideoMixerColumn::VideoMixerColumn(Sp3ctraAudioProcessor& p)
-    : mixer_(p)
+    : processor_(p), mixer_(p)
 {
     // paint() fills the whole column (bg + header). Opaque so the mixer's 60 fps
     // repaints don't cascade a parent-background repaint through this container.
@@ -141,6 +173,32 @@ VideoMixerColumn::VideoMixerColumn(Sp3ctraAudioProcessor& p)
         playBtn_.setToggleState(true, juce::dontSendNotification);   // → ▶
     };
     addAndMakeVisible(stopBtn_);
+
+    recBtn_.setTooltip(juce::String::fromUTF8(
+        "Record VIDEO MIX + master audio to a high-quality .mov\n"
+        "Left-click: start / stop    Right-click: resolution"));
+    recBtn_.onClick = [this]
+    {
+        if (mixer_.isRecording())
+        {
+            mixer_.endRecording();
+            recBtn_.setRecording(false);
+        }
+        else
+        {
+            startRecordingFlow();
+        }
+    };
+    recBtn_.onRightClick = [this]
+    {
+        juce::PopupMenu m;
+        m.addSectionHeader("Recording resolution");
+        for (int hgt : { 1080, 1440, 2160 })
+            m.addItem(juce::String(hgt) + "p", true, recordHeight_ == hgt,
+                      [this, hgt] { recordHeight_ = hgt; });
+        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&recBtn_));
+    };
+    addAndMakeVisible(recBtn_);
 
     detachBtn_.setTooltip("Open / close the detached master window");
     detachBtn_.onClick = [this] { mixer_.toggleDetachedWindow(); };
@@ -189,6 +247,7 @@ void VideoMixerColumn::resized()
     // expand grip) — the video outputs keep running while ZONE 4 is folded.
     playBtn_.setVisible(true);
     stopBtn_.setVisible(true);
+    recBtn_.setVisible(true);
     detachBtn_.setVisible(showFull);
     fullscreenBtn_.setVisible(showFull);
     collapseBtn_.setVisible(showFull);
@@ -198,13 +257,14 @@ void VideoMixerColumn::resized()
     if (collapsed_)
     {
         expandBtn_.setBounds(0, 2, kGripW, kGripW);
-        playBtn_.setBounds(2, 2 + kGripW + 6, kGripW - 4, kGripW - 4);
-        stopBtn_.setBounds(2, 2 + kGripW + 6 + kGripW, kGripW - 4, kGripW - 4);
+        playBtn_.setBounds(2, 2 + kGripW + 6,               kGripW - 4, kGripW - 4);
+        stopBtn_.setBounds(2, 2 + kGripW + 6 + kGripW,      kGripW - 4, kGripW - 4);
+        recBtn_ .setBounds(2, 2 + kGripW + 6 + kGripW * 2,  kGripW - 4, kGripW - 4);
         return;
     }
 
     auto header = r.removeFromTop(kHeaderH);
-    // Right-aligned: [collapse][fullscreen][detach]  …  [stop][play]
+    // Right-aligned: [collapse][fullscreen][detach]  …  [rec][play][stop]
     const int bw = 22;
     collapseBtn_.setBounds(header.removeFromRight(bw).reduced(1));
     fullscreenBtn_.setBounds(header.removeFromRight(bw).reduced(1));
@@ -212,6 +272,72 @@ void VideoMixerColumn::resized()
     header.removeFromRight(8);
     stopBtn_.setBounds(header.removeFromRight(bw).reduced(1));
     playBtn_.setBounds(header.removeFromRight(bw).reduced(1));
+    recBtn_.setBounds(header.removeFromRight(bw).reduced(1));
 
     mixer_.setBounds(r);
+}
+
+//==============================================================================
+void VideoMixerColumn::startRecordingFlow()
+{
+    auto* sessions = processor_.sessions();
+    const auto stamp = juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S");
+
+    // Named session active (Standalone): recordings belong to the session —
+    // start capturing straight into <session>/exports/ with an auto-stamped
+    // name, no chooser. Only the Global session (and the DAW builds, which
+    // have no session folder) still ask where to save.
+    if (sessions != nullptr && sessions->isStandalone() && ! sessions->isGlobal())
+    {
+        sessions->exportsDir().createDirectory();
+        const auto file = sessions->exportsDir()
+                              .getChildFile("Sp3ctra_" + stamp + ".mov");
+        juce::String err;
+        if (mixer_.beginRecording(file, recordHeight_, err))
+            recBtn_.setRecording(true);
+        else
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::MessageBoxIconType::WarningIcon,
+                "Recording failed",
+                err.isNotEmpty() ? err : juce::String("Could not start the recorder."),
+                "OK");
+        return;
+    }
+
+    // Global / DAW: chooser, seeded at the exports folder (Global) or the
+    // last capture directory used.
+    auto fallback = juce::File::getSpecialLocation(juce::File::userMoviesDirectory);
+    if (! fallback.isDirectory())
+        fallback = juce::File::getSpecialLocation(juce::File::userHomeDirectory);
+    const auto dir = sessions->startDirFor(
+        PathKeys::videoCapture, fallback, /*isExport*/ true);
+
+    const auto suggested = dir.getChildFile("Sp3ctra_" + stamp + ".mov");
+
+    fileChooser_ = std::make_unique<juce::FileChooser>(
+        juce::String::fromUTF8("Record VIDEO MIX + master audio to…"),
+        suggested, "*.mov");
+
+    const auto flags = juce::FileBrowserComponent::saveMode
+                     | juce::FileBrowserComponent::canSelectFiles
+                     | juce::FileBrowserComponent::warnAboutOverwriting;
+
+    fileChooser_->launchAsync(flags, [this](const juce::FileChooser& fc)
+    {
+        auto file = fc.getResult();
+        if (file == juce::File{}) return;                       // cancelled
+        if (file.getFileExtension().isEmpty())
+            file = file.withFileExtension("mov");
+        processor_.sessions()->rememberDirFor(PathKeys::videoCapture, file);
+
+        juce::String err;
+        if (mixer_.beginRecording(file, recordHeight_, err))
+            recBtn_.setRecording(true);
+        else
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::MessageBoxIconType::WarningIcon,
+                "Recording failed",
+                err.isNotEmpty() ? err : juce::String("Could not start the recorder."),
+                "OK");
+    });
 }

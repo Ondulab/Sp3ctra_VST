@@ -110,6 +110,54 @@ ScoreSetupPanel::ScoreSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
             settings.spectroHeightMM = heightSlider.getValue();
     };
 
+    // ── Export — format / sheet size / DPI (moved off the PLAY page) ───────
+    exportSectionLabel.setText("Export", juce::dontSendNotification);
+    exportSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
+    exportSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
+    addAndMakeVisible(exportSectionLabel);
+
+    initLabel(formatLabel, "Image Format");
+    formatCombo.addItem("PNG",  1);
+    formatCombo.addItem("JPEG", 2);
+    formatCombo.setSelectedId(
+        (bool) apvts.state.getProperty("scoreExportPng", true) ? 1 : 2,
+        juce::dontSendNotification);
+    formatCombo.onChange = [this]
+    {
+        apvts.state.setProperty("scoreExportPng",
+                                formatCombo.getSelectedId() == 1, nullptr);
+    };
+    addAndMakeVisible(formatCombo);
+
+    initLabel(pageLabel, "Page");
+    pageCombo.addItem("A4 Portrait",  1);
+    pageCombo.addItem("A3 Landscape", 2);
+    pageCombo.addItem("Selection",    3);
+    pageCombo.setTooltip("A4/A3: fixed sheets — the waveform picker slides a "
+                         "one-page window over the file. Selection: pick a "
+                         "free region in the waveform (drag its edges to "
+                         "resize); the sheet stretches to hold it. Takes "
+                         "effect on the next GENERATE.");
+    pageCombo.setSelectedId(juce::jlimit(0, 2, settings.pageFormat) + 1,
+                            juce::dontSendNotification);
+    pageCombo.onChange = [this]
+    {
+        // The PLAY page's timer mirrors this into the region-picker window.
+        settings.pageFormat = pageCombo.getSelectedId() - 1;
+    };
+    addAndMakeVisible(pageCombo);
+
+    initLabel(dpiLabel, "Printer DPI");
+    for (int d : { 200, 300, 400, 600, 800 })
+        dpiCombo.addItem(juce::String(d), d);
+    dpiCombo.setTooltip("Output resolution — 400 DPI matches the CIS sensor "
+                        "(print at 100% to play in tune). Takes effect on the "
+                        "next GENERATE.");
+    dpiCombo.setSelectedId((int) settings.printerDpi, juce::dontSendNotification);
+    dpiCombo.onChange = [this]
+    { settings.printerDpi = (double) juce::jmax(72, dpiCombo.getSelectedId()); };
+    addAndMakeVisible(dpiCombo);
+
     refreshFreqControls();
     refreshHeightControls();
     startTimerHz(5);   // mirror live LuxStral values while not in manual mode
@@ -260,4 +308,12 @@ void ScoreSetupPanel::resized()
     printSectionLabel.setBounds(row());
     { auto r = row(); heightManualToggle.setBounds(r.removeFromLeft(labelW + Sp3ctraTheme::kGap + ctrlW)); }
     labelled(heightLabel, heightSlider);
+
+    area.removeFromTop(Sp3ctraTheme::kRowGap);   // small breather
+
+    // ── Export (format / sheet / DPI) ──
+    exportSectionLabel.setBounds(row());
+    labelled(formatLabel, formatCombo);
+    labelled(pageLabel,   pageCombo);
+    labelled(dpiLabel,    dpiCombo);
 }

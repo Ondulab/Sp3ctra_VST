@@ -136,6 +136,8 @@ double pageWindowSeconds(const ScoreSettings& s)
 {
     if (s.writingSpeed <= 0.0)
         return 0.0;   // whole file
+    if (s.pageFormat == 2)   // Selection sheet: the free region IS the window
+        return (s.selectionSec > 0.0) ? s.selectionSec : 0.0;   // 0 = to end
     const double widthMM = (s.pageFormat == 1) ? SCORE_A3_WIDTH_MM : SCORE_A4_WIDTH_MM;
     return (widthMM / 10.0) / s.writingSpeed;   // mm→cm, then cm / (cm/s)
 }
@@ -216,6 +218,44 @@ RenderResult renderScore(const juce::File& wav,
     // synth's existing colour-temperature panning reproduces the stereo image.
     // A mono file (or <2 channels) falls back to the regular mono path.
     const bool stereo = (s.enableStereoMode != 0) && (reader->numChannels >= 2);
+
+    // ── Analysis memory guard — BEFORE any allocation ────────────────────────
+    // The spectrogram stores num_windows × (padSize/2+1) doubles per layer per
+    // channel, with windows zero-padded up to SCORE_FFT_EFFECTIVE_SIZE for
+    // fine frequency interpolation (~262 KB per time column at full pad). A
+    // FULL sheet over a long file dwarfs the output image by orders of
+    // magnitude — seen live at 68 GB — so refuse upfront with the estimate.
+    // Budget scales with the machine: 25% of physical RAM, clamped 2..8 GB.
+    {
+        const double windows = (double) framesToLoad
+                                   / juce::jmax(1.0, (double) sampleRate / binsPerSecond)
+                             + 2.0;
+        auto layerBytes = [&](int winSize)
+        {
+            const int pad = juce::jmin(SCORE_FFT_EFFECTIVE_SIZE, winSize * 16);
+            return windows * (double) (pad / 2 + 1) * (double) sizeof(double);
+        };
+        double bytes = layerBytes(fftSize);
+        if (s.enableMultiRes != 0)   // mirrors the layer set built below
+        {
+            const int mid  = juce::jmax(256, fftSize / 4);
+            const int high = juce::jmax(128, fftSize / 16);
+            if (mid  < fftSize) bytes += layerBytes(mid);
+            if (high < mid)     bytes += layerBytes(high);
+        }
+        if (stereo)
+            bytes *= 2.0;                                    // dataR per layer
+        bytes += (double) framesToLoad * 8.0 * (stereo ? 2.0 : 1.0);  // signal buffers
+        const double ramBytes = (double) juce::SystemStats::getMemorySizeInMegabytes()
+                              * 1.0e6;
+        const double capBytes = juce::jlimit(2.0e9, 8.0e9, ramBytes * 0.25);
+        if (bytes > capBytes)
+            return fail("Analysis too large (~" + juce::String(bytes / 1.0e9, 1)
+                        + " GB, cap " + juce::String(capBytes / 1.0e9, 1)
+                        + juce::String::fromUTF8(" GB) — shorten the selection, "
+                          "lower the DPI or the writing speed, or disable "
+                          "stereo/multi-res"));
+    }
 
     std::vector<double> signal, signalR;
     if (stereo)
@@ -364,12 +404,26 @@ RenderResult renderScore(const juce::File& wav,
     if (progress) progress(0.60f);
 
     // ── Layout (port of spectral_raster.c:556-707) ───────────────────────────
-    const double pageW = pageWidthPx(s.pageFormat, dpi);
+    // pageFormat 2 = Selection: one sheet stretched to hold the SELECTED
+    // region at the writing speed (A4/A3 share the fixed-page geometry; the
+    // helpers fall back to A4 width / 297 mm height for format 2).
+    const double labelMargin = 150.0 * (dpi / 400.0);
+    double pageW = pageWidthPx(s.pageFormat, dpi);
     const double pageH = pageHeightPx(s.pageFormat, dpi);
+    if (s.pageFormat == 2 && s.writingSpeed > 0.0)
+    {
+        const double realDur = (double) totalSamples / (double) sampleRate;
+        pageW = labelMargin + realDur * s.writingSpeed * (dpi / 2.54);
+    }
     const int imageW = (int) pageW;
     const int imageH = (int) pageH;
+    // Same ceiling as MIDI SCORE's FULL sheets (~1.5 GB transient RGB).
+    if ((juce::int64) imageW * (juce::int64) imageH > (juce::int64) 500'000'000)
+        return fail("Sheet too large (" + juce::String(imageW) + " x "
+                    + juce::String(imageH)
+                    + juce::String::fromUTF8(" px) — shorten the selection or"
+                                             " lower the DPI / writing speed"));
 
-    const double labelMargin    = 150.0 * (dpi / 400.0);
     const double mmPx           = mmToPixels(dpi);
     const double bottomMarginPx = s.bottomMarginMM  * mmPx;
     const double spectroHeightPx= s.spectroHeightMM * mmPx;
@@ -685,6 +739,47 @@ namespace
         return out;
     }
 
+    // Insert a "Sp3ctraCal" tEXt chunk (band + frequency range) right after
+    // IHDR so the sampler can reload the image with the score's EXACT log
+    // frequency / band mapping. Same defensive contract as pngWithDpi.
+    juce::MemoryBlock pngWithCalibration(const juce::MemoryBlock& src,
+                                         const scoregen::SpectroCalibration& cal)
+    {
+        const auto*  p = static_cast<const juce::uint8*> (src.getData());
+        const size_t n = src.getSize();
+        const size_t headEnd = 8 + 25;   // 8-byte signature + 25-byte IHDR chunk
+        const juce::uint8 sig[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+        if (n < headEnd || memcmp(p, sig, 8) != 0 || memcmp(p + 12, "IHDR", 4) != 0)
+            return src;
+
+        // ASCII "key=value;" payload — self-describing and version-tagged.
+        juce::String payload;
+        payload << "v=1"
+                << ";bx=" << cal.band.getX()      << ";by=" << cal.band.getY()
+                << ";bw=" << cal.band.getWidth()  << ";bh=" << cal.band.getHeight()
+                << ";lo=" << juce::String(cal.minHz, 6)
+                << ";hi=" << juce::String(cal.maxHz, 6)
+                << ";st=" << (cal.stereo ? 1 : 0);
+
+        static const char kKeyword[] = "Sp3ctraCal";   // 10 chars, no NUL
+        juce::MemoryBlock chunk;                        // "tEXt" + keyword + 0 + text
+        chunk.append("tEXt", 4);
+        chunk.append(kKeyword, sizeof(kKeyword) - 1);
+        const char nul = 0;
+        chunk.append(&nul, 1);
+        const char* utf = payload.toRawUTF8();
+        chunk.append(utf, std::strlen(utf));
+
+        juce::MemoryBlock out;
+        out.append(p, headEnd);                                         // signature + IHDR
+        appendBE32(out, (juce::uint32) (chunk.getSize() - 4));          // data length (excl "tEXt")
+        out.append(chunk.getData(), chunk.getSize());                   // "tEXt" + data
+        appendBE32(out, pngCrc32((const juce::uint8*) chunk.getData(),
+                                 chunk.getSize()));                     // CRC over type+data
+        out.append(p + headEnd, n - headEnd);                          // pHYs / IDAT … IEND
+        return out;
+    }
+
     // Patch the JFIF APP0 density fields in place (units = dpi, X = Y = dpi).
     // libjpeg writes a JFIF header with units = 0 (aspect ratio only); we rewrite
     // it so viewers know the true resolution. No-op if no JFIF marker is found.
@@ -708,7 +803,8 @@ namespace
     }
 }
 
-bool exportImage(const juce::Image& img, const juce::File& dest, bool asPng, double dpi)
+bool exportImage(const juce::Image& img, const juce::File& dest, bool asPng, double dpi,
+                 const SpectroCalibration* cal)
 {
     if (! img.isValid())
         return false;
@@ -737,6 +833,10 @@ bool exportImage(const juce::Image& img, const juce::File& dest, bool asPng, dou
         if (asPng) bytes = pngWithDpi(bytes, dpi);
         else       jpegSetDpi(bytes, dpi);
     }
+    // Calibration only rides PNG (lossless, chunk-based); JPEG export stays a
+    // plain picture — the sampler falls back to its row/column scan for those.
+    if (asPng && cal != nullptr && cal->valid)
+        bytes = pngWithCalibration(bytes, *cal);
 
     dest.deleteFile();
     juce::FileOutputStream out(dest);
@@ -749,6 +849,79 @@ bool exportImage(const juce::Image& img, const juce::File& dest, bool asPng, dou
         return false;
     }
     return true;
+}
+
+SpectroCalibration readCalibration(const juce::File& pngFile)
+{
+    SpectroCalibration cal;
+
+    juce::MemoryBlock mb;
+    if (! pngFile.loadFileAsData(mb))
+        return cal;
+
+    const auto*  p = static_cast<const juce::uint8*> (mb.getData());
+    const size_t n = mb.getSize();
+    const juce::uint8 sig[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+    if (n < 8 || memcmp(p, sig, 8) != 0)
+        return cal;                                   // not a PNG
+
+    static const char kKeyword[] = "Sp3ctraCal";
+    const size_t kwLen = sizeof(kKeyword) - 1;
+
+    // Walk the chunk list: [len:4 BE][type:4][data:len][crc:4].
+    size_t pos = 8;
+    while (pos + 8 <= n)
+    {
+        const juce::uint32 len = ((juce::uint32) p[pos]     << 24)
+                               | ((juce::uint32) p[pos + 1] << 16)
+                               | ((juce::uint32) p[pos + 2] <<  8)
+                               |  (juce::uint32) p[pos + 3];
+        const juce::uint8* type = p + pos + 4;
+        const size_t dataPos = pos + 8;
+        if (dataPos + (size_t) len + 4 > n)
+            break;                                    // truncated / malformed
+
+        if (memcmp(type, "tEXt", 4) == 0
+            && len > kwLen + 1
+            && memcmp(p + dataPos, kKeyword, kwLen) == 0
+            && p[dataPos + kwLen] == 0)
+        {
+            const juce::String text(
+                juce::CharPointer_UTF8((const char*) (p + dataPos + kwLen + 1)),
+                (size_t) (len - kwLen - 1));
+            int bx = 0, by = 0, bw = 0, bh = 0, st = 0;
+            double lo = 0.0, hi = 0.0;
+            for (const auto& tok : juce::StringArray::fromTokens(text, ";", ""))
+            {
+                const int eq = tok.indexOfChar('=');
+                if (eq <= 0) continue;
+                const juce::String k = tok.substring(0, eq);
+                const juce::String v = tok.substring(eq + 1);
+                if      (k == "bx") bx = v.getIntValue();
+                else if (k == "by") by = v.getIntValue();
+                else if (k == "bw") bw = v.getIntValue();
+                else if (k == "bh") bh = v.getIntValue();
+                else if (k == "lo") lo = v.getDoubleValue();
+                else if (k == "hi") hi = v.getDoubleValue();
+                else if (k == "st") st = v.getIntValue();
+            }
+            if (bw > 0 && bh > 0 && lo > 0.0 && hi > lo)
+            {
+                cal.band   = juce::Rectangle<int>(bx, by, bw, bh);
+                cal.minHz  = lo;
+                cal.maxHz  = hi;
+                cal.stereo = (st != 0);
+                cal.valid  = true;
+            }
+            return cal;
+        }
+
+        if (memcmp(type, "IEND", 4) == 0)
+            break;
+        pos = dataPos + (size_t) len + 4;             // advance past data + CRC
+    }
+
+    return cal;
 }
 
 } // namespace scoregen

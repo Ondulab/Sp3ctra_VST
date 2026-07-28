@@ -164,6 +164,18 @@ public:
     /** Remove the mapping of one parameter (no-op when unmapped). */
     void removeMappingFor(const juce::String& paramId);
 
+    /** Release EVERY mapping (header MIDI menu "clear all"). Message thread. */
+    void clearAll();
+
+    /** Number of occupied mapping slots. Message thread (paramId mirror). */
+    int numMappings() const noexcept
+    {
+        int n = 0;
+        for (const auto& s : slots_)
+            if (s.paramId.isNotEmpty()) ++n;
+        return n;
+    }
+
     /** True + fills the out-params when the parameter is mapped. */
     bool getMappingFor(const juce::String& paramId,
                        int& type, int& channel, int& number) const;
@@ -346,7 +358,18 @@ private:
     };
 
     int  slotIndexFor(const juce::String& paramId) const;   // -1 when unmapped
-    void notifyChanged() { sendChangeMessage(); }
+    void notifyChanged()
+    {
+        sendChangeMessage();
+        if (onMappingsEdited) onMappingsEdited();
+    }
+
+public:
+    /** Fired on every mapping table mutation (learn, remove, restore) — the
+     *  processor hooks the session autosave here (markStateDirty). */
+    std::function<void()> onMappingsEdited;
+
+private:
 
     juce::AudioProcessorValueTreeState& apvts;
     IVirtualMidiSink* sink_ = nullptr;   // NON-APVTS targets (set once at ctor)

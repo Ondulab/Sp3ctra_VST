@@ -333,6 +333,56 @@ void luxsynth_engine_set_config(LuxSynthEngine *engine, const LuxSynthConfig *co
         (float)(TWO_PI * config->lfo_rate_hz * engine->inv_sample_rate);
 }
 
+void luxsynth_engine_set_sample_rate(LuxSynthEngine *engine, float sample_rate)
+{
+    if (!engine || !engine->initialized || sample_rate <= 0.0f)
+        return;
+    if (engine->sample_rate == sample_rate)
+        return;
+
+    const double ratio = (double)sample_rate / (double)engine->sample_rate;
+
+    engine->sample_rate = sample_rate;
+    engine->inv_sample_rate = 1.0f / sample_rate;
+    engine->config.sample_rate = sample_rate;
+
+    engine->global_lfo.phase_increment =
+        (float)(TWO_PI * engine->global_lfo.rate_hz * engine->inv_sample_rate);
+
+    /* Re-derive every per-sample step cached at note-on from its stored
+     * Hz/seconds source so live voices keep their physical pitch and
+     * envelope times at the new rate. */
+    for (int i = 0; i < engine->num_voices; i++)
+    {
+        LuxSynthVoice *v = &engine->voices[i];
+
+        for (int j = 0; j < v->num_oscillators; j++)
+            v->oscillators[j].phase_increment =
+                (float)(TWO_PI * (v->frequency * (float)(j + 1)) *
+                        engine->inv_sample_rate);
+
+        AdsrEnvelope *envs[2] = { &v->volume_env, &v->filter_env };
+        for (int k = 0; k < 2; k++)
+        {
+            AdsrEnvelope *env = envs[k];
+            float attack_samples  = env->attack_s  * sample_rate;
+            float decay_samples   = env->decay_s   * sample_rate;
+            float release_samples = env->release_s * sample_rate;
+
+            env->attack_time_samples  = attack_samples;
+            env->decay_time_samples   = decay_samples;
+            env->release_time_samples = release_samples;
+
+            env->attack_increment  = (attack_samples  > 0.0f) ? (1.0f / attack_samples)  : 1.0f;
+            env->decay_decrement   = (decay_samples   > 0.0f) ? ((1.0f - env->sustain_level) / decay_samples) : 1.0f;
+            env->release_decrement = (release_samples > 0.0f) ? (env->sustain_level / release_samples) : 1.0f;
+
+            /* Keep the envelope at the same phase inside its segment */
+            env->current_samples = (long long)((double)env->current_samples * ratio);
+        }
+    }
+}
+
 /* ============================================================================
  * PUBLIC: Spectral data update
  * ========================================================================== */

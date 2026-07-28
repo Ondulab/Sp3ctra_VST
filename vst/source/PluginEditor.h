@@ -3,7 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "PluginProcessor.h"
-#include "SettingsWindow.h"
+#include "AboutDialog.h"
 #include "CisVisualizerComponent.h"
 #include "image/SourcesTabComponent.h"
 #include "image/LuxPitchTabComponent.h"
@@ -40,108 +40,79 @@
 #include "ui/setup/LuxGrainSetupPanel.h"
 #include "ui/setup/SamplerSetupPanel.h"
 #include "ui/setup/ScoreSetupPanel.h"
+#include "ui/setup/MidiScoreSetupPanel.h"
+#include "ui/setup/TimbreSetupPanel.h"
+#include "ui/setup/VoiceSetupPanel.h"
+#include "ui/setup/VideoScrollSetupPanel.h"
 #include "UITheme.h"
 #include "Sp3ctraLookAndFeel.h"
 
 // ============================================================================
-// GearButton — settings icon rendered as a yellow cogwheel.
-// Self-contained: painting logic lives in the header to avoid a separate TU.
+// HeaderMenuButton — flat menu-bar item for the top banner (SESSION / MIDI /
+// ADVANCED / ABOUT). Text label + optional coloured status dot (the SESSION
+// item shows the active session name and its saved/unsaved dot). Hover pill
+// highlight; the attached juce::PopupMenu anchors below the button.
+// Self-contained painting (same idiom as the former GearButton).
 // ============================================================================
-class GearButton : public juce::Button
+class HeaderMenuButton : public juce::Button
 {
 public:
-    GearButton() : juce::Button("settings") {}
+    explicit HeaderMenuButton(const juce::String& text)
+        : juce::Button(text), label_(text) {}
+
+    void setLabel(const juce::String& text)
+    {
+        if (label_ == text) return;
+        label_ = text;
+        repaint();
+    }
+    const juce::String& label() const noexcept { return label_; }
+
+    /** Show/hide the status dot (SESSION saved/unsaved indicator). */
+    void setDot(bool show, juce::Colour c)
+    {
+        dotVisible_ = show; dotColour_ = c; repaint();
+    }
+
+    static juce::Font font() { return juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened(); }
+
+    /** Width the button needs for its current label (+dot), incl. padding. */
+    int idealWidth() const
+    {
+        return juce::GlyphArrangement::getStringWidthInt(font(), label_)
+             + 2 * kHPadPx + (dotVisible_ ? kDotSpanPx : 0);
+    }
 
     void paintButton(juce::Graphics& g, bool isMouseOver, bool isButtonDown) override
     {
-        const auto b  = getLocalBounds().toFloat().reduced(3.f);
-        const float cx = b.getCentreX();
-        const float cy = b.getCentreY();
-        const float r  = juce::jmin(b.getWidth(), b.getHeight()) * 0.5f;
-
-        // Background
-        const juce::Colour bg(0xff2a2a2a);
-        g.setColour(isButtonDown ? bg.brighter(0.3f)
-                  : isMouseOver  ? bg.brighter(0.12f)
-                  :                bg);
-        g.fillRoundedRectangle(b, 4.f);
-
-        // Cogwheel (yellow)
-        const juce::Colour gear = isButtonDown ? juce::Colour(0xffffe066)
-                                : isMouseOver  ? juce::Colour(0xffffcc00)
-                                :                juce::Colour(0xffc89600);
-        g.setColour(gear);
-        g.fillPath(makeGearPath(cx, cy, r * 0.82f, 8));
-
-        // Centre hole — punched out with background colour
-        g.setColour(bg);
-        g.fillEllipse(cx - r * 0.23f, cy - r * 0.23f, r * 0.46f, r * 0.46f);
+        const auto b = getLocalBounds().toFloat().reduced(1.f);
+        if (isMouseOver || isButtonDown)
+        {
+            g.setColour(juce::Colour(0xff3a3a3a).brighter(isButtonDown ? 0.15f : 0.f));
+            g.fillRoundedRectangle(b, 4.f);
+        }
+        g.setColour(isMouseOver ? juce::Colours::white : juce::Colour(0xffc8cdd6));
+        g.setFont(font());
+        const int textW = getWidth() - 2 * kHPadPx - (dotVisible_ ? kDotSpanPx : 0);
+        g.drawText(label_, kHPadPx, 0, textW, getHeight(),
+                   juce::Justification::centredLeft, true);
+        if (dotVisible_)
+        {
+            g.setColour(dotColour_);
+            const float cy = getHeight() * 0.5f;
+            g.fillEllipse((float) (kHPadPx + textW + 4), cy - 3.f, 6.f, 6.f);
+        }
     }
 
 private:
-    static juce::Path makeGearPath(float cx, float cy, float r, int teeth)
-    {
-        const float outer = r;
-        const float inner = r * 0.68f;
-        const float arc   = juce::MathConstants<float>::twoPi / (float)(teeth * 2);
-        const float half  = arc * 0.36f;
-        juce::Path p;
-        bool first = true;
-        for (int i = 0; i < teeth * 2; ++i)
-        {
-            const float ri = (i % 2 == 0) ? outer : inner;
-            const float a0 = arc * (float)i - half;
-            const float a1 = arc * (float)i + half;
-            if (first) { p.startNewSubPath(cx + ri * std::cos(a0), cy + ri * std::sin(a0)); first = false; }
-            else         p.lineTo         (cx + ri * std::cos(a0), cy + ri * std::sin(a0));
-            p.lineTo(cx + ri * std::cos(a1), cy + ri * std::sin(a1));
-        }
-        p.closeSubPath();
-        return p;
-    }
+    static constexpr int kHPadPx   = 10;   // text side padding
+    static constexpr int kDotSpanPx = 12;  // dot + gap
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(GearButton)
-};
+    juce::String label_;
+    bool         dotVisible_ = false;
+    juce::Colour dotColour_  = juce::Colours::green;
 
-// ============================================================================
-// PanicButton — "All Notes Off" panic, rendered as a red "PANIC" label (the
-// de-facto standard on MIDI hardware and plugins). Releases every held/stuck
-// MIDI note across all synth engines. Self-contained (painting in the header,
-// like GearButton).
-// ============================================================================
-class PanicButton : public juce::Button
-{
-public:
-    PanicButton() : juce::Button("panic")
-    {
-        setTooltip("All Notes Off (panic) - release every held/stuck note");
-    }
-
-    void paintButton(juce::Graphics& g, bool isMouseOver, bool isButtonDown) override
-    {
-        const auto b = getLocalBounds().toFloat().reduced(2.f);
-
-        // Background
-        const juce::Colour bg(0xff2a2a2a);
-        g.setColour(isButtonDown ? bg.brighter(0.3f)
-                  : isMouseOver  ? bg.brighter(0.12f)
-                  :                bg);
-        g.fillRoundedRectangle(b, 4.f);
-
-        // Red outline + "PANIC" label
-        const juce::Colour red = isButtonDown ? juce::Colour(0xffff6b6b)
-                               : isMouseOver  ? juce::Colour(0xffff4d4d)
-                               :                juce::Colour(0xffd83a3a);
-        g.setColour(red.withAlpha(isMouseOver || isButtonDown ? 0.9f : 0.6f));
-        g.drawRoundedRectangle(b, 4.f, 1.2f);
-
-        g.setColour(red);
-        g.setFont(juce::Font(juce::FontOptions(juce::jmin(b.getHeight() * 0.46f, 15.f)))
-                      .boldened());
-        g.drawText("PANIC", getLocalBounds(), juce::Justification::centred, false);
-    }
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PanicButton)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(HeaderMenuButton)
 };
 
 // ============================================================================
@@ -340,7 +311,7 @@ private:
         g.setColour(active ? juce::Colours::white
                   : hovered ? juce::Colour(0xffb8c0d0)
                   :           juce::Colour(0xff8890a0));
-        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontTiny)).boldened());
+        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontTab)).boldened());
         g.drawText(text, r, juce::Justification::centred, false);
     }
 
@@ -404,8 +375,13 @@ public:
 
 private:
     // ── Layout constants ──────────────────────────────────────────────────────
-    static constexpr int kHeaderH   = 52;
-    static constexpr int kVisY      = kHeaderH + 8;
+    // Single-row header: logo (left) + right-aligned menu bar (SESSION / MIDI /
+    // ADVANCED / ABOUT). The SESSION menu item is Standalone-only.
+    static constexpr int kTitleRowH = 44;
+
+    int headerH() const noexcept { return kTitleRowH; }
+    int visY() const noexcept { return headerH() + 8; }
+
     // ZONE 1 stacks one panel per active visualizer output; its total height
     // grows with the panel count so each stays readable.
     static constexpr int kVisPanelH = 60;   // per-panel height
@@ -416,7 +392,7 @@ private:
 
     /** Top of zones 2/3/4 (below the visualizer strip), before the keyboard
      *  ruler offset. */
-    int zonesBaseY() const noexcept { return kVisY + visHeight() + 6; }
+    int zonesBaseY() const noexcept { return visY() + visHeight() + 6; }
 
     static constexpr int kPaletteW   = ModuleCatalogComponent::kRailW;  // module catalogue rail
     static constexpr int kCatHeaderH = 22;   // catalogue rail header band (title + ✕)
@@ -439,8 +415,6 @@ private:
     static constexpr int kHPad = Sp3ctraTheme::kHPad;
 
     // ── Behaviour ─────────────────────────────────────────────────────────────
-    void openSettings();
-
     /** MIDI-follow — polls the mapping engine (~20 Hz) and, when enabled, jumps
      *  to the module a MIDI controller just moved. */
     void timerCallback() override;
@@ -568,6 +542,10 @@ private:
     std::unique_ptr<LuxGrainSetupPanel>   grainSetup;
     std::unique_ptr<SamplerSetupPanel>    samplerSetup;
     std::unique_ptr<ScoreSetupPanel>      scoreSetup;
+    std::unique_ptr<MidiScoreSetupPanel>  midiScoreSetup;  // export prefs (PNG/JPEG, A4/A3/FULL, DPI)
+    std::unique_ptr<TimbreSetupPanel>     timbreSetup;     // export prefs (PNG/JPEG, DPI)
+    std::unique_ptr<VoiceSetupPanel>      voiceSetup;      // export prefs (PNG/JPEG, A4/A3/Selection, DPI)
+    std::unique_ptr<VideoScrollSetupPanel> videoScrollSetup;  // OUT > VIDEO SCROLL bg (per-instance)
     // (M9 media modules have no SETUP face — picking lives on MediaSourcePage)
 
     // ── ZONE 4: video scroll column (collapsible, detachable window) ──────────
@@ -581,10 +559,27 @@ private:
     // ── LookAndFeel (declared before all JUCE components that use it) ─────────
     Sp3ctraLookAndFeel sp3ctraLaf;
 
-    // ── Header: gear settings button ──────────────────────────────────────────
-    GearButton settingsButton;
-    PanicButton panicButton;   // All Notes Off (panic)
-    std::unique_ptr<SettingsWindow> settingsWindow;
+    // ── Header menu bar (right-aligned) ───────────────────────────────────────
+    // SESSION (Standalone only — shows the active session name + saved dot),
+    // MIDI (follow toggle / clear mappings / panic), ADVANCED (log level /
+    // worker threads), ABOUT (dialog + Ondulab links).
+    HeaderMenuButton menuSessionBtn_  { "SESSION" };
+    HeaderMenuButton menuMidiBtn_     { "MIDI" };
+    HeaderMenuButton menuAdvancedBtn_ { "ADVANCED" };
+    HeaderMenuButton menuAboutBtn_    { "ABOUT" };
+    void layoutHeaderMenus();          // right-aligned row (widths follow labels)
+    void showSessionMenu();
+    void showMidiMenu();
+    void showAdvancedMenu();
+    void showAboutMenu();
+    void exportMidiMappingsFlow();     // MIDI table → .sp3midi (reusable asset)
+    void importMidiMappingsFlow();     // .sp3midi → MIDI table (replace, confirm)
+
+    std::unique_ptr<juce::FileChooser> sessionChooser;
+    juce::String shownSessionLabel_;   // change-detect for cheap header repaints
+    /** Directory-picker → name-input → SessionManager action (NEW / SAVE AS). */
+    void runSessionCreateFlow(bool saveAs);
+    void refreshSessionBar();          // SESSION menu label + dot + relayout
 
     // Tooltip support (palette rail stub + existing component tooltips)
     juce::TooltipWindow tooltipWindow { this };

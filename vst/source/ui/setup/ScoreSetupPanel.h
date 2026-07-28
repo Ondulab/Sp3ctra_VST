@@ -28,8 +28,9 @@ public:
     ScoreSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour);
     ~ScoreSetupPanel() override;
 
-    /** Natural content height (freq-range + dynamic-range + CIS-height rows). */
-    static constexpr int kPreferredH = 400;
+    /** Natural content height (freq-range + dynamic-range + CIS-height +
+     *  export rows). */
+    static constexpr int kPreferredH = 570;
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -78,6 +79,15 @@ private:
     juce::ToggleButton heightManualToggle;
     juce::Label        heightLabel;
     juce::Slider       heightSlider;
+
+    // ── Export — image format / sheet size / DPI (moved off the PLAY page).
+    // Page + DPI live in the shared ScoreSettings (they shape the GENERATE
+    // geometry and the region-picker window); the PNG/JPEG choice rides in
+    // apvts.state ("scoreExportPng") — the PLAY page's single Export button
+    // reads it at export time.
+    juce::Label    exportSectionLabel;
+    juce::Label    formatLabel, pageLabel, dpiLabel;
+    juce::ComboBox formatCombo, pageCombo, dpiCombo;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ScoreSetupPanel)
 };

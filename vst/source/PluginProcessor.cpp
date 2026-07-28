@@ -1,11 +1,14 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "session/SessionManager.h"   // working-session (project) persistence
+#include "session/Sp3sImporter.h"     // one-shot legacy .sp3s migration
 #include <juce_audio_formats/juce_audio_formats.h>   // SCORE source-audio preview
 #include <iterator>                                  // std::size (insert bank tables)
 #include "sources/MediaSourceEngines.h"              // M9 — IMAGE/VIDEO/CAMERA engines
 #include "sources/MediaSourceService.h"              // M9 — source service thread
 #include "sampler/SamplerMidiTargets.h"              // MIDI-Learn virtual targets (sampler play params)
 #include "tts/PiperTts.h"                            // VOICE — offline TTS (startup smoke test)
+#include "recorder/VideoRecorder.h"                  // VIDEO MIX + master-audio recorder
 
 // C headers still used directly by this file
 extern "C" {
@@ -16,6 +19,7 @@ extern "C" {
     #include "synthesis/luxstral/synth_luxstral_algorithms.h" // update_gap_limiter_coefficients()
     #include "synthesis/luxstral/vst_adapters.h"              // luxstral_are_audio_buffers_ready(), buffers
     #include "synthesis/luxstral/wave_generation.h"           // request_frequency_reinit() hot-reload
+    #include "synthesis/luxstral/synth_luxstral_threading.h"  // synth_request_pool_restart() hot-reload
     #include "synthesis/luxstral/luxstral_wavetable.h"        // user timbre wavetable (tuned grains)
     #include "processing/lux_pitch.h"                         // LuxPitch engine (g_lux_pitch_proc)
     #include "processing/lux_mask.h"                          // LuxMask engine (g_lux_mask_proc)
@@ -85,14 +89,39 @@ namespace
 }
 
 //==============================================================================
-// SCORE transport: derive the engine LoopMode from the two loop params.
+// Per-module-type score transport param IDs. Each SCORE-family module drives
+// ONLY its own player slot, so VOICE / MIDI SCORE / TIMBRE / SCORE have
+// INDEPENDENT speed / loop / reverse (moving one no longer drags the others).
+// SCORE keeps the legacy "score*" ids so old sessions restore unchanged.
+namespace {
+struct ScoreXportIds { const char* play; const char* speed; const char* loop; const char* reverse; };
+
+ScoreXportIds scoreXportIds(ModuleType t)
+{
+    switch (t)
+    {
+        case ModuleType::Timbre:    return { "timbrePlaying",    "timbreSpeed",    "timbreLoop",    "timbreReverse"    };
+        case ModuleType::MidiScore: return { "midiScorePlaying", "midiScoreSpeed", "midiScoreLoop", "midiScoreReverse" };
+        case ModuleType::Voice:     return { "voicePlaying",     "voiceSpeed",     "voiceLoop",     "voiceReverse"     };
+        default:                    return { "scorePlaying",     "scoreSpeed",     "scoreLoop",     "scoreReverse"     };
+    }
+}
+
 // Reverse always loops (the engine has no one-shot reverse), mirroring the
-// SCORE page pictograms: reverse → INVERSE, else loop → LOOP, else NONE.
+// generator pictograms: reverse → INVERSE, else loop → LOOP, else NONE.
+LoopMode loopModeFromIds(juce::AudioProcessorValueTreeState& apvts,
+                         const char* loopId, const char* reverseId)
+{
+    if (apvts.getRawParameterValue(reverseId)->load() > 0.5f) return LoopMode::INVERSE;
+    if (apvts.getRawParameterValue(loopId)->load()    > 0.5f) return LoopMode::LOOP;
+    return LoopMode::NONE;
+}
+} // namespace
+
+// SCORE module's own loop mode (used by the automatable scorePlaying path).
 static LoopMode scoreLoopModeFromParams(juce::AudioProcessorValueTreeState& apvts)
 {
-    if (apvts.getRawParameterValue("scoreReverse")->load() > 0.5f) return LoopMode::INVERSE;
-    if (apvts.getRawParameterValue("scoreLoop")->load()    > 0.5f) return LoopMode::LOOP;
-    return LoopMode::NONE;
+    return loopModeFromIds(apvts, "scoreLoop", "scoreReverse");
 }
 
 //==============================================================================
@@ -1313,6 +1342,43 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             juce::AudioParameterFloatAttributes{}.withLabel("x")));
     }
 
+    // Per-module transport for the other SCORE-family generators — same range /
+    // defaults as SCORE above, but independent so VOICE's speed no longer drags
+    // MIDI SCORE's (and vice-versa). Routed to each type's own player slot.
+    {
+        auto addScoreXport = [&params](const char* playId, const char* speedId,
+                                       const char* loopId, const char* revId,
+                                       const char* pretty)
+        {
+            // Play is a command transport — forced back to Stop on restore
+            // (never auto-run), like scorePlaying.
+            params.push_back(std::make_unique<juce::AudioParameterBool>(
+                juce::ParameterID{playId, 1}, juce::String(pretty) + " Play", false));
+            params.push_back(std::make_unique<juce::AudioParameterBool>(
+                juce::ParameterID{loopId, 1}, juce::String(pretty) + " Loop", true));
+            params.push_back(std::make_unique<juce::AudioParameterBool>(
+                juce::ParameterID{revId, 1}, juce::String(pretty) + " Reverse", false));
+            juce::NormalisableRange<float> s(0.1f, 6.0f, 0.01f);
+            s.setSkewForCentre(1.0f);
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID{speedId, 1}, juce::String(pretty) + " Speed", s, 1.0f,
+                juce::AudioParameterFloatAttributes{}.withLabel("x")));
+        };
+        addScoreXport("voicePlaying",     "voiceSpeed",     "voiceLoop",     "voiceReverse",     "Voice");
+        addScoreXport("midiScorePlaying", "midiScoreSpeed", "midiScoreLoop", "midiScoreReverse", "MIDI Score");
+        addScoreXport("timbrePlaying",    "timbreSpeed",    "timbreLoop",    "timbreReverse",    "Timbre");
+    }
+
+    // Per-slot ACTIVE (module enable) for the shared score-player pool. The
+    // rack LED toggles this — DECOUPLED from the play transport above: PLAY
+    // auto-activates the module, stopping PLAY leaves it active, and a
+    // deactivate/re-activate pauses/resumes the reading. Default ON and, unlike
+    // the play commands, PERSISTED (never forced off on restore).
+    for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{scoreActiveParam(s), 1},
+            "Score Active " + juce::String(s), true));
+
     // ── M9: IMAGE / VIDEO / CAMERA source modules ────────────────────────────
     // The line position IS the musical control of these sources — automatable,
     // like the SCORE transport above. Loop modes mirror the sampler's:
@@ -1594,10 +1660,32 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID{p + "compress", 1}, tag + "Compression",
             juce::NormalisableRange<float>(1.0f, 64.0f, 1.0f), 1.0f));
+        // Legacy per-instance invert toggle (RGB negative). KEPT so old sessions
+        // still restore it; migrated to the "invertMode" choice below in
+        // setStateInformation. Not shown in the UI any more.
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID{p + "invert", 1}, tag + "Invert Color", false));
+        // 3-way inversion selector (supersedes "invert"):
+        //   Off       — no inversion
+        //   Negative  — 255 - RGB per channel (the old invert)
+        //   Luminance — invert HSL lightness only; hue + saturation preserved
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{p + "invertMode", 1}, tag + "Invert",
+            juce::StringArray{"Off", "Negative", "Luminance"}, 0));
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID{p + "colorMode", 1}, tag + "Color (RGB)", true));
+        // Background/frame colour: painted where the zoomed/rotated image no
+        // longer covers the viewport (the negative-zoom border). Default white =
+        // the previous hard-coded behaviour. Set per instance in the SETUP face.
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{p + "bgR", 1}, tag + "BG R",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 1.0f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{p + "bgG", 1}, tag + "BG G",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 1.0f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{p + "bgB", 1}, tag + "BG B",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 1.0f));
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID{p + "paused", 1}, tag + "Paused", false));
         // Per-instance output enable (the rack block's LED toggles this). Default
@@ -1640,6 +1728,9 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
 
     // VOICE module TTS diagnostic — no-op unless SP3CTRA_TTS_SMOKE is set.
     PiperTts::runSmokeTestIfRequested();
+
+    // VIDEO MIX + master-audio recorder (idle until the REC button starts it).
+    videoRecorder_ = std::make_unique<VideoRecorder>();
 
 
     // Cache parameter pointers for fast access
@@ -1849,6 +1940,16 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
         frameSequencers_[(size_t) e]->setLuxSampler(samplers_[(size_t) e].get());
     }
 
+    // Working-session manager: needs the samplers to exist (bank save/load).
+    // Host-specific init (Standalone vs DAW) is resolved lazily at first
+    // get/setStateInformation, when JUCE has stamped wrapperType.
+    sessions_ = std::make_unique<SessionManager>(*this);
+    // MIDI-learn table edits are part of the session — autosave them too.
+    midiMap_.onMappingsEdited = [this] { if (sessions_) sessions_->markStateDirty(); };
+    // Catch-all dirty hook on the state tree (see SessionDirtyListener doc).
+    sessionDirtyListener_ = std::make_unique<SessionDirtyListener>(*this);
+    apvts.state.addListener(sessionDirtyListener_.get());
+
     // ── M9 / P5-M3: IMAGE ×8 + VIDEO / CAMERA source engines + service ──────
     for (int s = 0; s < 8; ++s)
     {
@@ -1927,6 +2028,15 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener(PARAM_SCORE_LOOP,    this);
     apvts.addParameterListener(PARAM_SCORE_REVERSE, this);
     apvts.addParameterListener(PARAM_SCORE_SPEED,   this);
+    // Per-module transports for VOICE / MIDI SCORE / TIMBRE (independent slots).
+    for (ModuleType t : { ModuleType::Voice, ModuleType::MidiScore, ModuleType::Timbre })
+    {
+        const auto ids = scoreXportIds(t);
+        apvts.addParameterListener(ids.play,    this);
+        apvts.addParameterListener(ids.speed,   this);
+        apvts.addParameterListener(ids.loop,    this);
+        apvts.addParameterListener(ids.reverse, this);
+    }
 
     // M9 — IMAGE / VIDEO / CAMERA source params → engines
     // (P5-M3: the imgSrc* listeners — slot 0 legacy ids included — are
@@ -1957,14 +2067,8 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
                 apvts.getRawParameterValue(fsEngineParam(e, "SeqBeatsPerStep"))->load()));
         }
 
-    // SCORE transport params → every score-player slot (shared until M5).
-    if (scorePlayerService_ != nullptr)
-        for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
-        {
-            scorePlayerService_->setSpeed(
-                s, *apvts.getRawParameterValue(PARAM_SCORE_SPEED));
-            scorePlayerService_->setLoopMode(s, scoreLoopModeFromParams(apvts));
-        }
+    // Score transport → each family type's own slot (independent per module).
+    primeScoreTransports();
 
     // Engines 1..7: their own APVTS banks — MIDI channel defaults to e+1
     // so direct MIDI doesn't double-trigger out of the box. Per-engine enable
@@ -2083,6 +2187,24 @@ Sp3ctraAudioProcessor::~Sp3ctraAudioProcessor()
     log_info("VST", "Sp3ctraAudioProcessor: Destructor - Shutting down");
     log_info("VST", "=============================================================");
 
+    // Detach the session-dirty hook first: teardown below may still mutate the
+    // state tree, and the listener must never fire into a dying SessionManager.
+    if (sessionDirtyListener_ != nullptr)
+        apvts.state.removeListener(sessionDirtyListener_.get());
+
+    // Flush any pending session autosave while the samplers still exist.
+    // (Normal Standalone close also flushes via makeStandaloneRefState.)
+    if (sessions_ != nullptr && sessions_->isStandalone()
+        && sessions_->hasUnsavedChanges())
+    {
+        sessions_->saveStateNow();
+        sessions_->saveBanksNow();
+    }
+
+    // Stop the RT audio tap, then finalise any in-progress recording.
+    recActive_.store(false, std::memory_order_release);
+    if (videoRecorder_) { videoRecorder_->stop(); videoRecorder_.reset(); }
+
     // ── M9: media source service FIRST (uses Context/buffers owned by sharedCore) ──
     if (mediaService_)
     {
@@ -2131,6 +2253,48 @@ Sp3ctraAudioProcessor::~Sp3ctraAudioProcessor()
     log_info("VST", "=============================================================");
     log_info("VST", "Sp3ctraAudioProcessor: Destructor complete");
     log_info("VST", "=============================================================");
+}
+
+//==============================================================================
+// VIDEO MIX recording — thin bridge to the platform recorder. Audio is tapped
+// in processBlock (gated by recActive_); video frames arrive from the mixer's
+// render thread via pushRecordVideoFrame().
+bool Sp3ctraAudioProcessor::startVideoRecording(const juce::File& out, int w, int h,
+                                                double fps, juce::String& err)
+{
+    if (videoRecorder_ == nullptr) { err = "Recorder unavailable"; return false; }
+
+    const double sr = getSampleRate() > 0.0 ? getSampleRate() : 48000.0;
+    const int    ch = juce::jmax(1, getTotalNumOutputChannels());
+    if (! videoRecorder_->start(out, w, h, fps, sr, ch, err))
+    {
+        log_info("VST", "Video recording FAILED to start: %s", err.toRawUTF8());
+        return false;
+    }
+
+    recActive_.store(true, std::memory_order_release);   // arm the RT audio tap
+    log_info("VST", "Video recording started: %s (%dx%d @ %.0f fps)",
+             out.getFullPathName().toRawUTF8(), w, h, fps);
+    return true;
+}
+
+void Sp3ctraAudioProcessor::stopVideoRecording()
+{
+    recActive_.store(false, std::memory_order_release);  // stop the RT tap first
+    if (videoRecorder_) videoRecorder_->stop();
+    log_info("VST", "Video recording stopped");
+}
+
+bool Sp3ctraAudioProcessor::isVideoRecording() const noexcept
+{
+    return videoRecorder_ != nullptr && videoRecorder_->isRecording();
+}
+
+void Sp3ctraAudioProcessor::pushRecordVideoFrame(const juce::Image& composite,
+                                                 double tSeconds)
+{
+    if (recActive_.load(std::memory_order_acquire) && videoRecorder_ != nullptr)
+        videoRecorder_->pushVideoFrame(composite, tSeconds);
 }
 
 //==============================================================================
@@ -2277,6 +2441,34 @@ void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
         log_info("VST", "SR changed %d → %d Hz — recalculating frequencies",
                  oldSampleRate, static_cast<int>(sampleRate));
         applyConfigurationToCore(false);
+
+        // Hot SR change: every engine cached the rate at init — re-derive it.
+        // LuxStral renders on its own producer threads, so its wavetable
+        // (phase increments) and gap-limiter coefficients are rebuilt through
+        // the existing atomic reinit consumed on the synth thread; the other
+        // three engines render inline in processBlock, which the host
+        // guarantees is not running during prepareToPlay.
+        if (sharedCore && sharedCore->isReady())
+        {
+            request_frequency_reinit();
+            luxsynth_engine_set_sample_rate(&g_luxsynth_engine,
+                                            static_cast<float>(sampleRate));
+            luxwave_engine_set_sample_rate(&g_luxwave_engine,
+                                           static_cast<float>(sampleRate));
+            luxgrain_engine_set_sample_rate(&g_luxgrain_engine,
+                                            static_cast<float>(sampleRate));
+
+            // The score preview buffer was resampled to the OLD host rate at
+            // decode time — drop it so it cannot resume off-pitch.
+            scorePreviewPlaying_.store(false, std::memory_order_release);
+            {
+                juce::SpinLock::ScopedLockType sl(scorePreviewLock_);
+                scorePreviewBuf_.setSize(0, 0);
+                scorePreviewPos_  = 0;
+                scorePreviewRate_ = sampleRate;
+            }
+            scorePreviewPosAtomic_.store(0, std::memory_order_release);
+        }
     }
 
     // ── Reset consumer tracking (prevent stale buffer re-output at startup) ──
@@ -3264,6 +3456,14 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             buffer.applyGain(gain);
     }
 
+    // ── VIDEO MIX recording: tap the finished master stereo → recorder FIFO.
+    // RT-safe: lock-free write, no alloc/lock; gated so it's a single atomic
+    // load when idle. `buffer` here IS the final mastered mix.
+    if (recActive_.load(std::memory_order_acquire) && videoRecorder_ != nullptr
+        && totalNumOutputChannels > 0)
+        videoRecorder_->pushAudio(buffer.getArrayOfReadPointers(),
+                                  totalNumOutputChannels, numSamples);
+
     // ── UI VU meters: fold this block's per-engine peaks into the atomics
     // with an exponential release, then reset the block accumulators.
     // Single RT writer; the AUDIO MIX panel reads at UI rate (relaxed).
@@ -3300,7 +3500,12 @@ juce::AudioProcessorEditor* Sp3ctraAudioProcessor::createEditor()
 
 //==============================================================================
 // APVTS State Management (automatic save/restore in DAW projects)
-void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
+//
+// captureFullState() builds the COMPLETE plugin state (APVTS + every non-APVTS
+// child tree). It is the single source of truth shared by getStateInformation
+// (the host/DAW blob) and by the SessionManager, which writes the same tree to
+// <session>/project.sp3ctra. Message-thread safe: read-only, atomic snapshots.
+juce::ValueTree Sp3ctraAudioProcessor::captureFullState(bool embedBanks)
 {
     auto state = apvts.copyState();
     // Persist the session paths so they survive DAW project reloads and
@@ -3308,7 +3513,6 @@ void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     // state may still carry the value restored at load time, and skipping
     // the write would resurrect a path the user has since cleared.
     state.setProperty("lastSessionPath",  lastSessionPath,  nullptr);
-    state.setProperty("samplerOutputDir", samplerOutputDir, nullptr);
     state.setProperty("scoreWavPath",     scoreWavPath,     nullptr);
     state.setProperty("luxgrainSamplePath", luxgrainSamplePath_, nullptr);
     // Synth-split state version — gates the staged migrations in
@@ -3370,6 +3574,70 @@ void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     }
     replaceChild(midiMap_.toValueTree());    // MIDI CC/Note → param mappings
 
+    // DAW self-containment: embed the recorded sampler audio so the host project
+    // needs no external files. Standalone sessions keep banks as sidecar files
+    // (embedBanks=false) — see SessionManager.
+    if (embedBanks)
+        replaceChild(samplerBanksToTree());
+
+    return state;
+}
+
+// Recorded sampler audio → a SAMPLER_BANKS tree, one binary child per engine.
+// Reuses LuxSampler::saveToFile via a temp file (same primitive as the retired
+// .sp3s), then folds the bytes into the ValueTree as a MemoryBlock property.
+juce::ValueTree Sp3ctraAudioProcessor::samplerBanksToTree()
+{
+    juce::ValueTree banks("SAMPLER_BANKS");
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+    {
+        auto* smp = getSampler(e);
+        if (smp == nullptr) continue;
+        juce::TemporaryFile tmp(".fsmp");
+        if (! smp->saveToFile(tmp.getFile())) continue;
+        juce::MemoryBlock blob;
+        if (! tmp.getFile().loadFileAsData(blob) || blob.isEmpty()) continue;
+        juce::ValueTree eng("Engine");
+        eng.setProperty("index", e, nullptr);
+        eng.setProperty("fsmp",  blob, nullptr);   // stored base64 in the XML
+        banks.appendChild(eng, nullptr);
+    }
+    return banks;
+}
+
+void Sp3ctraAudioProcessor::restoreSamplerBanksFromTree(const juce::ValueTree& banks)
+{
+    if (! banks.isValid()) return;
+    for (int c = 0; c < banks.getNumChildren(); ++c)
+    {
+        auto eng = banks.getChild(c);
+        const int e = (int) eng.getProperty("index", -1);
+        if (e < 0 || e >= LuxSampler::kMaxEngines) continue;
+        auto* smp = getSampler(e);
+        if (smp == nullptr) continue;
+        if (auto* blob = eng.getProperty("fsmp").getBinaryData())
+        {
+            juce::TemporaryFile tmp(".fsmp");
+            tmp.getFile().replaceWithData(blob->getData(), blob->getSize());
+            smp->loadFromFile(tmp.getFile());
+        }
+    }
+}
+
+void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
+{
+    // Standalone: the SessionManager owns persistence — the host blob is only a
+    // pointer to the active session directory (the real state auto-saves to the
+    // folder). DAW: a full, self-contained blob with the sampler banks embedded.
+    if (sessions_ != nullptr && sessions_->isStandalone())
+    {
+        auto ref = sessions_->makeStandaloneRefState();
+        std::unique_ptr<juce::XmlElement> xml(ref.createXml());
+        copyXmlToBinary(*xml, destData);
+        return;
+    }
+
+    auto state = captureFullState(/*embedBanks*/ true);
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
 
     copyXmlToBinary(*xml, destData);
@@ -3379,14 +3647,35 @@ void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 
 void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    // APVTS handles deserialization automatically via ValueTree
-    std::unique_ptr<juce::XmlElement> xmlState(getXmlFromBinary(data, sizeInBytes));
+    std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
 
+    // Standalone: the host blob is only a pointer to the active session dir
+    // (Sp3ctraStandaloneRef) — open it. On the FIRST launch after upgrading
+    // from the pre-session build, the blob is instead a legacy full state →
+    // migrate it once into the Global session. The SessionManager reuses
+    // applyStateXml for the real restore.
+    if (sessions_ != nullptr && sessions_->isStandalone())
+    {
+        if (xml != nullptr && xml->hasTagName("Sp3ctraStandaloneRef"))
+            sessions_->openOnLaunch(
+                juce::File(xml->getStringAttribute("activeSessionDir")));
+        else
+            sessions_->migrateLegacyBlobIntoGlobal(std::move(xml));
+        return;
+    }
+
+    // DAW / other hosts: full self-contained restore (banks embedded). Delegate
+    // to applyStateXml so the SessionManager and the host share one code path.
+    applyStateXml(std::move(xml));
+}
+
+void Sp3ctraAudioProcessor::applyStateXml(std::unique_ptr<juce::XmlElement> xmlState)
+{
     // A failed restore silently keeps every default (topology, SCORE, SEQ,
     // sampler params, session paths) — make that loudly visible in the log.
     if (xmlState == nullptr)
         log_error("VST", "State restore FAILED: corrupt/unreadable state blob "
-                         "(%d bytes) — session resets to defaults", sizeInBytes);
+                         "— session resets to defaults");
     else if (! xmlState->hasTagName(apvts.state.getType()))
         log_error("VST", "State restore FAILED: unexpected root tag '%s' "
                          "(expected '%s') — session resets to defaults",
@@ -3417,6 +3706,32 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
             forceRestoredParam("videoScrollPaused", 0.0);       // legacy global
             for (int s = 0; s < CHAIN_MAX_CHAINS; ++s)
                 forceRestoredParam(vsParam(s, "paused"), 0.0);  // per-instance: run
+
+            // Migration — the per-instance VideoScroll "invert" bool became the
+            // 3-way "invertMode" choice (Off/Negative/Luminance). A saved
+            // invert==1 meant RGB negative → seed invertMode = 1. Only when the
+            // session predates the choice (no invertMode entry) so new sessions,
+            // which always write invertMode, win untouched.
+            for (int s = 0; s < CHAIN_MAX_CHAINS; ++s)
+            {
+                const juce::String invId  = vsParam(s, "invert");
+                const juce::String modeId = vsParam(s, "invertMode");
+                juce::XmlElement* invEl = nullptr;
+                bool haveMode = false;
+                for (auto* e : xmlState->getChildWithTagNameIterator("PARAM"))
+                {
+                    const auto pid = e->getStringAttribute("id");
+                    if      (pid == invId)  invEl = e;
+                    else if (pid == modeId) haveMode = true;
+                }
+                if (! haveMode && invEl != nullptr
+                    && invEl->getDoubleAttribute("value") >= 0.5)
+                {
+                    auto* e = xmlState->createNewChildElement("PARAM");
+                    e->setAttribute("id", modeId);
+                    e->setAttribute("value", 1.0);   // Negative
+                }
+            }
             for (int e = 0; e < LuxSampler::kMaxEngines; ++e)   // Stop
                 forceRestoredParam(fsEngineParam(e, "SeqTransport"), 0.0);
             forceRestoredParam(PARAM_SCORE_PLAYING, 0.0);
@@ -3544,9 +3859,21 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
             // avoid a cross-thread write.
             auto* mm = juce::MessageManager::getInstanceWithoutCreating();
             const bool onMessageThread = (mm == nullptr || mm->isThisTheMessageThread());
+            // Silence the session autosave across replaceState too: its listener
+            // storm (message-thread restore) would otherwise mark the session
+            // dirty and re-save the very state we are loading. The guard in
+            // applyRestoredStateOnMessageThread (always called right after) resets it.
+            if (sessions_) sessions_->setSuppressAutosave(true);
             if (onMessageThread) bulkParamApply_ = true;
             apvts.replaceState(juce::ValueTree::fromXml(*xmlState));
             if (onMessageThread) bulkParamApply_ = false;
+            // replaceState swapped the underlying tree object — re-attach the
+            // session-dirty listener to the NEW tree (old one is orphaned).
+            if (sessionDirtyListener_ != nullptr)
+            {
+                apvts.state.removeListener(sessionDirtyListener_.get());
+                apvts.state.addListener(sessionDirtyListener_.get());
+            }
 
             // Everything below mutates non-APVTS state that UI timers iterate
             // concurrently (chainModel_, SCORE/SEQ trees, engines). Some hosts
@@ -3571,6 +3898,15 @@ void Sp3ctraAudioProcessor::setStateInformation (const void* data, int sizeInByt
 
 void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
 {
+    // Silence the SessionManager autosave for the whole restore: the flood of
+    // setValueNotifyingHost / model pushes below would otherwise immediately
+    // re-dirty and re-save exactly what we just loaded. RAII-reset on exit.
+    struct SuppressGuard {
+        SessionManager* s;
+        ~SuppressGuard() { if (s) s->setSuppressAutosave(false); }
+    } _suppress { sessions_.get() };
+    if (sessions_) sessions_->setSuppressAutosave(true);
+
     {
         {
             // Transport open-state is patched into the tree BEFORE replaceState
@@ -3598,34 +3934,25 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
                 for (int s = 0; s < LuxSampler::kMaxEngines; ++s)
                     forceTo(fsEngineParam(s, "SeqTransport"), 0.0f);
                 forceTo(PARAM_SCORE_PLAYING, 0.0f);
+                forceTo("voicePlaying",     0.0f);
+                forceTo("midiScorePlaying", 0.0f);
+                forceTo("timbrePlaying",    0.0f);
                 for (int s = 0; s < 8; ++s)
                 {
                     forceTo(imgSrcParam(s, "Play"), 0.0f);
                     forceTo(vidSrcParam(s, "Play"), 0.0f);
                 }
             }
-            // Push the restored SCORE speed/loop into the engine (the listener
-            // does not fire for values equal to the pre-restore state).
-            if (samplers_[0] != nullptr)
-            {
-                // P5-M4: shared transport params → every score-player slot.
-                if (scorePlayerService_ != nullptr)
-                    for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
-                    {
-                        scorePlayerService_->setSpeed(s,
-                            apvts.getRawParameterValue(PARAM_SCORE_SPEED)->load());
-                        scorePlayerService_->setLoopMode(
-                            s, scoreLoopModeFromParams(apvts));
-                    }
-            }
-            // Restore last session path — SamplerPageComponent reads this
-            // on construction to auto-reload the session.
+            // Push the restored transport into each family type's own slot (the
+            // listener does not fire for values equal to the pre-restore state).
+            // deriveChainRouting() re-primes once slots are (re)cached; this
+            // covers the case where slots were already mapped before restore.
+            primeScoreTransports();
+            // LEGACY .sp3s pointer — read once for the one-shot bank import
+            // below, then cleared forever. (samplerOutputDir was retired with
+            // the project-session model: exports land in the session folder.)
             lastSessionPath = apvts.state
                 .getProperty("lastSessionPath", "").toString();
-            // Restore sampler output directory — SamplerSetupPanel and
-            // SAVE SESSION read this to bypass the file chooser when set.
-            samplerOutputDir = apvts.state
-                .getProperty("samplerOutputDir", "").toString();
             scoreWavPath = apvts.state
                 .getProperty("scoreWavPath", "").toString();
             log_info("VST", "State restored from DAW project — applying to engines...");
@@ -3782,9 +4109,42 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
             midiMap_.restoreFromValueTree(
                 apvts.state.getChildWithName("MIDI_MAPPINGS"));
 
-            // Arm the one-shot session auto-load for the first editor.
-            if (lastSessionPath.isNotEmpty())
-                samplerAutoLoadPending_.store(true, std::memory_order_release);
+            // Recorded sampler audio. A DAW blob embeds it (SAMPLER_BANKS child);
+            // a Standalone session keeps it as sidecar banks/engineN.fsmp loaded
+            // by the SessionManager.
+            bool banksRestored = false;
+            if (auto banksTree = apvts.state.getChildWithName("SAMPLER_BANKS");
+                banksTree.isValid())
+            {
+                restoreSamplerBanksFromTree(banksTree);
+                banksRestored = true;
+            }
+            else if (sessions_ != nullptr && sessions_->isStandalone())
+                banksRestored = sessions_->onStateRestored();
+
+            // One-shot migration of the retired .sp3s sampler sessions: legacy
+            // blobs carried the recorded audio ONLY in an external .sp3s at
+            // lastSessionPath. If nothing restored the banks, import it now —
+            // INSIDE this suppressed-autosave scope, so the first autosave can
+            // never write an empty banks/ folder over audio still referenced
+            // by the old file. Then clear the path forever: the audio now
+            // lives in the session (Standalone) or the host blob (DAW).
+            if (! banksRestored && lastSessionPath.isNotEmpty())
+            {
+                const juce::File legacy(lastSessionPath);
+                if (legacy.existsAsFile()
+                    && Sp3sImporter::importFile(*this, legacy))
+                {
+                    lastSessionPath.clear();
+                    if (sessions_ != nullptr && sessions_->isStandalone())
+                        sessions_->saveBanksNow();   // persist the import at once
+                }
+                else if (! legacy.existsAsFile())
+                    log_error("VST", "Legacy .sp3s not found (%s) — sample banks "
+                                     "were NOT restored", lastSessionPath.toRawUTF8());
+            }
+            else if (banksRestored)
+                lastSessionPath.clear();   // migration done in a previous run
 
             if (!coreNeedsInit && sharedCore && sharedCore->isReady())
             {
@@ -3848,6 +4208,7 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
     if (mm == nullptr || mm->isThisTheMessageThread())
     {
         applyParameterChange(parameterID, newValue);
+        if (sessions_) sessions_->markStateDirty();   // UI-driven change → autosave
         return;
     }
 
@@ -3876,7 +4237,10 @@ void Sp3ctraAudioProcessor::timerCallback()
                 { applyParameterChange(deferredParamIds_[i], raw->load()); ++applied; }
         bulkParamApply_ = false;
         if (applied > 0)
+        {
             log_debug("VST", "Applied %d deferred parameter change(s)", applied);
+            if (sessions_) sessions_->markStateDirty();   // session autosave
+        }
     }
 
     // ── Coalesced config resync / wavetable reinit / envelope coeff rebuild ──
@@ -4028,6 +4392,10 @@ void Sp3ctraAudioProcessor::timerCallback()
             s_lastMs = nowMs;
         }
     }
+
+    // Session autosave (Standalone only): debounced trailing-edge writes of
+    // project.sp3ctra + sidecar banks. No-op in a DAW or with no dirty state.
+    if (sessions_) sessions_->autosaveTick(0);
 }
 
 // Real parameter handler — message thread only (see dispatcher above).
@@ -4041,48 +4409,67 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
     // below is a lock-free atomic write (uiPlay/uiHold/uiStop, score setters).
     // (The per-engine sequencer transports route through the "luxSampler"
     // branch below — the sequencer is internal to its sampler.)
-    if (parameterID == PARAM_SCORE_PLAYING)
+    // ── Per-module-type score transport (play / speed / loop / reverse) ──────
+    // Route each SCORE-family module's transport to ITS OWN player slot so the
+    // four generators stay independent (SCORE keeps the legacy "score*" ids).
+    // Per-slot module ACTIVE (rack LED enable), decoupled from the transport.
+    if (parameterID.startsWith("scoreActive"))
     {
-        // P5-M4: the automatable scorePlaying param drives the SCORE module's
-        // own player slot (the other family types' transports are UI/M5).
-        if (auto* sc = getScoreChannel(ModuleType::Score))
+        if (scorePlayerService_ != nullptr)
+            if (auto* sc = scorePlayerService_->channel(parameterID.getTrailingIntValue()))
+                sc->setScoreActive(newValue > 0.5f);
+        return;
+    }
+    for (ModuleType t : kScoreFamily)
+    {
+        const auto ids = scoreXportIds(t);
+        if (parameterID == ids.play)
         {
-            const bool wantPlay = newValue > 0.5f;
-            if (wantPlay != sc->isScorePlaying())
+            if (auto* sc = getScoreChannel(t))
             {
-                if (wantPlay)
+                const bool wantPlay = newValue > 0.5f;
+                if (wantPlay != sc->isScorePlaying())
                 {
-                    // Same as the SCORE page button: push transport settings first.
-                    sc->setScoreSpeed(
-                        apvts.getRawParameterValue(PARAM_SCORE_SPEED)->load());
-                    sc->setScoreLoopMode(scoreLoopModeFromParams(apvts));
-                    sc->uiPlayScore();
+                    if (wantPlay)
+                    {
+                        // PLAY activates the module (never plays deactivated):
+                        // flip its ACTIVE param on for persistence/host, and
+                        // apply it now — the param listener runs deferred. Skip
+                        // during a bulk restore: the saved ACTIVE value is being
+                        // applied in the same pass and transports are forced off.
+                        if (! bulkParamApply_)
+                        {
+                            if (auto* ap = apvts.getParameter(scoreActiveParam(sc->slot())))
+                                if (ap->getValue() < 0.5f)
+                                {
+                                    ap->beginChangeGesture();
+                                    ap->setValueNotifyingHost(1.0f);
+                                    ap->endChangeGesture();
+                                }
+                            sc->setScoreActive(true);
+                        }
+                        // Same as the page button: push transport settings first.
+                        sc->setScoreSpeed(apvts.getRawParameterValue(ids.speed)->load());
+                        sc->setScoreLoopMode(loopModeFromIds(apvts, ids.loop, ids.reverse));
+                        sc->uiPlayScore();
+                    }
+                    else
+                        sc->uiStopScore();
                 }
-                else
-                    sc->uiStopScore();
             }
+            return;
         }
-        return;
-    }
-    if (parameterID == PARAM_SCORE_SPEED)
-    {
-        // Shared transport params until M5 (per-instance banks): broadcast to
-        // every score-player slot — matches the legacy single-channel feel
-        // for whichever module is playing.
-        if (scorePlayerService_ != nullptr)
-            for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
-                scorePlayerService_->setSpeed(s, newValue);
-        return;
-    }
-    if (parameterID == PARAM_SCORE_LOOP || parameterID == PARAM_SCORE_REVERSE)
-    {
-        if (scorePlayerService_ != nullptr)
+        if (parameterID == ids.speed)
         {
-            const LoopMode m = scoreLoopModeFromParams(apvts);
-            for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
-                scorePlayerService_->setLoopMode(s, m);
+            if (auto* sc = getScoreChannel(t)) sc->setScoreSpeed(newValue);
+            return;
         }
-        return;
+        if (parameterID == ids.loop || parameterID == ids.reverse)
+        {
+            if (auto* sc = getScoreChannel(t))
+                sc->setScoreLoopMode(loopModeFromIds(apvts, ids.loop, ids.reverse));
+            return;
+        }
     }
 
     // ── M9 / P5-M3: IMAGE ×8 / VIDEO / CAMERA — every engine call is atomic ──
@@ -4284,6 +4671,16 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
             coeffUpdatePending_ = true;
         }
 
+        // 🔧 HOT-RELOAD: Worker-thread count → rebuild the synthesis pool at the
+        // next pass boundary (no app restart). The producer consumes the request
+        // after the coalesced config resync has refreshed num_workers.
+        if (parameterID == "luxstralNumWorkers") {
+            if (!bulkParamApply_)
+                log_info("VST", "Worker threads set to %d - pool rebuild requested",
+                         (int) newValue);
+            workerPoolRestartPending_ = true;
+        }
+
         return;  // Done - synthesis engine will pick up changes automatically
     }
     
@@ -4385,6 +4782,15 @@ void Sp3ctraAudioProcessor::drainPendingConfig()
         // wavetables exist only produced the "waves is NULL, skipping" warning.
         if (!coreNeedsInit)
             update_gap_limiter_coefficients();
+    }
+    if (workerPoolRestartPending_) {
+        workerPoolRestartPending_ = false;
+        // Runs AFTER the applyConfigurationToCore() above so num_workers is
+        // fresh when the producer consumes the request. Skip while the core is
+        // coming up: the pool is built lazily on the first synthesis pass and
+        // reads num_workers from config at that point anyway.
+        if (!coreNeedsInit)
+            synth_request_pool_restart();
     }
 }
 
@@ -5369,6 +5775,11 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
             for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
                 if ((gone >> s) & 1u)
                     scorePlayerService_->discard(s);
+
+        // Slots just (re)mapped: push each family type's transport params into
+        // its own slot (the atomic loopMode default is NONE but the params
+        // default to Loop=on — a freshly placed generator needs this).
+        primeScoreTransports();
     }
 
     // ── AUDIO MIX / zero-CPU contract — per-engine OUT send counts ──────────
@@ -5403,6 +5814,26 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
     }
 
     chain_plan_publish(&plan);
+}
+
+void Sp3ctraAudioProcessor::primeScoreTransports()
+{
+    if (scorePlayerService_ == nullptr)
+        return;
+    for (ModuleType t : kScoreFamily)
+        if (auto* sc = getScoreChannel(t))
+        {
+            const auto ids = scoreXportIds(t);
+            sc->setScoreSpeed(apvts.getRawParameterValue(ids.speed)->load());
+            sc->setScoreLoopMode(loopModeFromIds(apvts, ids.loop, ids.reverse));
+        }
+    // Per-slot module ACTIVE state persists (unlike the play transports): push
+    // each restored enable into its pool slot so a saved-deactivated module
+    // opens deactivated. Transports are already forced STOPPED, so no resume
+    // is armed here.
+    for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+        if (auto* sc = scorePlayerService_->channel(s))
+            sc->setScoreActive(apvts.getRawParameterValue(scoreActiveParam(s))->load() >= 0.5f);
 }
 
 ScoreChannel* Sp3ctraAudioProcessor::getScoreChannel(ModuleType t) noexcept
@@ -5502,6 +5933,8 @@ void Sp3ctraAudioProcessor::persistChainModel()
     if (existing.isValid())
         state.removeChild(existing, nullptr);
     state.appendChild(chainModel_.toValueTree(), nullptr);
+    // Rack topology edits are session content — schedule an autosave.
+    if (sessions_) sessions_->markStateDirty();
 }
 
 //==============================================================================
@@ -5533,6 +5966,7 @@ juce::ValueTree Sp3ctraAudioProcessor::scoreStateToTree() const
     t.setProperty("enableNormalization", s.enableNormalization, nullptr);
     t.setProperty("fftSize",             s.fftSize,             nullptr);
     t.setProperty("startTimeSec",        s.startTimeSec,        nullptr);
+    t.setProperty("selectionSec",        s.selectionSec,        nullptr);
     t.setProperty("enableStereoMode",    s.enableStereoMode,    nullptr);
     t.setProperty("enableMultiRes",      s.enableMultiRes,      nullptr);
     // minFreq/maxFreq are recomputed at GENERATE time from the musical range —
@@ -5572,6 +6006,7 @@ void Sp3ctraAudioProcessor::restoreScoreStateFromTree(const juce::ValueTree& t)
     s.enableNormalization  = (int)    t.getProperty("enableNormalization", s.enableNormalization);
     s.fftSize              = (int)    t.getProperty("fftSize",             s.fftSize);
     s.startTimeSec         = (double) t.getProperty("startTimeSec",        s.startTimeSec);
+    s.selectionSec         = (double) t.getProperty("selectionSec",        s.selectionSec);
     s.enableStereoMode     = (int)    t.getProperty("enableStereoMode",    s.enableStereoMode);
     s.enableMultiRes       = (int)    t.getProperty("enableMultiRes",      s.enableMultiRes);
     if (! s.spectroHeightManual)

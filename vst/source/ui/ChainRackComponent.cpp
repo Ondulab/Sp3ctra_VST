@@ -316,30 +316,18 @@ void ChainRackComponent::rebuild()
                 || m.type == ModuleType::Equalizer || m.type == ModuleType::Harmonize)
                 bp->setEnableParamOverride(insertBankParam(
                     m.type, processor.poolSlotForInstance(m.id), "Enabled"));
+            // Score family (SCORE/TIMBRE/MIDI SCORE/VOICE): the LED is the
+            // module ACTIVE toggle of ITS player slot — decoupled from the
+            // transport (PLAY lives on the page). Deactivating stops the
+            // reading (remembering the head); reactivating resumes it.
+            if (isScoreFamily(m.type))
+                bp->setEnableParamOverride(scoreActiveParam(m.slot >= 0 ? m.slot : 0));
             bp->onClick        = [this](juce::Uuid id) { selectInstance(id, true); };
             bp->onToggleEnable = [this, bp]            { toggleEnable(bp->getEnableParam()); };
             bp->onRemove       = [this](juce::Uuid id) { removeInstance(id); };
-            // P5-M5 — the score-family LED is the instance's TRANSPORT: click
-            // = PLAY/STOP of ITS player slot (uiPlayScore toggles; empty slot
-            // = no-op). The sentinel id only arms the LED hit-zone/hover ring
-            // — the callback above is replaced, nothing reaches the APVTS.
-            if (isScoreFamily(m.type))
-            {
-                const int scoreSlot = m.slot >= 0 ? m.slot : 0;
-                bp->setEnableParamOverride("__scoreTransport");
-                bp->onToggleEnable = [this, scoreSlot]
-                {
-                    if (auto* sc = processor.getScoreChannelForSlot(scoreSlot))
-                        sc->uiPlayScore();
-                };
-            }
             bp->setRemovable(! locked);
             const bool hasLed = bp->getEnableParam().isNotEmpty();
-            const bool isTransportLed = isScoreFamily(m.type);
-            bp->setTooltip(isTransportLed
-                ? (locked ? "Click the LED to play/stop - drag to reorder"
-                          : "Click the LED to play/stop - drag to reorder - x to remove")
-                : hasLed
+            bp->setTooltip(hasLed
                 ? (locked ? "Click the LED to enable/disable - drag to reorder"
                           : "Click the LED to enable/disable - drag to reorder - x to remove")
                 : (locked ? "Drag to reorder" : "Drag to reorder - x to remove"));
@@ -420,10 +408,14 @@ void ChainRackComponent::toggleEnable(const juce::String& paramId)
 void ChainRackComponent::removeInstance(const juce::Uuid& id)
 {
     int c = -1, i = -1;
-    if (model.find(id, c, i) == nullptr)
+    const auto* inst = model.find(id, c, i);
+    if (inst == nullptr)
         return;
+
+    // No confirmation: the module's settings memory survives (typeMemory) and
+    // it can be re-added instantly. Only whole-chain deletion confirms.
     model.remove(c, i);
-    // Deferred: rebuild() destroys the very block whose mouseUp called us.
+    // Deferred: rebuild() destroys the very block that spawned us.
     scheduleRefresh(false);
 }
 
@@ -995,8 +987,29 @@ void ChainRackComponent::mouseUp(const juce::MouseEvent& e)
             const juce::Rectangle<int> x(getWidth() - kPadX - 16, band.headerY, 18, kHeaderH);
             if (x.contains(e.getPosition()))
             {
-                model.removeChain(band.chainIdx);
-                mutateAndRefresh(false);
+                // Destructive: the chain and all its module placements go away
+                // — confirm first (its modules' settings memory survives).
+                const int chainIdx = band.chainIdx;
+                const int nModules = (chainIdx >= 0
+                                      && chainIdx < (int) model.chains.size())
+                    ? (int) model.chains[(size_t) chainIdx].modules.size() : 0;
+                const juce::String msg =
+                    "Delete CHAIN " + juce::String(chainIdx + 1)
+                    + (nModules > 0
+                        ? (" and its " + juce::String(nModules) + " module(s)?")
+                        : juce::String("?"));
+                Sp3ctraDialog::showConfirm(
+                    this, "Delete chain", msg.toRawUTF8(), "Delete", "Cancel",
+                    [safe = juce::Component::SafePointer<ChainRackComponent>(this),
+                     chainIdx](bool ok)
+                    {
+                        if (! ok) return;
+                        auto* self = safe.getComponent();
+                        if (self == nullptr) return;
+                        if (self->model.numChains() <= 1) return;   // last chain
+                        self->model.removeChain(chainIdx);
+                        self->mutateAndRefresh(false);
+                    });
                 return;
             }
         }
@@ -1008,9 +1021,12 @@ void ChainRackComponent::mouseUp(const juce::MouseEvent& e)
 //==============================================================================
 void ChainRackComponent::savePresetFlow(int chainIdx)
 {
-    const auto dir = juce::File::getSpecialLocation(
-                         juce::File::userDocumentsDirectory)
-                         .getChildFile("Sp3ctra Chain Presets");
+    // Presets are reusable across sessions: seed from the last preset folder
+    // used (default: Documents/Sp3ctra Chain Presets), not the session dir.
+    const auto dir = processor.sessions()->startDirFor(
+        PathKeys::chainPreset,
+        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+            .getChildFile("Sp3ctra Chain Presets"));
     dir.createDirectory();
     presetChooser_ = std::make_unique<juce::FileChooser>(
         "Save chain preset",
@@ -1027,6 +1043,7 @@ void ChainRackComponent::savePresetFlow(int chainIdx)
                 return;
             if (file.getFileExtension().isEmpty())
                 file = file.withFileExtension(".sp3chain");
+            processor.sessions()->rememberDirFor(PathKeys::chainPreset, file);
             if (! processor.saveChainPreset(chainIdx, file))
             {
                 const juce::String msg = "Could not write\n"
@@ -1039,9 +1056,34 @@ void ChainRackComponent::savePresetFlow(int chainIdx)
 
 void ChainRackComponent::loadPresetFlow(int targetChainIdx)
 {
-    const auto dir = juce::File::getSpecialLocation(
-                         juce::File::userDocumentsDirectory)
-                         .getChildFile("Sp3ctra Chain Presets");
+    // Loading INTO an existing non-empty chain replaces its modules — confirm
+    // before opening the chooser (loading as a NEW chain destroys nothing).
+    if (targetChainIdx >= 0 && targetChainIdx < (int) model.chains.size()
+        && ! model.chains[(size_t) targetChainIdx].modules.empty())
+    {
+        const juce::String msg =
+            "Loading a preset replaces the current modules of CHAIN "
+            + juce::String(targetChainIdx + 1) + ".";
+        Sp3ctraDialog::showConfirm(
+            this, "Load chain preset", msg.toRawUTF8(), "Continue", "Cancel",
+            [safe = juce::Component::SafePointer<ChainRackComponent>(this),
+             targetChainIdx](bool ok)
+            {
+                if (! ok) return;
+                if (auto* self = safe.getComponent())
+                    self->loadPresetFlowConfirmed(targetChainIdx);
+            });
+        return;
+    }
+    loadPresetFlowConfirmed(targetChainIdx);
+}
+
+void ChainRackComponent::loadPresetFlowConfirmed(int targetChainIdx)
+{
+    const auto dir = processor.sessions()->startDirFor(
+        PathKeys::chainPreset,
+        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+            .getChildFile("Sp3ctra Chain Presets"));
     presetChooser_ = std::make_unique<juce::FileChooser>(
         targetChainIdx >= 0 ? "Load preset into this chain"
                             : "Load preset as new chain",
@@ -1054,6 +1096,7 @@ void ChainRackComponent::loadPresetFlow(int targetChainIdx)
             const auto file = fc.getResult();
             if (file == juce::File{})
                 return;
+            processor.sessions()->rememberDirFor(PathKeys::chainPreset, file);
             const auto preset = ChainPresetIO::loadFromFile(file);
             if (! preset.isValid())
             {
@@ -1193,18 +1236,20 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const j
                        ? LedState::Active : LedState::Off;
 
         // SCORE, TIMBRE, MIDI SCORE and VOICE each own a score-player slot
-        // (P5-M4): the block LED reflects THIS instance's transport —
-        // ● playing / ◐ content loaded / ○ empty.
+        // (P5-M4): the LED is the module's ACTIVE (enable) state, not the
+        // transport — ○ deactivated / ● active & playing / ◐ active & stopped.
         case ModuleType::Score:
         case ModuleType::Timbre:
         case ModuleType::MidiScore:
         case ModuleType::Voice:
-            if (auto* sc = processor.getScoreChannelForSlot(
-                    engineSlot >= 0 ? engineSlot : 0))
-                return sc->isScorePlaying()  ? LedState::Active
-                     : sc->scoreHasContent() ? LedState::Idle
-                     :                         LedState::Off;
-            return LedState::Off;
+        {
+            const int slot = engineSlot >= 0 ? engineSlot : 0;
+            if (! paramOn(scoreActiveParam(slot)))
+                return LedState::Off;                 // deactivated
+            auto* sc = processor.getScoreChannelForSlot(slot);
+            return (sc != nullptr && sc->isScorePlaying()) ? LedState::Active
+                                                           : LedState::Idle;
+        }
 
         case ModuleType::VideoScroll:
         {

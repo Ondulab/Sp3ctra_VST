@@ -6,31 +6,32 @@
 #include "SlotSpectralEditorComponent.h"
 #include "../image/ScoreEqComponent.h"
 #include "../midi/MidiLearnAttachment.h"   // right-click MIDI-Learn on play controls
+#include "SamplerValueBox.h"               // crop / fade param chips under the image
 
 class Sp3ctraAudioProcessor;
 
 /**
- * @brief Compact pictogram button for one loop mode (radio-style).
+ * @brief Compact pictogram button for the loop row (toggle-style).
  *
  * Reuses the SCORE transport-button visual language (rounded dark cell, accent
- * glow when active) so the SAMPLER loop controls read at a glance — the old
- * truncated "NONE / LOOP / INV / PING" text buttons were unreadable. Unlike
- * SCORE (whose play button is larger than its loop/reverse pictograms), all
- * four loop buttons here share ONE size.
+ * glow when active) so the SAMPLER loop controls read at a glance. All loop
+ * buttons share ONE size.
  *
  * Glyphs:
- *   None     → straight right arrow  (──▶)  : play once, no repeat
- *   Loop     → racetrack loop, arrow left   : repeat forward
- *   Inverse  → racetrack loop mirrored      : repeat backward
- *   PingPong → double-headed arrow (◀─▶)    : bounce forward / backward
+ *   None      → straight right arrow (──▶)  : play forward
+ *   ArrowLeft → straight left arrow  (◀──)  : play backward
+ *   Loop      → racetrack loop, arrow left  : repeat
+ *   Inverse   → racetrack loop mirrored     : (kept for reuse)
+ *   PingPong  → double-headed arrow (◀─▶)   : (kept for reuse)
  *
- * These are mutually-exclusive radio buttons, not JUCE toggles: the active one
+ * The sampler uses THREE of these as independent composable toggles
+ * (forward / backward / repeat — combined via composeLoopMode): the lit state
  * is pushed in via setActive(); the click is wired through Button::onClick.
  */
 class LoopModeButton : public juce::Button
 {
 public:
-    enum class Glyph { None, Loop, Inverse, PingPong };
+    enum class Glyph { None, Loop, Inverse, PingPong, ArrowLeft };
 
     LoopModeButton() : juce::Button("loopMode") {}
 
@@ -66,6 +67,16 @@ public:
             case Glyph::Loop:     drawLoopGlyph    (g, centred(inner, 1.0f), fg, false); break;
             case Glyph::Inverse:  drawLoopGlyph    (g, centred(inner, 1.0f), fg, true);  break;
             case Glyph::PingPong: drawPingPongGlyph(g, centred(inner, 1.8f), fg);        break;
+            case Glyph::ArrowLeft:
+            {
+                // Mirror the right arrow about the icon's vertical centre.
+                const auto r = centred(inner, 1.6f);
+                juce::Graphics::ScopedSaveState ss(g);
+                g.addTransform(juce::AffineTransform::scale(-1.0f, 1.0f)
+                                   .translated(r.getCentreX() * 2.0f, 0.0f));
+                drawArrowGlyph(g, r, fg);
+                break;
+            }
         }
     }
 
@@ -344,8 +355,9 @@ private:
     // ── Sliders ───────────────────────────────────────────────────────────────
     juce::Slider speedSlider; // 0.01–32.0×; skewed so 1.0× sits at centre position
 
-    // ── Loop mode (4 radio-style icon buttons: NONE / LOOP / INVERSE / PINGPONG) ──
-    LoopModeButton loopBtns[4];
+    // ── Loop row (3 composable toggles: 0 = forward →, 1 = backward ←,
+    //    2 = repeat ⟲ — combined into LoopMode via composeLoopMode) ───────────
+    LoopModeButton loopBtns[3];
 
     // ── Resume mode toggle ────────────────────────────────────────────────────
     juce::ToggleButton resumeToggle { "Resume from last position" };
@@ -355,15 +367,24 @@ private:
     // of erasing it (tape-style "continue recording").
     juce::ToggleButton overdubToggle { "Overdub (extend REC)" };
 
-    // ── Fade info labels — thin strip UNDER the image view ────────────────────
-    // The fade curves are edited directly ON the image (drag the end handle
-    // for the length, the mid-curve handle for the shape — see
-    // SlotSpectralEditorComponent); these labels mirror the live type/power.
-    // Right-click = MIDI-learn of the fade POWER.
-    juce::Label fadeInInfo_, fadeOutInfo_;
+    // ── Param boxes — two-row strip UNDER the image view ──────────────────────
+    // Crop bounds + fade width / curve type / power as editable, MIDI-mappable
+    // chips (drag a number vertically, Shift = fine; type boxes open a
+    // LIN/EXP/LOG/S menu at the cursor; right-click any chip = MIDI-Learn).
+    // The image handles stay as a second way to edit the same engine values —
+    // both paths meet in SamplerMidiTargets::read/apply, so chips, handles and
+    // MIDI can never disagree.
+    SamplerValueBox cropStartBox_   { "start", juce::Colour(0xff33ff99), false };
+    SamplerValueBox cropEndBox_     { "end",   juce::Colour(0xffff6633), false };
+    SamplerValueBox fadeInLenBox_   { "in",    juce::Colour(0xff44ee88), false };
+    SamplerValueBox fadeInTypeBox_  { {},      juce::Colour(0xff44ee88), true  };
+    SamplerValueBox fadeInPowBox_   { "pow",   juce::Colour(0xff44ee88), false };
+    SamplerValueBox fadeOutLenBox_  { "out",   juce::Colour(0xffff6633), false };
+    SamplerValueBox fadeOutTypeBox_ { {},      juce::Colour(0xffff6633), true  };
+    SamplerValueBox fadeOutPowBox_  { "pow",   juce::Colour(0xffff6633), false };
 
-    /** Refresh the fade info labels from the engine (type · power). */
-    void refreshFadeInfo();
+    /** Repaint every param box (they read the engine live on paint). */
+    void refreshParamBoxes();
 
     // ── Unified MIDI-Learn (right-click any play control / action button) ──────
     // Recreated on every slot / engine rebind so the synthetic target ids track

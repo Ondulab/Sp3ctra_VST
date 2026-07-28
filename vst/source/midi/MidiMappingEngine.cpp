@@ -66,6 +66,19 @@ void MidiMappingEngine::removeMappingFor(const juce::String& paramId)
     notifyChanged();
 }
 
+void MidiMappingEngine::clearAll()
+{
+    // Same slot-reset as the restore preamble (restoreFromValueTree): release
+    // every mapping, then notify once so badges refresh and the session saves.
+    for (auto& s : slots_)
+    {
+        s.param  .store(nullptr, std::memory_order_release);
+        s.vtarget.store(-1,      std::memory_order_release);
+        s.paramId.clear();
+    }
+    notifyChanged();
+}
+
 bool MidiMappingEngine::getMappingFor(const juce::String& paramId,
                                       int& type, int& channel, int& number) const
 {

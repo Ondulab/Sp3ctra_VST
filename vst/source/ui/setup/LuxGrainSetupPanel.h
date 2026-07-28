@@ -95,7 +95,9 @@ private:
     {
         chooser = std::make_unique<juce::FileChooser>(
             "Select the grain material (audio file)",
-            juce::File::getSpecialLocation(juce::File::userMusicDirectory),
+            processor.sessions()->startDirFor(
+                PathKeys::grainSample,
+                juce::File::getSpecialLocation(juce::File::userMusicDirectory)),
             "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a");
         chooser->launchAsync(
             juce::FileBrowserComponent::openMode
@@ -105,6 +107,7 @@ private:
                 const auto f = fc.getResult();
                 if (f == juce::File{})
                     return;
+                processor.sessions()->rememberDirFor(PathKeys::grainSample, f);
                 juce::String err;
                 if (! processor.loadLuxGrainSampleFile(f, err))
                 {

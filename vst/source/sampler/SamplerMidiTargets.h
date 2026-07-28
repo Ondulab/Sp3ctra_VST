@@ -42,6 +42,9 @@ namespace SamplerMidiTargets
         Rec, Play, Save, Clear,      // action targets (slot-addressed)
         EqBand,                      // per-slot EQ band gain (band in id bits 24+)
         MixMode,                     // per-bank composite rule (Mix/Add/Darken)
+        CropStart, CropEnd,          // play-region bounds [0..1] of the take
+        FadeInLen, FadeOutLen,       // fade widths [0..1] of the active region
+        LoopFwd, LoopBwd, LoopRepeat,// loop-row toggles (compose into LoopMode)
         KindCount
     };
 
@@ -66,6 +69,13 @@ namespace SamplerMidiTargets
             case Kind::Clear:       return "clear";
             case Kind::EqBand:      return "eq";   // real id is "eq{band}" (makeEqBandId)
             case Kind::MixMode:     return "mixmode";
+            case Kind::CropStart:   return "cropstart";
+            case Kind::CropEnd:     return "cropend";
+            case Kind::FadeInLen:   return "fainlen";
+            case Kind::FadeOutLen:  return "foutlen";
+            case Kind::LoopFwd:     return "loopfwd";
+            case Kind::LoopBwd:     return "loopbwd";
+            case Kind::LoopRepeat:  return "looprepeat";
             default:                return "";
         }
     }
@@ -152,9 +162,13 @@ namespace SamplerMidiTargets
         {
             case Kind::Speed: case Kind::Img: case Kind::Floor:
             case Kind::FadeInPow: case Kind::FadeOutPow:
+            case Kind::CropStart: case Kind::CropEnd:
+            case Kind::FadeInLen: case Kind::FadeOutLen:
             case Kind::EqBand:                             return 0;    // continuous
-            case Kind::Resume: case Kind::Overdub:         return 2;    // 2-state
-            case Kind::LoopMode:                           return 4;    // NONE/LOOP/INV/PING
+            case Kind::Resume: case Kind::Overdub:
+            case Kind::LoopFwd: case Kind::LoopBwd:
+            case Kind::LoopRepeat:                         return 2;    // 2-state
+            case Kind::LoopMode:                           return 6;    // legacy cycle (all LoopModes)
             case Kind::MixMode:                            return 3;    // MIX/ADD/DARKEN
             case Kind::FadeInType: case Kind::FadeOutType: return 4;    // LIN/EXP/LOG/S
             case Kind::Rec: case Kind::Play:               return -1;   // momentary action
@@ -191,10 +205,20 @@ namespace SamplerMidiTargets
             case Kind::FadeOutPow:  return powerRange().convertTo0to1(fs.getSlotDecayCurvePower(slot));
             case Kind::Resume:      return fs.getSlotResumeMode(slot) ? 1.0f : 0.0f;
             case Kind::Overdub:     return fs.getOverdubMode()        ? 1.0f : 0.0f;
-            case Kind::LoopMode:    return (float) (int) fs.getSlotLoopMode(slot)        / 3.0f;
+            case Kind::LoopMode:    return (float) (int) fs.getSlotLoopMode(slot)        / 5.0f;
+            case Kind::LoopFwd: case Kind::LoopBwd: case Kind::LoopRepeat:
+            {
+                bool f, b, r;
+                decomposeLoopMode(fs.getSlotLoopMode(slot), f, b, r);
+                return (k == Kind::LoopFwd ? f : k == Kind::LoopBwd ? b : r) ? 1.0f : 0.0f;
+            }
             case Kind::MixMode:     return (float) (int) fs.getSlotMixMode(slot)         / 2.0f;
             case Kind::FadeInType:  return (float) (int) fs.getSlotAttackCurveType(slot) / 3.0f;
             case Kind::FadeOutType: return (float) (int) fs.getSlotDecayCurveType(slot)  / 3.0f;
+            case Kind::CropStart:   return fs.getSlotStartFrac(slot);
+            case Kind::CropEnd:     return fs.getSlotEndFrac(slot);
+            case Kind::FadeInLen:   return fs.getSlotAttackLen(slot);
+            case Kind::FadeOutLen:  return fs.getSlotDecayLen(slot);
             default:                return 0.0f;
         }
     }
@@ -213,10 +237,30 @@ namespace SamplerMidiTargets
             case Kind::FadeOutPow:  fs.setSlotDecayCurvePower(slot, powerRange().convertFrom0to1(n));   break;
             case Kind::Resume:      fs.setSlotResumeMode(slot, n >= 0.5f);                              break;
             case Kind::Overdub:     fs.setOverdubMode(n >= 0.5f);                                       break;
-            case Kind::LoopMode:    fs.setSlotLoopMode(slot, (LoopMode) (int) std::lround(n * 3.0f));   break;
+            case Kind::LoopMode:    fs.setSlotLoopMode(slot, (LoopMode) (int) std::lround(n * 5.0f));   break;
+            case Kind::LoopFwd: case Kind::LoopBwd: case Kind::LoopRepeat:
+            {
+                bool f, b, r;
+                decomposeLoopMode(fs.getSlotLoopMode(slot), f, b, r);
+                const bool on = (n >= 0.5f);
+                if      (k == Kind::LoopFwd) f = on;
+                else if (k == Kind::LoopBwd) b = on;
+                else                         r = on;
+                if (f || b)   // same guard as the UI: keep one direction lit
+                    fs.setSlotLoopMode(slot, composeLoopMode(f, b, r));
+                break;
+            }
             case Kind::MixMode:     fs.setSlotMixMode(slot, (SlotMixMode) (int) std::lround(n * 2.0f)); break;
             case Kind::FadeInType:  fs.setSlotAttackCurveType(slot, (FadeCurveType) (int) std::lround(n * 3.0f)); break;
             case Kind::FadeOutType: fs.setSlotDecayCurveType(slot,  (FadeCurveType) (int) std::lround(n * 3.0f)); break;
+            // Crop bounds keep the same 0.01 min-span guard as the image drag
+            // (SlotSpectralEditorComponent::mouseDrag) so a CC can't cross them.
+            case Kind::CropStart:
+                fs.setSlotStartFrac(slot, juce::jmin(n, fs.getSlotEndFrac(slot) - 0.01f));   break;
+            case Kind::CropEnd:
+                fs.setSlotEndFrac(slot, juce::jmax(n, fs.getSlotStartFrac(slot) + 0.01f));   break;
+            case Kind::FadeInLen:   fs.setSlotAttackLen(slot, n);                                   break;
+            case Kind::FadeOutLen:  fs.setSlotDecayLen(slot, n);                                    break;
             default: break;
         }
     }

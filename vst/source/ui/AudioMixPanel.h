@@ -43,9 +43,9 @@ public:
             { ModuleType::LuxWave,  "luxwaveVolume"  },
             { ModuleType::LuxGrain, "luxgrainVolume" },
         };
-        for (int i = 0; i < kNumEngines; ++i)
+        for (size_t i = 0; i < kNumEngines; ++i)
         {
-            auto& s = strips[(size_t) i];
+            auto& s = strips[i];
             s.type   = kEngines[i].t;
             s.colour = moduleColour(kEngines[i].t);
             s.name   = moduleDisplayName(kEngines[i].t)

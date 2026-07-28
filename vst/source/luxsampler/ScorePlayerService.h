@@ -51,8 +51,15 @@ public:
     void uiPlayScore() noexcept;
     void uiStopScore() noexcept;
     void uiDiscardScore();
+
+    /** Module ACTIVE state (rack LED), decoupled from the transport:
+     *  deactivating stops playback but remembers the head + that it was
+     *  playing; reactivating resumes it (no need to re-press PLAY). */
+    bool isScoreActive() const noexcept;
+    void setScoreActive(bool active) noexcept;
     bool uiBeginScoreScrub() noexcept;
     void uiEndScoreScrub() noexcept;
+    void uiSetScorePaused(bool paused) noexcept;
     void uiSeekScore(int frame) noexcept;
     void setScoreResumeHead(int frame) noexcept;
     void setScoreSpeed(float v) noexcept;
@@ -63,6 +70,12 @@ public:
                                   double scoreMinHz = 0.0,
                                   double scoreMaxHz = 0.0,
                                   bool stereo = false);
+
+    /** Live swap: replaces the frames WITHOUT stopping the transport — the
+     *  head is remapped proportionally and the next 1 ms tick simply reads
+     *  the new content (no gap, no click, pause/scrub holds survive). Build
+     *  the frames off-thread with ScorePlayerService::buildFramesFromImage. */
+    void uiHotSwapScoreFrames(std::vector<CapturedFrame>&& frames) noexcept;
 
     int slot() const noexcept { return slot_; }
 
@@ -103,9 +116,12 @@ public:
 
     void play(int slot) noexcept;                 // toggle: stops if playing
     void stop(int slot) noexcept;
+    bool isActive(int slot) const noexcept;       // module enable (rack LED)
+    void setActive(int slot, bool active) noexcept;
     void discard(int slot);                       // stop + free the slot's frames
     bool beginScrub(int slot) noexcept;
     void endScrub(int slot) noexcept;
+    void setPaused(int slot, bool paused) noexcept; // freeze a RUNNING transport
     void seek(int slot, int frame) noexcept;
     void setResumeHead(int slot, int frame) noexcept;
     void setSpeed(int slot, float v) noexcept;
@@ -114,6 +130,16 @@ public:
     void loadFramesFromImage(int slot, const juce::Image& image,
                              juce::Rectangle<int> band,
                              double scoreMinHz, double scoreMaxHz, bool stereo);
+
+    /** Pure image→frames conversion (the expensive part of a load) — safe on
+     *  any thread, no slot touched. Empty result = invalid/degenerate image. */
+    static std::vector<CapturedFrame> buildFramesFromImage(
+        const juce::Image& image, juce::Rectangle<int> band,
+        double scoreMinHz, double scoreMaxHz, bool stereo);
+
+    /** Swap a slot's frames in place, transport untouched (see
+     *  ScoreChannel::uiHotSwapScoreFrames). Empty input is ignored. */
+    void hotSwapFrames(int slot, std::vector<CapturedFrame>&& frames) noexcept;
 
     /** C-hook backend: slot may still write its chains (play, scrub or a
      *  session winding down). Any-thread safe. */
@@ -143,6 +169,12 @@ private:
 
         // Player-side session flag (published for the ownership gates)
         std::atomic<bool> sessionActive { false };
+
+        // Module ACTIVE state (rack LED enable), independent of the transport.
+        // Deactivating stops the run and latches resumeOnReactivate so the
+        // next re-activate replays from resumeHead. Default ON.
+        std::atomic<bool> active             { true };
+        std::atomic<bool> resumeOnReactivate { false };
     };
 
     /** Player-thread-private session state (one per slot). */

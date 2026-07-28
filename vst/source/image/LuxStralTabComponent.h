@@ -161,7 +161,9 @@ public:
         {
             timbreFileChooser = std::make_unique<juce::FileChooser>(
                 "Select a sample for the LuxStral timbre",
-                juce::File::getSpecialLocation(juce::File::userMusicDirectory),
+                processor.sessions()->startDirFor(
+                    PathKeys::timbreSource,
+                    juce::File::getSpecialLocation(juce::File::userMusicDirectory)),
                 "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg;*.m4a");
             const auto flags = juce::FileBrowserComponent::openMode
                              | juce::FileBrowserComponent::canSelectFiles;
@@ -169,7 +171,10 @@ public:
             {
                 const auto file = fc.getResult();
                 if (file.existsAsFile())
+                {
+                    processor.sessions()->rememberDirFor(PathKeys::timbreSource, file);
                     loadTimbreSample(file);
+                }
             });
         };
 

@@ -136,6 +136,17 @@ void luxgrain_engine_set_config(LuxGrainEngine *e, const LuxGrainConfig *c) {
   e->cfg_pending_seq++; /* even: consistent */
 }
 
+void luxgrain_engine_set_sample_rate(LuxGrainEngine *e, float sample_rate) {
+  if (!e || !e->initialized || sample_rate <= 0.0f)
+    return;
+  if (e->sample_rate == sample_rate)
+    return;
+  e->sample_rate = sample_rate;
+  e->inv_sample_rate = 1.0f / sample_rate;
+  /* Grains already in flight keep their spawn-time phase_inc for their last
+   * few milliseconds; every new grain derives from the new rate. */
+}
+
 int luxgrain_engine_active_grains(const LuxGrainEngine *e) {
   return e ? e->active_grains : 0;
 }

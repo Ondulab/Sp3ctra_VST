@@ -3,6 +3,7 @@
 #include "IconPaths.h"
 #include "ui/ScrollWheelGuard.h"
 #include "Sp3ctraVersion.h"
+#include "Sp3ctraDialog.h"   // session-bar prompts (name input / confirm)
 
 //==============================================================================
 Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& p)
@@ -51,7 +52,8 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     chainRack->onVideoBlockSelected = [this](int slot)
     {
         videoSlotIndex_ = slot;
-        if (videoScrollPage) videoScrollPage->setSlot(slot);
+        if (videoScrollPage)  videoScrollPage ->setSlot(slot);
+        if (videoScrollSetup) videoScrollSetup->setSlot(slot);
     };
     // Selecting a SAMPLER block binds the sampler page + setup to engine A/B
     // (slot 0 = A, 1 = B), fired just before onBlockSelected → selectBlock.
@@ -130,7 +132,8 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     timbrePage = std::make_unique<TimbreGenTabComponent>(audioProcessor);
     zone3Content.addChildComponent(timbrePage.get());
 
-    // MIDI SCORE — MIDI-file → printable score generator (no SETUP face)
+    // MIDI SCORE — MIDI-file → printable score generator (export prefs on
+    // its SETUP face, created with the other setup panels below)
     midiScorePage = std::make_unique<MidiScoreGenTabComponent>(audioProcessor);
     zone3Content.addChildComponent(midiScorePage.get());
     voicePage = std::make_unique<VoiceGenTabComponent>(audioProcessor);
@@ -190,6 +193,16 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         audioProcessor, ChainRackComponent::blockColour(ChainBlockId::Sampler));
     scoreSetup   = std::make_unique<ScoreSetupPanel>(
         audioProcessor, ChainRackComponent::blockColour(ChainBlockId::Score));
+    // MIDI SCORE / TIMBRE export prefs live in each PLAY page's persisted
+    // state — the panels edit the pages directly (created above).
+    midiScoreSetup = std::make_unique<MidiScoreSetupPanel>(
+        *midiScorePage, ChainRackComponent::blockColour(ChainBlockId::MidiScore));
+    timbreSetup = std::make_unique<TimbreSetupPanel>(
+        *timbrePage, ChainRackComponent::blockColour(ChainBlockId::Timbre));
+    voiceSetup = std::make_unique<VoiceSetupPanel>(
+        *voicePage, ChainRackComponent::blockColour(ChainBlockId::Voice));
+    videoScrollSetup = std::make_unique<VideoScrollSetupPanel>(
+        audioProcessor, ChainRackComponent::blockColour(ChainBlockId::VideoScroll));
     // M9 — media modules: source picking lives on the PLAY page now
     // (MediaSourcePage hosts LOAD/CLEAR/device combo); no SETUP face.
     zone3Content.addChildComponent(sourceSetup.get());
@@ -201,6 +214,10 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     zone3Content.addChildComponent(grainSetup.get());
     zone3Content.addChildComponent(samplerSetup.get());
     zone3Content.addChildComponent(scoreSetup.get());
+    zone3Content.addChildComponent(midiScoreSetup.get());
+    zone3Content.addChildComponent(timbreSetup.get());
+    zone3Content.addChildComponent(voiceSetup.get());
+    zone3Content.addChildComponent(videoScrollSetup.get());
 
     // PLAY | SETUP face switcher (above the zone-3 viewport). Every block now
     // has a SETUP face — the SP3CTRA source hosts the network/CIS config there.
@@ -256,17 +273,37 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     splitterRight.onDragEnd   = [this] { persistLayoutProps(); };
     addAndMakeVisible(splitterRight);
 
-    // ── Header gear button ────────────────────────────────────────────────────
-    settingsButton.onClick = [this] { openSettings(); };
-    addAndMakeVisible(settingsButton);
-
-    // ── Header panic button (All Notes Off) ───────────────────────────────────
-    panicButton.onClick = [this]
+    // ── Header menu bar (right-aligned): SESSION · MIDI · ADVANCED · ABOUT ────
+    // SESSION is Standalone-only (in a DAW the host project IS the session).
+    if (auto* sessions = audioProcessor.sessions();
+        sessions != nullptr && sessions->isStandalone())
     {
-        // Signal the audio thread to release every held/stuck note next block.
-        audioProcessor.requestAllNotesOff();
-    };
-    addAndMakeVisible(panicButton);
+        menuSessionBtn_.setTooltip(
+            "Working session: everything auto-saves into the session folder.");
+        menuSessionBtn_.onClick = [this] { showSessionMenu(); };
+        addAndMakeVisible(menuSessionBtn_);
+
+        // Session switches refresh the menu label (name + saved dot).
+        sessions->onSessionChanged =
+            [safe = juce::Component::SafePointer<Sp3ctraAudioProcessorEditor>(this)]
+        {
+            if (auto* self = safe.getComponent())
+                self->refreshSessionBar();
+        };
+        refreshSessionBar();
+    }
+
+    menuMidiBtn_.setTooltip("MIDI: follow control, mappings, panic.");
+    menuMidiBtn_.onClick = [this] { showMidiMenu(); };
+    addAndMakeVisible(menuMidiBtn_);
+
+    menuAdvancedBtn_.setTooltip("Advanced: log level, worker threads.");
+    menuAdvancedBtn_.onClick = [this] { showAdvancedMenu(); };
+    addAndMakeVisible(menuAdvancedBtn_);
+
+    menuAboutBtn_.setTooltip("About Sp3ctra, links, license, donate.");
+    menuAboutBtn_.onClick = [this] { showAboutMenu(); };
+    addAndMakeVisible(menuAboutBtn_);
 
     // ── Restore persisted layout (survives session reload) ────────────────────
     auto& state = apvts.state;
@@ -289,7 +326,8 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         (int) state.getProperty("selVideoSlot", 0));
     if (samplerPage)     samplerPage    ->setSamplerIndex(samplerEngineIndex_);
     if (samplerSetup)    samplerSetup   ->setSamplerIndex(samplerEngineIndex_);
-    if (videoScrollPage) videoScrollPage->setSlot(videoSlotIndex_);
+    if (videoScrollPage)  videoScrollPage ->setSlot(videoSlotIndex_);
+    if (videoScrollSetup) videoScrollSetup->setSlot(videoSlotIndex_);
 
     // Selected block: fall back to the default when out of range or when its
     // module was deleted since the save (the rack can't highlight a ghost).
@@ -334,23 +372,417 @@ Sp3ctraAudioProcessorEditor::~Sp3ctraAudioProcessorEditor()
 {
     stopTimer();
     audioProcessor.onStateRestoredUi = nullptr;   // this editor is going away
+    if (auto* s = audioProcessor.sessions())
+        s->onSessionChanged = nullptr;            // ditto for the session bar
     juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
-    settingsWindow.reset();
+}
+
+//==============================================================================
+// Header menu bar (right-aligned): SESSION · MIDI · ADVANCED · ABOUT
+//==============================================================================
+void Sp3ctraAudioProcessorEditor::layoutHeaderMenus()
+{
+    const int bh = kTitleRowH - 16;
+    const int by = (kTitleRowH - bh) / 2;
+    int x = getWidth() - 10;
+    auto place = [&](HeaderMenuButton& b)
+    {
+        if (! b.isVisible()) return;
+        const int w = b.idealWidth();
+        x -= w;
+        b.setBounds(x, by, w, bh);
+        x -= 4;
+    };
+    // Right-to-left so the visual order is SESSION · MIDI · ADVANCED · ABOUT.
+    place(menuAboutBtn_);
+    place(menuAdvancedBtn_);
+    place(menuMidiBtn_);
+    place(menuSessionBtn_);
+}
+
+void Sp3ctraAudioProcessorEditor::refreshSessionBar()
+{
+    auto* s = audioProcessor.sessions();
+    if (s == nullptr || ! s->isStandalone())
+        return;
+    // The SESSION menu button IS the status display: name + saved/unsaved dot.
+    menuSessionBtn_.setLabel("SESSION : " + s->sessionName());
+    menuSessionBtn_.setDot(true, s->hasUnsavedChanges()
+                                     ? juce::Colour(0xffe0a030)    // autosave pending
+                                     : juce::Colour(0xff3fae5a));  // saved
+    shownSessionLabel_ = s->sessionName()
+                       + (s->hasUnsavedChanges() ? "*" : "");
+    layoutHeaderMenus();   // width follows the label
+}
+
+void Sp3ctraAudioProcessorEditor::showSessionMenu()
+{
+    auto* s = audioProcessor.sessions();
+    if (s == nullptr) return;
+
+    juce::PopupMenu m;
+    m.addSectionHeader("SESSION : " + s->sessionName());
+    m.addItem(1, juce::String::fromUTF8("New session…"));
+    m.addItem(2, juce::String::fromUTF8("Open session…"));
+    m.addItem(3, juce::String::fromUTF8("Save session as…"));
+    m.addItem(4, "Reveal session folder");
+    m.addSeparator();
+    m.addItem(5, juce::String::fromUTF8("Close session (back to Global)"),
+              ! s->isGlobal());
+
+    m.showMenuAsync(
+        juce::PopupMenu::Options().withTargetComponent(&menuSessionBtn_),
+        [safe = juce::Component::SafePointer<Sp3ctraAudioProcessorEditor>(this)]
+        (int choice)
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr || choice == 0) return;
+            auto* mgr = self->audioProcessor.sessions();
+            switch (choice)
+            {
+                case 1: self->runSessionCreateFlow(false); break;
+                case 2:
+                {
+                    self->sessionChooser = std::make_unique<juce::FileChooser>(
+                        "Open a session folder",
+                        mgr->startDirFor(PathKeys::sessionParent,
+                                         SessionManager::appSupportRoot()
+                                             .getChildFile("Sessions")));
+                    self->sessionChooser->launchAsync(
+                        juce::FileBrowserComponent::openMode
+                            | juce::FileBrowserComponent::canSelectDirectories,
+                        [safe](const juce::FileChooser& fc)
+                        {
+                            const auto dir = fc.getResult();
+                            auto* s2 = safe.getComponent();
+                            if (s2 == nullptr || ! dir.isDirectory()) return;
+                            auto* m2 = s2->audioProcessor.sessions();
+                            m2->rememberDirFor(PathKeys::sessionParent,
+                                               dir.getParentDirectory());
+                            if (! m2->openSession(dir))
+                                Sp3ctraDialog::showWarning(
+                                    s2, "Open session",
+                                    "This folder is not a Sp3ctra session "
+                                    "(no project.sp3ctra file found).");
+                        });
+                    break;
+                }
+                case 3: self->runSessionCreateFlow(true); break;
+                case 4: mgr->sessionDir().revealToUser(); break;
+                case 5:
+                    if (! mgr->isGlobal())
+                        Sp3ctraDialog::showConfirm(
+                            self, "Close session",
+                            "Return to the Global session?\n"
+                            "(Everything is already saved in the session folder.)",
+                            "Close", "Cancel",
+                            [safe](bool ok)
+                            {
+                                if (! ok) return;
+                                if (auto* s3 = safe.getComponent())
+                                    s3->audioProcessor.sessions()->closeSession();
+                            });
+                    break;
+            }
+        });
+}
+
+void Sp3ctraAudioProcessorEditor::showMidiMenu()
+{
+    const bool follow      = midiFollowEnabled();
+    const int  numMappings = audioProcessor.getMidiMap().numMappings();
+
+    juce::PopupMenu m;
+    m.addSectionHeader("MIDI");
+    // Label mirrors the state (ON ⇄ OFF) — selecting it toggles.
+    m.addItem(1, juce::String("Follow control : ") + (follow ? "ON" : "OFF"),
+              true, follow);
+    m.addSeparator();
+    m.addItem(4, juce::String::fromUTF8("Import MIDI mappings…"));
+    m.addItem(5, juce::String::fromUTF8("Export MIDI mappings…")
+                 + (numMappings > 0 ? " (" + juce::String(numMappings) + ")"
+                                    : juce::String()),
+              numMappings > 0);
+    m.addItem(2, juce::String::fromUTF8("Clear all MIDI mappings…"),
+              numMappings > 0);
+    m.addSeparator();
+    m.addItem(3, "PANIC (all notes off)");
+
+    m.showMenuAsync(
+        juce::PopupMenu::Options().withTargetComponent(&menuMidiBtn_),
+        [safe = juce::Component::SafePointer<Sp3ctraAudioProcessorEditor>(this)]
+        (int choice)
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr || choice == 0) return;
+            switch (choice)
+            {
+                case 1:   // toggle midiFollowParam
+                    if (auto* p = self->audioProcessor.getAPVTS()
+                                      .getParameter("midiFollowParam"))
+                        p->setValueNotifyingHost(
+                            p->getValue() >= 0.5f ? 0.0f : 1.0f);
+                    break;
+                case 2:   // destructive → confirm
+                    Sp3ctraDialog::showConfirm(
+                        self, "Clear MIDI mappings",
+                        "Remove ALL MIDI CC/Note assignments?\n"
+                        "This cannot be undone.",
+                        "Clear all", "Cancel",
+                        [safe](bool ok)
+                        {
+                            if (! ok) return;
+                            if (auto* s2 = safe.getComponent())
+                                s2->audioProcessor.getMidiMap().clearAll();
+                        });
+                    break;
+                case 3:   // release every held/stuck note next audio block
+                    self->audioProcessor.requestAllNotesOff();
+                    break;
+                case 4: self->importMidiMappingsFlow(); break;
+                case 5: self->exportMidiMappingsFlow(); break;
+            }
+        });
+}
+
+//==============================================================================
+// MIDI mappings ↔ .sp3midi files. Reusable assets across sessions (like the
+// .sp3chain presets): the chooser remembers its own directory, it never
+// defaults into the session folder.
+//==============================================================================
+void Sp3ctraAudioProcessorEditor::exportMidiMappingsFlow()
+{
+    auto* s = audioProcessor.sessions();
+    const auto dir = s->startDirFor(
+        PathKeys::midiMap,
+        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+            .getChildFile("Sp3ctra MIDI Mappings"));
+    dir.createDirectory();
+
+    // Suggested name carries the session so exports stay identifiable.
+    const juce::String base = s->isStandalone()
+        ? s->sessionName() + " mappings" : juce::String("Sp3ctra mappings");
+
+    sessionChooser = std::make_unique<juce::FileChooser>(
+        "Export MIDI mappings", dir.getChildFile(base + ".sp3midi"), "*.sp3midi");
+    sessionChooser->launchAsync(
+        juce::FileBrowserComponent::saveMode
+            | juce::FileBrowserComponent::canSelectFiles
+            | juce::FileBrowserComponent::warnAboutOverwriting,
+        [safe = juce::Component::SafePointer<Sp3ctraAudioProcessorEditor>(this)]
+        (const juce::FileChooser& fc)
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr) return;
+            auto file = fc.getResult();
+            if (file == juce::File{}) return;
+            file = file.withFileExtension("sp3midi");
+            self->audioProcessor.sessions()->rememberDirFor(PathKeys::midiMap, file);
+
+            const auto tree = self->audioProcessor.getMidiMap().toValueTree();
+            const auto xml  = tree.createXml();
+            if (xml == nullptr || ! xml->writeTo(file))
+                Sp3ctraDialog::showWarning(
+                    self, "Export MIDI mappings",
+                    ("Could not write\n" + file.getFullPathName()).toRawUTF8());
+        });
+}
+
+void Sp3ctraAudioProcessorEditor::importMidiMappingsFlow()
+{
+    auto* s = audioProcessor.sessions();
+    sessionChooser = std::make_unique<juce::FileChooser>(
+        "Import MIDI mappings",
+        s->startDirFor(
+            PathKeys::midiMap,
+            juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+                .getChildFile("Sp3ctra MIDI Mappings")),
+        "*.sp3midi");
+    sessionChooser->launchAsync(
+        juce::FileBrowserComponent::openMode
+            | juce::FileBrowserComponent::canSelectFiles,
+        [safe = juce::Component::SafePointer<Sp3ctraAudioProcessorEditor>(this)]
+        (const juce::FileChooser& fc)
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr) return;
+            const auto file = fc.getResult();
+            if (file == juce::File{}) return;
+            self->audioProcessor.sessions()->rememberDirFor(PathKeys::midiMap, file);
+
+            const auto xml = juce::XmlDocument::parse(file);
+            const auto tree = xml != nullptr ? juce::ValueTree::fromXml(*xml)
+                                             : juce::ValueTree();
+            if (! tree.isValid() || ! tree.hasType("MIDI_MAPPINGS"))
+            {
+                Sp3ctraDialog::showWarning(
+                    self, "Import MIDI mappings",
+                    (file.getFileName()
+                     + " is not a valid Sp3ctra MIDI mappings file.").toRawUTF8());
+                return;
+            }
+
+            auto apply = [safe, tree]
+            {
+                if (auto* s2 = safe.getComponent())
+                    // Replace semantics: clears the table then re-adds each MAP
+                    // (assignments for absent modules are silently dropped).
+                    s2->audioProcessor.getMidiMap().restoreFromValueTree(tree);
+            };
+
+            // Importing REPLACES the current table — confirm when non-empty.
+            const int current = self->audioProcessor.getMidiMap().numMappings();
+            if (current > 0)
+                Sp3ctraDialog::showConfirm(
+                    self, "Import MIDI mappings",
+                    ("Importing replaces your current " + juce::String(current)
+                     + " assignment(s).").toRawUTF8(),
+                    "Import", "Cancel",
+                    [apply](bool ok) { if (ok) apply(); });
+            else
+                apply();
+        });
+}
+
+void Sp3ctraAudioProcessorEditor::showAdvancedMenu()
+{
+    auto& apvts = audioProcessor.getAPVTS();
+
+    // Current values (denormalised) for the check-marks.
+    const int curLog = (int) std::round(
+        apvts.getRawParameterValue("logLevel")->load());
+    const int curWorkers = (int) std::round(
+        apvts.getRawParameterValue("luxstralNumWorkers")->load());
+
+    juce::PopupMenu logMenu;
+    static const char* kLogNames[] = { "Error", "Warning", "Info", "Debug" };
+    for (int i = 0; i < 4; ++i)
+        logMenu.addItem(100 + i, kLogNames[i], true, curLog == i);
+
+    juce::PopupMenu workersMenu;
+    for (const int n : { 1, 2, 4, 6, 8, 12, 16 })
+        workersMenu.addItem(200 + n, juce::String(n), true, curWorkers == n);
+
+    juce::PopupMenu m;
+    m.addSectionHeader("ADVANCED");
+    m.addSubMenu("Log level",      logMenu);
+    m.addSubMenu("Worker threads", workersMenu);
+
+    m.showMenuAsync(
+        juce::PopupMenu::Options().withTargetComponent(&menuAdvancedBtn_),
+        [safe = juce::Component::SafePointer<Sp3ctraAudioProcessorEditor>(this)]
+        (int choice)
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr || choice == 0) return;
+            auto& ap = self->audioProcessor.getAPVTS();
+            auto setDenorm = [&ap](const char* id, float denorm)
+            {
+                if (auto* p = ap.getParameter(id))
+                    p->setValueNotifyingHost(p->convertTo0to1(denorm));
+            };
+            if (choice >= 100 && choice < 200)
+                setDenorm("logLevel", (float) (choice - 100));
+            else if (choice >= 200)
+                setDenorm("luxstralNumWorkers", (float) (choice - 200));
+        });
+}
+
+void Sp3ctraAudioProcessorEditor::showAboutMenu()
+{
+    juce::PopupMenu m;
+    m.addSectionHeader("Sp3ctra v" SP3CTRA_VERSION_STRING);
+    m.addItem(1, juce::String::fromUTF8("About Sp3ctra…"));
+    m.addSeparator();
+    m.addItem(2, juce::String::fromUTF8("Website — ondulab.com"));
+    m.addItem(3, juce::String::fromUTF8("Downloads"));
+    m.addItem(4, juce::String::fromUTF8("Donate ♥ (PayPal)"));
+    m.addSeparator();
+    m.addItem(5, juce::String::fromUTF8("Report a bug…"));
+    m.addItem(6, "License (GNU GPL v3)");
+
+    m.showMenuAsync(
+        juce::PopupMenu::Options().withTargetComponent(&menuAboutBtn_),
+        [safe = juce::Component::SafePointer<Sp3ctraAudioProcessorEditor>(this)]
+        (int choice)
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr || choice == 0) return;
+            auto open = [](const juce::String& url)
+            { juce::URL(url).launchInDefaultBrowser(); };
+            switch (choice)
+            {
+                case 1: AboutDialog::show(self); break;
+                case 2: open(AboutDialog::kWebsiteUrl);   break;
+                case 3: open(AboutDialog::kDownloadsUrl); break;
+                case 4: open(AboutDialog::kDonateUrl);    break;
+                case 5: open(AboutDialog::bugReportUrl()); break;
+                case 6: open(AboutDialog::kLicenseUrl);   break;
+            }
+        });
+}
+
+void Sp3ctraAudioProcessorEditor::runSessionCreateFlow(bool saveAs)
+{
+    auto* s = audioProcessor.sessions();
+    if (s == nullptr) return;
+
+    // 1) Pick the PARENT folder the session directory will be created in…
+    sessionChooser = std::make_unique<juce::FileChooser>(
+        saveAs ? "Choose where to save the session copy"
+               : "Choose where to create the new session",
+        s->startDirFor(PathKeys::sessionParent,
+                       SessionManager::appSupportRoot().getChildFile("Sessions")));
+    sessionChooser->launchAsync(
+        juce::FileBrowserComponent::openMode
+            | juce::FileBrowserComponent::canSelectDirectories,
+        [this, saveAs](const juce::FileChooser& fc)
+        {
+            const auto parent = fc.getResult();
+            if (! parent.isDirectory()) return;
+            auto* mgr = audioProcessor.sessions();
+            mgr->rememberDirFor(PathKeys::sessionParent, parent);
+
+            // 2) …then name it. The session starts from the CURRENT state.
+            const juce::String defaultName =
+                saveAs ? (mgr->sessionName() + " copy")
+                       : ("Session "
+                          + juce::Time::getCurrentTime().formatted("%Y-%m-%d"));
+            Sp3ctraDialog::showInput(
+                this,
+                saveAs ? "Save session as" : "New session",
+                "Session name:",
+                defaultName,
+                "Create", "Cancel",
+                [safe = juce::Component::SafePointer<Sp3ctraAudioProcessorEditor>(this),
+                 parent, saveAs](const juce::String& name)
+                {
+                    auto* self = safe.getComponent();
+                    if (self == nullptr || name.trim().isEmpty()) return;
+                    auto* m = self->audioProcessor.sessions();
+                    const bool ok = saveAs ? m->saveAs(parent, name.trim())
+                                           : m->newSession(parent, name.trim());
+                    if (! ok)
+                        Sp3ctraDialog::showWarning(
+                            self, saveAs ? "Save session as" : "New session",
+                            "Could not create the session folder "
+                            "(name already used, or the location is not writable).");
+                });
+        });
 }
 
 //==============================================================================
 bool Sp3ctraAudioProcessorEditor::blockHasSetup(ChainBlockId id) noexcept
 {
     // Every block has a SETUP face — the SP3CTRA source hosts the network/CIS
-    // configuration there (formerly the gear-wheel Network tab) — EXCEPT the
-    // VIDEO SCROLL output, whose params are all on its PLAY page (no setup),
-    // the REVERB / ECHO / EQ FX inserts (single PLAY page too), and the
+    // configuration there (formerly the gear-wheel Network tab); the VIDEO SCROLL
+    // output hosts its per-instance background/frame colour; MIDI SCORE hosts
+    // its export prefs (PNG/JPEG, A4/A3/FULL, DPI) — EXCEPT the
+    // REVERB / ECHO / EQ FX inserts (single PLAY page), and the
     // IMAGE / VIDEO / CAMERA media modules (source picking lives on PLAY).
-    return id != ChainBlockId::RetiredSequencer && id != ChainBlockId::VideoScroll
+    return id != ChainBlockId::RetiredSequencer
         && id != ChainBlockId::Reverb    && id != ChainBlockId::Echo
         && id != ChainBlockId::Equalizer && id != ChainBlockId::Harmonize
-        && id != ChainBlockId::Timbre    && id != ChainBlockId::MidiScore
-        && id != ChainBlockId::Voice
         && id != ChainBlockId::None
         && id != ChainBlockId::ImageSrc  && id != ChainBlockId::VideoSrc
         && id != ChainBlockId::CameraSrc;
@@ -405,10 +837,14 @@ void Sp3ctraAudioProcessorEditor::applyZone3Visibility()
     if (maskSetup)    maskSetup   ->setVisible(setupFace && id == ChainBlockId::Mask);
     if (samplerSetup) samplerSetup->setVisible(setupFace && id == ChainBlockId::Sampler);
     if (scoreSetup)   scoreSetup  ->setVisible(setupFace && id == ChainBlockId::Score);
+    if (midiScoreSetup) midiScoreSetup->setVisible(setupFace && id == ChainBlockId::MidiScore);
+    if (timbreSetup)  timbreSetup ->setVisible(setupFace && id == ChainBlockId::Timbre);
+    if (voiceSetup)   voiceSetup  ->setVisible(setupFace && id == ChainBlockId::Voice);
     if (stralSetup)   stralSetup  ->setVisible(setupFace && id == ChainBlockId::LuxStral);
     if (synthSetup)   synthSetup  ->setVisible(setupFace && id == ChainBlockId::LuxSynth);
     if (waveSetup)    waveSetup   ->setVisible(setupFace && id == ChainBlockId::LuxWave);
     if (grainSetup)   grainSetup  ->setVisible(setupFace && id == ChainBlockId::LuxGrain);
+    if (videoScrollSetup) videoScrollSetup->setVisible(setupFace && id == ChainBlockId::VideoScroll);
 }
 
 //==============================================================================
@@ -429,6 +865,16 @@ void Sp3ctraAudioProcessorEditor::timerCallback()
     const bool touched = audioProcessor.getMidiMap().takeLastTouchedParam(paramId);
     if (touched && midiFollowEnabled())
         followMidiParam(paramId);
+
+    // Session bar dot (saved / autosave-pending) — repaint only on change.
+    if (auto* s = audioProcessor.sessions();
+        s != nullptr && s->isStandalone())
+    {
+        const juce::String label = s->sessionName()
+                                 + (s->hasUnsavedChanges() ? "*" : "");
+        if (label != shownSessionLabel_)
+            refreshSessionBar();
+    }
 }
 
 void Sp3ctraAudioProcessorEditor::followMidiParam(const juce::String& paramId)
@@ -809,34 +1255,28 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colour(0xff1e1e1e));
 
-    // ── Header ────────────────────────────────────────────────────────────────
+    // ── Header (single row): logo + title left, menu bar right ────────────────
     g.setGradientFill(juce::ColourGradient(
         juce::Colour(0xff383838), 0.f, 0.f,
-        juce::Colour(0xff262626), 0.f, (float)kHeaderH, false));
-    g.fillRect(0, 0, getWidth(), kHeaderH);
+        juce::Colour(0xff262626), 0.f, (float)kTitleRowH, false));
+    g.fillRect(0, 0, getWidth(), kTitleRowH);
 
-    // Logo picto (5 coloured bars) — left side of header
-    constexpr float pictoW = 36.f;
-    constexpr float pictoH = 40.f;
+    // Logo picto (5 coloured bars) — slightly reduced, left side of header
+    constexpr float pictoW = 28.f;
+    constexpr float pictoH = 32.f;
     const float pictoX = 10.f;
-    const float pictoY = ((float)kHeaderH - pictoH) * 0.5f;
+    const float pictoY = ((float)kTitleRowH - pictoH) * 0.5f;
     Icons::drawSp3ctraLogoPicto(g, { pictoX, pictoY, pictoW, pictoH });
 
-    // "Sp3ctra" text — right of the picto
+    // "Sp3ctra" text — right of the picto (version now lives in ABOUT)
     g.setColour(juce::Colours::white);
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontTitle)).boldened());
     const int textX = (int)(pictoX + pictoW + 6.f);
-    g.drawText("Sp3ctra", juce::Rectangle<int>(textX, 0, getWidth() - textX - 24, kHeaderH),
+    g.drawText("Sp3ctra", juce::Rectangle<int>(textX, 0, getWidth() - textX - 24, kTitleRowH),
                juce::Justification::centredLeft, true);
 
-    // Version — centred between logo and gear button
-    g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
-    g.setColour(juce::Colour(0xff777777));
-    g.drawText("v" SP3CTRA_VERSION_STRING, juce::Rectangle<int>(0, 0, getWidth(), kHeaderH),
-               juce::Justification::centred, true);
-
     g.setColour(juce::Colour(0xff444444));
-    g.fillRect(0, kHeaderH, getWidth(), 1);
+    g.fillRect(0, headerH(), getWidth(), 1);
 
     // ── Separator between zone 1 (visualizer [+ keyboard ruler]) and zones ───
     g.setColour(juce::Colour(0xff333333));
@@ -903,15 +1343,12 @@ void Sp3ctraAudioProcessorEditor::paint(juce::Graphics& g)
 //==============================================================================
 void Sp3ctraAudioProcessorEditor::resized()
 {
-    // ── Header gear button (top-right) ────────────────────────────────────────
-    const int btnSz = kHeaderH - 8;
-    settingsButton.setBounds(getWidth() - btnSz - 4, 4, btnSz, btnSz);
-    const int panicW = btnSz * 3 / 2;   // wider, rectangular: holds "PANIC"
-    panicButton.setBounds(getWidth() - btnSz - 8 - panicW, 4, panicW, btnSz);
+    // ── Header menu bar (right-aligned, single row) ───────────────────────────
+    layoutHeaderMenus();
 
     // ── ZONE 1: CIS Visualizer — full window width; height = panel count ─────
     if (cisVisualizer)
-        cisVisualizer->setBounds(kHPad, kVisY, getWidth() - 2 * kHPad, visHeight());
+        cisVisualizer->setBounds(kHPad, visY(), getWidth() - 2 * kHPad, visHeight());
 
     layoutZones();
 
@@ -949,12 +1386,12 @@ void Sp3ctraAudioProcessorEditor::layoutZones()
     // ZONE 1 height tracks the active panel count — re-apply it here so block
     // selection (which calls layoutZones, not resized) resizes the strip.
     if (cisVisualizer)
-        cisVisualizer->setBounds(kHPad, kVisY, W - 2 * kHPad, visHeight());
+        cisVisualizer->setBounds(kHPad, visY(), W - 2 * kHPad, visHeight());
 
     // Keyboard ruler (M5): directly under zone 1, same x-extent as the
     // visualizer; it takes kRulerH px from the top of the zones row.
     if (keyboardRuler && keyboardRuler->isVisible())
-        keyboardRuler->setBounds(kHPad, kVisY + visHeight(),
+        keyboardRuler->setBounds(kHPad, visY() + visHeight(),
                                  juce::jmax(50, W - 2 * kHPad), kRulerH);
 
     // (Former ZONE 5 dock removed — the engines + MASTER live in the AUDIO MIX
@@ -1111,21 +1548,25 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
                 top = grainSetup.get();   topMinH = LuxGrainSetupPanel::kPreferredH; break;
             case ChainBlockId::Score:
                 top = scoreSetup.get();   topMinH = ScoreSetupPanel::kPreferredH;    break;
+            case ChainBlockId::MidiScore:
+                top = midiScoreSetup.get(); topMinH = MidiScoreSetupPanel::kPreferredH; break;
+            case ChainBlockId::Timbre:
+                top = timbreSetup.get();  topMinH = TimbreSetupPanel::kPreferredH;   break;
+            case ChainBlockId::Voice:
+                top = voiceSetup.get();   topMinH = VoiceSetupPanel::kPreferredH;    break;
             case ChainBlockId::Chain1Source:
             case ChainBlockId::Chain2Source:
                 top = sourceSetup.get();  topMinH = SourceSetupPanel::kPreferredH;    break;
+            case ChainBlockId::VideoScroll:
+                top = videoScrollSetup.get(); topMinH = VideoScrollSetupPanel::kPreferredH; break;
             case ChainBlockId::ImageSrc:
             case ChainBlockId::VideoSrc:
             case ChainBlockId::CameraSrc:   // M9 — picking moved to the PLAY page
             case ChainBlockId::RetiredSequencer:
-            case ChainBlockId::VideoScroll:
             case ChainBlockId::Reverb:
             case ChainBlockId::Echo:
             case ChainBlockId::Equalizer:
             case ChainBlockId::Harmonize:
-            case ChainBlockId::Timbre:
-            case ChainBlockId::MidiScore:
-            case ChainBlockId::Voice:
             case ChainBlockId::None:
                 break;   // no SETUP face (blockHasSetup == false)
         }
@@ -1238,18 +1679,6 @@ void Sp3ctraAudioProcessorEditor::persistLayoutProps()
     state.setProperty("selLuxStralSend", luxStralSendSlot_, nullptr);
     state.setProperty("selSamplerEngine",  samplerEngineIndex_,  nullptr);
     state.setProperty("selVideoSlot",      videoSlotIndex_,      nullptr);
-}
-
-//==============================================================================
-void Sp3ctraAudioProcessorEditor::openSettings()
-{
-    if (!settingsWindow)
-    {
-        settingsWindow = std::make_unique<SettingsWindow>(audioProcessor);
-        Sp3ctraUI::disableSliderScrollWheel(*settingsWindow);
-    }
-    settingsWindow->setVisible(true);
-    settingsWindow->toFront(true);
 }
 
 //==============================================================================

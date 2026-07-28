@@ -319,6 +319,19 @@ public:
         return juce::Font { juce::FontOptions(Sp3ctraTheme::kFontSmall) };
     }
 
+    /** The default ideal width knows nothing about the tick gutter drawn by
+        drawPopupMenuItem below — short labels ("8") ended up ellipsized when
+        ticked. Reserve the gutter here. */
+    void getIdealPopupMenuItemSize(const juce::String& text, bool isSeparator,
+                                   int standardMenuItemHeight,
+                                   int& idealWidth, int& idealHeight) override
+    {
+        juce::LookAndFeel_V4::getIdealPopupMenuItemSize(
+            text, isSeparator, standardMenuItemHeight, idealWidth, idealHeight);
+        if (! isSeparator)
+            idealWidth += static_cast<int>(Sp3ctraTheme::kFontSmall) + 6;
+    }
+
     void drawPopupMenuBackground(juce::Graphics& g, int width, int height) override
     {
         // fillAll first: covers the OS-level square window corners so they
@@ -384,7 +397,7 @@ public:
         const int leftPad  = isTicked ? static_cast<int>(Sp3ctraTheme::kFontSmall) + 6 : 8;
         const int rightPad = hasSubMenu ? 20 : (shortcutKeyText.isNotEmpty() ? 80 : 8);
         g.setColour(textCol);
-        g.drawText(text, area.reduced(leftPad, 0).withTrimmedRight(rightPad),
+        g.drawText(text, area.withTrimmedLeft(leftPad).withTrimmedRight(rightPad),
                    juce::Justification::centredLeft, true);
 
         if (shortcutKeyText.isNotEmpty())

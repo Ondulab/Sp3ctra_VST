@@ -42,7 +42,11 @@ public:
         styleH(compressSlider_, " fr");
         for (auto* s : sliders()) addAndMakeVisible(*s);
 
-        addAndMakeVisible(invertButton_);
+        // Inversion selector (matches the invertMode param order).
+        invertCombo_.addItem("Off",       1);
+        invertCombo_.addItem("Negative",  2);
+        invertCombo_.addItem("Luminance", 3);
+        addAndMakeVisible(invertCombo_);
         addAndMakeVisible(colorButton_);
     }
 
@@ -115,7 +119,7 @@ public:
         zoomSlider_    .setBounds(x, L.yZoom,      w, kCH);
         fadeSlider_    .setBounds(x, L.yFade,      w, kCH);
         compressSlider_.setBounds(x, L.yCompress,  w, kCH);
-        invertButton_  .setBounds(x, L.yInvert,    w, kCH);
+        invertCombo_   .setBounds(x, L.yInvert,    w, kCH);
         colorButton_   .setBounds(x, L.yColor,     w, kCH);
     }
 
@@ -192,9 +196,9 @@ private:
         thickAtt_   = std::make_unique<SA>(apvts, vsParam(slot_, "thickness"), thicknessSlider_);
         zoomAtt_    = std::make_unique<SA>(apvts, vsParam(slot_, "zoom"),      zoomSlider_);
         fadeAtt_    = std::make_unique<SA>(apvts, vsParam(slot_, "fade"),      fadeSlider_);
-        compAtt_    = std::make_unique<SA>(apvts, vsParam(slot_, "compress"),  compressSlider_);
-        invertAtt_  = std::make_unique<BA>(apvts, vsParam(slot_, "invert"),    invertButton_);
-        colorAtt_   = std::make_unique<BA>(apvts, vsParam(slot_, "colorMode"), colorButton_);
+        compAtt_    = std::make_unique<SA>(apvts, vsParam(slot_, "compress"),   compressSlider_);
+        invertAtt_  = std::make_unique<CA>(apvts, vsParam(slot_, "invertMode"), invertCombo_);
+        colorAtt_   = std::make_unique<BA>(apvts, vsParam(slot_, "colorMode"),  colorButton_);
 
         // Right-click MIDI Learn on every play control of THIS instance.
         auto& mm = processor_.getMidiMap();
@@ -210,7 +214,7 @@ private:
         learn(zoomSlider_,      "zoom");
         learn(fadeSlider_,      "fade");
         learn(compressSlider_,  "compress");
-        learn(invertButton_,    "invert");
+        learn(invertCombo_,     "invertMode");
         learn(colorButton_,     "colorMode");
         repaint();
     }
@@ -218,15 +222,15 @@ private:
     Sp3ctraAudioProcessor& processor_;
     int slot_ { -1 };
 
-    juce::ComboBox  modeCombo_;
+    juce::ComboBox  modeCombo_, invertCombo_;
     juce::Slider    speedSlider_, linePosSlider_, thicknessSlider_,
                     zoomSlider_, fadeSlider_, compressSlider_;
-    juce::ToggleButton invertButton_, colorButton_;
+    juce::ToggleButton colorButton_;
 
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> modeAtt_;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> modeAtt_, invertAtt_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   speedAtt_, linePosAtt_,
         thickAtt_, zoomAtt_, fadeAtt_, compAtt_;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   invertAtt_, colorAtt_;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   colorAtt_;
     std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(VideoScrollPage)

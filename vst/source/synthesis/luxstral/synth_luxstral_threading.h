@@ -123,6 +123,7 @@ int barrier_destroy(barrier_t *barrier);
 int synth_init_thread_pool(struct LuxStralEngine *eng);
 int synth_start_worker_threads(struct LuxStralEngine *eng);
 void synth_shutdown_thread_pool(void);  // Public entry point (atexit/shared core)
+void synth_request_pool_restart(void);  // Hot-apply num_workers (rebuild at next pass)
 
 /* RT deterministic threading (Phase 1 & 2) */
 int synth_init_barriers(struct LuxStralEngine *eng, int num_threads);

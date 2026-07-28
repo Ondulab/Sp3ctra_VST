@@ -1,6 +1,7 @@
 #include "SlotGridComponent.h"
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "../Sp3ctraDialog.h"            // destructive-action confirmations
 #include "../ui/ModuleParamManifest.h"   // fsEngineParam (SETUP "Banks" count)
 #include "SamplerMidiTargets.h"
 
@@ -280,6 +281,9 @@ void SlotGridComponent::mouseDown(const juce::MouseEvent& e)
         menu.addItem(2, "Paste here",
                      clipboardFull, // enabled only when clipboard has a valid different slot
                      false);
+        menu.addItem(3, "Clear bank",
+                     hasContent,    // nothing to clear on an empty slot
+                     false);
 
         // showMenuAsync is correct here: the lambda is called on the message thread
         menu.showMenuAsync(juce::PopupMenu::Options()
@@ -305,12 +309,33 @@ void SlotGridComponent::mouseDown(const juce::MouseEvent& e)
                             selectedSlot = idx;
                             repaint();
                             if (onSlotSelected) onSlotSelected(idx);
+                            // Paste rewrote a bank's frames — persist banks.
+                            processor.sessions()->markBanksDirty();
                         }
                         break;
 
-                    case 3: // Clear
-                        fs2->uiClearSlot(idx);
-                        repaint();
+                    case 3: // Clear — destructive: confirm when non-empty
+                        if (! fs2->slotHasContent(idx))
+                            break;
+                        Sp3ctraDialog::showConfirm(
+                            this, "Clear bank",
+                            ("Clear bank " + juce::String(idx + 1)
+                             + "? The recorded audio is discarded.").toRawUTF8(),
+                            "Clear", "Cancel",
+                            [safe2 = juce::Component::SafePointer<
+                                 SlotGridComponent>(this), idx](bool ok)
+                            {
+                                if (! ok) return;
+                                auto* s2 = safe2.getComponent();
+                                if (s2 == nullptr) return;
+                                if (auto* eng = s2->processor.getSampler(
+                                        s2->samplerIndex_))
+                                {
+                                    eng->uiClearSlot(idx);
+                                    s2->repaint();
+                                    s2->processor.sessions()->markBanksDirty();
+                                }
+                            });
                         break;
 
                     default:

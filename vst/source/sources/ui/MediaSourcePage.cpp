@@ -292,7 +292,9 @@ void MediaSourcePage::chooseMedia()
     const bool isImage = (kind == Kind::Image);
     chooser_ = std::make_unique<juce::FileChooser>(
         isImage ? "Choose an image" : "Choose a video",
-        juce::File::getSpecialLocation(juce::File::userPicturesDirectory),
+        processor.sessions()->startDirFor(
+            PathKeys::mediaImport,
+            juce::File::getSpecialLocation(juce::File::userPicturesDirectory)),
         isImage ? "*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.tiff;*.tif"
                 : "*.mov;*.mp4;*.m4v;*.avi;*.mpg;*.mpeg");
 
@@ -306,6 +308,7 @@ void MediaSourcePage::chooseMedia()
             const auto file = fc.getResult();
             if (file == juce::File{})
                 return;
+            safe->processor.sessions()->rememberDirFor(PathKeys::mediaImport, file);
 
             juce::String err;
             bool ok = false;

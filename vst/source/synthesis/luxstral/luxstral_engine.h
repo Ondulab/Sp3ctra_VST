@@ -82,6 +82,9 @@ typedef struct LuxStralEngine {
   _Atomic int pool_shutdown;           /* RT-SAFE: C11 atomic                  */
   /* Signal to unblock workers during prepareToPlay() buffer size changes     */
   _Atomic int workers_must_exit;       /* RT-SAFE: C11 atomic                  */
+  /* Hot-apply of the "Worker threads" setting: producer tears the pool down
+   * at the next pass boundary and lazily re-inits with the new config count  */
+  _Atomic int pool_restart_requested;  /* RT-SAFE: C11 atomic                  */
 
   /* ===== Barriers (deterministic worker execution) ========================= */
 #ifdef __linux__

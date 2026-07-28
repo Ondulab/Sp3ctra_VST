@@ -8,6 +8,8 @@
 #include "LuxSampler.h"
 #include "lux_sampler_hooks.h"   // forward decls so hooks can call each other in any order
 #include "score_player_hooks.h"  // P5-M4 — display-bus deferral to the score service
+#include "ScorePlayerService.h"  // buildFramesFromImage — calibrated image reload
+#include "../image/ScoreGenRenderer.h" // scoregen::readCalibration / SpectroCalibration
 
 extern "C" {
     #include "audio_image_buffers.h"
@@ -536,8 +538,51 @@ void LuxSampler::getLiveFrame(uint8_t* outR, uint8_t* outG, uint8_t* outB,
 void LuxSampler::setEnabled(bool e) noexcept
 {
     const bool was = enabled.exchange(e, std::memory_order_acq_rel);
-    if (!was || e)
-        return;   // no transition, or turning ON — nothing to tear down
+    if (was == e)
+        return;   // no transition
+
+    if (e)
+    {
+        // Re-enabled: restart the banks that were playing at disable time,
+        // resuming each at its saved head (one-shot force-resume — the slot's
+        // own Resume mode does not need to be ON). Mask is empty at project
+        // restore, so the never-auto-run-at-launch carve-out stays intact.
+        const uint32_t mask = resumeOnEnableMask_;
+        resumeOnEnableMask_ = 0;
+        if (mask == 0)
+            return;
+        int first = -1, count = 0;
+        for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
+        {
+            if (!((mask >> i) & 1u) || !slots[i].has_content)
+                continue;
+            if (static_cast<SlotState>(atomicState.slotState[i].load(
+                    std::memory_order_relaxed)) != SlotState::IDLE)
+                continue;
+            if (first < 0)
+            {
+                // Same arming sequence as uiPlaySlot: shared-chain eviction,
+                // manual (additive) session, stale stop cleared BEFORE arming.
+                stopOtherEnginesPlayback(engineIndex_);
+                atomicState.seqControlledPlay.store(false, std::memory_order_release);
+                atomicState.stopPlayCmd.store(false, std::memory_order_release);
+                first = i;
+            }
+            armForceResume(i);
+            atomicState.slotState[i].store(static_cast<int>(SlotState::PLAYING),
+                                           std::memory_order_release);
+            ++count;
+        }
+        if (first >= 0)
+        {
+            atomicState.activePlaySlot.store(first, std::memory_order_release);
+            atomicState.startPlayCmd.store(first, std::memory_order_release);
+            atomicState.passthroughEnabled.store(false, std::memory_order_release);
+            log_info("FS", "LuxSampler[%c] re-enabled — resuming %d bank(s)",
+                     engineTag(), count);
+        }
+        return;
+    }
 
     // Disabled while active (module removed from its chain / LED off): the
     // command drains in onLiveFrameAssembled() no longer run, so an in-flight
@@ -562,17 +607,31 @@ void LuxSampler::setEnabled(bool e) noexcept
         }
     }
 
-    // Stop a REAL playing slot and
-    // hand the live feed back.
-    const int cp = atomicState.activePlaySlot.load(std::memory_order_acquire);
-    if (cp >= 0 && cp < LuxSamplerConstants::NUM_SLOTS)
+    // Stop EVERY playing bank (multi-bank play) and hand the live feed back,
+    // remembering them for resume-on-re-enable: the player saves each voice's
+    // head as it drops (deactivateVoice → saveLastPlayHead), which feeds the
+    // one-shot force-resume when the module comes back. Leftover flags from a
+    // rapid enable/disable cycle (voice never restarted) are wiped first.
+    for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
+        forceResumeOnce_[i].store(false, std::memory_order_relaxed);
+    uint32_t playing = 0;
+    for (int i = 0; i < LuxSamplerConstants::NUM_SLOTS; ++i)
+        if (static_cast<SlotState>(atomicState.slotState[i].load(
+                std::memory_order_acquire)) == SlotState::PLAYING)
+        {
+            playing |= (1u << i);
+            atomicState.slotState[i].store(static_cast<int>(SlotState::IDLE),
+                                           std::memory_order_release);
+        }
+    resumeOnEnableMask_ = playing;
+    if (playing != 0)
     {
         atomicState.stopPlayCmd.store(true, std::memory_order_release);
-        atomicState.slotState[cp].store(static_cast<int>(SlotState::IDLE),
-                                        std::memory_order_release);
         atomicState.activePlaySlot.store(-1, std::memory_order_release);
         atomicState.seqControlledPlay.store(false, std::memory_order_release);
         atomicState.passthroughEnabled.store(true, std::memory_order_release);
+        log_info("FS", "LuxSampler[%c] disabled — %d playing bank(s) parked "
+                       "for resume", engineTag(), __builtin_popcount(playing));
     }
 }
 
@@ -990,6 +1049,62 @@ bool LuxSampler::loadSlotFromImageFile(int slotIndex, const juce::File& imageFil
     }
 
     rotQuarters = ((rotQuarters % 4) + 4) % 4;
+
+    // ── Calibrated reload ────────────────────────────────────────────────────
+    // A Sp3ctra-exported spectrogram (VOICE / SCORE / MIDI SCORE) carries its
+    // band + frequency range in a "Sp3ctraCal" PNG chunk, so rebuild the frames
+    // through the SAME builder the score player uses (freq = rows→log, time =
+    // columns) for a bit-identical calage — instead of the calibration-blind
+    // row/column scan below. Only in native orientation: a rotation would
+    // invalidate the band coordinates (fall back to the raw scan then).
+    if (rotQuarters == 0)
+    {
+        const scoregen::SpectroCalibration cal = scoregen::readCalibration(imageFile);
+        if (cal.valid)
+        {
+            std::vector<CapturedFrame> built =
+                ScorePlayerService::buildFramesFromImage(
+                    img, cal.band, cal.minHz, cal.maxHz, cal.stereo);
+            if (! built.empty())
+            {
+                atomicState.slotState[slotIndex].store(
+                    static_cast<int>(SlotState::IDLE), std::memory_order_release);
+                if (atomicState.activePlaySlot.load(std::memory_order_acquire) == slotIndex)
+                    atomicState.activePlaySlot.store(-1, std::memory_order_release);
+                waitForPlayerRelease(slotIndex);
+
+                int count = 0;
+                {
+                    std::lock_guard<std::mutex> lk(slotsMutex_);
+                    FrameSlot& dst = slots[slotIndex];
+                    dst.allocate();
+                    count = juce::jmin((int) built.size(), dst.capacity);
+                    for (int y = 0; y < count; ++y)
+                        dst.frames[y] = built[(size_t) y];   // 1 ms/frame, freq = log columns
+                    dst.frame_count = count;
+                    dst.duration_us = static_cast<uint64_t>(count) * 1000ULL; // 1 ms/frame (score baseline)
+                    dst.has_content = true;
+                    const juce::String name = imageFile.getFileNameWithoutExtension();
+                    std::strncpy(dst.label, name.toRawUTF8(), sizeof(dst.label) - 1);
+                    dst.label[sizeof(dst.label) - 1] = '\0';
+                }
+
+                // Lossless re-rotation source (rot stays 0 — the frames already
+                // encode the score's native freq/time layout).
+                slotSrcPath_[slotIndex] = imageFile.getFullPathName();
+                slotSrcRot_ [slotIndex] = 0;
+                setSlotStartFrac(slotIndex, 0.0f);
+                setSlotEndFrac  (slotIndex, 1.0f);
+
+                log_info("FS", "loadSlotFromImageFile: slot %d <- '%s' CALIBRATED "
+                               "(%d frames, band %dx%d, %.1f-%.0f Hz)",
+                         slotIndex, imageFile.getFileName().toRawUTF8(), count,
+                         cal.band.getWidth(), cal.band.getHeight(), cal.minHz, cal.maxHz);
+                return true;
+            }
+        }
+    }
+
     img = rotateImageQuarters(img, rotQuarters);
 
     // One image row per frame, resampled to the CIS width — same recipe as
@@ -2460,9 +2575,11 @@ bool FramePlayerThread::tickVoice(VoiceCtx& v, FrameSlot& slot,
                 v.direction = 1;
                 break;
             case LoopMode::INVERSE:
+            case LoopMode::ONCE_BACKWARD:
                 v.direction = -1;
                 break;
             case LoopMode::PINGPONG:
+            case LoopMode::ONCE_ROUNDTRIP:
                 break; // keep current direction
         }
     }
@@ -2475,13 +2592,18 @@ bool FramePlayerThread::tickVoice(VoiceCtx& v, FrameSlot& slot,
         v.prevStartFrame = startFrame;
         v.prevEndFrame   = endFrame;
 
-        if (wasFirst && sampler.getSlotResumeMode(slotIdx))
+        // Module re-enable resumes where playback was parked even when the
+        // slot's own Resume mode is OFF (one-shot flag; consumed either way).
+        const bool forced = wasFirst && sampler.consumeForceResume(slotIdx);
+        if (wasFirst && (forced || sampler.getSlotResumeMode(slotIdx)))
         {
             const int saved = sampler.getLastPlayHead(slotIdx);
             if (saved >= startFrame && saved < endFrame)
             {
                 slot.play_head = saved;
-                if (v.prevLoopMode == LoopMode::PINGPONG)
+                // Two-phase modes resume in the phase they were paused in.
+                if (v.prevLoopMode == LoopMode::PINGPONG
+                    || v.prevLoopMode == LoopMode::ONCE_ROUNDTRIP)
                     v.direction = sampler.getLastDirection(slotIdx);
             }
             else
@@ -2530,8 +2652,10 @@ bool FramePlayerThread::tickVoice(VoiceCtx& v, FrameSlot& slot,
                 switch (p_loop)
                 {
                     case LoopMode::NONE:
+                    case LoopMode::ONCE_BACKWARD:
                         // Voice ended — leave the overshot head unclamped so a
-                        // Resume-mode restart falls back to the region start.
+                        // Resume-mode restart falls back to the region edge
+                        // matching the direction (start fwd / end bwd).
                         return false;
                     case LoopMode::LOOP:
                         v.direction    = 1;
@@ -2551,6 +2675,17 @@ bool FramePlayerThread::tickVoice(VoiceCtx& v, FrameSlot& slot,
                         break;
                     case LoopMode::PINGPONG:
                         v.direction    = -v.direction;
+                        slot.play_head = juce::jlimit(startFrame,
+                                                      endFrame - 1,
+                                                      slot.play_head);
+                        v.frameAcc = 0.0f;
+                        break;
+                    case LoopMode::ONCE_ROUNDTRIP:
+                        // One bounce only: forward edge turns around, the
+                        // backward edge ends the voice.
+                        if (bwdBound)
+                            return false;
+                        v.direction    = -1;
                         slot.play_head = juce::jlimit(startFrame,
                                                       endFrame - 1,
                                                       slot.play_head);
@@ -3060,7 +3195,8 @@ void FramePlayerThread::runSamplerSession()
         v.slot         = i;
         v.active       = true;
         v.prevLoopMode = sampler.getSlotLoopMode(i);
-        v.direction    = (v.prevLoopMode == LoopMode::INVERSE) ? -1 : 1;
+        v.direction    = (v.prevLoopMode == LoopMode::INVERSE
+                          || v.prevLoopMode == LoopMode::ONCE_BACKWARD) ? -1 : 1;
         sl.play_head   = 0; // real head set on the voice's first range init
         ++numActive;
         log_info("FS", "Slot %d: playback start — %d frames, %.2f s",

@@ -238,6 +238,18 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
 
   // Persistent dynamically-sized buffers live in the engine struct
 
+  // Hot-apply of the "Worker threads" setting (gear menu): tear the pool down
+  // at a pass boundary — workers are idle at the start barrier here — then
+  // fall through to the lazy re-init below, which re-reads the fresh
+  // g_sp3ctra_config.num_workers. Costs one blocked pass (~60 ms hold).
+  if (atomic_exchange(&eng->pool_restart_requested, 0) &&
+      eng->pool_initialized &&
+      eng->num_workers != g_sp3ctra_config.num_workers) {
+    log_info("SYNTH", "Worker count %d -> %d — rebuilding thread pool",
+             eng->num_workers, g_sp3ctra_config.num_workers);
+    synth_shutdown_thread_pool();
+  }
+
   // Initialize thread pool and RT-safe buffers if not initialized
   // This handles both first start AND restart after buffer size change
   if (!eng->pool_initialized) {

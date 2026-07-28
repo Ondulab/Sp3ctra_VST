@@ -189,6 +189,14 @@ void luxsynth_engine_reset(LuxSynthEngine *engine);
 void luxsynth_engine_set_config(LuxSynthEngine *engine, const LuxSynthConfig *config);
 
 /**
+ * @brief Re-derive all cached sample-rate-dependent state after a host
+ *        sample-rate change (oscillator phase increments, ADSR sample counts,
+ *        LFO increment). Live voices keep their pitch and envelope position.
+ * @note Call from prepareToPlay (host guarantees no concurrent processBlock).
+ */
+void luxsynth_engine_set_sample_rate(LuxSynthEngine *engine, float sample_rate);
+
+/**
  * @brief Update spectral data from image pipeline.
  * @note Call from pipeline thread; engine reads snapshot in process().
  */

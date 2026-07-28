@@ -94,6 +94,15 @@ inline juce::String camSrcParam(int slot, const char* suffix)
                           + "_" + suffix;
 }
 
+// Score-player pool per-slot ACTIVE (module enable). The score family
+// (SCORE / TIMBRE / MIDI SCORE / VOICE) shares one 8-slot player pool; each
+// instance's rack LED toggles ITS slot's active state (NOT the transport).
+// Deactivating stops playback while remembering the head; reactivating
+// resumes it. Default ON, PERSISTED (unlike the play transports it is not
+// forced back off on session restore).
+inline juce::String scoreActiveParam(int slot)
+{ return "scoreActive" + juce::String(juce::jlimit(0, 7, slot)); }
+
 // Engine-send (OUT) conditioning banks — one per send instance (M6 pools).
 inline juce::String lsOutParam(int slot, const char* suffix)
 { return "luxstralOut" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
@@ -188,7 +197,8 @@ namespace module_param_manifest_detail
     };
     inline const char* const kVideoScroll[] = {
         "mode", "speed", "linePos", "thickness", "zoom", "fade",
-        "compress", "invert", "colorMode", "paused", "enabled",
+        "compress", "invert",   // "invert" = legacy bool, migrated to "invertMode"
+        "invertMode", "colorMode", "bgR", "bgG", "bgB", "paused", "enabled",
         "MixLevel", "MixBlend",   // → videoMix{N}_level / _blend
     };
     inline const char* const kLsOut[] = {

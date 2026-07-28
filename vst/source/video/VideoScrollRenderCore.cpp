@@ -384,7 +384,11 @@ bool VideoScrollRenderCore::buildLineImage(juce::Image& out, int coreH, int band
     coreH = juce::jmax(1, coreH);
     bandH = juce::jmax(coreH, bandH);
 
-    const bool invert    = param("invert",    0.f) > 0.5f;
+    // Inversion mode: 0 Off / 1 Negative (255-RGB) / 2 Luminance (invert HSL
+    // lightness, keep hue+saturation). Fall back to the legacy "invert" bool
+    // (== Negative) when a pre-migration session left invertMode at Off.
+    int invMode = (int) param("invertMode", 0.f);
+    if (invMode == 0 && param("invert", 0.f) > 0.5f) invMode = 1;
     const bool colorMode = param("colorMode", 0.f) > 0.5f;
 
     // The reference width is the newest captured line's pixel count.
@@ -521,7 +525,23 @@ bool VideoScrollRenderCore::buildLineImage(juce::Image& out, int coreH, int band
             int rr = (int) (sr * invN + 0.5f);
             int gv = (int) (sg * invN + 0.5f);
             int bb = (int) (sb * invN + 0.5f);
-            if (invert) { rr = 255 - rr; gv = 255 - gv; bb = 255 - bb; }
+            if (invMode == 1)          // Negative — flip each channel
+            {
+                rr = 255 - rr; gv = 255 - gv; bb = 255 - bb;
+            }
+            else if (invMode == 2)     // Luminance only — invert HSL lightness
+            {
+                // Inverting L in HSL while keeping hue+saturation is exactly a
+                // uniform per-channel shift by (1 - (max+min)) [proof: chroma
+                // C = (1-|2L-1|)·S is unchanged by L→1-L, so only the L-C/2
+                // offset moves, by the same amount on every channel]. In 0..255:
+                // delta = 255 - max - min. No clipping possible (new range stays
+                // in [1-max, 1-min]), but the write below jlimits anyway.
+                const int mx = juce::jmax(rr, gv, bb);
+                const int mn = juce::jmin(rr, gv, bb);
+                const int delta = 255 - mx - mn;
+                rr += delta; gv += delta; bb += delta;
+            }
             auto* dp = reinterpret_cast<juce::PixelRGB*>(dst + x * dps);
             dp->setARGB(255,
                         (juce::uint8) juce::jlimit(0, 255, rr),
@@ -735,7 +755,14 @@ bool VideoScrollRenderCore::buildWarp()
 //==============================================================================
 void VideoScrollRenderCore::drawWarp(juce::Graphics& g, int destW, int destH)
 {
-    g.fillAll(juce::Colours::white);   // no warp yet / zoom borders → blank paper
+    // Background/frame colour: fills the viewport wherever the zoomed/rotated
+    // image doesn't reach (negative-zoom border) and the "no warp yet" state.
+    // Default white (1,1,1) = the previous hard-coded blank paper.
+    const juce::Colour bg = juce::Colour::fromFloatRGBA(
+        juce::jlimit(0.f, 1.f, param("bgR", 1.f)),
+        juce::jlimit(0.f, 1.f, param("bgG", 1.f)),
+        juce::jlimit(0.f, 1.f, param("bgB", 1.f)), 1.f);
+    g.fillAll(bg);
     if (!warpReady_ || !warpBuf_.isValid() || bufW_ <= 0 || compH_ <= 0)
         return;
 

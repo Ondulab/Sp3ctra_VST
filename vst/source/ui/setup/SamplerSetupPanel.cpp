@@ -2,6 +2,7 @@
 #include "SetupHeader.h"
 #include "../../Sp3ctraConstants.h"
 #include "../../UITheme.h"
+#include "../../Sp3ctraDialog.h"          // destructive-action confirmations
 #include "../../luxsampler/LuxSampler.h"
 
 // ── Colour helpers ────────────────────────────────────────────────────────────
@@ -87,16 +88,19 @@ SamplerSetupPanel::SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Col
         "Momentary = play only while the button (or a mapped MIDI key) is held.");
     addAndMakeVisible(playModeCombo);   // attachment: rebindEngineParams()
 
-    // ── Image export on Save Session ──────────────────────────────────────
+    // ── Image export on slot SAVE ─────────────────────────────────────────
+    // (The former .sp3s "Save Session" flow and its shared Output Dir were
+    // retired with the project-session model: slot saves/exports now land in
+    // the working session's exports/ folder automatically.)
     exportImagesLabel.setText("Export Images:", juce::dontSendNotification);
     exportImagesLabel.setJustificationType(juce::Justification::centredRight);
     exportImagesLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(exportImagesLabel);
 
-    exportImagesToggle.setButtonText("Export PNG/JPEG on Save Session");
+    exportImagesToggle.setButtonText("Export PNG/JPEG on slot SAVE");
     exportImagesToggle.setTooltip(
-        "When enabled, clicking SAVE SESSION also exports every non-empty "
-        "slot as an image (one row per captured CIS line) next to the .fsmp file.");
+        "When enabled, saving a slot (.fslot) also exports its content "
+        "as an image (one row per captured CIS line) next to the file.");
     addAndMakeVisible(exportImagesToggle);
     exportImagesAttachment = std::make_unique<
         juce::AudioProcessorValueTreeState::ButtonAttachment>(
@@ -113,70 +117,6 @@ SamplerSetupPanel::SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Col
     exportFormatAttachment = std::make_unique<
         juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         apvts, "luxSamplerExportFormat", exportFormatCombo);
-
-    // ── Output Directory (shared by SAVE SESSION and image export) ────────
-    outputDirLabel.setText("Output Dir:", juce::dontSendNotification);
-    outputDirLabel.setJustificationType(juce::Justification::centredRight);
-    outputDirLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-    addAndMakeVisible(outputDirLabel);
-
-    outputDirValueLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
-    outputDirValueLabel.setJustificationType(juce::Justification::centredLeft);
-    outputDirValueLabel.setColour(juce::Label::backgroundColourId,
-                                  juce::Colours::black.withAlpha(0.4f));
-    outputDirValueLabel.setColour(juce::Label::outlineColourId,
-                                  juce::Colours::grey.withAlpha(0.5f));
-    outputDirValueLabel.setMinimumHorizontalScale(0.5f);
-    outputDirValueLabel.setTooltip(
-        "Folder used by SAVE SESSION for the .sp3s file and the optional "
-        "PNG/JPEG image exports. Leave empty to be prompted each time.");
-    addAndMakeVisible(outputDirValueLabel);
-
-    outputDirBrowseBtn.setButtonText("Browse...");
-    outputDirBrowseBtn.onClick = [this]()
-    {
-        const juce::String current = audioProcessor.getSamplerOutputDir();
-        juce::File startDir = current.isNotEmpty()
-            ? juce::File(current)
-            : juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
-        if (! startDir.isDirectory())
-            startDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
-
-        outputDirChooser = std::make_unique<juce::FileChooser>(
-            "Choose output directory for LuxSampler sessions and images",
-            startDir);
-        const int flags = juce::FileBrowserComponent::openMode
-                        | juce::FileBrowserComponent::canSelectDirectories;
-        outputDirChooser->launchAsync(flags, [this](const juce::FileChooser& fc)
-        {
-            const juce::File chosen = fc.getResult();
-            if (chosen != juce::File{} && chosen.isDirectory())
-            {
-                const juce::String full = chosen.getFullPathName();
-                audioProcessor.setSamplerOutputDir(full);
-                outputDirValueLabel.setText(full, juce::dontSendNotification);
-            }
-        });
-    };
-    addAndMakeVisible(outputDirBrowseBtn);
-
-    outputDirClearBtn.setButtonText("X");
-    outputDirClearBtn.setTooltip("Clear output directory - SAVE SESSION will prompt again.");
-    outputDirClearBtn.onClick = [this]()
-    {
-        audioProcessor.setSamplerOutputDir({});
-        outputDirValueLabel.setText("(not set - file chooser will be used)",
-                                    juce::dontSendNotification);
-    };
-    addAndMakeVisible(outputDirClearBtn);
-
-    // Initialise value label from APVTS-restored value
-    {
-        const juce::String cur = audioProcessor.getSamplerOutputDir();
-        outputDirValueLabel.setText(
-            cur.isNotEmpty() ? cur : juce::String("(not set - file chooser will be used)"),
-            juce::dontSendNotification);
-    }
 
     // REC / PLAY / SAVE MIDI triggering now lives on the editor's transport
     // buttons via the unified right-click MIDI-Learn (no bindings panel here).
@@ -207,12 +147,31 @@ SamplerSetupPanel::SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Col
         slotDurLabel[i].setJustificationType(juce::Justification::centred);
         addAndMakeVisible(slotDurLabel[i]);
 
-        // Clear button
+        // Clear button — destructive: confirm when the bank holds audio
         slotClearBtn[i].setButtonText("X");
         slotClearBtn[i].onClick = [this, i]()
         {
-            if (auto* fs = audioProcessor.getSampler(samplerIndex_))
-                fs->clearSlot(i);
+            auto* fs = audioProcessor.getSampler(samplerIndex_);
+            if (fs == nullptr || ! fs->slotHasContent(i))
+                return;
+            Sp3ctraDialog::showConfirm(
+                this, "Clear bank",
+                ("Clear bank " + juce::String(i + 1)
+                 + "? The recorded audio is discarded.").toRawUTF8(),
+                "Clear", "Cancel",
+                [safe = juce::Component::SafePointer<SamplerSetupPanel>(this), i]
+                (bool ok)
+                {
+                    if (! ok) return;
+                    auto* self = safe.getComponent();
+                    if (self == nullptr) return;
+                    if (auto* eng = self->audioProcessor.getSampler(
+                            self->samplerIndex_))
+                    {
+                        eng->clearSlot(i);
+                        self->audioProcessor.sessions()->markBanksDirty();
+                    }
+                });
         };
         addAndMakeVisible(slotClearBtn[i]);
     }
@@ -378,22 +337,8 @@ void SamplerSetupPanel::resized()
     row(playModeLabel,    playModeCombo);
     row(exportImagesLabel, exportImagesToggle);
     row(exportFormatLabel, exportFormatCombo);
-
-    // ── Output Directory row (special layout: value field + 2 buttons) ────
-    {
-        const int vc       = (rowH - ctrlH) / 2;
-        const int browseW  = 80;
-        const int clearW   = 28;
-        const int btnGap   = 4;
-        const int valueW   = ctrlW - browseW - clearW - 2 * btnGap;
-
-        outputDirLabel.setBounds(pad, y + vc, labelW, ctrlH);
-        outputDirValueLabel.setBounds(ctrlX, y + vc, valueW, ctrlH);
-        outputDirBrowseBtn .setBounds(ctrlX + valueW + btnGap, y + vc, browseW, ctrlH);
-        outputDirClearBtn  .setBounds(ctrlX + valueW + btnGap + browseW + btnGap,
-                                       y + vc, clearW, ctrlH);
-        y += rowH;
-    }
+    // (The Output Directory row was retired with the project-session model:
+    // slot saves/exports land in the working session's exports/ folder.)
 
     y += pad; // gap before slot grid
 

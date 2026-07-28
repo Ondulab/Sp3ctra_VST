@@ -125,10 +125,12 @@ target_sources(Sp3ctraVST
     PRIVATE
         source/PluginProcessor.cpp
         source/PluginProcessor.h
+        source/session/SessionManager.cpp
+        source/session/SessionManager.h
+        source/session/Sp3sImporter.cpp
+        source/session/Sp3sImporter.h
         source/PluginEditor.cpp
         source/PluginEditor.h
-        source/SettingsWindow.cpp
-        source/SettingsWindow.h
         source/CisVisualizerComponent.cpp
         source/CisVisualizerComponent.h
         source/Sp3ctraCore.cpp
@@ -140,8 +142,6 @@ target_sources(Sp3ctraVST
         source/global_stubs.c
         
         # Settings tabs (gear wheel — machine-level only since M5)
-        source/settings/SystemSettingsTab.cpp
-        source/settings/SystemSettingsTab.h
 
         # Image pipeline UI
         source/image/BlobVisualizerComponent.cpp
@@ -189,6 +189,11 @@ target_sources(Sp3ctraVST
         source/ui/setup/SamplerSetupPanel.h
         source/ui/setup/ScoreSetupPanel.cpp
         source/ui/setup/ScoreSetupPanel.h
+        source/ui/setup/MidiScoreSetupPanel.h
+        source/ui/setup/TimbreSetupPanel.h
+        source/ui/setup/VoiceSetupPanel.h
+        source/ui/setup/VideoScrollSetupPanel.cpp
+        source/ui/setup/VideoScrollSetupPanel.h
 
         # M9 — IMAGE / VIDEO / CAMERA source modules (engines + service + UI)
         # (VideoFileReader impl is platform-specific — see block below)
@@ -342,15 +347,20 @@ target_sources(Sp3ctraVST
 if(APPLE)
     target_sources(Sp3ctraVST PRIVATE
         source/sources/VideoFileReader.mm
+        # VIDEO MIX + master-audio recorder (AVAssetWriter → HEVC .mov).
+        source/recorder/VideoRecorder.mm
     )
 elseif(WIN32)
     # VIDEO file source via Media Foundation (mirrors the AVFoundation reader).
     target_sources(Sp3ctraVST PRIVATE
         source/sources/VideoFileReaderMF.cpp
+        # Recorder: macOS-only for now → graceful stub (Media Foundation TODO).
+        source/recorder/VideoRecorderStub.cpp
     )
 else()
     target_sources(Sp3ctraVST PRIVATE
         source/sources/VideoFileReaderStub.cpp
+        source/recorder/VideoRecorderStub.cpp
     )
 endif()
 

@@ -49,9 +49,16 @@ int  ScoreChannel::getScoreFrameCount() const noexcept { return svc_->frameCount
 int  ScoreChannel::getScorePlayHead()   const noexcept { return svc_->playHead(slot_); }
 void ScoreChannel::uiPlayScore() noexcept       { svc_->play(slot_); }
 void ScoreChannel::uiStopScore() noexcept       { svc_->stop(slot_); }
+bool ScoreChannel::isScoreActive() const noexcept { return svc_->isActive(slot_); }
+void ScoreChannel::setScoreActive(bool a) noexcept { svc_->setActive(slot_, a); }
 void ScoreChannel::uiDiscardScore()             { svc_->discard(slot_); }
 bool ScoreChannel::uiBeginScoreScrub() noexcept { return svc_->beginScrub(slot_); }
 void ScoreChannel::uiEndScoreScrub() noexcept   { svc_->endScrub(slot_); }
+void ScoreChannel::uiSetScorePaused(bool paused) noexcept { svc_->setPaused(slot_, paused); }
+void ScoreChannel::uiHotSwapScoreFrames(std::vector<CapturedFrame>&& frames) noexcept
+{
+    svc_->hotSwapFrames(slot_, std::move(frames));
+}
 void ScoreChannel::uiSeekScore(int frame) noexcept { svc_->seek(slot_, frame); }
 void ScoreChannel::setScoreResumeHead(int frame) noexcept { svc_->setResumeHead(slot_, frame); }
 void ScoreChannel::setScoreSpeed(float v) noexcept { svc_->setSpeed(slot_, v); }
@@ -150,6 +157,42 @@ void ScorePlayerService::stop(int slot) noexcept
     s.playHead.store(0, std::memory_order_relaxed);
 }
 
+bool ScorePlayerService::isActive(int slot) const noexcept
+{
+    return slot >= 0 && slot < kMaxSlots
+        && slots_[slot].active.load(std::memory_order_acquire);
+}
+
+void ScorePlayerService::setActive(int slot, bool active) noexcept
+{
+    if (slot < 0 || slot >= kMaxSlots) return;
+    ScoreSlot& s = slots_[slot];
+    // Only act on a real transition — the enable param re-applies idempotently
+    // on restore / bulk apply, and we must not clobber a live resume latch.
+    if (s.active.exchange(active, std::memory_order_acq_rel) == active) return;
+
+    if (!active)
+    {
+        // Deactivate: stop the reading, but REMEMBER the head and that it was
+        // playing so re-activate resumes exactly there (no re-press of PLAY).
+        if (s.playRequested.load(std::memory_order_acquire))
+        {
+            const int head = s.playHead.load(std::memory_order_relaxed);
+            stop(slot);                                          // silence
+            s.resumeHead.store(head, std::memory_order_relaxed); // continue here
+            s.resumeOnReactivate.store(true, std::memory_order_release);
+        }
+        else
+            s.resumeOnReactivate.store(false, std::memory_order_release);
+    }
+    else if (s.resumeOnReactivate.exchange(false, std::memory_order_acq_rel))
+    {
+        // Re-activate: it was playing when deactivated → resume from the
+        // remembered head (beginSession consumes the armed resumeHead).
+        play(slot);
+    }
+}
+
 void ScorePlayerService::discard(int slot)
 {
     if (slot < 0 || slot >= kMaxSlots) return;
@@ -190,6 +233,18 @@ void ScorePlayerService::endScrub(int slot) noexcept
     // so a subsequent PLAY starts from that column. The session teardown
     // (white + stagings) runs on the player thread's next tick.
     slots_[slot].scrubbing.store(false, std::memory_order_release);
+}
+
+void ScorePlayerService::setPaused(int slot, bool paused) noexcept
+{
+    if (slot < 0 || slot >= kMaxSlots) return;
+    ScoreSlot& s = slots_[slot];
+    // Pause of a RUNNING transport only: rides the scrub-hold path — the
+    // session stays alive (playRequested true) and the tick re-injects the
+    // column under the head every 1 ms, a sustained instant. seek() moves
+    // the held column live. The stopped-transport hold is beginScrub().
+    if (!s.playRequested.load(std::memory_order_acquire)) return;
+    s.scrubbing.store(paused, std::memory_order_release);
 }
 
 void ScorePlayerService::seek(int slot, int frame) noexcept
@@ -255,7 +310,8 @@ void ScorePlayerService::loadFramesFromImage(int slot, const juce::Image& image,
     // mid-session, but a reload must never keep the old take sounding.
     stop(slot);
 
-    if (!image.isValid() || image.getWidth() <= 0 || image.getHeight() <= 0)
+    auto buffer = buildFramesFromImage(image, band, scoreMinHz, scoreMaxHz, stereo);
+    if (buffer.empty())
     {
         std::lock_guard<std::mutex> lk(s.frameMutex);
         std::vector<CapturedFrame>().swap(s.frames);
@@ -264,6 +320,48 @@ void ScorePlayerService::loadFramesFromImage(int slot, const juce::Image& image,
         log_warning("SCP", "Score[%d]: invalid image, slot cleared", slot);
         return;
     }
+    const int frames = (int) buffer.size();
+
+    {
+        std::lock_guard<std::mutex> lk(s.frameMutex);
+        s.frames = std::move(buffer);
+        s.frameCount.store(frames, std::memory_order_relaxed);
+        s.hasContent.store(frames > 0, std::memory_order_release);
+    }
+    s.playHead.store(0, std::memory_order_relaxed);
+
+    log_info("SCP", "Score[%d]: loaded %d frames (image %dx%d)",
+             slot, frames, image.getWidth(), image.getHeight());
+}
+
+void ScorePlayerService::hotSwapFrames(int slot,
+                                       std::vector<CapturedFrame>&& frames) noexcept
+{
+    if (slot < 0 || slot >= kMaxSlots || frames.empty()) return;
+    ScoreSlot& s = slots_[slot];
+    const int newN = (int) frames.size();
+
+    std::lock_guard<std::mutex> lk(s.frameMutex);
+    const int oldN = (int) s.frames.size();
+    // Same musical position in the new time grid (the frame count moves with
+    // the writing speed) — the next tick reads the new content right there.
+    const int head = s.playHead.load(std::memory_order_relaxed);
+    const int mapped = oldN > 0
+        ? juce::jlimit(0, newN - 1,
+                       juce::roundToInt((double) head * newN / oldN))
+        : 0;
+    s.frames = std::move(frames);
+    s.frameCount.store(newN, std::memory_order_relaxed);
+    s.hasContent.store(true, std::memory_order_release);
+    s.playHead.store(mapped, std::memory_order_relaxed);
+}
+
+std::vector<CapturedFrame> ScorePlayerService::buildFramesFromImage(
+    const juce::Image& image, juce::Rectangle<int> band,
+    double scoreMinHz, double scoreMaxHz, bool stereo)
+{
+    if (!image.isValid() || image.getWidth() <= 0 || image.getHeight() <= 0)
+        return {};
 
     // Extract ONLY the spectrogram band (the part a CIS sensor would scan).
     // Empty band ⇒ fall back to the full image.
@@ -365,17 +463,7 @@ void ScorePlayerService::loadFramesFromImage(int slot, const juce::Image& image,
         }
     }
 
-    {
-        std::lock_guard<std::mutex> lk(s.frameMutex);
-        s.frames = std::move(buffer);
-        s.frameCount.store(frames, std::memory_order_relaxed);
-        s.hasContent.store(frames > 0, std::memory_order_release);
-    }
-    s.playHead.store(0, std::memory_order_relaxed);
-
-    log_info("SCP", "Score[%d]: loaded %d frames from band %dx%d (image %dx%d)",
-             slot, frames, b.getWidth(), bandH,
-             image.getWidth(), image.getHeight());
+    return buffer;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -488,7 +576,8 @@ void ScorePlayerService::beginSession(int slot) noexcept
 
     v = Session {};
     v.prevLoopMode = static_cast<LoopMode>(s.loopMode.load(std::memory_order_relaxed));
-    v.direction    = (v.prevLoopMode == LoopMode::INVERSE) ? -1 : 1;
+    v.direction    = (v.prevLoopMode == LoopMode::INVERSE
+                      || v.prevLoopMode == LoopMode::ONCE_BACKWARD) ? -1 : 1;
 
     // An armed resume frame (live EQ re-apply, scrub release) takes over the
     // initial head — one-shot, so a fresh PLAY starts from the beginning.
@@ -572,9 +661,11 @@ bool ScorePlayerService::advanceAndFetch(int slot, int& nb) noexcept
         switch (lm)
         {
             case LoopMode::LOOP:
-            case LoopMode::NONE:     v.direction = 1;  break;
-            case LoopMode::INVERSE:  v.direction = -1; break;
-            case LoopMode::PINGPONG: break; // keep current direction
+            case LoopMode::NONE:           v.direction = 1;  break;
+            case LoopMode::INVERSE:
+            case LoopMode::ONCE_BACKWARD:  v.direction = -1; break;
+            case LoopMode::PINGPONG:
+            case LoopMode::ONCE_ROUNDTRIP: break; // keep current direction
         }
     }
 
@@ -607,6 +698,7 @@ bool ScorePlayerService::advanceAndFetch(int slot, int& nb) noexcept
                 switch (lm)
                 {
                     case LoopMode::NONE:
+                    case LoopMode::ONCE_BACKWARD:
                         alive = false;
                         break;
                     case LoopMode::LOOP:
@@ -621,6 +713,13 @@ bool ScorePlayerService::advanceAndFetch(int slot, int& nb) noexcept
                         break;
                     case LoopMode::PINGPONG:
                         v.direction = -v.direction;
+                        head        = juce::jlimit(0, n - 1, head);
+                        v.frameAcc  = 0.0f;
+                        break;
+                    case LoopMode::ONCE_ROUNDTRIP:
+                        // One bounce: forward edge turns around, backward ends.
+                        if (bwdBound) { alive = false; break; }
+                        v.direction = -1;
                         head        = juce::jlimit(0, n - 1, head);
                         v.frameAcc  = 0.0f;
                         break;

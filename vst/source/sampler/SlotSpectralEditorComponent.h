@@ -53,8 +53,8 @@ public:
      *  that mirror the slot content (sliders, loop buttons…). */
     std::function<void()> onContentRotated;
 
-    /** Fired on every fade edit (length, shape, type) — the owner keeps its
-     *  fade info labels (under the view) in sync. */
+    /** Fired on every handle edit (fade length/shape/type AND crop bars) — the
+     *  owner keeps its param-box strip (under the view) in sync. */
     std::function<void()> onFadeChanged;
 
     void paint    (juce::Graphics& g)         override;

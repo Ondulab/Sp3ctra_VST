@@ -559,8 +559,10 @@ void SourceSetupPanel::updateMidiDataPortDisplay()
 //==============================================================================
 void SourceSetupPanel::chooseFirmware()
 {
-    fileChooser = std::make_unique<juce::FileChooser> ("Select firmware (.bin)",
-                                                       juce::File{}, "*.bin");
+    fileChooser = std::make_unique<juce::FileChooser> (
+        "Select firmware (.bin)",
+        audioProcessor.sessions()->startDirFor (PathKeys::firmware, juce::File{}),
+        "*.bin");
     fileChooser->launchAsync (juce::FileBrowserComponent::openMode
                                   | juce::FileBrowserComponent::canSelectFiles,
                               [this] (const juce::FileChooser& fc)
@@ -568,6 +570,7 @@ void SourceSetupPanel::chooseFirmware()
         auto f = fc.getResult();
         if (f.existsAsFile())
         {
+            audioProcessor.sessions()->rememberDirFor (PathKeys::firmware, f);
             firmwareFile = f;
             fwFileLabel.setText (f.getFileName(), juce::dontSendNotification);
         }

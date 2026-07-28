@@ -42,6 +42,23 @@ struct RenderResult
     juce::Rectangle<int> spectroBand;
 };
 
+/** Calibration a Sp3ctra spectrogram carries so the SAMPLER (or any reader) can
+ *  reload the EXACT frequency / band mapping the generator played, instead of
+ *  the calibration-blind row/column scan. Embedded on export in a PNG
+ *  "Sp3ctraCal" tEXt chunk; read back by readCalibration(). */
+struct SpectroCalibration
+{
+    juce::Rectangle<int> band;      ///< spectro band inside the image (x,y,w,h)
+    double minHz  = 0.0;            ///< band bottom frequency (low edge)
+    double maxHz  = 0.0;            ///< band top frequency (high edge)
+    bool   stereo = false;          ///< colour L/R composite (see SCORE stereo)
+    bool   valid  = false;          ///< false ⇒ no Sp3ctra calibration present
+};
+
+/** Reads the calibration embedded by exportImage() from a PNG file. Returns
+ *  {valid=false} for non-Sp3ctra images (arbitrary user PNGs) or non-PNG. */
+SpectroCalibration readCalibration(const juce::File& pngFile);
+
 /** Loaded-file probe shown in the UI before generation. */
 struct WavInfo
 {
@@ -72,7 +89,11 @@ RenderResult renderScore(const juce::File& wav,
 /** Writes `img` to `dest` as PNG (asPng=true) or JPEG (quality 0.9), embedding
  *  the physical resolution `dpi` so a print at "100%" reproduces the true size
  *  (PNG pHYs chunk / JPEG JFIF density). Without this tag, viewers assume 72/96
- *  DPI and a 400-DPI page prints ~5× too large. `dpi <= 0` ⇒ no tag written. */
-bool exportImage(const juce::Image& img, const juce::File& dest, bool asPng, double dpi);
+ *  DPI and a 400-DPI page prints ~5× too large. `dpi <= 0` ⇒ no tag written.
+ *  When `cal != nullptr && cal->valid` and asPng, also embeds a "Sp3ctraCal"
+ *  tEXt chunk so the sampler can reload the image with the exact score mapping
+ *  (see readCalibration / LuxSampler::loadSlotFromImageFile). */
+bool exportImage(const juce::Image& img, const juce::File& dest, bool asPng, double dpi,
+                 const SpectroCalibration* cal = nullptr);
 
 } // namespace scoregen

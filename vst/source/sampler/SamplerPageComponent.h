@@ -16,10 +16,13 @@ class Sp3ctraAudioProcessor;
  *   2. SlotEditorComponent   (h=210, fixed)  — edit panel:
  *        left  (~63 %) : REC/PLAY/CLEAR buttons + large timeline
  *        right (~37 %) : Speed / Loop / Resume controls
- *   3. Session toolbar       (NEW / SAVE / LOAD session)
- *   4. Step sequencer        (grid + transport bar) — INTERNAL to this engine:
+ *   3. Step sequencer        (grid + transport bar) — INTERNAL to this engine:
  *        one sequencer per sampler, addressing only its own banks (the global
  *        SEQUENCER rack module was retired).
+ *
+ * (The former per-sampler ".sp3s session" toolbar was retired with the
+ * project-session model: banks persist through the SessionManager — sidecar
+ * files in the working session or embedded in the DAW blob.)
  *
  * Manages selectedSlot state shared between SlotGrid and SlotEditor.
  */
@@ -38,17 +41,17 @@ public:
     static constexpr int kSeqH  = 180;  // step-sequencer grid (2 rows + header)
 
     // Natural height — must match the layout in resized(): pad + grid + gap +
-    // editor + gap + session toolbar + gap + sequencer + gap + transport + pad.
+    // editor + gap + sequencer + gap + transport + pad.
     // The transport reserves its two-row height so the page never clips it.
     // PluginEditor uses this to size the zone-3 viewport content so the whole
     // page scrolls into view at min size.
     static constexpr int kPreferredH = Sp3ctraTheme::kPad + kGridH + Sp3ctraTheme::kGap
-                                     + kEditH + Sp3ctraTheme::kGap + Sp3ctraTheme::kControlH
-                                     + Sp3ctraTheme::kGap + kSeqH + Sp3ctraTheme::kGap
+                                     + kEditH + Sp3ctraTheme::kGap + kSeqH
+                                     + Sp3ctraTheme::kGap
                                      + TransportBarComponent::kTwoRowH
                                      + Sp3ctraTheme::kPad;
 
-    /** Bind this page (grid + editor + sequencer + session I/O) to engine i. */
+    /** Bind this page (grid + editor + sequencer) to engine i. */
     void setSamplerIndex(int i)
     {
         samplerIndex_ = i;
@@ -61,31 +64,12 @@ public:
 private:
     void onSlotSelected(int idx);
 
-    Sp3ctraAudioProcessor& processor;
     int  samplerIndex_ = 0;   // 0 = engine A, 1 = engine B
 
     SlotGridComponent     slotGrid;
     SlotEditorComponent   slotEditor;
     SequencerComponent    sequencer;      // this engine's step grid
     TransportBarComponent seqTransport;   // this engine's seq transport bar
-
-    // ── Session toolbar ───────────────────────────────────────────────────────
-    juce::TextButton newSessionBtn  { "NEW SESSION"  };
-    juce::TextButton saveSessionBtn { "SAVE SESSION" };
-    juce::TextButton loadSessionBtn { "LOAD SESSION" };
-
-    std::unique_ptr<juce::FileChooser> fileChooser;
-
-    // ── Session helpers (Non-RT, message thread only) ─────────────────────────
-    void doSaveSession(const juce::File& sessionFile);
-    /** @p isAutoRestore true when triggered by the startup auto-reload: the
-     *  slot params / sequencer pattern freshly restored from the DAW state
-     *  (newer than the session's copies) are then preserved. */
-    void doLoadSession(const juce::File& sessionFile, bool isAutoRestore = false);
-
-    /** Path of the last loaded or saved session.
-     *  When set, SAVE SESSION writes directly to this file (no file dialog). */
-    juce::File currentSessionFile;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SamplerPageComponent)
 };

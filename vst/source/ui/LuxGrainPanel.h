@@ -41,7 +41,7 @@
 class LuxGrainPanel : public juce::Component
 {
 public:
-    explicit LuxGrainPanel(Sp3ctraAudioProcessor& p) : processor(p)
+    explicit LuxGrainPanel(Sp3ctraAudioProcessor& p)
     {
         auto& apvts = p.getAPVTS();
 
@@ -235,8 +235,6 @@ private:
         geo.matGridY = my;
         return geo;
     }
-
-    Sp3ctraAudioProcessor& processor;
 
     juce::Label    volumeLabel;
     juce::Slider   volumeSlider;
