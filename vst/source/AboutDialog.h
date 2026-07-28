@@ -1,7 +1,8 @@
 /**
  * @file AboutDialog.h
  * @brief "About Sp3ctra" overlay — logo, tagline, version, license, credits,
- *        and the Ondulab links (website / downloads / donate / bug report).
+ *        the Ondulab links (website / donate / bug report) and the entry to
+ *        the in-app software update (UpdateDialog).
  *
  * Same overlay idiom as Sp3ctraDialog: parented to the top-level component,
  * centred, self-deleting on close. Header-only, no separate TU.
@@ -12,6 +13,8 @@
 #include "UITheme.h"
 #include "IconPaths.h"
 #include "Sp3ctraVersion.h"
+#include "OndulabLinks.h"
+#include "UpdateDialog.h"
 
 class AboutDialog : public juce::Component
 {
@@ -27,19 +30,6 @@ public:
         host->addAndMakeVisible(dlg);
         dlg->centreOnParent();
         dlg->toFront(true);
-    }
-
-    // Shared by the ABOUT menu quick links so dialog and menu never diverge.
-    static constexpr const char* kWebsiteUrl   = "https://www.ondulab.com";
-    static constexpr const char* kDownloadsUrl = "https://www.ondulab.com/telechargement.html";
-    static constexpr const char* kDonateUrl    = "https://paypal.me/Ondulab";
-    static constexpr const char* kLicenseUrl   = "https://www.gnu.org/licenses/gpl-3.0.html";
-    static juce::String bugReportUrl()
-    {
-        // Version in the subject so reports identify the build at a glance.
-        return juce::String("mailto:contact@ondulab.com?subject=")
-             + juce::URL::addEscapeChars("Sp3ctra v" SP3CTRA_VERSION_STRING
-                                         " - bug report", true);
     }
 
     void paint(juce::Graphics& g) override
@@ -105,12 +95,28 @@ private:
                          juce::Colour(0xff88aaff));
             addAndMakeVisible(l);
         };
-        addLink(juce::String::fromUTF8("Website — ondulab.com"),         kWebsiteUrl);
-        addLink(juce::String::fromUTF8("Downloads"),                     kDownloadsUrl);
-        addLink(juce::String::fromUTF8("Donate ♥ (PayPal)"),             kDonateUrl);
+        addLink(juce::String::fromUTF8("Website — ondulab.com"), OndulabLinks::kWebsiteUrl);
+
+        // In-app update replaces the old "Downloads" page link: empty URL is
+        // not well-formed so HyperlinkButton::clicked() launches nothing and
+        // only onClick runs.
+        auto* upd = links_.add(new juce::HyperlinkButton(
+            juce::String::fromUTF8("Software update…"), juce::URL()));
+        upd->setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings), false,
+                     juce::Justification::centredLeft);
+        upd->setColour(juce::HyperlinkButton::textColourId, juce::Colour(0xff88aaff));
+        upd->onClick = [this]
+        {
+            auto* host = getParentComponent();
+            dismiss();
+            UpdateDialog::show(host);
+        };
+        addAndMakeVisible(upd);
+
+        addLink(juce::String::fromUTF8("Donate ♥ (PayPal)"), OndulabLinks::kDonateUrl);
         addLink(juce::String::fromUTF8("Report a bug — contact@ondulab.com"),
-                bugReportUrl());
-        addLink(juce::String::fromUTF8("GNU GPL v3 License"),            kLicenseUrl);
+                OndulabLinks::bugReportUrl());
+        addLink(juce::String::fromUTF8("GNU GPL v3 License"), OndulabLinks::kLicenseUrl);
 
         closeBtn_.setButtonText("CLOSE");
         closeBtn_.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xff242424));

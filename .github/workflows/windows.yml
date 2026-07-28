@@ -108,6 +108,9 @@ jobs:
       # no workflow edit needed. URLs stay constant within a X.Y cycle; the
       # ondulab.com download page only changes when X.Y changes. LICENSE +
       # THIRD-PARTY-NOTICES ride inside each zip (GPLv3 checklist).
+      # latest-windows.json carries the FULL x.y.z (tag/assets only carry x.y):
+      # the in-app updater (AppUpdater) reads it to detect new builds. Uploaded
+      # last so the manifest never advertises a version whose zip isn't up yet.
       - name: Publish to release (master → beta channel)
         if: github.ref == 'refs/heads/master'
         shell: pwsh
@@ -135,4 +138,7 @@ jobs:
           Copy-Item -Recurse build/Sp3ctraVST_artefacts/Release/VST3/Sp3ctra.vst3 $vdir/Sp3ctra.vst3
           Copy-Item LICENSE, THIRD-PARTY-NOTICES.md $vdir/
           Compress-Archive -Path $vdir -DestinationPath "$vdir.zip" -Force
+          Set-Content -NoNewline latest-windows.json `
+            "{`"version`":`"$ver`",`"standalone`":`"$sdir.zip`"}"
           gh release upload $tag "$sdir.zip" "$vdir.zip" --clobber -R "${{ github.repository }}"
+          gh release upload $tag latest-windows.json --clobber -R "${{ github.repository }}"

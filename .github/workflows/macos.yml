@@ -65,6 +65,9 @@ jobs:
       # X.Y.0 auto-creates release vX.Y.0-beta.1 on the next green build.
       # ditto preserves bundle exec permissions (upload-artifact does not).
       # LICENSE + THIRD-PARTY-NOTICES ride inside each zip (GPLv3 checklist).
+      # latest-macos.json carries the FULL x.y.z (tag/assets only carry x.y):
+      # the in-app updater (AppUpdater) reads it to detect new builds. Uploaded
+      # last so the manifest never advertises a version whose zip isn't up yet.
       - name: Publish to release (master → beta channel)
         if: github.ref == 'refs/heads/master'
         env:
@@ -86,4 +89,7 @@ jobs:
             cp LICENSE THIRD-PARTY-NOTICES.md "$dir/"
             ditto -c -k --keepParent "$dir" "$dir.zip"
           done
+          printf '{"version":"%s","standalone":"%s-macOS-Standalone-arm64.zip"}\n' \
+            "$ver" "$base" > latest-macos.json
           gh release upload "$tag" ${base}-macOS-*.zip --clobber -R "$GITHUB_REPOSITORY"
+          gh release upload "$tag" latest-macos.json --clobber -R "$GITHUB_REPOSITORY"

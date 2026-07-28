@@ -356,7 +356,8 @@ private:
  */
 class Sp3ctraAudioProcessorEditor : public juce::AudioProcessorEditor,
                                     public juce::DragAndDropContainer,
-                                    private juce::Timer
+                                    private juce::Timer,
+                                    private juce::ChangeListener
 {
 public:
     Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor&);
@@ -572,6 +573,11 @@ private:
     void showMidiMenu();
     void showAdvancedMenu();
     void showAboutMenu();
+
+    /** AppUpdater state changes (the only ChangeBroadcaster we listen to):
+     *  light the ABOUT dot while an update is available / staged. */
+    void changeListenerCallback(juce::ChangeBroadcaster*) override;
+    void refreshUpdateBadge();
     void exportMidiMappingsFlow();     // MIDI table → .sp3midi (reusable asset)
     void importMidiMappingsFlow();     // .sp3midi → MIDI table (replace, confirm)
 

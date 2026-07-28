@@ -4,6 +4,8 @@
 #include "ui/ScrollWheelGuard.h"
 #include "Sp3ctraVersion.h"
 #include "Sp3ctraDialog.h"   // session-bar prompts (name input / confirm)
+#include "AppUpdater.h"
+#include "UpdateDialog.h"
 
 //==============================================================================
 Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& p)
@@ -301,9 +303,18 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     menuAdvancedBtn_.onClick = [this] { showAdvancedMenu(); };
     addAndMakeVisible(menuAdvancedBtn_);
 
-    menuAboutBtn_.setTooltip("About Sp3ctra, links, license, donate.");
+    menuAboutBtn_.setTooltip("About Sp3ctra, software update, license, donate.");
     menuAboutBtn_.onClick = [this] { showAboutMenu(); };
     addAndMakeVisible(menuAboutBtn_);
+
+    // In-app update: the ABOUT dot lights up when a new build is available.
+    // The startup check itself runs once per process, standalone only (a DAW
+    // plugin must not fire network requests just because it was loaded).
+    AppUpdater::getInstance()->addChangeListener(this);
+    refreshUpdateBadge();
+    if (auto* sessions = audioProcessor.sessions();
+        sessions != nullptr && sessions->isStandalone())
+        AppUpdater::getInstance()->startupCheck();
 
     // ── Restore persisted layout (survives session reload) ────────────────────
     auto& state = apvts.state;
@@ -371,6 +382,8 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
 Sp3ctraAudioProcessorEditor::~Sp3ctraAudioProcessorEditor()
 {
     stopTimer();
+    if (auto* up = AppUpdater::getInstanceWithoutCreating())
+        up->removeChangeListener(this);
     audioProcessor.onStateRestoredUi = nullptr;   // this editor is going away
     if (auto* s = audioProcessor.sessions())
         s->onSessionChanged = nullptr;            // ditto for the session bar
@@ -690,12 +703,28 @@ void Sp3ctraAudioProcessorEditor::showAdvancedMenu()
 
 void Sp3ctraAudioProcessorEditor::showAboutMenu()
 {
+    // The update entry replaces the old "Downloads" web link: label follows
+    // the AppUpdater state so a startup-detected update is one click away.
+    juce::String updateLabel = juce::String::fromUTF8("Check for updates…");
+    switch (AppUpdater::getInstance()->state())
+    {
+        case AppUpdater::State::updateAvailable:
+            updateLabel = juce::String::fromUTF8("Update to v")
+                        + AppUpdater::getInstance()->latestVersion()
+                        + juce::String::fromUTF8("…");
+            break;
+        case AppUpdater::State::readyToRestart:
+            updateLabel = juce::String::fromUTF8("Restart to finish update…");
+            break;
+        default: break;
+    }
+
     juce::PopupMenu m;
     m.addSectionHeader("Sp3ctra v" SP3CTRA_VERSION_STRING);
     m.addItem(1, juce::String::fromUTF8("About Sp3ctra…"));
     m.addSeparator();
     m.addItem(2, juce::String::fromUTF8("Website — ondulab.com"));
-    m.addItem(3, juce::String::fromUTF8("Downloads"));
+    m.addItem(3, updateLabel);
     m.addItem(4, juce::String::fromUTF8("Donate ♥ (PayPal)"));
     m.addSeparator();
     m.addItem(5, juce::String::fromUTF8("Report a bug…"));
@@ -713,13 +742,28 @@ void Sp3ctraAudioProcessorEditor::showAboutMenu()
             switch (choice)
             {
                 case 1: AboutDialog::show(self); break;
-                case 2: open(AboutDialog::kWebsiteUrl);   break;
-                case 3: open(AboutDialog::kDownloadsUrl); break;
-                case 4: open(AboutDialog::kDonateUrl);    break;
-                case 5: open(AboutDialog::bugReportUrl()); break;
-                case 6: open(AboutDialog::kLicenseUrl);   break;
+                case 2: open(OndulabLinks::kWebsiteUrl);   break;
+                case 3: UpdateDialog::show(self); break;
+                case 4: open(OndulabLinks::kDonateUrl);    break;
+                case 5: open(OndulabLinks::bugReportUrl()); break;
+                case 6: open(OndulabLinks::kLicenseUrl);   break;
             }
         });
+}
+
+void Sp3ctraAudioProcessorEditor::changeListenerCallback(juce::ChangeBroadcaster* source)
+{
+    if (source == AppUpdater::getInstanceWithoutCreating())
+        refreshUpdateBadge();
+}
+
+void Sp3ctraAudioProcessorEditor::refreshUpdateBadge()
+{
+    const auto st = AppUpdater::getInstance()->state();
+    const bool pending = st == AppUpdater::State::updateAvailable
+                      || st == AppUpdater::State::readyToRestart;
+    menuAboutBtn_.setDot(pending, juce::Colour(0xff7aade0));
+    layoutHeaderMenus();   // dot changes the button's ideal width
 }
 
 void Sp3ctraAudioProcessorEditor::runSessionCreateFlow(bool saveAs)

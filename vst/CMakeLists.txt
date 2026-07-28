@@ -131,6 +131,10 @@ target_sources(Sp3ctraVST
         source/session/Sp3sImporter.h
         source/PluginEditor.cpp
         source/PluginEditor.h
+        source/AppUpdater.cpp
+        source/AppUpdater.h
+        source/UpdateDialog.h
+        source/OndulabLinks.h
         source/CisVisualizerComponent.cpp
         source/CisVisualizerComponent.h
         source/Sp3ctraCore.cpp
