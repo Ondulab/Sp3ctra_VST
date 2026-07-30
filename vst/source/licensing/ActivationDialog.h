@@ -66,7 +66,7 @@ public:
                    juce::Justification::centredLeft);
         g.setColour(lic ? juce::Colour(0xff7fd88f) : juce::Colour(0xffe0b060));
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSmall));
-        g.drawText(lic ? "Full version" : "Demo version",
+        g.drawText(lic ? "Studio mode" : "Play mode",
                    64, 44, getWidth() - 88, 16, juce::Justification::centredLeft);
 
         // ── Body ─────────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ public:
             g.setColour(juce::Colour(0xffe0b060));
             g.drawFittedText(juce::String::fromUTF8("“") + blockedAction_
                                  + juce::String::fromUTF8("” is available in "
-                                                          "the full version."),
+                                                          "Studio mode."),
                              24, y, getWidth() - 48, 18,
                              juce::Justification::centredLeft, 1);
             y += 24;
@@ -101,11 +101,11 @@ public:
         {
             g.drawFittedText(
                 juce::String::fromUTF8(
-                    "The demo is fully playable, without time limit.\n"
+                    "Play mode is the full instrument, without time limit.\n"
                     "Saving sessions and exporting (audio, video, images, "
-                    "MIDI, presets) are disabled — and a DAW project will "
-                    "not keep the plugin's state.\n"
-                    "One license unlocks all formats on up to 3 machines."),
+                    "MIDI, presets) belong to Studio mode — and a DAW "
+                    "project will not keep the plugin's state.\n"
+                    "One license activates Studio mode on up to 3 machines."),
                 24, y, getWidth() - 48, 76, juce::Justification::topLeft, 6);
         }
     }
@@ -156,7 +156,7 @@ private:
             Sp3ctraDialog::showConfirm(
                 this, "Deactivate this machine",
                 "The license seat is freed for another machine and this "
-                "install returns to the demo (saving and exports disabled).",
+                "install returns to Play mode (saving and exports disabled).",
                 "Deactivate", "Cancel",
                 [](bool ok) { if (ok) LicenseManager::getInstance()->deactivate(); });
         };

@@ -19,6 +19,15 @@
  * params (scoreLoop / scoreReverse / scoreSpeed / scorePlaying) drive it
  * exactly like a generated score. All state persists as JSON in
  * apvts.state ("midiScoreGenState") — offline tool, not host-automatable.
+ *
+ * PLAYBACK SHAPING (SAMPLER-style, playback-only — exports stay clean):
+ * a crop window (green start / orange end bars dragged on the preview, or
+ * the chips under it), edge fades (LIN/EXP/LOG/S curve + power, same
+ * handles and chips as the SAMPLER slot editor) and a SCORE-style IMAGE EQ
+ * shape what the score player receives: PLAY renders only the crop window,
+ * then the fades darken→silence the edges and the EQ shifts each band
+ * row's ink in dB, before the frames are loaded. The preview keeps showing
+ * the raw piece with the shaping drawn as an overlay.
  */
 #pragma once
 
@@ -34,7 +43,11 @@
 #include "../midi/MidiLearnAttachment.h"
 #include "../IconPaths.h"
 #include "../licensing/ActivationDialog.h"
+#include "../luxsampler/FadeCurve.h"       // fade curve shapes (LIN/EXP/LOG/S)
+#include "../sampler/SamplerValueBox.h"    // crop / fade param chips under the preview
 #include "MidiScoreGenRenderer.h"
+#include "ScoreEqComponent.h"
+#include "EqCurve.h"                       // shared Catmull-Rom EQ evaluator
 
 class MidiScoreGenTabComponent : public juce::Component,
                                  private juce::Timer,
@@ -42,7 +55,7 @@ class MidiScoreGenTabComponent : public juce::Component,
 {
 public:
     static constexpr uint32_t kAccentARGB = 0xffc9a13e;   // bronze (MIDI SCORE identity)
-    static constexpr int      kPreferredH = 745;          // +4 vibrato rows
+    static constexpr int      kPreferredH = 920;          // + crop/fade chips + IMAGE EQ
 
     explicit MidiScoreGenTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p)
@@ -346,6 +359,78 @@ public:
         playHint.setMinimumHorizontalScale(1.0f);
         addAndMakeVisible(playHint);
 
+        // ── Playback shaping: crop / fade chips (SAMPLER-style) + IMAGE EQ ──
+        {
+            const auto pct = [](float n)
+            { return juce::String(juce::roundToInt(n * 100.0f)) + "%"; };
+            const auto pow2 = [](float n)
+            { return juce::String(shapePowerRange().convertFrom0to1(n), 2); };
+            const auto curve = [](float n)
+            {
+                static const char* kNames[] = { "LIN", "EXP", "LOG", "S" };
+                return juce::String(kNames[juce::jlimit(0, kNumFadeCurveTypes - 1,
+                                                        (int) std::lround(n * 3.0f))]);
+            };
+
+            auto setup = [this](SamplerValueBox& b,
+                                std::function<float()> rd,
+                                std::function<void(float)> ap,
+                                std::function<juce::String(float)> fmt)
+            {
+                b.readNorm  = std::move(rd);
+                b.applyNorm = [this, ap = std::move(ap)](float n)
+                {
+                    ap(n);
+                    markShapeDirty();
+                };
+                b.format = std::move(fmt);
+                addAndMakeVisible(b);
+            };
+            setup(cropStartBox_,
+                  [this] { return cropStart_; },
+                  [this](float n) { cropStart_ = juce::jlimit(0.0f, cropEnd_ - 0.01f, n); },
+                  pct);
+            setup(cropEndBox_,
+                  [this] { return cropEnd_; },
+                  [this](float n) { cropEnd_ = juce::jlimit(cropStart_ + 0.01f, 1.0f, n); },
+                  pct);
+            setup(fadeInLenBox_,
+                  [this] { return fadeInLen_; },
+                  [this](float n) { fadeInLen_ = juce::jlimit(0.0f, 1.0f, n); },
+                  pct);
+            setup(fadeInTypeBox_,
+                  [this] { return (float) (int) fadeInType_ / 3.0f; },
+                  [this](float n) { fadeInType_ = (FadeCurveType)
+                        juce::jlimit(0, kNumFadeCurveTypes - 1, (int) std::lround(n * 3.0f)); },
+                  curve);
+            setup(fadeInPowBox_,
+                  [this] { return shapePowerRange().convertTo0to1(fadeInPow_); },
+                  [this](float n) { fadeInPow_ = shapePowerRange().convertFrom0to1(n); },
+                  pow2);
+            setup(fadeOutLenBox_,
+                  [this] { return fadeOutLen_; },
+                  [this](float n) { fadeOutLen_ = juce::jlimit(0.0f, 1.0f, n); },
+                  pct);
+            setup(fadeOutTypeBox_,
+                  [this] { return (float) (int) fadeOutType_ / 3.0f; },
+                  [this](float n) { fadeOutType_ = (FadeCurveType)
+                        juce::jlimit(0, kNumFadeCurveTypes - 1, (int) std::lround(n * 3.0f)); },
+                  curve);
+            setup(fadeOutPowBox_,
+                  [this] { return shapePowerRange().convertTo0to1(fadeOutPow_); },
+                  [this](float n) { fadeOutPow_ = shapePowerRange().convertFrom0to1(n); },
+                  pow2);
+            fadeInTypeBox_ .setChoices({ "LIN", "EXP", "LOG", "S" });
+            fadeOutTypeBox_.setChoices({ "LIN", "EXP", "LOG", "S" });
+
+            // IMAGE EQ — shapes the PLAYED frames (never the export). The band
+            // grid follows the instrument's tuning; the saved curve was decoded
+            // by restoreState() above, syncEqRange() re-grids it if needed.
+            eqEditor.onChange = [this] { markShapeDirty(); };
+            addAndMakeVisible(eqEditor);
+            syncEqRange();
+        }
+
         // ── Log ──────────────────────────────────────────────────────────────
         logLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
         logLabel.setColour(juce::Label::textColourId, juce::Colour(0xff8890a0));
@@ -417,14 +502,18 @@ public:
                 else if (scrubHead >= 0) headFrame = scrubHead;
                 if (headFrame >= 0)
                 {
+                    // The loaded frames cover the CROP window only — map the
+                    // head back onto the whole-piece preview strip.
                     const int n = juce::jmax(1, fs->getScoreFrameCount());
                     const float frac = juce::jlimit(0.f, 1.f, (float) headFrame / (float) n);
-                    const float lx = imgArea.getX() + frac * imgArea.getWidth();
+                    const float pieceFrac = cropStart_ + frac * (cropEnd_ - cropStart_);
+                    const float lx = imgArea.getX() + pieceFrac * imgArea.getWidth();
                     g.setColour(accent.withAlpha(playing || paused ? 0.9f : 0.6f));
                     g.fillRect(lx - 0.75f, imgArea.getY(), 1.5f, imgArea.getHeight());
                 }
             }
 
+            drawShapeOverlay(g);
             drawPanOverlay(g);
             g.restoreState();
 
@@ -908,12 +997,365 @@ public:
     }
 
     //==========================================================================
-    // Preview interactions: the pan line/handles get first pick, everything
-    // else is a scrub click (when our frames are loaded — same behaviour as
-    // the SCORE and TIMBRE pages).
+    // Crop / fade overlay on the preview — the SAMPLER slot editor's visual
+    // language: green start / orange end bars (drag anywhere on the bar),
+    // full-height fade ramps with an END handle (length) and a MID handle
+    // (shape — drag bends the curve, right-click picks LIN/EXP/LOG/S,
+    // double-click resets to LIN). All playback-only: the preview strip
+    // underneath stays the raw piece.
+    static constexpr float kShapeHandleR = 4.5f;   // node radius (EQ-sized)
+    static constexpr int   kShapeGrabR   = 10;     // fade handle grab radius
+    static constexpr int   kShapeSnap    = 8;      // crop bar snap (px)
+
+    /** Skewed 0.1..10 power range (1.0 at centre) — mirrors the SAMPLER chips. */
+    static const juce::NormalisableRange<float>& shapePowerRange()
+    {
+        static const juce::NormalisableRange<float> r = []
+        { juce::NormalisableRange<float> rr(0.1f, 10.0f); rr.setSkewForCentre(1.0f); return rr; }();
+        return r;
+    }
+
+    float cropSpan() const noexcept { return juce::jmax(1.0e-4f, cropEnd_ - cropStart_); }
+
+    /** Peak-end (length) handle of a fade — in preview coordinates. */
+    juce::Point<float> shapeFadeEndPoint(bool in) const
+    {
+        const auto a = panArea();
+        if (a.isEmpty() || ! previewImage.isValid()) return { -1.0f, -1.0f };
+        const float x = in
+            ? fracToX(cropStart_ + fadeInLen_  * cropSpan())
+            : fracToX(cropEnd_   - fadeOutLen_ * cropSpan());
+        return { x, a.getY() + kShapeHandleR + 2.0f };
+    }
+
+    /** MID (shape) handle ON the fade curve — hidden for near-zero fades. */
+    juce::Point<float> shapeFadeMidPoint(bool in) const
+    {
+        const auto a = panArea();
+        if (a.isEmpty() || ! previewImage.isValid()) return { -1.0f, -1.0f };
+        float x0, x1; FadeCurveType type; float power;
+        if (in)
+        {
+            x0 = fracToX(cropStart_);
+            x1 = fracToX(cropStart_ + fadeInLen_ * cropSpan());
+            type = fadeInType_; power = fadeInPow_;
+        }
+        else
+        {
+            x0 = fracToX(cropEnd_ - fadeOutLen_ * cropSpan());
+            x1 = fracToX(cropEnd_);
+            type = fadeOutType_; power = fadeOutPow_;
+        }
+        if (x1 - x0 <= 8.0f)
+            return { -1.0f, -1.0f };
+        const float peak = a.getY() + kShapeHandleR + 2.0f;
+        const float bot  = a.getBottom() - 1.0f;
+        const float mg   = applyFadeCurve(0.5f, type, power);
+        return { (x0 + x1) * 0.5f, bot - mg * juce::jmax(1.0f, bot - peak) };
+    }
+
+    void drawShapeOverlay(juce::Graphics& g)
+    {
+        const auto a = panArea();
+        if (a.isEmpty())
+            return;
+
+        const float sx = fracToX(cropStart_);
+        const float ex = fracToX(cropEnd_);
+        const float top = a.getY(), H = a.getHeight();
+
+        // Dim outside [start, end] — that part never reaches the player.
+        g.setColour(juce::Colour(0x88080810));
+        if (sx > a.getX())    g.fillRect(a.getX(), top, sx - a.getX(), H);
+        if (ex < a.getRight()) g.fillRect(ex, top, a.getRight() - ex, H);
+
+        // Start / End bars with a dark edge for contrast on the white score.
+        g.setColour(juce::Colours::black.withAlpha(0.45f));
+        g.fillRect(sx - 1.0f, top, 4.0f, H);
+        g.setColour(juce::Colour(0xff33ff99));
+        g.fillRect(sx, top, 2.0f, H);
+        g.setColour(juce::Colours::black.withAlpha(0.45f));
+        g.fillRect(ex - 1.0f, top, 4.0f, H);
+        g.setColour(juce::Colour(0xffff6633));
+        g.fillRect(ex, top, 2.0f, H);
+
+        // Fade ramps + handles (port of SlotSpectralEditorComponent::drawFades).
+        const float hy   = a.getY() + kShapeHandleR + 2.0f;   // curve peak (gain 1)
+        const float sBot = a.getBottom() - 1.0f;              // curve foot (gain 0)
+        const float fH   = juce::jmax(1.0f, sBot - hy);
+
+        const auto drawOne = [&](float x0, float x1, FadeCurveType type, float power,
+                                 juce::Colour col, bool rising, bool active, bool hover,
+                                 bool midActive, bool midHover)
+        {
+            const int steps = juce::jmax(2, (int) std::abs(x1 - x0));
+            if (x1 > x0 + 0.5f)
+            {
+                juce::Path curve, fill;
+                for (int s = 0; s <= steps; ++s)
+                {
+                    const float t    = (float) s / (float) steps;
+                    const float p    = rising ? t : (1.0f - t);
+                    const float gain = applyFadeCurve(juce::jlimit(0.0f, 1.0f, p), type, power);
+                    const float x    = x0 + t * (x1 - x0);
+                    const float y    = sBot - gain * fH;
+                    if (s == 0) { curve.startNewSubPath(x, y); fill.startNewSubPath(x, sBot); fill.lineTo(x, y); }
+                    else        { curve.lineTo(x, y);          fill.lineTo(x, y); }
+                }
+                fill.lineTo(x1, sBot);
+                fill.closeSubPath();
+                g.setColour(col.withAlpha(0.18f));
+                g.fillPath(fill);
+                g.setColour(col.withAlpha(0.9f));
+                g.strokePath(curve, juce::PathStrokeType(1.8f, juce::PathStrokeType::curved));
+            }
+
+            const float hx = rising ? x1 : x0;
+            const float r  = (active || hover) ? kShapeHandleR + 1.0f : kShapeHandleR;
+            if (active || hover)
+            {
+                g.setColour(col.withAlpha(0.25f));
+                g.fillEllipse(hx - r - 2.5f, hy - r - 2.5f, 2 * (r + 2.5f), 2 * (r + 2.5f));
+            }
+            g.setColour(active ? col.brighter(0.3f) : juce::Colour(0xff20202a));
+            g.fillEllipse(hx - r, hy - r, 2 * r, 2 * r);
+            g.setColour(active ? juce::Colours::white : col.withAlpha(0.9f));
+            g.drawEllipse(hx - r, hy - r, 2 * r, 2 * r, 1.4f);
+
+            if (x1 > x0 + 8.0f)
+            {
+                const float mx = (x0 + x1) * 0.5f;
+                const float mg = applyFadeCurve(0.5f, type, power);
+                const float my = sBot - mg * fH;
+                const float mr = (midActive || midHover) ? kShapeHandleR + 1.5f
+                                                         : kShapeHandleR + 0.5f;
+                if (midActive || midHover)
+                {
+                    g.setColour(juce::Colours::white.withAlpha(0.25f));
+                    g.fillEllipse(mx - mr - 2.5f, my - mr - 2.5f,
+                                  2 * (mr + 2.5f), 2 * (mr + 2.5f));
+                }
+                g.setColour(juce::Colour(0xff20202a));
+                g.fillEllipse(mx - mr, my - mr, 2 * mr, 2 * mr);
+                g.setColour(midActive ? col.brighter(0.5f)
+                                      : juce::Colours::white.withAlpha(0.9f));
+                g.drawEllipse(mx - mr, my - mr, 2 * mr, 2 * mr, 1.6f);
+            }
+        };
+
+        drawOne(sx, fracToX(cropStart_ + fadeInLen_ * cropSpan()),
+                fadeInType_, fadeInPow_, juce::Colour(0xff44ee88), /*rising=*/true,
+                shapeDrag_ == ShapeDrag::FadeIn,       shapeHover_ == 1,
+                shapeDrag_ == ShapeDrag::FadeInShape,  shapeHover_ == 3);
+        drawOne(fracToX(cropEnd_ - fadeOutLen_ * cropSpan()), ex,
+                fadeOutType_, fadeOutPow_, juce::Colour(0xffff6633), /*rising=*/false,
+                shapeDrag_ == ShapeDrag::FadeOut,      shapeHover_ == 2,
+                shapeDrag_ == ShapeDrag::FadeOutShape, shapeHover_ == 4);
+    }
+
+    void showShapeFadeMenu(bool in)
+    {
+        const auto cur = in ? fadeInType_ : fadeOutType_;
+        juce::PopupMenu m;
+        m.addSectionHeader(in ? "Fade in curve" : "Fade out curve");
+        static const char* kNames[] = { "LIN", "EXP", "LOG", "S" };
+        for (int i = 0; i < kNumFadeCurveTypes; ++i)
+            m.addItem(i + 1, kNames[i], true, static_cast<int>(cur) == i);
+
+        juce::Component::SafePointer<MidiScoreGenTabComponent> safe(this);
+        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this)
+                                                  .withMousePosition(),
+            [safe, in](int result)
+            {
+                if (safe == nullptr || result <= 0) return;
+                const auto t = static_cast<FadeCurveType>(result - 1);
+                if (in) safe->fadeInType_  = t;
+                else    safe->fadeOutType_ = t;
+                safe->markShapeDirty();
+            });
+    }
+
+    /** Crop/fade editing on mouse-down; true = consumed (no scrub). Fade
+     *  handles win, then the crop bars; a plain click elsewhere stays a scrub. */
+    bool handleShapeMouseDown(const juce::MouseEvent& e)
+    {
+        if (! previewImage.isValid() || ! previewArea.contains(e.getPosition()))
+            return false;
+        const auto a = panArea();
+        if (a.isEmpty())
+            return false;
+
+        const auto isNear = [&](juce::Point<float> p)
+        { return p.x >= 0.0f && e.position.getDistanceFrom(p) <= (float) kShapeGrabR; };
+        const bool endIn  = isNear(shapeFadeEndPoint(true));
+        const bool endOut = isNear(shapeFadeEndPoint(false));
+        const bool midIn  = isNear(shapeFadeMidPoint(true));
+        const bool midOut = isNear(shapeFadeMidPoint(false));
+
+        // Right-click a fade handle → curve type menu (LIN/EXP/LOG/S).
+        if (e.mods.isRightButtonDown())
+        {
+            if (endIn || midIn)        { showShapeFadeMenu(true);  return true; }
+            if (endOut || midOut)      { showShapeFadeMenu(false); return true; }
+            return false;
+        }
+
+        // Double-click the MID handle → back to a straight (LIN) fade.
+        if ((midIn || midOut) && e.getNumberOfClicks() >= 2)
+        {
+            if (midIn) { fadeInType_  = FadeCurveType::LINEAR; fadeInPow_  = 1.0f; }
+            else       { fadeOutType_ = FadeCurveType::LINEAR; fadeOutPow_ = 1.0f; }
+            markShapeDirty();
+            return true;
+        }
+
+        if      (endIn)  shapeDrag_ = ShapeDrag::FadeIn;
+        else if (endOut) shapeDrag_ = ShapeDrag::FadeOut;
+        else if (midIn)  shapeDrag_ = ShapeDrag::FadeInShape;
+        else if (midOut) shapeDrag_ = ShapeDrag::FadeOutShape;
+        else
+        {
+            const float sx = fracToX(cropStart_), ex = fracToX(cropEnd_);
+            if      (std::abs(e.position.x - sx) <= (float) kShapeSnap) shapeDrag_ = ShapeDrag::Start;
+            else if (std::abs(e.position.x - ex) <= (float) kShapeSnap) shapeDrag_ = ShapeDrag::End;
+            else return false;   // free clicks keep scrubbing the play head
+        }
+        dragShapeHandle(e);
+        return true;
+    }
+
+    void dragShapeHandle(const juce::MouseEvent& e)
+    {
+        if (shapeDrag_ == ShapeDrag::None)
+            return;
+        const float f = (float) xToFrac(e.position.x);
+        switch (shapeDrag_)
+        {
+            case ShapeDrag::Start:
+                cropStart_ = juce::jlimit(0.0f, cropEnd_ - 0.01f, f);
+                break;
+            case ShapeDrag::End:
+                cropEnd_ = juce::jlimit(cropStart_ + 0.01f, 1.0f, f);
+                break;
+            case ShapeDrag::FadeIn:
+                fadeInLen_ = juce::jlimit(0.0f, 1.0f, (f - cropStart_) / cropSpan());
+                break;
+            case ShapeDrag::FadeOut:
+                fadeOutLen_ = juce::jlimit(0.0f, 1.0f, (cropEnd_ - f) / cropSpan());
+                break;
+            case ShapeDrag::FadeInShape:
+            case ShapeDrag::FadeOutShape:
+            {
+                // Bend the curve so its mid-point passes through the mouse:
+                // below the diagonal → EXP, above → LOG, close to it → LIN;
+                // an S curve keeps its type and takes the power instead
+                // (same mapping as the SAMPLER slot editor).
+                const bool  in   = (shapeDrag_ == ShapeDrag::FadeInShape);
+                const auto  a    = panArea();
+                const float peak = a.getY() + kShapeHandleR + 2.0f;
+                const float bot  = a.getBottom() - 1.0f;
+                const float gv   = juce::jlimit(0.02f, 0.98f,
+                    (bot - e.position.y) / juce::jmax(1.0f, bot - peak));
+                const float lg   = std::log(gv) / std::log(0.5f);
+
+                const auto cur = in ? fadeInType_ : fadeOutType_;
+                FadeCurveType type;
+                float         power;
+                if (cur == FadeCurveType::SCURVE)
+                { type = FadeCurveType::SCURVE;      power = juce::jlimit(0.1f, 10.0f, lg); }
+                else if (std::abs(gv - 0.5f) < 0.015f)
+                { type = FadeCurveType::LINEAR;      power = 1.0f; }
+                else if (gv < 0.5f)
+                { type = FadeCurveType::EXPONENTIAL; power = juce::jlimit(0.1f, 10.0f, lg - 1.0f); }
+                else
+                { type = FadeCurveType::LOGARITHMIC; power = juce::jlimit(0.1f, 10.0f, 1.0f / lg - 1.0f); }
+
+                if (in) { fadeInType_  = type; fadeInPow_  = power; }
+                else    { fadeOutType_ = type; fadeOutPow_ = power; }
+                break;
+            }
+            default: break;
+        }
+        markShapeDirty();
+    }
+
+    void mouseMove(const juce::MouseEvent& e) override
+    {
+        int newHover = 0;
+        juce::MouseCursor cursor = juce::MouseCursor::NormalCursor;
+        if (previewImage.isValid() && previewArea.contains(e.getPosition()))
+        {
+            const auto isNear = [&](juce::Point<float> p)
+            { return p.x >= 0.0f && e.position.getDistanceFrom(p) <= (float) kShapeGrabR; };
+            if      (isNear(shapeFadeEndPoint(true)))  newHover = 1;
+            else if (isNear(shapeFadeEndPoint(false))) newHover = 2;
+            else if (isNear(shapeFadeMidPoint(true)))  newHover = 3;
+            else if (isNear(shapeFadeMidPoint(false))) newHover = 4;
+
+            if (newHover != 0)
+                cursor = juce::MouseCursor::PointingHandCursor;
+            else
+            {
+                const float sx = fracToX(cropStart_), ex = fracToX(cropEnd_);
+                if (std::abs(e.position.x - sx) <= (float) kShapeSnap
+                    || std::abs(e.position.x - ex) <= (float) kShapeSnap)
+                    cursor = juce::MouseCursor::LeftRightResizeCursor;
+            }
+        }
+        setMouseCursor(cursor);
+        if (newHover != shapeHover_)
+        {
+            shapeHover_ = newHover;
+            repaint(previewArea);
+        }
+    }
+
+    void mouseExit(const juce::MouseEvent&) override
+    {
+        if (shapeHover_ != 0)
+        {
+            shapeHover_ = 0;
+            repaint(previewArea);
+        }
+    }
+
+    void refreshShapeChips()
+    {
+        for (auto* b : { &cropStartBox_, &cropEndBox_,
+                         &fadeInLenBox_,  &fadeInTypeBox_,  &fadeInPowBox_,
+                         &fadeOutLenBox_, &fadeOutTypeBox_, &fadeOutPowBox_ })
+            b->repaint();
+    }
+
+    /** A crop/fade/EQ edit: playback + saved state change, the preview strip
+     *  itself doesn't (the shaping is an overlay) — no strip re-render. */
+    void markShapeDirty()
+    {
+        playDirty  = true;
+        stateDirty = true;
+        lastEditMs = juce::Time::getMillisecondCounter();
+        refreshShapeChips();
+        repaint(previewArea);
+    }
+
+    /** Re-grid the EQ nodes onto the instrument's current tuning span.
+     *  No-op (curve kept) while the span is unchanged. */
+    void syncEqRange()
+    {
+        const auto s = settingsWithTuning();
+        if (s.minFreq > 0.0 && s.maxFreq > s.minFreq)
+            eqEditor.setRange(s.minFreq, s.maxFreq);
+    }
+
+    //==========================================================================
+    // Preview interactions: the pan line/handles get first pick, then the
+    // crop/fade handles, everything else is a scrub click (when our frames
+    // are loaded — same behaviour as the SCORE and TIMBRE pages).
     void mouseDown(const juce::MouseEvent& e) override
     {
         if (handlePanMouseDown(e))
+            return;
+        if (handleShapeMouseDown(e))
             return;
         scrubbing = framesAreOurs && previewImage.isValid()
                  && previewArea.contains(e.getPosition());
@@ -930,12 +1372,18 @@ public:
     void mouseDrag(const juce::MouseEvent& e) override
     {
         if (dragPanIdx >= 0) { dragPanHandle(e); return; }
+        if (shapeDrag_ != ShapeDrag::None) { dragShapeHandle(e); return; }
         if (scrubbing) scrubTo(e);
     }
-    void mouseUp  (const juce::MouseEvent&)   override
+    void mouseUp  (const juce::MouseEvent& e)   override
     {
         dragPanIdx = -1;
         scrubbing  = false;
+        if (shapeDrag_ != ShapeDrag::None)
+        {
+            shapeDrag_ = ShapeDrag::None;
+            mouseMove(e);   // refresh hover state under the released cursor
+        }
         if (scrubAuditioning)
         {
             if (auto* fs = boundChannel()) fs->uiEndScoreScrub();
@@ -1040,11 +1488,40 @@ public:
         // Log fills whatever is left under the column.
         logLabel.setBounds(pad, y, colW, juce::jmax(0, getHeight() - pad - y));
 
-        // ── Preview (right of the column) ────────────────────────────────────
+        // ── Preview (right of the column) + shaping strip under it ──────────
         const int previewX = pad + colW + 10;
+        const int chipH = 16, chipGap = 2;
+        const int eqH   = ScoreEqComponent::kPreferredH;
+        const int shapeH = chipH + 4 + eqH;
         previewArea = juce::Rectangle<int>(previewX, contentTop,
                                            juce::jmax(80, getWidth() - previewX - pad),
-                                           juce::jmax(80, getHeight() - pad - contentTop));
+                                           juce::jmax(80, getHeight() - pad - contentTop
+                                                          - shapeH - gap));
+
+        // Chips row — [start][end]  [in][type][pow]  [out][type][pow].
+        {
+            const int stripW = previewArea.getWidth();
+            const int typeW  = 40;
+            const int valW   = juce::jmax(30, (stripW - 2 * typeW - 7 * chipGap) / 6);
+            int x = previewX;
+            const int cy = previewArea.getBottom() + gap;
+            auto place = [&](SamplerValueBox& b, int w)
+            {
+                b.setBounds(x, cy, w, chipH);
+                x += w + chipGap;
+            };
+            place(cropStartBox_,   valW);
+            place(cropEndBox_,     valW);
+            place(fadeInLenBox_,   valW);
+            place(fadeInTypeBox_,  typeW);
+            place(fadeInPowBox_,   valW);
+            place(fadeOutLenBox_,  valW);
+            place(fadeOutTypeBox_, typeW);
+            // Last chip absorbs the integer-division remainder.
+            place(fadeOutPowBox_,  juce::jmax(30, previewX + stripW - x));
+
+            eqEditor.setBounds(previewX, cy + chipH + 4, stripW, eqH);
+        }
 
         layoutPreviewScrollbars();
         clampPreviewView();
@@ -1933,11 +2410,158 @@ private:
     }
 
     //==========================================================================
-    // Playback: render the whole piece as one strip at the physical time scale
-    // (DPI × writing speed), capped in frame count for very long pieces, and
-    // load it into the shared score player. The player injects 1000 columns/s
-    // at speed 1x, so "real tempo" ≈ (px/s ÷ 1000) on the Speed knob — logged.
+    // Playback: render the CROP WINDOW as one strip at the physical time scale
+    // (DPI × writing speed), capped in frame count for very long pieces, shape
+    // it (edge fades + image EQ), and load it into the shared score player.
+    // The player injects 1000 columns/s at speed 1x, so "real tempo" ≈
+    // (px/s ÷ 1000) on the Speed knob — logged.
     static constexpr int kMaxPlayFrames = 30000;   // ≈ 310 MB of frames
+
+    /** Message-thread copy of the playback shaping, safe to carry onto the
+     *  live-reload worker thread (the EQ curve is snapshotted as plain data). */
+    struct ShapeSnapshot
+    {
+        float cropStart = 0.0f, cropEnd = 1.0f;
+        float fadeInLen = 0.0f, fadeOutLen = 0.0f;
+        FadeCurveType fadeInType = FadeCurveType::LINEAR;
+        FadeCurveType fadeOutType = FadeCurveType::LINEAR;
+        float fadeInPow = 1.0f, fadeOutPow = 1.0f;
+        double eqMinF = 0.0, eqMaxF = 0.0;
+        std::vector<float> eqGains;
+
+        bool eqActive() const noexcept
+        {
+            if (eqGains.size() < 2 || eqMinF <= 0.0 || eqMaxF <= eqMinF)
+                return false;
+            for (float g : eqGains)
+                if (std::abs(g) > 0.01f) return true;
+            return false;
+        }
+        bool fadesActive() const noexcept
+        { return fadeInLen > 1.0e-3f || fadeOutLen > 1.0e-3f; }
+        bool active() const noexcept { return eqActive() || fadesActive(); }
+    };
+
+    ShapeSnapshot shapeSnapshot() const
+    {
+        ShapeSnapshot sp;
+        sp.cropStart   = cropStart_;
+        sp.cropEnd     = cropEnd_;
+        sp.fadeInLen   = fadeInLen_;
+        sp.fadeOutLen  = fadeOutLen_;
+        sp.fadeInType  = fadeInType_;
+        sp.fadeOutType = fadeOutType_;
+        sp.fadeInPow   = fadeInPow_;
+        sp.fadeOutPow  = fadeOutPow_;
+        sp.eqMinF      = eqEditor.getMinFreq();
+        sp.eqMaxF      = eqEditor.getMaxFreq();
+        sp.eqGains     = eqEditor.getGains();
+        return sp;
+    }
+
+    /** Shapes a rendered PLAYBACK strip in place (never the preview / export):
+     *  each band row's ink shifts by the EQ gain over the score's dB range
+     *  (same convention as SCORE's applyEqToImage — a −cut lightens toward
+     *  silence, a +boost darkens, pure-white silence never gains energy) and
+     *  the crop-window edges fade with the SAMPLER curves (linear gain →
+     *  dB → darkness shift, so a fade ends in actual silence). Static + pure:
+     *  called from the message thread AND the live-reload worker. */
+    static void applyPlaybackShaping(juce::Image& img,
+                                     juce::Rectangle<int> band, bool stereo,
+                                     const ShapeSnapshot& sp,
+                                     const midiscoregen::MidiScoreSettings& s)
+    {
+        if (! img.isValid() || ! sp.active())
+            return;
+        band = band.getIntersection(img.getBounds());
+        if (band.isEmpty())
+            band = img.getBounds();
+
+        const double range = juce::jmax(1.0, s.dynamicRangeDB);
+
+        // Per-row EQ darkness shift (constant along a row).
+        std::vector<float> rowShift((size_t) band.getHeight(), 0.0f);
+        if (sp.eqActive() && s.minFreq > 0.0 && s.maxFreq > s.minFreq)
+        {
+            const double bandBottom = (double) band.getBottom();
+            const double bandH      = (double) juce::jmax(1, band.getHeight());
+            const double ratio      = s.maxFreq / s.minFreq;
+            const int    n          = (int) sp.eqGains.size();
+            for (int yy = band.getY(); yy < band.getBottom(); ++yy)
+            {
+                const double pos  = juce::jlimit(0.0, 1.0, (bandBottom - (yy + 0.5)) / bandH);
+                const double freq = s.minFreq * std::pow(ratio, pos);
+                const double x    = std::log(freq / sp.eqMinF)
+                                  / std::log(sp.eqMaxF / sp.eqMinF) * (double) (n - 1);
+                const float gdb   = eqCurveDbAt(sp.eqGains.data(), n,
+                                                juce::jlimit(0.0f, (float) (n - 1), (float) x),
+                                                ScoreEqComponent::kGainRange);
+                rowShift[(size_t) (yy - band.getY())] = (float) (gdb / range);
+            }
+        }
+
+        // Per-column fade darkness shift (constant down a column). The strip
+        // IS the crop window, so the fades sit on its first/last fractions.
+        std::vector<float> colShift((size_t) band.getWidth(), 0.0f);
+        if (sp.fadesActive())
+        {
+            const double bandW = (double) juce::jmax(1, band.getWidth());
+            for (int xx = 0; xx < band.getWidth(); ++xx)
+            {
+                const double u = (xx + 0.5) / bandW;   // 0..1 across the window
+                float gain = 1.0f;
+                if (sp.fadeInLen > 1.0e-3f && u < (double) sp.fadeInLen)
+                    gain *= applyFadeCurve((float) (u / sp.fadeInLen),
+                                           sp.fadeInType, sp.fadeInPow);
+                if (sp.fadeOutLen > 1.0e-3f && u > 1.0 - (double) sp.fadeOutLen)
+                    gain *= applyFadeCurve((float) ((1.0 - u) / sp.fadeOutLen),
+                                           sp.fadeOutType, sp.fadeOutPow);
+                if (gain >= 0.999f)
+                    continue;
+                const double db = (gain <= 1.0e-6f)
+                    ? -range : juce::jmax(-range, 20.0 * std::log10((double) gain));
+                colShift[(size_t) xx] = (float) (db / range);
+            }
+        }
+
+        juce::Image::BitmapData bmp(img, juce::Image::BitmapData::readWrite);
+        for (int yy = band.getY(); yy < band.getBottom(); ++yy)
+        {
+            const float rs = rowShift[(size_t) (yy - band.getY())];
+            // Row LUT covers the EQ part; fade columns add their own shift.
+            juce::uint8 lut[256];
+            for (int v = 0; v < 256; ++v)
+            {
+                if (v >= 255 && rs > 0.0f) { lut[v] = 255; continue; }   // silence stays silent
+                const float dk = juce::jlimit(0.0f, 1.0f, (1.0f - (float) v / 255.0f) + rs);
+                lut[v] = (juce::uint8) juce::jlimit(0, 255,
+                             (int) std::lround((1.0f - dk) * 255.0f));
+            }
+            juce::uint8* line = bmp.getLinePointer(yy);
+            for (int xx = band.getX(); xx < band.getRight(); ++xx)
+            {
+                const float cs = colShift[(size_t) (xx - band.getX())];
+                juce::uint8* p = line + xx * bmp.pixelStride;
+                if (cs == 0.0f)
+                {
+                    if (stereo) { p[0] = lut[p[0]]; p[1] = lut[p[1]]; p[2] = lut[p[2]]; }
+                    else        { p[0] = p[1] = p[2] = lut[p[0]]; }
+                    continue;
+                }
+                const float shift = rs + cs;
+                auto shape = [shift](juce::uint8 v) -> juce::uint8
+                {
+                    if (v >= 255 && shift > 0.0f) return 255;
+                    const float dk = juce::jlimit(0.0f, 1.0f,
+                                                  (1.0f - (float) v / 255.0f) + shift);
+                    return (juce::uint8) juce::jlimit(0, 255,
+                               (int) std::lround((1.0f - dk) * 255.0f));
+                };
+                if (stereo) { p[0] = shape(p[0]); p[1] = shape(p[1]); p[2] = shape(p[2]); }
+                else        { p[0] = p[1] = p[2] = shape(p[0]); }
+            }
+        }
+    }
 
     bool reloadPlayFrames()
     {
@@ -1945,23 +2569,28 @@ private:
         if (fs == nullptr || ! data.ok || data.notes.empty())
             return false;
 
+        syncEqRange();   // playback maps EQ rows onto the current tuning span
         const auto s = settingsWithTuning();
         const double dur = juce::jmax(0.05, data.durationSec);
+        const double t0  = juce::jlimit(0.0, dur, (double) cropStart_ * dur);
+        const double t1  = juce::jlimit(t0 + 0.05, dur, (double) cropEnd_ * dur);
+        const double win = juce::jmax(0.05, t1 - t0);
         double pxPerSec = (s.printerDpi / 2.54) * s.writingSpeed;
         bool reduced = false;
-        if (dur * pxPerSec > (double) kMaxPlayFrames)
+        if (win * pxPerSec > (double) kMaxPlayFrames)
         {
-            pxPerSec = (double) kMaxPlayFrames / dur;   // long piece: coarser time grid
+            pxPerSec = (double) kMaxPlayFrames / win;   // long window: coarser time grid
             reduced  = true;
         }
 
-        const auto r = midiscoregen::renderStrip(data, effectiveVoices(), s, 0.0, dur,
-                                                 pxPerSec, 400.0);   // full CIS height
+        auto r = midiscoregen::renderStrip(data, effectiveVoices(), s, t0, t1,
+                                           pxPerSec, 400.0);   // full CIS height
         if (! (r.ok && r.image.isValid()))
         {
             logLabel.setText("Failed: " + r.log, juce::dontSendNotification);
             return false;
         }
+        applyPlaybackShaping(r.image, r.spectroBand, r.stereo, shapeSnapshot(), s);
 
         fs->loadScoreFramesFromImage(r.image, r.spectroBand, s.minFreq, s.maxFreq,
                                      r.stereo);
@@ -1973,6 +2602,9 @@ private:
 
         juce::String msg = juce::String(loadedFrameCount) + juce::String::fromUTF8(" frames loaded — ")
                          + "real tempo at Speed " + juce::String(pxPerSec / 1000.0, 2) + "x";
+        if (cropStart_ > 0.001f || cropEnd_ < 0.999f)
+            msg += "  (crop " + juce::String(juce::roundToInt(cropStart_ * 100.0f)) + "-"
+                 + juce::String(juce::roundToInt(cropEnd_ * 100.0f)) + "%)";
         if (reduced)
             msg += " (long piece: time grid reduced to "
                  + juce::String(pxPerSec, 0) + " px/s)";
@@ -2006,28 +2638,37 @@ private:
             || fs->getScoreFrameCount() != loadedFrameCount)
             return;   // stopped or channel reclaimed → next PLAY reloads
 
+        syncEqRange();
         const auto s = settingsWithTuning();
         const double dur = juce::jmax(0.05, data.durationSec);
+        const double t0  = juce::jlimit(0.0, dur, (double) cropStart_ * dur);
+        const double t1  = juce::jlimit(t0 + 0.05, dur, (double) cropEnd_ * dur);
+        const double win = juce::jmax(0.05, t1 - t0);
         double pxPerSec = (s.printerDpi / 2.54) * s.writingSpeed;
-        if (dur * pxPerSec > (double) kMaxPlayFrames)
-            pxPerSec = (double) kMaxPlayFrames / dur;
+        if (win * pxPerSec > (double) kMaxPlayFrames)
+            pxPerSec = (double) kMaxPlayFrames / win;
 
         playDirty       = false;   // edits landing during the render re-arm it
         liveRenderBusy_ = true;
 
-        // The WHOLE expensive path runs off-thread: strip render AND the
-        // image→frames conversion. The old frames keep playing untouched;
-        // the message thread only performs an O(1) vector swap at the end.
+        // The WHOLE expensive path runs off-thread: strip render, playback
+        // shaping (fades + EQ) AND the image→frames conversion. The old frames
+        // keep playing untouched; the message thread only performs an O(1)
+        // vector swap at the end.
         juce::Thread::launch(
             [safe = juce::Component::SafePointer<MidiScoreGenTabComponent>(this),
-             dataCopy = data, voicesCopy = effectiveVoices(), s, dur, pxPerSec]
+             dataCopy = data, voicesCopy = effectiveVoices(), s, t0, t1, pxPerSec,
+             sp = shapeSnapshot()]
             {
                 auto r = midiscoregen::renderStrip(dataCopy, voicesCopy, s,
-                                                   0.0, dur, pxPerSec, 400.0);
+                                                   t0, t1, pxPerSec, 400.0);
                 std::vector<CapturedFrame> frames;
                 if (r.ok && r.image.isValid())
+                {
+                    applyPlaybackShaping(r.image, r.spectroBand, r.stereo, sp, s);
                     frames = ScorePlayerService::buildFramesFromImage(
                         r.image, r.spectroBand, s.minFreq, s.maxFreq, r.stereo);
+                }
                 r.image = juce::Image();   // big bitmap not needed anymore
                 juce::MessageManager::callAsync(
                     [safe, r = std::move(r), frames = std::move(frames)]() mutable
@@ -2158,9 +2799,12 @@ private:
         if (n <= 0) return;
         const auto area = previewImgArea.isEmpty() ? previewImageBounds() : previewImgArea;
         if (area.getWidth() <= 0.f) return;
-        const float fx = juce::jlimit(0.f, 1.f,
+        // The loaded frames cover the CROP window only: clamp the click into
+        // it and map the piece fraction back onto the frame axis.
+        const float fx = juce::jlimit(cropStart_, cropEnd_,
             ((float) e.position.x - area.getX()) / area.getWidth());
-        scrubHead = juce::jlimit(0, n - 1, (int) (fx * (float) n));
+        const float wf = (fx - cropStart_) / cropSpan();
+        scrubHead = juce::jlimit(0, n - 1, (int) (wf * (float) n));
         fs->uiSeekScore(scrubHead);
         repaint(previewArea);
     }
@@ -2194,6 +2838,13 @@ private:
             refreshFileLabel();   // page count follows the writing speed
             persistState();
         }
+
+        // Crop/fade/EQ edits change no preview strip (overlay only) — persist
+        // them on their own debounce, once the gesture has settled.
+        if (stateDirty && ! previewDirty
+            && shapeDrag_ == ShapeDrag::None && ! eqEditor.isDragging()
+            && juce::Time::getMillisecondCounter() - lastEditMs > 400)
+            persistState();
 
         // Longer debounce than the preview: full-height re-render + hot-swap
         // of the playing frames, only while OUR piece is audible.
@@ -2536,6 +3187,16 @@ private:
         root->setProperty("labels", pageSettings.showLabels);
         root->setProperty("fmt",    pageSettings.pageFormat);
         root->setProperty("png",    exportAsPng_);
+        // Playback shaping — crop window, edge fades, IMAGE EQ curve.
+        root->setProperty("cropS",  (double) cropStart_);
+        root->setProperty("cropE",  (double) cropEnd_);
+        root->setProperty("fiL",    (double) fadeInLen_);
+        root->setProperty("fiT",    (int) fadeInType_);
+        root->setProperty("fiP",    (double) fadeInPow_);
+        root->setProperty("foL",    (double) fadeOutLen_);
+        root->setProperty("foT",    (int) fadeOutType_);
+        root->setProperty("foP",    (double) fadeOutPow_);
+        root->setProperty("eq",     eqEditor.encodeState());
         processor.getAPVTS().state.setProperty(
             "midiScoreGenState", juce::JSON::toString(juce::var(root), true), nullptr);
     }
@@ -2557,6 +3218,29 @@ private:
         if (o->hasProperty("fmt"))    pageSettings.pageFormat      =
             juce::jlimit(0, 2, (int) o->getProperty("fmt"));
         if (o->hasProperty("png"))    exportAsPng_                 = (bool)   o->getProperty("png");
+
+        // Playback shaping — crop window, edge fades, IMAGE EQ curve.
+        if (o->hasProperty("cropS")) cropStart_ =
+            juce::jlimit(0.0f, 0.99f, (float) (double) o->getProperty("cropS"));
+        if (o->hasProperty("cropE")) cropEnd_ =
+            juce::jlimit(cropStart_ + 0.01f, 1.0f, (float) (double) o->getProperty("cropE"));
+        if (o->hasProperty("fiL"))   fadeInLen_ =
+            juce::jlimit(0.0f, 1.0f, (float) (double) o->getProperty("fiL"));
+        if (o->hasProperty("fiT"))   fadeInType_ = (FadeCurveType)
+            juce::jlimit(0, kNumFadeCurveTypes - 1, (int) o->getProperty("fiT"));
+        if (o->hasProperty("fiP"))   fadeInPow_ =
+            juce::jlimit(0.1f, 10.0f, (float) (double) o->getProperty("fiP"));
+        if (o->hasProperty("foL"))   fadeOutLen_ =
+            juce::jlimit(0.0f, 1.0f, (float) (double) o->getProperty("foL"));
+        if (o->hasProperty("foT"))   fadeOutType_ = (FadeCurveType)
+            juce::jlimit(0, kNumFadeCurveTypes - 1, (int) o->getProperty("foT"));
+        if (o->hasProperty("foP"))   fadeOutPow_ =
+            juce::jlimit(0.1f, 10.0f, (float) (double) o->getProperty("foP"));
+        {
+            const juce::String eq = o->getProperty("eq").toString();
+            if (eq.isNotEmpty())
+                eqEditor.decodeState(eq);
+        }
 
         auto readPanArray = [](const juce::var& v,
                                std::vector<midiscoregen::PanPoint>& out)
@@ -2764,6 +3448,27 @@ private:
     int  scrubHead = -1;
     bool scrubbing = false, scrubAuditioning = false;
     int  dragPanIdx = -1;                // pan handle being dragged (-1 = none)
+
+    // ── Playback shaping (SAMPLER-style): crop window + edge fades + EQ ─────
+    enum class ShapeDrag { None, Start, End, FadeIn, FadeOut,
+                           FadeInShape, FadeOutShape };
+    float cropStart_  = 0.0f, cropEnd_    = 1.0f;   // fraction of the piece
+    float fadeInLen_  = 0.0f, fadeOutLen_ = 0.0f;   // fraction of the crop span
+    FadeCurveType fadeInType_  = FadeCurveType::LINEAR;
+    FadeCurveType fadeOutType_ = FadeCurveType::LINEAR;
+    float fadeInPow_  = 1.0f, fadeOutPow_ = 1.0f;
+    ShapeDrag shapeDrag_  = ShapeDrag::None;
+    int       shapeHover_ = 0;   // 1=in end · 2=out end · 3=in mid · 4=out mid
+
+    ScoreEqComponent eqEditor { juce::Colour(kAccentARGB) };
+    SamplerValueBox cropStartBox_   { "start", juce::Colour(0xff33ff99), false };
+    SamplerValueBox cropEndBox_     { "end",   juce::Colour(0xffff6633), false };
+    SamplerValueBox fadeInLenBox_   { "in",    juce::Colour(0xff44ee88), false };
+    SamplerValueBox fadeInTypeBox_  { {},      juce::Colour(0xff44ee88), true  };
+    SamplerValueBox fadeInPowBox_   { "pow",   juce::Colour(0xff44ee88), false };
+    SamplerValueBox fadeOutLenBox_  { "out",   juce::Colour(0xffff6633), false };
+    SamplerValueBox fadeOutTypeBox_ { {},      juce::Colour(0xffff6633), true  };
+    SamplerValueBox fadeOutPowBox_  { "pow",   juce::Colour(0xffff6633), false };
 
     std::unique_ptr<juce::FileChooser> fileChooser;
 

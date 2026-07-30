@@ -829,8 +829,6 @@ void SlotEditorComponent::resized()
 
     // ── Right column ──────────────────────────────────────────────────────────
     {
-        const int ctrlX = rightX + lW + 4;
-        const int ctrlW = colW - lW - 4;
         int ry = kEdParamTop;
 
         layoutButtonRow(rightX, ry, cropBtn, saveBtn, loadBtn);

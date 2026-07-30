@@ -10,6 +10,7 @@
 #include "score_player_hooks.h"  // P5-M4 — display-bus deferral to the score service
 #include "ScorePlayerService.h"  // buildFramesFromImage — calibrated image reload
 #include "../image/ScoreGenRenderer.h" // scoregen::readCalibration / SpectroCalibration
+#include "../image/EqCurve.h"          // shared Catmull-Rom EQ evaluator (drawn == applied)
 
 extern "C" {
     #include "audio_image_buffers.h"
@@ -1381,7 +1382,8 @@ void LuxSampler::rebuildFreqLut(int i) noexcept
 
     // Fill the inactive buffer with a per-position GAIN IN dB, then publish.
     // Nodes sit on octave boundaries → position xn maps linearly onto the node
-    // index axis (idx = xn·(ng-1)); we linear-interpolate the dB between nodes.
+    // index axis (idx = xn·(ng-1)); between nodes the dB is the shared
+    // Catmull-Rom spline (EqCurve.h) — the same curve ScoreEqComponent draws.
     const int cur    = freqLutActive_[i].load(std::memory_order_relaxed);
     const int target = 1 - cur;
     float*    lut    = freqLut_[i][target];
@@ -1391,12 +1393,8 @@ void LuxSampler::rebuildFreqLut(int i) noexcept
     {
         for (int j = 0; j < LuxSamplerConstants::FREQ_LUT_N; ++j)
         {
-            const float xn  = (float) j / (float) (LuxSamplerConstants::FREQ_LUT_N - 1);
-            const float idx = xn * (float) (ng - 1);
-            int   i0 = (int) idx;
-            if (i0 > ng - 2) i0 = ng - 2;
-            const float frac = idx - (float) i0;
-            const float g    = gains[i0] + frac * (gains[i0 + 1] - gains[i0]);
+            const float xn = (float) j / (float) (LuxSamplerConstants::FREQ_LUT_N - 1);
+            const float g  = eqCurveDbAt(gains, ng, xn * (float) (ng - 1), 24.0f);
             lut[j] = g;
             if (std::abs(g) > 0.01f) active = true;
         }

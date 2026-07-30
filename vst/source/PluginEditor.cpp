@@ -744,8 +744,8 @@ void Sp3ctraAudioProcessorEditor::showAboutMenu()
     m.addSectionHeader("Sp3ctra v" SP3CTRA_VERSION_STRING);
     m.addItem(1, juce::String::fromUTF8("About Sp3ctra…"));
     m.addItem(8, LicenseManager::isLicensed()
-                     ? juce::String::fromUTF8("License — full version…")
-                     : juce::String::fromUTF8("Activate license… (demo)"));
+                     ? juce::String::fromUTF8("License — Studio mode…")
+                     : juce::String::fromUTF8("Activate Studio mode…"));
     m.addSeparator();
     m.addItem(2, juce::String::fromUTF8("Website — ondulab.com"));
     m.addItem(3, updateLabel);

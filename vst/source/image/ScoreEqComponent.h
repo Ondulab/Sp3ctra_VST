@@ -19,6 +19,7 @@
 #include <functional>
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"   // optional right-click MIDI-Learn per band
+#include "EqCurve.h"                       // shared Catmull-Rom evaluator (LuxEq look)
 
 class ScoreEqComponent : public juce::Component
 {
@@ -110,22 +111,24 @@ public:
     /** True while a node is being dragged — host defers the heavy image reapply. */
     bool isDragging() const noexcept { return dragging != -1; }
 
-    /** Gain (dB) at an arbitrary frequency — linear interpolation in log-freq. */
+    /** Gain (dB) at an arbitrary frequency — smooth Catmull-Rom spline through
+     *  the nodes (same evaluator family as the LuxEq module), sampled in
+     *  log-freq node space so what paint() draws is exactly what applies. */
     float gainDbAtFreq(double hz) const noexcept
     {
-        if (freqs.size() < 2) return 0.0f;
+        if (freqs.size() < 2) return gains.empty() ? 0.0f : gains.front();
         if (hz <= freqs.front()) return gains.front();
         if (hz >= freqs.back())  return gains.back();
-        for (size_t i = 0; i + 1 < freqs.size(); ++i)
-        {
-            if (hz <= freqs[i + 1])
-            {
-                const double t = std::log(hz / freqs[i]) / std::log(freqs[i + 1] / freqs[i]);
-                return (float) (gains[i] + t * (gains[i + 1] - gains[i]));
-            }
-        }
-        return gains.back();
+        const double x = std::log(hz / minF) / std::log(maxF / minF)
+                       * (double) (gains.size() - 1);
+        return eqCurveDbAt(gains.data(), (int) gains.size(), (float) x, kGainRange);
     }
+
+    /** Curve snapshot accessors — lets hosts capture the curve for use on a
+     *  background thread (see MidiScoreGenTabComponent's playback shaping). */
+    double getMinFreq() const noexcept { return minF; }
+    double getMaxFreq() const noexcept { return maxF; }
+    const std::vector<float>& getGains() const noexcept { return gains; }
 
     //==========================================================================
     void paint(juce::Graphics& g) override
@@ -170,25 +173,31 @@ public:
             }
         }
 
-        // Curve + filled area to the 0 dB line.
-        juce::Path curve, fill;
-        const float y0 = gainToY(0.0f, plot);
-        for (size_t i = 0; i < freqs.size(); ++i)
+        // Curve + filled area to the 0 dB line — sampled from the SAME
+        // Catmull-Rom evaluator gainDbAtFreq() uses (shared with the LuxEq
+        // module's editor), so the drawn spline is exactly the applied gain.
+        if (gains.size() >= 2)
         {
-            const float x = freqToX(freqs[i], plot);
-            const float y = gainToY(gains[i], plot);
-            if (i == 0) { curve.startNewSubPath(x, y); fill.startNewSubPath(x, y0); fill.lineTo(x, y); }
-            else        { curve.lineTo(x, y); fill.lineTo(x, y); }
-        }
-        if (!freqs.empty())
-        {
-            fill.lineTo(freqToX(freqs.back(), plot), y0);
+            juce::Path curve, fill;
+            const float y0 = gainToY(0.0f, plot);
+            const int steps = juce::jmax(48, (int) plot.getWidth() / 3);
+            for (int s = 0; s <= steps; ++s)
+            {
+                const float u = (float) s / (float) steps;
+                const float x = plot.getX() + u * plot.getWidth();
+                const float y = gainToY(eqCurveDbAt(gains.data(), (int) gains.size(),
+                                                    u * (float) (gains.size() - 1),
+                                                    kGainRange), plot);
+                if (s == 0) { curve.startNewSubPath(x, y); fill.startNewSubPath(x, y0); fill.lineTo(x, y); }
+                else        { curve.lineTo(x, y); fill.lineTo(x, y); }
+            }
+            fill.lineTo(plot.getRight(), y0);
             fill.closeSubPath();
+            g.setColour(accent.withAlpha(0.12f));
+            g.fillPath(fill);
+            g.setColour(accent.withAlpha(0.9f));
+            g.strokePath(curve, juce::PathStrokeType(1.6f));
         }
-        g.setColour(accent.withAlpha(0.12f));
-        g.fillPath(fill);
-        g.setColour(accent.withAlpha(0.9f));
-        g.strokePath(curve, juce::PathStrokeType(1.6f));
 
         // Node handles (ADSR style).
         for (size_t i = 0; i < freqs.size(); ++i)
