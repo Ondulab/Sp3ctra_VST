@@ -12,6 +12,11 @@
 #include <math.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+/* clock_gettime(CLOCK_MONOTONIC) shim — usually pulled in via the mirrored
+ * <pthread.h>, but this TU is pthread-free so it must be explicit. */
+#include "sp3ctra_win_compat.h"
+#endif
 
 /* ==========================================================================
  * Clock
