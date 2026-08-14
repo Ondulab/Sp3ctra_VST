@@ -220,8 +220,12 @@ bool MidiTapSink::openPort(const juce::String& deviceName, juce::String& errOut)
 
     if (deviceName == "Virtual")
     {
+        // createNewDevice only exists on CoreMIDI/ALSA — JUCE does not declare
+        // it on Windows, so the call must be compiled out, not just null-checked.
+#if JUCE_LINUX || JUCE_MAC || JUCE_IOS
         const juce::String name = "Sp3ctra MIDI TAP " + juce::String(impl->slot + 1);
         impl->port = juce::MidiOutput::createNewDevice(name);
+#endif
         if (impl->port == nullptr)
         {
             errOut = "Virtual MIDI ports are not available on this platform. "
@@ -230,7 +234,9 @@ bool MidiTapSink::openPort(const juce::String& deviceName, juce::String& errOut)
             impl->err = errOut;
             return false;
         }
+#if JUCE_LINUX || JUCE_MAC || JUCE_IOS
         impl->openedPortName = name;
+#endif
     }
     else
     {
