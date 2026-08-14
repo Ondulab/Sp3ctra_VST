@@ -21,7 +21,7 @@
 class ModuleCatalogComponent : public juce::Component
 {
 public:
-    static constexpr int kRailW   = 124;
+    static constexpr int kRailW   = 156;   // wide enough for "VIDEO SCROLL" / "→ LUXSTRAL" un-elided
     static constexpr int kHeaderH = 16;
     static constexpr int kChipH   = 26;
     static constexpr int kChipGap = 5;
@@ -50,7 +50,7 @@ public:
         g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSubTab)).boldened());
         for (const auto& s : sections)
         {
-            g.setColour(juce::Colour(0xff66cc88));
+            g.setColour(moduleCatColour(s.cat).withAlpha(0.90f));
             g.drawText(moduleCatLabel(s.cat), kPadX + 1, s.y, getWidth() - 2 * kPadX, kHeaderH,
                        juce::Justification::centredLeft, false);
         }
@@ -117,9 +117,9 @@ private:
         void paint(juce::Graphics& g) override
         {
             auto b = getLocalBounds().toFloat().reduced(1.5f);
-            g.setColour(isMouseOver() ? colour.withAlpha(0.18f) : colour.withAlpha(0.10f));
+            g.setColour(isMouseOver() ? colour.withAlpha(0.26f) : colour.withAlpha(0.15f));
             g.fillRoundedRectangle(b, 4.f);
-            g.setColour(colour.withAlpha(isMouseOver() ? 0.85f : 0.40f));
+            g.setColour(colour.withAlpha(isMouseOver() ? 1.0f : 0.75f));
             g.drawRoundedRectangle(b, 4.f, 1.f);
 
             // grip dots (drag affordance)
@@ -132,7 +132,8 @@ private:
                 g.fillEllipse(gx + 3.f, gy, 1.6f, 1.6f);
             }
 
-            // Name — a MIDI DIN badge leads the label for MIDI-input modules.
+            // Name — a badge leads the label: keyboard for MIDI-input modules,
+            // boxed "FX" for the FX section.
             auto textArea = b.reduced(7.f, 0.f).withTrimmedRight(14.f);
             if (moduleNeedsMidi(type))
             {
@@ -140,6 +141,14 @@ private:
                 const juce::Rectangle<float> iconR(b.getX() + 5.f, b.getCentreY() - icoH * 0.5f,
                                                    icoW, icoH);
                 ModuleIcons::drawMidiKeyboard(g, iconR, colour.withAlpha(isMouseOver() ? 0.90f : 0.62f));
+                textArea = textArea.withLeft(iconR.getRight() + 5.f);
+            }
+            else if (moduleIsFx(type))
+            {
+                const float icoW = 14.f, icoH = 12.f;
+                const juce::Rectangle<float> iconR(b.getX() + 5.f, b.getCentreY() - icoH * 0.5f,
+                                                   icoW, icoH);
+                ModuleIcons::drawFxBadge(g, iconR, colour.withAlpha(isMouseOver() ? 0.90f : 0.62f));
                 textArea = textArea.withLeft(iconR.getRight() + 5.f);
             }
 

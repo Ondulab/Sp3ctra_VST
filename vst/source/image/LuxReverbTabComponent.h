@@ -12,6 +12,8 @@
  */
 #pragma once
 
+#include "../ui/ModuleCatalog.h"
+
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
@@ -21,7 +23,7 @@ class LuxReverbTabComponent : public juce::Component
 {
 public:
     /** Accent colour for the REVERB page (matches the catalogue chip). */
-    static constexpr uint32_t kAccentARGB = 0xff9d8ce0;
+    static inline const uint32_t kAccentARGB = moduleColour(ModuleType::Reverb).getARGB();   ///< inherited module colour
 
     static constexpr int kPreferredH =
         ReverbEditorComponent::kPreferredH + 4 + 22 + 30 + 8;

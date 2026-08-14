@@ -24,7 +24,11 @@
 #include "../processing/lux_echo.h"
 #include "../processing/lux_eq.h"
 #include "../processing/lux_harmo.h"
+#include "../processing/lux_centro.h"
+#include "../processing/lux_drive.h"
+#include "../processing/lux_dcblock.h"
 #include "../processing/video_scroll.h"
+#include "../processing/midi_tap.h"
 #include "../processing/internal_source.h"
 #include <time.h>
 #include <sys/time.h>
@@ -249,7 +253,6 @@ int initDoubleBuffer(DoubleBuffer *db) {
   /* Initialize additive synthesis data */
   memset(db->preprocessed_data.additive.grayscale, 0, sizeof(db->preprocessed_data.additive.grayscale));
   memset(db->preprocessed_data.additive.notes, 0, sizeof(db->preprocessed_data.additive.notes));
-  db->preprocessed_data.additive.contrast_factor = 1.0f;
   
   /* Initialize polyphonic synthesis data */
 #ifndef DISABLE_LUXSYNTH
@@ -413,8 +416,16 @@ static void chain_resolve_insert_states(const SynthChainPlan *sp,
                 states[i] = (void *)lux_eq_instance(sp->insert_state_idx[i]); break;
             case IMAGE_CHAIN_INSERT_LUXHARMO:
                 states[i] = (void *)lux_harmo_instance(sp->insert_state_idx[i]); break;
+            case IMAGE_CHAIN_INSERT_LUXCENTRO:
+                states[i] = (void *)lux_centro_instance(sp->insert_state_idx[i]); break;
+            case IMAGE_CHAIN_INSERT_LUXDRIVE:
+                states[i] = (void *)lux_drive_instance(sp->insert_state_idx[i]); break;
+            case IMAGE_CHAIN_INSERT_LUXDCBLOCK:
+                states[i] = (void *)lux_dcblock_instance(sp->insert_state_idx[i]); break;
             case IMAGE_CHAIN_INSERT_VIDEOSCROLL:
                 states[i] = (void *)video_scroll_instance(sp->insert_state_idx[i]); break;
+            case IMAGE_CHAIN_INSERT_MIDITAP:
+                states[i] = (void *)midi_tap_instance(sp->insert_state_idx[i]); break;
             default:
                 states[i] = NULL; break;
         }
@@ -517,6 +528,87 @@ static int synth_chain_has_no_signal(const SynthChainPlan *sp, int base_sig)
     return 1;
 }
 
+/* ── FX tail runout ──────────────────────────────────────────────────────────
+ * Reverb and Echo are DEFINED by what they keep printing after their input
+ * goes silent. Cutting their chain the instant it loses its feed (source
+ * module deactivated or removed, score/sampler player stopped) truncates that
+ * decay mid-flight — the sound stops dead instead of ringing out.
+ *
+ * So a chain that lost its feed keeps being walked on blank paper (the white
+ * line synth_source_base already hands back) until every tail-bearing insert
+ * in the span reports it has nothing left to print. Only then does the
+ * no-signal publication fire and the chain go quiet.
+ *
+ * Both queries are O(1) reads of per-line bookkeeping — cheap enough to run
+ * once per chain per line. */
+static int chain_span_fx_tail_alive(const SynthChainPlan *sp, int from, int to)
+{
+    if (from < 0) from = 0;
+    if (to > sp->num_inserts) to = sp->num_inserts;
+
+    for (int i = from; i < to; i++)
+    {
+        const int id  = sp->insert_id[i];
+        const int idx = sp->insert_state_idx[i];
+        if (id == IMAGE_CHAIN_INSERT_LUXREVERB
+            && lux_reverb_tail_alive(lux_reverb_instance(idx)))
+            return 1;
+        if (id == IMAGE_CHAIN_INSERT_LUXECHO
+            && lux_echo_tail_alive(lux_echo_instance(idx)))
+            return 1;
+    }
+    return 0;
+}
+
+/* Per-chain runout budget, in lines. The tail queries above ARE the terminator
+ * in every sane topology; this only bounds the pathological one: a Reverb/Echo
+ * forced to BG_BLACK reads the blank-paper line as full material and would
+ * re-excite itself forever, turning a stopped chain into a permanent drone.
+ * The longest legitimate tail is the echo's (255-line delay at 0.95 feedback ≈
+ * 28k lines); 60k leaves 2x headroom over it and over a 20 s reverb decay. */
+#define CHAIN_RUNOUT_MAX_LINES 60000
+static int s_chain_runout_lines[CHAIN_MAX_CHAINS];
+
+static void chain_runout_clear(int chain_idx)
+{
+    if (chain_idx >= 0 && chain_idx < CHAIN_MAX_CHAINS)
+        s_chain_runout_lines[chain_idx] = 0;
+}
+
+/* THE producer-side runout arbiter: 0 = publish no-signal and skip the chain,
+ * 1 = walk it once more on blank paper. Charges the line to the budget, and
+ * owns the reset — every line the chain HAS a feed rearms a full runout. */
+static int chain_runout_should_walk(const SynthChainPlan *sp, int chain_idx,
+                                    int no_signal)
+{
+    if (chain_idx < 0 || chain_idx >= CHAIN_MAX_CHAINS)
+        return 0;
+    if (!no_signal)
+    {
+        s_chain_runout_lines[chain_idx] = 0;
+        return 0;
+    }
+    if (!chain_span_fx_tail_alive(sp, 0, sp->num_inserts))
+        return 0;
+    if (s_chain_runout_lines[chain_idx] >= CHAIN_RUNOUT_MAX_LINES)
+        return 0;
+    s_chain_runout_lines[chain_idx]++;
+    return 1;
+}
+
+/* Pool-wide sweep (no plan needed): 1 while ANY Reverb/Echo instance still has
+ * a tail. The feeder polls it to keep ticking at source rate through a runout
+ * instead of dropping back to its 20 Hz idle poll — which would stretch an
+ * echo's repeats by 25x on the way out. */
+int chain_any_fx_tail_alive(void)
+{
+    for (int i = 0; i < CHAIN_MAX_CHAINS; i++)
+        if (lux_reverb_tail_alive(lux_reverb_instance(i))
+            || lux_echo_tail_alive(lux_echo_instance(i)))
+            return 1;
+    return 0;
+}
+
 /* ── Chain "no signal" publication ───────────────────────────────────────────
  * A chain lost its feed (source module removed / deactivated / emptied): make
  * the silence OBSERVABLE everywhere the chain is. Idempotent and cheap (a few
@@ -553,6 +645,22 @@ static void chain_publish_no_signal(const SynthChainPlan *sp, int chain_idx,
             video_scroll_capture_line(
                 video_scroll_instance(sp->insert_state_idx[i]),
                 s_white_line, s_white_line, s_white_line, nb_pixels);
+        else if (id == IMAGE_CHAIN_INSERT_MIDITAP)
+            /* The MIDI analogue of the white-line feed — but NOT a white line:
+             * under BG_BLACK polarity a white line is maximum material in every
+             * band, i.e. a 128-note chord on every chain teardown. Silence means
+             * releasing whatever is held. Idempotent, so calling it on every
+             * de-fed tick is free. */
+            midi_tap_silence(midi_tap_instance(sp->insert_state_idx[i]));
+#ifdef VST_MODE
+        else if (id == IMAGE_CHAIN_INSERT_SAMPLER)
+            /* Blend-reference analogue of the white line: an unfed chain
+             * streams blank paper, so the marker's MIX/darken-blend input
+             * cache must not keep the LAST column an upstream player (VOICE/
+             * SCORE head, other engine) left there — playback would keep
+             * folding that residual tone into the composite. Idempotent. */
+            lux_sampler_whiten_input_cache(sp->insert_state_idx[i]);
+#endif
     }
 
     if (ls_bank >= 0)
@@ -575,6 +683,68 @@ static void chain_publish_no_signal(const SynthChainPlan *sp, int chain_idx,
             NULL, NULL, NULL, nb_pixels);
     if (sp->viz_tap_insert >= 0 && audioBuffers != NULL)
         audio_image_buffers_clear_selection_tap(audioBuffers);
+}
+
+/* ── Pre-marker "no signal" sweep (player-owned chains) ──────────────────────
+ * The player-owned mirror of chain_publish_no_signal: the chain's own source
+ * died (module disabled, media unloaded) while a player DRIVES the span below
+ * its marker. The player keeps its own stream, but everything the pre-marker
+ * walk fed at line rate goes stale the instant that walk stops running: the
+ * SAMPLER markers' MIX/darken-blend input cache keeps folding the source's
+ * LAST line into the playback composite (a disabled IMAGE kept sounding
+ * through a driving sampler, 2026-08-05), an above-marker OUT staging freezes
+ * on its last column, waterfalls freeze, MIDI taps hold their notes.
+ * Sweeps ONLY the inserts in [0, own_mk] — the span below the marker belongs
+ * to the player thread (single-writer staging seqlock), and V1's one-OUT-per-
+ * type-per-chain rule means an OUT found in the span is producer-staged.
+ * Idempotent + cheap — safe to call every line/tick while the source stays
+ * silent. */
+static void chain_publish_no_signal_pre_marker(const SynthChainPlan *sp,
+                                               int chain_idx, int own_mk,
+                                               AudioImageBuffers *audioBuffers,
+                                               int nb_pixels,
+                                               int is_first_send_chain)
+{
+    const uint8_t *s_white_line = chain_white_line();
+    int ls_above = 0, has_lx = 0, has_lw = 0, has_lg = 0;
+
+    for (int i = 0; i <= own_mk && i < sp->num_inserts; i++)
+    {
+        const int id = sp->insert_id[i];
+        if (id == IMAGE_CHAIN_INSERT_OUT_LUXSTRAL)
+            ls_above = 1;
+        else if (id == IMAGE_CHAIN_INSERT_OUT_LUXSYNTH)
+            has_lx = 1;
+        else if (id == IMAGE_CHAIN_INSERT_OUT_LUXWAVE)
+            has_lw = 1;
+        else if (id == IMAGE_CHAIN_INSERT_OUT_LUXGRAIN)
+            has_lg = 1;
+        else if (id == IMAGE_CHAIN_INSERT_VIDEOSCROLL)
+            video_scroll_capture_line(
+                video_scroll_instance(sp->insert_state_idx[i]),
+                s_white_line, s_white_line, s_white_line, nb_pixels);
+        else if (id == IMAGE_CHAIN_INSERT_MIDITAP)
+            midi_tap_silence(midi_tap_instance(sp->insert_state_idx[i]));
+#ifdef VST_MODE
+        else if (id == IMAGE_CHAIN_INSERT_SAMPLER)
+            lux_sampler_whiten_input_cache(sp->insert_state_idx[i]);
+#endif
+    }
+
+    if (ls_above)
+    {
+        synth_staging_set_inactive(chain_idx);
+        if (is_first_send_chain && audioBuffers != NULL)
+            audio_image_buffers_publish_engine_input(
+                audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL,
+                NULL, NULL, NULL, nb_pixels);
+    }
+    if (has_lx)
+        synth_staging_luxsynth_set_inactive(chain_idx);
+    if (has_lw)
+        synth_staging_luxwave_set_inactive(chain_idx);
+    if (has_lg)
+        synth_staging_luxgrain_set_inactive(chain_idx);
 }
 
 /* ── M3: uniform per-chain execution ─────────────────────────────────────────
@@ -1063,6 +1233,33 @@ int chain_player_execute_owned(int is_score, int engine_slot, int force_play,
     }
     return plan.num_ls_sends;
 }
+
+/* ── Player-side tail runout query ───────────────────────────────────────────
+ * 1 while ANY chain owned by THIS player still has a Reverb/Echo tail to print
+ * below its owning marker. The span is exactly the one chain_player_execute_
+ * owned walks, so a player that keeps injecting blank paper while this returns
+ * 1 finishes the decay at ITS OWN line rate — the only rate at which an echo's
+ * line-expressed delay stays true. The producers keep deferring meanwhile: the
+ * player is still "feeding" (its session is winding down), so the chain never
+ * takes the no-signal branch and nothing double-ticks the FX. Non-RT. */
+int chain_player_fx_tail_alive(int is_score, int engine_slot)
+{
+    ChainPlan plan;
+    chain_plan_get(&plan);
+
+    for (int c = 0; c < plan.num_chains && c < CHAIN_MAX_CHAINS; c++)
+    {
+        const SynthChainPlan *sp = &plan.chain[c];
+        if (!sp->present || !chain_player_owned(sp, is_score, engine_slot))
+            continue;
+        const int own_mk = chain_owning_marker_pos(sp, is_score, engine_slot);
+        if (own_mk < 0)
+            continue;
+        if (chain_span_fx_tail_alive(sp, own_mk + 1, sp->num_inserts))
+            return 1;
+    }
+    return 0;
+}
 #endif /* VST_MODE */
 
 
@@ -1148,6 +1345,49 @@ void chain_player_stagings_set_inactive(int engine_slot)
 void score_player_stagings_set_inactive(int score_slot)
 {
     player_stagings_set_inactive_impl(1, score_slot);
+}
+
+/* ── Player stop → downstream blend-reference silence ────────────────────────
+ * Companion of the staging deactivation above, for the OTHER stale-state
+ * channel: every SAMPLER marker BELOW the stopping player's own marker had its
+ * MIX/darken-blend input cache fed by this player's walk (cacheInputFrame at
+ * the marker). When the player stops, nothing re-feeds those caches on a
+ * sourceless chain — the last column (e.g. where a VOICE head stopped) would
+ * keep being blended into that engine's playback. The no-signal sweep
+ * (chain_publish_no_signal) covers the steady state, but NOT a chain still
+ * owned by its DRIVING downstream sampler — hence this targeted teardown.
+ * Non-RT (player threads). */
+static void player_whiten_downstream_inputs_impl(int is_score, int player_slot)
+{
+#ifdef VST_MODE
+    ChainPlan plan;
+    chain_plan_get(&plan);
+    for (int c = 0; c < plan.num_chains && c < CHAIN_MAX_CHAINS; c++)
+    {
+        const SynthChainPlan *sp = &plan.chain[c];
+        if (!sp->present || !chain_player_owned(sp, is_score, player_slot))
+            continue;
+        const int own_mk = chain_owning_marker_pos(sp, is_score, player_slot);
+        if (own_mk < 0)
+            continue;
+        for (int i = own_mk + 1; i < sp->num_inserts; i++)
+            if (sp->insert_id[i] == IMAGE_CHAIN_INSERT_SAMPLER)
+                lux_sampler_whiten_input_cache(sp->insert_state_idx[i]);
+    }
+#else
+    (void)is_score;
+    (void)player_slot;
+#endif
+}
+
+void chain_player_whiten_downstream_inputs(int engine_slot)
+{
+    player_whiten_downstream_inputs_impl(0, engine_slot);
+}
+
+void score_player_whiten_downstream_inputs(int score_slot)
+{
+    player_whiten_downstream_inputs_impl(1, score_slot);
 }
 
 void *udpThread(void *arg) {
@@ -1440,8 +1680,10 @@ void *udpThread(void *arg) {
         /* (P5-M4) The score players no longer ride the sampler engines —
          * their display ownership is a separate aggregate. Without it the
          * live publish fights the ScorePlayerService's 1 kHz writes (visible
-         * flicker between the device feed and the score). */
-        if (!lux_sampler_is_playing() && !score_player_any_playing())
+         * flicker between the device feed and the score). (P8) A PARKED
+         * score hold feeds audio only — it must not steal the live view,
+         * hence the display-specific hook. */
+        if (!lux_sampler_is_playing() && !score_player_owns_display())
 #endif
         {
           uint8_t *wR = NULL, *wG = NULL, *wB = NULL;
@@ -1608,14 +1850,25 @@ void *udpThread(void *arg) {
                                 audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL,
                                 pex.lsR, pex.lsG, pex.lsB, nb_pixels);
                     }
-                    else if (own_mk >= 0 && audioBuffers != NULL
-                             && sp->viz_tap_insert >= 0
-                             && sp->viz_tap_insert <= own_mk)
-                        /* Sourceless owned chain: the pre-marker span carries
-                         * no stream — the selection tap shows blank paper
-                         * instead of freezing on its last frame. */
-                        audio_image_buffers_clear_selection_tap(audioBuffers);
+                    else if (own_mk >= 0)
+                    {
+                        /* Sourceless owned chain: sweep the pre-marker span's
+                         * stale per-position state (sampler blend caches,
+                         * above-marker stagings, probes) and blank the
+                         * selection tap instead of freezing on last frames. */
+                        chain_publish_no_signal_pre_marker(
+                            sp, c, own_mk, audioBuffers, nb_pixels,
+                            c == first_send_chain);
+                        if (audioBuffers != NULL && sp->viz_tap_insert >= 0
+                            && sp->viz_tap_insert <= own_mk)
+                            audio_image_buffers_clear_selection_tap(audioBuffers);
+                    }
                 }
+                /* A player feeds this chain → it gets a full runout budget the
+                 * day it stops (the player's own runout comes first; this one
+                 * catches what it cannot cover, e.g. the module being pulled
+                 * out of the rack mid-decay). */
+                chain_runout_clear(c);
                 if (c == pb_chain) pb_player_owned = 1;
                 continue;
             }
@@ -1623,7 +1876,14 @@ void *udpThread(void *arg) {
             const uint8_t *sbR, *sbG, *sbB;
             const int sig = synth_source_base(sp, c, db,
                                               nb_pixels, &sbR, &sbG, &sbB);
-            if (synth_chain_has_no_signal(sp, sig))
+            const int no_sig = synth_chain_has_no_signal(sp, sig);
+            /* FX RUNOUT: the chain lost its feed but a Reverb/Echo still has a
+             * tail — walk it once more on the blank-paper base so the decay
+             * finishes. The branch below takes over the line the last tail
+             * runs out (or the budget expires). Called unconditionally: a fed
+             * line is what rearms the budget. */
+            const int fx_runout = chain_runout_should_walk(sp, c, no_sig);
+            if (no_sig && !fx_runout)
             {
                 /* Path-B tap: published by the pb_no_signal block after the
                  * loop (is_pb_chain = 0 here — no double publish). */
@@ -1850,9 +2110,10 @@ void internal_sources_process_tick(void *arg)
 
 #ifdef VST_MODE
   /* (P5-M4) Score ownership is per chain/per slot (chain_hosts_driving_score)
-   * — this aggregate only arbitrates the single visual mix bus below. */
+   * — this aggregate only arbitrates the single visual mix bus below. (P8)
+   * Display-specific hook: a parked score hold leaves the bus to us. */
   const int any_player_playing =
-      lux_sampler_is_playing() || score_player_any_playing();
+      lux_sampler_is_playing() || score_player_owns_display();
 #else
   const int any_player_playing = 0;
 #endif
@@ -1951,10 +2212,20 @@ void internal_sources_process_tick(void *arg)
                   audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL,
                   pex.lsR, pex.lsG, pex.lsB, nb_pixels);
       }
-      else if (own_mk >= 0 && audioBuffers != NULL
-               && sp->viz_tap_insert >= 0 && sp->viz_tap_insert <= own_mk)
-          /* Sourceless owned chain: blank paper on the selection tap. */
-          audio_image_buffers_clear_selection_tap(audioBuffers);
+      else if (own_mk >= 0)
+      {
+          /* Sourceless owned chain (mirror of udpThread): sweep the
+           * pre-marker span's stale per-position state — sampler blend
+           * caches, above-marker stagings, probes — and blank the
+           * selection tap instead of freezing on last frames. */
+          chain_publish_no_signal_pre_marker(sp, c, own_mk, audioBuffers,
+                                             nb_pixels,
+                                             c == first_send_chain);
+          if (audioBuffers != NULL && sp->viz_tap_insert >= 0
+              && sp->viz_tap_insert <= own_mk)
+              audio_image_buffers_clear_selection_tap(audioBuffers);
+      }
+      chain_runout_clear(c);   /* fed chain → full runout budget on stop */
       continue;
     }
 
@@ -1962,7 +2233,12 @@ void internal_sources_process_tick(void *arg)
     const int sig = synth_source_base(sp, c, db,
                                       nb_pixels, &sbR, &sbG, &sbB);
     const int no_sig = synth_chain_has_no_signal(sp, sig);
-    if (no_sig || sig <= 0)
+    /* FX RUNOUT: a chain that just lost its feed keeps being walked on blank
+     * paper while a Reverb/Echo still has a tail to print. sig == 0 is NOT a
+     * runout — the live path owns those frames and this tick has nothing fresh
+     * to walk (udpThread rearms the budget there). */
+    const int fx_runout = chain_runout_should_walk(sp, c, no_sig);
+    if (!fx_runout && (no_sig || sig <= 0))
     {
       /* sig==0 → the live path owns this chain's frames (device streaming
        * edge) — leave everything as-is; a true no-signal chain goes silent. */
@@ -2259,7 +2535,6 @@ void *audioProcessingThread(void *arg) {
          * StrokeForge analyses the MIXED notes — single-send parity intact. */
         DoubleBuffer *mdb = context->doubleBuffer;
         static PreprocessedImageData s_mixed_pp;   /* audio-thread scratch */
-        float  mixed_contrast = 0.0f;
         int    stereo_valid   = 0;
         const int max_notes   = PREPROCESS_MAX_NOTES;
 
@@ -2267,12 +2542,11 @@ void *audioProcessingThread(void *arg) {
             &planB_render,
             s_mixed_pp.additive.notes, max_notes,
             s_mixed_pp.stereo.left_gains, s_mixed_pp.stereo.right_gains,
-            &mixed_contrast, &stereo_valid);
+            &stereo_valid);
         (void) stereo_valid;   /* gains are centre-filled when mono */
 
         if (mixed > 0)
         {
-          s_mixed_pp.additive.contrast_factor = mixed_contrast;
           /* Display axis: with pixels_per_note == 1 the note and pixel axes
            * coincide — reuse the mixed amplitudes as the grayscale mirror. */
           memcpy(s_mixed_pp.additive.grayscale, s_mixed_pp.additive.notes,
@@ -2282,7 +2556,7 @@ void *audioProcessingThread(void *arg) {
             int sf_notes = get_cis_pixels_nb();
             if (sf_notes > max_notes) sf_notes = max_notes;
             img_stage_blob_detect(s_mixed_pp.additive.notes, sf_notes,
-                                  mixed_contrast, &s_mixed_pp.strokeforge);
+                                  &s_mixed_pp.strokeforge);
           }
         }
         else if (mixed == 0)

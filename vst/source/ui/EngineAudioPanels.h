@@ -24,6 +24,7 @@
 #include "../midi/MidiLearnAttachment.h"
 #include "EnvelopeEditorComponent.h"
 #include "AudioPanelWidgets.h"   // AudioPanelLayout + AudioPanelUI (shared visual language)
+#include "Sp3ctraBarSlider.h"
 #include <memory>
 #include <vector>
 
@@ -111,7 +112,8 @@ private:
     Geom computeGeom(int w) const;
 
     juce::Label  volumeLabel;
-    juce::Slider luxwaveVolumeSlider, lwAmplitudeSlider;
+    Sp3ctraBarSlider luxwaveVolumeSlider;
+    juce::Slider lwAmplitudeSlider;
     juce::Slider lwFltCutoffSlider, lwFltDepthSlider;
     juce::Slider lwLfoRateSlider, lwLfoDepthSlider;
     juce::ComboBox lwScanModeCombo;

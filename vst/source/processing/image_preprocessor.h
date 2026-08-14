@@ -33,7 +33,6 @@ typedef struct {
     struct {
         float grayscale[CIS_MAX_PIXELS_NB];     /* Per-pixel grayscale [0.0, 1.0] after all processing */
         float notes[PREPROCESS_MAX_NOTES];      /* Per-note averaged values [0.0, 1.0] */
-        float contrast_factor;                  /* Computed contrast factor [0.0, 1.0] */
     } additive;
     
     /* LUXSYNTH SYNTHESIS - Linear response for FFT (no gamma) */

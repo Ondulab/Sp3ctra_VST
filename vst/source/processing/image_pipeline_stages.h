@@ -76,22 +76,6 @@ void img_stage_apply_gamma(float *pixels, int count, float gamma);
 void img_stage_apply_db_decode(float *pixels, int count, float range_db);
 
 /* ============================================================================
- * Contrast calculation — measures pixel variance for volume modulation.
- * Must be called on RAW grayscale (before inversion/gamma) for accuracy.
- * Returns a value in [contrast_min, 1.0].
- *
- * NOTE: This function accesses g_sp3ctra_config for contrast parameters.
- *       Future refactoring may pass these as explicit parameters.
- * ============================================================================ */
-float img_stage_calculate_contrast(
-    const float *grayscale,
-    int          pixel_count,
-    float        contrast_min,
-    float        contrast_adjustment_power,
-    float        contrast_stride
-);
-
-/* ============================================================================
  * LuxStral-specific: Per-note averaging
  * Averages `pixels_per_note` consecutive grayscale values into one note value.
  * Sets note[0] = 0.0 (legacy bug correction).
@@ -142,7 +126,6 @@ void img_stage_grayscale_luxsynth(
 void img_stage_blob_detect(
     const float          *notes,
     int                   num_notes,
-    float                 contrast_factor,
     StrokeForgeFrameData *out
 );
 

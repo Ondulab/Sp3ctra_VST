@@ -107,6 +107,11 @@ void VideoScrollRenderCore::allocateScrollBuffer(int w, int h)
 
 void VideoScrollRenderCore::setDisplaySize(int w, int h)
 {
+    // Horizontal display (Deg90/270): allocate at swapped dims so the frame,
+    // once rotated by drawWarp(), natively matches the viewport aspect instead
+    // of letterboxing to a sliver.
+    if ((juce::jlimit(0, 3, (int) param("mode", 0.f)) & 1) != 0)
+        std::swap(w, h);
     allocateScrollBuffer(w, h);
 }
 
@@ -575,11 +580,13 @@ bool VideoScrollRenderCore::buildWarp()
     const float pLinePos  = param("linePos",  1.f);
     const float pCompress = param("compress", 1.f);
     const float pFade     = param("fade",     0.f);
+    const float pGamma    = param("gamma",    1.f);
     if (warpReady_ && !warpDirty_
         && pLinePos == wsLinePos_ && pCompress == wsCompress_ && pFade == wsFade_
+        && pGamma == wsGamma_
         && bufW_ == wsBufW_ && compH_ == wsCompH_)
         return false;
-    wsLinePos_ = pLinePos; wsCompress_ = pCompress; wsFade_ = pFade;
+    wsLinePos_ = pLinePos; wsCompress_ = pCompress; wsFade_ = pFade; wsGamma_ = pGamma;
     wsBufW_ = bufW_; wsCompH_ = compH_; warpDirty_ = false;
 
     // ── Birth line (the "source" the effects radiate from) ───────────────────
@@ -597,6 +604,15 @@ bool VideoScrollRenderCore::buildWarp()
     // "compress" param (same range/normalisation).
     const float comp01 = juce::jlimit(0.f, 1.f, (param("compress", 1.f) - 1.0f) / 63.0f);
     const float fade01 = juce::jlimit(0.f, 1.f, param("fade", 0.f));
+
+    // Gamma gain LUT (photo convention pow(x, 1/gamma): >1 brightens midtones,
+    // identity at 1 — endpoints 0/255 are fixed, so the paper-white background
+    // stays white). Applied per channel as the last step of the per-pixel pass.
+    const float gammaVal = juce::jlimit(0.01f, 10.0f, pGamma);
+    uint8_t gammaLut[256];
+    for (int i = 0; i < 256; ++i)
+        gammaLut[i] = (uint8_t) juce::jlimit(0, 255, (int) std::lround(
+            255.0 * std::pow((double) i / 255.0, 1.0 / (double) gammaVal)));
 
     if (warpBuf_.getWidth() != bufW_ || warpBuf_.getHeight() != compH_)
         warpBuf_ = juce::Image(juce::Image::RGB, juce::jmax(1, bufW_),
@@ -682,9 +698,9 @@ bool VideoScrollRenderCore::buildWarp()
                 {
                     auto* dp = reinterpret_cast<juce::PixelRGB*>(dstLine + x * dps);
                     dp->setARGB(255,
-                        (juce::uint8) juce::jlimit(0, 255, (int) ((float) aR[x] * k + 0.5f)),
-                        (juce::uint8) juce::jlimit(0, 255, (int) ((float) aG[x] * k + 0.5f)),
-                        (juce::uint8) juce::jlimit(0, 255, (int) ((float) aB[x] * k + 0.5f)));
+                        gammaLut[juce::jlimit(0, 255, (int) ((float) aR[x] * k + 0.5f))],
+                        gammaLut[juce::jlimit(0, 255, (int) ((float) aG[x] * k + 0.5f))],
+                        gammaLut[juce::jlimit(0, 255, (int) ((float) aB[x] * k + 0.5f))]);
                 }
             }
             else
@@ -701,9 +717,9 @@ bool VideoScrollRenderCore::buildWarp()
                     bl = (bl + (lum - bl) * sat) * dim;
                     auto* dp = reinterpret_cast<juce::PixelRGB*>(dstLine + x * dps);
                     dp->setARGB(255,
-                        (juce::uint8) juce::jlimit(0, 255, (int) (r  + 0.5f)),
-                        (juce::uint8) juce::jlimit(0, 255, (int) (gv + 0.5f)),
-                        (juce::uint8) juce::jlimit(0, 255, (int) (bl + 0.5f)));
+                        gammaLut[juce::jlimit(0, 255, (int) (r  + 0.5f))],
+                        gammaLut[juce::jlimit(0, 255, (int) (gv + 0.5f))],
+                        gammaLut[juce::jlimit(0, 255, (int) (bl + 0.5f))]);
                 }
             }
         }
@@ -769,21 +785,30 @@ void VideoScrollRenderCore::drawWarp(juce::Graphics& g, int destW, int destH)
     // ── Zoom + orientation rotation (applied to the warped/aged image) ───────
     //   Deg0 (0°) → vertical, Deg90/270 → horizontal, Deg180 → flipped vertical.
     const float zoom = juce::jlimit(0.5f, 4.0f, param("zoom", 1.f));
-    const int modeVal = (int) param("mode", 0.f);
-    const float angle = static_cast<float>(juce::jlimit(0, 3, modeVal))
-                        * juce::MathConstants<float>::halfPi;
+    const int modeVal = juce::jlimit(0, 3, (int) param("mode", 0.f));
+    const float angle = (float) modeVal * juce::MathConstants<float>::halfPi;
 
-    // The component dimensions are now the destination dimensions.
     const float cw = (float) destW;
     const float ch = (float) destH;
     const float cx = cw * 0.5f;
     const float cy = ch * 0.5f;
 
+    // Uniform "fit" placement: ONE scale factor, sized on the ROTATED footprint
+    // (90°/270° swap width/height), so the whole frame sits inside the viewport
+    // at zoom 1 whatever the window aspect. zoom is relative to that fit
+    // (> 1 magnifies, < 1 shrinks into the bg border).
+    const float sw = (float) bufW_;
+    const float sh = (float) compH_;
+    const bool  swapWH = (modeVal & 1) != 0;
+    const float fitW = swapWH ? sh : sw;
+    const float fitH = swapWH ? sw : sh;
+    const float s = juce::jmin(cw / fitW, ch / fitH) * zoom;
+
     juce::AffineTransform t =
-        juce::AffineTransform::scale(cw / (float) bufW_, ch / (float) compH_)
-            .scaled(zoom, zoom, cx, cy);
-    if (modeVal != 0)
-        t = t.rotated(angle, cx, cy);
+        juce::AffineTransform::translation(sw * -0.5f, sh * -0.5f)
+            .rotated(angle)
+            .scaled(s)
+            .translated(cx, cy);
 
     // Medium-quality resampling: the warp pass already did a proper box-average
     // downsample, so the final blit is a mild rescale — medium is visually

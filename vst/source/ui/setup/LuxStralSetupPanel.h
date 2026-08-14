@@ -7,6 +7,7 @@
  *   luxstralTuning / luxstralRootNote / luxstralNumOctaves /
  *   luxstralPhysiologicalFilter / luxstralPhysiologicalDepth /
  *   luxstralSoftLimitThreshold / luxstralSoftLimitKnee /
+ *   luxstralRangeDb (decode window — moved here from the OUT page 2026-08-05) /
  *   sfBlobContrastAdaptive / sfBlobContrastSensitivity
  *
  * NOTE: the "Worker Threads" slider (luxstralNumWorkers) did NOT move here —
@@ -17,6 +18,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "../../PluginProcessor.h"
+#include "../Sp3ctraBarSlider.h"
 
 class LuxStralSetupPanel : public juce::Component,
                            public juce::ComboBox::Listener,
@@ -29,7 +31,7 @@ public:
     /** Natural content height (header + 3 sections, no internal viewport —
      *  the zone-3 viewport scrolls). The TIMBRE section (sample wavetable)
      *  lives on the engine PLAY page — it is a performance control set. */
-    static constexpr int kPreferredH = 505;
+    static constexpr int kPreferredH = 545;
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -41,30 +43,33 @@ private:
     // Section: Musical Tuning
     juce::Label tuningRangeSectionLabel;
     juce::Label tuningLabel;
-    juce::Slider tuningSlider;
+    Sp3ctraBarSlider tuningSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> tuningAttachment;
     juce::Label rootNoteLabel;
     juce::ComboBox rootNoteComboBox;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> rootNoteAttachment;
     juce::Label numOctavesLabel;
-    juce::Slider numOctavesSlider;
+    Sp3ctraBarSlider numOctavesSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> numOctavesAttachment;
     juce::Label freqRangeInfoLabel;
     juce::Label physiologicalFilterLabel;
     juce::ToggleButton physiologicalFilterToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> physiologicalFilterAttachment;
     juce::Label physiologicalDepthLabel;
-    juce::Slider physiologicalDepthSlider;
+    Sp3ctraBarSlider physiologicalDepthSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> physiologicalDepthAttachment;
 
-    // Section: Dynamics Processing (Soft Limit only)
+    // Section: Dynamics Processing (Soft Limit + decode window)
     juce::Label dynamicsSectionLabel;
     juce::Label softLimitThresholdLabel;
-    juce::Slider softLimitThresholdSlider;
+    Sp3ctraBarSlider softLimitThresholdSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> softLimitThresholdAttachment;
     juce::Label softLimitKneeLabel;
-    juce::Slider softLimitKneeSlider;
+    Sp3ctraBarSlider softLimitKneeSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> softLimitKneeAttachment;
+    juce::Label rangeDbLabel;
+    Sp3ctraBarSlider rangeDbSlider;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> rangeDbAttachment;
 
     // Section: StrokeForge Advanced Blob Detection
     juce::Label sfBlobSectionLabel;
@@ -72,7 +77,7 @@ private:
     juce::ToggleButton contrastAdaptiveToggle;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> contrastAdaptiveAttachment;
     juce::Label contrastSensLabel;
-    juce::Slider contrastSensSlider;
+    Sp3ctraBarSlider contrastSensSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> contrastSensAttachment;
 
     // Listener callbacks

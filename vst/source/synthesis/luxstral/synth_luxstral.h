@@ -73,17 +73,9 @@ void synth_AudioProcess_silence(void);
  * @param imageData Input image data array
  * @param audioLeft Output left channel audio buffer
  * @param audioRight Output right channel audio buffer
- * @param contrast Contrast adjustment parameter
  */
-void synth_IfftMode(float *imageData, float *audioLeft, float *audioRight, float contrast, struct DoubleBuffer *db);
+void synth_IfftMode(float *imageData, float *audioLeft, float *audioRight, struct DoubleBuffer *db);
 void synth_luxstral_cleanup(void);
-
-/**
- * @brief Get the last calculated contrast factor (thread-safe)
- * @return Last contrast factor value (0.0-1.0 range typically)
- * @note Used by auto-volume system to detect audio intensity for adaptive thresholding
- */
-float synth_get_last_contrast_factor(void);
 
 /**
  * @brief Cumulative phase-management onset count (thread-safe, monotonic)

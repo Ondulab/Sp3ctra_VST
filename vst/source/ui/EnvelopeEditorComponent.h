@@ -30,6 +30,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
+#include "Sp3ctraBarSlider.h"
 #include <memory>
 #include <vector>
 
@@ -149,13 +150,13 @@ private:
     void bind(Bound& b, const juce::String& id, bool readRange = true);
 
     // ── Compact numeric boxes (SliderAttachment) ────────────────────────────
-    juce::Slider boxA, boxD, boxS, boxR;
-    juce::Slider boxWAtk, boxW, boxWRel;
+    Sp3ctraBarSlider boxA, boxD, boxS, boxR;
+    Sp3ctraBarSlider boxWAtk, boxW, boxWRel;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
         boxAAtt, boxDAtt, boxSAtt, boxRAtt, boxWAtkAtt, boxWAtt, boxWRelAtt;
     MidiMappingEngine* midiMap_ = nullptr;
     std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
-    void initBox(juce::Slider& box, const juce::String& paramId,
+    void initBox(Sp3ctraBarSlider& box, const juce::String& paramId,
                  std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>& att);
 
     // Lane rectangles (set in resized(), consumed by computeGeometry()/paint()).

@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "session/MachinePrefs.h"     // machine-scoped settings (LINK, layout…)
 #include "session/SessionManager.h"   // working-session (project) persistence
 #include "session/Sp3sImporter.h"     // one-shot legacy .sp3s migration
 #include "licensing/LicenseManager.h" // demo contract: no state into DAW projects
@@ -10,6 +11,7 @@
 #include "sampler/SamplerMidiTargets.h"              // MIDI-Learn virtual targets (sampler play params)
 #include "tts/PiperTts.h"                            // VOICE — offline TTS (startup smoke test)
 #include "recorder/VideoRecorder.h"                  // VIDEO MIX + master-audio recorder
+#include "image/ScoreGenRenderer.h"                  // P9 — calibrated-PNG session takes
 
 // C headers still used directly by this file
 extern "C" {
@@ -28,7 +30,12 @@ extern "C" {
     #include "processing/lux_echo.h"                          // LuxEcho FX (g_lux_echo_proc)
     #include "processing/lux_eq.h"                            // LuxEq FX (g_lux_eq_proc)
     #include "processing/lux_harmo.h"                         // LuxHarmo/SCALE FX (g_lux_harmo_proc)
+    #include "processing/lux_centro.h"                        // LuxCentro/CENTROID FX (g_lux_centro_proc)
+    #include "processing/lux_drive.h"                         // LuxDrive/LEVELS FX (g_lux_drive_proc)
+    #include "processing/lux_dcblock.h"                       // LuxDcBlock/DC BLOCK FX (g_lux_dcblock_proc)
     #include "processing/video_scroll.h"                      // VideoScroll capture-ring pool
+    #include "processing/midi_tap.h"                          // MidiTap note-extraction pool
+    #include "midi/MidiTapSink.h"                             // MidiTap file + port sinks
     #include "processing/image_chain.h"                       // Insert chain executor (order + taps)
     #include "processing/chain_plan.h"                         // M6 Phase 2 — RT chain descriptor
     #include "processing/synth_staging.h"                      // deferred staging resets (M3)
@@ -85,33 +92,36 @@ namespace
     {
         return t == ModuleType::Pitch  || t == ModuleType::Mask
             || t == ModuleType::Reverb || t == ModuleType::Echo
-            || t == ModuleType::Equalizer || t == ModuleType::Harmonize;
+            || t == ModuleType::Equalizer || t == ModuleType::Harmonize
+            || t == ModuleType::Centroid || t == ModuleType::Drive
+            || t == ModuleType::DcBlock;
     }
 }
 
 //==============================================================================
-// Per-module-type score transport param IDs. Each SCORE-family module drives
-// ONLY its own player slot, so VOICE / MIDI SCORE / TIMBRE / SCORE have
-// INDEPENDENT speed / loop / reverse (moving one no longer drags the others).
-// SCORE keeps the legacy "score*" ids so old sessions restore unchanged.
+// Per-INSTANCE score transport param IDs (P7). Each SCORE-family module drives
+// ONLY its own player slot, so VOICE / MIDI SCORE / TIMBRE / SCORE — and two
+// SCOREs living in two different chains — have INDEPENDENT play / speed / loop
+// / reverse. Slot 0 keeps the legacy per-type ids ("score*", "timbre*"…) so old
+// sessions, automation lanes and MIDI mappings restore unchanged.
 namespace {
-struct ScoreXportIds { const char* play; const char* speed; const char* loop; const char* reverse; };
-
-ScoreXportIds scoreXportIds(ModuleType t)
+struct ScoreXportIds
 {
-    switch (t)
-    {
-        case ModuleType::Timbre:    return { "timbrePlaying",    "timbreSpeed",    "timbreLoop",    "timbreReverse"    };
-        case ModuleType::MidiScore: return { "midiScorePlaying", "midiScoreSpeed", "midiScoreLoop", "midiScoreReverse" };
-        case ModuleType::Voice:     return { "voicePlaying",     "voiceSpeed",     "voiceLoop",     "voiceReverse"     };
-        default:                    return { "scorePlaying",     "scoreSpeed",     "scoreLoop",     "scoreReverse"     };
-    }
+    juce::String play, speed, loop, reverse;
+};
+
+ScoreXportIds scoreXportIds(ModuleType t, int slot)
+{
+    return { scoreXportParam(t, slot, "Playing"),
+             scoreXportParam(t, slot, "Speed"),
+             scoreXportParam(t, slot, "Loop"),
+             scoreXportParam(t, slot, "Reverse") };
 }
 
 // Reverse always loops (the engine has no one-shot reverse), mirroring the
 // generator pictograms: reverse → INVERSE, else loop → LOOP, else NONE.
 LoopMode loopModeFromIds(juce::AudioProcessorValueTreeState& apvts,
-                         const char* loopId, const char* reverseId)
+                         const juce::String& loopId, const juce::String& reverseId)
 {
     if (apvts.getRawParameterValue(reverseId)->load() > 0.5f) return LoopMode::INVERSE;
     if (apvts.getRawParameterValue(loopId)->load()    > 0.5f) return LoopMode::LOOP;
@@ -319,10 +329,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"luxstralSoftLimitKnee", 1}, "Soft Limit Knee",
         juce::NormalisableRange<float>(0.01f, 1.0f, 0.01f), 0.2f, kHiddenFloat));
 
-    // (Purge 2026-07-12: luxstralFidelityMode/RangeDb deleted — the inverse-dB
-    // decode law is ALWAYS ON with its dB window PER OUT SEND, from the
-    // luxstralOut{N}_rangeDb bank; the migration seeds the banks from the old
-    // shared knob read out of the raw session XML.)
+    // ── Setup — inverse-dB decode window (LuxStral) ──────────────────────────
+    // The decode law is ALWAYS ON; its dB window is a MACHINE SETTING (it must
+    // match the dynamicRangeDB the SCORE was generated with — default 50), so
+    // it lives on the SETUP face, not per OUT send. (2026-08-05: the per-OUT
+    // luxstralOut{N}_rangeDb bank was re-collapsed into this single knob; the
+    // migration seeds it from bank slot 0 / the pre-P1 shared knob.)
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"luxstralRangeDb", 1}, "LuxStral Range",
+        juce::NormalisableRange<float>(20.0f, 80.0f, 0.5f), 50.0f,
+        kHiddenFloat.withLabel("dB")));
 
     // ── Gameplay — Phase management: physical onset modes ───────────────────
     // When a note attacks (strong volume jump crossing the gate from silence),
@@ -401,101 +417,33 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"luxstralTimbreScanRate", 1}, "Timbre Scan Rate",
         juce::NormalisableRange<float>(0.05f, 4.0f, 0.01f, 0.5f), 1.0f));
 
-    // ── Synth-split P1 — per-OUT conditioning banks (pool slots 0..7) ────────
-    // One bank per OUT-module instance: the OUT conditions its chain's flux
-    // before sending it to the global engine. Gamma has NO enable toggle
-    // (1.0 = off); Intensity is the pre-engine mix weight of the send.
-    // Defaults mirror the legacy conditioning defaults so a fresh session is
-    // bit-identical. (The legacy pre-split globals were deleted from the
-    // layout on 2026-07-12 — the migration reads their OLD ids from the raw
-    // session XML, see setStateInformation.)
+    // ── Synth-split P1 — per-OUT banks (pool slots 0..7) ─────────────────────
+    // One bank per OUT-module instance. (Purge 2026-08-05: the per-OUT
+    // conditioning knobs — Negative / DC Blocking / Gamma / Intensity — are
+    // gone; 2026-08-13: Contrast Min followed, the variance dimming is the
+    // LEVELS module's CONTRAST knob now — visual domain, the sound follows.
+    // Flux conditioning is the chain's business: LEVELS (lux_drive)
+    // carries Floor/Gamma/Saturation/Contrast/Invert and the dedicated DC
+    // module the mean removal. The OUT stage applies the CANONICAL decode:
+    // inversion ON (intrinsic to the inverse-dB law), DC OFF, gamma 1.0,
+    // unity send weight — see applyConfigurationToCore.)
     for (int s = 0; s < 8; ++s)
     {
         const juce::String n(s);
 
-        // LuxStral OUT
-        params.push_back(std::make_unique<juce::AudioParameterBool>(
-            juce::ParameterID{lsOutParam(s, "negative"), 1},
-            "LS OUT" + n + " Negative", true));
-        params.push_back(std::make_unique<juce::AudioParameterBool>(
-            juce::ParameterID{lsOutParam(s, "dcBlocking"), 1},
-            "LS OUT" + n + " DC Blocking", true));
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID{lsOutParam(s, "gamma"), 1},
-            "LS OUT" + n + " Gamma",
-            juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f, 0.30f), 1.0f));
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID{lsOutParam(s, "contrastMin"), 1},
-            "LS OUT" + n + " Contrast Min",
-            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.21f));
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID{lsOutParam(s, "rangeDb"), 1},
-            "LS OUT" + n + " Range",
-            juce::NormalisableRange<float>(20.0f, 80.0f, 0.5f), 50.0f,
-            juce::AudioParameterFloatAttributes{}.withLabel("dB")));
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID{lsOutParam(s, "intensity"), 1},
-            "LS OUT" + n + " Intensity",
-            juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 1.0f));
         // Per-send power (rack LED) — the ENGINE enable stays deviceEnabled
         // (AUDIO MIX strip LED). A disabled send contributes silence to the mix.
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID{lsOutParam(s, "enabled"), 1},
             "LS OUT" + n + " On", true));
 
-        // LuxSynth OUT
-        params.push_back(std::make_unique<juce::AudioParameterBool>(
-            juce::ParameterID{lxOutParam(s, "negative"), 1},
-            "LX OUT" + n + " Negative", true));
-        params.push_back(std::make_unique<juce::AudioParameterBool>(
-            juce::ParameterID{lxOutParam(s, "dcBlocking"), 1},
-            "LX OUT" + n + " DC Blocking", true));
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID{lxOutParam(s, "gamma"), 1},
-            "LX OUT" + n + " Gamma",
-            juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f, 0.30f), 1.0f));
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID{lxOutParam(s, "intensity"), 1},
-            "LX OUT" + n + " Intensity",
-            juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 1.0f));
+        // LuxSynth / LuxWave / LuxGrain OUT — per-send power only.
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID{lxOutParam(s, "enabled"), 1},
             "LX OUT" + n + " On", true));
-
-        // LuxWave OUT — autonomous conditioning (no longer inherits LuxSynth's)
-        params.push_back(std::make_unique<juce::AudioParameterBool>(
-            juce::ParameterID{lwOutParam(s, "negative"), 1},
-            "LW OUT" + n + " Negative", true));
-        params.push_back(std::make_unique<juce::AudioParameterBool>(
-            juce::ParameterID{lwOutParam(s, "dcBlocking"), 1},
-            "LW OUT" + n + " DC Blocking", true));
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID{lwOutParam(s, "gamma"), 1},
-            "LW OUT" + n + " Gamma",
-            juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f, 0.30f), 1.0f));
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID{lwOutParam(s, "intensity"), 1},
-            "LW OUT" + n + " Intensity",
-            juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 1.0f));
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID{lwOutParam(s, "enabled"), 1},
             "LW OUT" + n + " On", true));
-
-        // LuxGrain OUT — autonomous conditioning (granular engine, M2)
-        params.push_back(std::make_unique<juce::AudioParameterBool>(
-            juce::ParameterID{lgOutParam(s, "negative"), 1},
-            "LG OUT" + n + " Negative", true));
-        params.push_back(std::make_unique<juce::AudioParameterBool>(
-            juce::ParameterID{lgOutParam(s, "dcBlocking"), 1},
-            "LG OUT" + n + " DC Blocking", true));
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID{lgOutParam(s, "gamma"), 1},
-            "LG OUT" + n + " Gamma",
-            juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f, 0.30f), 1.0f));
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID{lgOutParam(s, "intensity"), 1},
-            "LG OUT" + n + " Intensity",
-            juce::NormalisableRange<float>(0.0f, 2.0f, 0.01f), 1.0f));
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             juce::ParameterID{lgOutParam(s, "enabled"), 1},
             "LG OUT" + n + " On", true));
@@ -1053,8 +1001,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
 
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             id("Enabled"), tag + "Enabled", false));
-        // 9 gain nodes on the octave boundaries of the pixel/frequency axis
-        // (LUX_EQ_NUM_BANDS) — 0 dB default = flat curve = pass-through.
+        // Up to LUX_EQ_NUM_BANDS gain nodes spread evenly over the
+        // pixel/frequency axis — 0 dB default = flat curve = pass-through.
+        // NumPoints picks how many are active (default 2 = one straight line).
         for (int b = 0; b < LUX_EQ_NUM_BANDS; ++b)
         {
             const auto sfx = "Band" + juce::String(b);
@@ -1065,6 +1014,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
                                                LUX_EQ_GAIN_DB_MAX, 0.1f), 0.0f,
                 juce::AudioParameterFloatAttributes{}.withLabel("dB")));
         }
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            id("NumPoints"), tag + "Points",
+            juce::StringArray{"2", "3", "4", "5", "6", "7", "8", "9"}, 0));
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             id("BackgroundMode"), tag + "Background",
             juce::StringArray{"Auto", "Black", "White"}, 2));
@@ -1109,6 +1061,136 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             id("BackgroundMode"), tag + "Background",
             juce::StringArray{"Auto", "Black", "White"}, 2));
     }
+    for (int n = 0; n < 8; ++n)
+    {
+        const juce::String tag = "CT" + juce::String(n) + " ";
+        auto id = [n](const char* sfx) { return juce::ParameterID{ctParam(n, sfx), 1}; };
+
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            id("Enabled"), tag + "Enabled", false));
+        // Écrêtage: material below Floor (% of full scale above the background
+        // floor) is clipped — the runs above it are the masses.
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("Floor"), tag + "Floor",
+            juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 10.0f,
+            juce::AudioParameterFloatAttributes{}.withLabel("%")));
+        // Equivalent width of the barycentre line each mass is re-printed as.
+        // Log-skewed (centre = 8 px): the pixel axis is log-frequency with a
+        // constant pixel-per-semitone density, so an equal knob move is an
+        // equal RATIO of width — constant in musical bandwidth.
+        juce::NormalisableRange<float> thickRange(1.0f, 64.0f, 0.1f);
+        thickRange.setSkewForCentre(8.0f);
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("Thickness"), tag + "Thickness",
+            thickRange, 6.0f,
+            juce::AudioParameterFloatAttributes{}.withLabel("px")));
+        // Edge shape of the re-printed line: 0 = square band, 1 = fully smoothed.
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("Edge"), tag + "Edge",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+        // Output EQ — same node model as the LuxEq bank: up to
+        // LUX_EQ_NUM_BANDS gain nodes applied AFTER the barycentre redraw
+        // (0 dB default = flat curve = pass-through).
+        for (int b = 0; b < LUX_EQ_NUM_BANDS; ++b)
+        {
+            const auto sfx = "Band" + juce::String(b);
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID{ctParam(n, sfx.toRawUTF8()), 1},
+                tag + sfx,
+                juce::NormalisableRange<float>(-LUX_EQ_GAIN_DB_MAX,
+                                               LUX_EQ_GAIN_DB_MAX, 0.1f), 0.0f,
+                juce::AudioParameterFloatAttributes{}.withLabel("dB")));
+        }
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            id("NumPoints"), tag + "Points",
+            juce::StringArray{"2", "3", "4", "5", "6", "7", "8", "9"}, 0));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            id("BackgroundMode"), tag + "Background",
+            juce::StringArray{"Auto", "Black", "White"}, 2));
+    }
+    for (int n = 0; n < 8; ++n)
+    {
+        // LEVELS bank (internal type "Drive") — "LV" is the host-facing display
+        // tag only; the ParameterIDs stay "luxdrive{n}_*".
+        const juce::String tag = "LV" + juce::String(n) + " ";
+        auto id = [n](const char* sfx) { return juce::ParameterID{dvParam(n, sfx), 1}; };
+
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            id("Enabled"), tag + "Enabled", false));
+        // Mid-tone gamma on the material energy (both ends anchored — never
+        // clips): < 1 lifts the faint material, > 1 thins it. Log-skewed
+        // around 1 (the Photoshop Levels middle slider); a flat OUTPUT-EQ
+        // curve covers global gain.
+        juce::NormalisableRange<float> gammaRange(LUX_DRIVE_GAMMA_MIN,
+                                                  LUX_DRIVE_GAMMA_MAX, 0.01f);
+        gammaRange.setSkewForCentre(1.0f);
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("Gamma"), tag + "Gamma", gammaRange, 1.0f));
+        // COLOUR saturation, bipolar: -100 = black & white, 0 = untouched,
+        // +100 = hyper-vibrant (chroma x3 around each pixel's luminance).
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("Saturation"), tag + "Saturation",
+            juce::NormalisableRange<float>(-100.0f, 100.0f, 0.1f), 0.0f,
+            juce::AudioParameterFloatAttributes{}.withLabel("%")));
+        // Écrêtage bas: material below Floor (% of full scale above the
+        // background floor) is clipped to the background.
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("Floor"), tag + "Floor",
+            juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 0.0f,
+            juce::AudioParameterFloatAttributes{}.withLabel("%")));
+        // CONTRAST MIN — visual port of the per-OUT audio knob (LuxStral
+        // contrastMin): per-line variance contrast dims the MATERIAL down to
+        // this floor, so a flat/blurred stream fades on screen as it does in
+        // volume. 100 % = off; the audio default 0.21 maps to 21 %.
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("ContrastMin"), tag + "Contrast",
+            juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 100.0f,
+            juce::AudioParameterFloatAttributes{}.withLabel("%")));
+        // Final output inversion (mirrors the VideoScroll invert modes):
+        //   Negative  — flip each RGB channel
+        //   Luminance — invert HSL lightness only; hue + saturation preserved
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            id("InvertMode"), tag + "Invert",
+            juce::StringArray{"Off", "Negative", "Luminance"}, 0));
+        // Output EQ — same node model as the LuxEq bank: up to
+        // LUX_EQ_NUM_BANDS gain nodes applied AFTER the transfer
+        // (0 dB default = flat curve = pass-through). Mirrors CENTROID.
+        for (int b = 0; b < LUX_EQ_NUM_BANDS; ++b)
+        {
+            const auto sfx = "Band" + juce::String(b);
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID{dvParam(n, sfx.toRawUTF8()), 1},
+                tag + sfx,
+                juce::NormalisableRange<float>(-LUX_EQ_GAIN_DB_MAX,
+                                               LUX_EQ_GAIN_DB_MAX, 0.1f), 0.0f,
+                juce::AudioParameterFloatAttributes{}.withLabel("dB")));
+        }
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            id("NumPoints"), tag + "Points",
+            juce::StringArray{"2", "3", "4", "5", "6", "7", "8", "9"}, 0));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            id("BackgroundMode"), tag + "Background",
+            juce::StringArray{"Auto", "Black", "White"}, 2));
+    }
+    for (int n = 0; n < 8; ++n)
+    {
+        // DC BLOCK bank — per-line mean removal (the OUT sends' "DC Blocking"
+        // toggle as a dosable chain insert).
+        const juce::String tag = "DC" + juce::String(n) + " ";
+        auto id = [n](const char* sfx) { return juce::ParameterID{dcbParam(n, sfx), 1}; };
+
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            id("Enabled"), tag + "Enabled", false));
+        // Fraction of the per-line mean removed — 100 % = the OUT sends' full
+        // DC Blocking.
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("Amount"), tag + "Amount",
+            juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 100.0f,
+            juce::AudioParameterFloatAttributes{}.withLabel("%")));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            id("BackgroundMode"), tag + "Background",
+            juce::StringArray{"Auto", "Black", "White"}, 2));
+    }
 
     // Fade-in duration [ms] — applied when restarting the live stream after Stop.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -1120,9 +1202,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"samplerGamma", 1}, "Sampler Gamma",
         juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f, 0.30f), 1.0f));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"samplerContrastMin", 1}, "Sampler Contrast Min",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
     // samplerFreezeMode: 0=PLAY, 1=HOLD (freeze last sampler frame), 2=STOP (silence)
     params.push_back(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID{"samplerFreezeMode", 1}, "Sampler Freeze Mode",
@@ -1318,50 +1397,40 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             nm + "Seq Transport", juce::StringArray{"Stop", "Play", "Hold"}, 0));
     }
 
-    // ── SCORE playback transport (LuxSampler score slot) ─────────────────────
-    // The SCORE generator itself stays out of the APVTS (offline settings), but
-    // its playback transport is a live performance control: expose it so the
-    // DAW can automate / MIDI-map it. parameterChanged() relays to LuxSampler.
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"scorePlaying", 1}, "Score Play", false));
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"scoreLoop", 1}, "Score Loop", true));
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{"scoreReverse", 1}, "Score Reverse", false));
+    // ── SCORE-family playback transports (one bank PER INSTANCE) ─────────────
+    // The generators themselves stay out of the APVTS (offline settings), but
+    // their playback transport is a live performance control: expose it so the
+    // DAW can automate / MIDI-map it. parameterChanged() relays each bank to
+    // ITS player slot, so two instances of the same type placed in two chains
+    // are fully independent. Slot 0 = legacy ids ("scoreLoop", "timbreSpeed"…).
     {
-        // Same feel as the SCORE page knob: 0.1×–6× with 1× at the centre.
-        juce::NormalisableRange<float> spd(0.1f, 6.0f, 0.01f);
-        spd.setSkewForCentre(1.0f);
-        params.push_back(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID{"scoreSpeed", 1}, "Score Speed", spd, 1.0f,
-            juce::AudioParameterFloatAttributes{}.withLabel("x")));
-    }
-
-    // Per-module transport for the other SCORE-family generators — same range /
-    // defaults as SCORE above, but independent so VOICE's speed no longer drags
-    // MIDI SCORE's (and vice-versa). Routed to each type's own player slot.
-    {
-        auto addScoreXport = [&params](const char* playId, const char* speedId,
-                                       const char* loopId, const char* revId,
-                                       const char* pretty)
+        auto addScoreXport = [&params](ModuleType t, int slot, const char* pretty)
         {
+            const auto ids = scoreXportIds(t, slot);
+            const juce::String tag = juce::String(pretty)
+                                   + (slot > 0 ? " " + juce::String(slot + 1) : juce::String());
             // Play is a command transport — forced back to Stop on restore
-            // (never auto-run), like scorePlaying.
+            // (never auto-run) and kept out of the chain-owned VALUES.
             params.push_back(std::make_unique<juce::AudioParameterBool>(
-                juce::ParameterID{playId, 1}, juce::String(pretty) + " Play", false));
+                juce::ParameterID{ids.play, 1}, tag + " Play", false));
             params.push_back(std::make_unique<juce::AudioParameterBool>(
-                juce::ParameterID{loopId, 1}, juce::String(pretty) + " Loop", true));
+                juce::ParameterID{ids.loop, 1}, tag + " Loop", true));
             params.push_back(std::make_unique<juce::AudioParameterBool>(
-                juce::ParameterID{revId, 1}, juce::String(pretty) + " Reverse", false));
+                juce::ParameterID{ids.reverse, 1}, tag + " Reverse", false));
+            // Same feel as the generator page knob: 0.1×–6× with 1× centred.
             juce::NormalisableRange<float> s(0.1f, 6.0f, 0.01f);
             s.setSkewForCentre(1.0f);
             params.push_back(std::make_unique<juce::AudioParameterFloat>(
-                juce::ParameterID{speedId, 1}, juce::String(pretty) + " Speed", s, 1.0f,
+                juce::ParameterID{ids.speed, 1}, tag + " Speed", s, 1.0f,
                 juce::AudioParameterFloatAttributes{}.withLabel("x")));
         };
-        addScoreXport("voicePlaying",     "voiceSpeed",     "voiceLoop",     "voiceReverse",     "Voice");
-        addScoreXport("midiScorePlaying", "midiScoreSpeed", "midiScoreLoop", "midiScoreReverse", "MIDI Score");
-        addScoreXport("timbrePlaying",    "timbreSpeed",    "timbreLoop",    "timbreReverse",    "Timbre");
+        for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+        {
+            addScoreXport(ModuleType::Score,     s, "Score");
+            addScoreXport(ModuleType::Voice,     s, "Voice");
+            addScoreXport(ModuleType::MidiScore, s, "MIDI Score");
+            addScoreXport(ModuleType::Timbre,    s, "Timbre");
+        }
     }
 
     // Per-slot ACTIVE (module enable) for the shared score-player pool. The
@@ -1622,6 +1691,33 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"acqGateMultDiv", 1}, "Acquisition Mult/Div",
         juce::StringArray{"/32", "/16", "/8", "/4", "/2", "x1", "x2", "x4"}, 5));
 
+    // ── MIDI MIX master — the TIMEBASE and the destinations, shared by every
+    // MIDI TAP probe. Everything here is global on purpose: N probes must write
+    // files that align on ONE timeline, so per-probe tempi are not a thing.
+    // (The destination NAME, SMF type and file-name template are strings and
+    // live on apvts.state instead — see the MIDI MIX panel.)
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"midiRecArm", 1}, "MIDI Rec", false));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"midiTempo", 1}, "MIDI Tempo",
+        juce::NormalisableRange<float>(20.0f, 300.0f, 0.1f), 120.0f));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"midiPortLatency", 1}, "MIDI Port Latency",
+        juce::StringArray{"0 ms", "2 ms", "5 ms", "10 ms", "20 ms"}, 2));
+    // Write-time rhythmic grid, FILE ONLY (the real-time sinks stay honest).
+    // Not cosmetic: MuseScore 4 removed the per-score MIDI import panel, so a
+    // raw-timed file is quantized by whatever the reader decides.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"midiQuantize", 1}, "MIDI Grid",
+        juce::StringArray{"Off", "1/32", "1/16T", "1/16", "1/8T", "1/8", "1/4"}, 3));
+    // Real-time destinations. The plugin BUS defaults OFF: it is the riskiest
+    // path in a DAW (a track routed back to this instance feeds PITCH/MASK and
+    // self-oscillates), so it must be an explicit opt-in.
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"midiPortEnable", 1}, "MIDI Port Out", false));
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{"midiBusEnable", 1}, "MIDI Bus Out", false));
+
     // ── VIDEO SCROLL output modules — per-instance automatable banks (×8) ──────
     // Each VideoScroll module instance owns a slot 0..7 (ModuleInstance.slot) that
     // keys both its RT capture ring (video_scroll_instance) and this APVTS bank.
@@ -1652,6 +1748,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID{p + "fade", 1}, tag + "Fade",
             juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+        // Display gamma gain (photo convention pow(x, 1/gamma) — same range as
+        // the per-OUT banks): >1 brightens midtones, <1 darkens, identity at 1.
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{p + "gamma", 1}, tag + "Gamma",
+            juce::NormalisableRange<float>(0.01f, 10.0f, 0.01f, 0.30f), 1.0f));
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID{p + "compress", 1}, tag + "Compression",
             juce::NormalisableRange<float>(1.0f, 64.0f, 1.0f), 1.0f));
@@ -1696,6 +1797,107 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             juce::ParameterID{mx + "blend", 1}, "Mix " + tag + "Blend",
             juce::StringArray{"Mix", "Add", "Screen"}, 0));
+    }
+
+    // ── MIDI TAP probes — per-instance automatable banks (×8) ─────────────────
+    // Each MIDI TAP instance owns a slot 0..7 (ModuleInstance.slot) keying both
+    // its RT extraction state (midi_tap_instance) and this bank. Defaults MUST
+    // mirror midi_tap_config_default() — applyConfigurationToCore pushes these
+    // values over the C defaults on the first sync.
+    for (int n = 0; n < 8; ++n)
+    {
+        auto id = [n](const char* sfx) { return juce::ParameterID{ mtParam(n, sfx), 1 }; };
+        const juce::String tag = "MT" + juce::String(n) + " ";
+
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            id("enabled"), tag + "Enabled", true));
+        // Armed = this probe's notes reach the master REC / real-time sinks.
+        // Persisted (it is a routing choice, not a transport state).
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            id("arm"), tag + "Arm", true));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("level"), tag + "Level",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f));
+
+        // Bands = every bright semitone may become a note (scores, strokes).
+        // Fundamental = HPS on the band array, so a VOICE yields its melody
+        // instead of its harmonic stack (see midi_tap.h).
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            id("mode"), tag + "Mode",
+            juce::StringArray{"Bands", "Fundamental"}, 0));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            id("source"), tag + "Source",
+            juce::StringArray{"Luma", "R", "G", "B"}, 0));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("threshold"), tag + "Threshold",
+            juce::NormalisableRange<float>(0.0f, 255.0f, 0.5f), 12.0f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("hysteresis"), tag + "Hysteresis",
+            juce::NormalisableRange<float>(0.1f, 0.95f, 0.01f), 0.6f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("relative"), tag + "Relative Gate",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.25f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("smooth"), tag + "Smooth",
+            juce::NormalisableRange<float>(0.05f, 1.0f, 0.01f), 0.5f));
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            id("peakOnly"), tag + "Peak Only", true));
+        params.push_back(std::make_unique<juce::AudioParameterInt>(
+            id("maxPoly"), tag + "Max Poly", 1, MIDI_TAP_MAX_POLY, 8));
+
+        // attackMs is THE reject-short-notes knob (it costs that much uniform
+        // latency); minOnMs only DELAYS the note-off — see midi_tap.h.
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("attackMs"), tag + "Attack",
+            juce::NormalisableRange<float>(0.0f, 500.0f, 1.0f), 12.0f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("releaseMs"), tag + "Release",
+            juce::NormalisableRange<float>(1.0f, 2000.0f, 1.0f), 40.0f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("minOnMs"), tag + "Min Length",
+            juce::NormalisableRange<float>(0.0f, 2000.0f, 1.0f), 60.0f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("maxOnMs"), tag + "Max Length",
+            juce::NormalisableRange<float>(0.0f, 30000.0f, 10.0f), 8000.0f));
+
+        params.push_back(std::make_unique<juce::AudioParameterInt>(
+            id("transpose"), tag + "Transpose", -48, 48, 0));
+        params.push_back(std::make_unique<juce::AudioParameterInt>(
+            id("noteLo"), tag + "Note Low", 0, 127, 0));
+        params.push_back(std::make_unique<juce::AudioParameterInt>(
+            id("noteHi"), tag + "Note High", 0, 127, 127));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            id("rangePolicy"), tag + "Out Of Range",
+            juce::StringArray{"Clamp", "Drop"}, 0));
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            id("backgroundMode"), tag + "Background",
+            juce::StringArray{"Black", "White", "Auto"}, 2));
+
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            id("velCurve"), tag + "Velocity Curve",
+            juce::StringArray{"Linear", "Soft", "Fixed"}, 1));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("velSpan"), tag + "Velocity Span",
+            juce::NormalisableRange<float>(1.0f, 255.0f, 1.0f), 96.0f));
+        params.push_back(std::make_unique<juce::AudioParameterInt>(
+            id("velFixed"), tag + "Fixed Velocity", 1, 127, 100));
+        // Channel 16 by default: PITCH/MASK/LuxSynth/LuxWave filter incoming
+        // MIDI on their own bank's channel, so a channel-16 emission is ignored
+        // unless the user deliberately points a receiver at it — the first
+        // layer of the feedback-loop mitigation (see midi_tap.h).
+        params.push_back(std::make_unique<juce::AudioParameterInt>(
+            id("channel"), tag + "Channel", 1, 16, 16));
+
+        // DENSE ("black MIDI") — velocity-tracking restrikes: the .mid carries
+        // each partial's amplitude envelope instead of one latched velocity,
+        // which is what keeps a voice intelligible on re-render (midi_tap.h §6).
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            id("dense"), tag + "Dense", false));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("retrigMs"), tag + "Retrig",
+            juce::NormalisableRange<float>(5.0f, 200.0f, 1.0f), 10.0f));
+        params.push_back(std::make_unique<juce::AudioParameterInt>(
+            id("retrigDelta"), tag + "Retrig Delta", 1, 32, 5));
     }
 
     return { params.begin(), params.end() };
@@ -1840,6 +2042,7 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("luxstralPhysiologicalDepth", this);
     apvts.addParameterListener("luxstralSoftLimitThreshold", this);
     apvts.addParameterListener("luxstralSoftLimitKnee", this);
+    apvts.addParameterListener("luxstralRangeDb", this);
     // M4 — core-side LuxSynth engine feed (lx_fft_* config mirror)
     apvts.addParameterListener("lxFftBins", this);
     apvts.addParameterListener("lxFftSmoothing", this);
@@ -1889,7 +2092,6 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     apvts.addParameterListener("imageFadeInMs",        this);
     // Sampler-specific preprocessing parameters
     apvts.addParameterListener("samplerGamma",         this);
-    apvts.addParameterListener("samplerContrastMin",   this);
     apvts.addParameterListener("samplerFreezeMode",    this);
     apvts.addParameterListener("rawFreezeMode",        this);
 
@@ -1922,10 +2124,19 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
              LuxSamplerConstants::NUM_SLOTS,
              static_cast<double>(LuxSamplerConstants::MAX_DURATION_S));
     scorePlayerService_ = std::make_unique<ScorePlayerService>();
+    // P9 — every full frames load (any generator page) becomes the slot's
+    // persisted session take; hot swaps don't fire (see the hook's doc).
+    scorePlayerService_->onFramesLoaded =
+        [this](int slot, const juce::Image& img, juce::Rectangle<int> band,
+               double lo, double hi, bool stereo)
+    { captureScoreTake(slot, img, band, lo, hi, stereo); };
 
     // SCORE generation defaults (shared by the PLAY page and the SETUP panel).
-    score_settings_defaults(&scoreSettings_);
-    scoreSettings_.writingSpeed = 2.5;   // page maps to a sensible default duration
+    for (auto& sc : scoreSettings_)
+    {
+        score_settings_defaults(&sc);
+        sc.writingSpeed = 2.5;   // page maps to a sensible default duration
+    }
 
     // One FrameSequencer per sampler engine — the sequencer is internal to its
     // sampler and addresses only that engine's banks.
@@ -2018,20 +2229,17 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
         apvts.addParameterListener(fsEngineParam(e, "SeqTransport"),    this);
     }
 
-    // SCORE playback transport (relayed to LuxSampler in parameterChanged)
-    apvts.addParameterListener(PARAM_SCORE_PLAYING, this);
-    apvts.addParameterListener(PARAM_SCORE_LOOP,    this);
-    apvts.addParameterListener(PARAM_SCORE_REVERSE, this);
-    apvts.addParameterListener(PARAM_SCORE_SPEED,   this);
-    // Per-module transports for VOICE / MIDI SCORE / TIMBRE (independent slots).
-    for (ModuleType t : { ModuleType::Voice, ModuleType::MidiScore, ModuleType::Timbre })
-    {
-        const auto ids = scoreXportIds(t);
-        apvts.addParameterListener(ids.play,    this);
-        apvts.addParameterListener(ids.speed,   this);
-        apvts.addParameterListener(ids.loop,    this);
-        apvts.addParameterListener(ids.reverse, this);
-    }
+    // SCORE-family PLAY commands, per instance bank. Speed/Loop/Reverse are
+    // manifest suffixes — the manifest loop above already registered them for
+    // the four types; only "Playing" (excluded from the manifest on purpose)
+    // needs its own registration here.
+    for (ModuleType t : kScoreFamily)
+        for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+            apvts.addParameterListener(scoreXportParam(t, s, "Playing"), this);
+    // Per-slot module ACTIVE (rack LED) — the pause/resume relay lives in
+    // applyParameterChange's "scoreActive" branch.
+    for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+        apvts.addParameterListener(scoreActiveParam(s), this);
 
     // M9 — IMAGE / VIDEO / CAMERA source params → engines
     // (P5-M3: the imgSrc* listeners — slot 0 legacy ids included — are
@@ -2105,7 +2313,11 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     lux_echo_init_all();
     lux_eq_init_all();
     lux_harmo_init_all();
+    lux_centro_init_all();
+    lux_drive_init_all();
+    lux_dcblock_init_all();
     video_scroll_init_all();   // init 8 VideoScroll capture rings (RT pool) before the synth thread starts
+    midi_tap_init_all();       // init 8 MidiTap note-extraction rings (RT pool), same reason
 
     // Just update g_sp3ctra_config with current APVTS defaults (no socket/buffer creation)
     applyConfigurationToCore(false);
@@ -2127,10 +2339,16 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
         (size_t) juce::jmax(1, deferredParamIds_.size()));
     for (int i = 0; i < deferredParamIds_.size(); ++i)
         paramDirty_[(size_t) i].store(false, std::memory_order_relaxed);
-    {
-        const auto it = paramIndexById_.find(PARAM_SCORE_PLAYING);
-        scorePlayingParamIdx_ = (it != paramIndexById_.end()) ? it->second : -1;
-    }
+    // P7 — deferred-queue index of every SCORE-family PLAY bank, so the
+    // transport mirror in timerCallback() can guard each one individually.
+    for (int f = 0; f < 4; ++f)
+        for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+        {
+            const auto id = scoreXportParam(kScoreFamily[f], s, "Playing");
+            const auto it = paramIndexById_.find(id);
+            scorePlayIdx_[f][s]   = (it != paramIndexById_.end()) ? it->second : -1;
+            scorePlayParam_[f][s] = apvts.getParameter(id);
+        }
     startTimer(30);
 
     log_info("VST", "Sp3ctraAudioProcessor: Constructor complete (deferred init)");
@@ -2187,18 +2405,29 @@ Sp3ctraAudioProcessor::~Sp3ctraAudioProcessor()
     if (sessionDirtyListener_ != nullptr)
         apvts.state.removeListener(sessionDirtyListener_.get());
 
-    // Flush any pending session autosave while the samplers still exist.
-    // (Normal Standalone close also flushes via makeStandaloneRefState.)
-    if (sessions_ != nullptr && sessions_->isStandalone()
-        && sessions_->hasUnsavedChanges())
+    // Flush the session while the samplers still exist. The state save is
+    // UNCONDITIONAL: engine-direct edits (per-slot sampler params, sequencer
+    // steps…) never mark the session dirty, so gating on hasUnsavedChanges()
+    // silently dropped them on Cmd+Q (the close-button path flushes via
+    // makeStandaloneRefState, but app-quit destroys the window without it).
+    // Banks stay gated — they are heavy writes and every bank mutation does
+    // mark banksDirty (recording falling-edge, clear, load, paste).
+    if (sessions_ != nullptr && sessions_->isStandalone())
     {
         sessions_->saveStateNow();
-        sessions_->saveBanksNow();
+        if (sessions_->hasUnsavedChanges())   // saveStateNow cleared stateDirty
+            sessions_->saveBanksNow();        // → only banksDirty remains
     }
 
     // Stop the RT audio tap, then finalise any in-progress recording.
     recActive_.store(false, std::memory_order_release);
     if (videoRecorder_) { videoRecorder_->stop(); videoRecorder_.reset(); }
+
+    // MIDI takes: finalise the files, then destroy the sinks (their destructors
+    // release any note still held on a real-time destination).
+    stopMidiCapture();
+    midiBusMask_.store(0, std::memory_order_release);
+    for (auto& s : midiTapSinks_) s.reset();
 
     // ── M9: media source service FIRST (uses Context/buffers owned by sharedCore) ──
     if (mediaService_)
@@ -2290,6 +2519,239 @@ void Sp3ctraAudioProcessor::pushRecordVideoFrame(const juce::Image& composite,
 {
     if (recActive_.load(std::memory_order_acquire) && videoRecorder_ != nullptr)
         videoRecorder_->pushVideoFrame(composite, tSeconds);
+}
+
+//==============================================================================
+// Sink C — MIDI TAP → the plugin's MIDI output bus. AUDIO THREAD ONLY.
+//
+// Timing: the probes stamp in wall-clock microseconds on their producer thread;
+// processBlock only knows "this callback happened around now", and host
+// callbacks jitter by up to a full block. Mapping events straight onto the
+// current block would clip an event that belonged at offset 200 down to 0 — an
+// image arpeggio would arrive as a chord. So we emit ONE BLOCK BEHIND: every
+// event's window is fully closed before it is placed, at the cost of one block
+// of latency.
+//
+// Cursors/held/generation live in plain members owned exclusively by this
+// thread — legal because the probe ring is a broadcast window (midi_tap.h).
+//==============================================================================
+void Sp3ctraAudioProcessor::drainMidiTapToBus(juce::MidiBuffer& out, int numSamples)
+{
+    const uint32_t mask = midiBusMask_.load(std::memory_order_acquire);
+    if (mask == 0 || numSamples <= 0)
+        return;
+
+    const double sr = getSampleRate();
+    if (sr <= 0.0) return;
+
+    const juce::uint64 blockUs = (juce::uint64) ((double) numSamples * 1e6 / sr);
+    const juce::uint64 nowUs   = midi_tap_now_us();
+    if (nowUs < blockUs) return;
+    const juce::uint64 winEnd   = nowUs - blockUs;
+    const juce::uint64 winStart = (winEnd > blockUs) ? winEnd - blockUs : 0;
+    const double usPerSample = 1.0e6 / sr;
+
+    for (int slot = 0; slot < CHAIN_MAX_CHAINS; ++slot)
+    {
+        if (((mask >> slot) & 1u) == 0) continue;
+        auto* st = midi_tap_instance(slot);
+        if (st == nullptr) continue;
+
+        const int ch = busChannel_[slot];
+
+        // Generation first (a re-init rewinds write_index under our cursor).
+        const uint32_t gen = midi_tap_generation(st);
+        if (gen != busGen_[slot])
+        {
+            busGen_[slot] = gen;
+            flushBusHeld(out, slot, ch);
+            busCursor_[slot] = midi_tap_ring_writepos(st);
+            continue;
+        }
+
+        uint32_t dropped = 0;
+        const uint32_t avail = midi_tap_ring_available(st, busCursor_[slot], &dropped);
+        if (dropped > 0)
+            flushBusHeld(out, slot, ch);   // our shadow no longer matches the stream
+
+        uint32_t k = 0;
+        for (; k < avail; ++k)
+        {
+            MidiTapEvent e;
+            if (! midi_tap_ring_get(st, busCursor_[slot] + k, &e))
+                continue;      // torn slot: skip the event, still consume the index
+            if (e.t_us > winEnd)
+                break;         // not due yet — leave the cursor here, retry next block
+
+            int off = (e.t_us > winStart)
+                    ? (int) ((double) (e.t_us - winStart) / usPerSample) : 0;
+            off = juce::jlimit(0, numSamples - 1, off);
+
+            const bool on = (e.status == 0x90) && e.vel > 0;
+            out.addEvent(on ? juce::MidiMessage::noteOn (ch, (int) e.note,
+                                                         (juce::uint8) e.vel)
+                            : juce::MidiMessage::noteOff(ch, (int) e.note), off);
+            busHeld_[slot][e.note] = on ? 1 : 0;
+        }
+        busCursor_[slot] += k;
+    }
+}
+
+void Sp3ctraAudioProcessor::flushBusHeld(juce::MidiBuffer& out, int slot, int ch)
+{
+    for (int n = 0; n < 128; ++n)
+    {
+        if (! busHeld_[slot][n]) continue;
+        busHeld_[slot][n] = 0;
+        out.addEvent(juce::MidiMessage::noteOff(ch, n), 0);
+    }
+}
+
+//==============================================================================
+// MIDI MIX capture — see PluginProcessor.h.
+//==============================================================================
+/** Lazily create the sink of `slot` and push the current settings onto it. */
+MidiTapSink* Sp3ctraAudioProcessor::midiTapSink(int slot)
+{
+    if (slot < 0 || slot >= CHAIN_MAX_CHAINS) return nullptr;
+    auto& s = midiTapSinks_[(size_t) slot];
+    if (s == nullptr)
+    {
+        s = std::make_unique<MidiTapSink>(slot);
+        if (midiTapDestName_.isNotEmpty())
+        {
+            juce::String err;
+            s->openPort(midiTapDestName_, err);
+        }
+    }
+    if (auto* p = apvts.getRawParameterValue(mtParam(slot, "channel")))
+        s->setChannel((int) p->load());
+    static const double kLat[5] = { 0.0, 2.0, 5.0, 10.0, 20.0 };
+    if (auto* p = apvts.getRawParameterValue("midiPortLatency"))
+        s->setPortLatencyMs(kLat[juce::jlimit(0, 4, (int) p->load())]);
+    // Grid in ticks of the writer's 960 PPQ: Off, 1/32, 1/16T, 1/16, 1/8T, 1/8, 1/4.
+    static const int kGrid[7] = { 0, 120, 160, 240, 320, 480, 960 };
+    if (auto* p = apvts.getRawParameterValue("midiQuantize"))
+        s->setQuantizeTicks(kGrid[juce::jlimit(0, 6, (int) p->load())]);
+    return s.get();
+}
+
+bool Sp3ctraAudioProcessor::startMidiCapture(const juce::File& dir,
+                                             const juce::String& stem,
+                                             juce::String& err)
+{
+    if (midiCaptureActive_.load(std::memory_order_acquire))
+    {
+        err = "Already recording";
+        return false;
+    }
+
+    const auto slots = activeMidiTapSlots();
+    if (slots.empty())
+    {
+        err = "No MIDI TAP module is patched into a chain.";
+        return false;
+    }
+
+    auto armed = [this](int slot)
+    {
+        auto* p = apvts.getRawParameterValue(mtParam(slot, "arm"));
+        auto* e = apvts.getRawParameterValue(mtParam(slot, "enabled"));
+        return p != nullptr && p->load() >= 0.5f && e != nullptr && e->load() >= 0.5f;
+    };
+
+    double bpm = 120.0;
+    if (auto* p = apvts.getRawParameterValue("midiTempo")) bpm = p->load();
+
+    // Arm the transport FIRST: every file opened below stamps against the SAME
+    // t0, which is the whole point of a master strip.
+    midiCaptureT0Us_ = midi_tap_transport_arm();
+
+    int opened = 0;
+    for (int slot : slots)
+    {
+        if (! armed(slot)) continue;
+        auto* sink = midiTapSink(slot);
+        if (sink == nullptr) continue;
+        const auto f = dir.getChildFile(stem + "_TAP" + juce::String(slot + 1) + ".mid");
+        juce::String e1;
+        if (sink->startFile(f, bpm, midiCaptureT0Us_, e1)) ++opened;
+        else if (err.isEmpty()) err = e1;
+    }
+
+    if (opened == 0)
+    {
+        midi_tap_transport_disarm();
+        if (err.isEmpty())
+            err = "No MIDI TAP is armed — arm at least one probe in the MIDI MIX strip.";
+        return false;
+    }
+
+    midiCaptureActive_.store(true, std::memory_order_release);
+    log_info("VST", "MIDI capture started: %d take(s) in %s",
+             opened, dir.getFullPathName().toRawUTF8());
+    return true;
+}
+
+void Sp3ctraAudioProcessor::stopMidiCapture()
+{
+    if (! midiCaptureActive_.exchange(false, std::memory_order_acq_rel))
+        return;
+    // Disarm before closing so nothing new is stamped into a take mid-write.
+    midi_tap_transport_disarm();
+    for (auto& s : midiTapSinks_)
+        if (s) s->stopFile();
+    log_info("VST", "MIDI capture stopped");
+}
+
+bool Sp3ctraAudioProcessor::isMidiCapturing() const noexcept
+{
+    return midiCaptureActive_.load(std::memory_order_acquire);
+}
+
+double Sp3ctraAudioProcessor::midiCaptureElapsed() const noexcept
+{
+    if (! midiCaptureActive_.load(std::memory_order_acquire)) return 0.0;
+    const juce::uint64 now = midi_tap_now_us();
+    return (now > midiCaptureT0Us_) ? (double) (now - midiCaptureT0Us_) * 1e-6 : 0.0;
+}
+
+int Sp3ctraAudioProcessor::midiCaptureNoteCount() const noexcept
+{
+    int n = 0;
+    for (const auto& s : midiTapSinks_)
+        if (s) n += s->noteCount();
+    return n;
+}
+
+void Sp3ctraAudioProcessor::setMidiTapDestination(const juce::String& deviceName)
+{
+    midiTapDestName_ = deviceName;
+    for (int slot : activeMidiTapSlots())
+    {
+        auto* sink = midiTapSink(slot);
+        if (sink == nullptr) continue;
+        juce::String err;
+        if (! sink->openPort(deviceName, err))
+            log_info("VST", "MIDI TAP %d port open failed: %s",
+                     slot + 1, err.toRawUTF8());
+    }
+}
+
+juce::String Sp3ctraAudioProcessor::midiTapDestination() const
+{
+    return midiTapDestName_;
+}
+
+juce::String Sp3ctraAudioProcessor::midiTapLastError() const
+{
+    for (const auto& s : midiTapSinks_)
+        if (s)
+        {
+            const auto e = s->lastError();
+            if (e.isNotEmpty()) return e;
+        }
+    return {};
 }
 
 //==============================================================================
@@ -2821,6 +3283,12 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // released voices complete BEFORE the render collapses to zero CPU —
     // closing instantly froze spectrum+voices, which resurrected as a stale
     // "last sound" on re-enable.
+    //
+    // engFadeS/E = block start/end gains of the per-engine enable fade
+    // (anti-click): a per-sample ramp toward fed ? 1 : 0 applied at each
+    // engine's buffer write below. The drain window outlives the fade, so a
+    // fade-out always completes on live render data before the gate closes.
+    float engFadeS[4], engFadeE[4];
     {
         const auto anyEnabled = [](uint32_t mask,
                                    const lux_out_params_t* banks) noexcept {
@@ -2865,6 +3333,22 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             else if (engineDrainBlocks_[e] > 0)
                 --engineDrainBlocks_[e];
             engineGate_[e] = fed[e] || engineDrainBlocks_[e] > 0;
+        }
+        // Advance the fades one block (exponential, kEngineFadeTauSec tau,
+        // ends snapped so steady ON multiplies by exactly 1 and fully OFF
+        // lets the write sites skip their loops entirely).
+        const float fadeAlpha = 1.0f - std::exp(
+            -(float) numSamples
+            / (kEngineFadeTauSec
+               * (float) juce::jmax(8000.0, getSampleRate())));
+        for (int e = 0; e < 4; ++e)
+        {
+            const float target = fed[e] ? 1.0f : 0.0f;
+            engFadeS[e] = engineFadeGain_[e];
+            float g = engFadeS[e] + fadeAlpha * (target - engFadeS[e]);
+            if (std::abs(target - g) < 1.0e-3f) g = target;
+            engineFadeGain_[e] = g;
+            engFadeE[e] = g;
         }
     }
 
@@ -2982,11 +3466,11 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // deviceEnabled. It paces audioProcessingThread (the whole synth pipeline
     // renders on this signal): gating it on the output toggle starved the
     // pipeline down to the 50ms wait timeout (each grain replayed ~4-5x =
-    // robotic sound). deviceEnabled gates the WRITE into the JUCE buffer here,
-    // and (via g_engine_render_gates below) collapses the producer's render to
-    // a silence commit — the handshake itself is never gated.
+    // robotic sound). The enable fade (engFadeS/E[0], target = fed) gates the
+    // WRITE into the JUCE buffer here, and (via g_engine_render_gates below)
+    // collapses the producer's render to a silence commit once the drain
+    // expires — the handshake itself is never gated.
     // ========================================================================
-    const bool luxstralEnabled = (deviceEnabledParam == nullptr || deviceEnabledParam->load() >= 0.5f);
 
     // ── Zero-CPU contract — publish per-engine render gates to the synth
     // thread (multithreading.c): the enabled-aware gates computed above
@@ -3026,13 +3510,16 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             float* rightData = luxstral_buffers_R[readIdx].data;
 
                 if (leftData && rightData) {
-                if (luxstralEnabled) {
+                if (engFadeS[0] > 0.0f || engFadeE[0] > 0.0f) {
                     const float lsVol = luxstralVolumeParam->load();
+                    const float lsGk  = (engFadeE[0] - engFadeS[0])
+                                      / (float) juce::jmax(1, samplesToRead);
                     float pk = lsPkBlock_;   // VU: post-volume block peak
                     if (totalNumOutputChannels >= 1) {
                         float* destLeft = buffer.getWritePointer(0);
                         for (int i = 0; i < samplesToRead; ++i) {
-                            const float v = leftData[i] * lsVol;
+                            const float v = leftData[i] * lsVol
+                                          * (engFadeS[0] + lsGk * (float) i);
                             destLeft[i] = v;
                             const float a = v < 0.0f ? -v : v;
                             if (a > pk) pk = a;
@@ -3041,7 +3528,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                     if (totalNumOutputChannels >= 2) {
                         float* destRight = buffer.getWritePointer(1);
                         for (int i = 0; i < samplesToRead; ++i) {
-                            const float v = rightData[i] * lsVol;
+                            const float v = rightData[i] * lsVol
+                                          * (engFadeS[0] + lsGk * (float) i);
                             destRight[i] = v;
                             const float a = v < 0.0f ? -v : v;
                             if (a > pk) pk = a;
@@ -3057,21 +3545,25 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                 // DO NOT set ready=0 — producer manages ready flags
                 luxstral_signal_buffer_consumed();
             }
-        } else if (luxstralEnabled && leftReady && rightReady) {
+        } else if ((engFadeS[0] > 0.0f || engFadeE[0] > 0.0f)
+                   && leftReady && rightReady) {
             // ♻️ SAME DATA as last time (producer hasn't finished next buffer yet)
             // Re-output the same audio — much better than silence!
             // Count stale re-outputs for RT Profiler diagnostics (always, not only Debug)
             rt_profiler_report_stale_luxstral(&g_vst_rt_profiler);
             float* leftData = luxstral_buffers_L[readIdx].data;
             float* rightData = luxstral_buffers_R[readIdx].data;
-            
+
             if (leftData && rightData) {
                 const float lsVol = luxstralVolumeParam->load();
+                const float lsGk  = (engFadeE[0] - engFadeS[0])
+                                  / (float) juce::jmax(1, samplesToRead);
                 float pk = lsPkBlock_;   // VU: post-volume block peak
                 if (totalNumOutputChannels >= 1) {
                     float* destLeft = buffer.getWritePointer(0);
                     for (int i = 0; i < samplesToRead; ++i) {
-                        const float v = leftData[i] * lsVol;
+                        const float v = leftData[i] * lsVol
+                                      * (engFadeS[0] + lsGk * (float) i);
                         destLeft[i] = v;
                         const float a = v < 0.0f ? -v : v;
                         if (a > pk) pk = a;
@@ -3080,7 +3572,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                 if (totalNumOutputChannels >= 2) {
                     float* destRight = buffer.getWritePointer(1);
                     for (int i = 0; i < samplesToRead; ++i) {
-                        const float v = rightData[i] * lsVol;
+                        const float v = rightData[i] * lsVol
+                                      * (engFadeS[0] + lsGk * (float) i);
                         destRight[i] = v;
                         const float a = v < 0.0f ? -v : v;
                         if (a > pk) pk = a;
@@ -3137,15 +3630,19 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             const int lxLatchedThisBlock =
                 (g_luxsynth_engine.spec_applied_seq != lxSeqBefore);
 
-            // 3. Mix into JUCE output buffer (additive)
+            // 3. Mix into JUCE output buffer (additive), through the enable
+            // fade so the power toggle never steps the output
             const float lxVol = luxsynthVolumeParam->load();
+            const float lxGk  = (engFadeE[1] - engFadeS[1])
+                              / (float) juce::jmax(1, numSamples);
 
             float pk = lxPkBlock_;   // VU: post-volume block peak
             if (totalNumOutputChannels >= 1)
             {
                 float* dest = buffer.getWritePointer(0);
                 for (int i = 0; i < numSamples; ++i) {
-                    const float v = g_luxsynth_engine.output_left[i] * lxVol;
+                    const float v = g_luxsynth_engine.output_left[i] * lxVol
+                                  * (engFadeS[1] + lxGk * (float) i);
                     dest[i] += v;
                     const float a = v < 0.0f ? -v : v;
                     if (a > pk) pk = a;
@@ -3155,7 +3652,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             {
                 float* dest = buffer.getWritePointer(1);
                 for (int i = 0; i < numSamples; ++i) {
-                    const float v = g_luxsynth_engine.output_right[i] * lxVol;
+                    const float v = g_luxsynth_engine.output_right[i] * lxVol
+                                  * (engFadeS[1] + lxGk * (float) i);
                     dest[i] += v;
                     const float a = v < 0.0f ? -v : v;
                     if (a > pk) pk = a;
@@ -3310,14 +3808,18 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                                    g_luxwave_engine.output_left,
                                    g_luxwave_engine.output_right);
 
-            // 4. Mix into JUCE output buffer (additive)
+            // 4. Mix into JUCE output buffer (additive), through the enable
+            // fade so the power toggle never steps the output
             const float lwVol = luxwaveVolumeParam->load();
+            const float lwGk  = (engFadeE[2] - engFadeS[2])
+                              / (float) juce::jmax(1, numSamples);
             float pk = lwPkBlock_;   // VU: post-volume block peak
             if (totalNumOutputChannels >= 1)
             {
                 float* dest = buffer.getWritePointer(0);
                 for (int i = 0; i < numSamples; ++i) {
-                    const float v = g_luxwave_engine.output_left[i] * lwVol;
+                    const float v = g_luxwave_engine.output_left[i] * lwVol
+                                  * (engFadeS[2] + lwGk * (float) i);
                     dest[i] += v;
                     const float a = v < 0.0f ? -v : v;
                     if (a > pk) pk = a;
@@ -3327,7 +3829,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             {
                 float* dest = buffer.getWritePointer(1);
                 for (int i = 0; i < numSamples; ++i) {
-                    const float v = g_luxwave_engine.output_right[i] * lwVol;
+                    const float v = g_luxwave_engine.output_right[i] * lwVol
+                                  * (engFadeS[2] + lwGk * (float) i);
                     dest[i] += v;
                     const float a = v < 0.0f ? -v : v;
                     if (a > pk) pk = a;
@@ -3391,12 +3894,15 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                                     numSamples);
             const float lgVol = luxgrainVolumeParam
                                 ? luxgrainVolumeParam->load() : 1.0f;
+            const float lgGk  = (engFadeE[3] - engFadeS[3])
+                              / (float) juce::jmax(1, numSamples);
             float pk = lgPkBlock_;   // VU: post-volume block peak
             if (totalNumOutputChannels >= 1)
             {
                 float* dest = buffer.getWritePointer(0);
                 for (int i = 0; i < numSamples; ++i) {
-                    const float v = g_luxgrain_out_l[i] * lgVol;
+                    const float v = g_luxgrain_out_l[i] * lgVol
+                                  * (engFadeS[3] + lgGk * (float) i);
                     dest[i] += v;
                     const float a = v < 0.0f ? -v : v;
                     if (a > pk) pk = a;
@@ -3406,7 +3912,8 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             {
                 float* dest = buffer.getWritePointer(1);
                 for (int i = 0; i < numSamples; ++i) {
-                    const float v = g_luxgrain_out_r[i] * lgVol;
+                    const float v = g_luxgrain_out_r[i] * lgVol
+                                  * (engFadeS[3] + lgGk * (float) i);
                     dest[i] += v;
                     const float a = v < 0.0f ? -v : v;
                     if (a > pk) pk = a;
@@ -3459,6 +3966,13 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         videoRecorder_->pushAudio(buffer.getArrayOfReadPointers(),
                                   totalNumOutputChannels, numSamples);
 
+    // ── MIDI TAP → plugin MIDI bus (sink C). DELIBERATELY THE LAST THING that
+    // touches midiMessages: every reader above (PITCH, MASK, LuxSynth, LuxWave)
+    // has already consumed the incoming buffer, so an in-process feedback loop
+    // is structurally impossible within a block.
+    // Single atomic load when disabled — the recActive_ gating pattern.
+    drainMidiTapToBus(midiMessages, numSamples);
+
     // ── UI VU meters: fold this block's per-engine peaks into the atomics
     // with an exponential release, then reset the block accumulators.
     // Single RT writer; the AUDIO MIX panel reads at UI rate (relaxed).
@@ -3508,7 +4022,10 @@ juce::ValueTree Sp3ctraAudioProcessor::captureFullState(bool embedBanks)
     // state may still carry the value restored at load time, and skipping
     // the write would resurrect a path the user has since cleared.
     state.setProperty("lastSessionPath",  lastSessionPath,  nullptr);
-    state.setProperty("scoreWavPath",     scoreWavPath,     nullptr);
+    for (int i = 0; i < ScorePlayerService::kMaxSlots; ++i)   // P7 — per instance
+        state.setProperty(i == 0 ? juce::Identifier("scoreWavPath")
+                                 : juce::Identifier("scoreWavPath" + juce::String(i)),
+                          scoreWavPath[(size_t) i], nullptr);
     state.setProperty("luxgrainSamplePath", luxgrainSamplePath_, nullptr);
     // Synth-split state version — gates the staged migrations in
     // setStateInformation (absent = pre-split blob; 1 = pre per-send enable;
@@ -3526,7 +4043,8 @@ juce::ValueTree Sp3ctraAudioProcessor::captureFullState(bool embedBanks)
             state.removeChild(existing, nullptr);
         state.appendChild(child, nullptr);
     };
-    replaceChild(scoreStateToTree());        // SCORE settings + freq override
+    for (int i = 0; i < ScorePlayerService::kMaxSlots; ++i)
+        replaceChild(scoreStateToTree(i));   // SCORE settings, one child per instance
     replaceChild(luxstralWavetableToTree()); // user timbre wavetable (harmonics)
     // A cleared timbre writes no child — drop any stale copy so it doesn't
     // resurrect on the next load.
@@ -3575,6 +4093,30 @@ juce::ValueTree Sp3ctraAudioProcessor::captureFullState(bool embedBanks)
     if (embedBanks)
         replaceChild(samplerBanksToTree());
 
+    // P9 — persisted score-family takes (calibrated PNGs). Same split as the
+    // banks: embedded in the DAW blob, sidecar takes/slotN.png in Standalone.
+    // Always drop the copy restored at load time first, so a stale blob can
+    // neither resurrect in a re-save nor leak into a Standalone project file.
+    {
+        auto stale = state.getChildWithName("SCORE_TAKES");
+        if (stale.isValid())
+            state.removeChild(stale, nullptr);
+        if (embedBanks)
+        {
+            juce::ValueTree takes("SCORE_TAKES");
+            for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+            {
+                if (scoreTakePng_[(size_t) s].isEmpty()) continue;
+                juce::ValueTree t("Take");
+                t.setProperty("slot", s, nullptr);
+                t.setProperty("png",  scoreTakePng_[(size_t) s], nullptr);
+                takes.appendChild(t, nullptr);
+            }
+            if (takes.getNumChildren() > 0)
+                state.appendChild(takes, nullptr);
+        }
+    }
+
     return state;
 }
 
@@ -3617,6 +4159,189 @@ void Sp3ctraAudioProcessor::restoreSamplerBanksFromTree(const juce::ValueTree& b
             smp->loadFromFile(tmp.getFile());
         }
     }
+}
+
+//==============================================================================
+// P9 — persisted score takes + resume-playback-on-load (see PluginProcessor.h)
+//==============================================================================
+void Sp3ctraAudioProcessor::captureScoreTake(int slot, const juce::Image& image,
+                                             juce::Rectangle<int> band,
+                                             double minHz, double maxHz,
+                                             bool stereo)
+{
+    if (slot < 0 || slot >= ScorePlayerService::kMaxSlots || ! image.isValid())
+        return;
+    scoregen::SpectroCalibration cal;
+    cal.band   = band;
+    cal.minHz  = minHz;
+    cal.maxHz  = maxHz;
+    cal.stereo = stereo;
+    cal.valid  = band.getWidth() > 0 && band.getHeight() > 0
+              && minHz > 0.0 && maxHz > minHz;
+    if (! cal.valid)
+        return;   // no calibration ⇒ the frames could not be rebuilt from it
+
+    // Invalidate any in-flight encode/rebuild for this slot, then encode off
+    // the message thread — a full page PNG takes tens of ms. The image is
+    // deep-copied first: juce::Image pixels are COW-shared with the page,
+    // which mutates them in place on the next EQ tweak.
+    const juce::uint32 gen = ++scoreTakeGen_[slot];
+    juce::Image copy = image.createCopy();
+    juce::WeakReference<Sp3ctraAudioProcessor> weakThis(this);
+    juce::Thread::launch([weakThis, slot, gen, copy, cal]
+    {
+        juce::MemoryBlock png = scoregen::encodeCalibratedPng(copy, cal);
+        juce::MessageManager::callAsync([weakThis, slot, gen,
+                                         png = std::move(png)]
+        {
+            if (auto* p = weakThis.get())
+                p->storeScoreTake(slot, gen, png);
+        });
+    });
+}
+
+void Sp3ctraAudioProcessor::storeScoreTake(int slot, juce::uint32 gen,
+                                           const juce::MemoryBlock& png)
+{
+    if (slot < 0 || slot >= ScorePlayerService::kMaxSlots
+        || gen != scoreTakeGen_[slot] || png.isEmpty())
+        return;   // superseded by a newer take/restore, or the encode failed
+    scoreTakePng_[(size_t) slot] = png;
+    log_debug("VST", "Score take[%d]: captured (%d KB)", slot,
+              (int) ((png.getSize() + 1023) / 1024));
+    // Standalone: persist the sidecar at once — takes only change on a
+    // (re)generate, so this stays far off the autosave cadence. DAW: nothing
+    // to do, captureFullState embeds the cache when the host saves.
+    if (sessions_ != nullptr && sessions_->isStandalone())
+        sessions_->saveScoreTakeNow(slot);
+}
+
+void Sp3ctraAudioProcessor::restoreScoreTakes()
+{
+    // Refill the cache from wherever this restore's takes live: the
+    // SCORE_TAKES child (DAW blob) or the session's takes/ sidecars.
+    for (auto& b : scoreTakePng_)
+        b.reset();
+    if (auto takes = apvts.state.getChildWithName("SCORE_TAKES"); takes.isValid())
+    {
+        for (int c = 0; c < takes.getNumChildren(); ++c)
+        {
+            auto t = takes.getChild(c);
+            const int s = (int) t.getProperty("slot", -1);
+            if (s < 0 || s >= ScorePlayerService::kMaxSlots) continue;
+            if (auto* blob = t.getProperty("png").getBinaryData())
+                scoreTakePng_[(size_t) s] = *blob;
+        }
+    }
+    else if (sessions_ != nullptr && sessions_->isStandalone())
+    {
+        for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+        {
+            juce::MemoryBlock mb;
+            const juce::File f = sessions_->takeFile(s);
+            if (f.existsAsFile() && f.loadFileAsData(mb) && mb.getSize() > 0)
+                scoreTakePng_[(size_t) s] = std::move(mb);
+        }
+    }
+
+    // Rebuild each in-use slot's frames off-thread (decode + buildFrames can
+    // be hundreds of MB of pixel work — never on the message thread), then
+    // hot-swap them in on completion. Slots without a take (or without a
+    // module) keep today's behaviour: empty until a page regenerates.
+    juce::uint32 launched = 0;
+    for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+    {
+        const juce::uint32 gen = ++scoreTakeGen_[s];
+        if (scoreTakePng_[(size_t) s].isEmpty() || ! scorePlayerSlotInUse(s))
+            continue;
+        launched |= 1u << s;
+        juce::WeakReference<Sp3ctraAudioProcessor> weakThis(this);
+        juce::Thread::launch([weakThis, s, gen,
+                              bytes = scoreTakePng_[(size_t) s]]
+        {
+            auto cal = scoregen::readCalibration(bytes.getData(), bytes.getSize());
+            std::vector<CapturedFrame> frames;
+            if (cal.valid)
+                if (auto img = juce::ImageFileFormat::loadFrom(bytes.getData(),
+                                                               bytes.getSize());
+                    img.isValid())
+                    frames = ScorePlayerService::buildFramesFromImage(
+                        img, cal.band, cal.minHz, cal.maxHz, cal.stereo);
+            auto shared = std::make_shared<std::vector<CapturedFrame>>(
+                std::move(frames));
+            juce::MessageManager::callAsync([weakThis, s, gen, shared]
+            {
+                if (auto* p = weakThis.get())
+                    p->finishScoreTakeRestore(s, gen, std::move(*shared));
+            });
+        });
+    }
+    // A slot saved playing but with no rebuildable take can never resume —
+    // drop its armed bit so it cannot linger into a later restore.
+    pendingResumeScore_.fetch_and(launched, std::memory_order_acq_rel);
+}
+
+void Sp3ctraAudioProcessor::finishScoreTakeRestore(
+    int slot, juce::uint32 gen, std::vector<CapturedFrame>&& frames)
+{
+    if (slot < 0 || slot >= ScorePlayerService::kMaxSlots
+        || gen != scoreTakeGen_[slot])
+        return;   // superseded: a fresh GENERATE / another restore won
+    const juce::uint32 bit = 1u << slot;
+    if (frames.empty())
+    {
+        log_warning("VST", "Score take[%d]: unreadable persisted take — "
+                           "frames not restored", slot);
+        pendingResumeScore_.fetch_and(~bit, std::memory_order_acq_rel);
+        return;
+    }
+    if (scorePlayerService_ == nullptr || ! scorePlayerSlotInUse(slot))
+        return;
+    const int n = (int) frames.size();
+    scorePlayerService_->hotSwapFrames(slot, std::move(frames));
+    log_info("VST", "Score take[%d]: %d frames restored from the persisted "
+                    "take", slot, n);
+
+    // Machine opted in and the session saved this slot PLAYING → re-press
+    // PLAY exactly as the page button would (param-visible, the "Playing"
+    // relay activates + pushes speed/loop + starts the engine). The head
+    // starts at 0 — the saved position is deliberately not restored.
+    if ((pendingResumeScore_.fetch_and(~bit, std::memory_order_acq_rel) & bit)
+        != 0)
+    {
+        const int ty = scoreSlotType_[slot].load(std::memory_order_acquire);
+        if (ty >= 0)
+            if (auto* p = apvts.getParameter(
+                    scoreXportParam((ModuleType) ty, slot, "Playing")))
+                p->setValueNotifyingHost(1.0f);
+    }
+}
+
+void Sp3ctraAudioProcessor::applyPendingResumeTransports()
+{
+    const juce::uint32 img = pendingResumeImg_.exchange(0, std::memory_order_acq_rel);
+    const juce::uint32 vid = pendingResumeVid_.exchange(0, std::memory_order_acq_rel);
+    const juce::uint32 seq = pendingResumeSeq_.exchange(0, std::memory_order_acq_rel);
+    if (! MachinePrefs::resumePlaybackOnLoad())
+    {
+        // Opt-out machine: nothing resumes, including the score slots armed
+        // for finishScoreTakeRestore.
+        pendingResumeScore_.store(0, std::memory_order_release);
+        return;
+    }
+    auto push = [this](const juce::String& id, float denorm)
+    {
+        if (auto* p = apvts.getParameter(id))
+            p->setValueNotifyingHost(p->convertTo0to1(denorm));
+    };
+    for (int s = 0; s < 8; ++s)
+    {
+        if ((img >> s) & 1u) push(imgSrcParam(s, "Play"), 1.0f);
+        if ((vid >> s) & 1u) push(vidSrcParam(s, "Play"), 1.0f);
+    }
+    for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+        if (const int v = (int) ((seq >> (2 * e)) & 3u); v != 0)
+            push(fsEngineParam(e, "SeqTransport"), (float) v);
 }
 
 void Sp3ctraAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
@@ -3746,9 +4471,46 @@ void Sp3ctraAudioProcessor::applyStateXml(std::unique_ptr<juce::XmlElement> xmlS
                     e->setAttribute("value", 1.0);   // Negative
                 }
             }
+            // P9 — remember which audio transports this state saved RUNNING
+            // before the never-auto-run patch below folds them all to Stop.
+            // Consumed on the message thread at the end of the restore
+            // (applyPendingResumeTransports / finishScoreTakeRestore), where
+            // the machine resume pref gates them — harvesting is free, so the
+            // pref is read once there, never on this (possibly loader) thread.
+            {
+                auto savedValue = [&xmlState](const juce::String& id) -> double
+                {
+                    for (auto* e : xmlState->getChildWithTagNameIterator("PARAM"))
+                        if (e->getStringAttribute("id") == id)
+                            return e->getDoubleAttribute("value");
+                    return 0.0;
+                };
+                juce::uint32 score = 0, img = 0, vid = 0, seq = 0;
+                for (ModuleType t : kScoreFamily)
+                    for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+                        if (savedValue(scoreXportParam(t, s, "Playing")) >= 0.5)
+                            score |= 1u << s;
+                for (int e = 0; e < LuxSampler::kMaxEngines; ++e)
+                    seq |= ((juce::uint32) juce::jlimit(0, 2,
+                               juce::roundToInt(savedValue(
+                                   fsEngineParam(e, "SeqTransport")))) & 3u)
+                           << (2 * e);
+                for (int s = 0; s < 8; ++s)
+                {
+                    if (savedValue(imgSrcParam(s, "Play")) >= 0.5) img |= 1u << s;
+                    if (savedValue(vidSrcParam(s, "Play")) >= 0.5) vid |= 1u << s;
+                }
+                pendingResumeScore_.store(score, std::memory_order_release);
+                pendingResumeSeq_  .store(seq,   std::memory_order_release);
+                pendingResumeImg_  .store(img,   std::memory_order_release);
+                pendingResumeVid_  .store(vid,   std::memory_order_release);
+            }
+
             for (int e = 0; e < LuxSampler::kMaxEngines; ++e)   // Stop
                 forceRestoredParam(fsEngineParam(e, "SeqTransport"), 0.0);
-            forceRestoredParam(PARAM_SCORE_PLAYING, 0.0);
+            for (ModuleType t : kScoreFamily)                    // P7 — every bank
+                for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+                    forceRestoredParam(scoreXportParam(t, s, "Playing"), 0.0);
             for (int s = 0; s < 8; ++s)                          // M9 sources
             {
                 forceRestoredParam(imgSrcParam(s, "Play"), 0.0); // (P5-M3 ×8)
@@ -3832,36 +4594,18 @@ void Sp3ctraAudioProcessor::applyStateXml(std::unique_ptr<juce::XmlElement> xmlS
                         seedBank(fsEngineParam(e, "Enabled"),
                                  legacy("luxSamplerEnabled", 0.0));
 
-                if (splitVer < 1)
-                {
+                // (splitVer < 1 seeding is gone entirely: the last survivor,
+                // contrastMin, left the bank on 2026-08-13 — the variance
+                // dimming is the LEVELS module's CONTRAST knob now.)
 
-                const double lsGamma = legacy("luxstralGammaEnable", 1.0) >= 0.5
-                                     ? legacy("luxstralGammaValue", 1.0) : 1.0;
-                const double rangeDb = legacy("luxstralFidelityRangeDb", 50.0);
-
-                // LuxStral OUT slot 0 — carries the legacy global conditioning.
-                seedBank(lsOutParam(0, "negative"),    legacy("luxstralInversion",   1.0));
-                seedBank(lsOutParam(0, "dcBlocking"),  legacy("luxstralAcRemoval",   1.0));
-                seedBank(lsOutParam(0, "gamma"),       lsGamma);
-                seedBank(lsOutParam(0, "contrastMin"), legacy("luxstralContrastMin", 0.21));
-                seedBank(lsOutParam(0, "rangeDb"),     rangeDb);
-
-                // LuxSynth OUT slot 0 — and LuxWave OUT slot 0 seeds from the
-                // SAME values: before its own bank, LuxWave inherited the
-                // LuxSynth-conditioned line (parity of the inheritance).
-                const double xInv = legacy("luxsynthInversion", 1.0);
-                const double xDc  = legacy("luxsynthAcRemoval", 1.0);
-                const double xGam = legacy("luxsynthGammaValue", 1.0);
-                seedBank(lxOutParam(0, "negative"),   xInv);
-                seedBank(lxOutParam(0, "dcBlocking"), xDc);
-                seedBank(lxOutParam(0, "gamma"),      xGam);
-                seedBank(lwOutParam(0, "negative"),   xInv);
-                seedBank(lwOutParam(0, "dcBlocking"), xDc);
-                seedBank(lwOutParam(0, "gamma"),      xGam);
-
-                log_info("VST", "Synth-split migration: legacy conditioning "
-                                "params seeded into the per-OUT banks");
-                }
+                // Migration 2026-08-05 — Range dB re-collapsed into the single
+                // SETUP knob "luxstralRangeDb". Seed it from the P1-era per-OUT
+                // bank (slot 0 carried the shared value), falling back to the
+                // pre-P1 shared knob; sessions saved after the purge already
+                // carry the new id (seedBank no-ops then).
+                seedBank("luxstralRangeDb",
+                         legacy("luxstralOut0_rangeDb",
+                                legacy("luxstralFidelityRangeDb", 50.0)));
             }
 
             // replaceState fires the APVTS listeners synchronously. On the
@@ -3947,10 +4691,9 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
                     forceTo(vsParam(s, "paused"), 0.0f);
                 for (int s = 0; s < LuxSampler::kMaxEngines; ++s)
                     forceTo(fsEngineParam(s, "SeqTransport"), 0.0f);
-                forceTo(PARAM_SCORE_PLAYING, 0.0f);
-                forceTo("voicePlaying",     0.0f);
-                forceTo("midiScorePlaying", 0.0f);
-                forceTo("timbrePlaying",    0.0f);
+                for (ModuleType t : kScoreFamily)   // P7 — every instance bank
+                    for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+                        forceTo(scoreXportParam(t, s, "Playing"), 0.0f);
                 for (int s = 0; s < 8; ++s)
                 {
                     forceTo(imgSrcParam(s, "Play"), 0.0f);
@@ -3967,8 +4710,11 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
             // the project-session model: exports land in the session folder.)
             lastSessionPath = apvts.state
                 .getProperty("lastSessionPath", "").toString();
-            scoreWavPath = apvts.state
-                .getProperty("scoreWavPath", "").toString();
+            for (int i = 0; i < ScorePlayerService::kMaxSlots; ++i)
+                scoreWavPath[(size_t) i] = apvts.state.getProperty(
+                    i == 0 ? juce::Identifier("scoreWavPath")
+                           : juce::Identifier("scoreWavPath" + juce::String(i)),
+                    "").toString();
             log_info("VST", "State restored from DAW project — applying to engines...");
 
             // On state restore, just update g_sp3ctra_config.
@@ -4035,7 +4781,9 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
             projectChainValuesToBanks();
 
             // SCORE settings + frequency override (processor members, not APVTS).
-            restoreScoreStateFromTree(apvts.state.getChildWithName("SCORE"));
+            for (int i = 0; i < ScorePlayerService::kMaxSlots; ++i)
+                restoreScoreStateFromTree(i, apvts.state.getChildWithName(
+                    juce::Identifier(scoreStateTag(i))));
 
             // User timbre wavetable — rebuilds the mip tables from the
             // persisted harmonics (absent child ⇒ clears any loaded table).
@@ -4160,6 +4908,20 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
             else if (banksRestored)
                 lastSessionPath.clear();   // migration done in a previous run
 
+            // Second overlay: the applySamplerParamsFromState() above ran on
+            // EMPTY banks — "settings follow content" reset every recorded
+            // slot's play params (speed, loop, floor, fades, EQ…). The bank
+            // load right after restored frames only (the .fsmp carries no
+            // per-slot play params), so re-apply the saved params now that
+            // the slots hold their content. The legacy .sp3s import path
+            // (banksRestored == false) re-applies internally instead.
+            if (banksRestored)
+                applySamplerParamsFromState();
+
+            // Machine-scoped params override the blob (BEFORE the UDP restart
+            // below, so the receiver comes up on THIS machine's port/address).
+            applyMachineParamOverrides();
+
             if (!coreNeedsInit && sharedCore && sharedCore->isReady())
             {
                 // Pipeline already running: hot-reload UDP with restored config.
@@ -4175,6 +4937,14 @@ void Sp3ctraAudioProcessor::applyRestoredStateOnMessageThread()
                          static_cast<int>(udpPortParam->load()));
             }
             // else: coreNeedsInit == true → prepareToPlay() will call startWithConfig()
+
+            // P9 — media/sequencer transports the session saved running come
+            // back now (machine opt-in; content is restored above). Then the
+            // persisted score takes rebuild their slots' frames off-thread —
+            // the armed score transports resume in finishScoreTakeRestore,
+            // once the frames actually landed.
+            applyPendingResumeTransports();
+            restoreScoreTakes();
 
             // Let an OPEN editor rebuild its rack/panels from the new model.
             if (onStateRestoredUi)
@@ -4292,29 +5062,36 @@ void Sp3ctraAudioProcessor::timerCallback()
             timbreScanLastMs_ = 0.0;
     }
 
-    // ── SCORE transport mirror ────────────────────────────────────────────────
-    // The SCORE page is a view: it no longer force-stops the score in its
-    // destructor, so with no page open somebody must still fold the engine's
-    // one-shot natural end back onto the automatable scorePlaying param (the
-    // param listener then runs uiStopScore — idempotent). Guard: never fold
-    // while a scorePlaying change is still pending in the deferred queue —
-    // an automation Play marked dirty between the drain above and this
-    // mirror would otherwise be swallowed (param 1, engine not started yet).
-    if (! (scorePlayingParamIdx_ >= 0
-           && paramDirty_[(size_t) scorePlayingParamIdx_].load(std::memory_order_acquire)))
-        if (auto* p = apvts.getParameter(PARAM_SCORE_PLAYING))
+    // ── SCORE-family transport mirror (one bank per instance, P7) ────────────
+    // The generator pages are views: they no longer force-stop their score in
+    // their destructor, so with no page open somebody must still fold the
+    // engine's one-shot natural end back onto the automatable "…Playing" param
+    // (the param listener then runs uiStopScore — idempotent). Guard: never
+    // fold while that bank's change is still pending in the deferred queue —
+    // an automation Play marked dirty between the drain above and this mirror
+    // would otherwise be swallowed (param 1, engine not started yet).
+    for (int f = 0; f < 4; ++f)
+        for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
         {
-            // P5-M4: the param mirrors the SCORE module's own slot (absent
-            // module ⇒ nothing can play ⇒ fold to 0 too).
-            auto* sc = getScoreChannel(ModuleType::Score);
-            if (p->getValue() >= 0.5f && (sc == nullptr || ! sc->isScorePlaying()))
+            const int idx = scorePlayIdx_[f][s];
+            if (idx >= 0 && paramDirty_[(size_t) idx].load(std::memory_order_acquire))
+                continue;
+            auto* p = scorePlayParam_[f][s];
+            if (p == nullptr || p->getValue() < 0.5f)
+                continue;   // already stopped — nothing to fold
+            // The bank mirrors ITS OWN instance's slot (absent module ⇒
+            // nothing can play ⇒ fold to 0 too).
+            auto* sc = scoreSlotHostsType(s, kScoreFamily[f])
+                           ? getScoreChannelForSlot(s) : nullptr;
+            if (sc == nullptr || ! sc->isScorePlaying())
                 p->setValueNotifyingHost(0.0f);
         }
 
     // ── Deferred Pitch/Mask/Reverb/Echo/VideoScroll pool resets (see header) ──
     if ((pendingPitchResets_ | pendingMaskResets_ | pendingReverbResets_
          | pendingEchoResets_ | pendingEqResets_ | pendingHarmoResets_
-         | pendingVideoScrollInits_
+         | pendingCentroResets_ | pendingDriveResets_ | pendingDcBlockResets_
+         | pendingVideoScrollInits_ | pendingMidiTapPanics_ | pendingMidiTapInits_
          | pendingStagingResets_) != 0
         && juce::Time::getMillisecondCounter() - poolResetArmedMs_ >= 40)
     {
@@ -4326,8 +5103,20 @@ void Sp3ctraAudioProcessor::timerCallback()
             if ((pendingEchoResets_   >> i) & 1u) lux_echo_reset(lux_echo_instance(i));
             if ((pendingEqResets_     >> i) & 1u) lux_eq_reset(lux_eq_instance(i));
             if ((pendingHarmoResets_  >> i) & 1u) lux_harmo_reset(lux_harmo_instance(i));
+            if ((pendingCentroResets_ >> i) & 1u) lux_centro_reset(lux_centro_instance(i));
+            if ((pendingDriveResets_  >> i) & 1u) lux_drive_reset(lux_drive_instance(i));
+            if ((pendingDcBlockResets_ >> i) & 1u) lux_dcblock_reset(lux_dcblock_instance(i));
             if ((pendingVideoScrollInits_ >> i) & 1u)
                 video_scroll_init(video_scroll_instance(i));
+            // MIDI TAP teardown is TWO-STAGE and order matters: panic first
+            // (pushes the note-offs into the ring so the sinks can still drain
+            // them), init only on the NEXT tick (wipes the ring + bumps the
+            // generation). Wiping in one go would swallow the note-offs and
+            // leave hung notes on every destination.
+            if ((pendingMidiTapPanics_ >> i) & 1u)
+                midi_tap_panic(midi_tap_instance(i));
+            else if ((pendingMidiTapInits_ >> i) & 1u)
+                midi_tap_init(midi_tap_instance(i));
             if ((pendingStagingResets_ >> i) & 1u)
             {
                 synth_staging_set_inactive(i);
@@ -4338,8 +5127,15 @@ void Sp3ctraAudioProcessor::timerCallback()
         }
         pendingPitchResets_ = pendingMaskResets_ = pendingVideoScrollInits_ = 0;
         pendingReverbResets_ = pendingEchoResets_ = pendingEqResets_ = 0;
-        pendingHarmoResets_ = 0;
+        pendingHarmoResets_ = pendingCentroResets_ = pendingDriveResets_ = 0;
+        pendingDcBlockResets_ = 0;
         pendingStagingResets_ = 0;
+        // Hand the panicked slots to the init stage and re-arm the timer, so
+        // the ring wipe lands one full defer window after the note-offs.
+        pendingMidiTapInits_  = pendingMidiTapPanics_;
+        pendingMidiTapPanics_ = 0;
+        if (pendingMidiTapInits_ != 0)
+            poolResetArmedMs_ = juce::Time::getMillisecondCounter();
     }
 
     // ── RT profiler: drain deferred logs (RT threads never log directly) ─────
@@ -4434,53 +5230,65 @@ void Sp3ctraAudioProcessor::applyParameterChange(const juce::String& parameterID
                 sc->setScoreActive(newValue > 0.5f);
         return;
     }
-    for (ModuleType t : kScoreFamily)
     {
-        const auto ids = scoreXportIds(t);
-        if (parameterID == ids.play)
+        ModuleType   t = ModuleType::Score;
+        int          xs = 0;
+        juce::String suffix;
+        if (parseScoreXportParam(parameterID, t, xs, suffix))
         {
-            if (auto* sc = getScoreChannel(t))
+            const auto ids = scoreXportIds(t, xs);
+            // Route to the instance that OWNS this bank: its player slot IS the
+            // bank index (the pool slot). A bank whose instance is not placed
+            // resolves to nothing — its edits are remembered, never played.
+            auto channelForBank = [this, t, xs]() -> ScoreChannel*
             {
-                const bool wantPlay = newValue > 0.5f;
-                if (wantPlay != sc->isScorePlaying())
+                if (scorePlayerService_ == nullptr)
+                    return nullptr;
+                return scoreSlotHostsType(xs, t) ? scorePlayerService_->channel(xs)
+                                                 : nullptr;
+            };
+            if (suffix == "Playing")
+            {
+                if (auto* sc = channelForBank())
                 {
-                    if (wantPlay)
+                    const bool wantPlay = newValue > 0.5f;
+                    if (wantPlay != sc->isScorePlaying())
                     {
-                        // PLAY activates the module (never plays deactivated):
-                        // flip its ACTIVE param on for persistence/host, and
-                        // apply it now — the param listener runs deferred. Skip
-                        // during a bulk restore: the saved ACTIVE value is being
-                        // applied in the same pass and transports are forced off.
-                        if (! bulkParamApply_)
+                        if (wantPlay)
                         {
-                            if (auto* ap = apvts.getParameter(scoreActiveParam(sc->slot())))
-                                if (ap->getValue() < 0.5f)
-                                {
-                                    ap->beginChangeGesture();
-                                    ap->setValueNotifyingHost(1.0f);
-                                    ap->endChangeGesture();
-                                }
-                            sc->setScoreActive(true);
+                            // PLAY activates the module (never plays deactivated):
+                            // flip its ACTIVE param on for persistence/host, and
+                            // apply it now — the param listener runs deferred. Skip
+                            // during a bulk restore: the saved ACTIVE value is being
+                            // applied in the same pass and transports are forced off.
+                            if (! bulkParamApply_)
+                            {
+                                if (auto* ap = apvts.getParameter(scoreActiveParam(sc->slot())))
+                                    if (ap->getValue() < 0.5f)
+                                    {
+                                        ap->beginChangeGesture();
+                                        ap->setValueNotifyingHost(1.0f);
+                                        ap->endChangeGesture();
+                                    }
+                                sc->setScoreActive(true);
+                            }
+                            // Same as the page button: push transport settings first.
+                            sc->setScoreSpeed(apvts.getRawParameterValue(ids.speed)->load());
+                            sc->setScoreLoopMode(loopModeFromIds(apvts, ids.loop, ids.reverse));
+                            sc->uiPlayScore();
                         }
-                        // Same as the page button: push transport settings first.
-                        sc->setScoreSpeed(apvts.getRawParameterValue(ids.speed)->load());
-                        sc->setScoreLoopMode(loopModeFromIds(apvts, ids.loop, ids.reverse));
-                        sc->uiPlayScore();
+                        else
+                            sc->uiStopScore();
                     }
-                    else
-                        sc->uiStopScore();
                 }
+                return;
             }
-            return;
-        }
-        if (parameterID == ids.speed)
-        {
-            if (auto* sc = getScoreChannel(t)) sc->setScoreSpeed(newValue);
-            return;
-        }
-        if (parameterID == ids.loop || parameterID == ids.reverse)
-        {
-            if (auto* sc = getScoreChannel(t))
+            if (suffix == "Speed")
+            {
+                if (auto* sc = channelForBank()) sc->setScoreSpeed(newValue);
+                return;
+            }
+            if (auto* sc = channelForBank())          // "Loop" | "Reverse"
                 sc->setScoreLoopMode(loopModeFromIds(apvts, ids.loop, ids.reverse));
             return;
         }
@@ -4843,6 +5651,7 @@ void Sp3ctraAudioProcessor::loadChainModelFromState()
     chainModel_.deriveActiveTypes(chainActiveTypes_);
     videoScrollSlots_.clear();
     videoScrollSlotIds_.clear();
+    midiTapSlots_.clear();
     luxstralSends_.clear();
     for (const auto& ch : chainModel_.chains)
         for (const auto& mod : ch.modules)
@@ -4853,6 +5662,9 @@ void Sp3ctraAudioProcessor::loadChainModelFromState()
                 videoScrollSlots_.insert(mod.slot);
                 videoScrollSlotIds_[mod.slot] = mod.id;   // identity baseline (no reset on load)
             }
+            if (mod.type == ModuleType::MidiTap
+                && mod.slot >= 0 && mod.slot < CHAIN_MAX_CHAINS)
+                midiTapSlots_.insert(mod.slot);
             if (mod.type == ModuleType::LuxStral
                 && mod.slot >= 0 && mod.slot < ChainModel::kMaxEngineSends)
                 luxstralSends_.insert(mod.slot);
@@ -4881,7 +5693,7 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
     // mask, indexed by the INSTANCE'S pool slot (stable across edits and
     // chain moves).
     uint32_t pitchMask = 0, maskMask = 0, reverbMask = 0, echoMask = 0, eqMask = 0,
-             harmoMask = 0;
+             harmoMask = 0, centroMask = 0, driveMask = 0, dcBlockMask = 0;
     for (int c = 0; c < chainModel_.numChains(); ++c)
     {
         for (const auto& m : chainModel_.chains[(size_t) c].modules)
@@ -4893,6 +5705,9 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
             if (m.type == ModuleType::Echo)      echoMask   |= (1u << slot);
             if (m.type == ModuleType::Equalizer) eqMask     |= (1u << slot);
             if (m.type == ModuleType::Harmonize) harmoMask  |= (1u << slot);
+            if (m.type == ModuleType::Centroid)  centroMask |= (1u << slot);
+            if (m.type == ModuleType::Drive)     driveMask  |= (1u << slot);
+            if (m.type == ModuleType::DcBlock)   dcBlockMask |= (1u << slot);
         }
     }
     chainPitchMask_.store(pitchMask, std::memory_order_relaxed);
@@ -4901,6 +5716,19 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
     chainEchoMask_.store(echoMask,   std::memory_order_relaxed);
     chainEqMask_.store(eqMask,       std::memory_order_relaxed);
     chainHarmoMask_.store(harmoMask, std::memory_order_relaxed);
+    chainCentroMask_.store(centroMask, std::memory_order_relaxed);
+    chainDriveMask_.store(driveMask,   std::memory_order_relaxed);
+    chainDcBlockMask_.store(dcBlockMask, std::memory_order_relaxed);
+
+    // MIDI TAP presence mask — keyed by ModuleInstance.slot (its OWN pool),
+    // NOT by poolSlotForInstance: like VideoScroll, the model assigns the slot.
+    uint32_t midiTapMask = 0;
+    for (const auto& ch : chainModel_.chains)
+        for (const auto& m : ch.modules)
+            if (m.type == ModuleType::MidiTap
+                && m.slot >= 0 && m.slot < CHAIN_MAX_CHAINS)
+                midiTapMask |= (1u << m.slot);
+    chainMidiTapMask_.store(midiTapMask, std::memory_order_relaxed);
 
     // Per-instance `enabled` sync — must NOT wait for applyConfigurationToCore:
     // a pure topology change (Pitch dragged to another chain, chain removal,
@@ -4924,6 +5752,16 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
                 (bankOn(eqParam(i, "Enabled")) && ((eqMask     >> i) & 1u)) ? 1 : 0;
             lux_harmo_instance(i)->config.enabled =
                 (bankOn(hmParam(i, "Enabled")) && ((harmoMask  >> i) & 1u)) ? 1 : 0;
+            lux_centro_instance(i)->config.enabled =
+                (bankOn(ctParam(i, "Enabled")) && ((centroMask >> i) & 1u)) ? 1 : 0;
+            lux_drive_instance(i)->config.enabled =
+                (bankOn(dvParam(i, "Enabled")) && ((driveMask  >> i) & 1u)) ? 1 : 0;
+            lux_dcblock_instance(i)->config.enabled =
+                (bankOn(dcbParam(i, "Enabled")) && ((dcBlockMask >> i) & 1u)) ? 1 : 0;
+            // A probe removed from the rack must stop extracting immediately;
+            // midi_tap_process_line's lazy re-arm then releases its held notes.
+            midi_tap_instance(i)->config.enabled =
+                (bankOn(mtParam(i, "enabled")) && ((midiTapMask >> i) & 1u)) ? 1 : 0;
         }
     }
 
@@ -4972,12 +5810,18 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
         const uint32_t lostEcho   = (prevEchoSlots_   & ~echoMask)   | staleSlots.echo;
         const uint32_t lostEq     = (prevEqSlots_     & ~eqMask)     | staleSlots.eq;
         const uint32_t lostHarmo  = (prevHarmoSlots_  & ~harmoMask)  | staleSlots.harmo;
+        const uint32_t lostCentro = (prevCentroSlots_ & ~centroMask) | staleSlots.centro;
+        const uint32_t lostDrive  = (prevDriveSlots_  & ~driveMask)  | staleSlots.drive;
+        const uint32_t lostDcBlock = (prevDcBlockSlots_ & ~dcBlockMask) | staleSlots.dcblock;
         pendingPitchResets_  |= lostPitch;
         pendingMaskResets_   |= lostMask;
         pendingReverbResets_ |= lostReverb;
         pendingEchoResets_   |= lostEcho;
         pendingEqResets_     |= lostEq;
         pendingHarmoResets_  |= lostHarmo;
+        pendingCentroResets_ |= lostCentro;
+        pendingDriveResets_  |= lostDrive;
+        pendingDcBlockResets_ |= lostDcBlock;
         // A slot ACTIVE in the new plan must not be reset by a pending bit
         // armed for a previous removal (remove + re-add within the 40 ms
         // window): the deferred reset would wipe — and race — the freshly
@@ -4989,7 +5833,11 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
         pendingEchoResets_   &= ~echoMask;
         pendingEqResets_     &= ~eqMask;
         pendingHarmoResets_  &= ~harmoMask;
-        if ((lostPitch | lostMask | lostReverb | lostEcho | lostEq | lostHarmo) != 0)
+        pendingCentroResets_ &= ~centroMask;
+        pendingDriveResets_  &= ~driveMask;
+        pendingDcBlockResets_ &= ~dcBlockMask;
+        if ((lostPitch | lostMask | lostReverb | lostEcho | lostEq | lostHarmo
+             | lostCentro | lostDrive | lostDcBlock) != 0)
             poolResetArmedMs_ = juce::Time::getMillisecondCounter();
         prevPitchSlots_  = pitchMask;
         prevMaskSlots_   = maskMask;
@@ -4997,6 +5845,9 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
         prevEchoSlots_   = echoMask;
         prevEqSlots_     = eqMask;
         prevHarmoSlots_  = harmoMask;
+        prevCentroSlots_ = centroMask;
+        prevDriveSlots_  = driveMask;
+        prevDcBlockSlots_ = dcBlockMask;
     }
 }
 
@@ -5020,6 +5871,9 @@ Sp3ctraAudioProcessor::PoolStale Sp3ctraAudioProcessor::updateModulePoolBindings
             case ModuleType::Reverb:    return stale.reverb;
             case ModuleType::Equalizer: return stale.eq;
             case ModuleType::Harmonize: return stale.harmo;
+            case ModuleType::Centroid:  return stale.centro;
+            case ModuleType::Drive:     return stale.drive;
+            case ModuleType::DcBlock:   return stale.dcblock;
             case ModuleType::Echo:
             default:                    return stale.echo;
         }
@@ -5028,7 +5882,9 @@ Sp3ctraAudioProcessor::PoolStale Sp3ctraAudioProcessor::updateModulePoolBindings
     {
         return t == ModuleType::Pitch  || t == ModuleType::Mask
             || t == ModuleType::Reverb || t == ModuleType::Echo
-            || t == ModuleType::Equalizer || t == ModuleType::Harmonize;
+            || t == ModuleType::Equalizer || t == ModuleType::Harmonize
+            || t == ModuleType::Centroid || t == ModuleType::Drive
+            || t == ModuleType::DcBlock;
     };
 
     std::map<juce::Uuid, ModuleType> live;
@@ -5135,8 +5991,12 @@ Sp3ctraAudioProcessor::navTargetForParam(const juce::String& id) const
     else if (banked("luxecho",   slot)) { t.type = ModuleType::Echo;       t.instanceId = poolInstance (t.type, slot); }
     else if (banked("luxeq",     slot)) { t.type = ModuleType::Equalizer;  t.instanceId = poolInstance (t.type, slot); }
     else if (banked("luxharmo",  slot)) { t.type = ModuleType::Harmonize;  t.instanceId = poolInstance (t.type, slot); }
+    else if (banked("luxcentro", slot)) { t.type = ModuleType::Centroid;   t.instanceId = poolInstance (t.type, slot); }
+    else if (banked("luxdrive",  slot)) { t.type = ModuleType::Drive;      t.instanceId = poolInstance (t.type, slot); }
+    else if (banked("luxdcblock", slot)) { t.type = ModuleType::DcBlock;   t.instanceId = poolInstance (t.type, slot); }
     else if (banked("videoScroll", slot) || banked("videoMix", slot))
                                         { t.type = ModuleType::VideoScroll; t.instanceId = chainInstance(t.type, slot); }
+    else if (banked("midiTap",   slot)) { t.type = ModuleType::MidiTap;    t.instanceId = chainInstance(t.type, slot); }
     else if (banked("luxstralOut", slot)) { t.type = ModuleType::LuxStral; t.instanceId = chainInstance(t.type, slot); }
     else if (banked("luxsynthOut", slot)) { t.type = ModuleType::LuxSynth; t.instanceId = chainInstance(t.type, -1); }
     else if (banked("luxwaveOut",  slot)) { t.type = ModuleType::LuxWave;  t.instanceId = chainInstance(t.type, -1); }
@@ -5572,7 +6432,9 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
             const ModuleType t = mi.type;
             if ((t == ModuleType::Pitch || t == ModuleType::Mask
                  || t == ModuleType::Reverb || t == ModuleType::Echo
-                 || t == ModuleType::Equalizer || t == ModuleType::Harmonize)
+                 || t == ModuleType::Equalizer || t == ModuleType::Harmonize
+                 || t == ModuleType::Centroid || t == ModuleType::Drive
+                 || t == ModuleType::DcBlock)
                 && sp.num_inserts < CHAIN_PLAN_MAX_INSERTS)
             {
                 sp.insert_id[sp.num_inserts] =
@@ -5581,6 +6443,9 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
                     : (t == ModuleType::Reverb)? IMAGE_CHAIN_INSERT_LUXREVERB
                     : (t == ModuleType::Echo)  ? IMAGE_CHAIN_INSERT_LUXECHO
                     : (t == ModuleType::Harmonize) ? IMAGE_CHAIN_INSERT_LUXHARMO
+                    : (t == ModuleType::Centroid)  ? IMAGE_CHAIN_INSERT_LUXCENTRO
+                    : (t == ModuleType::Drive)     ? IMAGE_CHAIN_INSERT_LUXDRIVE
+                    : (t == ModuleType::DcBlock)   ? IMAGE_CHAIN_INSERT_LUXDCBLOCK
                     :                            IMAGE_CHAIN_INSERT_LUXEQ;
                 // Pool slot bound to THIS INSTANCE's UUID — stable across edits
                 // and chain moves (must match deriveChainRouting's masks).
@@ -5593,6 +6458,17 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
             {
                 // PASS-THROUGH PROBE: insert_state_idx is the PER-INSTANCE slot (0..7).
                 sp.insert_id[sp.num_inserts]        = IMAGE_CHAIN_INSERT_VIDEOSCROLL;
+                sp.insert_state_idx[sp.num_inserts] = mi.slot;
+                sp.num_inserts++;
+            }
+            else if (t == ModuleType::MidiTap
+                     && mi.slot >= 0 && mi.slot < CHAIN_MAX_CHAINS
+                     && sp.num_inserts < CHAIN_PLAN_MAX_INSERTS)
+            {
+                // PASS-THROUGH PROBE: like VideoScroll, insert_state_idx is the
+                // PER-INSTANCE slot (ModuleInstance.slot), NOT a UUID→pool
+                // lookup — MidiTap owns its own 8-slot pool.
+                sp.insert_id[sp.num_inserts]        = IMAGE_CHAIN_INSERT_MIDITAP;
                 sp.insert_state_idx[sp.num_inserts] = mi.slot;
                 sp.num_inserts++;
             }
@@ -5703,7 +6579,10 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
             if (m.type == ModuleType::LuxStral || m.type == ModuleType::LuxSynth
                 || m.type == ModuleType::LuxWave || m.type == ModuleType::LuxGrain)
                 hasOut = true;
-            if (m.type == ModuleType::VideoScroll
+            // Both pass-through probes make a chain worth executing: without
+            // this a chain hosting ONLY a MIDI TAP would keep present == 0 and
+            // the probe would never see a line.
+            if ((m.type == ModuleType::VideoScroll || m.type == ModuleType::MidiTap)
                 && m.slot >= 0 && m.slot < CHAIN_MAX_CHAINS)
                 hasProbe = true;
             if (m.type == ModuleType::Sampler || isScoreFamily(m.type))
@@ -5768,6 +6647,8 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
     // old "free the shared channel when the LAST family member leaves").
     {
         int famSlot[4] = { -1, -1, -1, -1 };
+        int slotType[ScorePlayerService::kMaxSlots];
+        std::fill(std::begin(slotType), std::end(slotType), -1);
         uint8_t present = 0;
         for (const auto& ch : chainModel_.chains)
             for (const auto& m : ch.modules)
@@ -5776,19 +6657,49 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
                 const int slot = juce::jlimit(0, ChainModel::kMaxScorePlayers - 1,
                                               m.slot >= 0 ? m.slot : 0);
                 present |= (uint8_t) (1u << slot);
+                slotType[slot] = (int) m.type;   // P7 — slot → owning type
                 for (int f = 0; f < 4; ++f)
                     if (kScoreFamily[f] == m.type && famSlot[f] < 0)
                         famSlot[f] = slot;
             }
         for (int f = 0; f < 4; ++f)
             scoreFamilySlot_[f].store(famSlot[f], std::memory_order_release);
+        for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+        {
+            scoreSlotType_[s].store(slotType[s], std::memory_order_release);
+            // P8 — VOICE feeds like a media source: active + take generated
+            // ⇒ the parked column flows with the transport stopped (IMAGE
+            // parity). Only VOICE-hosted slots get the hold behaviour.
+            if (scorePlayerService_ != nullptr)
+                scorePlayerService_->setHoldWhenStopped(
+                    s, slotType[s] == (int) ModuleType::Voice);
+        }
 
         const uint8_t gone = (uint8_t) (scoreSlotsPresentMask_ & ~present);
         scoreSlotsPresentMask_ = present;
-        if (gone != 0 && scorePlayerService_ != nullptr)
-            for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
-                if ((gone >> s) & 1u)
-                    scorePlayerService_->discard(s);
+        for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+        {
+            if (((gone >> s) & 1u) == 0)
+                continue;
+            if (scorePlayerService_ != nullptr)
+                scorePlayerService_->discard(s);
+            // P7 — the slot is now free for the NEXT score-family module, in
+            // any chain: drop everything the departed instance owned so the
+            // next one starts clean (frames above, settings + take here, and
+            // the generator page documents through the editor hook).
+            score_settings_defaults(&scoreSettings_[(size_t) s]);
+            scoreSettings_[(size_t) s].writingSpeed = 2.5;
+            scoreWavPath[(size_t) s].clear();
+            // P9 — the persisted take goes with it (cache, armed resume and
+            // Standalone sidecar), and the gen bump voids in-flight encodes.
+            scoreTakePng_[(size_t) s].reset();
+            ++scoreTakeGen_[s];
+            pendingResumeScore_.fetch_and(~(1u << s), std::memory_order_acq_rel);
+            if (sessions_ != nullptr && sessions_->isStandalone())
+                sessions_->saveScoreTakeNow(s);   // empty cache ⇒ deletes the file
+            if (onScoreSlotReleased)
+                onScoreSlotReleased(s);
+        }
 
         // Slots just (re)mapped: push each family type's transport params into
         // its own slot (the atomic loopMode default is NONE but the params
@@ -5834,13 +6745,19 @@ void Sp3ctraAudioProcessor::primeScoreTransports()
 {
     if (scorePlayerService_ == nullptr)
         return;
-    for (ModuleType t : kScoreFamily)
-        if (auto* sc = getScoreChannel(t))
-        {
-            const auto ids = scoreXportIds(t);
-            sc->setScoreSpeed(apvts.getRawParameterValue(ids.speed)->load());
-            sc->setScoreLoopMode(loopModeFromIds(apvts, ids.loop, ids.reverse));
-        }
+    // P7 — each PLACED instance gets its OWN bank pushed into its own slot.
+    for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
+    {
+        const int ty = scoreSlotType_[s].load(std::memory_order_acquire);
+        if (ty < 0)
+            continue;
+        auto* sc = scorePlayerService_->channel(s);
+        if (sc == nullptr)
+            continue;
+        const auto ids = scoreXportIds((ModuleType) ty, s);
+        sc->setScoreSpeed(apvts.getRawParameterValue(ids.speed)->load());
+        sc->setScoreLoopMode(loopModeFromIds(apvts, ids.loop, ids.reverse));
+    }
     // Per-slot module ACTIVE state persists (unlike the play transports): push
     // each restored enable into its pool slot so a saved-deactivated module
     // opens deactivated. Transports are already forced STOPPED, so no resume
@@ -5863,12 +6780,22 @@ ScoreChannel* Sp3ctraAudioProcessor::getScoreChannel(ModuleType t) noexcept
     return nullptr;
 }
 
-std::vector<int> Sp3ctraAudioProcessor::activeVideoSlots() const
+std::vector<std::pair<int, int>> Sp3ctraAudioProcessor::activeVideoSlots() const
+{
+    std::vector<std::pair<int, int>> out;
+    for (int c = 0; c < (int) chainModel_.chains.size(); ++c)
+        for (const auto& m : chainModel_.chains[(size_t) c].modules)
+            if (m.type == ModuleType::VideoScroll && m.slot >= 0)
+                out.emplace_back(m.slot, c);
+    return out;
+}
+
+std::vector<int> Sp3ctraAudioProcessor::activeMidiTapSlots() const
 {
     std::vector<int> out;
     for (const auto& ch : chainModel_.chains)
         for (const auto& m : ch.modules)
-            if (m.type == ModuleType::VideoScroll && m.slot >= 0)
+            if (m.type == ModuleType::MidiTap && m.slot >= 0)
                 out.push_back(m.slot);
     std::sort(out.begin(), out.end());
     return out;
@@ -5954,10 +6881,11 @@ void Sp3ctraAudioProcessor::persistChainModel()
 //==============================================================================
 // Non-APVTS module state ↔ session blob (SCORE / SEQ / SAMPLER_SLOTS)
 //==============================================================================
-juce::ValueTree Sp3ctraAudioProcessor::scoreStateToTree() const
+juce::ValueTree Sp3ctraAudioProcessor::scoreStateToTree(int slot) const
 {
-    juce::ValueTree t("SCORE");
-    const auto& s = scoreSettings_;
+    slot = juce::jlimit(0, ScorePlayerService::kMaxSlots - 1, slot);
+    juce::ValueTree t(juce::Identifier(scoreStateTag(slot)));
+    const auto& s = scoreSettings_[(size_t) slot];
     t.setProperty("dynamicRangeDB",      s.dynamicRangeDB,      nullptr);
     t.setProperty("gammaCorrection",     s.gammaCorrection,     nullptr);
     t.setProperty("contrastFactor",      s.contrastFactor,      nullptr);
@@ -5986,18 +6914,24 @@ juce::ValueTree Sp3ctraAudioProcessor::scoreStateToTree() const
     // minFreq/maxFreq are recomputed at GENERATE time from the musical range —
     // persisting them would only freeze stale values; deliberately omitted.
 
-    t.setProperty("ovManual",  scoreFreq_.manual,    nullptr);
-    t.setProperty("ovTuning",  scoreFreq_.tuning,    nullptr);
-    t.setProperty("ovRoot",    scoreFreq_.rootIndex, nullptr);
-    t.setProperty("ovOctaves", scoreFreq_.octaves,   nullptr);
+    // The freq override is GLOBAL (instrument tuning) — carried by slot 0 only.
+    if (slot == 0)
+    {
+        t.setProperty("ovManual",  scoreFreq_.manual,    nullptr);
+        t.setProperty("ovTuning",  scoreFreq_.tuning,    nullptr);
+        t.setProperty("ovRoot",    scoreFreq_.rootIndex, nullptr);
+        t.setProperty("ovOctaves", scoreFreq_.octaves,   nullptr);
+    }
     return t;
 }
 
-void Sp3ctraAudioProcessor::restoreScoreStateFromTree(const juce::ValueTree& t)
+void Sp3ctraAudioProcessor::restoreScoreStateFromTree(int slot,
+                                                     const juce::ValueTree& t)
 {
     if (! t.isValid())
         return;
-    auto& s = scoreSettings_;   // defaults (constructor) fill missing props
+    slot = juce::jlimit(0, ScorePlayerService::kMaxSlots - 1, slot);
+    auto& s = scoreSettings_[(size_t) slot];   // defaults fill missing props
     s.dynamicRangeDB       = (double) t.getProperty("dynamicRangeDB",      s.dynamicRangeDB);
     s.gammaCorrection      = (double) t.getProperty("gammaCorrection",     s.gammaCorrection);
     s.contrastFactor       = (double) t.getProperty("contrastFactor",      s.contrastFactor);
@@ -6026,10 +6960,13 @@ void Sp3ctraAudioProcessor::restoreScoreStateFromTree(const juce::ValueTree& t)
     if (! s.spectroHeightManual)
         s.spectroHeightMM = SCORE_CIS_HEIGHT_MM;   // keep the lock invariant
 
-    scoreFreq_.manual    = (bool)   t.getProperty("ovManual",  scoreFreq_.manual);
-    scoreFreq_.tuning    = (double) t.getProperty("ovTuning",  scoreFreq_.tuning);
-    scoreFreq_.rootIndex = (int)    t.getProperty("ovRoot",    scoreFreq_.rootIndex);
-    scoreFreq_.octaves   = (int)    t.getProperty("ovOctaves", scoreFreq_.octaves);
+    if (slot == 0)
+    {
+        scoreFreq_.manual    = (bool)   t.getProperty("ovManual",  scoreFreq_.manual);
+        scoreFreq_.tuning    = (double) t.getProperty("ovTuning",  scoreFreq_.tuning);
+        scoreFreq_.rootIndex = (int)    t.getProperty("ovRoot",    scoreFreq_.rootIndex);
+        scoreFreq_.octaves   = (int)    t.getProperty("ovOctaves", scoreFreq_.octaves);
+    }
 }
 
 // User timbre wavetable (tuned grains): persist the harmonic coefficients the
@@ -6121,6 +7058,9 @@ bool Sp3ctraAudioProcessor::loadTimbreSampleFile(const juce::File& file,
     // Land the extraction on the persisted/current scan position.
     luxstral_wavetable_set_position(
         apvts.getRawParameterValue("luxstralTimbrePos")->load());
+    // The path/wavetable persist outside the APVTS — the global dirty listener
+    // never sees them. (No-op during restore: autosave is suppressed there.)
+    if (sessions_) sessions_->markStateDirty();
     return true;
 }
 
@@ -6160,6 +7100,7 @@ bool Sp3ctraAudioProcessor::loadLuxGrainSampleFile(const juce::File& file,
         return false;
     }
     luxgrainSamplePath_ = file.getFullPathName();
+    if (sessions_) sessions_->markStateDirty();   // path persists outside the APVTS
     return true;
 }
 
@@ -6167,6 +7108,7 @@ void Sp3ctraAudioProcessor::clearLuxGrainSample()
 {
     luxgrainSamplePath_.clear();
     luxgrain_engine_clear_sample(&g_luxgrain_engine);
+    if (sessions_) sessions_->markStateDirty();   // path persists outside the APVTS
 }
 
 void Sp3ctraAudioProcessor::restoreLuxstralWavetableFromTree(const juce::ValueTree& t)
@@ -6306,6 +7248,35 @@ void Sp3ctraAudioProcessor::applySamplerParamsFromState()
     }
 }
 
+void Sp3ctraAudioProcessor::applyMachineParamOverrides()
+{
+    // See MachinePrefs.h for the mechanism. Runs on the message thread at the
+    // end of every restore; setValueNotifyingHost fires parameterChanged
+    // synchronously here (message thread → applyParameterChange inline), so
+    // the UDP/config side effects follow without extra plumbing.
+    auto& props = MachinePrefs::file();
+    for (auto* id : MachinePrefs::kParams)
+    {
+        auto* p = apvts.getParameter(id);
+        if (p == nullptr)
+            continue;
+        const float restored = p->convertFrom0to1(p->getValue());
+        const juce::String key = MachinePrefs::paramKey(id);
+        if (props.containsKey(key))
+        {
+            const auto v = (float) props.getDoubleValue(key, restored);
+            if (v != restored)
+            {
+                p->setValueNotifyingHost(p->convertTo0to1(v));
+                log_info("VST", "Machine override: %s = %.3f (blob had %.3f)",
+                         id, (double) v, (double) restored);
+            }
+        }
+        else
+            props.setValue(key, (double) restored);   // first-run seed
+    }
+}
+
 //==============================================================================
 // M9 — IMAGE / VIDEO / CAMERA source engines: presence + state blob
 //==============================================================================
@@ -6361,8 +7332,14 @@ juce::ValueTree Sp3ctraAudioProcessor::mediaSourcesStateToTree() const
             t.setProperty(juce::Identifier("imagePath" + sfx),
                           eng->getFile().getFullPathName(), nullptr);
         if (auto* v = videoSources_[(size_t) s].get())
+        {
             t.setProperty(juce::Identifier("videoPath" + sfx),
                           v->getFile().getFullPathName(), nullptr);
+            // Playhead (0..1) — restored as a seek so a scrubbed position
+            // survives a reload (the transport itself restarts as "run").
+            t.setProperty(juce::Identifier("videoPos" + sfx),
+                          v->getPositionFrac(), nullptr);
+        }
         t.setProperty(juce::Identifier("cameraDevice" + sfx),
                       cameraDeviceNames_[(size_t) s], nullptr);
     }
@@ -6394,6 +7371,10 @@ void Sp3ctraAudioProcessor::restoreMediaSourcesFromTree(const juce::ValueTree& t
             if (! v->loadFile(juce::File(vidPath), err))
                 log_warning("VST", "Video source %d restore failed: %s",
                             s, err.toRawUTF8());
+            else if (const double pos =
+                         (double) t.getProperty(juce::Identifier("videoPos" + sfx), 0.0);
+                     pos > 0.0)
+                v->seekFrac(pos);   // resume where the session left off
         }
         cameraDeviceNames_[(size_t) s] =
             t.getProperty(juce::Identifier("cameraDevice" + sfx), "").toString();
@@ -6484,8 +7465,11 @@ void Sp3ctraAudioProcessor::teardownAbsentModules(const std::set<ModuleType>& no
     // settings reset stays SCORE-only.
     if (removed(ModuleType::Score))
     {
-        score_settings_defaults(&scoreSettings_);
-        scoreSettings_.writingSpeed = 2.5;   // match the constructor default
+        for (auto& sc : scoreSettings_)
+        {
+            score_settings_defaults(&sc);
+            sc.writingSpeed = 2.5;   // match the constructor default
+        }
     }
 
     // Pitch / Mask: handled at INSTANCE granularity by deriveChainRouting() —
@@ -6560,6 +7544,38 @@ void Sp3ctraAudioProcessor::teardownAbsentModules(const std::set<ModuleType>& no
         videoScrollSlotIds_ = std::move(vsIdsNow);
     }
     videoScrollSlots_ = vsNow;
+
+    // MIDI TAP: per-instance probe (slot 0..7), may repeat per chain → diff at
+    // slot granularity, same deferred discipline as VideoScroll.
+    //
+    // NO bank wipe here, deliberately: updateInsertParamMemory() already owns
+    // the whole bank contract for any manifest type (reset on claim → J3 chain
+    // inheritance → force-enable), and it runs BEFORE this function. The
+    // VideoScroll wipe above re-runs after it and therefore clobbers that
+    // inheritance for a freshly placed instance — do not replicate it.
+    std::set<int> mtNow;
+    for (const auto& ch : chainModel_.chains)
+        for (const auto& m : ch.modules)
+            if (m.type == ModuleType::MidiTap
+                && m.slot >= 0 && m.slot < CHAIN_MAX_CHAINS)
+                mtNow.insert(m.slot);
+    for (int slot : midiTapSlots_)
+        if (mtNow.count(slot) == 0)
+        {
+            // Two-stage teardown. The producer may still be inside the frame
+            // taken with the OLD plan, so we may NOT push note-offs or wipe the
+            // ring yet: the timer runs midi_tap_panic() ≥40 ms later (the
+            // note-offs must reach the sinks), then midi_tap_init() clears.
+            pendingMidiTapPanics_ |= (1u << slot);
+            poolResetArmedMs_ = juce::Time::getMillisecondCounter();
+        }
+    // Remove + re-add within the defer window: keep the probe running.
+    for (int slot : mtNow)
+    {
+        pendingMidiTapPanics_ &= ~(1u << slot);
+        pendingMidiTapInits_  &= ~(1u << slot);
+    }
+    midiTapSlots_ = mtNow;
 }
 
 bool Sp3ctraAudioProcessor::saveChainPreset(int chainIdx, const juce::File& file)
@@ -6867,8 +7883,6 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         static_cast<int>(apvts.getRawParameterValue("imageFadeInMs")->load());
     g_sp3ctra_config.sampler_gamma        =
         apvts.getRawParameterValue("samplerGamma")->load();
-    g_sp3ctra_config.sampler_contrast_min =
-        apvts.getRawParameterValue("samplerContrastMin")->load();
     g_sp3ctra_config.sampler_freeze_mode  =
         static_cast<int>(apvts.getRawParameterValue("samplerFreezeMode")->load());
     g_sp3ctra_config.raw_freeze_mode      =
@@ -6894,44 +7908,50 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
         g_sp3ctra_config.lx_fft_smoothing =
             apvts.getRawParameterValue("lxFftSmoothing")->load();
 
-        // ── Synth-split P1 — per-OUT conditioning banks → g_sp3ctra_config ──
-        // contrast_min / range_db are LuxStral-only.
-        for (int s = 0; s < LUX_OUT_MAX_SLOTS; ++s)
+        // ── Per-OUT banks → g_sp3ctra_config ─────────────────────────────────
+        // Purge 2026-08-05: the per-OUT conditioning knobs are gone — every
+        // send applies the CANONICAL decode: inversion ON (intrinsic to the
+        // inverse-dB law), DC blocking OFF (the dedicated DC chain module is
+        // the replacement), gamma 1.0 (LEVELS shapes upstream), unity send
+        // weight. Nothing per send but the enable now (2026-08-13: contrast_min
+        // left for the LEVELS module's CONTRAST knob); range_db is the
+        // machine-level SETUP knob (must match the SCORE's dynamicRangeDB).
         {
             auto rawf = [this](const juce::String& id) {
                 auto* v = apvts.getRawParameterValue(id);
                 return v ? v->load() : 0.0f;
             };
+            const float rangeDb = rawf("luxstralRangeDb");
 
-            lux_out_params_t* ls = &g_sp3ctra_config.luxstral_out[s];
-            ls->negative     = (int)rawf(lsOutParam(s, "negative"));
-            ls->dc_blocking  = (int)rawf(lsOutParam(s, "dcBlocking"));
-            ls->gamma        = rawf(lsOutParam(s, "gamma"));
-            ls->contrast_min = rawf(lsOutParam(s, "contrastMin"));
-            ls->range_db     = rawf(lsOutParam(s, "rangeDb"));
-            ls->intensity    = rawf(lsOutParam(s, "intensity"));
-            ls->enabled      = (int)rawf(lsOutParam(s, "enabled"));
+            for (int s = 0; s < LUX_OUT_MAX_SLOTS; ++s)
+            {
+                lux_out_params_t* ls = &g_sp3ctra_config.luxstral_out[s];
+                ls->negative     = 1;
+                ls->dc_blocking  = 0;
+                ls->gamma        = 1.0f;
+                ls->range_db     = rangeDb;
+                ls->intensity    = 1.0f;
+                ls->enabled      = (int)rawf(lsOutParam(s, "enabled"));
 
-            lux_out_params_t* lx = &g_sp3ctra_config.luxsynth_out[s];
-            lx->negative    = (int)rawf(lxOutParam(s, "negative"));
-            lx->dc_blocking = (int)rawf(lxOutParam(s, "dcBlocking"));
-            lx->gamma       = rawf(lxOutParam(s, "gamma"));
-            lx->intensity   = rawf(lxOutParam(s, "intensity"));
-            lx->enabled     = (int)rawf(lxOutParam(s, "enabled"));
-
-            lux_out_params_t* lw = &g_sp3ctra_config.luxwave_out[s];
-            lw->negative    = (int)rawf(lwOutParam(s, "negative"));
-            lw->dc_blocking = (int)rawf(lwOutParam(s, "dcBlocking"));
-            lw->gamma       = rawf(lwOutParam(s, "gamma"));
-            lw->intensity   = rawf(lwOutParam(s, "intensity"));
-            lw->enabled     = (int)rawf(lwOutParam(s, "enabled"));
-
-            lux_out_params_t* lg = &g_sp3ctra_config.luxgrain_out[s];
-            lg->negative    = (int)rawf(lgOutParam(s, "negative"));
-            lg->dc_blocking = (int)rawf(lgOutParam(s, "dcBlocking"));
-            lg->gamma       = rawf(lgOutParam(s, "gamma"));
-            lg->intensity   = rawf(lgOutParam(s, "intensity"));
-            lg->enabled     = (int)rawf(lgOutParam(s, "enabled"));
+                lux_out_params_t* banks[3] = {
+                    &g_sp3ctra_config.luxsynth_out[s],
+                    &g_sp3ctra_config.luxwave_out[s],
+                    &g_sp3ctra_config.luxgrain_out[s],
+                };
+                const juce::String enables[3] = {
+                    lxOutParam(s, "enabled"),
+                    lwOutParam(s, "enabled"),
+                    lgOutParam(s, "enabled"),
+                };
+                for (int b = 0; b < 3; ++b)
+                {
+                    banks[b]->negative    = 1;
+                    banks[b]->dc_blocking = 0;
+                    banks[b]->gamma       = 1.0f;
+                    banks[b]->intensity   = 1.0f;
+                    banks[b]->enabled     = (int)rawf(enables[b]);
+                }
+            }
         }
 
         // ── Insert chain order (M1 — modular pipeline core) ──
@@ -7076,6 +8096,8 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
                 LuxEqConfig c     = lux_eq_config_default();
                 c.enabled         = static_cast<int>(raw("Enabled"));
                 c.background_mode = kEqBgChoiceToMode[bgChoice];
+                c.num_bands       = juce::jlimit(2, LUX_EQ_NUM_BANDS,
+                                                 2 + (int) raw("NumPoints"));
                 for (int b = 0; b < LUX_EQ_NUM_BANDS; ++b)
                     c.band_gain_db[b] =
                         raw(("Band" + juce::String(b)).toRawUTF8());
@@ -7114,6 +8136,155 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
                 if (((hmask >> i) & 1u) == 0) c.enabled = 0;
                 lux_harmo_instance(i)->config = c;
             }
+        }
+
+        // ── Sync LuxCentro (CENTROID) configs — one APVTS bank per pool instance ──
+        {
+            // Choice order is {Auto, Black, White} — map onto the C-side modes.
+            static const int kCtBgChoiceToMode[3] =
+                { LUX_CENTRO_BG_AUTO, LUX_CENTRO_BG_BLACK, LUX_CENTRO_BG_WHITE };
+            const uint32_t cmask = chainCentroMask_.load(std::memory_order_relaxed);
+            for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
+            {
+                auto raw = [&, i](const char* sfx)
+                { return apvts.getRawParameterValue(ctParam(i, sfx))->load(); };
+
+                int bgChoice = static_cast<int>(raw("BackgroundMode"));
+                if (bgChoice < 0 || bgChoice > 2) bgChoice = 0;
+
+                LuxCentroConfig c = lux_centro_config_default();
+                c.enabled         = static_cast<int>(raw("Enabled"));
+                c.floor_level     = raw("Floor") / 100.0f;
+                c.thickness_px    = raw("Thickness");
+                c.edge_soft       = raw("Edge");
+                c.background_mode = kCtBgChoiceToMode[bgChoice];
+                c.eq_num_bands    = juce::jlimit(2, LUX_EQ_NUM_BANDS,
+                                                 2 + (int) raw("NumPoints"));
+                for (int b = 0; b < LUX_EQ_NUM_BANDS; ++b)
+                    c.eq_band_gain_db[b] =
+                        raw(("Band" + juce::String(b)).toRawUTF8());
+                if (((cmask >> i) & 1u) == 0) c.enabled = 0;
+                lux_centro_instance(i)->config = c;
+            }
+        }
+
+        // ── Sync LuxDrive (LEVELS) configs — one APVTS bank per pool instance ─
+        {
+            // Choice order is {Auto, Black, White} — map onto the C-side modes.
+            static const int kDvBgChoiceToMode[3] =
+                { LUX_DRIVE_BG_AUTO, LUX_DRIVE_BG_BLACK, LUX_DRIVE_BG_WHITE };
+            const uint32_t dmask = chainDriveMask_.load(std::memory_order_relaxed);
+            for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
+            {
+                auto raw = [&, i](const char* sfx)
+                { return apvts.getRawParameterValue(dvParam(i, sfx))->load(); };
+
+                int bgChoice = static_cast<int>(raw("BackgroundMode"));
+                if (bgChoice < 0 || bgChoice > 2) bgChoice = 0;
+
+                LuxDriveConfig c  = lux_drive_config_default();
+                c.enabled         = static_cast<int>(raw("Enabled"));
+                c.gamma           = raw("Gamma");
+                c.saturation      = raw("Saturation") / 100.0f;
+                c.floor_level     = raw("Floor") / 100.0f;
+                c.contrast_min    = raw("ContrastMin") / 100.0f;
+                // Same curve as the audio measure — one exponent, both domains.
+                c.contrast_power  =
+                    g_sp3ctra_config.additive_contrast_adjustment_power;
+                c.invert_mode     = juce::jlimit(0, 2,
+                                        static_cast<int>(raw("InvertMode")));
+                c.background_mode = kDvBgChoiceToMode[bgChoice];
+                c.eq_num_bands    = juce::jlimit(2, LUX_EQ_NUM_BANDS,
+                                                 2 + (int) raw("NumPoints"));
+                for (int b = 0; b < LUX_EQ_NUM_BANDS; ++b)
+                    c.eq_band_gain_db[b] =
+                        raw(("Band" + juce::String(b)).toRawUTF8());
+                if (((dmask >> i) & 1u) == 0) c.enabled = 0;
+                lux_drive_instance(i)->config = c;
+            }
+        }
+
+        // ── Sync LuxDcBlock (DC BLOCK) configs — one APVTS bank per pool instance ─
+        {
+            // Choice order is {Auto, Black, White} — map onto the C-side modes.
+            static const int kDcbBgChoiceToMode[3] =
+                { LUX_DCBLOCK_BG_AUTO, LUX_DCBLOCK_BG_BLACK, LUX_DCBLOCK_BG_WHITE };
+            const uint32_t bmask = chainDcBlockMask_.load(std::memory_order_relaxed);
+            for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
+            {
+                auto raw = [&, i](const char* sfx)
+                { return apvts.getRawParameterValue(dcbParam(i, sfx))->load(); };
+
+                int bgChoice = static_cast<int>(raw("BackgroundMode"));
+                if (bgChoice < 0 || bgChoice > 2) bgChoice = 0;
+
+                LuxDcBlockConfig c = lux_dcblock_config_default();
+                c.enabled          = static_cast<int>(raw("Enabled"));
+                c.amount           = raw("Amount") / 100.0f;
+                c.background_mode  = kDcbBgChoiceToMode[bgChoice];
+                if (((bmask >> i) & 1u) == 0) c.enabled = 0;
+                lux_dcblock_instance(i)->config = c;
+            }
+        }
+
+        // ── Sync MIDI TAP configs — one APVTS bank per pool instance ──────────
+        {
+            // Choice order is {Black, White, Auto} — already the C-side order.
+            const uint32_t tmask = chainMidiTapMask_.load(std::memory_order_relaxed);
+            for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
+            {
+                auto raw = [&, i](const char* sfx)
+                { return apvts.getRawParameterValue(mtParam(i, sfx))->load(); };
+
+                MidiTapConfig c    = midi_tap_config_default();
+                c.enabled          = static_cast<int>(raw("enabled"));
+                c.mode             = static_cast<int>(raw("mode"));
+                c.source           = static_cast<int>(raw("source"));
+                c.max_poly         = static_cast<int>(raw("maxPoly"));
+                c.thresh           = raw("threshold");
+                c.hyst             = raw("hysteresis");
+                c.rel              = raw("relative");
+                c.smooth           = raw("smooth");
+                c.peak_only        = static_cast<int>(raw("peakOnly"));
+                c.attack_ms        = raw("attackMs");
+                c.release_ms       = raw("releaseMs");
+                c.min_on_ms        = raw("minOnMs");
+                c.max_on_ms        = raw("maxOnMs");
+                c.transpose        = static_cast<int>(raw("transpose"));
+                c.note_lo          = static_cast<int>(raw("noteLo"));
+                c.note_hi          = static_cast<int>(raw("noteHi"));
+                c.range_policy     = static_cast<int>(raw("rangePolicy"));
+                c.background_mode  = static_cast<int>(raw("backgroundMode"));
+                c.vel_curve        = static_cast<int>(raw("velCurve"));
+                c.vel_span         = raw("velSpan");
+                c.vel_fixed        = static_cast<int>(raw("velFixed"));
+                c.dense            = static_cast<int>(raw("dense"));
+                c.retrig_ms        = raw("retrigMs");
+                c.retrig_delta     = static_cast<int>(raw("retrigDelta"));
+                // Anchor the band grid on the instrument's PHYSICAL axis so a
+                // printed A really lands on MIDI A (same rule as LuxHarmo).
+                c.axis_low_hz      = g_sp3ctra_config.low_frequency;
+                if (((tmask >> i) & 1u) == 0) c.enabled = 0;
+                midi_tap_instance(i)->config = c;
+
+                // Publish the audio thread's view of this probe (sink C).
+                busChannel_[i] = juce::jlimit(1, 16, (int) raw("channel"));
+                if (auto* s = midiTapSinks_[(size_t) i].get())
+                    s->setChannel(busChannel_[i]);
+            }
+
+            // Bus sink arming: enabled AND armed AND present AND the global bus
+            // toggle. Published last so the audio thread never sees a probe
+            // armed before its channel is in place.
+            const bool busOn = apvts.getRawParameterValue("midiBusEnable")->load() >= 0.5f;
+            uint32_t busMask = 0;
+            if (busOn)
+                for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
+                    if (((tmask >> i) & 1u) != 0
+                        && midi_tap_instance(i)->config.enabled
+                        && apvts.getRawParameterValue(mtParam(i, "arm"))->load() >= 0.5f)
+                        busMask |= (1u << i);
+            midiBusMask_.store(busMask, std::memory_order_release);
         }
 
     }

@@ -51,6 +51,7 @@ void ScoreChannel::uiPlayScore() noexcept       { svc_->play(slot_); }
 void ScoreChannel::uiStopScore() noexcept       { svc_->stop(slot_); }
 bool ScoreChannel::isScoreActive() const noexcept { return svc_->isActive(slot_); }
 void ScoreChannel::setScoreActive(bool a) noexcept { svc_->setActive(slot_, a); }
+bool ScoreChannel::isScoreFeeding() const noexcept { return svc_->slotIsFeeding(slot_); }
 void ScoreChannel::uiDiscardScore()             { svc_->discard(slot_); }
 bool ScoreChannel::uiBeginScoreScrub() noexcept { return svc_->beginScrub(slot_); }
 void ScoreChannel::uiEndScoreScrub() noexcept   { svc_->endScrub(slot_); }
@@ -136,6 +137,9 @@ void ScorePlayerService::play(int slot) noexcept
     // Toggle parity with the legacy uiPlayScore(): PLAY while playing = STOP.
     if (s.playRequested.load(std::memory_order_acquire)) { stop(slot); return; }
     if (!s.hasContent.load(std::memory_order_acquire)) return;
+    // A deactivated module never feeds its chains — the UI paths activate
+    // first (applyParameterChange "…Playing"); anything else is refused.
+    if (!s.active.load(std::memory_order_acquire)) return;
     // A real PLAY always advances — never inherits a leftover scrub hold.
     s.scrubbing.store(false, std::memory_order_release);
     s.playRequested.store(true, std::memory_order_release);
@@ -154,7 +158,21 @@ void ScorePlayerService::stop(int slot) noexcept
     // NEXT session's first tick to the old drag column (or into new frames
     // after a GENERATE reload) after beginSession chose head 0.
     s.seekHead.store(-1, std::memory_order_relaxed);
-    s.playHead.store(0, std::memory_order_relaxed);
+    // P8 hold slots PARK instead of rewinding: the session survives the stop
+    // and keeps injecting the column under the head (IMAGE parity — STOP
+    // freezes the scan where it is, it does not jump the drone to column 0).
+    if (! s.holdWhenStopped.load(std::memory_order_acquire))
+        s.playHead.store(0, std::memory_order_relaxed);
+}
+
+void ScorePlayerService::setHoldWhenStopped(int slot, bool hold) noexcept
+{
+    if (slot < 0 || slot >= kMaxSlots) return;
+    // No teardown here on hold→false: the run loop re-evaluates the want
+    // predicate every tick and winds the session down through the normal
+    // runout path (FX tails preserved). The 5 ms idle wait picks up a fresh
+    // hold without an explicit notify.
+    slots_[slot].holdWhenStopped.store(hold, std::memory_order_release);
 }
 
 bool ScorePlayerService::isActive(int slot) const noexcept
@@ -183,7 +201,13 @@ void ScorePlayerService::setActive(int slot, bool active) noexcept
             s.resumeOnReactivate.store(true, std::memory_order_release);
         }
         else
+        {
+            // A stopped-transport scrub-hold (sustained column) must not
+            // survive deactivation: clear it so the session tears down and
+            // the chain goes silent — deactivated = no flux, ever.
+            s.scrubbing.store(false, std::memory_order_release);
             s.resumeOnReactivate.store(false, std::memory_order_release);
+        }
     }
     else if (s.resumeOnReactivate.exchange(false, std::memory_order_acq_rel))
     {
@@ -210,6 +234,7 @@ void ScorePlayerService::discard(int slot)
     // The session's own teardown (≤1 ms later) may resolve the NEW plan and
     // miss them — and it can't re-stage either (the frames are gone).
     score_player_stagings_set_inactive(slot);
+    score_player_whiten_downstream_inputs(slot);   // same plan-race rationale
 }
 
 bool ScorePlayerService::beginScrub(int slot) noexcept
@@ -219,6 +244,9 @@ bool ScorePlayerService::beginScrub(int slot) noexcept
     // Already playing → the live-seek path handles the drag (legacy contract).
     if (s.playRequested.load(std::memory_order_acquire)) return false;
     if (!s.hasContent.load(std::memory_order_acquire)) return false;
+    // Deactivated module: no scrub audition either — the rack LED is off,
+    // so the module must not inject a sustained column into its chains.
+    if (!s.active.load(std::memory_order_acquire)) return false;
     // playRequested stays FALSE: the PLAY button + head line keep their
     // stopped appearance — this is a transient audition, not playback.
     s.scrubbing.store(true, std::memory_order_release);
@@ -295,6 +323,22 @@ bool ScorePlayerService::anyFeeding() const noexcept
     return false;
 }
 
+bool ScorePlayerService::ownsDisplay() const noexcept
+{
+    // Same shape as the run loop's display-owner pick: playing, scrubbing or
+    // a tail runout claims the bus; a PARKED hold (sessionActive without any
+    // of those) does not — the producers keep the live view.
+    for (int i = 0; i < kMaxSlots; ++i)
+    {
+        const ScoreSlot& s = slots_[i];
+        if (s.playRequested.load(std::memory_order_acquire)
+            || s.scrubbing.load(std::memory_order_acquire)
+            || s.runoutActive.load(std::memory_order_acquire))
+            return true;
+    }
+    return false;
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Frame loading — port of LuxSampler::loadScoreFramesFromImage (per slot)
 // ═════════════════════════════════════════════════════════════════════════════
@@ -332,6 +376,9 @@ void ScorePlayerService::loadFramesFromImage(int slot, const juce::Image& image,
 
     log_info("SCP", "Score[%d]: loaded %d frames (image %dx%d)",
              slot, frames, image.getWidth(), image.getHeight());
+
+    if (onFramesLoaded)
+        onFramesLoaded(slot, image, band, scoreMinHz, scoreMaxHz, stereo);
 }
 
 void ScorePlayerService::hotSwapFrames(int slot,
@@ -475,12 +522,14 @@ void ScorePlayerService::run()
 
     while (!threadShouldExit())
     {
-        // Idle: nothing wants to run and no session to wind down.
+        // Idle: nothing wants to run and no session to wind down. A P8 hold
+        // (active VOICE with content) counts as work — the parked drone.
         bool anyWork = false;
         for (int i = 0; i < kMaxSlots && !anyWork; ++i)
             anyWork = sessions_[i].active
                    || slots_[i].playRequested.load(std::memory_order_acquire)
-                   || slots_[i].scrubbing.load(std::memory_order_acquire);
+                   || slots_[i].scrubbing.load(std::memory_order_acquire)
+                   || slotWantsHold(i);
         if (!anyWork)
         {
             wait(5);
@@ -507,21 +556,29 @@ void ScorePlayerService::run()
         const uint64_t scoreTickT0 = nowUs();   // per-family perf timing
 
         // Display owner: the LOWEST feeding slot writes the visual mix bus
-        // (single display bus; the sampler engines defer while any score
-        // plays — per-slot viz is the same follow-up as the samplers').
+        // (single display bus; the sampler engines + producers defer via
+        // score_player_owns_display()). A P8 PARKED hold deliberately never
+        // claims it: the drone is audio-only, the live view stays with the
+        // producers — but a session WINDING DOWN (runout/teardown tick) still
+        // owns the bus so the final blank/white write lands as before.
         int displayOwner = -1;
         for (int i = 0; i < kMaxSlots; ++i)
-            if (sessions_[i].active
-                || slots_[i].playRequested.load(std::memory_order_acquire)
-                || slots_[i].scrubbing.load(std::memory_order_acquire))
+        {
+            const bool transport =
+                slots_[i].playRequested.load(std::memory_order_acquire)
+                || slots_[i].scrubbing.load(std::memory_order_acquire);
+            const bool parkedHold = !transport && slotWantsHold(i);
+            if (transport || (sessions_[i].active && !parkedHold))
             { displayOwner = i; break; }
+        }
 
         for (int i = 0; i < kMaxSlots; ++i)
         {
             ScoreSlot& s = slots_[i];
             Session&   v = sessions_[i];
             const bool want = s.playRequested.load(std::memory_order_acquire)
-                           || s.scrubbing.load(std::memory_order_acquire);
+                           || s.scrubbing.load(std::memory_order_acquire)
+                           || slotWantsHold(i);
 
             if (!v.active)
             {
@@ -529,23 +586,46 @@ void ScorePlayerService::run()
                 beginSession(i);
                 if (!v.active) continue;   // no content — request dropped
             }
+            else if (v.runout)
+            {
+                if (!want)
+                {
+                    injectRunout(i, i == displayOwner);
+                    if (++v.runoutTicks >= kRunoutMaxTicks
+                        || !chain_player_fx_tail_alive(/*is_score*/ 1, i))
+                        endSession(i, i == displayOwner);
+                    continue;
+                }
+                // PLAY pressed while the tail was running out: a fresh session
+                // simply takes over. The FX keep their state — the new content
+                // re-excites the very tail that was decaying (no reset, no
+                // click), exactly as re-triggering into a live reverb.
+                beginSession(i);           // v = Session{} → runout cleared
+                if (!v.active || v.runout) continue;   // no content: stay in runout
+            }
             else if (!want)
             {
-                endSession(i, i == displayOwner);
+                beginRunoutOrEnd(i, i == displayOwner);
                 continue;
             }
 
             int nb = 0;
             const bool alive = advanceAndFetch(i, nb);
             if (nb > 0)
+            {
+                v.lastNb = nb;
                 inject(i, nb, i == displayOwner);
+            }
             if (!alive)
             {
                 // Natural end (LoopMode::NONE): transport snaps back to
                 // STOP; the head stays where the run ended (legacy parity).
                 s.playRequested.store(false, std::memory_order_release);
                 s.scrubbing.store(false, std::memory_order_release);
-                endSession(i, i == displayOwner);
+                // P8 hold: the run ended but the session survives — the next
+                // tick re-injects the final column (parked drone at the end).
+                if (! slotWantsHold(i))
+                    beginRunoutOrEnd(i, i == displayOwner);
             }
         }
 
@@ -582,11 +662,18 @@ void ScorePlayerService::beginSession(int slot) noexcept
     // An armed resume frame (live EQ re-apply, scrub release) takes over the
     // initial head — one-shot, so a fresh PLAY starts from the beginning.
     const int resume = s.resumeHead.exchange(-1, std::memory_order_relaxed);
-    const int head   = (resume > 0) ? juce::jlimit(0, n - 1, resume)
-                                    : (v.direction > 0 ? 0 : n - 1);
+    int head = (v.direction > 0) ? 0 : n - 1;
+    if (resume > 0)
+        head = juce::jlimit(0, n - 1, resume);
+    else if (! s.playRequested.load(std::memory_order_acquire)
+             && ! s.scrubbing.load(std::memory_order_acquire))
+        // P8 parked entry (hold without transport — reactivation, or frames
+        // just loaded): the drone resumes at the parked column, not at 0.
+        head = juce::jlimit(0, n - 1, s.playHead.load(std::memory_order_relaxed));
     s.playHead.store(head, std::memory_order_relaxed);
 
     v.active = true;
+    s.runoutActive.store(false, std::memory_order_release);
     s.sessionActive.store(true, std::memory_order_release);
     log_info("SCP", "Score[%d]: playback start — %d frames, %.2f s",
              slot, n, (double) n / 1000.0);
@@ -597,13 +684,21 @@ void ScorePlayerService::endSession(int slot, bool wasDisplayOwner) noexcept
     ScoreSlot& s = slots_[slot];
     Session&   v = sessions_[slot];
     if (!v.active) return;
-    v.active = false;
+    v.active      = false;
+    v.runout      = false;
+    v.runoutTicks = 0;
+    s.runoutActive.store(false, std::memory_order_release);
 
     // Audio silence: the stagings have no timeout — deactivate every OUT this
     // slot's chains staged (the mixers then commit silence). Sourced chains
     // are re-staged by their own producer on its next line; sourceless chains
     // fall to the feeder's no-signal publication (white taps + probes).
     score_player_stagings_set_inactive(slot);
+    // Same for the downstream SAMPLER markers' blend references: this slot's
+    // walk was their input feed — drop it, or a driving sampler keeps folding
+    // the head's LAST column into its playback (the no-signal sweep cannot
+    // reach a chain still owned by that driving engine).
+    score_player_whiten_downstream_inputs(slot);
 
     // Path-B teardown (legacy injectWhiteFrame parity): while this slot owned
     // the pb chain, inject() was the polyphonic sections' SOLE writer — zero
@@ -643,6 +738,44 @@ void ScorePlayerService::endSession(int slot, bool wasDisplayOwner) noexcept
              s.frameCount.load(std::memory_order_relaxed));
 }
 
+// ── FX tail runout ──────────────────────────────────────────────────────────
+// A Reverb/Echo below the SCORE marker is still printing when the transport
+// stops: tearing the session down on that same tick truncates the decay (the
+// producers would immediately publish no-signal on this sourceless chain, and
+// nothing would ever walk the FX again). Instead the session stays alive and
+// feeds blank paper through the SAME chain walk at the SAME 1 kHz, so the
+// tails run out exactly as they would over a silent passage of the score.
+// The slot keeps reporting "feeding" throughout (sessionActive), which is what
+// keeps the producers deferring — no double-tick, no leak of the device feed.
+bool ScorePlayerService::beginRunoutOrEnd(int slot, bool isDisplayOwner) noexcept
+{
+    Session& v = sessions_[slot];
+    if (!chain_player_fx_tail_alive(/*is_score*/ 1, slot))
+    {
+        endSession(slot, isDisplayOwner);
+        return false;
+    }
+    v.runout      = true;
+    v.runoutTicks = 0;
+    slots_[slot].runoutActive.store(true, std::memory_order_release);
+    log_info("SCP", "Score[%d]: transport stopped — FX tail runout", slot);
+    return true;
+}
+
+void ScorePlayerService::injectRunout(int slot, bool displayOwner) noexcept
+{
+    // Blank paper = 255 on every channel = silence in Sp3ctra's image-to-sound
+    // mapping. Reuse the played geometry so the echo ring keeps matching slots.
+    int nb = sessions_[slot].lastNb;
+    if (nb <= 0) nb = get_cis_pixels_nb();
+    nb = juce::jlimit(1, (int) LuxSamplerConstants::MAX_PIXELS, nb);
+
+    std::memset(workR_, 255, (size_t) nb);
+    std::memset(workG_, 255, (size_t) nb);
+    std::memset(workB_, 255, (size_t) nb);
+    inject(slot, nb, displayOwner);
+}
+
 bool ScorePlayerService::advanceAndFetch(int slot, int& nb) noexcept
 {
     ScoreSlot& s = slots_[slot];
@@ -680,9 +813,12 @@ bool ScorePlayerService::advanceAndFetch(int slot, int& nb) noexcept
     }
 
     // Scrub-audition holds position: the column under the cursor is
-    // re-injected unchanged every tick → a sustained tone.
+    // re-injected unchanged every tick → a sustained tone. Same hold for a
+    // P8 parked session (transport stopped, session kept by holdWhenStopped):
+    // the head only advances under a live PLAY.
     bool alive = true;
-    if (!s.scrubbing.load(std::memory_order_relaxed))
+    if (s.playRequested.load(std::memory_order_acquire)
+        && !s.scrubbing.load(std::memory_order_relaxed))
     {
         v.frameAcc    += s.speed.load(std::memory_order_relaxed);
         const int step = (int) v.frameAcc;
@@ -818,6 +954,15 @@ extern "C" int score_player_any_playing(void)
     s_hookBusy.fetch_add(1, std::memory_order_acq_rel);
     auto* svc = s_scoreService.load(std::memory_order_acquire);
     const int r = (svc != nullptr && svc->anyFeeding()) ? 1 : 0;
+    s_hookBusy.fetch_sub(1, std::memory_order_acq_rel);
+    return r;
+}
+
+extern "C" int score_player_owns_display(void)
+{
+    s_hookBusy.fetch_add(1, std::memory_order_acq_rel);
+    auto* svc = s_scoreService.load(std::memory_order_acquire);
+    const int r = (svc != nullptr && svc->ownsDisplay()) ? 1 : 0;
     s_hookBusy.fetch_sub(1, std::memory_order_acq_rel);
     return r;
 }

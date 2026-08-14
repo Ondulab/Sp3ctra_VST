@@ -22,6 +22,7 @@
 #include <memory>
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
+#include "Sp3ctraBarSlider.h"
 #include "../processing/lux_reverb.h"   // self-manages extern "C" linkage
 
 class ReverbEditorComponent : public juce::Component,
@@ -356,15 +357,10 @@ private:
         bnd.attach->sendInitialUpdate();
     }
 
-    void initBox(juce::Slider& box, const juce::String& id,
+    void initBox(Sp3ctraBarSlider& box, const juce::String& id,
                  std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>& att)
     {
-        box.setSliderStyle(juce::Slider::LinearBar);
-        box.setTextBoxStyle(juce::Slider::TextBoxAbove, false, 0, 0);
-        box.setColour(juce::Slider::trackColourId, accent.withAlpha(0.22f));
-        box.setColour(juce::Slider::backgroundColourId, juce::Colour(0xff181820));
-        box.setColour(juce::Slider::textBoxTextColourId, juce::Colours::white.withAlpha(0.92f));
-        box.setColour(juce::Slider::textBoxOutlineColourId, accent.withAlpha(0.3f));
+        box.setAccent(accent);
         addAndMakeVisible(box);
         att = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, id, box);
     }
@@ -380,7 +376,7 @@ private:
     int slot_ { 0 };   // pool slot of the bound instance (live overlay)
 
     Bound dcy, dif, mix;
-    juce::Slider boxD, boxF, boxM;
+    Sp3ctraBarSlider boxD, boxF, boxM;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> boxDAtt, boxFAtt, boxMAtt;
     MidiMappingEngine* midiMap_ = nullptr;
     std::unique_ptr<MidiLearnAttachment> learnD_, learnF_, learnM_;

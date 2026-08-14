@@ -5,8 +5,10 @@
  *
  * Per-frame pipeline (energy space, per channel):
  *   1. e_in  = polarity(in)                          (bg conversion)
- *   2. MASK: e_out = floor + geff[x] * (e_in - floor)
- *      WARP: material scattered along x + s*disp[x], floor re-added
+ *   2. MASK: e_out = (e_in - m) + geff[x] * m,  m = max(0, e_in - floor)
+ *      WARP: material scattered along x + s*disp[x] over each pixel's own
+ *            pedestal min(e_in, floor) — the background is never re-printed
+ *            at the estimated floor (see lux_drive.c: grey-bands fix)
  *   3. out   = polarity(clamp(e_out))
  *
  * The displacement grid disp[x] = nearest-allowed-degree centre − x (pixels)
@@ -115,31 +117,27 @@ void lux_harmo_init(LuxHarmoState *state)
     if (!state) return;
     state->config = lux_harmo_config_default();
     state->auto_bg_white = 1;   /* paper is the typical Sp3ctra stream */
+    state->active_ticks  = 0;   /* seeded HERE, never in reset (see lux_reverb.c) */
     lux_harmo_reset(state);
 }
 
-/* Resolve the background pole for this frame + report the background's OWN
- * energy (*out_floor). Polarity/gate mirror lux_eq_resolve_bg, but the floor
- * estimate is the sampled MINIMUM energy of the line, NOT its mean: every
- * output row is rebuilt as floor + processed material, so a mean-based floor
- * (which averages the material in) over-estimates on dense bright-on-black
- * streams and prints a uniform grey veil on every empty row. The darkest
- * sampled pixel IS the background; under-estimating is harmless (slight
- * material overcount), over-estimating is the grey-background bug. */
+/* Resolve the background pole for this frame + report the PAPER's own energy
+ * (*out_floor). Polarity: mean-based AUTO learn-then-LOCK (mirrors lux_eq).
+ * Paper level: EMA of the per-line 10th-PERCENTILE energy — the canonical
+ * grey-bands fix (see lux_drive_resolve_bg). The previous sampled-minimum
+ * estimator froze behind its "line is background" gate and seeded at 0 on
+ * dense passages, so the pedestal/material split drifted with the content.
+ * A low percentile finds the paper between the strokes even on dense lines. */
 static int lux_harmo_resolve_bg(LuxHarmoState *state,
                                 const uint8_t *in_r, const uint8_t *in_g,
                                 const uint8_t *in_b, int px, float *out_floor)
 {
     uint32_t sum = 0;
     int      n   = 0;
-    int      min_pm = 255, max_pm = 0;   /* sampled per-pixel channel means */
     for (int i = 0; i < px; i += 8)
     {
-        const int pm = ((int)in_r[i] + in_g[i] + in_b[i]) / 3;
-        sum += (uint32_t)pm;
+        sum += (uint32_t)(((int)in_r[i] + in_g[i] + in_b[i]) / 3);
         n   += 1;
-        if (pm < min_pm) min_pm = pm;
-        if (pm > max_pm) max_pm = pm;
     }
     const int mean = (n > 0) ? (int)(sum / (uint32_t)n) : 255;
 
@@ -158,16 +156,32 @@ static int lux_harmo_resolve_bg(LuxHarmoState *state,
         bg_white = state->auto_bg_white;
     }
 
-    /* Floor = the sampled pixel CLOSEST to the background pole. The mean
-     * gate still skips lines with no visible background at all (fully dense
-     * passages must not drag the floor up). */
-    const int   line_is_bg = bg_white ? (mean > 143) : (mean < 111);
-    float inst_floor = bg_white ? (float)(255 - max_pm) : (float)min_pm;
-    if (inst_floor < 0.0f) inst_floor = 0.0f;
+    /* 10th-percentile energy over a 32-bin histogram of sampled pixels. */
+    int hist[32] = { 0 };
+    int ns = 0;
+    for (int i = 0; i < px; i += 4)
+    {
+        const int v = ((int)in_r[i] + in_g[i] + in_b[i]) / 3;
+        const int e = bg_white ? 255 - v : v;
+        hist[e >> 3]++;
+        ns++;
+    }
+    const int target = ns / 10;
+    int acc = 0, bin = 0;
+    for (; bin < 31; ++bin)
+    {
+        acc += hist[bin];
+        if (acc > target)
+            break;
+    }
+    const float inst_floor = (float)(bin * 8 + 4);
+
+    /* EMA every line (1/16) — a percentile needs no "line is background"
+     * gate, and reseeds honestly right after a reset. */
     if (state->floor_ema < 0.0f)
-        state->floor_ema = line_is_bg ? inst_floor : 0.0f;   /* seed */
-    else if (line_is_bg)
-        state->floor_ema += (inst_floor - state->floor_ema) * (1.0f / 64.0f);
+        state->floor_ema = inst_floor;
+    else
+        state->floor_ema += (inst_floor - state->floor_ema) * (1.0f / 16.0f);
 
     *out_floor = state->floor_ema;
     return bg_white;
@@ -270,21 +284,29 @@ static inline float lux_harmo_comb_gain(float disp_px, float pps,
     return 1.0f - t * t * (3.0f - 2.0f * t);
 }
 
-/* MASK — apply the blended comb (scratch) to one channel, material only. */
-static void lux_harmo_mask_channel(const uint8_t *in, uint8_t *out,
-                                   const float *geff, int px,
-                                   int bg_white, float floor_e)
+/* MASK — apply the blended comb (scratch) to one channel, material only.
+ * The pixel's OWN pedestal is preserved: e_out = e_in - m + geff[x] * m.
+ * Background pixels (m = 0) pass through bit-identical — the paper is never
+ * re-printed at the estimated floor (see lux_drive_channel: grey-bands fix).
+ * Returns nonzero when the comb actually altered the line (rack LED). */
+static int lux_harmo_mask_channel(const uint8_t *in, uint8_t *out,
+                                  const float *geff, int px,
+                                  int bg_white, float floor_e)
 {
+    int diff = 0;   /* OR of out^in — a material-free line passes through */
+
     for (int i = 0; i < px; i++)
     {
         const float e_in  = bg_white ? (float)(255 - in[i]) : (float)in[i];
         float e_mat = e_in - floor_e;
         if (e_mat < 0.0f) e_mat = 0.0f;
-        float e_out = floor_e + geff[i] * e_mat;
+        float e_out = (e_in - e_mat) + geff[i] * e_mat;
         if (e_out > 255.0f) e_out = 255.0f;
         if (e_out < 0.0f)   e_out = 0.0f;
         out[i] = bg_white ? (uint8_t)(255.0f - e_out) : (uint8_t)e_out;
+        diff  |= out[i] ^ in[i];
     }
+    return diff;
 }
 
 /* WARP — scatter one channel's material into `accum` with weight w (linear
@@ -407,18 +429,25 @@ void lux_harmo_process_frame(
             }
             geff[i] = 1.0f - s * (1.0f - g);
         }
-        lux_harmo_mask_channel(in_r, state->out_r, geff, px, bg_white, floor_e);
-        lux_harmo_mask_channel(in_g, state->out_g, geff, px, bg_white, floor_e);
-        lux_harmo_mask_channel(in_b, state->out_b, geff, px, bg_white, floor_e);
+        int diff = lux_harmo_mask_channel(in_r, state->out_r, geff, px, bg_white, floor_e);
+        diff |= lux_harmo_mask_channel(in_g, state->out_g, geff, px, bg_white, floor_e);
+        diff |= lux_harmo_mask_channel(in_b, state->out_b, geff, px, bg_white, floor_e);
+        if (diff)
+            state->active_ticks++;
     }
     else
     {
         /* WARP — per channel: weighted scatter (both grids while fading),
-         * then floor re-added and polarity restored. */
+         * then the landed material sits on each pixel's OWN pedestal
+         * min(e_in, floor): background pixels that receive nothing stay
+         * bit-identical instead of being re-printed at the estimated floor
+         * (grey-bands fix, see lux_drive.c). Pixels whose material left keep
+         * the tracked paper level — their true paper is unknowable. */
         const float h_px = 0.5f * ((cfg->width_st > 0.01f) ? cfg->width_st : 0.01f)
                          * state->grid_pps;
         const uint8_t *ins[3]  = { in_r, in_g, in_b };
         uint8_t       *outs[3] = { state->out_r, state->out_g, state->out_b };
+        int diff = 0;   /* OR of out^in — no scattered material leaves the line intact */
         for (int ch = 0; ch < 3; ch++)
         {
             float *accum = state->scratch;
@@ -432,13 +461,19 @@ void lux_harmo_process_frame(
                               fading ? x : 1.0f, bg_white, floor_e);
             for (int i = 0; i < px; i++)
             {
-                float e_out = floor_e + accum[i];
+                const float e_in  = bg_white ? (float)(255 - ins[ch][i])
+                                             : (float)ins[ch][i];
+                const float e_ped = (e_in < floor_e) ? e_in : floor_e;
+                float e_out = e_ped + accum[i];
                 if (e_out > 255.0f) e_out = 255.0f;
                 if (e_out < 0.0f)   e_out = 0.0f;
                 outs[ch][i] = bg_white ? (uint8_t)(255.0f - e_out)
                                        : (uint8_t)e_out;
+                diff |= outs[ch][i] ^ ins[ch][i];
             }
         }
+        if (diff)
+            state->active_ticks++;
     }
 
     *out_r = state->out_r;

@@ -1,4 +1,5 @@
 #include "SlotEditorComponent.h"
+#include "../ui/ModuleCatalog.h"
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "../Sp3ctraDialog.h"     // destructive-action confirmations
@@ -186,12 +187,14 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     };
     addAndMakeVisible(loadBtn);
 
-    // ↺ / ↻ in the spectral view rewrote the frames — mirror the LOAD refresh
-    // (the spectral editor already marked itself dirty).
+    // ↺ / ↻ in the spectral view rewrote the frames — mirror the LOAD refresh.
+    // (The spectral editor's own markDirty() only flags its repaint preview —
+    // the session must be told the banks changed here.)
     spectralEditor.onContentRotated = [this]
     {
         refreshSliderValues();
         refreshLoopButtons();
+        processor.sessions()->markBanksDirty();
     };
 
     // ── Labels ────────────────────────────────────────────────────────────────
@@ -215,9 +218,6 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     floorLabel.setJustificationType(juce::Justification::centredRight);
     addAndMakeVisible(floorLabel);
 
-    floorSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    floorSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
     floorSlider.setRange(0.0, 100.0, 1.0);
     floorSlider.setTextValueSuffix("%");
     floorSlider.setValue(0.0, juce::dontSendNotification);
@@ -226,8 +226,13 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     floorSlider.onValueChange = [this]
     {
         if (auto* fs = processor.getSampler(samplerIndex_))
+        {
             fs->setSlotEqFloor(selectedSlot,
                 static_cast<float>(floorSlider.getValue()) * 0.01f);
+            // Slot params live in the engine, not the APVTS — the global
+            // session-dirty listener never sees them, so mark explicitly.
+            processor.sessions()->markStateDirty();
+        }
         spectralEditor.markDirty();   // preview the floor on the image
     };
     addAndMakeVisible(floorSlider);
@@ -236,9 +241,6 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     // Range 0–32.0×; skewed so that 1.0× sits at the physical centre.
     // 0 freezes the play head (the current frame sustains as a drone) — move
     // it by dragging the playhead on the timeline while the bank plays.
-    speedSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    speedSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                 Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
     // Step 0.001 gives 10× finer resolution than 0.01 — especially important
     // at slow playback rates (0.01–0.10×) where the skewed slider compresses
     // the physical space. Display is clamped to 2 decimal places.
@@ -252,8 +254,11 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     speedSlider.onValueChange = [this]
     {
         if (auto* fs = processor.getSampler(samplerIndex_))
+        {
             fs->setSlotSpeed(selectedSlot,
                              static_cast<float>(speedSlider.getValue()));
+            processor.sessions()->markStateDirty();
+        }
     };
     addAndMakeVisible(speedSlider);
 
@@ -288,6 +293,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
         {
             fs->setSlotEq(selectedSlot, eqEditor.encodeState());
             spectralEditor.markDirty();            // preview the EQ on the image
+            processor.sessions()->markStateDirty();
         }
     };
     addAndMakeVisible(eqEditor);
@@ -298,18 +304,24 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     resumeToggle.onStateChange = [this]
     {
         if (auto* fs = processor.getSampler(samplerIndex_))
+        {
             fs->setSlotResumeMode(selectedSlot,
                                    resumeToggle.getToggleState());
+            processor.sessions()->markStateDirty();
+        }
     };
     addAndMakeVisible(resumeToggle);
 
     // ── Overdub / extend toggle (engine-wide) ─────────────────────────────────
     overdubToggle.setColour(juce::ToggleButton::textColourId,
-                            juce::Colour(0xffcc88ff)); // SAMPLER purple identity
+                            moduleColour(ModuleType::Sampler)); // SAMPLER module colour
     overdubToggle.onStateChange = [this]
     {
         if (auto* fs = processor.getSampler(samplerIndex_))
+        {
             fs->setOverdubMode(overdubToggle.getToggleState());
+            processor.sessions()->markStateDirty();
+        }
     };
     addAndMakeVisible(overdubToggle);
 
@@ -346,6 +358,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
                     SamplerMidiTargets::apply(*fs, selectedSlot, kind, n);
                     spectralEditor.markDirty();   // curves/crop live on the image
                     refreshParamBoxes();          // crop chips are coupled (min span)
+                    processor.sessions()->markStateDirty();
                 }
             };
             b.format = std::move(fmt);
@@ -497,7 +510,10 @@ void SlotEditorComponent::refreshLoopButtons()
 void SlotEditorComponent::applyLoopMode(LoopMode m)
 {
     if (auto* fs = processor.getSampler(samplerIndex_))
+    {
         fs->setSlotLoopMode(selectedSlot, m);
+        processor.sessions()->markStateDirty();
+    }
     refreshLoopButtons();
 }
 
@@ -680,6 +696,7 @@ void SlotEditorComponent::drainMidiActionPulses()
         {
             fs->uiClearSlot(s);
             if (s == selectedSlot) { refreshSliderValues(); spectralEditor.markDirty(); }
+            processor.sessions()->markBanksDirty();   // same as the CLEAR button
         }
 
         // EQ bands (continuous) → apply latched gains (non-RT), reload the curve
@@ -694,8 +711,12 @@ void SlotEditorComponent::drainMidiActionPulses()
                 eqTouched = true;
             }
         }
-        if (eqTouched && s == selectedSlot)
-            refreshFreqCurve();
+        if (eqTouched)
+        {
+            processor.sessions()->markStateDirty();   // @imageEq persists in state
+            if (s == selectedSlot)
+                refreshFreqCurve();
+        }
     }
 }
 
@@ -730,7 +751,7 @@ void SlotEditorComponent::paint(juce::Graphics& g)
     g.fillRoundedRectangle(
         juce::Rectangle<float>(4.0f, 4.0f, (float)(W - 8), (float)kEdTitleH), 3.0f);
 
-    g.setColour(juce::Colour(0xffcc88ff));
+    g.setColour(moduleColour(ModuleType::Sampler));
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
     g.drawText("BANK " + juce::String(selectedSlot + 1),
                juce::Rectangle<int>(8, 4, W - 16, kEdTitleH),
@@ -975,7 +996,7 @@ void SlotEditorComponent::timerCallback()
     cropBtn.setEnabled(canCrop);
     cropBtn.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a2a4a));
     cropBtn.setColour(juce::TextButton::textColourOffId,
-                      canCrop ? juce::Colour(0xffcc88ff) : juce::Colour(0xff665577));
+                      canCrop ? moduleColour(ModuleType::Sampler) : juce::Colour(0xff665577));
 
     // ── SAVE / LOAD buttons ──────────────────────────────────────────────────
     saveBtn.setEnabled(hasContent);

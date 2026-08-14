@@ -12,6 +12,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "../../PluginProcessor.h"
+#include "../Sp3ctraBarSlider.h"
 
 class MaskSetupPanel : public juce::Component
 {
@@ -42,12 +43,12 @@ private:
 
     // Free pixels per semitone
     juce::Label  freeStepLabel;
-    juce::Slider freeStepSlider;
+    Sp3ctraBarSlider freeStepSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> freeStepAttachment;
 
     // Pitch Bend Range
     juce::Label  pbRangeLabel;
-    juce::Slider pbRangeSlider;
+    Sp3ctraBarSlider pbRangeSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> pbRangeAttachment;
 
     // MIDI Channel (1-16)

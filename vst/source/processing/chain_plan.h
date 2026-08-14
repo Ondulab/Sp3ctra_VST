@@ -26,17 +26,28 @@
 extern "C" {
 #endif
 
-/* Max ordered inserts in ONE chain recipe. Worst case allowed by the model:
- * Pitch + Mask + Reverb + Echo + EQ + Harmo + up to CHAIN_MAX_CHAINS (8)
- * VideoScroll probes (the per-chain duplicate rule is relaxed for VideoScroll
- * only) + up to 2 Sampler position markers + 1 Score position marker + 3 OUT
- * send markers (M3: 1 per type per chain) = 20. The `num_inserts <
- * CHAIN_PLAN_MAX_INSERTS` gate in deriveAndPublishChainPlan is a defensive
- * cap; at 21 it is unreachable for any legal model (an overflow would
- * silently drop entries — a dropped marker misroutes every probe/FX placed
- * after it). states[] locals in multithreading.c grow to 21*sizeof(void*) =
- * 168 B — negligible stack. */
-#define CHAIN_PLAN_MAX_INSERTS 21   /* max ordered processors/probes/markers per chain */
+/* Max ordered inserts in ONE chain recipe. Worst case allowed by the model,
+ * recounted against the CURRENT placement rules (the previous count of 20 was
+ * stale on three points and the cap of 21 was already reachable: LuxGrain made
+ * the OUT sends 4, P6 raised kMaxSamplerEngines from 2 to 8, and P5-M4 made the
+ * score family emit one marker PER TYPE):
+ *
+ *   Pitch + Mask + Reverb + Echo + EQ + Harmo
+ *          + Centro + Drive + DcBlock           9   1 each (per-chain dup rule)
+ *   VideoScroll probes                          8   dup rule relaxed, pool of 8
+ *   Sampler position markers                    8   dup rule relaxed, 8 engines
+ *   Score-family markers                        4   1 per type per chain
+ *   OUT send markers                            4   LuxStral/Synth/Wave/Grain
+ *   MidiTap probes                              8   dup rule relaxed, pool of 8
+ *                                             ---
+ *                                              41
+ *
+ * The `num_inserts < CHAIN_PLAN_MAX_INSERTS` gate in deriveAndPublishChainPlan
+ * is a defensive cap: at 44 it stays unreachable for any legal model (an
+ * overflow would silently drop entries — a dropped marker misroutes every
+ * probe/FX placed after it). states[] locals in multithreading.c grow to
+ * 44*sizeof(void*) = 352 B — negligible stack. */
+#define CHAIN_PLAN_MAX_INSERTS 44   /* max ordered processors/probes/markers per chain */
 #define CHAIN_MAX_CHAINS       8    /* per-instance state pool size (Pitch/Mask/VideoScroll) */
 
 /* Where a chain's input frame comes from. */
@@ -81,11 +92,12 @@ typedef struct {
 /* Synth-split P3 — one LuxStral SEND: a chain feeding the (single) LuxStral
  * engine through its → LUXSTRAL OUT module. `recipe` is the chain compiled up
  * to the OUT's position (same shape as a synth chain); `bank_slot` picks the
- * send's conditioning bank (g_sp3ctra_config.luxstral_out[bank_slot]:
- * negative/DC/gamma/contrastMin/rangeDb/intensity/enabled) and its envelope
- * state. Every send is staged by its producer thread (synth_staging.h) and
- * the engine feed is the intensity-weighted MIX of all active sends, pulled
- * by the audio thread. */
+ * send's bank (g_sp3ctra_config.luxstral_out[bank_slot]: enabled — the
+ * other fields hold the canonical decode since the 2026-08-05 purge; the
+ * last knob, contrastMin, left for the LEVELS CONTRAST on 2026-08-13)
+ * and its envelope state. Every send is staged by its producer thread
+ * (synth_staging.h) and the engine feed is the MIX of all active sends,
+ * pulled by the audio thread. */
 typedef struct {
     int chain_idx;              /* model chain hosting this send (0..7) */
     int bank_slot;              /* luxstral_out[] / luxstralOut{N}_* bank (0..7) */

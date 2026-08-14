@@ -58,7 +58,12 @@ public:
             // start/stop record commands (their only drain site while the
             // SP3CTRA device is silent — see multithreading.c), so REC
             // arm/stop must stay alive at the idle poll rate.
-            if (internal_source_any_active())
+            // A Reverb/Echo whose source just went away is still printing its
+            // tail, and the tick above is what walks it out (see the FX runout
+            // in multithreading.c). Dropping to the 20 Hz idle poll mid-decay
+            // would stretch an echo's line-expressed repeats by 25x, so hold
+            // source rate until the tails are spent.
+            if (internal_source_any_active() || chain_any_fx_tail_alive())
                 wait(2);      // ~500 Hz — plenty for 30/60 fps media + inertia-free line moves
             else
                 wait(50);     // idle: poll for activation + keep the REC drain alive

@@ -21,9 +21,6 @@ PitchSetupPanel::PitchSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
     freeStepLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(freeStepLabel);
 
-    freeStepSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    freeStepSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                   50, Sp3ctraTheme::kControlH);
     addAndMakeVisible(freeStepSlider);
 
     // ── Pitch Bend Range ────────────────────────────────────────────────
@@ -32,9 +29,6 @@ PitchSetupPanel::PitchSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
     pbRangeLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(pbRangeLabel);
 
-    pbRangeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    pbRangeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                  50, Sp3ctraTheme::kControlH);
     addAndMakeVisible(pbRangeSlider);
 
     // ── MIDI Channel (1-16) ────────────────────────────────────────────

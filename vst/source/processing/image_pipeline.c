@@ -264,7 +264,6 @@ PipelineConfig pipeline_build_config_live(void)
      * chains override sampler_relayed + stream_opacity per send (executor). */
     cfg.sampler_relayed = 0;
     cfg.stream_opacity  = 1.0f;
-    cfg.contrast_min   = out0->contrast_min;
 
     /* Misc */
     cfg.stereo_enabled  = g_sp3ctra_config.stereo_mode_enabled;
@@ -299,7 +298,6 @@ PipelineConfig pipeline_build_config_ls_send(int bank_slot, int chain_idx,
     cfg.luxstral_path.inversion  = out->negative;
     cfg.luxstral_path.ac_removal = out->dc_blocking;
     cfg.luxstral_path.gamma      = out->gamma;
-    cfg.contrast_min             = out->contrast_min;
     cfg.luxstral_db_range        = out->range_db;
     cfg.luxstral_intensity       = 1.0f;
     cfg.envelope_id              = ENVELOPE_LS_SEND_BASE + chain_idx;
@@ -314,9 +312,7 @@ PipelineConfig pipeline_build_config_sampler(void)
 
     /* Path A — LuxStral: per-OUT conditioning bank, slot 0
      * (synth-split P1 — same bank as the live builder: the OUT owns its
-     * conditioning regardless of which worker drives the pipeline).
-     * contrast_min stays on the sampler-specific floor below (parity with
-     * the legacy sampler stream); unification is a P3/P4 concern. */
+     * conditioning regardless of which worker drives the pipeline). */
     const lux_out_params_t *out0 = &g_sp3ctra_config.luxstral_out[0];
     cfg.luxstral_path.inversion  = out0->negative;
     cfg.luxstral_path.ac_removal = out0->dc_blocking;
@@ -341,7 +337,6 @@ PipelineConfig pipeline_build_config_sampler(void)
      * crossfader-driven opacity applies (legacy MIX-mode parity). */
     cfg.sampler_relayed = 1;
     cfg.stream_opacity  = g_sp3ctra_config.image_sampler_opacity;
-    cfg.contrast_min   = g_sp3ctra_config.sampler_contrast_min;
 
     /* Misc */
     cfg.stereo_enabled  = g_sp3ctra_config.stereo_mode_enabled;
@@ -378,28 +373,22 @@ void pipeline_path_luxstral(
         raw_r, raw_g, raw_b, nb_pixels,
         out->additive.grayscale);
 
-    /* Stage 2: Contrast (on RAW grayscale, before inversion/gamma) */
-    out->additive.contrast_factor = img_stage_calculate_contrast(
-        out->additive.grayscale,
-        nb_pixels,
-        config->contrast_min,
-        g_sp3ctra_config.additive_contrast_adjustment_power,
-        g_sp3ctra_config.additive_contrast_stride);
-
-    /* Stage 3: Inversion */
+    /* Stage 2: Inversion
+     * (2026-08-13: the old Stage 2 — variance contrast for the auto-volume —
+     * is gone; the LEVELS module's CONTRAST knob dims the flux upstream.) */
     if (config->luxstral_path.inversion)
         img_stage_invert(out->additive.grayscale, nb_pixels);
 
-    /* Stage 4: AC removal */
+    /* Stage 3: AC removal */
     if (config->luxstral_path.ac_removal)
         img_stage_remove_dc(out->additive.grayscale, nb_pixels);
 
-    /* Stage 5: Gamma — photographic shaping of the grey scale (1.0 = bypass) */
+    /* Stage 4: Gamma — photographic shaping of the grey scale (1.0 = bypass) */
     if (config->luxstral_path.gamma > 0.0f && config->luxstral_path.gamma != 1.0f)
         img_stage_apply_gamma(out->additive.grayscale, nb_pixels,
                               config->luxstral_path.gamma);
 
-    /* Stage 5b: inverse-dB decode law — ALWAYS ON.  Exact inverse of the
+    /* Stage 4b: inverse-dB decode law — ALWAYS ON.  Exact inverse of the
      * SCORE encoder's linear-in-dB brightness map, applied on top of the
      * (possibly gamma-shaped) grey scale; gamma 1.0 = pure dB decode.  See
      * config_loader.h for the knob recipe that recovers the exact encoder
@@ -407,7 +396,7 @@ void pipeline_path_luxstral(
     img_stage_apply_db_decode(out->additive.grayscale, nb_pixels,
                               config->luxstral_db_range);
 
-    /* Stage 6: Per-note averaging */
+    /* Stage 5: Per-note averaging */
     img_stage_grayscale_luxstral(
         out->additive.grayscale,
         nb_pixels,
@@ -416,7 +405,7 @@ void pipeline_path_luxstral(
         out->additive.notes,
         &num_notes);
 
-    /* Stage 7: Freeze / Opacity / Fade envelope — PER-CHAIN transport
+    /* Stage 6: Freeze / Opacity / Fade envelope — PER-CHAIN transport
      * authority (P4 doctrine, fix 2026-07-14: the old global re-gate silenced
      * every producer-staged send with the sampler transport + RAW gate —
      * an IMAGE-fed chain was mute until two unrelated transports were set
@@ -501,7 +490,6 @@ void pipeline_path_luxstral(
         img_stage_blob_detect(
             out->additive.notes,
             sf_num_notes,
-            out->additive.contrast_factor,
             &out->strokeforge);
     }
 }

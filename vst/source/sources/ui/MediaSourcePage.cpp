@@ -195,23 +195,6 @@ MediaSourcePage::MediaSourcePage(Sp3ctraAudioProcessor& p, Kind k)
             processor.getMidiMap(), rotateButton, imgSrcParam(0, "Rotate")));
     }
 
-    // ── ACTIVE toggle (all kinds) — the source's on/off ──────────────────────
-    // Off: the source feeds NOTHING (its chain streams blank paper). Media,
-    // transport and params are kept; switching back on resumes instantly.
-    {
-        activeButton.setClickingTogglesState(true);
-        activeButton.setColour(juce::TextButton::buttonOnColourId,
-                               juce::Colour(0xff3c8f4a));
-        addAndMakeVisible(activeButton);
-        const char* enabledId = kind == Kind::Image ? "imgSrcEnabled"
-                              : kind == Kind::Video ? "vidSrcEnabled"
-                                                    : "camSrcEnabled";
-        activeAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            apvts, enabledId, activeButton);
-        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
-            processor.getMidiMap(), activeButton, enabledId));
-    }
-
     statusLabel.setJustificationType(juce::Justification::centredLeft);
     statusLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.55f));
     statusLabel.setFont(juce::Font(juce::FontOptions(12.0f)));
@@ -244,8 +227,6 @@ MediaSourcePage::MediaSourcePage(Sp3ctraAudioProcessor& p, Kind k)
         speedLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.5f));
         addAndMakeVisible(speedLabel);
 
-        speedSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        speedSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 64, kCtrlH);
         addAndMakeVisible(speedSlider);
         speedAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
             apvts, kind == Kind::Image ? "imgSrcDuration" : "vidSrcSpeed", speedSlider);
@@ -267,9 +248,9 @@ MediaSourcePage::MediaSourcePage(Sp3ctraAudioProcessor& p, Kind k)
         positionLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.5f));
         addAndMakeVisible(positionLabel);
 
-        positionSlider.setSliderStyle(juce::Slider::LinearHorizontal);
         positionSlider.setRange(0.0, 1.0, 0.0001);
-        positionSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        positionSlider.setTextBoxStyle(juce::Slider::NoTextBox, true, 0, 0);
+        positionSlider.setCycleEnabled(false);   // scrubber: double-click jumps nowhere
         positionSlider.onDragStart = [this] { scrubbing_ = true; };
         positionSlider.onDragEnd   = [this] { scrubbing_ = false; };
         positionSlider.onValueChange = [this]
@@ -322,7 +303,11 @@ void MediaSourcePage::chooseMedia()
                 if (auto* e = safe->processor.getVideoSource(safe->slot_))
                     ok = e->loadFile(file, err);
             }
-            if (! ok && err.isNotEmpty())
+            if (ok)
+                // The path persists in MEDIA_SOURCES, outside the APVTS tree —
+                // the global dirty listener never sees it.
+                safe->processor.sessions()->markStateDirty();
+            else if (err.isNotEmpty())
                 juce::AlertWindow::showMessageBoxAsync(
                     juce::MessageBoxIconType::WarningIcon, "Load failed", err);
         });
@@ -344,6 +329,7 @@ void MediaSourcePage::clearMedia()
             deviceCombo.setSelectedId(0, juce::dontSendNotification);
             break;
     }
+    processor.sessions()->markStateDirty();   // cleared path persists in MEDIA_SOURCES
 }
 
 void MediaSourcePage::refreshDevices()
@@ -529,12 +515,10 @@ void MediaSourcePage::resized()
 {
     auto b = getLocalBounds().reduced(kPad);
 
-    // Source picker row at the top (LOAD/CLEAR — or device combo for CAMERA),
-    // with the ACTIVE toggle pinned at the right edge.
+    // Source picker row at the top (LOAD/CLEAR — or device combo for CAMERA).
+    // The source's on/off is the module power switch in the face bar (zone 3).
     {
         auto row = b.removeFromTop(kCtrlH);
-        activeButton.setBounds(row.removeFromRight(74));
-        row.removeFromRight(kRowGap);
         if (kind == Kind::Camera)
         {
             deviceCombo.setBounds(row.removeFromLeft(juce::jmax(180, row.getWidth() - 190)));
@@ -599,19 +583,10 @@ void MediaSourcePage::setSlot(int slot)
     auto& apvts = processor.getAPVTS();
     auto& mm    = processor.getMidiMap();
 
-    activeAttach.reset();
     playAttach.reset();
     loopAttach.reset();
     speedAttach.reset();
     learnAtts_.clear();
-
-    const auto enabledId = kind == Kind::Image ? imgSrcParam(slot_, "Enabled")
-                         : kind == Kind::Video ? vidSrcParam(slot_, "Enabled")
-                                               : camSrcParam(slot_, "Enabled");
-    activeAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        apvts, enabledId, activeButton);
-    learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(
-        mm, activeButton, enabledId));
 
     if (kind != Kind::Camera)
     {

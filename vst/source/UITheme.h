@@ -68,6 +68,19 @@ namespace Sp3ctraTheme
     constexpr int kLabelWide  = 140;
 
     // ──────────────────────────────────────────────────────────────────────────
+    // STRETCH LIMITS  (max widths — content stops following very wide zones)
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Max width of ONE column of label+control rows (mix panels, settings
+    /// columns, the chain rack). A wider host left-aligns the column and
+    /// leaves the remainder empty — sliders/combos never stretch past this.
+    constexpr int kMaxContentW = 560;
+
+    /// Max width of a full ZONE-3 page (two kMaxContentW columns + gap —
+    /// 2-column module pages and graphic editors stay usable, not absurd).
+    constexpr int kMaxPageW = 2 * kMaxContentW + 16;
+
+    // ──────────────────────────────────────────────────────────────────────────
     // SECTION / BADGE HEIGHTS
     // ──────────────────────────────────────────────────────────────────────────
 
@@ -174,9 +187,6 @@ namespace Sp3ctraTheme
     /// Inactive main tab text colour (dimmed).
     constexpr uint32_t kColTabInactiveText  = 0xff686878;
 
-    /// Active tab bottom accent line colour (warm amber).
-    constexpr uint32_t kColTabAccent        = 0xffc89650;
-
     /// Active tab top/side border glow.
     constexpr uint32_t kColTabBorderActive  = 0xff4a4a5a;
 
@@ -193,15 +203,6 @@ namespace Sp3ctraTheme
 
     /// Inactive sub-tab text.
     constexpr uint32_t kColSubTabInactiveText = 0xff586878;
-
-    /// Sub-tab accent: Sources.
-    constexpr uint32_t kColSubTabAccentSrc    = 0xff7aade0;
-
-    /// Sub-tab accent: LuxStral.
-    constexpr uint32_t kColSubTabAccentLux    = 0xff4fa3e0;
-
-    /// Sub-tab accent: LuxSynth.
-    constexpr uint32_t kColSubTabAccentSyn    = 0xffe08844;
 
     // — Tab geometry —
 

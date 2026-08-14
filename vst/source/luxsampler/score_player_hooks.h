@@ -9,8 +9,9 @@
  * ScorePlayerService.cpp against the registered service instance.
  *
  * "Feeding" covers the whole injection window: transport PLAY, scrub
- * audition (held-position injection) and the session teardown tick — any
- * moment the service may still write the chain's stream.
+ * audition (held-position injection), the P8 parked hold (VOICE — content
+ * loaded + module active, transport stopped) and the session teardown tick —
+ * any moment the service may still write the chain's stream.
  */
 #ifndef SCORE_PLAYER_HOOKS_H
 #define SCORE_PLAYER_HOOKS_H
@@ -22,10 +23,14 @@ extern "C" {
 /** 1 while score-player slot @p slot (0..7) is feeding its chains. */
 int score_player_slot_is_playing(int slot);
 
-/** 1 while ANY score-player slot is feeding (display-bus arbitration:
- *  the sampler engines defer the visual mix bus to the score service,
- *  exactly as they deferred to the legacy shared score channel). */
+/** 1 while ANY score-player slot is feeding — chain-walk/tap ownership
+ *  aggregate (a P8 parked hold counts: its walk owns its taps). */
 int score_player_any_playing(void);
+
+/** 1 while a score slot claims the SINGLE visual mix bus: playing, scrubbing
+ *  or a tail runout. A P8 parked hold does NOT count — the producers keep the
+ *  live view while a VOICE drones in place. Display arbitration only. */
+int score_player_owns_display(void);
 
 #ifdef __cplusplus
 }

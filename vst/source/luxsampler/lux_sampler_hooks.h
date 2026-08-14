@@ -52,6 +52,15 @@ void lux_sampler_cache_input_frame(int engine_slot,
                                    uint16_t       pixel_count);
 
 /**
+ * @brief Drop ONE engine's MIX/darken-blend reference: its marker's input
+ *        flux stopped (upstream player teardown, chain no-signal sweep).
+ *        Without this the last cached column keeps being blended into every
+ *        playback until the marker is fed again — a frozen residual tone.
+ *        Idempotent. Non-RT producer/player threads.
+ */
+void lux_sampler_whiten_input_cache(int engine_slot);
+
+/**
  * @brief Per-chain sampler capture — record ONE chain's stream into ITS
  *        engine's armed recording slot. A DRIVING engine (its own playback
  *        owns the channel) is skipped: it self-records inside its

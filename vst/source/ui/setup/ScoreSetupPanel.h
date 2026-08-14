@@ -20,6 +20,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../../PluginProcessor.h"
+#include "../Sp3ctraBarSlider.h"
 
 class ScoreSetupPanel : public juce::Component,
                         private juce::Timer
@@ -37,7 +38,7 @@ public:
 
 private:
     void initLabel(juce::Label& l, const juce::String& text);
-    void initSlider(juce::Slider& s, double lo, double hi, double step, double val);
+    void initSlider(Sp3ctraBarSlider& s, double lo, double hi, double step, double val);
     void initToggle(juce::ToggleButton& t, const juce::String& text, bool on);
     void timerCallback() override;
 
@@ -52,17 +53,27 @@ private:
     Sp3ctraAudioProcessor& proc;
     juce::AudioProcessorValueTreeState& apvts;
     juce::Colour accent;
-    ScoreSettings& settings;     // shared, owned by the processor
+    /** The settings block of the SCORE instance the UI currently views (P7).
+     *  Resolved on EVERY access — a reference cached at construction would
+     *  keep editing the first instance after another SCORE is selected. */
+    ScoreSettings& settings() { return proc.getScoreSettings(); }
+    const ScoreSettings& settings() const { return proc.getScoreSettings(); }
+
+    /** Re-reads every widget from the viewed instance's settings. Called when
+     *  the selection moves to another SCORE module. */
+public:
+    void refreshFromSettings();
+private:
 
     // ── Frequency range (mirror LuxStral or manual override) ───────────────
     juce::Label        freqSectionLabel;
     juce::ToggleButton manualToggle;
     juce::Label        tuningLabel;
-    juce::Slider       tuningSlider;
+    Sp3ctraBarSlider   tuningSlider;
     juce::Label        rootLabel;
     juce::ComboBox     rootCombo;
     juce::Label        octavesLabel;
-    juce::Slider       octavesSlider;
+    Sp3ctraBarSlider   octavesSlider;
     juce::Label        rangeInfoLabel;
 
     // ── Image processing — PhonoPaper-conforming controls only ─────────────
@@ -70,7 +81,7 @@ private:
     // overlap) is fixed to PhonoPaper-neutral values and no longer exposed.
     // Page Format / Printer DPI moved to the PLAY page (format options).
     juce::Label  dynLabel;
-    juce::Slider dynSlider;
+    Sp3ctraBarSlider dynSlider;
 
     // ── Print size — spectro band height = CIS sensor active length ────────
     // Locked to SCORE_CIS_HEIGHT_MM (219.456 mm) by default so a 100%-scale
@@ -78,7 +89,7 @@ private:
     juce::Label        printSectionLabel;
     juce::ToggleButton heightManualToggle;
     juce::Label        heightLabel;
-    juce::Slider       heightSlider;
+    Sp3ctraBarSlider   heightSlider;
 
     // ── Export — image format / sheet size / DPI (moved off the PLAY page).
     // Page + DPI live in the shared ScoreSettings (they shape the GENERATE

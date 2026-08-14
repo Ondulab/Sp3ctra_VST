@@ -79,8 +79,19 @@ typedef struct {
 
     LuxEchoSlot   ring[LUX_ECHO_RING_SLOTS];
     uint32_t      write_pos;      /* total lines pushed since last clear */
-    int           ring_active;    /* nonzero while the ring may hold energy */
+    int           ring_active;    /* nonzero while the ring may hold energy —
+                                   * a latch, cleared only by a reset */
+
+    /* Rack-LED heartbeat: bumped once per line the module actually CHANGED
+     * (output != input), i.e. a repeat printed. See lux_reverb.h. */
+    uint32_t      active_ticks;
     int           last_bg_mode;   /* RESOLVED polarity the history was built in */
+
+    /* Consecutive lines whose STORED feedback held no material (peak below one
+     * uint8 LSB). While it stays under `delay_lines` the delay window still
+     * carries a repeat that has not been printed yet — that is exactly what
+     * lux_echo_tail_alive() answers. Saturates at LUX_ECHO_MAX_DELAY + 1. */
+    int           quiet_lines;
 
     /* AUTO background — learned over a short window after each reset, then
      * LOCKED (see lux_reverb.h: polarity is a property of the SOURCE; a dense
@@ -91,9 +102,9 @@ typedef struct {
     int           auto_max_mean;
     int           auto_min_mean;
 
-    /* Background's own energy, slow EMA updated ONLY on near-background lines
-     * — a per-frame estimate would balloon during dense passages and shave the
-     * material out of the ring. -1 = unseeded. */
+    /* Paper level — EMA of the per-line 10th-percentile energy (see
+     * lux_drive.c: the gated mean-based floor stored the paper pedestal
+     * into the ring on dense streams). -1 = unseeded. */
     float         floor_ema;
 
     /* Preallocated output buffers. */
@@ -123,6 +134,16 @@ void lux_echo_process_frame(
     const uint8_t **out_r,
     const uint8_t **out_g,
     const uint8_t **out_b);
+
+/* ── Tail runout ───────────────────────────────────────────────────────────── */
+/*
+ * 1 while the delay window still holds a repeat to print. An echo is defined
+ * by what it keeps printing after its input goes silent, so the chain executor
+ * keeps walking a chain that lost its feed until every tail-bearing insert
+ * answers 0 here — without it, stopping the source cuts the repeat train on
+ * the spot. O(1).
+ */
+int lux_echo_tail_alive(const LuxEchoState *state);
 
 /* ── Global instance + per-chain pool (mirrors LuxPitch/LuxMask) ───────────── */
 extern LuxEchoState g_lux_echo_proc;

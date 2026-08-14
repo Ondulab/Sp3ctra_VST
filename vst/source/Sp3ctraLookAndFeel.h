@@ -19,7 +19,15 @@
 class Sp3ctraLookAndFeel : public juce::LookAndFeel_V4
 {
 public:
-    Sp3ctraLookAndFeel() = default;
+    Sp3ctraLookAndFeel()
+    {
+        // Toggle accent when no module page overrides it: the UI blue.
+        // Module pages tint their toggles by setting this colour id on the
+        // zone-3 page host (selectBlock) — drawToggleButton reads it with
+        // parent inheritance, so every toggle inside a page follows its
+        // block colour like the page's bar sliders do.
+        setColour(juce::ToggleButton::tickColourId, juce::Colour(0xff4fa3e0));
+    }
     ~Sp3ctraLookAndFeel() override = default;
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -96,8 +104,12 @@ public:
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // ToggleButton — iOS-style sliding switch (track + knob) + label on the right.
-    // Replaces JUCE's default tick-box for every boolean/enable toggle.
+    // ToggleButton — sliding switch in the DC-block bar language: dark
+    // interior, translucent accent fill when ON, 1 px accent outline, and a
+    // solid-accent square knob (the power-LED cue). The accent is the nearest
+    // ancestor's ToggleButton::tickColourId — module pages set their block
+    // colour on the zone-3 host, so toggles tint like the page's bar sliders;
+    // the LookAndFeel default (UI blue) covers everything else.
     // ─────────────────────────────────────────────────────────────────────────
     void drawToggleButton(juce::Graphics& g,
                           juce::ToggleButton& button,
@@ -107,31 +119,41 @@ public:
         const bool on      = button.getToggleState();
         const bool enabled = button.isEnabled();
 
+        auto accent = button.findColour(juce::ToggleButton::tickColourId, true);
+        if (! enabled) accent = accent.withMultipliedAlpha(0.5f);
+
         // Switch geometry — vertically centred, left-aligned within the bounds.
         const float h = juce::jmin(20.0f, (float)button.getHeight());
         const float w = h * 1.9f;
         const float y = ((float)button.getHeight() - h) * 0.5f;
-        const auto  track  = juce::Rectangle<float>(0.0f, y, w, h);
-        const float radius = h * 0.5f;
+        const auto  track = juce::Rectangle<float>(0.0f, y, w, h);
+        constexpr float r = 2.0f;   // same corner family as the bars
 
-        // Track
-        juce::Colour trackCol = on ? juce::Colour(0xff4fa3e0) : juce::Colour(0xff33373f);
-        if (! enabled) trackCol = trackCol.withMultipliedAlpha(0.5f);
-        g.setColour(trackCol);
-        g.fillRoundedRectangle(track, radius);
+        // Track — dark interior; accent fill when ON (the bar's "value" look)
+        g.setColour(juce::Colour(0xff181820));
+        g.fillRoundedRectangle(track, r);
+        if (on)
+        {
+            g.setColour(accent.withAlpha(0.25f));
+            g.fillRoundedRectangle(track, r);
+        }
+        g.setColour(accent.withAlpha(on ? 0.55f : 0.3f));
+        g.drawRoundedRectangle(track.reduced(0.5f), r, 1.0f);
+
         if (shouldDrawButtonAsHighlighted)
         {
             g.setColour(juce::Colours::white.withAlpha(0.06f));
-            g.fillRoundedRectangle(track, radius);
+            g.fillRoundedRectangle(track, r);
         }
 
-        // Sliding knob
-        constexpr float pad = 2.0f;
-        const float knobD = h - 2.0f * pad;
-        const float knobX = on ? (track.getRight() - pad - knobD)
+        // Sliding knob — solid accent when ON, muted grey when OFF
+        constexpr float pad = 2.5f;
+        const float knobS = h - 2.0f * pad;
+        const float knobX = on ? (track.getRight() - pad - knobS)
                                : (track.getX() + pad);
-        g.setColour(juce::Colour(enabled ? 0xffeaf3fb : 0xff888888));
-        g.fillEllipse(knobX, y + pad, knobD, knobD);
+        g.setColour(on ? accent
+                       : juce::Colour(0xff4a4e58).withMultipliedAlpha(enabled ? 1.0f : 0.5f));
+        g.fillRoundedRectangle(knobX, y + pad, knobS, knobS, r);
 
         // Label
         const auto text = button.getButtonText();
@@ -147,8 +169,14 @@ public:
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Linear Slider — explicit filled/unfilled colours so the "value" portion
-    // (left of thumb) is always brighter than the unfilled portion (right).
+    // Linear Slider — two custom branches:
+    //   • LinearHorizontal: explicit filled/unfilled colours so the "value"
+    //     portion (left of thumb) is always brighter than the unfilled part;
+    //   • LinearVertical (AudioMixPanel faders): Sp3ctraBarSlider's DC-block
+    //     bar language turned vertical and slimmer — dark interior, translucent
+    //     accent fill rising from the bottom, 1 px accent outline. Reads the
+    //     same slider colour ids Sp3ctraBarSlider::setAccent sets, so a mixer
+    //     strip tints its fader exactly like an editor tints its bars.
     // ─────────────────────────────────────────────────────────────────────────
     void drawLinearSlider(juce::Graphics& g,
                           int x, int y, int width, int height,
@@ -156,6 +184,28 @@ public:
                           juce::Slider::SliderStyle style,
                           juce::Slider& slider) override
     {
+        if (style == juce::Slider::LinearVertical)
+        {
+            constexpr float kBarW = 12.0f;   // thinner than the horizontal bars
+            const float barW = juce::jmin(kBarW, (float) width);
+            const juce::Rectangle<float> bar((float) x + ((float) width - barW) * 0.5f,
+                                             (float) y, barW, (float) height);
+
+            g.setColour(slider.findColour(juce::Slider::backgroundColourId));
+            g.fillRect(bar);
+
+            // Fill bottom → value (sliderPos is the value's y; top = max).
+            const float top = juce::jlimit((float) y, (float) (y + height), sliderPos);
+            const auto fill = slider.findColour(juce::Slider::trackColourId);
+            g.setColour(slider.isEnabled() ? fill : fill.withMultipliedAlpha(0.5f));
+            g.fillRect(juce::Rectangle<float>(bar.getX() + 0.5f, top,
+                                              barW - 1.0f, bar.getBottom() - top));
+
+            g.setColour(slider.findColour(juce::Slider::textBoxOutlineColourId));
+            g.drawRect(bar, 1.0f);
+            return;
+        }
+
         if (style != juce::Slider::LinearHorizontal)
         {
             LookAndFeel_V4::drawLinearSlider(g, x, y, width, height, sliderPos,
@@ -193,6 +243,15 @@ public:
             g.fillEllipse(thumbX - thumbR - 2.f, trackY - thumbR - 2.f,
                           (thumbR + 2.f) * 2.f, (thumbR + 2.f) * 2.f);
         }
+    }
+
+    /** The vertical bar faders have no round thumb, so they don't need the V4
+        thumb clearance — keep a hair of breathing room above/below the bar.
+        Horizontal sliders keep the indent their circular thumb requires. */
+    int getSliderThumbRadius(juce::Slider& slider) override
+    {
+        return slider.isVertical() ? 2
+                                   : LookAndFeel_V4::getSliderThumbRadius(slider);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

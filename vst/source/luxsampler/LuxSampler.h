@@ -409,6 +409,11 @@ public:
     // (fed per engine by the chain executor — P4 doctrine).
     void cacheInputFrame(const uint8_t* R, const uint8_t* G, const uint8_t* B,
                          uint16_t pixel_count) noexcept;
+    // The module's input went silent (upstream player stopped / chain unfed):
+    // drop the blend reference so playback stops folding the STALE last input
+    // column into the composite. getLiveFrame() then reports 0 pixels — the
+    // darken-blend becomes a no-op until the chain feeds the marker again.
+    void whitenInputCache() noexcept;
 
     // =========================================================================
     // Thread lifecycle (Non-RT, called from PluginProcessor)
@@ -798,16 +803,19 @@ public:
     /** Return slot i's encoded EQ string ("" when flat). Non-RT. */
     juce::String getSlotEq(int i) const;
 
-    // Per-band EQ gain access (message thread) — the slot EQ is a fixed 9-node
-    // octave grid over kEqMinHz..kEqMaxHz (see ScoreEqComponent). Lets the MIDI
-    // mapping tweak one band without the curve editor. Non-RT (parse/re-encode).
-    static constexpr int    kEqBands = 9;
+    // Per-band EQ gain access (message thread) — the slot EQ is a 2..9-node
+    // grid over kEqMinHz..kEqMaxHz (node count = the editor's "points"
+    // dropdown, see ScoreEqComponent; default 2 = one straight line). Lets the
+    // MIDI mapping tweak one band without the curve editor. Non-RT.
+    static constexpr int    kEqBands = 9;   // max nodes / MIDI band targets
     static constexpr double kEqMinHz = 65.41;
     static constexpr double kEqMaxHz = 16744.04;
-    /** Gain (dB, ±24) of EQ band @p band [0..8] on slot @p slot; 0 when flat. */
+    /** Gain (dB, ±24) of EQ band @p band [0..8] on slot @p slot; 0 when flat
+     *  or when the band doesn't exist on the slot's current grid. */
     float getSlotEqBandGain(int slot, int band) const noexcept;
     /** Set EQ band @p band [0..8] of slot @p slot to @p gainDb (clamped ±24),
-     *  preserving the other bands; republishes the LUT. Non-RT. */
+     *  preserving the other bands and the slot's node count (a band beyond the
+     *  current grid is ignored); republishes the LUT. Non-RT. */
     void  setSlotEqBandGain(int slot, int band, float gainDb) noexcept;
     /** RT: true when the curve is not flat (worth applying). */
     bool isFreqCurveActive(int i) const noexcept

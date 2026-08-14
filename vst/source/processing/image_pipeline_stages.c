@@ -162,77 +162,6 @@ void img_stage_apply_db_decode(float *pixels, int count, float range_db)
 }
 
 /* ============================================================================
- * img_stage_calculate_contrast — Variance-based contrast measurement
- *
- * Extracted from image_preprocessor.c::calculate_contrast().
- * Must be called on RAW grayscale (before inversion/gamma) for accuracy.
- * ============================================================================ */
-float img_stage_calculate_contrast(
-    const float *grayscale,
-    int          pixel_count,
-    float        contrast_min,
-    float        contrast_adjustment_power,
-    float        contrast_stride)
-{
-    size_t sample_stride, valid_samples;
-    int i;
-    float sum, sum_sq, mean, raw_variance, variance, val;
-    float max_possible_variance, contrast_ratio, adjusted_contrast, result;
-
-    if (grayscale == NULL || pixel_count <= 0)
-        return 1.0f; /* Default = maximum volume */
-
-    sample_stride = (size_t)contrast_stride;
-    if (sample_stride == 0)
-        sample_stride = 1;
-
-    sum = 0.0f;
-    sum_sq = 0.0f;
-    valid_samples = 0;
-
-    for (i = 0; i < pixel_count; i += (int)sample_stride)
-    {
-        val = grayscale[i];
-        /* NaN/Inf check (portable) */
-        if (val != val || val * 0.0f != 0.0f)
-            continue;
-
-        sum += val;
-        sum_sq += val * val;
-        valid_samples++;
-    }
-
-    if (valid_samples == 0)
-        return 1.0f;
-
-    mean = sum / (float)valid_samples;
-    raw_variance = (sum_sq / (float)valid_samples) - (mean * mean);
-    variance = (raw_variance > 0.0f) ? raw_variance : 0.0f;
-
-    /* VOLUME_AMP_RESOLUTION = 1.0 (normalized float range) */
-    max_possible_variance = (1.0f * 1.0f) / 4.0f;
-
-    if (max_possible_variance <= 0.0f)
-        return 1.0f;
-
-    contrast_ratio = sqrtf(variance) / sqrtf(max_possible_variance);
-
-    /* NaN/Inf protection */
-    if (contrast_ratio != contrast_ratio || contrast_ratio * 0.0f != 0.0f)
-        return 1.0f;
-
-    adjusted_contrast = powf(contrast_ratio, contrast_adjustment_power);
-
-    /* Linear mapping from contrast_min to 1.0 */
-    result = contrast_min + (1.0f - contrast_min) * adjusted_contrast;
-
-    if (result > 1.0f) result = 1.0f;
-    if (result < contrast_min) result = contrast_min;
-
-    return result;
-}
-
-/* ============================================================================
  * img_stage_grayscale_luxstral — Per-note averaging for additive synthesis
  * ============================================================================ */
 void img_stage_grayscale_luxstral(
@@ -391,11 +320,10 @@ void img_stage_grayscale_luxsynth(
 void img_stage_blob_detect(
     const float          *notes,
     int                   num_notes,
-    float                 contrast_factor,
     StrokeForgeFrameData *out)
 {
     if (notes == NULL || out == NULL || num_notes <= 0)
         return;
 
-    strokeforge_analyze_frame(notes, num_notes, contrast_factor, out);
+    strokeforge_analyze_frame(notes, num_notes, out);
 }

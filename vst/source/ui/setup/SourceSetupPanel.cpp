@@ -2,6 +2,7 @@
 #include "SetupHeader.h"
 #include "../../Sp3ctraConstants.h"
 #include "../../UITheme.h"
+#include "../../session/MachinePrefs.h"
 
 using DC = Sp3ctraDeviceClient;
 
@@ -491,7 +492,11 @@ void SourceSetupPanel::reconcileDpiToApvts (int dpi)
     {
         const float norm = p->convertTo0to1 (dpi == 200 ? 0.0f : 1.0f);
         if (std::abs (p->getValue() - norm) > 1.0e-4f)
+        {
             p->setValueNotifyingHost (norm);
+            // The device is the source of truth — mirror it machine-side too.
+            MachinePrefs::saveParam (apvts, "sensorDpi");
+        }
     }
 }
 
@@ -670,6 +675,13 @@ void SourceSetupPanel::applyLink()
     applyByte (udpAddr.box[3], "udpByte4");
 
     audioProcessor.endUdpBatchUpdate();
+
+    // LINK config is machine-scoped: persist it in the machine file so a
+    // restored session/DAW blob can never repoint this computer's link.
+    for (auto* id : { "udpPort", "udpByte1", "udpByte2", "udpByte3", "udpByte4",
+                      "deviceIpByte1", "deviceIpByte2",
+                      "deviceIpByte3", "deviceIpByte4" })
+        MachinePrefs::saveParam (apvts, id);
 
     applyLinkButton.setButtonText ("Applied!");
     juce::Component::SafePointer<SourceSetupPanel> safe (this);

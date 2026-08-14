@@ -5,6 +5,7 @@
 #include <memory>
 #include "../luxsampler/LuxSampler.h"
 #include "../midi/MidiLearnAttachment.h"
+#include "../ui/Sp3ctraBarSlider.h"
 
 class Sp3ctraAudioProcessor;
 
@@ -86,7 +87,7 @@ private:
     int  lastNumBanks_ = -1;  // relayout trigger when the SETUP count changes
 
     // ── Per-bank mixer rows (level fader + mix-mode box) ─────────────────────
-    juce::Slider   levelSlider[LuxSamplerConstants::MAX_UI_BANKS];
+    Sp3ctraBarSlider levelSlider[LuxSamplerConstants::MAX_UI_BANKS];
     juce::ComboBox modeBox    [LuxSamplerConstants::MAX_UI_BANKS];
     std::unique_ptr<MidiLearnAttachment> levelLearn[LuxSamplerConstants::MAX_UI_BANKS];
     std::unique_ptr<MidiLearnAttachment> modeLearn [LuxSamplerConstants::MAX_UI_BANKS];

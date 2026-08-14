@@ -98,13 +98,11 @@ void strokeforge_cleanup(void);
  *
  * @param notes          Per-note amplitude array [0..num_notes-1], 0.0–1.0
  * @param num_notes      Number of CIS oscillators
- * @param contrast_factor Frame contrast estimate (0.0–1.0), for future use
  * @param out            Output structure to fill (zeroed internally)
  */
 void strokeforge_analyze_frame(
     const float         *notes,
     int                  num_notes,
-    float                contrast_factor,
     StrokeForgeFrameData *out);
 
 #ifdef __cplusplus

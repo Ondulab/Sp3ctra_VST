@@ -34,7 +34,6 @@ typedef struct {
     int               bank_slot;
     int               num_notes;
     int               stereo_valid;
-    float             contrast_factor;
     float             notes[PREPROCESS_MAX_NOTES];
     float             left_gains[PREPROCESS_MAX_NOTES];
     float             right_gains[PREPROCESS_MAX_NOTES];
@@ -61,7 +60,6 @@ void synth_staging_stage_luxstral(int chain_idx, int bank_slot,
                          ? bank_slot : 0;
     s->num_notes       = num_notes;
     s->stereo_valid    = stereo_valid ? 1 : 0;
-    s->contrast_factor = pp->additive.contrast_factor;
     memcpy(s->notes, pp->additive.notes, (size_t) num_notes * sizeof(float));
     if (stereo_valid)
     {
@@ -111,7 +109,7 @@ static int staging_snapshot(const LsSendStaging* s, LsSendStaging* out)
 int synth_staging_mix_luxstral(const ChainPlan* plan,
                                float* notes_out, int max_notes,
                                float* left_out, float* right_out,
-                               float* contrast_out, int* stereo_valid_out)
+                               int* stereo_valid_out)
 {
     if (plan == NULL || notes_out == NULL || max_notes <= 0)
         return 0;
@@ -122,8 +120,6 @@ int synth_staging_mix_luxstral(const ChainPlan* plan,
     if (left_out)  memset(left_out,  0, (size_t) max_notes * sizeof(float));
     if (right_out) memset(right_out, 0, (size_t) max_notes * sizeof(float));
 
-    float  contrast_acc   = 0.0f;
-    float  weight_acc     = 0.0f;
     int    mixed          = 0;
     int    any_stereo     = 0;
     int    out_notes      = 0;
@@ -176,8 +172,6 @@ int synth_staging_mix_luxstral(const ChainPlan* plan,
             }
         }
 
-        contrast_acc += w * s_mix_snap.contrast_factor;
-        weight_acc   += w;
         ++mixed;
     }
 
@@ -188,14 +182,12 @@ int synth_staging_mix_luxstral(const ChainPlan* plan,
     if (contended)
     {
         __atomic_fetch_add(&s_contention_holds, 1, __ATOMIC_RELAXED);
-        if (contrast_out)     *contrast_out     = 0.0f;
         if (stereo_valid_out) *stereo_valid_out = 0;
         return -1;
     }
 
     if (mixed == 0)
     {
-        if (contrast_out)     *contrast_out     = 0.0f;
         if (stereo_valid_out) *stereo_valid_out = 0;
         return 0;
     }
@@ -226,8 +218,6 @@ int synth_staging_mix_luxstral(const ChainPlan* plan,
         }
     }
 
-    if (contrast_out)
-        *contrast_out = (weight_acc > 0.0f) ? contrast_acc / weight_acc : 0.0f;
     if (stereo_valid_out)
         *stereo_valid_out = any_stereo;
     return mixed;

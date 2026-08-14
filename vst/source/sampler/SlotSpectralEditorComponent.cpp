@@ -1,4 +1,5 @@
 #include "SlotSpectralEditorComponent.h"
+#include "../ui/ModuleCatalog.h"
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include <algorithm>
@@ -217,7 +218,7 @@ void SlotSpectralEditorComponent::paint(juce::Graphics& g)
     }
 
     // Axis labels.
-    g.setColour(juce::Colour(0xffcc88ff).withAlpha(0.7f));
+    g.setColour(moduleColour(ModuleType::Sampler).withAlpha(0.7f));
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontTiny)).boldened());
     g.drawText("treble", (int) img.getX() + 3, (int) img.getY() + 2, 60, 11, juce::Justification::left, false);
     g.drawText("bass",   (int) img.getX() + 3, (int) img.getBottom() - 12, 60, 11, juce::Justification::left, false);
@@ -403,6 +404,7 @@ void SlotSpectralEditorComponent::showFadeTypeMenu(bool in)
             const auto t = static_cast<FadeCurveType>(result - 1);
             if (in) fs2->setSlotAttackCurveType(safe->selectedSlot_, t);
             else    fs2->setSlotDecayCurveType (safe->selectedSlot_, t);
+            safe->processor.sessions()->markStateDirty();
             safe->markDirty();
             if (safe->onFadeChanged) safe->onFadeChanged();
         });
@@ -529,6 +531,7 @@ void SlotSpectralEditorComponent::mouseDown(const juce::MouseEvent& e)
             fs->setSlotDecayCurvePower(selectedSlot_, 1.0f);
         }
         mode_ = Mode::None;
+        processor.sessions()->markStateDirty();
         markDirty();
         if (onFadeChanged) onFadeChanged();
         return;
@@ -617,6 +620,8 @@ void SlotSpectralEditorComponent::mouseDrag(const juce::MouseEvent& e)
         }
         default: break;
     }
+    // Engine-held slot params (not APVTS) — mark the session dirty.
+    processor.sessions()->markStateDirty();
     markDirty();   // rebuild the preview with the new edit
 
     // Every handle drag (crop bars included) — the owner's param-box strip

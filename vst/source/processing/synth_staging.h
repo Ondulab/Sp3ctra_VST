@@ -61,7 +61,7 @@ void synth_staging_set_inactive(int chain_idx);
 int synth_staging_mix_luxstral(const ChainPlan* plan,
                                float* notes_out, int max_notes,
                                float* left_out, float* right_out,
-                               float* contrast_out, int* stereo_valid_out);
+                               int* stereo_valid_out);
 
 /* ── M4 — LuxSynth sends (conditioned LINE + raw RGB at the OUT position) ──
  * Producers stage the send's conditioned grayscale line (luxsynth_condition_

@@ -16,19 +16,24 @@
  */
 #pragma once
 
+#include "../ui/ModuleCatalog.h"
+
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
 #include "../ui/EnvelopeEditorComponent.h"
+#include "../ui/Sp3ctraBarSlider.h"
 #include "VisualizerMode.h"
 
 class LuxPitchTabComponent : public juce::Component
 {
 public:
+    static inline const uint32_t kAccentARGB = moduleColour(ModuleType::Pitch).getARGB();   ///< inherited module colour
+
     explicit LuxPitchTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p),
-          envelopeEditor(p.getAPVTS(), juce::Colour(0xffe06bb8),
+          envelopeEditor(p.getAPVTS(), juce::Colour(kAccentARGB),
                          lpParam(0, "AttackMs"), lpParam(0, "DecayMs"),
                          lpParam(0, "SustainLevel"), lpParam(0, "ReleaseMs"),
                          lpParam(0, "AttackCurve"), lpParam(0, "DecayCurve"),
@@ -52,22 +57,13 @@ public:
 
         // ── Glide ──────────────────────────────────────────────────────
         initLabel(glideLabel, "Glide");
-        glideSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        glideSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                    50, Sp3ctraTheme::kControlH);
         addAndMakeVisible(glideSlider);
 
         // ── LFO ────────────────────────────────────────────────────────
         initLabel(lfoRateLabel, "LFO Rate");
-        lfoRateSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        lfoRateSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                      50, Sp3ctraTheme::kControlH);
         addAndMakeVisible(lfoRateSlider);
 
         initLabel(lfoDepthLabel, "LFO Depth");
-        lfoDepthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        lfoDepthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                       50, Sp3ctraTheme::kControlH);
         addAndMakeVisible(lfoDepthSlider);
 
         // ── Velocity coupling ──────────────────────────────────────────
@@ -130,7 +126,7 @@ public:
         // MODULATION section header (above the first control row below the editor)
         const int sectionY = rowY(1) - 4;
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
-        g.setColour(juce::Colour(0xffe06bb8).withAlpha(0.55f));
+        g.setColour(juce::Colour(kAccentARGB).withAlpha(0.55f));
         g.drawText("--- MODULATION ---", leftX_, sectionY, leftW_, 12,
                    juce::Justification::centred);
     }
@@ -185,7 +181,7 @@ private:
     // Controls — ADSR sliders removed (now inside the graphic editor)
     juce::ToggleButton velCouplingToggle;
     juce::ComboBox     bgCombo;
-    juce::Slider       glideSlider, lfoRateSlider, lfoDepthSlider;
+    Sp3ctraBarSlider   glideSlider, lfoRateSlider, lfoDepthSlider;
 
     // Attachments — ADSR attachments removed (handled by the editor)
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>

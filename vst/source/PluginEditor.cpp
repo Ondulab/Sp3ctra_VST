@@ -7,6 +7,7 @@
 #include "AppUpdater.h"
 #include "UpdateDialog.h"
 #include "licensing/ActivationDialog.h"
+#include "session/MachinePrefs.h"   // machine-scoped settings (layout, LINK…)
 
 //==============================================================================
 Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& p)
@@ -58,13 +59,14 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
         if (videoScrollPage)  videoScrollPage ->setSlot(slot);
         if (videoScrollSetup) videoScrollSetup->setSlot(slot);
     };
-    // Selecting a SAMPLER block binds the sampler page + setup to engine A/B
-    // (slot 0 = A, 1 = B), fired just before onBlockSelected → selectBlock.
+    // Selecting a SAMPLER block binds the sampler page + setup to the engine
+    // hosted by that pool slot (0..7), fired just before onBlockSelected →
+    // selectBlock.
     chainRack->onSamplerBlockSelected = [this](int slot)
     {
-        samplerEngineIndex_ = (slot == 1) ? 1 : 0;
-        if (samplerPage)  samplerPage ->setSamplerIndex(slot);
-        if (samplerSetup) samplerSetup->setSamplerIndex(slot);
+        samplerEngineIndex_ = juce::jlimit(0, LuxSampler::kMaxEngines - 1, slot);
+        if (samplerPage)  samplerPage ->setSamplerIndex(samplerEngineIndex_);
+        if (samplerSetup) samplerSetup->setSamplerIndex(samplerEngineIndex_);
     };
     // Selecting a LUXSTRAL send tracks its slot (0..7) — it drives the OUT
     // page's conditioning bank and the per-send power button. The ENGINE
@@ -76,8 +78,12 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     // A chain edit changes the rack's preferred height → re-run the zone layout.
     chainRack->onModelChanged  = [this]
     {
-        layoutZones();
+        // Refresh BEFORE layouting: the MIDI MIX section's very existence AND
+        // its height are derived from its row count, so a stale refresh would
+        // lay out one edit late (the panel would appear only on the NEXT edit).
         if (waterfallColumn) waterfallColumn->refreshActiveSlots();   // outputs added/removed
+        if (midiMixPanel)    midiMixPanel   ->refreshActiveSlots();
+        layoutZones();
     };
     // State restore with the editor open (host preset change / project
     // reload): rebuild the rack from the NEW model — the audio follows the
@@ -87,6 +93,10 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     {
         if (chainRack)       chainRack->refreshFromModel();
         if (waterfallColumn) waterfallColumn->refreshActiveSlots();
+        if (midiMixPanel)    midiMixPanel   ->refreshActiveSlots();
+        // A host preset change can add/remove probes, so zone 4 must be
+        // re-split too — this path never used to relayout at all.
+        layoutZones();
     };
     rackViewport.setViewedComponent(chainRack.get(), false);
     rackViewport.setScrollBarsShown(true, false);
@@ -142,18 +152,40 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     voicePage = std::make_unique<VoiceGenTabComponent>(audioProcessor);
     zone3Content.addChildComponent(voicePage.get());
 
+    // P7 — a score-family module left the rack: its player-pool slot is now up
+    // for grabs by the next one placed ANYWHERE, so the four generator pages
+    // must drop the document they kept for it. Without this, adding a SCORE to
+    // chain 2 could inherit the take and settings of a SCORE deleted earlier.
+    audioProcessor.onScoreSlotReleased =
+        [this](int slot)
+        {
+            if (scorePage)     scorePage    ->forgetScoreSlot(slot);
+            if (timbrePage)    timbrePage   ->forgetScoreSlot(slot);
+            if (midiScorePage) midiScorePage->forgetScoreSlot(slot);
+            if (voicePage)     voicePage    ->forgetScoreSlot(slot);
+        };
+
     videoScrollPage = std::make_unique<VideoScrollPage>(audioProcessor);
     zone3Content.addChildComponent(videoScrollPage.get());
+    midiTapPage = std::make_unique<MidiTapPage>(audioProcessor);
+    zone3Content.addChildComponent(midiTapPage.get());
 
-    // FX — REVERB / ECHO / EQ / SCALE insert pages (all controls on the PLAY face)
+    // FX — REVERB / ECHO / EQ / SCALE / CENTROID / LEVELS insert pages (all
+    // controls on the PLAY face)
     reverbPage = std::make_unique<LuxReverbTabComponent>(audioProcessor);
     echoPage   = std::make_unique<LuxEchoTabComponent>(audioProcessor);
     eqPage     = std::make_unique<LuxEqTabComponent>(audioProcessor);
     harmoPage  = std::make_unique<LuxHarmoTabComponent>(audioProcessor);
+    centroPage = std::make_unique<LuxCentroTabComponent>(audioProcessor);
+    drivePage  = std::make_unique<LuxDriveTabComponent>(audioProcessor);
+    dcBlockPage = std::make_unique<LuxDcBlockTabComponent>(audioProcessor);
     zone3Content.addChildComponent(reverbPage.get());
     zone3Content.addChildComponent(echoPage.get());
     zone3Content.addChildComponent(eqPage.get());
     zone3Content.addChildComponent(harmoPage.get());
+    zone3Content.addChildComponent(centroPage.get());
+    zone3Content.addChildComponent(drivePage.get());
+    zone3Content.addChildComponent(dcBlockPage.get());
 
     // M9 — IMAGE / VIDEO / CAMERA source pages (preview + movable line + transport)
     imageSrcPage  = std::make_unique<MediaSourcePage>(audioProcessor, MediaSourcePage::Kind::Image);
@@ -248,6 +280,20 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     };
     addAndMakeVisible(audioMixPanel.get());
 
+    // ── MIDI MIX (between VIDEO MIX and AUDIO MIX) — master of the MIDI TAP
+    // probes. addChildComponent, NOT addAndMakeVisible: its visibility is owned
+    // by layoutZones() (hidden while no probe is patched).
+    midiMixPanel = std::make_unique<MidiMixPanel>(audioProcessor);
+    midiMixPanel->onCollapseToggled = [this](bool) { layoutZones(); persistLayoutProps(); };
+    midiMixPanel->onProbeSelected   = [this](int slot)
+    {
+        midiTapSlotIndex_ = slot;
+        if (midiTapPage) midiTapPage->setSlot(slot);
+        selectBlock(ChainBlockId::MidiTap);
+        persistLayoutProps();
+    };
+    addChildComponent(midiMixPanel.get());
+
     // ── ZONE 4: video scroll column (hosts the former VIDEO tab) ──────────────
     waterfallColumn = std::make_unique<VideoMixerColumn>(audioProcessor);
     waterfallColumn->onCollapseToggled = [this](bool)
@@ -258,7 +304,10 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     addAndMakeVisible(waterfallColumn.get());
 
     // ── Splitters (zone2|zone3 and zone3|zone4) ───────────────────────────────
-    splitterLeft.onDragStart = [this] { splitterDragStartW = zone2Width; };
+    // Drags anchor on the DISPLAYED width (zoneEff) so the handle tracks the
+    // mouse even when the persisted intent is wider than the current window
+    // allows; the drag then re-anchors the intent to what the user sees.
+    splitterLeft.onDragStart = [this] { splitterDragStartW = zone2Eff_; };
     splitterLeft.onDragged   = [this](int dx)
     {
         zone2Width = splitterDragStartW + dx;   // clamped in layoutZones()
@@ -267,7 +316,7 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     splitterLeft.onDragEnd   = [this] { persistLayoutProps(); };
     addAndMakeVisible(splitterLeft);
 
-    splitterRight.onDragStart = [this] { splitterDragStartW = zone4Width; };
+    splitterRight.onDragStart = [this] { splitterDragStartW = zone4Eff_; };
     splitterRight.onDragged   = [this](int dx)
     {
         zone4Width = splitterDragStartW - dx;   // clamped in layoutZones()
@@ -304,7 +353,7 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     menuAdvancedBtn_.onClick = [this] { showAdvancedMenu(); };
     addAndMakeVisible(menuAdvancedBtn_);
 
-    menuAboutBtn_.setTooltip("About Sp3ctra, software update, license, donate.");
+    menuAboutBtn_.setTooltip("About Sp3ctra, software update, license.");
     menuAboutBtn_.onClick = [this] { showAboutMenu(); };
     addAndMakeVisible(menuAboutBtn_);
 
@@ -335,13 +384,40 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
                     ActivationDialog::show(safe.getComponent());
             });
 
-    // ── Restore persisted layout (survives session reload) ────────────────────
+    // ── Restore persisted layout (SESSION-scoped — survives session reload) ───
+    // The session property wins; the transient "layout.*" machine keys (a
+    // short-lived scoping experiment) are only read when the session has
+    // none, so nothing saved during that window is lost.
     auto& state = apvts.state;
-    zone2Width = (int) state.getProperty("zone2W", kZone2DefaultW);
-    zone4Width = (int) state.getProperty("zone4W", kZone4DefaultW);
-    if ((bool) state.getProperty("scrollCollapsed", false))
+    auto& prefs = MachinePrefs::file();
+    auto layoutInt = [&](const char* legacy, const char* prefKey, int fallback)
+    {
+        if (state.hasProperty(legacy))
+            return (int) state.getProperty(legacy, fallback);
+        return prefs.containsKey(prefKey) ? prefs.getIntValue(prefKey, fallback)
+                                          : fallback;
+    };
+    auto layoutBool = [&](const char* legacy, const char* prefKey)
+    {
+        if (state.hasProperty(legacy))
+            return (bool) state.getProperty(legacy, false);
+        return prefs.containsKey(prefKey) && prefs.getBoolValue(prefKey, false);
+    };
+    zone2Width = layoutInt("zone2W", "layout.zone2W", kZone2DefaultW);
+    zone4Width = layoutInt("zone4W", "layout.zone4W", kZone4DefaultW);
+    if (layoutBool("scrollCollapsed", "layout.scrollCollapsed"))
         waterfallColumn->setCollapsed(true, false);
-    if ((bool) state.getProperty("catalogCollapsed", false))
+    if (midiMixPanel != nullptr
+        && layoutBool("midiMixCollapsed", "layout.midiMixCollapsed"))
+        midiMixPanel->setCollapsed(true, false);
+    // Re-open the persisted real-time MIDI destination (machine-scoped, by
+    // name; a vanished device silently degrades to "no port").
+    if (const auto dest = prefs.containsKey("midiTapDest")
+                              ? prefs.getValue("midiTapDest")
+                              : state.getProperty("midiTapDest", juce::var()).toString();
+        dest.isNotEmpty())
+        audioProcessor.setMidiTapDestination(dest);
+    if (layoutBool("catalogCollapsed", "layout.catalogCollapsed"))
         setCatalogCollapsed(true, false);   // also locks the chain rack
 
     // ── Restore the zone-3 selection (block + face + engine bindings) ─────────
@@ -350,14 +426,25 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     // first for the same reason).
     luxStralSendSlot_ = juce::jlimit(0, ChainModel::kMaxChains - 1,
         (int) state.getProperty("selLuxStralSend", 0));
-    samplerEngineIndex_  = juce::jlimit(0, 1,
+    samplerEngineIndex_  = juce::jlimit(0, LuxSampler::kMaxEngines - 1,
         (int) state.getProperty("selSamplerEngine", 0));
     videoSlotIndex_      = juce::jlimit(0, ChainModel::kMaxVideoSlots - 1,
         (int) state.getProperty("selVideoSlot", 0));
     if (samplerPage)     samplerPage    ->setSamplerIndex(samplerEngineIndex_);
     if (samplerSetup)    samplerSetup   ->setSamplerIndex(samplerEngineIndex_);
+    // Selected bank inside the sampler page (persisted alongside the engine).
+    {
+        const int bank = juce::jlimit(0, LuxSamplerConstants::NUM_SLOTS - 1,
+            (int) state.getProperty("selSamplerBank",
+                                    audioProcessor.getSamplerSelectedSlot()));
+        audioProcessor.setSamplerSelectedSlot(bank);
+        if (samplerPage) samplerPage->selectSlot(bank);
+    }
     if (videoScrollPage)  videoScrollPage ->setSlot(videoSlotIndex_);
     if (videoScrollSetup) videoScrollSetup->setSlot(videoSlotIndex_);
+    midiTapSlotIndex_ = juce::jlimit(0, ChainModel::kMaxMidiTaps - 1,
+        (int) state.getProperty("selMidiTapSlot", 0));
+    if (midiTapPage) midiTapPage->setSlot(midiTapSlotIndex_);
 
     // Selected block: fall back to the default when out of range or when its
     // module was deleted since the save (the rack can't highlight a ghost).
@@ -380,10 +467,20 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     juce::LookAndFeel::setDefaultLookAndFeel(&sp3ctraLaf);
 
     // ── Resizable editor + persisted size ─────────────────────────────────────
+    // Read the persisted size BEFORE setResizeLimits: that call snaps the
+    // still-0×0 editor to the MINIMUM size, whose resized() used to run
+    // persistLayoutProps() and overwrite the saved editorW/H in the state —
+    // the read right after then only ever saw kMinW×kMinH. This is why every
+    // session reopened at the minimum window size. persistLayoutProps() is
+    // additionally gated on layoutRestoreDone_ so no constructor-time layout
+    // pass can stomp restored values again.
+    const int w = juce::jlimit(kMinW, kMaxW,
+        layoutInt("editorW", "layout.editorW", kDefaultW));
+    const int h = juce::jlimit(kMinH, kMaxH,
+        layoutInt("editorH", "layout.editorH", kDefaultH));
     setResizable(true, true);
     setResizeLimits(kMinW, kMinH, kMaxW, kMaxH);
-    const int w = juce::jlimit(kMinW, kMaxW, (int) state.getProperty("editorW", kDefaultW));
-    const int h = juce::jlimit(kMinH, kMaxH, (int) state.getProperty("editorH", kDefaultH));
+    layoutRestoreDone_ = true;   // from here, resized() persists for real
     setSize(w, h);
 
     // Scrolling a panel should never nudge the knob/slider under the cursor:
@@ -403,7 +500,8 @@ Sp3ctraAudioProcessorEditor::~Sp3ctraAudioProcessorEditor()
     stopTimer();
     if (auto* up = AppUpdater::getInstanceWithoutCreating())
         up->removeChangeListener(this);
-    audioProcessor.onStateRestoredUi = nullptr;   // this editor is going away
+    audioProcessor.onStateRestoredUi   = nullptr; // this editor is going away
+    audioProcessor.onScoreSlotReleased = nullptr; // (its pages die with it)
     if (auto* s = audioProcessor.sessions())
         s->onSessionChanged = nullptr;            // ditto for the session bar
     juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
@@ -552,8 +650,12 @@ void Sp3ctraAudioProcessorEditor::showMidiMenu()
                 case 1:   // toggle midiFollowParam
                     if (auto* p = self->audioProcessor.getAPVTS()
                                       .getParameter("midiFollowParam"))
+                    {
                         p->setValueNotifyingHost(
                             p->getValue() >= 0.5f ? 0.0f : 1.0f);
+                        MachinePrefs::saveParam(self->audioProcessor.getAPVTS(),
+                                                "midiFollowParam");
+                    }
                     break;
                 case 2:   // destructive → confirm
                     Sp3ctraDialog::showConfirm(
@@ -701,6 +803,11 @@ void Sp3ctraAudioProcessorEditor::showAdvancedMenu()
     m.addSectionHeader("ADVANCED");
     m.addSubMenu("Log level",      logMenu);
     m.addSubMenu("Worker threads", workersMenu);
+    m.addSeparator();
+    // P9 — machine-scoped opt-in: re-arm the transports a session saved
+    // running when it reopens (never-auto-run stays the default).
+    m.addItem(300, "Resume playback on session load", true,
+              MachinePrefs::resumePlaybackOnLoad());
 
     m.showMenuAsync(
         juce::PopupMenu::Options().withTargetComponent(&menuAdvancedBtn_),
@@ -709,6 +816,13 @@ void Sp3ctraAudioProcessorEditor::showAdvancedMenu()
         {
             auto* self = safe.getComponent();
             if (self == nullptr || choice == 0) return;
+            if (choice == 300)
+            {
+                MachinePrefs::file().setValue(
+                    MachinePrefs::kResumePlaybackKey,
+                    ! MachinePrefs::resumePlaybackOnLoad());
+                return;
+            }
             auto& ap = self->audioProcessor.getAPVTS();
             auto setDenorm = [&ap](const char* id, float denorm)
             {
@@ -717,8 +831,11 @@ void Sp3ctraAudioProcessorEditor::showAdvancedMenu()
             };
             if (choice >= 100 && choice < 200)
                 setDenorm("logLevel", (float) (choice - 100));
-            else if (choice >= 200)
+            else if (choice >= 200 && choice < 300)
                 setDenorm("luxstralNumWorkers", (float) (choice - 200));
+            // Diagnostics are machine-scoped — persist outside the session.
+            MachinePrefs::saveParam(ap, "logLevel");
+            MachinePrefs::saveParam(ap, "luxstralNumWorkers");
         });
 }
 
@@ -749,7 +866,8 @@ void Sp3ctraAudioProcessorEditor::showAboutMenu()
     m.addSeparator();
     m.addItem(2, juce::String::fromUTF8("Website — ondulab.com"));
     m.addItem(3, updateLabel);
-    m.addItem(4, juce::String::fromUTF8("Donate ♥ (PayPal)"));
+    // Donate (id 4) retiré tant que le don Ondulab n'est pas actif : le lien
+    // paypal.me aboutissait à un montant nul. Voir OndulabLinks::kDonateUrl.
     m.addSeparator();
     m.addItem(5, juce::String::fromUTF8("Report an issue — GitHub"));
     m.addItem(7, juce::String::fromUTF8("Contact — contact@ondulab.com"));
@@ -769,7 +887,7 @@ void Sp3ctraAudioProcessorEditor::showAboutMenu()
                 case 1: AboutDialog::show(self); break;
                 case 2: open(OndulabLinks::kWebsiteUrl);   break;
                 case 3: UpdateDialog::show(self); break;
-                case 4: open(OndulabLinks::kDonateUrl);    break;
+                // case 4 : Donate — désactivé (voir addItem plus haut).
                 case 5: open(OndulabLinks::kIssuesUrl);    break;
                 case 6: open(OndulabLinks::kLicenseUrl);   break;
                 case 7: open(OndulabLinks::contactUrl());  break;
@@ -851,11 +969,16 @@ bool Sp3ctraAudioProcessorEditor::blockHasSetup(ChainBlockId id) noexcept
     // configuration there (formerly the gear-wheel Network tab); the VIDEO SCROLL
     // output hosts its per-instance background/frame colour; MIDI SCORE hosts
     // its export prefs (PNG/JPEG, A4/A3/FULL, DPI) — EXCEPT the
-    // REVERB / ECHO / EQ FX inserts (single PLAY page), and the
-    // IMAGE / VIDEO / CAMERA media modules (source picking lives on PLAY).
+    // REVERB / ECHO / EQ FX inserts (single PLAY page), the
+    // IMAGE / VIDEO / CAMERA media modules (source picking lives on PLAY), and
+    // MIDI TAP (the MIDI MIX master strip owns every settings-shaped control:
+    // timebase, destination, file — the probe only owns "what is a note").
     return id != ChainBlockId::RetiredSequencer
         && id != ChainBlockId::Reverb    && id != ChainBlockId::Echo
         && id != ChainBlockId::Equalizer && id != ChainBlockId::Harmonize
+        && id != ChainBlockId::Centroid  && id != ChainBlockId::Drive
+        && id != ChainBlockId::DcBlock
+        && id != ChainBlockId::MidiTap
         && id != ChainBlockId::None
         && id != ChainBlockId::ImageSrc  && id != ChainBlockId::VideoSrc
         && id != ChainBlockId::CameraSrc;
@@ -898,7 +1021,11 @@ void Sp3ctraAudioProcessorEditor::applyZone3Visibility()
     if (echoPage)        echoPage       ->setVisible(play && id == ChainBlockId::Echo);
     if (eqPage)          eqPage         ->setVisible(play && id == ChainBlockId::Equalizer);
     if (harmoPage)       harmoPage      ->setVisible(play && id == ChainBlockId::Harmonize);
+    if (centroPage)      centroPage     ->setVisible(play && id == ChainBlockId::Centroid);
+    if (drivePage)       drivePage      ->setVisible(play && id == ChainBlockId::Drive);
+    if (dcBlockPage)     dcBlockPage    ->setVisible(play && id == ChainBlockId::DcBlock);
     if (videoScrollPage) videoScrollPage->setVisible(play && id == ChainBlockId::VideoScroll);
+    if (midiTapPage)     midiTapPage    ->setVisible(play && id == ChainBlockId::MidiTap);
     if (imageSrcPage)    imageSrcPage   ->setVisible(play && id == ChainBlockId::ImageSrc);
     if (videoSrcPage)    videoSrcPage   ->setVisible(play && id == ChainBlockId::VideoSrc);
     if (cameraSrcPage)   cameraSrcPage  ->setVisible(play && id == ChainBlockId::CameraSrc);
@@ -993,6 +1120,15 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
     if (chainRack)
         chainRack->setSelectedBlock(id);
 
+    // Module accent for the zone-3 pages: every ToggleButton inside the shown
+    // page inherits this colour (drawToggleButton reads tickColourId with
+    // parent inheritance) — toggles tint like the page's bar sliders. The
+    // repaint covers pages that stay visible across a selection change (e.g.
+    // the shared OUT/send page when hopping between engine sends).
+    zone3Content.setColour(juce::ToggleButton::tickColourId,
+                           ChainRackComponent::blockColour(id));
+    zone3Content.repaint();
+
     // ── Contextual selection tap ──────────────────────────────────────────────
     // Tell the processor WHICH INSTANCE is selected: the chain executor then
     // publishes the stream at that module's position in ITS chain (selection-
@@ -1032,6 +1168,18 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
     else if (id == ChainBlockId::Harmonize)
     {
         if (harmoPage) harmoPage->setSlot(insertSlot);
+    }
+    else if (id == ChainBlockId::Centroid)
+    {
+        if (centroPage) centroPage->setSlot(insertSlot);
+    }
+    else if (id == ChainBlockId::Drive)
+    {
+        if (drivePage) drivePage->setSlot(insertSlot);
+    }
+    else if (id == ChainBlockId::DcBlock)
+    {
+        if (dcBlockPage) dcBlockPage->setSlot(insertSlot);
     }
     // Synth blocks: rebind the OUT/send page to this send's conditioning bank.
     // The LuxStral slot is resolved from the SELECTED INSTANCE (not from the
@@ -1090,16 +1238,46 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
                 videoSrcPage->setSlot(m->slot >= 0 ? m->slot : 0);
             if (m->type == ModuleType::Camera && cameraSrcPage != nullptr)
                 cameraSrcPage->setSlot(m->slot >= 0 ? m->slot : 0);
+            // MIDI TAP follows the SELECTED instance's slot. Bound here rather
+            // than through a rack pre-selection callback: setSelectedBlock()
+            // calls selectInstance(id, notify=false), so those callbacks do NOT
+            // fire on the session-restore path.
+            if (m->type == ModuleType::MidiTap)
+            {
+                midiTapSlotIndex_ = m->slot >= 0 ? m->slot : 0;
+                if (midiTapPage != nullptr)
+                    midiTapPage->setSlot(midiTapSlotIndex_);
+            }
             // P5-M5 — the generator pages follow the selected score-family
             // instance (its own player slot: transport, scrub, LOAD target).
-            if (m->type == ModuleType::Score && scorePage != nullptr)
-                scorePage->setScoreSlot(m->slot >= 0 ? m->slot : 0);
+            if (m->type == ModuleType::Score)
+            {
+                // P7 — the SCORE settings block the whole UI edits (PLAY page
+                // AND SETUP panel) is the selected instance's. Push it FIRST:
+                // both refreshes below read through it.
+                audioProcessor.setScoreUiSlot(m->slot >= 0 ? m->slot : 0);
+                if (scorePage != nullptr)
+                    scorePage->setScoreSlot(m->slot >= 0 ? m->slot : 0);
+                if (scoreSetup != nullptr)
+                    scoreSetup->refreshFromSettings();
+            }
+            // P7 — the SETUP faces read their PLAY page's per-instance state:
+            // refresh them right after the page swapped documents.
             if (m->type == ModuleType::Timbre && timbrePage != nullptr)
+            {
                 timbrePage->setScoreSlot(m->slot >= 0 ? m->slot : 0);
+                if (timbreSetup != nullptr) timbreSetup->refresh();
+            }
             if (m->type == ModuleType::MidiScore && midiScorePage != nullptr)
+            {
                 midiScorePage->setScoreSlot(m->slot >= 0 ? m->slot : 0);
+                if (midiScoreSetup != nullptr) midiScoreSetup->refresh();
+            }
             if (m->type == ModuleType::Voice && voicePage != nullptr)
+            {
                 voicePage->setScoreSlot(m->slot >= 0 ? m->slot : 0);
+                if (voiceSetup != nullptr) voiceSetup->refresh();
+            }
         }
         cisVisualizer->setSelectedTapLabel(tapLabel);
     }
@@ -1162,9 +1340,11 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
         case ChainBlockId::Voice:
             sources = { VisualizerMode::SELECTED_TAP };
             break;
-        // VIDEO SCROLL probe — zone 1 shows the stream AT the probe's position
-        // in its chain (what the probe captures), not the global Modulated bus.
+        // Pass-through PROBES (VIDEO SCROLL, MIDI TAP) — zone 1 shows the
+        // stream AT the probe's position in its chain (what the probe reads),
+        // not the global Modulated bus.
         case ChainBlockId::VideoScroll:
+        case ChainBlockId::MidiTap:
             sources = { VisualizerMode::SELECTED_TAP };
             break;
         // FX inserts — contextual: their output at their position in THEIR
@@ -1173,6 +1353,9 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
         case ChainBlockId::Echo:
         case ChainBlockId::Equalizer:
         case ChainBlockId::Harmonize:
+        case ChainBlockId::Centroid:
+        case ChainBlockId::Drive:
+        case ChainBlockId::DcBlock:
             sources = { VisualizerMode::SELECTED_TAP };
             break;
         // M9 — media sources: zone 1 shows the MODULE'S OWN line (internal
@@ -1225,18 +1408,21 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
     faceSwitch.setFace(setupFace, false);
 
     // Module power toggle (right of the face row) — rebind to this block's enable
-    // param, or hide for blocks without a power switch (SOURCE CIS, SCORE).
+    // param, or hide for blocks without a power switch (SOURCE CIS).
     {
         juce::String enableId = ChainRackComponent::enableParamId(id);
         // Engine sends power through THEIR bank's enable (per-send LED, M6);
-        // the type-level ids (deviceEnabled/luxsynthEnabled/luxwaveEnabled)
-        // are the ENGINE enables, which live on the AUDIO MIX strips.
+        // the type-level ids (deviceEnabled/luxsynthEnabled/luxwaveEnabled/
+        // luxgrainEnabled) are the ENGINE enables, which live on the AUDIO
+        // MIX strips.
         if (id == ChainBlockId::LuxStral)
             enableId = lsOutParam(sendSlot, "enabled");
         else if (id == ChainBlockId::LuxSynth)
             enableId = lxOutParam(sendSlot, "enabled");
         else if (id == ChainBlockId::LuxWave)
             enableId = lwOutParam(sendSlot, "enabled");
+        else if (id == ChainBlockId::LuxGrain)
+            enableId = lgOutParam(sendSlot, "enabled");
         // Pooled inserts: the enable lives in the selected INSTANCE's bank
         // (the catalog's type-level id is empty for them).
         else if (id == ChainBlockId::Pitch)
@@ -1251,16 +1437,65 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
             enableId = eqParam(insertSlot, "Enabled");
         else if (id == ChainBlockId::Harmonize)
             enableId = hmParam(insertSlot, "Enabled");
+        else if (id == ChainBlockId::Centroid)
+            enableId = ctParam(insertSlot, "Enabled");
+        else if (id == ChainBlockId::Drive)
+            enableId = dvParam(insertSlot, "Enabled");
+        else if (id == ChainBlockId::DcBlock)
+            enableId = dcbParam(insertSlot, "Enabled");
+        // MIDI TAP is per-instance on its OWN pool (midiTapSlotIndex_, not the
+        // shared insertSlot), so the header switch drives the same param as the
+        // rack LED.
+        else if (id == ChainBlockId::MidiTap)
+            enableId = mtParam(midiTapSlotIndex_, "enabled");
+        // P6 sampler engines are per-slot too: the catalog id is engine 0's
+        // legacy global ("luxSamplerEnabled") — resolve the SELECTED instance's
+        // engine so the switch drives the same param as its rack LED.
+        else if (id == ChainBlockId::Sampler)
+        {
+            int sc = -1, si = -1;
+            const auto* m = audioProcessor.getChainModel().find(selUid, sc, si);
+            enableId = fsEngineParam(m != nullptr && m->slot >= 0 ? m->slot : 0,
+                                     "Enabled");
+        }
+        // P5-M3 media sources are per-slot engines: resolve the SELECTED
+        // instance's bank — the catalog id is slot 0's legacy global, and
+        // binding it here would flip Chain 1's source from Chain 2's header
+        // (the same trap the rack LED override fixes in ChainRackComponent).
+        else if (id == ChainBlockId::ImageSrc || id == ChainBlockId::VideoSrc
+              || id == ChainBlockId::CameraSrc)
+        {
+            int sc = -1, si = -1;
+            const auto* m = audioProcessor.getChainModel().find(selUid, sc, si);
+            const int mediaSlot = m != nullptr && m->slot >= 0 ? m->slot : 0;
+            enableId = id == ChainBlockId::ImageSrc ? imgSrcParam(mediaSlot, "Enabled")
+                     : id == ChainBlockId::VideoSrc ? vidSrcParam(mediaSlot, "Enabled")
+                                                    : camSrcParam(mediaSlot, "Enabled");
+        }
+        // Score family (SCORE / TIMBRE / MIDI SCORE / VOICE): the switch is the
+        // module ACTIVE toggle of the SELECTED instance's player slot — the very
+        // param its rack LED drives, so header and LED always agree. Decoupled
+        // from the page transport: deactivating pauses the reading where it is,
+        // reactivating resumes it there (no re-press of PLAY).
+        else if (isScoreFamily(chainBlockToModuleType(id)))
+        {
+            int sc = -1, si = -1;
+            const auto* m = audioProcessor.getChainModel().find(selUid, sc, si);
+            enableId = scoreActiveParam(m != nullptr && m->slot >= 0 ? m->slot : 0);
+        }
         // Power follows the enable param alone — blocks without a SETUP face
         // (the FX inserts) still need their on/off switch here.
         const bool showPower = enableId.isNotEmpty();
         modulePowerAttachment.reset();   // detach before rebinding to a new param
+        modulePowerLearn.reset();
         if (showPower)
         {
             modulePowerButton.setAccent(ChainRackComponent::blockColour(id));
             modulePowerAttachment = std::make_unique<
                 juce::AudioProcessorValueTreeState::ButtonAttachment>(
                     audioProcessor.getAPVTS(), enableId, modulePowerButton);
+            modulePowerLearn = std::make_unique<MidiLearnAttachment>(
+                audioProcessor.getMidiMap(), modulePowerButton, enableId);
         }
         modulePowerButton.setVisible(showPower);
     }
@@ -1498,6 +1733,9 @@ void Sp3ctraAudioProcessorEditor::layoutZones()
     }
 
     // ── Zone widths (clamped so zone 3 keeps at least kZone3MinW) ────────────
+    // The clamp lands in zone2Eff_/zone4Eff_ (what is DISPLAYED), never back
+    // in zone2Width/zone4Width (the persisted USER INTENT): a narrow-window
+    // launch must not permanently shrink the widths saved in the session.
     const bool collapsed   = waterfallColumn->isCollapsed();
     const int  rightSplitW = collapsed ? 0 : kSplitterW;
 
@@ -1505,18 +1743,21 @@ void Sp3ctraAudioProcessorEditor::layoutZones()
     if (!collapsed)
     {
         const int z4Max = W - catRailW - kZone2MinW - kSplitterW - kZone3MinW - rightSplitW;
-        zone4Width = juce::jlimit(kZone4MinW, juce::jmax(kZone4MinW, z4Max), zone4Width);
-        z4w = zone4Width;
+        zone4Eff_ = juce::jlimit(kZone4MinW, juce::jmax(kZone4MinW, z4Max), zone4Width);
+        z4w = zone4Eff_;
     }
 
-    const int z2Max = W - catRailW - kSplitterW - kZone3MinW - rightSplitW - z4w;
-    zone2Width = juce::jlimit(kZone2MinW, juce::jmax(kZone2MinW, z2Max), zone2Width);
+    // The rack column is capped at kMaxContentW: past that the blocks would
+    // just stretch (nothing else lives in zone 2), so the splitter stops.
+    const int z2Max = juce::jmin(Sp3ctraTheme::kMaxContentW,
+                                 W - catRailW - kSplitterW - kZone3MinW - rightSplitW - z4w);
+    zone2Eff_ = juce::jlimit(kZone2MinW, juce::jmax(kZone2MinW, z2Max), zone2Width);
 
     // ── Place the columns left → right (chain rack flush against the rail) ────
     int x = catRailW;
 
-    rackViewport.setBounds(x, zonesY, zone2Width, zonesH);
-    x += zone2Width;
+    rackViewport.setBounds(x, zonesY, zone2Eff_, zonesH);
+    x += zone2Eff_;
 
     splitterLeft.setBounds(x, zonesY, kSplitterW, zonesH);
     x += kSplitterW;
@@ -1527,9 +1768,12 @@ void Sp3ctraAudioProcessorEditor::layoutZones()
     faceSwitch.setBounds(x, z3y, z3w, kFaceBarH);
     if (modulePowerButton.isVisible())   // power switch at the right end of the row
     {
+        // Right end of the CONTENT, not of a very wide zone — the page below
+        // is capped at kMaxPageW (layoutZone3), the switch stays above it.
         const int pw = 36;
         const int ph = kFaceBarH - 8;
-        modulePowerButton.setBounds(x + z3w - pw - 8, z3y + (kFaceBarH - ph) / 2, pw, ph);
+        const int faceW = juce::jmin(z3w, Sp3ctraTheme::kMaxPageW);
+        modulePowerButton.setBounds(x + faceW - pw - 8, z3y + (kFaceBarH - ph) / 2, pw, ph);
     }
     // The face row shifts the viewport when it hosts the PLAY | SETUP bar OR
     // just the power switch (blocks with an enable param but no SETUP face).
@@ -1548,7 +1792,15 @@ void Sp3ctraAudioProcessorEditor::layoutZones()
         x += kSplitterW;
     }
 
-    // ── ZONE 4 — VIDEO MIX above, AUDIO MIX below (P2b) ──────────────────────
+    // ── ZONE 4 — VIDEO MIX above, MIDI MIX (only when a probe is patched),
+    //    AUDIO MIX below ─────────────────────────────────────────────────────
+    // The MIDI MIX section only EXISTS while at least one MIDI TAP sits in a
+    // chain: hasProbes() comes from activeMidiTapSlots() via refreshActiveSlots(),
+    // which is why both of its call sites must run BEFORE layoutZones().
+    const bool midiShown = midiMixPanel != nullptr
+                        && midiMixPanel->hasProbes() && ! collapsed;
+    if (midiMixPanel != nullptr) midiMixPanel->setVisible(midiShown);
+
     if (audioMixPanel != nullptr)
     {
         audioMixPanel->setMini(collapsed);
@@ -1563,12 +1815,23 @@ void Sp3ctraAudioProcessorEditor::layoutZones()
         }
         else
         {
+            int mmH = 0;
+            if (midiShown)
+                mmH = midiMixPanel->isCollapsed()
+                    ? MidiMixPanel::kHeaderH
+                    : juce::jlimit(MidiMixPanel::kHeaderH,
+                                   juce::jmax(MidiMixPanel::kHeaderH, zonesH - 240),
+                                   midiMixPanel->preferredHeight());
+
             // AUDIO MIX takes its preferred height, VIDEO MIX keeps at least
             // 120 px — shrink the mixer when the window gets very short.
             const int amH = juce::jmin(AudioMixPanel::kPreferredH,
-                                       juce::jmax(120, zonesH - 120));
-            waterfallColumn->setBounds(x, zonesY, z4w, juce::jmax(0, zonesH - amH));
-            audioMixPanel  ->setBounds(x, zonesY + zonesH - amH, z4w, amH);
+                                       juce::jmax(120, zonesH - 120 - mmH));
+            const int wfH = juce::jmax(0, zonesH - amH - mmH);
+            waterfallColumn->setBounds(x, zonesY, z4w, wfH);
+            if (midiShown)
+                midiMixPanel->setBounds(x, zonesY + wfH, z4w, mmH);
+            audioMixPanel  ->setBounds(x, zonesY + wfH + mmH, z4w, amH);
         }
     }
     else
@@ -1577,7 +1840,7 @@ void Sp3ctraAudioProcessorEditor::layoutZones()
     }
 
     // ── Rack content sizing (viewport scrolls when the window is short) ──────
-    const int rackW = juce::jmax(60, zone2Width - rackViewport.getScrollBarThickness());
+    const int rackW = juce::jmax(60, zone2Eff_ - rackViewport.getScrollBarThickness());
     chainRack->setSize(rackW, juce::jmax(chainRack->preferredHeight(), zonesH));
 
     layoutZone3();
@@ -1591,7 +1854,10 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
     if (vpW <= 0 || vpH <= 0)
         return;
 
-    const int cw = juce::jmax(120, vpW - zone3Viewport.getScrollBarThickness());
+    // Pages stop stretching past kMaxPageW (two content columns): on a very
+    // wide window the page keeps its natural width, left-aligned in the zone.
+    const int cw = juce::jmax(120, juce::jmin(vpW - zone3Viewport.getScrollBarThickness(),
+                                              Sp3ctraTheme::kMaxPageW));
 
     // Resolve which page(s) the current selection + face hosts, with their
     // natural minimum heights (the viewport scrolls when the window is
@@ -1640,6 +1906,10 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
             case ChainBlockId::Echo:
             case ChainBlockId::Equalizer:
             case ChainBlockId::Harmonize:
+            case ChainBlockId::Centroid:
+            case ChainBlockId::Drive:
+            case ChainBlockId::DcBlock:
+            case ChainBlockId::MidiTap:   // the MIDI MIX master owns the settings
             case ChainBlockId::None:
                 break;   // no SETUP face (blockHasSetup == false)
         }
@@ -1693,12 +1963,20 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
                 top = eqPage.get();          topMinH = LuxEqTabComponent::kPreferredH; break;
             case ChainBlockId::Harmonize:
                 top = harmoPage.get();       topMinH = LuxHarmoTabComponent::kPreferredH; break;
+            case ChainBlockId::Centroid:
+                top = centroPage.get();      topMinH = LuxCentroTabComponent::kPreferredH; break;
+            case ChainBlockId::Drive:
+                top = drivePage.get();       topMinH = LuxDriveTabComponent::kPreferredH; break;
+            case ChainBlockId::DcBlock:
+                top = dcBlockPage.get();     topMinH = LuxDcBlockTabComponent::kPreferredH; break;
             case ChainBlockId::ImageSrc:
                 top = imageSrcPage.get();    topMinH = MediaSourcePage::kPreferredH; break;
             case ChainBlockId::VideoSrc:
                 top = videoSrcPage.get();    topMinH = MediaSourcePage::kPreferredH; break;
             case ChainBlockId::CameraSrc:
                 top = cameraSrcPage.get();   topMinH = MediaSourcePage::kPreferredH; break;
+            case ChainBlockId::MidiTap:
+                top = midiTapPage.get();     topMinH = MidiTapPage::preferredHeight(); break;
             case ChainBlockId::RetiredSequencer:   // unreachable — retired ordinal
             case ChainBlockId::None:
                 break;   // empty rack — zone 3 stays blank
@@ -1731,9 +2009,15 @@ void Sp3ctraAudioProcessorEditor::persistLayoutProps()
 {
     if (getWidth() <= 0 || getHeight() <= 0)
         return;
+    // Constructor-time layout passes (setResizeLimits snapping 0×0 to the
+    // minimum, early selectBlock) must never overwrite the restored layout.
+    if (! layoutRestoreDone_)
+        return;
 
     // Message-thread only: properties ride along with the APVTS session state
-    // (getStateInformation serialises apvts.state including these).
+    // (getStateInformation serialises apvts.state including these). The window
+    // layout is SESSION-scoped by design: each project carries its own
+    // workspace arrangement (size, zone widths, collapsed bands).
     auto& state = audioProcessor.getAPVTS().state;
     state.setProperty("editorW", getWidth(),  nullptr);
     state.setProperty("editorH", getHeight(), nullptr);
@@ -1743,6 +2027,10 @@ void Sp3ctraAudioProcessorEditor::persistLayoutProps()
                       waterfallColumn != nullptr && waterfallColumn->isCollapsed(),
                       nullptr);
     state.setProperty("catalogCollapsed", catalogCollapsed, nullptr);
+    state.setProperty("midiMixCollapsed",
+                      midiMixPanel != nullptr && midiMixPanel->isCollapsed(),
+                      nullptr);
+    state.setProperty("selMidiTapSlot", midiTapSlotIndex_, nullptr);
 
     // Zone-3 selection — which block/page the user was editing, its PLAY/SETUP
     // face and the engine/instance bindings behind it. Restored in the ctor.
@@ -1751,6 +2039,8 @@ void Sp3ctraAudioProcessorEditor::persistLayoutProps()
     state.setProperty("selEngineView",     engineView_,          nullptr);
     state.setProperty("selLuxStralSend", luxStralSendSlot_, nullptr);
     state.setProperty("selSamplerEngine",  samplerEngineIndex_,  nullptr);
+    state.setProperty("selSamplerBank",
+                      audioProcessor.getSamplerSelectedSlot(),   nullptr);
     state.setProperty("selVideoSlot",      videoSlotIndex_,      nullptr);
 }
 

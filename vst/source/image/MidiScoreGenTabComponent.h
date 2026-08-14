@@ -14,7 +14,7 @@
  * (PNG/JPEG, A4/A3/FULL sheet and DPI on the SETUP face — pieces longer
  * than one page frame their export zone in a picker window; ALL PAGES keeps
  * the numbered paginated export), and the same audition path — the
- * rendered strip is loaded into the shared SCORE player channel
+ * rendered strip is loaded into this instance's own score-player slot
  * (LuxSampler::loadScoreFramesFromImage + uiPlayScore), so the transport
  * params (scoreLoop / scoreReverse / scoreSpeed / scorePlaying) drive it
  * exactly like a generated score. All state persists as JSON in
@@ -31,6 +31,8 @@
  */
 #pragma once
 
+#include "../ui/ModuleCatalog.h"
+
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <algorithm>
 #include <array>
@@ -41,6 +43,8 @@
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
+#include "ScoreTransportBinding.h"
+#include "../ui/Sp3ctraBarSlider.h"
 #include "../IconPaths.h"
 #include "../licensing/ActivationDialog.h"
 #include "../luxsampler/FadeCurve.h"       // fade curve shapes (LIN/EXP/LOG/S)
@@ -54,7 +58,7 @@ class MidiScoreGenTabComponent : public juce::Component,
                                  private juce::ScrollBar::Listener
 {
 public:
-    static constexpr uint32_t kAccentARGB = 0xffc9a13e;   // bronze (MIDI SCORE identity)
+    static inline const uint32_t kAccentARGB = moduleColour(ModuleType::MidiScore).getARGB();   ///< inherited module colour
     static constexpr int      kPreferredH = 920;          // + crop/fade chips + IMAGE EQ
 
     explicit MidiScoreGenTabComponent(Sp3ctraAudioProcessor& p)
@@ -67,7 +71,11 @@ public:
             timbregen::applyPreset(v, 0);
             v.enabled = true;
         }
-        restoreState();   // persisted page (and its MIDI file) when present
+        // P7 — every instance starts from these defaults, then the persisted
+        // per-instance docs overwrite whichever were saved.
+        defaultDoc_.voices = voices; defaultDoc_.pageSettings = pageSettings;
+        for (auto& d : docs_) d = defaultDoc_;
+        restoreState();   // persisted pages (and their MIDI files) when present
 
         // ── MIDI file row ────────────────────────────────────────────────────
         loadButton.setButtonText("Load MIDI...");
@@ -305,7 +313,7 @@ public:
             addChildComponent(sb);
         }
 
-        // ── Audition transport (shared SCORE player channel) ────────────────
+        // ── Audition transport (this instance's own score-player slot) ──────
         playStopButton.setTooltip("Play / stop the piece through the score player");
         playStopButton.onClick = [this] { togglePlay(); };
         addAndMakeVisible(playStopButton);
@@ -318,13 +326,9 @@ public:
 
         loopBtn.setTooltip("Loop playback");
         addAndMakeVisible(loopBtn);
-        loopAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            processor.getAPVTS(), "midiScoreLoop", loopBtn);
 
         reverseBtn.setTooltip("Reverse (play the piece backward)");
         addAndMakeVisible(reverseBtn);
-        reverseAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            processor.getAPVTS(), "midiScoreReverse", reverseBtn);
 
         initLabel(speedLabel, "Speed");
         speedSlider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
@@ -336,17 +340,10 @@ public:
         speedSlider.setTextValueSuffix("x");
         speedSlider.setSkewFactorFromMidPoint(1.0);
         addAndMakeVisible(speedSlider);
-        speedAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-            processor.getAPVTS(), "midiScoreSpeed", speedSlider);
 
-        // Right-click MIDI Learn — MIDI SCORE's own transport (play/loop/reverse/speed).
-        {
-            auto& mm = processor.getMidiMap();
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, playStopButton, "midiScorePlaying"));
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, loopBtn,        "midiScoreLoop"));
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, reverseBtn,     "midiScoreReverse"));
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, speedSlider,    "midiScoreSpeed"));
-        }
+        // P7 — transport attachments + MIDI-Learn follow the SELECTED
+        // instance: bindTransport() re-points them on every setScoreSlot().
+        bindTransport();
 
         playHint.setText("PLAY loads the piece into the score player "
                          "(set LuxStral source = Sampler to hear it).",
@@ -2191,10 +2188,8 @@ private:
         addAndMakeVisible(lbl);
     }
 
-    void initSlider(juce::Slider& s, double lo, double hi, double step, double val)
+    void initSlider(Sp3ctraBarSlider& s, double lo, double hi, double step, double val)
     {
-        s.setSliderStyle(juce::Slider::LinearHorizontal);
-        s.setTextBoxStyle(juce::Slider::TextBoxRight, false, 78, Sp3ctraTheme::kControlH);
         s.setRange(lo, hi, step);
         s.setValue(val, juce::dontSendNotification);
         addAndMakeVisible(s);
@@ -2780,7 +2775,7 @@ private:
 
         // Route through MIDI SCORE's own play param so the DAW sees the
         // transport; the processor pushes speed/loop and starts/stops its slot.
-        if (auto* p = processor.getAPVTS().getParameter("midiScorePlaying"))
+        if (auto* p = processor.getAPVTS().getParameter(xport_.playParamId()))
         {
             const float norm = play ? 1.0f : 0.0f;
             if (! juce::approximatelyEqual(p->getValue(), norm))
@@ -2874,7 +2869,7 @@ private:
 
         // Mirror MIDI SCORE's play param on the real engine state (DAW lane
         // truthful when a one-shot ends / an internal reload stops playback).
-        if (auto* p = processor.getAPVTS().getParameter("midiScorePlaying"))
+        if (auto* p = processor.getAPVTS().getParameter(xport_.playParamId()))
         {
             const float norm = (fs != nullptr && fs->isScorePlaying() && framesAreOurs)
                                  ? 1.0f : 0.0f;
@@ -3139,9 +3134,63 @@ private:
 
     //==========================================================================
     // Persistence — one JSON blob in apvts.state (like timbreGenState).
+    //==========================================================================
+    // P7 — one page, N instances. This component is a VIEW over a single MIDI
+    // SCORE instance at a time: everything the instance owns lives in an
+    // InstanceDoc keyed by the module's score-player pool slot. Selecting
+    // another MIDI SCORE parks the live members into their doc and pulls the
+    // target's out, so two MIDI SCORE modules in two chains keep entirely
+    // separate files, voices, shaping and renders. One APVTS key per doc.
+    //==========================================================================
+    static constexpr int kMaxDocs = 8;   // == ScorePlayerService::kMaxSlots
+
+    struct InstanceDoc
+    {
+        midiscoregen::MidiScoreData data;                 // parsed file (ok=false when none)
+        std::array<timbregen::TimbreSlotParams, midiscoregen::kMaxVoices> voices {};
+        std::array<bool, midiscoregen::kMaxVoices> voiceSolo {};
+        midiscoregen::MidiScoreSettings pageSettings {};
+        int  selectedVoice = 0;
+        bool exportAsPng   = true;
+        // Playback shaping (crop window, edge fades, IMAGE EQ curve).
+        float cropStart = 0.0f, cropEnd = 1.0f;
+        float fadeInLen = 0.0f, fadeOutLen = 0.0f;
+        FadeCurveType fadeInType  = FadeCurveType::LINEAR;
+        FadeCurveType fadeOutType = FadeCurveType::LINEAR;
+        float fadeInPow = 1.0f, fadeOutPow = 1.0f;
+        juce::String eqState;                             // encoded EQ spline
+        // Render (copy-on-write: an untouched instance costs nothing).
+        juce::Image previewImage;
+        bool previewDirty = true, playDirty = true;
+        bool framesAreOurs = false;
+        int  loadedFrameCount = 0;
+    };
+
+    /** APVTS state key of instance @p slot's page (slot 0 = legacy key, so
+     *  sessions saved before P7 restore into the first instance). */
+    static juce::String stateKey(int slot)
+    {
+        return slot <= 0 ? juce::String("midiScoreGenState")
+                         : "midiScoreGenState" + juce::String(juce::jlimit(1, 7, slot));
+    }
+
+    /** Parks the live members into their doc, then writes EVERY instance doc. */
     void persistState()
     {
         stateDirty = false;
+        captureDoc();
+        for (int i = 0; i < kMaxDocs; ++i)
+            persistDoc(i, docs_[(size_t) i]);
+    }
+
+    /** Serialises ONE instance doc into its APVTS key. */
+    void persistDoc(int slot, const InstanceDoc& d) const
+    {
+        // Local aliases so the body below reads the DOC, never the live members.
+        const auto& voices       = d.voices;
+        const auto& voiceSolo    = d.voiceSolo;
+        const auto& pageSettings = d.pageSettings;
+        const auto& data         = d.data;
         juce::Array<juce::var> arr;
         for (int vi = 0; vi < midiscoregen::kMaxVoices; ++vi)
         {
@@ -3186,29 +3235,53 @@ private:
         root->setProperty("dpi",    pageSettings.printerDpi);
         root->setProperty("labels", pageSettings.showLabels);
         root->setProperty("fmt",    pageSettings.pageFormat);
-        root->setProperty("png",    exportAsPng_);
+        root->setProperty("png",    d.exportAsPng);
         // Playback shaping — crop window, edge fades, IMAGE EQ curve.
-        root->setProperty("cropS",  (double) cropStart_);
-        root->setProperty("cropE",  (double) cropEnd_);
-        root->setProperty("fiL",    (double) fadeInLen_);
-        root->setProperty("fiT",    (int) fadeInType_);
-        root->setProperty("fiP",    (double) fadeInPow_);
-        root->setProperty("foL",    (double) fadeOutLen_);
-        root->setProperty("foT",    (int) fadeOutType_);
-        root->setProperty("foP",    (double) fadeOutPow_);
-        root->setProperty("eq",     eqEditor.encodeState());
+        root->setProperty("cropS",  (double) d.cropStart);
+        root->setProperty("cropE",  (double) d.cropEnd);
+        root->setProperty("fiL",    (double) d.fadeInLen);
+        root->setProperty("fiT",    (int) d.fadeInType);
+        root->setProperty("fiP",    (double) d.fadeInPow);
+        root->setProperty("foL",    (double) d.fadeOutLen);
+        root->setProperty("foT",    (int) d.fadeOutType);
+        root->setProperty("foP",    (double) d.fadeOutPow);
+        root->setProperty("eq",     d.eqState);
         processor.getAPVTS().state.setProperty(
-            "midiScoreGenState", juce::JSON::toString(juce::var(root), true), nullptr);
+            stateKey(slot), juce::JSON::toString(juce::var(root), true), nullptr);
     }
 
+    /** Loads every instance doc, then makes the live one current. Data only:
+     *  the constructor calls this before the widgets exist. */
     void restoreState()
     {
+        for (int i = 0; i < kMaxDocs; ++i)
+            restoreDoc(i, docs_[(size_t) i]);
+        applyDocToMembers();
+    }
+
+    /** Reads instance @p slot's page back from its APVTS key. */
+    void restoreDoc(int slot, InstanceDoc& d)
+    {
         const juce::String blob = processor.getAPVTS().state
-            .getProperty("midiScoreGenState", "").toString();
+            .getProperty(stateKey(slot), "").toString();
         if (blob.isEmpty()) return;
         const juce::var root = juce::JSON::parse(blob);
         auto* o = root.getDynamicObject();
         if (o == nullptr) return;
+        // Aliases: the body below fills the DOC, never the live members.
+        auto& voices       = d.voices;
+        auto& voiceSolo    = d.voiceSolo;
+        auto& pageSettings = d.pageSettings;
+        auto& data         = d.data;
+        auto& exportAsPng_ = d.exportAsPng;
+        auto& cropStart_   = d.cropStart;
+        auto& cropEnd_     = d.cropEnd;
+        auto& fadeInLen_   = d.fadeInLen;
+        auto& fadeInType_  = d.fadeInType;
+        auto& fadeInPow_   = d.fadeInPow;
+        auto& fadeOutLen_  = d.fadeOutLen;
+        auto& fadeOutType_ = d.fadeOutType;
+        auto& fadeOutPow_  = d.fadeOutPow;
 
         if (o->hasProperty("ws"))     pageSettings.writingSpeed    = (double) o->getProperty("ws");
         if (o->hasProperty("line"))   pageSettings.lineWidthMM     = (double) o->getProperty("line");
@@ -3236,11 +3309,7 @@ private:
             juce::jlimit(0, kNumFadeCurveTypes - 1, (int) o->getProperty("foT"));
         if (o->hasProperty("foP"))   fadeOutPow_ =
             juce::jlimit(0.1f, 10.0f, (float) (double) o->getProperty("foP"));
-        {
-            const juce::String eq = o->getProperty("eq").toString();
-            if (eq.isNotEmpty())
-                eqEditor.decodeState(eq);
-        }
+        d.eqState = o->getProperty("eq").toString();
 
         auto readPanArray = [](const juce::var& v,
                                std::vector<midiscoregen::PanPoint>& out)
@@ -3339,6 +3408,8 @@ public:
         scrubHead        = -1;
         scrubbing        = false;
         boundScoreSlot_  = slot;
+        bindTransport();   // P7 — the transport follows the selected instance
+        viewDoc(slot >= 0 ? slot : transportSlot());   // …and so do the page's own settings
         repaint();
     }
 
@@ -3377,6 +3448,119 @@ public:
     }
 
 private:
+    //── P7 — per-instance page docs (see InstanceDoc above) ───────────────────
+    /** Parks the live members into the doc the page is currently viewing. */
+    void captureDoc()
+    {
+        auto& d = docs_[(size_t) docSlot_];
+        d.data             = data;
+        d.voices           = voices;
+        d.voiceSolo        = voiceSolo;
+        d.pageSettings     = pageSettings;
+        d.selectedVoice    = selectedVoice;
+        d.exportAsPng      = exportAsPng_;
+        d.cropStart        = cropStart_;
+        d.cropEnd          = cropEnd_;
+        d.fadeInLen        = fadeInLen_;
+        d.fadeInType       = fadeInType_;
+        d.fadeInPow        = fadeInPow_;
+        d.fadeOutLen       = fadeOutLen_;
+        d.fadeOutType      = fadeOutType_;
+        d.fadeOutPow       = fadeOutPow_;
+        d.eqState          = eqEditor.encodeState();
+        d.previewImage     = previewImage;
+        d.previewDirty     = previewDirty;
+        d.playDirty        = playDirty;
+        d.framesAreOurs    = framesAreOurs;
+        d.loadedFrameCount = loadedFrameCount;
+    }
+
+    /** Pulls the viewed doc back into the live members (data only — safe
+     *  before the widgets exist, i.e. from the constructor). */
+    void applyDocToMembers()
+    {
+        const auto& d = docs_[(size_t) docSlot_];
+        data             = d.data;
+        voices           = d.voices;
+        voiceSolo        = d.voiceSolo;
+        pageSettings     = d.pageSettings;
+        selectedVoice    = juce::jlimit(0, midiscoregen::kMaxVoices - 1, d.selectedVoice);
+        exportAsPng_     = d.exportAsPng;
+        cropStart_       = d.cropStart;
+        cropEnd_         = d.cropEnd;
+        fadeInLen_       = d.fadeInLen;
+        fadeInType_      = d.fadeInType;
+        fadeInPow_       = d.fadeInPow;
+        fadeOutLen_      = d.fadeOutLen;
+        fadeOutType_     = d.fadeOutType;
+        fadeOutPow_      = d.fadeOutPow;
+        previewImage     = d.previewImage;
+        previewDirty     = d.previewDirty;
+        playDirty        = d.playDirty;
+        framesAreOurs    = d.framesAreOurs;
+        loadedFrameCount = d.loadedFrameCount;
+
+        // View state that never belongs to an instance: void the zoom tile so
+        // no pixel of the previous instance can leak into this one's preview.
+        hiResTile_ = juce::Image();
+        tileT0_ = tileT1_ = tilePxPerSec_ = 0.0;
+        ++tileEpoch_;
+        previewZoom_ = 1.0; previewCx_ = 0.5; previewCy_ = 0.5;
+    }
+
+    /** Pushes the live members onto the widgets. Constructor-unsafe (the voice
+     *  tabs and sliders must exist) — call it only after the page is built. */
+    void refreshUiFromMembers()
+    {
+        if (docs_[(size_t) docSlot_].eqState.isNotEmpty())
+            eqEditor.decodeState(docs_[(size_t) docSlot_].eqState);
+        syncEqRange();
+        wsSlider   .setValue(pageSettings.writingSpeed,    juce::dontSendNotification);
+        lineSlider .setValue(pageSettings.lineWidthMM,     juce::dontSendNotification);
+        velSlider  .setValue(pageSettings.velocityRangeDb, juce::dontSendNotification);
+        labelsToggle.setToggleState(pageSettings.showLabels, juce::dontSendNotification);
+        logLabel.setText(data.ok ? data.log : juce::String(), juce::dontSendNotification);
+        refreshVoiceControls();
+        updateVoiceTabs();
+        resized();
+        repaint();
+    }
+
+    /** P7 — instance @p slot left the rack: its document dies with it, so the
+     *  next module that lands on this pool slot (possibly in another chain)
+     *  starts from the page defaults instead of inheriting a stranger's work.
+     *  Wiping the LIVE members too when the page is viewing that slot. */
+public:
+    void forgetScoreSlot(int slot)
+    {
+        slot = juce::jlimit(0, kMaxDocs - 1, slot);
+        docs_[(size_t) slot] = defaultDoc_;
+        stateDirty = true;            // the wipe must reach the next save
+        if (slot == docSlot_)
+        {
+            applyDocToMembers();
+            refreshUiFromMembers();
+            boundScoreSlot_ = -1;
+        }
+    }
+private:
+
+    /** Switches the page to instance @p slot (parking the current one). */
+    void viewDoc(int slot)
+    {
+        slot = juce::jlimit(0, kMaxDocs - 1, slot);
+        if (slot == docSlot_)
+            return;
+        captureDoc();
+        docSlot_ = slot;
+        applyDocToMembers();
+        refreshUiFromMembers();
+    }
+
+    std::array<InstanceDoc, kMaxDocs> docs_ {};
+    InstanceDoc defaultDoc_ {};   ///< pristine page — what a freed slot reverts to
+    int docSlot_ = 0;          ///< instance whose doc is live in the members
+
     /** The bound score channel: the selected instance's slot while it is
      *  still in the rack, else the first placed instance of this type. */
     ScoreChannel* boundChannel() const
@@ -3385,6 +3569,23 @@ private:
             && processor.scorePlayerSlotInUse(boundScoreSlot_))
             return processor.getScoreChannelForSlot(boundScoreSlot_);
         return processor.getScoreChannel(ModuleType::MidiScore);
+    }
+    /** Player-pool slot whose transport bank the widgets are bound to. Falls
+     *  back to the first placed instance of this type (then slot 0) so the page
+     *  always shows a valid bank, even with no module in the rack. */
+    int transportSlot() const
+    {
+        if (boundScoreSlot_ >= 0 && processor.scorePlayerSlotInUse(boundScoreSlot_))
+            return boundScoreSlot_;
+        if (auto* sc = processor.getScoreChannel(ModuleType::MidiScore))
+            return sc->slot();
+        return 0;
+    }
+    void bindTransport()
+    {
+        xport_.rebind(processor.getAPVTS(), processor.getMidiMap(),
+                      ModuleType::MidiScore, transportSlot(),
+                      playStopButton, loopBtn, reverseBtn, speedSlider);
     }
     int boundScoreSlot_ = -1;
 
@@ -3407,10 +3608,11 @@ private:
     juce::ToggleButton labelsToggle;
     MidiScoreIconToggle loopBtn    { MidiScoreIconToggle::Glyph::Loop };
     MidiScoreIconToggle reverseBtn { MidiScoreIconToggle::Glyph::Inverse };
-    juce::Slider   partialsSlider, slopeSlider, oddSlider, inharmSlider,
-                   combSlider, combPosSlider, attackSlider, decaySlider, hfDampSlider,
-                   vibDepthSlider, vibRateSlider, vibOnsetSlider, vibLifeSlider,
-                   levelSlider, wsSlider, lineSlider, velSlider, speedSlider;
+    Sp3ctraBarSlider partialsSlider, slopeSlider, oddSlider, inharmSlider,
+                     combSlider, combPosSlider, attackSlider, decaySlider, hfDampSlider,
+                     vibDepthSlider, vibRateSlider, vibOnsetSlider, vibLifeSlider,
+                     levelSlider, wsSlider, lineSlider, velSlider;
+    juce::Slider   speedSlider;   // rotary transport knob — NOT a bar
     juce::TextButton loadButton;
     ExportImageButton exportButton;
     bool exportAsPng_ = true;            // SETUP face: PNG (true) / JPEG
@@ -3418,9 +3620,6 @@ private:
     MidiScorePlayButton playStopButton;
     MidiScorePauseButton pauseButton;
     PauseMode pauseMode = PauseMode::none;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> loopAttach, reverseAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> speedAttach;
-    std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
 
     juce::Rectangle<int>   previewArea;
     juce::Rectangle<float> previewImgArea;
@@ -3471,6 +3670,10 @@ private:
     SamplerValueBox fadeOutPowBox_  { "pow",   juce::Colour(0xffff6633), false };
 
     std::unique_ptr<juce::FileChooser> fileChooser;
+
+    // Transport bank of the SELECTED instance (attachments + MIDI-Learn).
+    // Declared LAST so it is destroyed before the widgets it binds.
+    ScoreTransportBinding xport_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MidiScoreGenTabComponent)
 };

@@ -18,9 +18,11 @@
  * otherwise it re-encodes the SAME take (the waveform window stays meaningful
  * — VITS synthesis is stochastic, a new take would change the audio under the
  * selection). Page state persists as JSON in apvts.state ("voiceGenState");
- * the EQ curve rides in "voiceEqCurve" (same pattern as scoreEqCurve).
+ * the EQ curve rides inside each instance's own blob (P7).
  */
 #pragma once
+
+#include "../ui/ModuleCatalog.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <cmath>
@@ -28,8 +30,11 @@
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
+#include "ScoreTransportBinding.h"
+#include "../ui/Sp3ctraBarSlider.h"
 #include "../IconPaths.h"
 #include "../licensing/ActivationDialog.h"
+#include "../session/MachinePrefs.h"   // TTS install prefs are machine-scoped
 #include "ScoreGenRenderer.h"
 #include "ScoreEqComponent.h"
 #include "WaveformSelectorComponent.h"
@@ -41,7 +46,7 @@ class VoiceGenTabComponent : public juce::Component,
                              private juce::ScrollBar::Listener
 {
 public:
-    static constexpr uint32_t kAccentARGB = 0xffd06a9e;   // rose (VOICE identity)
+    static inline const uint32_t kAccentARGB = moduleColour(ModuleType::Voice).getARGB();   ///< inherited module colour
     static constexpr int      kPreferredH = 780;
 
     explicit VoiceGenTabComponent(Sp3ctraAudioProcessor& p)
@@ -201,7 +206,7 @@ public:
             addChildComponent(sb);
         }
 
-        // ── Playback transport (shared SCORE player channel) ────────────────
+        // ── Playback transport (this instance's own score-player slot) ──────
         playStopButton.setEnabled(false);
         playStopButton.setTooltip("Play / stop the generated vocal spectrum");
         playStopButton.onClick = [this] { togglePlay(); };
@@ -210,33 +215,25 @@ public:
         loopBtn.setEnabled(false);
         loopBtn.setTooltip("Loop playback");
         addAndMakeVisible(loopBtn);
-        loopAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            processor.getAPVTS(), "voiceLoop", loopBtn);
 
         reverseBtn.setEnabled(false);
         reverseBtn.setTooltip("Reverse (play the take backward)");
         addAndMakeVisible(reverseBtn);
-        reverseAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            processor.getAPVTS(), "voiceReverse", reverseBtn);
 
         initLabel(speedLabel, "Speed");
         initKnob(speedSlider, 0.1, 6.0, 0.01, 1.0, "x");
         speedSlider.setSkewFactorFromMidPoint(1.0);
-        speedAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-            processor.getAPVTS(), "voiceSpeed", speedSlider);
 
-        // Right-click MIDI Learn — VOICE's own transport (play/loop/reverse/speed).
-        {
-            auto& mm = processor.getMidiMap();
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, playStopButton, "voicePlaying"));
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, loopBtn,        "voiceLoop"));
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, reverseBtn,     "voiceReverse"));
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, speedSlider,    "voiceSpeed"));
-        }
+        // P7 — transport attachments + MIDI-Learn follow the SELECTED
+        // instance: bindTransport() re-points them on every setScoreSlot().
+        bindTransport();
 
         setTransportEnabled(false);
 
-        playHint.setText("Set LuxStral source = Sampler to hear the voice.",
+        // P8 — VOICE feeds like a media source: once generated and active,
+        // the parked column sounds even with the transport stopped.
+        playHint.setText("Generated + active: the parked column keeps sounding "
+                         "(drag it). PLAY scans the text; the LED silences.",
                          juce::dontSendNotification);
         playHint.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
         playHint.setColour(juce::Label::textColourId, juce::Colour(0xff8890a0));
@@ -280,7 +277,11 @@ public:
         // ── Image EQ (edits the generated image, never the take) ────────────
         eqEditor.onChange = [this] { eqDirty = true; };
         addAndMakeVisible(eqEditor);
+        if (docs_[(size_t) docSlot_].eqState.isNotEmpty())
+            eqEditor.decodeState(docs_[(size_t) docSlot_].eqState);
+        else
         {
+            // Pre-P7 sessions kept ONE curve in "voiceEqCurve" — adopt it.
             const juce::String eq = processor.getAPVTS().state
                 .getProperty("voiceEqCurve", "").toString();
             if (eq.isNotEmpty())
@@ -289,7 +290,7 @@ public:
 
         // ── Restore the cached take (WAV survives sessions; frames don't) ────
         {
-            const juce::File wav = cacheWavFile();
+            const juce::File wav = cacheWavFile(docSlot_);
             if (wav.existsAsFile())
             {
                 const auto info = scoregen::probeWav(wav);
@@ -395,6 +396,9 @@ public:
                 int headFrame = -1;
                 if (playing)             headFrame = fs->getScorePlayHead();
                 else if (scrubHead >= 0) headFrame = scrubHead;
+                else                     headFrame = fs->getScorePlayHead();
+                // ^ stopped: the PARKED column (P8 — it keeps sounding, like
+                //   a loaded IMAGE's frozen line; drag to move the drone).
                 if (headFrame >= 0)
                 {
                     const int n = juce::jmax(1, fs->getScoreFrameCount());
@@ -1092,10 +1096,8 @@ private:
         addAndMakeVisible(lbl);
     }
 
-    void initSlider(juce::Slider& s, double lo, double hi, double step, double val)
+    void initSlider(Sp3ctraBarSlider& s, double lo, double hi, double step, double val)
     {
-        s.setSliderStyle(juce::Slider::LinearHorizontal);
-        s.setTextBoxStyle(juce::Slider::TextBoxRight, false, 64, Sp3ctraTheme::kControlH);
         s.setRange(lo, hi, step);
         s.setValue(val, juce::dontSendNotification);
         addAndMakeVisible(s);
@@ -1121,11 +1123,6 @@ private:
         lastEditMs = juce::Time::getMillisecondCounter();
     }
 
-    static juce::File cacheWavFile()
-    {
-        return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-                   .getChildFile("Application Support/Sp3ctra/voice_renders/voice_last.wav");
-    }
 
     bool modelHasVoice() const
     {
@@ -1228,7 +1225,7 @@ private:
         if (busy) return;
 
         const juce::String t = textEditor.getText().trim();
-        const bool needSynth = ttsDirty || ! cacheWavFile().existsAsFile();
+        const bool needSynth = ttsDirty || ! cacheWavFile(docSlot_).existsAsFile();
 
         VoiceGenJob::Request req;
         if (needSynth)
@@ -1291,7 +1288,7 @@ private:
         genMaxFreq = hi;
         genDpi     = s.printerDpi;
         req.score   = s;
-        req.wavFile = cacheWavFile();
+        req.wavFile = cacheWavFile(docSlot_);
         pendingAutoPlay = autoPlayWhenDone;
 
         busy = true;
@@ -1376,7 +1373,7 @@ private:
         if (pendingAutoPlay)
         {
             pendingAutoPlay = false;
-            if (auto* p = processor.getAPVTS().getParameter("voicePlaying"))
+            if (auto* p = processor.getAPVTS().getParameter(xport_.playParamId()))
                 if (p->getValue() < 0.5f)
                     p->setValueNotifyingHost(1.0f);
         }
@@ -1595,7 +1592,7 @@ private:
 
     void togglePreview()
     {
-        const juce::File wav = cacheWavFile();
+        const juce::File wav = cacheWavFile(docSlot_);
         if (processor.isScorePreviewPlaying())
         {
             processor.pauseScorePreview();
@@ -1637,7 +1634,7 @@ private:
                 // Another module took the shared channel — reclaim it.
                 applyEqToImageAndReload();
             }
-            else if (cacheWavFile().existsAsFile())
+            else if (cacheWavFile(docSlot_).existsAsFile())
             {
                 // Restored session: re-encode the cached take, then auto-play.
                 startGenerate(/*autoPlayWhenDone*/ true);
@@ -1655,7 +1652,7 @@ private:
         // Route through VOICE's own play param so the DAW sees the transport;
         // the processor pushes speed/loop and starts/stops VOICE's slot. If the
         // param already matches (brief drift window), drive the engine directly.
-        if (auto* p = processor.getAPVTS().getParameter("voicePlaying"))
+        if (auto* p = processor.getAPVTS().getParameter(xport_.playParamId()))
         {
             const float norm = play ? 1.0f : 0.0f;
             if (! juce::approximatelyEqual(p->getValue(), norm))
@@ -1706,8 +1703,9 @@ private:
         if (eqDirty && ! eqEditor.isDragging())
         {
             eqDirty = false;
-            processor.getAPVTS().state
-                .setProperty("voiceEqCurve", eqEditor.encodeState(), nullptr);
+            // P7 - the curve belongs to THIS instance's doc (persisted with it).
+            docs_[(size_t) docSlot_].eqState = eqEditor.encodeState();
+            markDirty();
             if (baseImage.isValid())
                 applyEqToImageAndReload();
         }
@@ -1736,7 +1734,7 @@ private:
         // Mirror VOICE's play param on the real engine state so the DAW lane
         // stays truthful when a one-shot ends or an internal reload stops it.
         // parameterChanged() ignores writes that already match → no retrigger.
-        if (auto* p = processor.getAPVTS().getParameter("voicePlaying"))
+        if (auto* p = processor.getAPVTS().getParameter(xport_.playParamId()))
         {
             const float norm = (fs != nullptr && fs->isScorePlaying() && framesAreOurs)
                                  ? 1.0f : 0.0f;
@@ -1772,61 +1770,151 @@ private:
     }
 
     //==========================================================================
-    // Persistence — one JSON blob in apvts.state (like midiScoreGenState);
-    // the EQ curve rides separately in "voiceEqCurve" (scoreEqCurve pattern).
+    //==========================================================================
+    // P7 — one page, N instances. This component is a VIEW over a single VOICE
+    // instance at a time: everything the instance owns lives in an InstanceDoc
+    // keyed by the module's score-player pool slot. Selecting another VOICE
+    // parks the live members into their doc and pulls the target's out, so two
+    // VOICE modules in two chains keep entirely separate texts, voices, page
+    // settings, takes and renders. One APVTS key + one cached WAV per doc.
+    //==========================================================================
+    static constexpr int kMaxDocs = 8;   // == ScorePlayerService::kMaxSlots
+
+    struct InstanceDoc
+    {
+        /** ScoreSettings is a flat C struct with NO member initialisers: `{}`
+         *  zeroes it, and a zeroed sheet renders BLANK (spectroHeightMM = 0 ⇒
+         *  no band, fftSize = 0 ⇒ 64-sample windows). Every doc must therefore
+         *  start from the page defaults — applyDocToMembers() assigns settings
+         *  over settings_ unconditionally, so the doc IS the source of truth. */
+        InstanceDoc()
+        {
+            score_settings_defaults(&settings);
+            settings.writingSpeed = 2.5;       // match the SCORE page default
+        }
+
+        juce::String  text;
+        bool          autoMode = true;
+        juce::String  selectedVoiceId;
+        double        rate = 1.0, expr = 0.667, silence = 1.0;
+        juce::String  lastLang, lastVoiceName;
+        ScoreSettings settings {};
+        bool          exportAsPng = true;
+        bool          ttsDirty    = true;
+        juce::String  eqState;                 // encoded EQ spline
+        // Renders (copy-on-write: an untouched instance costs nothing).
+        juce::Image          generatedImage, baseImage, previewImage;
+        juce::Rectangle<int> spectroBand;
+        double genMinFreq = 0.0, genMaxFreq = 0.0;
+        double genDynRangeDB = 50.0, genDpi = 400.0;
+        double previewWp = 1.0;
+        juce::String previewStats;
+        bool  framesAreOurs   = false;
+        int   loadedFrameCount = 0;
+    };
+
+    // Persistence — one JSON blob per instance in apvts.state (slot 0 keeps the
+    // legacy "voiceGenState" key, so pre-P7 sessions restore into the first
+    // instance); the EQ curve rides inside the blob.
+    static juce::String stateKey(int slot)
+    {
+        return slot <= 0 ? juce::String("voiceGenState")
+                         : "voiceGenState" + juce::String(juce::jlimit(1, 7, slot));
+    }
+
+    /** Parks the live members into their doc, then writes EVERY instance doc.
+     *  externalVoicesDir / langPref are TTS install preferences, shared by all
+     *  instances — they stay on the legacy slot-0 blob. */
     void persistState()
     {
         stateDirty = false;
+        captureDoc();
+        for (int i = 0; i < kMaxDocs; ++i)
+            persistDoc(i, docs_[(size_t) i]);
+    }
+
+    void persistDoc(int slot, const InstanceDoc& d) const
+    {
         auto* root = new juce::DynamicObject();
-        root->setProperty("text",  text);
-        root->setProperty("voice", autoMode ? juce::String("auto") : selectedVoiceId);
-        root->setProperty("rate",  rate);
-        root->setProperty("expr",  expr);
-        root->setProperty("sil",   silence);
-        root->setProperty("ws",    settings_.writingSpeed);
-        root->setProperty("page",  settings_.pageFormat);
-        root->setProperty("dpi",   settings_.printerDpi);
-        root->setProperty("mres",  settings_.enableMultiRes);
-        root->setProperty("start", settings_.startTimeSec);
-        root->setProperty("sel",   settings_.selectionSec);
-        root->setProperty("png",   exportAsPng_);
-        root->setProperty("lang",  lastLang);
-        root->setProperty("vname", lastVoiceName);
+        root->setProperty("text",  d.text);
+        root->setProperty("voice", d.autoMode ? juce::String("auto") : d.selectedVoiceId);
+        root->setProperty("rate",  d.rate);
+        root->setProperty("expr",  d.expr);
+        root->setProperty("sil",   d.silence);
+        root->setProperty("ws",    d.settings.writingSpeed);
+        root->setProperty("page",  d.settings.pageFormat);
+        root->setProperty("dpi",   d.settings.printerDpi);
+        root->setProperty("mres",  d.settings.enableMultiRes);
+        root->setProperty("start", d.settings.startTimeSec);
+        root->setProperty("sel",   d.settings.selectionSec);
+        root->setProperty("png",   d.exportAsPng);
+        root->setProperty("lang",  d.lastLang);
+        root->setProperty("vname", d.lastVoiceName);
+        root->setProperty("eq",    d.eqState);
         root->setProperty("extdir", externalVoicesDir.getFullPathName());
         auto* prefs = new juce::DynamicObject();
         for (int i = 0; i < langPref.size(); ++i)
             prefs->setProperty(langPref.getName(i), langPref.getValueAt(i));
-        root->setProperty("pref", juce::var(prefs));
+        const juce::var prefVar(prefs);
+        root->setProperty("pref", prefVar);
         processor.getAPVTS().state.setProperty(
-            "voiceGenState", juce::JSON::toString(juce::var(root), true), nullptr);
+            stateKey(slot), juce::JSON::toString(juce::var(root), true), nullptr);
+        // TTS INSTALL prefs (voices folder + per-language voice picks) are
+        // machine-scoped: mirror them into machine.settings so a foreign
+        // session/DAW blob can never repoint this computer's voice install.
+        // (The blob copies remain as a read fallback for old sessions.)
+        MachinePrefs::file().setValue("voice.extDir",
+                                      externalVoicesDir.getFullPathName());
+        MachinePrefs::file().setValue("voice.langPref",
+                                      juce::JSON::toString(prefVar, true));
     }
 
+    /** Loads every instance doc, then makes the live one current. Data only:
+     *  the constructor calls this before the widgets exist. */
     void restoreState()
     {
+        for (int i = 0; i < kMaxDocs; ++i)
+            restoreDoc(i, docs_[(size_t) i]);
+        // Machine copy of the TTS install prefs wins over whatever the blobs
+        // carried (restoreDoc applied those as the pre-scoping fallback).
+        if (const auto extdir = MachinePrefs::file().getValue("voice.extDir");
+            extdir.isNotEmpty() && juce::File(extdir).isDirectory())
+            externalVoicesDir = juce::File(extdir);
+        if (const auto prefJson = MachinePrefs::file().getValue("voice.langPref");
+            prefJson.isNotEmpty())
+            if (auto* o = juce::JSON::parse(prefJson).getDynamicObject())
+                langPref = o->getProperties();
+        applyDocToMembers();
+    }
+
+    void restoreDoc(int slot, InstanceDoc& d)
+    {
         const juce::String blob = processor.getAPVTS().state
-            .getProperty("voiceGenState", "").toString();
+            .getProperty(stateKey(slot), "").toString();
         if (blob.isEmpty()) return;
         const juce::var root = juce::JSON::parse(blob);
         auto* o = root.getDynamicObject();
         if (o == nullptr) return;
 
-        text = o->getProperty("text").toString();
+        d.text = o->getProperty("text").toString();
         const juce::String v = o->getProperty("voice").toString();
-        autoMode        = (v.isEmpty() || v == "auto");
-        selectedVoiceId = autoMode ? juce::String() : v;
-        if (o->hasProperty("rate"))  rate    = (double) o->getProperty("rate");
-        if (o->hasProperty("expr"))  expr    = (double) o->getProperty("expr");
-        if (o->hasProperty("sil"))   silence = (double) o->getProperty("sil");
-        if (o->hasProperty("ws"))    settings_.writingSpeed   = (double) o->getProperty("ws");
-        if (o->hasProperty("page"))  settings_.pageFormat     = (int)    o->getProperty("page");
-        if (o->hasProperty("dpi"))   settings_.printerDpi     = (double) o->getProperty("dpi");
-        if (o->hasProperty("mres"))  settings_.enableMultiRes = (int)    o->getProperty("mres");
-        if (o->hasProperty("start")) settings_.startTimeSec   = (double) o->getProperty("start");
-        if (o->hasProperty("sel"))   settings_.selectionSec   = (double) o->getProperty("sel");
-        if (o->hasProperty("png"))   exportAsPng_             = (bool)   o->getProperty("png");
-        settings_.pageFormat = juce::jlimit(0, 2, settings_.pageFormat);
-        lastLang      = o->getProperty("lang").toString();
-        lastVoiceName = o->getProperty("vname").toString();
+        d.autoMode        = (v.isEmpty() || v == "auto");
+        d.selectedVoiceId = d.autoMode ? juce::String() : v;
+        if (o->hasProperty("rate"))  d.rate    = (double) o->getProperty("rate");
+        if (o->hasProperty("expr"))  d.expr    = (double) o->getProperty("expr");
+        if (o->hasProperty("sil"))   d.silence = (double) o->getProperty("sil");
+        if (o->hasProperty("ws"))    d.settings.writingSpeed   = (double) o->getProperty("ws");
+        if (o->hasProperty("page"))  d.settings.pageFormat     = (int)    o->getProperty("page");
+        if (o->hasProperty("dpi"))   d.settings.printerDpi     = (double) o->getProperty("dpi");
+        if (o->hasProperty("mres"))  d.settings.enableMultiRes = (int)    o->getProperty("mres");
+        if (o->hasProperty("start")) d.settings.startTimeSec   = (double) o->getProperty("start");
+        if (o->hasProperty("sel"))   d.settings.selectionSec   = (double) o->getProperty("sel");
+        if (o->hasProperty("png"))   d.exportAsPng             = (bool)   o->getProperty("png");
+        d.settings.pageFormat = juce::jlimit(0, 2, d.settings.pageFormat);
+        d.lastLang      = o->getProperty("lang").toString();
+        d.lastVoiceName = o->getProperty("vname").toString();
+        d.eqState       = o->getProperty("eq").toString();
+        // Shared TTS install prefs — only the slot-0 blob carries the truth.
         const juce::String extdir = o->getProperty("extdir").toString();
         if (extdir.isNotEmpty() && juce::File(extdir).isDirectory())
             externalVoicesDir = juce::File(extdir);
@@ -1852,6 +1940,8 @@ public:
         loadedFrameCount = 0;
         scrubHead        = -1;
         boundScoreSlot_  = slot;
+        bindTransport();   // P7 — the transport follows the selected instance
+        viewDoc(slot >= 0 ? slot : transportSlot());   // …and so do the page's own settings
         repaint();
     }
 
@@ -1890,6 +1980,164 @@ public:
     }
 
 private:
+    //── P7 — per-instance page docs (see InstanceDoc above) ───────────────────
+    /** Per-instance cached take. Slot 0 keeps the legacy path so an existing
+     *  install finds its last render. */
+    static juce::File cacheWavFile(int slot)
+    {
+        const juce::File dir = juce::File::getSpecialLocation(
+            juce::File::userApplicationDataDirectory)
+                .getChildFile("Application Support/Sp3ctra/voice_renders");
+        return slot <= 0 ? dir.getChildFile("voice_last.wav")
+                         : dir.getChildFile("voice_last" + juce::String(slot) + ".wav");
+    }
+
+    /** Parks the live members into the doc the page is currently viewing. */
+    void captureDoc()
+    {
+        auto& d = docs_[(size_t) docSlot_];
+        d.text             = text;
+        d.autoMode         = autoMode;
+        d.selectedVoiceId  = selectedVoiceId;
+        d.rate             = rate;
+        d.expr             = expr;
+        d.silence          = silence;
+        d.lastLang         = lastLang;
+        d.lastVoiceName    = lastVoiceName;
+        d.settings         = settings_;
+        d.exportAsPng      = exportAsPng_;
+        d.ttsDirty         = ttsDirty;
+        d.eqState          = eqEditor.encodeState();
+        d.generatedImage   = generatedImage;
+        d.baseImage        = baseImage;
+        d.previewImage     = previewImage;
+        d.spectroBand      = spectroBand;
+        d.genMinFreq       = genMinFreq;
+        d.genMaxFreq       = genMaxFreq;
+        d.genDynRangeDB    = genDynRangeDB;
+        d.genDpi           = genDpi;
+        d.previewWp        = previewWp_;
+        d.previewStats     = previewStats;
+        d.framesAreOurs    = framesAreOurs;
+        d.loadedFrameCount = loadedFrameCount;
+    }
+
+    /** Pulls the viewed doc back into the live members (data only — safe
+     *  before the widgets exist, i.e. from the constructor). */
+    void applyDocToMembers()
+    {
+        const auto& d = docs_[(size_t) docSlot_];
+        text             = d.text;
+        autoMode         = d.autoMode;
+        selectedVoiceId  = d.selectedVoiceId;
+        rate             = d.rate;
+        expr             = d.expr;
+        silence          = d.silence;
+        lastLang         = d.lastLang;
+        lastVoiceName    = d.lastVoiceName;
+        settings_        = d.settings;
+        exportAsPng_     = d.exportAsPng;
+        ttsDirty         = d.ttsDirty;
+        generatedImage   = d.generatedImage;
+        baseImage        = d.baseImage;
+        previewImage     = d.previewImage;
+        spectroBand      = d.spectroBand;
+        genMinFreq       = d.genMinFreq;
+        genMaxFreq       = d.genMaxFreq;
+        genDynRangeDB    = d.genDynRangeDB;
+        genDpi           = d.genDpi;
+        previewWp_       = d.previewWp;
+        previewStats     = d.previewStats;
+        framesAreOurs    = d.framesAreOurs;
+        loadedFrameCount = d.loadedFrameCount;
+
+        // View state that never belongs to an instance: void the zoom tile so
+        // no pixel of the previous instance can leak into this one's preview.
+        hiResTile_ = juce::Image();
+        tileFx0_ = tileFx1_ = tileFy0_ = tileFy1_ = 0.0;
+        tileDensity_ = 0.0;
+        ++tileEpoch_;
+        previewZoom_ = 1.0; previewCx_ = 0.5; previewCy_ = 0.5;
+        eqDirty = false;
+    }
+
+    /** Pushes the live members onto the widgets. Constructor-unsafe — call it
+     *  only once the page is built. */
+    void refreshUiFromMembers()
+    {
+        if (docs_[(size_t) docSlot_].eqState.isNotEmpty())
+            eqEditor.decodeState(docs_[(size_t) docSlot_].eqState);
+        textEditor.setText(text, juce::dontSendNotification);
+        rateSlider   .setValue(rate,    juce::dontSendNotification);
+        exprSlider   .setValue(expr,    juce::dontSendNotification);
+        silenceSlider.setValue(silence, juce::dontSendNotification);
+        wsSlider     .setValue(settings_.writingSpeed, juce::dontSendNotification);
+        multiResToggle.setToggleState(settings_.enableMultiRes != 0,
+                                      juce::dontSendNotification);
+        rebuildVoiceCombo();
+
+        // The take is a FILE per instance: re-point the waveform strip at it.
+        const juce::File wav = cacheWavFile(docSlot_);
+        if (wav.existsAsFile())
+        {
+            const auto info = scoregen::probeWav(wav);
+            if (info.ok)
+            {
+                waveform.setFile(wav);
+                waveform.setStartSeconds(settings_.startTimeSec);
+                updateExportWindow();
+                previewButton.setEnabled(true);
+                setSynthStatus(info.durationSec, info.sampleRate);
+                setTransportEnabled(true);
+            }
+        }
+        else
+        {
+            waveform.setFile(juce::File());
+            previewButton.setEnabled(false);
+            setTransportEnabled(false);
+        }
+        resized();
+        repaint();
+    }
+
+    /** P7 — instance @p slot left the rack: its document dies with it, so the
+     *  next module that lands on this pool slot (possibly in another chain)
+     *  starts from the page defaults instead of inheriting a stranger's work.
+     *  Wiping the LIVE members too when the page is viewing that slot. */
+public:
+    void forgetScoreSlot(int slot)
+    {
+        slot = juce::jlimit(0, kMaxDocs - 1, slot);
+        docs_[(size_t) slot] = defaultDoc_;
+        stateDirty = true;            // the wipe must reach the next save
+        if (slot == docSlot_)
+        {
+            applyDocToMembers();
+            refreshUiFromMembers();
+            boundScoreSlot_ = -1;
+        }
+    }
+private:
+
+    /** Switches the page to instance @p slot (parking the current one). */
+    void viewDoc(int slot)
+    {
+        slot = juce::jlimit(0, kMaxDocs - 1, slot);
+        if (slot == docSlot_)
+            return;
+        if (processor.isScorePreviewPlaying())
+            processor.stopScorePreview();   // the take being auditioned is leaving
+        captureDoc();
+        docSlot_ = slot;
+        applyDocToMembers();
+        refreshUiFromMembers();
+    }
+
+    std::array<InstanceDoc, kMaxDocs> docs_ {};
+    InstanceDoc defaultDoc_ {};   ///< pristine page — what a freed slot reverts to
+    int docSlot_ = 0;          ///< instance whose doc is live in the members
+
     /** The bound score channel: the selected instance's slot while it is
      *  still in the rack, else the first placed instance of this type. */
     ScoreChannel* boundChannel() const
@@ -1898,6 +2146,23 @@ private:
             && processor.scorePlayerSlotInUse(boundScoreSlot_))
             return processor.getScoreChannelForSlot(boundScoreSlot_);
         return processor.getScoreChannel(ModuleType::Voice);
+    }
+    /** Player-pool slot whose transport bank the widgets are bound to. Falls
+     *  back to the first placed instance of this type (then slot 0) so the page
+     *  always shows a valid bank, even with no module in the rack. */
+    int transportSlot() const
+    {
+        if (boundScoreSlot_ >= 0 && processor.scorePlayerSlotInUse(boundScoreSlot_))
+            return boundScoreSlot_;
+        if (auto* sc = processor.getScoreChannel(ModuleType::Voice))
+            return sc->slot();
+        return 0;
+    }
+    void bindTransport()
+    {
+        xport_.rebind(processor.getAPVTS(), processor.getMidiMap(),
+                      ModuleType::Voice, transportSlot(),
+                      playStopButton, loopBtn, reverseBtn, speedSlider);
     }
     int boundScoreSlot_ = -1;
 
@@ -1927,18 +2192,16 @@ private:
     bool exportBusy_  = false;         // one export at a time
     juce::Label      logLabel;
     juce::Label      wsLabel;
-    juce::Slider     wsSlider;
+    Sp3ctraBarSlider wsSlider;
     juce::ToggleButton multiResToggle;
     ScoreSettings    settings_ {};     // VOICE's own page settings (persisted in the blob)
 
-    // Playback transport (shared SCORE player channel).
+    // Playback transport (this instance's own score-player slot).
     TransportPlayButton playStopButton;
     VoiceIconToggle     loopBtn    { VoiceIconToggle::Glyph::Loop };
     VoiceIconToggle     reverseBtn { VoiceIconToggle::Glyph::Inverse };
     juce::Slider        speedSlider;
     juce::Label         speedLabel, playHint;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> loopAttach, reverseAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> speedAttach;
     int  scrubHead { -1 };
     bool scrubbing { false };
     bool scrubAuditioning { false };
@@ -1992,7 +2255,10 @@ private:
     std::unique_ptr<juce::FileChooser> fileChooser;
     VoiceGenJob job;
 
-    std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
+
+    // Transport bank of the SELECTED instance (attachments + MIDI-Learn).
+    // Declared LAST so it is destroyed before the widgets it binds.
+    ScoreTransportBinding xport_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(VoiceGenTabComponent)
 };

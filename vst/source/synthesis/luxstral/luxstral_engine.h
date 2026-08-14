@@ -129,8 +129,6 @@ typedef struct LuxStralEngine {
   /* ===== Sizes / counters / misc =========================================== */
   /* Mutex to ensure thread-safe synthesis processing for stereo channels     */
   pthread_mutex_t synth_process_mutex;
-  /* Last calculated contrast factor (atomic for auto-volume access)          */
-  _Atomic float last_contrast_factor;
   /* Track current audio buffer size for safe reallocation                    */
   int audio_buffer_size;
   /* Log limiting (periodic display)                                          */

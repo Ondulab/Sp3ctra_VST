@@ -88,6 +88,17 @@ extern "C"
         LuxSampler::unpinEngine(engine_slot);
     }
 
+    void lux_sampler_whiten_input_cache(int engine_slot)
+    {
+        // The marker's input flux stopped (upstream player teardown / chain
+        // no-signal sweep): drop the stale blend reference.
+        if (engine_slot < 0 || engine_slot >= LuxSampler::kMaxEngines)
+            return;
+        if (auto* e = LuxSampler::pinEngine(engine_slot))
+            e->whitenInputCache();
+        LuxSampler::unpinEngine(engine_slot);
+    }
+
     void lux_sampler_record_chain_frame(int engine_slot,
                                         const uint8_t* R,
                                         const uint8_t* G,
@@ -458,6 +469,16 @@ void LuxSampler::cacheInputFrame(const uint8_t* R, const uint8_t* G,
     std::memcpy(liveR_, R, static_cast<size_t>(livePixelCount_));
     std::memcpy(liveG_, G, static_cast<size_t>(livePixelCount_));
     std::memcpy(liveB_, B, static_cast<size_t>(livePixelCount_));
+}
+
+// whitenInputCache — the marker's input flux stopped: without this the last
+// cached column (e.g. where an upstream VOICE/SCORE head stopped) kept being
+// darken-blended into every subsequent playback (MIX knob / live-blend path)
+// until something re-fed the marker — audible as a frozen residual tone.
+void LuxSampler::whitenInputCache() noexcept
+{
+    std::lock_guard<std::mutex> lk(liveMutex_);
+    livePixelCount_ = 0;   // getLiveFrame → 0 pixels → blend no-op
 }
 
 // ============================================================================
@@ -1430,17 +1451,23 @@ void LuxSampler::setSlotEqBandGain(int slot, int band, float gainDb) noexcept
     if (band < 0 || band >= kEqBands) return;
 
     // Start from the current gains (missing/empty → flat), overwrite one band,
-    // and re-encode the fixed 9-node grid in ScoreEqComponent's string format.
-    float g[kEqBands] = { 0.0f };
+    // and re-encode in ScoreEqComponent's string format. The slot's node count
+    // (the editor's "points" dropdown) is PRESERVED: an empty slot gets the
+    // default 2-point grid, and a band that doesn't exist on the current grid
+    // is ignored so a CC can't silently re-grid the curve.
     float parsed[LuxSamplerConstants::MAX_EQ_NODES];
     const int n = parseEqGains(eqState_[slot], parsed, LuxSamplerConstants::MAX_EQ_NODES);
-    for (int i = 0; i < kEqBands; ++i)
+    const int count = (n >= 2) ? n : 2;
+    if (band >= count) return;
+
+    float g[LuxSamplerConstants::MAX_EQ_NODES] = { 0.0f };
+    for (int i = 0; i < count; ++i)
         g[i] = (i < n) ? parsed[i] : 0.0f;
     g[band] = juce::jlimit(-24.0f, 24.0f, gainDb);
 
     juce::String enc;
     enc << juce::String(kEqMinHz, 3) << '|' << juce::String(kEqMaxHz, 3) << '|';
-    for (int i = 0; i < kEqBands; ++i)
+    for (int i = 0; i < count; ++i)
     {
         if (i) enc << ';';
         enc << juce::String(g[i], 2);
@@ -2452,7 +2479,7 @@ void FramePlayerThread::injectWhiteFrame() noexcept
     //   of the live signal — the "LuxSynth gray freeze" regression.
     //
     // Instead, mirror exactly the UDP thread's silence injection:
-    //   zero additive.{grayscale, notes, contrast_factor} only.
+    //   zero additive.{grayscale, notes} only.
     //   polyphonic (LuxSynth), photowave (LuxWave) and stereo sections are
     //   owned by their respective source-routing paths and must not be touched
     //   here.
@@ -2466,6 +2493,10 @@ void FramePlayerThread::injectWhiteFrame() noexcept
     // this player relayed, or the last staged column keeps ringing forever
     // (sourceless score/sampler chains have no producer to replace it).
     chain_player_stagings_set_inactive(sampler.getEngineIndex());
+    // And drop the blend references of the SAMPLER markers below this engine's
+    // own marker: their input feed was THIS playback's walk — a downstream
+    // engine must not keep darken-blending the last resampled column.
+    chain_player_whiten_downstream_inputs(sampler.getEngineIndex());
 
     if (doubleBuffer != nullptr)
     {
@@ -2490,7 +2521,6 @@ void FramePlayerThread::injectWhiteFrame() noexcept
                         sizeof(doubleBuffer->preprocessed_data.additive.grayscale));
             std::memset(doubleBuffer->preprocessed_data.additive.notes, 0,
                         sizeof(doubleBuffer->preprocessed_data.additive.notes));
-            doubleBuffer->preprocessed_data.additive.contrast_factor = 0.0f;
             // FIX(silence): Also zero polyphonic.* when its chain is
             // sampler-relayed. Without this, LuxSynth keeps generating audio
             // from the last played frame during STEP_EMPTY / rtStop / end.
@@ -3062,9 +3092,10 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
             //    simultaneously only the display owner writes it (the
             //    other playback stays audio-only; per-engine viz is a
             //    follow-up). P5-M4: the samplers defer to the
-            //    ScorePlayerService while any score slot feeds.
+            //    ScorePlayerService while a score slot claims the display
+            //    (P8: a parked hold feeds audio only and defers to us).
             const bool mixBusOwner =
-                ! score_player_any_playing()
+                ! score_player_owns_display()
                 && (lux_sampler_playing_engine()
                     == sampler.getEngineIndex());
             uint8_t* wR = nullptr;

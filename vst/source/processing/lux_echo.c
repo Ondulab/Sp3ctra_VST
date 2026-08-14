@@ -69,6 +69,8 @@ void lux_echo_reset(LuxEchoState *state)
     state->write_pos    = 0;
     state->ring_active  = 0;
     state->last_bg_mode = -1;
+    /* Nothing recorded → nothing to run out (see lux_echo_tail_alive). */
+    state->quiet_lines  = LUX_ECHO_MAX_DELAY + 1;
     /* Re-arm the AUTO learning window + floor tracker. */
     state->auto_locked         = 0;
     state->auto_lock_countdown = LUX_ECHO_BG_LOCK_LINES;
@@ -82,6 +84,7 @@ void lux_echo_init(LuxEchoState *state)
     if (!state) return;
     state->config = lux_echo_config_default();
     state->auto_bg_white = 1;   /* paper is the typical Sp3ctra stream */
+    state->active_ticks  = 0;   /* seeded HERE, never in reset (see lux_reverb.c) */
     lux_echo_reset(state);
 }
 
@@ -91,8 +94,11 @@ void lux_echo_init(LuxEchoState *state)
  * energy (*out_floor): the paper is never exactly at the zero pole (white ≈
  * 230, energy ≈ 25), and adding that offset onto itself at every repeat would
  * veil the whole image — the ring must carry the MATERIAL energy only (input
- * minus floor). The floor is a slow EMA fed ONLY by near-background lines, so
- * dense passages don't balloon it and shave the material out of the ring. */
+ * minus floor). The floor is an EMA of the per-line 10th-PERCENTILE energy —
+ * the canonical grey-bands fix (see lux_drive_resolve_bg): the previous
+ * gated mean-based EMA seeded at 0 on dense passages, so the paper pedestal
+ * was stored into the ring and re-printed as delayed grey bands. A low
+ * percentile finds the paper between the strokes even on dense lines. */
 static int lux_echo_resolve_bg(LuxEchoState *state,
                                const uint8_t *in_r, const uint8_t *in_g,
                                const uint8_t *in_b, int px, float *out_floor)
@@ -121,14 +127,32 @@ static int lux_echo_resolve_bg(LuxEchoState *state,
         bg_white = state->auto_bg_white;
     }
 
-    /* Floor: follow the background only while the line is mostly background. */
-    const int   line_is_bg = bg_white ? (mean > 143) : (mean < 111);
-    float inst_floor = bg_white ? (float)(255 - mean) : (float)mean;
-    if (inst_floor < 0.0f) inst_floor = 0.0f;
+    /* 10th-percentile energy over a 32-bin histogram of sampled pixels. */
+    int hist[32] = { 0 };
+    int ns = 0;
+    for (int i = 0; i < px; i += 4)
+    {
+        const int v = ((int)in_r[i] + in_g[i] + in_b[i]) / 3;
+        const int e = bg_white ? 255 - v : v;
+        hist[e >> 3]++;
+        ns++;
+    }
+    const int target = ns / 10;
+    int acc = 0, bin = 0;
+    for (; bin < 31; ++bin)
+    {
+        acc += hist[bin];
+        if (acc > target)
+            break;
+    }
+    const float inst_floor = (float)(bin * 8 + 4);
+
+    /* EMA every line (1/16) — a percentile needs no "line is background"
+     * gate, and reseeds honestly right after a reset. */
     if (state->floor_ema < 0.0f)
-        state->floor_ema = line_is_bg ? inst_floor : 0.0f;   /* seed */
-    else if (line_is_bg)
-        state->floor_ema += (inst_floor - state->floor_ema) * (1.0f / 64.0f);
+        state->floor_ema = inst_floor;
+    else
+        state->floor_ema += (inst_floor - state->floor_ema) * (1.0f / 16.0f);
 
     *out_floor = state->floor_ema;
     return bg_white;
@@ -139,12 +163,17 @@ static int lux_echo_resolve_bg(LuxEchoState *state,
 /* Mix + feedback for one channel. `del`/`del_px` may be NULL/0 (ring not yet
  * filled up to the delay): repeats are silent but the line is still recorded.
  * The ring carries MATERIAL energy only (input minus the background floor), so
- * repeats re-print the strokes without stacking the paper's own level. */
-static void lux_echo_channel(
+ * repeats re-print the strokes without stacking the paper's own level.
+ * `*peak` accumulates the max STORED feedback energy across channels — the
+ * runout's "this slot still carries a repeat" measure. */
+static int lux_echo_channel(
     const uint8_t *in, const uint8_t *del, int del_px,
     uint8_t *out, uint8_t *fb,
-    int px, int bg_white, float floor_e, float mix, float feedback)
+    int px, int bg_white, float floor_e, float mix, float feedback,
+    float *peak)
 {
+    int diff = 0;   /* OR of out^in — no audible repeat leaves the line intact */
+
     for (int i = 0; i < px; i++)
     {
         const float e_in  = bg_white ? (float)(255 - in[i]) : (float)in[i];
@@ -160,7 +189,10 @@ static void lux_echo_channel(
 
         out[i] = bg_white ? (uint8_t)(255.0f - e_out) : (uint8_t)e_out;
         fb[i]  = (uint8_t)e_fb;
+        if (e_fb > *peak) *peak = e_fb;
+        diff  |= out[i] ^ in[i];
     }
+    return diff;
 }
 
 void lux_echo_process_frame(
@@ -222,12 +254,26 @@ void lux_echo_process_frame(
 
     const int del_px = dslot ? dslot->pixel_count : 0;
 
-    lux_echo_channel(in_r, dslot ? dslot->r : NULL, del_px,
-                     state->out_r, wslot->r, px, bg_white, floor_e, mix, feedback);
-    lux_echo_channel(in_g, dslot ? dslot->g : NULL, del_px,
-                     state->out_g, wslot->g, px, bg_white, floor_e, mix, feedback);
-    lux_echo_channel(in_b, dslot ? dslot->b : NULL, del_px,
-                     state->out_b, wslot->b, px, bg_white, floor_e, mix, feedback);
+    float fb_peak = 0.0f;
+    int diff = lux_echo_channel(in_r, dslot ? dslot->r : NULL, del_px,
+                     state->out_r, wslot->r, px, bg_white, floor_e, mix, feedback,
+                     &fb_peak);
+    diff |= lux_echo_channel(in_g, dslot ? dslot->g : NULL, del_px,
+                     state->out_g, wslot->g, px, bg_white, floor_e, mix, feedback,
+                     &fb_peak);
+    diff |= lux_echo_channel(in_b, dslot ? dslot->b : NULL, del_px,
+                     state->out_b, wslot->b, px, bg_white, floor_e, mix, feedback,
+                     &fb_peak);
+    if (diff)
+        state->active_ticks++;
+
+    /* Runout bookkeeping: the slot just written holds nothing above one LSB
+     * (what (uint8_t)e_fb keeps) → count it quiet. Once the whole delay window
+     * is quiet there is no repeat left anywhere in the ring. */
+    if (fb_peak >= 1.0f)
+        state->quiet_lines = 0;
+    else if (state->quiet_lines <= LUX_ECHO_MAX_DELAY)
+        state->quiet_lines++;
 
     wslot->pixel_count = px;
     state->write_pos++;
@@ -235,4 +281,21 @@ void lux_echo_process_frame(
     *out_r = state->out_r;
     *out_g = state->out_g;
     *out_b = state->out_b;
+}
+
+/* ── Tail runout ───────────────────────────────────────────────────────────── */
+int lux_echo_tail_alive(const LuxEchoState *state)
+{
+    if (!state) return 0;
+
+    const LuxEchoConfig *cfg = &state->config;
+    /* A dry echo (mix 0) prints nothing however loud the ring is — feedback
+     * alone is inaudible, so there is no tail to wait for. */
+    if (!cfg->enabled || cfg->mix <= 0.001f || !state->ring_active)
+        return 0;
+
+    int delay = cfg->delay_lines;
+    if (delay < 1)                  delay = 1;
+    if (delay > LUX_ECHO_MAX_DELAY) delay = LUX_ECHO_MAX_DELAY;
+    return (state->quiet_lines < delay) ? 1 : 0;
 }

@@ -34,6 +34,7 @@
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
 #include "AudioPanelWidgets.h"
+#include "Sp3ctraBarSlider.h"
 #include "ModuleCatalog.h"
 #include <memory>
 #include <vector>
@@ -50,9 +51,6 @@ public:
         volumeLabel.setColour(juce::Label::textColourId, juce::Colour(0xffb8c4d0));
         addAndMakeVisible(volumeLabel);
 
-        volumeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        volumeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 52,
-                                     Sp3ctraTheme::kControlH - 4);
         addAndMakeVisible(volumeSlider);
         volumeAttach = std::make_unique<SldAttach>(apvts, "luxgrainVolume",
                                                    volumeSlider);
@@ -237,7 +235,7 @@ private:
     }
 
     juce::Label    volumeLabel;
-    juce::Slider   volumeSlider;
+    Sp3ctraBarSlider volumeSlider;
     juce::Slider   densitySlider, shapeSlider, spreadSlider, edgeSlider;
     juce::Slider   sizeMinSlider, sizeMaxSlider, textureSlider, jitterSlider,
                    widthSlider, colorPanSlider, followSlider;

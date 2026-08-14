@@ -136,11 +136,8 @@ void strokeforge_cleanup(void)
 void strokeforge_analyze_frame(
     const float         *notes,
     int                  num_notes,
-    float                contrast_factor,
     StrokeForgeFrameData *out)
 {
-    (void)contrast_factor; /* reserved for future adaptive threshold */
-
     /* Initialize output: all attenuations = 1.0 (no change) */
     out->blob_count = 0;
     for (int i = 0; i < num_notes && i < STROKEFORGE_MAX_NOTES; i++)

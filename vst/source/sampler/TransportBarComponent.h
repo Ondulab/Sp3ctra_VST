@@ -2,6 +2,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../midi/MidiLearnAttachment.h"
+#include "../ui/Sp3ctraBarSlider.h"
 #include <vector>
 
 class Sp3ctraAudioProcessor;
@@ -78,11 +79,11 @@ private:
 
     // ── BPM ───────────────────────────────────────────────────────────────────
     juce::Label        bpmLabel         { {}, "BPM" };
-    juce::Slider       bpmSlider;
+    Sp3ctraBarSlider   bpmSlider;
 
     // ── Steps ─────────────────────────────────────────────────────────────────
     juce::Label        stepsLabel       { {}, "Steps" };
-    juce::Slider       stepsSlider;
+    Sp3ctraBarSlider   stepsSlider;
 
     // ── Loop / DAW sync ───────────────────────────────────────────────────────
     juce::ToggleButton loopToggle       { "Loop" };

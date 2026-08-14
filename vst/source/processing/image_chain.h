@@ -61,7 +61,19 @@ extern "C" {
                                             * pixel/frequency axis (per-chain pool) */
 #define IMAGE_CHAIN_INSERT_OUT_LUXGRAIN 12 /* OUT send marker — "→ LUXGRAIN"
                                             * granular engine (luxgrain_out[]) */
-#define IMAGE_CHAIN_NUM_INSERTS        13
+#define IMAGE_CHAIN_INSERT_MIDITAP     13  /* PASS-THROUGH PROBE with NO tap slot,
+                                            * like VIDEOSCROLL: extracts MIDI notes
+                                            * from the line and forwards the image
+                                            * unchanged (see midi_tap.h). Consumed
+                                            * ONLY by image_chain_run(). */
+#define IMAGE_CHAIN_INSERT_LUXCENTRO   14  /* FX — CENTROID: floor écrêtage + mass →
+                                            * barycentre line simplifier (per-chain
+                                            * pool) */
+#define IMAGE_CHAIN_INSERT_LUXDRIVE    15  /* FX — LEVELS: floor écrêtage + gain +
+                                            * tanh saturation (per-chain pool) */
+#define IMAGE_CHAIN_INSERT_LUXDCBLOCK  16  /* FX — DC BLOCK: per-line mean removal
+                                            * (per-chain pool) */
+#define IMAGE_CHAIN_NUM_INSERTS        17
 
 /*
  * M6 Phase 2 — generalised executor driven by an explicit ordered insert list

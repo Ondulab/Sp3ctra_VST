@@ -65,7 +65,7 @@ sp3ctra_config_t g_sp3ctra_config = {
     .decay_freq_beta   = 0.0f,
     
     // 🔧 CRITICAL: Image processing (conditioning lives in the per-OUT banks)
-    .additive_contrast_adjustment_power = 0.5f,  // Contrast curve exponent
+    .additive_contrast_adjustment_power = 0.5f,  // LEVELS CONTRAST exponent
 
     // 🔧 CRITICAL: Volume and dynamics
     .noise_gate_threshold = 0.005f,              // Noise suppression
@@ -78,23 +78,25 @@ sp3ctra_config_t g_sp3ctra_config = {
     .lx_fft_bins_choice = 2,               // 128 harmonics (param default)
     .lx_fft_smoothing   = 0.3f,            // param default
 
-    // Per-OUT conditioning banks (synth-split P1) — unity defaults so the
-    // pipeline is sane before the first applyConfigurationToCore() sync.
+    // Per-OUT banks (synth-split P1) — canonical decode defaults (purge
+    // 2026-08-05: inversion ON, DC OFF, gamma 1.0, unity weight — the knobs
+    // are gone, chain LEVELS/DC modules condition the flux) so the pipeline
+    // is sane before the first applyConfigurationToCore() sync.
     .luxstral_out = {[0 ... LUX_OUT_MAX_SLOTS - 1] =
-        {.negative = 1, .dc_blocking = 1, .gamma = 1.0f,
-         .contrast_min = 0.21f, .range_db = 50.0f, .intensity = 1.0f,
+        {.negative = 1, .dc_blocking = 0, .gamma = 1.0f,
+         .range_db = 50.0f, .intensity = 1.0f,
          .enabled = 1}},
     .luxsynth_out = {[0 ... LUX_OUT_MAX_SLOTS - 1] =
-        {.negative = 1, .dc_blocking = 1, .gamma = 1.0f,
-         .contrast_min = 0.21f, .range_db = 50.0f, .intensity = 1.0f,
+        {.negative = 1, .dc_blocking = 0, .gamma = 1.0f,
+         .range_db = 50.0f, .intensity = 1.0f,
          .enabled = 1}},
     .luxwave_out = {[0 ... LUX_OUT_MAX_SLOTS - 1] =
-        {.negative = 1, .dc_blocking = 1, .gamma = 1.0f,
-         .contrast_min = 0.21f, .range_db = 50.0f, .intensity = 1.0f,
+        {.negative = 1, .dc_blocking = 0, .gamma = 1.0f,
+         .range_db = 50.0f, .intensity = 1.0f,
          .enabled = 1}},
     .luxgrain_out = {[0 ... LUX_OUT_MAX_SLOTS - 1] =
-        {.negative = 1, .dc_blocking = 1, .gamma = 1.0f,
-         .contrast_min = 0.21f, .range_db = 50.0f, .intensity = 1.0f,
+        {.negative = 1, .dc_blocking = 0, .gamma = 1.0f,
+         .range_db = 50.0f, .intensity = 1.0f,
          .enabled = 1}},
 
     // Phase management — mode FREE = legacy free-running phases

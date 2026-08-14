@@ -9,7 +9,8 @@
  *
  * It edits the GENERATED IMAGE, never the source WAV: the host queries
  * gainDbAtFreq() per image row and shifts that row's darkness by gain/dynRange.
- * One draggable node sits on each octave boundary of the current range.
+ * The node count is user-selectable (top-right dropdown, kMinPoints..kMaxPoints,
+ * default 2 = one straight line); nodes spread evenly over the log-freq span.
  */
 #pragma once
 
@@ -26,9 +27,23 @@ class ScoreEqComponent : public juce::Component
 public:
     static constexpr int   kPreferredH = 150;
     static constexpr float kGainRange  = 24.0f;   // ± dB
+    static constexpr int   kMinPoints  = 2;       // straight line (default)
+    static constexpr int   kMaxPoints  = 9;       // octave grid of the 8-oct span
 
     explicit ScoreEqComponent(juce::Colour accentColour) : accent(accentColour)
     {
+        for (int n = kMinPoints; n <= kMaxPoints; ++n)
+            pointsCombo.addItem(juce::String(n) + " pts", n);
+        pointsCombo.setSelectedId(numPoints_, juce::dontSendNotification);
+        pointsCombo.onChange = [this]
+        {
+            const int n = pointsCombo.getSelectedId();
+            if (n < kMinPoints || n == numPoints_) return;
+            setNumPoints(n);
+            if (onChange) onChange();
+        };
+        addAndMakeVisible(pointsCombo);
+
         setRange(65.41, 16744.04);
     }
 
@@ -41,10 +56,10 @@ public:
     void setBandMidiLearn(MidiMappingEngine* mm, std::function<juce::String(int)> idFn)
     { eqLearnMap_ = mm; eqLearnIdFn_ = std::move(idFn); }
 
-    /** Number of band nodes (9 over the default octave span). */
+    /** Number of band nodes (== the dropdown's point count). */
     int numBands() const noexcept { return (int) gains.size(); }
 
-    /** Rebuild the octave node grid for a new frequency span (resets gains).
+    /** Rebuild the node grid for a new frequency span (resets gains).
      *  No-op when the span is unchanged, so regenerating with the same musical
      *  range keeps the curve the user drew. */
     void setRange(double minHz, double maxHz)
@@ -54,11 +69,32 @@ public:
             && std::abs(minHz - minF) < 1e-9 && std::abs(maxHz - maxF) < 1e-9)
             return;
         minF = minHz; maxF = maxHz;
-        const int oct = juce::jmax(1, (int) std::lround(std::log2(maxF / minF)));
-        freqs.clear();
-        for (int k = 0; k <= oct; ++k)
-            freqs.push_back(minF * std::pow(2.0, (double) k));
+        rebuildGrid();
         gains.assign(freqs.size(), 0.0f);
+        repaint();
+    }
+
+    /** Current node count (2 = one straight line … kMaxPoints). */
+    int numPoints() const noexcept { return numPoints_; }
+
+    /** Re-grid the curve onto @p n nodes (dropdown / host). The existing
+     *  spline is resampled at the new node positions so the drawn shape is
+     *  preserved as closely as n nodes allow. */
+    void setNumPoints(int n)
+    {
+        n = juce::jlimit(kMinPoints, kMaxPoints, n);
+        if (n == numPoints_ && (int) gains.size() == n) { syncCombo(); return; }
+        const std::vector<float> old = gains;
+        numPoints_ = n;
+        rebuildGrid();
+        gains.assign((size_t) n, 0.0f);
+        if (old.size() >= 2)
+            for (int i = 0; i < n; ++i)
+                gains[(size_t) i] = eqCurveDbAt(old.data(), (int) old.size(),
+                                                (float) i * (float) (old.size() - 1)
+                                                    / (float) (n - 1),
+                                                kGainRange);
+        syncCombo();
         repaint();
     }
 
@@ -75,8 +111,9 @@ public:
         return s;
     }
 
-    /** Restore a curve written by encodeState(). Returns false (curve left
-     *  untouched / flat) on any mismatch. */
+    /** Restore a curve written by encodeState(). Adopts the stored node count
+     *  (legacy octave grids beyond kMaxPoints are resampled down). Returns
+     *  false (curve left untouched) on any mismatch. */
     bool decodeState(const juce::String& s)
     {
         const auto parts = juce::StringArray::fromTokens(s, "|", "");
@@ -84,12 +121,23 @@ public:
         const double lo = parts[0].getDoubleValue();
         const double hi = parts[1].getDoubleValue();
         if (lo <= 0.0 || hi <= lo) return false;
-        setRange(lo, hi);
         const auto gs = juce::StringArray::fromTokens(parts[2], ";", "");
-        if ((size_t) gs.size() != gains.size()) return false;
+        if (gs.size() < 2) return false;
+        std::vector<float> loaded((size_t) gs.size());
         for (int i = 0; i < gs.size(); ++i)
-            gains[(size_t) i] = juce::jlimit(-kGainRange, kGainRange,
-                                             gs[i].getFloatValue());
+            loaded[(size_t) i] = juce::jlimit(-kGainRange, kGainRange,
+                                              gs[i].getFloatValue());
+        minF = lo; maxF = hi;
+        numPoints_ = juce::jlimit(kMinPoints, kMaxPoints, gs.size());
+        rebuildGrid();
+        gains.assign((size_t) numPoints_, 0.0f);
+        for (int i = 0; i < numPoints_; ++i)
+            gains[(size_t) i] = ((int) loaded.size() == numPoints_)
+                ? loaded[(size_t) i]
+                : eqCurveDbAt(loaded.data(), (int) loaded.size(),
+                              (float) i * (float) (loaded.size() - 1)
+                                  / (float) (numPoints_ - 1), kGainRange);
+        syncCombo();
         repaint();
         return true;
     }
@@ -226,9 +274,14 @@ public:
         {
             g.setColour(juce::Colour(0xff55606f));
             g.drawText(juce::String::fromUTF8("drag to shape  \xc2\xb7  double-click to reset"),
-                       plot.getRight() - 220, (int) bf.getY() + 2, 220, 10,
+                       (int) plot.getRight() - kComboW - 6 - 220, (int) bf.getY() + 2, 220, 10,
                        juce::Justification::right, false);
         }
+    }
+
+    void resized() override
+    {
+        pointsCombo.setBounds(getWidth() - 6 - kComboW, 1, kComboW, 15);
     }
 
     void mouseMove(const juce::MouseEvent& e) override
@@ -267,6 +320,23 @@ public:
     }
 
 private:
+    static constexpr int kComboW = 72;   // points dropdown (top-right corner)
+
+    /** Even log-frequency node grid over [minF, maxF] for numPoints_ nodes. */
+    void rebuildGrid()
+    {
+        freqs.resize((size_t) numPoints_);
+        const double r = maxF / minF;
+        for (int i = 0; i < numPoints_; ++i)
+            freqs[(size_t) i] = minF * std::pow(r, (double) i
+                                                   / (double) (numPoints_ - 1));
+    }
+
+    void syncCombo()
+    {
+        pointsCombo.setSelectedId(numPoints_, juce::dontSendNotification);
+    }
+
     juce::Rectangle<float> plotArea() const
     {
         return getLocalBounds().toFloat().reduced(6.0f).withTrimmedTop(12.0f).withTrimmedBottom(12.0f);
@@ -317,6 +387,8 @@ private:
 
     juce::Colour accent;
     double minF = 65.41, maxF = 16744.04;
+    int numPoints_ = kMinPoints;
+    juce::ComboBox pointsCombo;
     std::vector<double> freqs;
     std::vector<float>  gains;
     int hovered = -1, dragging = -1;

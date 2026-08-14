@@ -61,6 +61,10 @@ public:
         seqTransport.setSamplerIndex(i);
     }
 
+    /** Select bank @p idx in the grid + editor (same path as a tile click).
+     *  Used by the editor to restore the persisted selection. */
+    void selectSlot(int idx) { onSlotSelected(idx); }
+
 private:
     void onSlotSelected(int idx);
 

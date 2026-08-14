@@ -11,6 +11,8 @@
  *                       the APVTS synthSplitVersion migration gate)
  *     banks/engineN.fsmp  recorded sampler audio (LuxSampler::saveToFile), one
  *                       per engine — the ONLY data absent from captureFullState
+ *     takes/slotN.png   P9 — persisted score-family takes (calibrated PNGs the
+ *                       slot frames rebuild from headless at reopen)
  *     assets/           copies of imported media (relative paths in the state)
  *     exports/          default destination of user exports
  *
@@ -82,6 +84,10 @@ public:
     //== Persistence ==========================================================
     void saveStateNow();   // write project.sp3ctra (+ session.meta) atomically
     void saveBanksNow();   // write banks/engineN.fsmp
+    /** P9 — write (or, empty cache, delete) slot @p slot's takes/slotN.png
+     *  from the processor's take cache. Event-driven: called when a take is
+     *  (re)captured or its slot released — never on the autosave cadence. */
+    void saveScoreTakeNow(int slot);
     /** Called at the end of applyRestoredStateOnMessageThread when the restored
      *  state has NO embedded SAMPLER_BANKS (Standalone) — load sidecar banks.
      *  @returns true if at least one bank file was loaded. */
@@ -113,6 +119,9 @@ public:
     juce::File projectFile() const { return sessionDir_.getChildFile("project.sp3ctra"); }
     juce::File metaFile()    const { return sessionDir_.getChildFile("session.meta"); }
     juce::File banksDir()    const { return sessionDir_.getChildFile("banks"); }
+    juce::File takesDir()    const { return sessionDir_.getChildFile("takes"); }
+    juce::File takeFile(int slot) const
+    { return takesDir().getChildFile("slot" + juce::String(slot) + ".png"); }
     juce::File assetsDir()   const { return sessionDir_.getChildFile("assets"); }
     juce::File exportsDir()  const { return sessionDir_.getChildFile("exports"); }
 
@@ -122,6 +131,9 @@ private:
     bool writeStateTo(const juce::File& dir);
     bool writeBanksTo(const juce::File& dir);
     bool loadBanksFrom(const juce::File& dir);
+    // P9 — score-take sidecars (takes/slotN.png, from the processor's cache).
+    void writeTakeTo (const juce::File& dir, int slot);
+    void writeTakesTo(const juce::File& dir);   // all slots (new / save-as)
     void writeMeta(const juce::File& dir);
     static juce::String sanitizeName(const juce::String& name);
 

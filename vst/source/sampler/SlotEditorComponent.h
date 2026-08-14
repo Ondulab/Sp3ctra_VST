@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../ui/ModuleCatalog.h"
+
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <vector>
 #include "../luxsampler/LuxSampler.h"
@@ -7,6 +9,7 @@
 #include "../image/ScoreEqComponent.h"
 #include "../midi/MidiLearnAttachment.h"   // right-click MIDI-Learn on play controls
 #include "SamplerValueBox.h"               // crop / fade param chips under the image
+#include "../ui/Sp3ctraBarSlider.h"
 
 class Sp3ctraAudioProcessor;
 
@@ -48,7 +51,7 @@ public:
     {
         const auto b  = getLocalBounds().toFloat().reduced(1.f);
         const bool on = active && isEnabled();
-        const juce::Colour accent(0xffcc88ff); // SAMPLER / SLOT identity (purple)
+        const juce::Colour accent = moduleColour(ModuleType::Sampler); // inherited module colour
 
         const juce::Colour bg = on ? accent.withAlpha(0.22f) : juce::Colour(0xff222230);
         g.setColour(down ? bg.brighter(0.30f) : over ? bg.brighter(0.12f) : bg);
@@ -319,7 +322,7 @@ private:
 
     // ── Image + time + fades editor (middle) and SCORE-style EQ panel (bottom) ──
     SlotSpectralEditorComponent spectralEditor;
-    ScoreEqComponent            eqEditor { juce::Colour(0xffcc88ff) };
+    ScoreEqComponent            eqEditor { moduleColour(ModuleType::Sampler) };
     bool                        suppressEqPush_ = false; // guard during refresh
 
     /** Reload the EQ curve into eqEditor from the current slot (silent). */
@@ -348,12 +351,12 @@ private:
     //  per-bank mixer drives the same engine param, inverted.)
     // Pre-EQ material floor (0 % = off … 100 % = total white mask).
     juce::Label  floorLabel { {}, "Floor" };
-    juce::Slider floorSlider;
+    Sp3ctraBarSlider floorSlider;
     juce::Label speedLabel { {}, "Speed" };
     juce::Label loopLabel  { {}, "Loop" };
 
     // ── Sliders ───────────────────────────────────────────────────────────────
-    juce::Slider speedSlider; // 0.01–32.0×; skewed so 1.0× sits at centre position
+    Sp3ctraBarSlider speedSlider; // 0.01–32.0×; skewed so 1.0× sits at centre position
 
     // ── Loop row (3 composable toggles: 0 = forward →, 1 = backward ←,
     //    2 = repeat ⟲ — combined into LoopMode via composeLoopMode) ───────────

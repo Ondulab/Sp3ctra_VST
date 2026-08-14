@@ -13,16 +13,19 @@
  */
 #pragma once
 
+#include "../ui/ModuleCatalog.h"
+
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "../ui/HarmoEditorComponent.h"
+#include "../ui/Sp3ctraBarSlider.h"
 
 class LuxHarmoTabComponent : public juce::Component
 {
 public:
     /** Accent colour for the SCALE page (matches the catalogue chip). */
-    static constexpr uint32_t kAccentARGB = 0xff8fb84f;
+    static inline const uint32_t kAccentARGB = moduleColour(ModuleType::Harmonize).getARGB();   ///< inherited module colour
 
     static constexpr int kPreferredH =
         HarmoEditorComponent::kPreferredH + 4 + 22 + 3 * 30 + 30 + 8;
@@ -178,7 +181,7 @@ private:
     juce::Label    rootLabel, scaleLabel, modeLabel, bgLabel;
     juce::Label    strengthLabel, widthLabel, slopeLabel, glideLabel;
     juce::ComboBox rootCombo, scaleCombo, modeCombo, bgCombo;
-    juce::Slider   strengthSlider, widthSlider, slopeSlider, glideSlider;
+    Sp3ctraBarSlider strengthSlider, widthSlider, slopeSlider, glideSlider;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>
         rootAttach, scaleAttach, modeAttach, bgAttach;
@@ -198,12 +201,9 @@ private:
         addAndMakeVisible(lbl);
     }
 
-    void initSlider(juce::Slider& sld, juce::Label& lbl, const juce::String& text)
+    void initSlider(Sp3ctraBarSlider& sld, juce::Label& lbl, const juce::String& text)
     {
         initLabel(lbl, text);
-        sld.setSliderStyle(juce::Slider::LinearHorizontal);
-        sld.setTextBoxStyle(juce::Slider::TextBoxRight, false, 52,
-                            Sp3ctraTheme::kControlH);
         addAndMakeVisible(sld);
     }
 

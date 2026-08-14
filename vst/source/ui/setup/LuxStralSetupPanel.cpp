@@ -15,7 +15,7 @@ LuxStralSetupPanel::LuxStralSetupPanel(Sp3ctraAudioProcessor& processor, juce::C
     // ========================================================================
     tuningRangeSectionLabel.setText("Musical Tuning", juce::dontSendNotification);
     tuningRangeSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
-    tuningRangeSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
+    tuningRangeSectionLabel.setColour(juce::Label::textColourId, accent);
     addAndMakeVisible(tuningRangeSectionLabel);
 
     // Tuning (A4 reference)
@@ -24,9 +24,8 @@ LuxStralSetupPanel::LuxStralSetupPanel(Sp3ctraAudioProcessor& processor, juce::C
     tuningLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(tuningLabel);
 
-    tuningSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    tuningSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     tuningSlider.setTextValueSuffix(" Hz");
+    tuningSlider.setDoubleClickReturnValue(true, 440.0);   // cycle centre
     addAndMakeVisible(tuningSlider);
     tuningAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralTuning", tuningSlider);
@@ -54,8 +53,6 @@ LuxStralSetupPanel::LuxStralSetupPanel(Sp3ctraAudioProcessor& processor, juce::C
     numOctavesLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(numOctavesLabel);
 
-    numOctavesSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    numOctavesSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbNarrow, Sp3ctraTheme::kTextBoxH);
     numOctavesSlider.setRange(1, 10, 1);
     addAndMakeVisible(numOctavesSlider);
     numOctavesAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -93,19 +90,17 @@ LuxStralSetupPanel::LuxStralSetupPanel(Sp3ctraAudioProcessor& processor, juce::C
         "0.5 is a balanced starting point.");
     addAndMakeVisible(physiologicalDepthLabel);
 
-    physiologicalDepthSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    physiologicalDepthSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbXNarrow, Sp3ctraTheme::kTextBoxH);
     physiologicalDepthSlider.setTooltip(physiologicalDepthLabel.getTooltip());
     addAndMakeVisible(physiologicalDepthSlider);
     physiologicalDepthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralPhysiologicalDepth", physiologicalDepthSlider);
 
     // ========================================================================
-    // Section: Dynamics Processing (Soft Limit only)
+    // Section: Dynamics Processing (Soft Limit + decode window)
     // ========================================================================
     dynamicsSectionLabel.setText("Dynamics Processing", juce::dontSendNotification);
     dynamicsSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
-    dynamicsSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
+    dynamicsSectionLabel.setColour(juce::Label::textColourId, accent);
     addAndMakeVisible(dynamicsSectionLabel);
 
     softLimitThresholdLabel.setText("Soft Limit Threshold:", juce::dontSendNotification);
@@ -113,8 +108,6 @@ LuxStralSetupPanel::LuxStralSetupPanel(Sp3ctraAudioProcessor& processor, juce::C
     softLimitThresholdLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(softLimitThresholdLabel);
 
-    softLimitThresholdSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    softLimitThresholdSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     addAndMakeVisible(softLimitThresholdSlider);
     softLimitThresholdAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralSoftLimitThreshold", softLimitThresholdSlider);
@@ -124,18 +117,34 @@ LuxStralSetupPanel::LuxStralSetupPanel(Sp3ctraAudioProcessor& processor, juce::C
     softLimitKneeLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(softLimitKneeLabel);
 
-    softLimitKneeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    softLimitKneeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     addAndMakeVisible(softLimitKneeSlider);
     softLimitKneeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "luxstralSoftLimitKnee", softLimitKneeSlider);
+
+    // Inverse-dB decode window — machine setting (moved from the OUT page,
+    // 2026-08-05): must match the dynamicRangeDB the SCORE was generated with.
+    rangeDbLabel.setText("Range dB:", juce::dontSendNotification);
+    rangeDbLabel.setJustificationType(juce::Justification::centredRight);
+    rangeDbLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
+    rangeDbLabel.setTooltip(
+        "Window of the inverse-dB decode law (grey -> amplitude).\n"
+        "Must match the dynamic range (dB) the SCORE was generated with.\n"
+        "Default: 50 dB.");
+    addAndMakeVisible(rangeDbLabel);
+
+    rangeDbSlider.setTextValueSuffix(" dB");
+    rangeDbSlider.setDoubleClickReturnValue(true, 50.0);   // cycle centre (doc default)
+    rangeDbSlider.setTooltip(rangeDbLabel.getTooltip());
+    addAndMakeVisible(rangeDbSlider);
+    rangeDbAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        apvts, "luxstralRangeDb", rangeDbSlider);
 
     // ========================================================================
     // Section: StrokeForge Advanced Blob Detection
     // ========================================================================
     sfBlobSectionLabel.setText(juce::String::fromUTF8("StrokeForge — Advanced Blob Detection"), juce::dontSendNotification);
     sfBlobSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
-    sfBlobSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightyellow);
+    sfBlobSectionLabel.setColour(juce::Label::textColourId, accent);
     addAndMakeVisible(sfBlobSectionLabel);
 
     contrastAdaptiveLabel.setText("Contrast Adaptive:", juce::dontSendNotification);
@@ -153,8 +162,6 @@ LuxStralSetupPanel::LuxStralSetupPanel(Sp3ctraAudioProcessor& processor, juce::C
     contrastSensLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(contrastSensLabel);
 
-    contrastSensSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    contrastSensSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
     addAndMakeVisible(contrastSensSlider);
     contrastSensAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, "sfBlobContrastSensitivity", contrastSensSlider);
@@ -225,7 +232,7 @@ void LuxStralSetupPanel::resized()
     yPos += rowHeight + sectionSpacing;
 
     // ========================================================================
-    // Section: Dynamics Processing (Soft Limit only)
+    // Section: Dynamics Processing (Soft Limit + decode window)
     // ========================================================================
     dynamicsSectionLabel.setBounds(padding, yPos, contentWidth, 25);
     yPos += 30;
@@ -236,6 +243,10 @@ void LuxStralSetupPanel::resized()
 
     softLimitKneeLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
     softLimitKneeSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
+    yPos += rowHeight + itemSpacing;
+
+    rangeDbLabel.setBounds(padding, yPos + vc, labelWidth, ctrlH);
+    rangeDbSlider.setBounds(padding + labelWidth + Sp3ctraTheme::kGap, yPos + vc, sliderWidth, ctrlH);
     yPos += rowHeight + sectionSpacing;
 
     // ========================================================================

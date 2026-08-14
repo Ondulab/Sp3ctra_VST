@@ -23,6 +23,8 @@
  */
 #pragma once
 
+#include "../ui/ModuleCatalog.h"
+
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <functional>
 #include "../PluginProcessor.h"
@@ -30,6 +32,7 @@
 #include "../midi/MidiLearnAttachment.h"
 #include "../ui/AudioPanelWidgets.h"      // AudioPanelLayout + AudioPanelUI (shared look)
 #include "../ui/EnvelopeEditorComponent.h"
+#include "../ui/Sp3ctraBarSlider.h"
 #include "../ui/TimbreWaveformStrip.h"    // sample scan strip (luxstral_wavetable)
 #include "VisualizerMode.h"
 
@@ -281,6 +284,11 @@ public:
         const auto L = computeGeom(getWidth());
         using namespace AudioPanelUI;
 
+        // Module accent — inherited (see ModuleCatalog), badge bg derived.
+        const juce::Colour accentC   = moduleColour(ModuleType::LuxStral);
+        const juce::uint32 kAccent   = accentC.getARGB();
+        const juce::uint32 kAccentBg = accentC.withMultipliedBrightness(0.22f).getARGB();
+
         // ── Master Volume strip ─────────────────────────────────────────────
         {
             const auto r = L.volStrip.toFloat();
@@ -293,7 +301,7 @@ public:
         // ── Module identity chip — ONE LuxStral engine user-side (the hidden
         // second voice mirrors these engine params; synth-split D1).
         {
-            const juce::Colour tagCol(0xff7ab0f0);
+            const juce::Colour tagCol = accentC;
             const auto chip = L.engineChip.toFloat();
             g.setColour(tagCol.withAlpha(0.12f));
             g.fillRoundedRectangle(chip, 4.f);
@@ -307,9 +315,9 @@ public:
         // ── LEFT: OSCILLATORS ───────────────────────────────────────────────
         drawSectionBg(g, L.oscBg.getX(), L.oscBg.getY(), L.oscBg.getWidth(), L.oscBg.getHeight());
         drawBadge(g, L.oscBadge.getX(), L.oscBadge.getY(), L.oscBadge.getWidth(),
-                  0xff1c3755, 0xff7ab0f0, "OSCILLATORS");
+                  kAccentBg, kAccent, "OSCILLATORS");
         drawEnvCaption(g, L.oscBadge.getX() + kSecInsetX, L.oscCaptionY,
-                       L.oscBadge.getWidth() - 2 * kSecInsetX, 0xff7ab0f0, "ATTACK / RELEASE");
+                       L.oscBadge.getWidth() - 2 * kSecInsetX, kAccent, "ATTACK / RELEASE");
         {
             // Phase knobs dim when the mode makes them inert (Free = all off,
             // Breath ignores Position) — same affordance as the STEREO knob.
@@ -348,7 +356,7 @@ public:
                               && luxstral_wavetable_has_sample();
             drawSectionBg(g, L.tbBg.getX(), L.tbBg.getY(), L.tbBg.getWidth(), L.tbBg.getHeight());
             drawBadge(g, L.tbBadge.getX(), L.tbBadge.getY(), L.tbBadge.getWidth(),
-                      0xff1c3755, 0xff7ab0f0, "TIMBRE  --  SAMPLE");
+                      kAccentBg, kAccent, "TIMBRE  --  SAMPLE");
             const juce::uint32 klbl = tbOn ? 0xffb8c4d0 : kDimText;
             drawKnobLabel(g, L.tbGridX, L.tbGridW, L.tbGridY, 0, "Scan Rate", klbl);
             drawKnobLabel(g, L.tbGridX, L.tbGridW, L.tbGridY, 1, "Formant",   klbl);
@@ -359,18 +367,18 @@ public:
         const bool stOn = stereoEnableToggle.getToggleState();
         drawSectionBg(g, L.stBg.getX(), L.stBg.getY(), L.stBg.getWidth(), L.stBg.getHeight());
         drawBadge(g, L.stBadge.getX(), L.stBadge.getY(), L.stBadge.getWidth(),
-                  0xff1c3755, 0xff7ab0f0, "STEREO");
+                  kAccentBg, kAccent, "STEREO");
         drawKnobLabel(g, L.stGridX, L.stGridW, L.stGridY, 0, "Stereo Temp",
                       stOn ? 0xffb8c4d0 : kDimText);
 
         // ── RIGHT: STROKEFORGE (enable in badge; blob detection + morphing) ─
         const bool sfOn = sfEnabledToggle.getToggleState();
-        const juce::uint32 cap1 = sfOn ? 0xff8888e0 : kDimText;   // BLOB DETECTION
-        const juce::uint32 cap2 = sfOn ? 0xffb07af0 : kDimText;   // MORPHING
+        const juce::uint32 cap1 = sfOn ? kAccent : kDimText;   // BLOB DETECTION
+        const juce::uint32 cap2 = sfOn ? kAccent : kDimText;   // MORPHING
         const juce::uint32 klbl = sfOn ? 0xffb8c4d0 : kDimText;   // knob labels
         drawSectionBg(g, L.sfBg.getX(), L.sfBg.getY(), L.sfBg.getWidth(), L.sfBg.getHeight());
         drawBadge(g, L.sfBadge.getX(), L.sfBadge.getY(), L.sfBadge.getWidth(),
-                  0xff2a2a40, 0xff8888e0, "STROKEFORGE");
+                  kAccentBg, kAccent, "STROKEFORGE");
 
         const int sdx = L.rightX + kSecInsetX;
         const int sdw = L.colW - 2 * kSecInsetX;
@@ -457,7 +465,7 @@ private:
         // The envelope editor captures its parameter IDs at construction —
         // recreate it against the selected engine's Attack/Release params.
         arEnv = std::make_unique<EnvelopeEditorComponent>(
-            apvts, juce::Colour(0xff7ab0f0),
+            apvts, moduleColour(ModuleType::LuxStral),
             pid("AttackMs"), juce::String(), juce::String(), pid("ReleaseMs"));
         // Re-run the bind with the learn engine attached so the A/R value
         // boxes get their right-click MIDI Learn popups.
@@ -785,16 +793,14 @@ private:
         addAndMakeVisible(lbl);
     }
 
-    void initSlider(juce::Slider& s)
+    void initSlider(Sp3ctraBarSlider& s)
     {
-        s.setSliderStyle(juce::Slider::LinearHorizontal);
-        s.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, Sp3ctraTheme::kControlH);
         addAndMakeVisible(s);
     }
 
     // ── Controls ────────────────────────────────────────────────────────────
     // (IMAGE conditioning widgets moved to SynthOutPageComponent — P2.)
-    juce::Slider       luxstralVolumeSlider;                       // master (left top)
+    Sp3ctraBarSlider   luxstralVolumeSlider;                       // master (left top)
     juce::Label        volumeLabel;
 
     // OSCILLATORS (left)
@@ -823,7 +829,7 @@ private:
 
     // STROKEFORGE — blob detection (right)
     juce::Label  blobThreshLabel, blobMinWidthLabel, blobMergeGapLabel, blobColorSplitLabel;
-    juce::Slider blobThreshSlider, blobMinWidthSlider, blobMergeGapSlider, blobColorSplitSlider;
+    Sp3ctraBarSlider blobThreshSlider, blobMinWidthSlider, blobMergeGapSlider, blobColorSplitSlider;
     // STROKEFORGE — morphing (right)
     juce::ToggleButton sfEnabledToggle, sfFocusOnlyToggle;
     juce::Slider       sfMorphWidthSlider, sfFocusSigmaSlider, sfSpectralThreshSlider;

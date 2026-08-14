@@ -1,4 +1,5 @@
 #include "EngineAudioPanels.h"
+#include "ModuleCatalog.h"
 
 // ── Shared layout helpers — rotary-knob grid (mockup-validated layout) ────────
 //    Sections stack full-width; continuous params are knobs in a fixed-column
@@ -26,9 +27,6 @@ AudioWavePanel::AudioWavePanel(Sp3ctraAudioProcessor& p)
     volumeLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(volumeLabel);
 
-    luxwaveVolumeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    luxwaveVolumeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50,
-                                        Sp3ctraTheme::kControlH);
     addAndMakeVisible(luxwaveVolumeSlider);
     luxwaveVolumeAttachment = std::make_unique<SldAttach>(apvts, "luxwaveVolume", luxwaveVolumeSlider);
 
@@ -44,7 +42,7 @@ AudioWavePanel::AudioWavePanel(Sp3ctraAudioProcessor& p)
 
     // Amplitude ADSR as a draggable envelope editor with curve bend handles.
     volEnv = std::make_unique<EnvelopeEditorComponent>(
-        apvts, juce::Colour(0xffddaa44),
+        apvts, moduleColour(ModuleType::LuxWave),
         "luxwaveAttackMs", "luxwaveDecayMs", "luxwaveSustainLevel", "luxwaveReleaseMs",
         "luxwaveAttackCurve", "luxwaveDecayCurve", "luxwaveReleaseCurve");
     volEnv->setMidiMap(&p.getMidiMap());   // re-bind so the boxes get learn
@@ -168,7 +166,7 @@ void AudioWavePanel::paint(juce::Graphics& g)
 
     // ── Module identity chip (top of the right column) ──────────────────────
     {
-        const juce::Colour tagCol(0xffddaa44);
+        const juce::Colour tagCol = moduleColour(ModuleType::LuxWave);
         const auto chip = L.chip.toFloat();
         g.setColour(tagCol.withAlpha(0.12f));
         g.fillRoundedRectangle(chip, 4.f);
@@ -182,11 +180,11 @@ void AudioWavePanel::paint(juce::Graphics& g)
     // ── LEFT: WAVETABLE ──────────────────────────────────────────────────────
     drawSectionBg(g, L.waveBg.getX(), L.waveBg.getY(), L.waveBg.getWidth(), L.waveBg.getHeight());
     drawBadge(g, L.waveBadge.getX(), L.waveBadge.getY(), L.waveBadge.getWidth(),
-              0xff3a2a1a, 0xffddaa44, "WAVETABLE");
+              moduleColour(ModuleType::LuxWave).withMultipliedBrightness(0.22f).getARGB(), moduleColour(ModuleType::LuxWave).getARGB(), "WAVETABLE");
     g.setColour(juce::Colour(0xff888888));
     g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
     g.drawText("Scan", L.scanCaption, juce::Justification::centredLeft, true);
-    drawEnvCaption(g, L.waveGridX, L.waveCaptionY, L.waveGridW, 0xffddaa44, "AMPLITUDE  ADSR");
+    drawEnvCaption(g, L.waveGridX, L.waveCaptionY, L.waveGridW, moduleColour(ModuleType::LuxWave).getARGB(), "AMPLITUDE  ADSR");
     drawKnobLabel(g, L.waveGridX, L.waveGridW, L.waveGridY, 0, "Amplitude");
 
     // ── RIGHT: FILTER ────────────────────────────────────────────────────────

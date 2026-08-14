@@ -1,4 +1,5 @@
 #include "KeyboardRulerComponent.h"
+#include "ModuleCatalog.h"
 
 // C engine state — read-only here (display overlay).
 extern "C" {
@@ -13,8 +14,8 @@ extern "C" {
 
 namespace
 {
-    constexpr juce::uint32 kAccentPitch = 0xffe06bb8;   // pink  (LuxPitch identity)
-    constexpr juce::uint32 kAccentMask  = 0xff6be0d0;   // teal  (LuxMask identity)
+    const juce::uint32 kAccentPitch = moduleColour(ModuleType::Pitch).getARGB();   // inherited
+    const juce::uint32 kAccentMask  = moduleColour(ModuleType::Mask).getARGB();    // inherited
 
     // Strip palette — deliberately subdued so the keys read as a ruler,
     // not as a playable keyboard.

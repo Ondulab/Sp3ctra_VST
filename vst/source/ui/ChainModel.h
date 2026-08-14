@@ -28,9 +28,11 @@ struct ModuleInstance
 {
     ModuleType  type;
     juce::Uuid  id;       ///< stable identity (survives reordering)
-    int         slot{-1}; ///< per-instance index: VideoScroll bank (0..7),
-                          ///  sampler engine (0=A, 1=B) OR engine-send bank
-                          ///  (0..7); -1 for non-slotted types.
+    int         slot{-1}; ///< per-instance index, keyed per POOL FAMILY (each
+                          ///  family numbers independently, 0..7): VideoScroll
+                          ///  bank, MidiTap bank, sampler engine, engine-send
+                          ///  bank, media source or score player.
+                          ///  -1 for non-slotted types (see hasSlot()).
 
     /** J2 — the module's settings AT REST (chain-owned): a "VALUES" tree whose
      *  properties are the manifest suffixes → raw param values. Written by
@@ -92,6 +94,27 @@ public:
     /** Count of slotted instances across the whole model (optionally excluding one). */
     int videoSlotCount(const juce::Uuid* exclude = nullptr) const;
 
+    //── MidiTap per-instance slot pool — INDEPENDENT of the VideoScroll pool ───
+    // A MIDI TAP is a probe like VideoScroll (pass-through, may repeat in a
+    // chain), but it owns its OWN 8-slot pool: `slot` indexes both its RT
+    // capture ring (midi_tap_instance) and its APVTS bank (midiTap{slot}_*).
+    // Sharing the VideoScroll pool would mean one slot addressing two unrelated
+    // RT states AND one budget counter for two module types (a 9th module of
+    // EITHER type would then be dropped on load).
+    static constexpr int kMaxMidiTaps = 8;   // MUST equal CHAIN_MAX_CHAINS
+    static bool isMidiTap(ModuleType t) noexcept { return t == ModuleType::MidiTap; }
+    /** Lowest free MidiTap slot 0..kMaxMidiTaps-1 across ALL chains, or -1 if full. */
+    int firstFreeMidiTapSlot(const juce::Uuid* movingId = nullptr) const;
+    /** Count of MidiTap instances across the whole model (optionally excluding one). */
+    int midiTapCount(const juce::Uuid* exclude = nullptr) const;
+
+    /** Types EXEMPT from the per-chain "never two instances of a type" rule —
+     *  they are bounded by a model-wide slot pool instead. THE list: canInsert()
+     *  and validateAndRepair() both go through it, so adding the next
+     *  multi-instance type updates them at once (the kScoreFamily lesson). */
+    static bool mayRepeatInChain(ModuleType t) noexcept
+        { return isSlottedType(t) || isMidiTap(t) || isSamplerEngine(t); }
+
     //── Sampler engine slot pool (A=0, B=1) — INDEPENDENT of the VideoScroll pool ─
     // A Sampler instance's `slot` is its engine index: first placed = A (0),
     // second = B (1). Up to 2 may coexist (even in the same chain).
@@ -130,17 +153,21 @@ public:
 
     //── Score-player slot pool — P5-M1 ──────────────────────────────────────────
     // ONE pool SHARED by the whole score family (kScoreFamily: SCORE / TIMBRE /
-    // MIDI SCORE / VOICE): an instance's `slot` is its future ScoreSlotPool
-    // lecteur index (8 lecteurs indépendants). M1 NOTE: the runtime still plays
-    // the single shared score channel until P5-M4.
+    // MIDI SCORE / VOICE): an instance's `slot` is its ScoreSlotPool lecteur
+    // index (8 lecteurs indépendants) and, since P7, also the index of its OWN
+    // transport bank (scoreXportParam) and of its generator page document —
+    // two SCOREs living in two chains share nothing.
     static constexpr int kMaxScorePlayers = 8;
     int firstFreeScorePlayerSlot(const juce::Uuid* movingId = nullptr) const;
 
-    /** Types that carry a per-instance `slot` (VideoScroll bank, sampler engine,
-     *  engine send, media source or score player). */
+    /** Types that carry a per-instance `slot` (VideoScroll bank, MidiTap bank,
+     *  sampler engine, engine send, media source or score player).
+     *  CRITICAL: toValueTree() only persists `slot` when this is true — a type
+     *  missing here re-heals to a different slot on every reload, silently
+     *  swapping settings AND host automation lanes between instances. */
     static bool hasSlot(ModuleType t) noexcept
-        { return isSlottedType(t) || isSamplerEngine(t) || isEngineSend(t)
-              || isMediaSource(t) || isScoreFamily(t); }
+        { return isSlottedType(t) || isMidiTap(t) || isSamplerEngine(t)
+              || isEngineSend(t)  || isMediaSource(t) || isScoreFamily(t); }
 
     //── Mutations (return false when the rule check fails) ─────────────────────
     bool insert(int chainIdx, ModuleType type, int dropIdx);

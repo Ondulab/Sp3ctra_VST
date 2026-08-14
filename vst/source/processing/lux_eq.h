@@ -5,18 +5,22 @@
  *
  * The pixel axis IS the instrument's frequency axis (log-mapped, pixel 0 =
  * low_frequency, last pixel = high_frequency — see wave_generation.c), so a
- * "band" is simply a node on that axis: LUX_EQ_NUM_BANDS nodes sit on the
- * octave boundaries and the per-pixel gain is a smooth Catmull-Rom spline
- * through them in dB (lux_eq_curve_db — shared with the UI editor, so the
- * drawn curve IS the applied gain).
+ * "band" is simply a node on that axis: `num_bands` nodes (2..LUX_EQ_NUM_BANDS,
+ * user-selectable, default 2 = one straight line) spread evenly over it and
+ * the per-pixel gain is a smooth Catmull-Rom spline through them in dB
+ * (lux_eq_curve_db — shared with the UI editor, so the drawn curve IS the
+ * applied gain).
  *
- * Gain applies to the MATERIAL energy only (input minus the background floor,
- * same floor tracking as LuxEcho): boosting must re-print the strokes, never
- * brighten the paper. Energy space: `background_mode` picks which pole carries
- * the material (mirrors LuxPitch/LuxMask/LuxReverb/LuxEcho — the chain inserts
- * see the RAW image, upstream of the synth's Negative).
+ * Gain applies to the MATERIAL energy only (input minus the tracked PAPER
+ * level — 10th-percentile estimator, see lux_drive.c): boosting must re-print
+ * the strokes, never brighten the paper. The pixel's OWN pedestal is kept, so
+ * background pixels pass through bit-identical. Energy space: `background_mode`
+ * picks which pole carries the material (mirrors LuxPitch/LuxMask/LuxReverb/
+ * LuxEcho — the chain inserts see the RAW image, upstream of the synth's
+ * Negative).
  *
- *   e_out = floor + 10^(dB(x)/20) * (e_in - floor)      (clamped to 0..255)
+ *   m     = max(0, e_in - floor)
+ *   e_out = (e_in - m) + 10^(dB(x)/20) * m              (clamped to 0..255)
  *
  * Memory: per instance ≈ 56 KB (float LUT + RGB out buffers) — no history.
  *
@@ -41,9 +45,10 @@ extern "C" {
 /* Capacity matches LuxPitch/LuxMask (>6912 for 400 DPI CIS). */
 #define LUX_EQ_MAX_PIXELS  8192
 
-/* Nodes on the octave boundaries of the default 8-octave range (C2..~16.7k)
- * — matches ScoreEqComponent's grid. The curve is positional: nodes spread
- * evenly over the pixel axis whatever the configured frequency span. */
+/* MAXIMUM node count — one node per octave boundary of the default 8-octave
+ * range (C2..~16.7k), matching ScoreEqComponent's grid. The ACTIVE count is
+ * config.num_bands (2..LUX_EQ_NUM_BANDS). The curve is positional: the active
+ * nodes spread evenly over the pixel axis whatever the configured span. */
 #define LUX_EQ_NUM_BANDS   9
 #define LUX_EQ_GAIN_DB_MAX 24.0f   /* band range: ±24 dB */
 
@@ -52,16 +57,21 @@ extern "C" {
 #define LUX_EQ_BG_WHITE  1   /* dark material on white background   */
 #define LUX_EQ_BG_AUTO   2   /* detect from the stream (default)    */
 
-/* Gain curve in dB at position x ∈ [0, LUX_EQ_NUM_BANDS-1] — uniform
- * Catmull-Rom spline through the node gains (C1-smooth, interpolates every
- * node; end nodes duplicated). Single source of truth: the RT LUT builder
- * and the UI editor both sample THIS, so what is drawn is what is applied.
- * Overshoot between nodes is clamped to the band range (±24 dB). */
-static inline float lux_eq_curve_db(const float g[/*LUX_EQ_NUM_BANDS*/], float x)
+/* Gain curve in dB at position x ∈ [0, n-1] over the n active node gains —
+ * uniform Catmull-Rom spline (C1-smooth, interpolates every node; end nodes
+ * duplicated). Single source of truth: the RT LUT builder and the UI editor
+ * both sample THIS, so what is drawn is what is applied. Overshoot between
+ * nodes is clamped to the band range (±24 dB). */
+static inline float lux_eq_curve_db(const float g[/*n*/], int n, float x)
 {
-    const int last = LUX_EQ_NUM_BANDS - 1;
+    if (n > LUX_EQ_NUM_BANDS) n = LUX_EQ_NUM_BANDS;
+    if (n < 2)                return (n == 1) ? g[0] : 0.0f;
+    const int last = n - 1;
     if (x <= 0.0f)          return g[0];
     if (x >= (float)last)   return g[last];
+    /* Two nodes = ONE STRAIGHT LINE (the duplicated-endpoint spline below
+     * would ease in/out into an S shape between them). */
+    if (n == 2)             return g[0] + (g[1] - g[0]) * x;
     int k = (int)x;
     if (k > last - 1) k = last - 1;
     const float t  = x - (float)k;
@@ -85,6 +95,7 @@ static inline float lux_eq_curve_db(const float g[/*LUX_EQ_NUM_BANDS*/], float x
 typedef struct {
     int   enabled;
     int   background_mode;                  /* LUX_EQ_BG_* */
+    int   num_bands;                        /* active nodes, 2..LUX_EQ_NUM_BANDS */
     float band_gain_db[LUX_EQ_NUM_BANDS];   /* -24..+24 dB per node */
 } LuxEqConfig;
 
@@ -94,7 +105,14 @@ typedef struct {
 typedef struct {
     LuxEqConfig config;
 
-    int  eq_active;      /* nonzero while shaping a stream (rack LED) */
+    int  eq_active;      /* latch: a stream was shaped at least once since the
+                          * last reset — NOT an activity indicator */
+
+    /* Rack-LED heartbeat: bumped once per line the module actually CHANGED
+     * (output != input). Blank paper carries no material to shape, so the
+     * curve leaves it intact and the LED correctly falls back to idle.
+     * See lux_reverb.h. */
+    uint32_t active_ticks;
     int  last_bg_mode;   /* RESOLVED polarity the floor was learned in */
 
     /* AUTO background — learned over a short window after each reset, then
@@ -105,13 +123,15 @@ typedef struct {
     int  auto_max_mean;
     int  auto_min_mean;
 
-    /* Background's own energy, slow EMA fed ONLY by near-background lines
-     * (see lux_echo.c). -1 = unseeded. */
+    /* Paper level — EMA of the per-line 10th-percentile energy (see
+     * lux_drive.c: the mean-based floor followed the ink mass on dense
+     * streams). -1 = unseeded. */
     float floor_ema;
 
     /* Per-pixel LINEAR gain, rebuilt only when the bands / width change. */
     float lut[LUX_EQ_MAX_PIXELS];
     float lut_gains[LUX_EQ_NUM_BANDS];   /* band values the LUT was built from */
+    int   lut_bands;                     /* node count it was built for */
     int   lut_px;                        /* pixel count it was built for; 0 = stale */
 
     /* Preallocated output buffers. */

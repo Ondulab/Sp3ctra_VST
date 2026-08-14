@@ -56,9 +56,6 @@ SamplerSetupPanel::SamplerSetupPanel(Sp3ctraAudioProcessor& processor, juce::Col
     maxDurationLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
     addAndMakeVisible(maxDurationLabel);
 
-    maxDurationSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    maxDurationSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                                       Sp3ctraTheme::kTbXNarrow, Sp3ctraTheme::kTextBoxH);
     maxDurationSlider.setTextValueSuffix(" s");
     addAndMakeVisible(maxDurationSlider);   // attachment: rebindEngineParams()
 

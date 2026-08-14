@@ -7,18 +7,23 @@
  * bound to APVTS params (host-automatable, MIDI-mappable) like the other FX
  * editors: one luxeq{slot}_Band{k} param per node, rebindable per instance.
  *
- * The node grid is FIXED (LUX_EQ_NUM_BANDS nodes on the octave boundaries of
- * the instrument's default 8-octave range) — the C engine spreads the same
- * nodes over the pixel axis, so the curve is positional whatever the span.
+ * The node count is user-selectable (top-right dropdown → luxeq{slot}_NumPoints,
+ * 2..LUX_EQ_NUM_BANDS, default 2 = one straight line) — the C engine spreads
+ * the same nodes over the pixel axis, so the curve is positional whatever the
+ * span. On a count change the current spline is resampled at the new node
+ * positions so the drawn shape survives the re-grid.
  * Between nodes the curve is the SHARED Catmull-Rom spline (lux_eq_curve_db):
  * the path is sampled from the exact evaluator the RT LUT uses.
- * The curve brightens while the bound pool instance is shaping a stream.
+ * The curve brightens while the bound pool instance is shaping a stream —
+ * by default the LuxEq pool; hosts embedding the editor for another engine's
+ * EQ bank (CENTROID's output EQ) repoint `liveProvider` at their own pool.
  */
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <cmath>
+#include <functional>
 #include <memory>
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
@@ -37,6 +42,12 @@ public:
     {
         // Unbound until the owning tab calls setInstance() with the selected
         // instance's bank ids (luxeq{slot}_Band*).
+        for (int n = 2; n <= LUX_EQ_NUM_BANDS; ++n)
+            pointsCombo_.addItem(juce::String(n) + " pts", n);
+        pointsCombo_.setSelectedId(numBands_, juce::dontSendNotification);
+        pointsCombo_.onChange = [this] { pointsComboChanged(); };
+        addAndMakeVisible(pointsCombo_);
+
         setRepaintsOnMouseActivity(true);
         startTimerHz(30);
     }
@@ -47,10 +58,21 @@ public:
      *  band's parameter (nearest node by x, like dragging). */
     void setMidiMap(MidiMappingEngine* m) noexcept { midiMap_ = m; }
 
+    /** Live-glow source: true while the engine instance bound to `slot` is
+     *  actually applying this curve. Defaults to the LuxEq pool — replace it
+     *  when the editor drives another engine's EQ bank. */
+    std::function<bool(int slot)> liveProvider = [](int slot)
+    {
+        const LuxEqState& st = *lux_eq_instance(slot);
+        return st.config.enabled != 0 && st.eq_active != 0;
+    };
+
     /** (Re)bind the nodes to one instance's band params and point the live
      *  overlay at that instance's pool slot. `bandIds` must hold exactly
-     *  LUX_EQ_NUM_BANDS ids, node order (low → high frequency). */
-    void setInstance(int slot, const juce::StringArray& bandIds)
+     *  LUX_EQ_NUM_BANDS ids, node order (low → high frequency);
+     *  `numPointsId` is the instance's node-count choice param. */
+    void setInstance(int slot, const juce::StringArray& bandIds,
+                     const juce::String& numPointsId)
     {
         jassert(bandIds.size() == LUX_EQ_NUM_BANDS);
         slot_ = juce::jlimit(0, 7, slot);
@@ -60,6 +82,26 @@ public:
             bands[(size_t) b].attach.reset();
             if (b < bandIds.size())
                 bind(bands[(size_t) b], bandIds[b]);
+        }
+
+        // Node-count dropdown ← luxeq{slot}_NumPoints (choice "2".."9").
+        pointsAttach_.reset();
+        pointsLearn_.reset();
+        if (auto* p = apvts.getParameter(numPointsId))
+        {
+            pointsAttach_ = std::make_unique<juce::ParameterAttachment>(
+                *p, [this](float v)
+                {
+                    numBands_ = juce::jlimit(2, LUX_EQ_NUM_BANDS,
+                                             2 + (int) std::lround(v));
+                    pointsCombo_.setSelectedId(numBands_,
+                                               juce::dontSendNotification);
+                    repaint();
+                });
+            pointsAttach_->sendInitialUpdate();
+            if (midiMap_ != nullptr)
+                pointsLearn_ = std::make_unique<MidiLearnAttachment>(
+                    *midiMap_, pointsCombo_, numPointsId);
         }
         repaint();
     }
@@ -76,8 +118,7 @@ public:
         g.drawRoundedRectangle(bf.reduced(0.5f), 4.0f, 1.0f);
 
         const auto plot = plotArea();
-        const LuxEqState& st = *lux_eq_instance(slot_);
-        const bool live = (st.config.enabled != 0 && st.eq_active != 0);
+        const bool live = liveProvider && liveProvider(slot_);
 
         // Horizontal gain grid: 0 dB centre (brighter) + ±12 / ±24.
         for (int db = -24; db <= 24; db += 12)
@@ -92,17 +133,18 @@ public:
                        juce::Justification::left, false);
         }
 
-        // Vertical octave grid + Hz labels (default instrument range — the
+        // Vertical node grid + Hz labels (default instrument range — the
         // engine's curve is positional, labels are informative).
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
-        for (int i = 0; i < LUX_EQ_NUM_BANDS; ++i)
+        for (int i = 0; i < numBands_; ++i)
         {
             const float x = nodeX(i, plot);
             g.setColour(juce::Colour(0x0cffffff));
             g.drawVerticalLine((int) x, plot.getY(), plot.getBottom());
-            if (i == 0 || i + 1 == LUX_EQ_NUM_BANDS || (i % 2 == 0))
+            if (i == 0 || i + 1 == numBands_ || (i % 2 == 0))
             {
-                const double f = kMinFreq * std::pow(2.0, (double) i);
+                const double f = kMinFreq
+                    * std::pow(2.0, 8.0 * (double) i / (double) (numBands_ - 1));
                 const juce::String lbl = (f >= 1000.0)
                     ? juce::String(f / 1000.0, f >= 10000.0 ? 0 : 1) + "k"
                     : juce::String((int) std::lround(f));
@@ -116,7 +158,7 @@ public:
         // Catmull-Rom evaluator the engine's LUT uses (lux_eq_curve_db), so
         // the drawn spline is exactly the applied gain.
         float nodeDb[LUX_EQ_NUM_BANDS];
-        for (int i = 0; i < LUX_EQ_NUM_BANDS; ++i)
+        for (int i = 0; i < numBands_; ++i)
             nodeDb[i] = bands[(size_t) i].value;
         juce::Path curve, fill;
         const float y0 = gainToY(0.0f, plot);
@@ -125,8 +167,8 @@ public:
         {
             const float u  = (float) s / (float) steps;
             const float x  = plot.getX() + u * plot.getWidth();
-            const float y  = gainToY(lux_eq_curve_db(nodeDb,
-                                 u * (float) (LUX_EQ_NUM_BANDS - 1)), plot);
+            const float y  = gainToY(lux_eq_curve_db(nodeDb, numBands_,
+                                 u * (float) (numBands_ - 1)), plot);
             if (s == 0) { curve.startNewSubPath(x, y); fill.startNewSubPath(x, y0); fill.lineTo(x, y); }
             else        { curve.lineTo(x, y); fill.lineTo(x, y); }
         }
@@ -138,7 +180,7 @@ public:
         g.strokePath(curve, juce::PathStrokeType(1.6f));
 
         // Node handles.
-        for (int i = 0; i < LUX_EQ_NUM_BANDS; ++i)
+        for (int i = 0; i < numBands_; ++i)
         {
             const float x = nodeX(i, plot);
             const float y = gainToY(bands[(size_t) i].value, plot);
@@ -164,9 +206,14 @@ public:
         {
             g.setColour(juce::Colour(0xff55606f));
             g.drawText(juce::String::fromUTF8("drag to shape  \xc2\xb7  double-click to reset"),
-                       (int) plot.getRight() - 220, (int) bf.getY() + 2, 220, 10,
+                       (int) plot.getRight() - kComboW - 6 - 220, (int) bf.getY() + 2, 220, 10,
                        juce::Justification::right, false);
         }
+    }
+
+    void resized() override
+    {
+        pointsCombo_.setBounds(getWidth() - 6 - kComboW, 1, kComboW, 15);
     }
 
     //==========================================================================
@@ -224,6 +271,30 @@ public:
 private:
     // Default instrument span (C2 → ~16.7 kHz, 8 octaves) — label grid only.
     static constexpr double kMinFreq = 65.41;
+    static constexpr int    kComboW  = 72;   // points dropdown (top-right corner)
+
+    /** Dropdown edit — resample the current spline at the new node positions
+     *  (shape preserved as closely as the new count allows), publish the new
+     *  band values, then the new count. Host/preset changes of the NumPoints
+     *  param bypass this and just re-grid (pointsAttach_ callback). */
+    void pointsComboChanged()
+    {
+        const int newN = pointsCombo_.getSelectedId();
+        if (newN < 2 || newN == numBands_ || pointsAttach_ == nullptr)
+            return;
+        float old[LUX_EQ_NUM_BANDS];
+        const int oldN = juce::jlimit(2, LUX_EQ_NUM_BANDS, numBands_);
+        for (int i = 0; i < oldN; ++i)
+            old[i] = bands[(size_t) i].value;
+        for (int i = 0; i < newN; ++i)
+        {
+            const float x = (float) i * (float) (oldN - 1) / (float) (newN - 1);
+            if (bands[(size_t) i].attach)
+                bands[(size_t) i].attach->setValueAsCompleteGesture(
+                    lux_eq_curve_db(old, oldN, x));
+        }
+        pointsAttach_->setValueAsCompleteGesture((float) (newN - 2));
+    }
 
     juce::Rectangle<float> plotArea() const
     {
@@ -232,7 +303,7 @@ private:
     }
     float nodeX(int i, juce::Rectangle<float> p) const
     {
-        return p.getX() + ((float) i / (float) (LUX_EQ_NUM_BANDS - 1)) * p.getWidth();
+        return p.getX() + ((float) i / (float) (numBands_ - 1)) * p.getWidth();
     }
     float gainToY(float db, juce::Rectangle<float> p) const
     {
@@ -247,7 +318,7 @@ private:
     {
         const auto p = plotArea();
         int best = -1; float bd = 1e9f;
-        for (int i = 0; i < LUX_EQ_NUM_BANDS; ++i)
+        for (int i = 0; i < numBands_; ++i)
         {
             const float dx = std::abs(nodeX(i, p) - pt.x);
             if (dx < bd) { bd = dx; best = i; }
@@ -257,7 +328,7 @@ private:
     int nodeAt(juce::Point<float> pt) const
     {
         const auto p = plotArea();
-        for (int i = 0; i < LUX_EQ_NUM_BANDS; ++i)
+        for (int i = 0; i < numBands_; ++i)
         {
             const float x = nodeX(i, p), y = gainToY(bands[(size_t) i].value, p);
             if (pt.getDistanceFrom({ x, y }) <= 11.0f) return i;
@@ -273,8 +344,8 @@ private:
     }
     bool isFlat() const noexcept
     {
-        for (const auto& b : bands)
-            if (std::abs(b.value) > 0.01f) return false;
+        for (int i = 0; i < numBands_; ++i)
+            if (std::abs(bands[(size_t) i].value) > 0.01f) return false;
         return true;
     }
 
@@ -309,6 +380,12 @@ private:
     MidiMappingEngine* midiMap_ = nullptr;
 
     std::array<Bound, LUX_EQ_NUM_BANDS> bands;
+
+    // Node-count dropdown ↔ luxeq{slot}_NumPoints (2..LUX_EQ_NUM_BANDS).
+    int numBands_ = 2;
+    juce::ComboBox pointsCombo_;
+    std::unique_ptr<juce::ParameterAttachment> pointsAttach_;
+    std::unique_ptr<MidiLearnAttachment>       pointsLearn_;
 
     int hovered = -1, dragging = -1;
 

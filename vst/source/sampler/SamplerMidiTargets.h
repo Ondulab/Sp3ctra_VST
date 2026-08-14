@@ -28,8 +28,10 @@
 
 namespace SamplerMidiTargets
 {
-    // The slot EQ is a 9-node octave grid over the fixed 65.41–16744 Hz span
-    // (see ScoreEqComponent / LuxSampler::kEqBands).
+    // The slot EQ is a 2..9-node grid over the fixed 65.41–16744 Hz span (node
+    // count = the editor's "points" dropdown, see ScoreEqComponent /
+    // LuxSampler::kEqBands). Targets cover the 9-node maximum; a CC on a band
+    // beyond the slot's current grid is ignored (setSlotEqBandGain).
     constexpr int kEqBands = 9;
 
     // Scoped so the enumerators never collide with LuxSampler's LoopMode /

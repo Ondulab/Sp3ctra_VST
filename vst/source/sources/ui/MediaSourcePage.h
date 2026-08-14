@@ -21,6 +21,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../../PluginProcessor.h"
+#include "../../ui/Sp3ctraBarSlider.h"
 #include "../../midi/MidiLearnAttachment.h"
 #include <vector>
 
@@ -104,20 +105,16 @@ private:
     juce::TextButton rotateButton { "ROT" };
     juce::ComboBox   deviceCombo;                 // CAMERA only
     juce::TextButton refreshButton { "REFRESH" };
-    // ACTIVE — source on/off (all kinds): off feeds NOTHING into the chain
-    // (blank paper); media/params are kept, on resumes instantly.
-    juce::TextButton activeButton { "ACTIVE" };
     std::unique_ptr<juce::FileChooser> chooser_;
 
     // Transport row (kind-dependent subset)
     juce::TextButton playButton { "PLAY" };
     juce::ComboBox   loopCombo;
-    juce::Slider     speedSlider;      // IMAGE: scan time (s) / VIDEO: speed (x)
-    juce::Slider     positionSlider;   // VIDEO only: scrub 0..1
+    Sp3ctraBarSlider speedSlider;      // IMAGE: scan time (s) / VIDEO: speed (x)
+    Sp3ctraBarSlider positionSlider;   // VIDEO only: scrub 0..1
     juce::Label      speedLabel, loopLabel, positionLabel, statusLabel;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   playAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   activeAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> loopAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   speedAttach;
     std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;

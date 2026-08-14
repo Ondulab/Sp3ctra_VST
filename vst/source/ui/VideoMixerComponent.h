@@ -5,6 +5,7 @@
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
+#include "Sp3ctraBarSlider.h"
 #include "../video/VideoScrollRenderCore.h"
 #include <atomic>
 #include <memory>
@@ -19,6 +20,8 @@
  * slot's capture ring and renders its waterfall. A dynamic fader strip (one row
  * per output: level + blend Mix/Add/Screen, bound to videoMix{slot}_*) sits at
  * the top and controls how each is composited into the master image below it.
+ * Rows follow the RACK order and are labelled by host chain ("CHAIN n"), not by
+ * pool slot — the slot stays a hidden implementation detail of the param bank.
  *
  * Rendering architecture (perf):
  * ─────────────────────────────────────────────────────────────────────────────
@@ -168,7 +171,8 @@ private:
     struct Voice
     {
         int slot { -1 };
-        juce::Slider   level;
+        juce::String label;   ///< "CHAIN n" (+ a/b… when the chain hosts several)
+        Sp3ctraBarSlider level;
         juce::ComboBox blend;
         std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   levelAtt;
         std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> blendAtt;
@@ -180,7 +184,10 @@ private:
 
     Sp3ctraAudioProcessor& processor_;
     std::vector<std::unique_ptr<Voice>> voices_;
-    std::vector<int> activeSlots_;        // mirror of the current voice slots
+    std::vector<std::pair<int, int>> activeSlots_;   // {slot, chainIdx} mirror of
+                                                     // the current voices, in chain
+                                                     // order (drives change detection
+                                                     // incl. cross-chain moves)
 
     std::unique_ptr<Renderer> renderer_;
     uint32_t lastPresented_ { 0 };
@@ -193,6 +200,7 @@ private:
     static constexpr int kRowH     = 24;
     static constexpr int kStripPad = 6;
     static constexpr int kRowGap   = 4;
+    static constexpr int kLabelW   = 58;   // fits "CHAIN 8b" at kFontBadge bold
     static constexpr int kFps      = 60;   // presenter poll rate (renderer self-paces)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(VideoMixerComponent)

@@ -12,6 +12,8 @@
  */
 #pragma once
 
+#include "../ui/ModuleCatalog.h"
+
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
@@ -21,7 +23,7 @@ class LuxEqTabComponent : public juce::Component
 {
 public:
     /** Accent colour for the EQ page (matches the catalogue chip). */
-    static constexpr uint32_t kAccentARGB = 0xffe0847a;
+    static inline const uint32_t kAccentARGB = moduleColour(ModuleType::Equalizer).getARGB();   ///< inherited module colour
 
     static constexpr int kPreferredH =
         EqEditorComponent::kPreferredH + 4 + 22 + 30 + 8;
@@ -54,7 +56,7 @@ public:
         juce::StringArray bandIds;
         for (int b = 0; b < LUX_EQ_NUM_BANDS; ++b)
             bandIds.add(eqParam(slot_, ("Band" + juce::String(b)).toRawUTF8()));
-        editor.setInstance(slot_, bandIds);
+        editor.setInstance(slot_, bandIds, eqParam(slot_, "NumPoints"));
         bgAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
             processor.getAPVTS(), eqParam(slot_, "BackgroundMode"), bgCombo));
         bgLearn_ = std::make_unique<MidiLearnAttachment>(

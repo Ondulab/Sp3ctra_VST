@@ -157,15 +157,10 @@ void EnvelopeEditorComponent::bind(Bound& b, const juce::String& id, bool readRa
 }
 
 void EnvelopeEditorComponent::initBox(
-        juce::Slider& box, const juce::String& paramId,
+        Sp3ctraBarSlider& box, const juce::String& paramId,
         std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>& att)
 {
-    box.setSliderStyle(juce::Slider::LinearBar);
-    box.setTextBoxStyle(juce::Slider::TextBoxAbove, false, 0, 0);
-    box.setColour(juce::Slider::trackColourId, accent.withAlpha(0.22f));
-    box.setColour(juce::Slider::backgroundColourId, juce::Colour(0xff181820));
-    box.setColour(juce::Slider::textBoxTextColourId, juce::Colours::white.withAlpha(0.92f));
-    box.setColour(juce::Slider::textBoxOutlineColourId, accent.withAlpha(0.3f));
+    box.setAccent(accent);
     addAndMakeVisible(box);
     att = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, paramId, box);

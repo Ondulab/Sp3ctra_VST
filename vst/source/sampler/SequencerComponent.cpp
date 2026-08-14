@@ -45,6 +45,8 @@ SequencerComponent::SequencerComponent(Sp3ctraAudioProcessor& proc)
         {
             cycleStep(processor.getFrameSequencer(samplerIndex_), i, delta);
             updateButton(i);
+            // Steps persist in the SEQS tree (not APVTS) — mark dirty.
+            processor.sessions()->markStateDirty();
         };
         addAndMakeVisible(stepBtns[i]);
     }

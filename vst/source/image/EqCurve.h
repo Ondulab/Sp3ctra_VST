@@ -21,6 +21,9 @@ inline float eqCurveDbAt(const float* g, int n, float x, float clampDb) noexcept
     const int last = n - 1;
     if (x <= 0.0f)         return g[0];
     if (x >= (float) last) return g[last];
+    // Two nodes = ONE STRAIGHT LINE (the duplicated-endpoint spline below
+    // would ease in/out into an S shape between them).
+    if (n == 2) return g[0] + (g[1] - g[0]) * x;
     int k = (int) x;
     if (k > last - 1) k = last - 1;
     const float t  = x - (float) k;

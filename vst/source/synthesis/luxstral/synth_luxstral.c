@@ -224,10 +224,9 @@ int32_t synth_IfftInit(void) {
  * @param  imageData Grayscale input data
  * @param  audioDataLeft Left channel audio output buffer (stereo mode)
  * @param  audioDataRight Right channel audio output buffer (stereo mode)
- * @param  contrast_factor Contrast factor for volume modulation
  * @retval None
  */
-static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *audioDataLeft, float *audioDataRight, float contrast_factor, DoubleBuffer *db) {
+static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *audioDataLeft, float *audioDataRight, DoubleBuffer *db) {
 
   // LuxStral mode (limited logs)
   if (eng->log_counter % LOG_FREQUENCY == 0) {
@@ -546,9 +545,9 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
       }
     }
 
-  // The contrast factor is now passed as parameter from synth_AudioProcess
-
-  // Apply contrast modulation and unified stereo output
+  // Unified stereo output (2026-08-13: the contrast auto-volume is gone —
+  // the LEVELS module's CONTRAST knob dims the flux in the visual domain,
+  // so the decoded amplitudes already carry the dimming)
   if (eng->pool_initialized && !eng->pool_shutdown) {
     if (stereo_enabled) {
     // STEREO MODE: Use actual stereo buffers from threads
@@ -615,10 +614,10 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
       if (aL > peakPreL) peakPreL = aL;
       if (aR > peakPreR) peakPreR = aR;
 
-      // Apply contrast factor AND global fade for smooth transitions
+      // Apply global fade for smooth transitions
       float global_fade = get_global_fade_factor_and_update();
-      audioDataLeft[buff_idx] = left_signal * contrast_factor * global_fade;
-      audioDataRight[buff_idx] = right_signal * contrast_factor * global_fade;
+      audioDataLeft[buff_idx] = left_signal * global_fade;
+      audioDataRight[buff_idx] = right_signal * global_fade;
 
       // Apply final hard limiting
       if (audioDataLeft[buff_idx] > 1.0f) audioDataLeft[buff_idx] = 1.0f;
@@ -659,9 +658,9 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
         float a = fabsf(mono_pre);
         if (a > peakPre) peakPre = a;
 
-        // Apply contrast factor AND global fade for smooth transitions
+        // Apply global fade for smooth transitions
         float global_fade = get_global_fade_factor_and_update();
-        float mono_sample = mono_pre * contrast_factor * global_fade;
+        float mono_sample = mono_pre * global_fade;
 
         // Duplicate mono sample to both channels
         audioDataLeft[buff_idx] = mono_sample;
@@ -698,8 +697,8 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
 }
 
 // Public wrapper (signature unchanged for external callers)
-void synth_IfftMode(float *imageData, float *audioDataLeft, float *audioDataRight, float contrast_factor, DoubleBuffer *db) {
-  synth_IfftMode_impl(&g_luxstral_engine, imageData, audioDataLeft, audioDataRight, contrast_factor, db);
+void synth_IfftMode(float *imageData, float *audioDataLeft, float *audioDataRight, DoubleBuffer *db) {
+  synth_IfftMode_impl(&g_luxstral_engine, imageData, audioDataLeft, audioDataRight, db);
 }
 
 // Synth process function
@@ -759,11 +758,10 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
   // player). No source-tag gating, and NEVER a live-pipeline fallback — a
   // chain without signal was already committed as zeroed sections
   // (no-signal contract), so an empty buffer simply means silence.
-  float contrast_factor = 0.0f;
   int has_preprocessed = 0;
 
   int      _diag_print = 0;
-  float    _diag_gray_sum = 0.0f, _diag_notes_sum = 0.0f, _diag_cf = 0.0f;
+  float    _diag_gray_sum = 0.0f, _diag_notes_sum = 0.0f;
   uint64_t _diag_ts = 0;
 
   pthread_mutex_lock(&db->mutex);
@@ -777,13 +775,11 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
       _diag_gray_sum += db->preprocessed_data.additive.grayscale[_d];
     for (int _d = 0; _d < 3456; _d++)
       _diag_notes_sum += db->preprocessed_data.additive.notes[_d];
-    _diag_cf = db->preprocessed_data.additive.contrast_factor;
     _diag_ts = db->preprocessed_data.timestamp_us;
   }
   if (has_preprocessed) {
     memcpy(eng->grayScale_live, db->preprocessed_data.additive.grayscale,
            nb_pixels * sizeof(float));
-    contrast_factor = db->preprocessed_data.additive.contrast_factor;
   }
   pthread_mutex_unlock(&db->mutex);
 
@@ -795,21 +791,20 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
                    | ((_diag_gray_sum > 0.0f || _diag_notes_sum > 0.0f) ? 1 : 0);
     if (_sig != eng->diag_last_sig) {
       eng->diag_last_sig = _sig;
-      log_info("SRC-GATE", "has_pre=%d cf=%.4f gray_sum=%.2f notes_sum=%.2f ts=%llu",
-               has_preprocessed, _diag_cf,
+      log_info("SRC-GATE", "has_pre=%d gray_sum=%.2f notes_sum=%.2f ts=%llu",
+               has_preprocessed,
                _diag_gray_sum, _diag_notes_sum, (unsigned long long)_diag_ts);
     } else {
       log_info_every_ms(60000, "SRC-GATE",
-               "has_pre=%d cf=%.4f gray_sum=%.2f notes_sum=%.2f ts=%llu (heartbeat)",
-               has_preprocessed, _diag_cf,
+               "has_pre=%d gray_sum=%.2f notes_sum=%.2f ts=%llu (heartbeat)",
+               has_preprocessed,
                _diag_gray_sum, _diag_notes_sum, (unsigned long long)_diag_ts);
     }
   }
 
   if (!has_preprocessed) {
-    /* Nothing committed yet (startup) → silence. */
+    /* Nothing committed yet (startup) → silence (zeroed grayscale). */
     memset(eng->grayScale_live, 0, nb_pixels * sizeof(float));
-    contrast_factor = 0.0f;
   }
 
   // Capture raw scanner line for debug visualization
@@ -867,17 +862,12 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
   }
   // --- End Synth Data Freeze/Fade Logic ---
 
-  // Store contrast factor atomically for auto-volume system (using memcpy for float)
-  // Note: Single float write is atomic on most platforms, but we use explicit atomic for clarity
-  eng->last_contrast_factor = contrast_factor;
-
   // Launch synthesis with potentially frozen/faded data
   // Unified mode: always pass both left and right buffers
   synth_IfftMode_impl(eng,
                  eng->processed_grayScale,
                  obL[index].data,
                  obR[index].data,
-                 contrast_factor,
                  db);
 
   // Diagnostics (non-RT thread): log signal statistics occasionally (disabled for production)
@@ -909,10 +899,9 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
   //   }
   //   float gray_avg = (nb_pixels > 0) ? (gray_sum / (float)nb_pixels) : 0.0f;
 
-  //   log_info("SYNTH", "Diagnostics: readyL=%d readyR=%d contrast=%.6f gray_avg=%.6f rmsL=%.6f rmsR=%.6f peakL=%.6f peakR=%.6f",
+  //   log_info("SYNTH", "Diagnostics: readyL=%d readyR=%d gray_avg=%.6f rmsL=%.6f rmsR=%.6f peakL=%.6f peakR=%.6f",
   //            buffers_L[index].ready,
   //            buffers_R[index].ready,
-  //            contrast_factor,
   //            gray_avg,
   //            rms_l,
   //            rms_r,
@@ -986,13 +975,4 @@ void synth_AudioProcess_silence(void) {
 
   eng->last_write_index = index;
   __atomic_store_n(obIdx, 1 - index, __ATOMIC_RELEASE);
-}
-
-/**
- * @brief Get the last calculated contrast factor (thread-safe)
- * @return Last contrast factor value (0.0-1.0 range typically)
- * @note Used by auto-volume system to detect audio intensity for adaptive thresholding
- */
-float synth_get_last_contrast_factor(void) {
-  return g_luxstral_engine.last_contrast_factor;
 }

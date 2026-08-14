@@ -851,16 +851,35 @@ bool exportImage(const juce::Image& img, const juce::File& dest, bool asPng, dou
     return true;
 }
 
+juce::MemoryBlock encodeCalibratedPng(const juce::Image& img,
+                                      const SpectroCalibration& cal)
+{
+    if (! img.isValid() || ! cal.valid)
+        return {};
+    juce::MemoryOutputStream mem;
+    juce::PNGImageFormat fmt;
+    if (! fmt.writeImageToStream(img, mem))
+        return {};
+    juce::MemoryBlock bytes(mem.getData(), mem.getDataSize());
+    return pngWithCalibration(bytes, cal);
+}
+
 SpectroCalibration readCalibration(const juce::File& pngFile)
+{
+    juce::MemoryBlock mb;
+    if (! pngFile.loadFileAsData(mb))
+        return {};
+    return readCalibration(mb.getData(), mb.getSize());
+}
+
+SpectroCalibration readCalibration(const void* pngData, size_t numBytes)
 {
     SpectroCalibration cal;
 
-    juce::MemoryBlock mb;
-    if (! pngFile.loadFileAsData(mb))
+    const auto*  p = static_cast<const juce::uint8*> (pngData);
+    const size_t n = numBytes;
+    if (p == nullptr)
         return cal;
-
-    const auto*  p = static_cast<const juce::uint8*> (mb.getData());
-    const size_t n = mb.getSize();
     const juce::uint8 sig[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
     if (n < 8 || memcmp(p, sig, 8) != 0)
         return cal;                                   // not a PNG

@@ -13,6 +13,10 @@ extern "C" {
     #include "processing/lux_echo.h"
     #include "processing/lux_eq.h"
     #include "processing/lux_harmo.h"
+    #include "processing/lux_centro.h"
+    #include "processing/lux_drive.h"
+    #include "processing/lux_dcblock.h"
+    #include "processing/midi_tap.h"
     #include "audio/buffers/audio_image_buffers.h"    // lines_received counter
 }
 
@@ -48,6 +52,9 @@ ModuleType chainBlockToModuleType(ChainBlockId id) noexcept
         case ChainBlockId::Echo:     return ModuleType::Echo;
         case ChainBlockId::Equalizer:return ModuleType::Equalizer;
         case ChainBlockId::Harmonize:return ModuleType::Harmonize;
+        case ChainBlockId::Centroid: return ModuleType::Centroid;
+        case ChainBlockId::Drive:    return ModuleType::Drive;
+        case ChainBlockId::DcBlock:  return ModuleType::DcBlock;
         case ChainBlockId::Sampler:  return ModuleType::Sampler;
         case ChainBlockId::Score:    return ModuleType::Score;
         case ChainBlockId::Timbre:   return ModuleType::Timbre;
@@ -58,6 +65,7 @@ ModuleType chainBlockToModuleType(ChainBlockId id) noexcept
         case ChainBlockId::LuxWave:  return ModuleType::LuxWave;
         case ChainBlockId::LuxGrain: return ModuleType::LuxGrain;
         case ChainBlockId::VideoScroll: return ModuleType::VideoScroll;
+        case ChainBlockId::MidiTap:   return ModuleType::MidiTap;
         case ChainBlockId::ImageSrc:  return ModuleType::Image;
         case ChainBlockId::VideoSrc:  return ModuleType::Video;
         case ChainBlockId::CameraSrc: return ModuleType::Camera;
@@ -102,20 +110,21 @@ void ChainRackComponent::BlockComponent::paint(juce::Graphics& g)
 {
     auto b = getLocalBounds().toFloat().reduced(2.f);
 
-    // Selection halo
+    // Selection halo — deliberately loud: blocks of a category share one hue,
+    // so the selected block must read at a glance among identical neighbours.
     if (selected)
     {
-        g.setColour(colour.withAlpha(0.30f));
-        g.drawRoundedRectangle(b.expanded(1.2f), 6.5f, 3.0f);
+        g.setColour(colour.withAlpha(0.50f));
+        g.drawRoundedRectangle(b.expanded(2.0f), 7.0f, 3.5f);
     }
 
-    const juce::Colour bg = selected      ? colour.withAlpha(0.22f)
+    const juce::Colour bg = selected      ? colour.withAlpha(0.30f)
                           : isMouseOver() ? colour.withAlpha(0.10f)
                           :                 juce::Colour(0xff1a1f2a);
     g.setColour(bg);
     g.fillRoundedRectangle(b, 5.f);
-    g.setColour(selected ? colour.withAlpha(0.95f) : colour.withAlpha(0.35f));
-    g.drawRoundedRectangle(b, 5.f, selected ? 1.6f : 1.f);
+    g.setColour(selected ? colour : colour.withAlpha(0.35f));
+    g.drawRoundedRectangle(b, 5.f, selected ? 2.0f : 1.f);
 
     // ── State LED (right side): ● active / ◐ idle / ○ off ───────────────────
     {
@@ -172,7 +181,8 @@ void ChainRackComponent::BlockComponent::paint(juce::Graphics& g)
     }
 
     // ── Name ──────────────────────────────────────────────────────────────────
-    // A tiny keyboard badge leads the label for modules that need a MIDI input.
+    // A badge leads the label: tiny keyboard for MIDI-input modules, boxed "FX"
+    // for the FX section — same glyphs as the catalogue chips.
     auto textArea = b.reduced(9.f, 0.f).withTrimmedRight(40.f);
     if (moduleNeedsMidi(type))
     {
@@ -180,6 +190,14 @@ void ChainRackComponent::BlockComponent::paint(juce::Graphics& g)
         const juce::Rectangle<float> iconR(b.getX() + 8.f, b.getCentreY() - icoH * 0.5f,
                                            icoW, icoH);
         ModuleIcons::drawMidiKeyboard(g, iconR, colour.withAlpha(selected ? 0.95f : 0.62f));
+        textArea = textArea.withLeft(iconR.getRight() + 6.f);
+    }
+    else if (moduleIsFx(type))
+    {
+        const float icoW = 14.f, icoH = 12.f;
+        const juce::Rectangle<float> iconR(b.getX() + 8.f, b.getCentreY() - icoH * 0.5f,
+                                           icoW, icoH);
+        ModuleIcons::drawFxBadge(g, iconR, colour.withAlpha(selected ? 0.95f : 0.62f));
         textArea = textArea.withLeft(iconR.getRight() + 6.f);
     }
 
@@ -295,6 +313,9 @@ void ChainRackComponent::rebuild()
             // own enable param, so the mixer can drop just this output.
             if (m.type == ModuleType::VideoScroll && m.slot >= 0)
                 bp->setEnableParamOverride(vsParam(m.slot, "enabled"));
+            // Same per-instance rule for MIDI TAP (its own 8-slot pool).
+            if (m.type == ModuleType::MidiTap && m.slot >= 0)
+                bp->setEnableParamOverride(mtParam(m.slot, "enabled"));
             // P5-M3 media sources (Image/Video/Camera) are per-slot engines: the
             // rack LED must toggle THIS instance's own enable param, not the
             // global default (slot 0). Without this override every chain's LED
@@ -314,7 +335,9 @@ void ChainRackComponent::rebuild()
             // THIS instance's bank (pool slot bound to the module UUID).
             if (m.type == ModuleType::Pitch || m.type == ModuleType::Mask
                 || m.type == ModuleType::Reverb || m.type == ModuleType::Echo
-                || m.type == ModuleType::Equalizer || m.type == ModuleType::Harmonize)
+                || m.type == ModuleType::Equalizer || m.type == ModuleType::Harmonize
+                || m.type == ModuleType::Centroid || m.type == ModuleType::Drive
+                || m.type == ModuleType::DcBlock)
                 bp->setEnableParamOverride(insertBankParam(
                     m.type, processor.poolSlotForInstance(m.id), "Enabled"));
             // Score family (SCORE/TIMBRE/MIDI SCORE/VOICE): the LED is the
@@ -452,6 +475,9 @@ ChainBlockId ChainRackComponent::instanceToBlockId(ModuleType type, int chainIdx
         case ModuleType::Echo:     return ChainBlockId::Echo;
         case ModuleType::Equalizer:return ChainBlockId::Equalizer;
         case ModuleType::Harmonize:return ChainBlockId::Harmonize;
+        case ModuleType::Centroid: return ChainBlockId::Centroid;
+        case ModuleType::Drive:    return ChainBlockId::Drive;
+        case ModuleType::DcBlock:  return ChainBlockId::DcBlock;
         case ModuleType::Sampler:  return ChainBlockId::Sampler;
         case ModuleType::Score:    return ChainBlockId::Score;
         case ModuleType::Timbre:   return ChainBlockId::Timbre;
@@ -462,6 +488,7 @@ ChainBlockId ChainRackComponent::instanceToBlockId(ModuleType type, int chainIdx
         case ModuleType::LuxWave:  return ChainBlockId::LuxWave;
         case ModuleType::LuxGrain: return ChainBlockId::LuxGrain;
         case ModuleType::VideoScroll: return ChainBlockId::VideoScroll;
+        case ModuleType::MidiTap:  return ChainBlockId::MidiTap;
         case ModuleType::Image:    return ChainBlockId::ImageSrc;    // M9 — own pages
         case ModuleType::Video:    return ChainBlockId::VideoSrc;
         case ModuleType::Camera:   return ChainBlockId::CameraSrc;
@@ -1137,8 +1164,11 @@ void ChainRackComponent::timerCallback()
     updateLeds();
 }
 
-ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const juce::Uuid& uid, int engineSlot) const
+ChainRackComponent::LedState ChainRackComponent::ledFor(BlockComponent& blk, int engineSlot) const
 {
+    const ModuleType  type = blk.getType();
+    const juce::Uuid& uid  = blk.getUuid();
+
     auto paramOn = [this](const juce::String& id) -> bool
     {
         if (auto* raw = processor.getAPVTS().getRawParameterValue(id))
@@ -1146,24 +1176,38 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const j
         return false;
     };
 
+    // FX inserts: ○ disabled / ● its heartbeat moved since the previous refresh
+    // (the module changed the line it was fed) / ◐ enabled but producing
+    // nothing — unfed chain, or a stream carrying no material to work on.
+    auto fxLed = [&blk](int enabled, juce::uint32 ticks) -> LedState
+    {
+        const bool moved = blk.ledTickMoved(ticks);   // sample EVERY refresh
+        return enabled == 0 ? LedState::Off
+             : moved        ? LedState::Active
+                            : LedState::Idle;
+    };
+
     switch (type)
     {
         case ModuleType::Sp3ctra:
             return sourceLed;
 
-        // M9 — media sources: ● transport running / ◐ media ready / ○ nothing
-        // or DISABLED (the LED click toggles the source's ACTIVE param).
+        // M9 — media sources: ● feeding the chain / ◐ enabled but no media /
+        // ○ DISABLED (the LED click toggles the source's ACTIVE param).
+        // A loaded source publishes its current line even with the transport
+        // stopped (frozen head still drives the chain), so "loaded" — not
+        // "playing" — is what makes the flux flow.
         // P5-M3/M4 LED fix: each instance's LED reads ITS OWN engine slot
         // (the default-slot-0 read showed the first instance's state on all).
         case ModuleType::Image:
             if (auto* e = processor.getImageSource(engineSlot >= 0 ? engineSlot : 0))
-                return ! e->isLoaded() || ! e->isEnabled() ? LedState::Off
-                     : (e->isPlaying() ? LedState::Active : LedState::Idle);
+                return ! e->isEnabled() ? LedState::Off
+                     : (e->isLoaded() ? LedState::Active : LedState::Idle);
             return LedState::Off;
         case ModuleType::Video:
             if (auto* e = processor.getVideoSource(engineSlot >= 0 ? engineSlot : 0))
-                return ! e->isLoaded() || ! e->isEnabled() ? LedState::Off
-                     : (e->isPlaying() ? LedState::Active : LedState::Idle);
+                return ! e->isEnabled() ? LedState::Off
+                     : (e->isLoaded() ? LedState::Active : LedState::Idle);
             return LedState::Off;
         case ModuleType::Camera:
             if (auto* e = processor.getCameraSource(engineSlot >= 0 ? engineSlot : 0))
@@ -1185,31 +1229,43 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const j
             const int  v  = (int) st->midi.voice_count;
             return ! en ? LedState::Off : (v > 0 ? LedState::Active : LedState::Idle);
         }
-        // FX inserts — per-instance pool slot (UUID-bound, like Pitch/Mask):
-        // ● processing a stream / ◐ enabled but idle / ○ disabled.
+        // FX inserts — per-instance pool slot (UUID-bound, like Pitch/Mask).
+        // The *_active fields are latches (they only say "state to clear on
+        // reset"), so the LED reads the activity heartbeat instead — see fxLed.
         case ModuleType::Reverb:
         {
             const LuxReverbState* st = lux_reverb_instance(processor.poolSlotForInstance(uid));
-            return st->config.enabled == 0 ? LedState::Off
-                 : (st->tail_active != 0   ? LedState::Active : LedState::Idle);
+            return fxLed(st->config.enabled, st->active_ticks);
         }
         case ModuleType::Echo:
         {
             const LuxEchoState* st = lux_echo_instance(processor.poolSlotForInstance(uid));
-            return st->config.enabled == 0 ? LedState::Off
-                 : (st->ring_active != 0   ? LedState::Active : LedState::Idle);
+            return fxLed(st->config.enabled, st->active_ticks);
         }
         case ModuleType::Equalizer:
         {
             const LuxEqState* st = lux_eq_instance(processor.poolSlotForInstance(uid));
-            return st->config.enabled == 0 ? LedState::Off
-                 : (st->eq_active != 0     ? LedState::Active : LedState::Idle);
+            return fxLed(st->config.enabled, st->active_ticks);
         }
         case ModuleType::Harmonize:
         {
             const LuxHarmoState* st = lux_harmo_instance(processor.poolSlotForInstance(uid));
-            return st->config.enabled == 0 ? LedState::Off
-                 : (st->harmo_active != 0  ? LedState::Active : LedState::Idle);
+            return fxLed(st->config.enabled, st->active_ticks);
+        }
+        case ModuleType::Centroid:
+        {
+            const LuxCentroState* st = lux_centro_instance(processor.poolSlotForInstance(uid));
+            return fxLed(st->config.enabled, st->active_ticks);
+        }
+        case ModuleType::Drive:
+        {
+            const LuxDriveState* st = lux_drive_instance(processor.poolSlotForInstance(uid));
+            return fxLed(st->config.enabled, st->active_ticks);
+        }
+        case ModuleType::DcBlock:
+        {
+            const LuxDcBlockState* st = lux_dcblock_instance(processor.poolSlotForInstance(uid));
+            return fxLed(st->config.enabled, st->active_ticks);
         }
 
         case ModuleType::Sampler:
@@ -1239,8 +1295,11 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const j
                        ? LedState::Active : LedState::Off;
 
         // SCORE, TIMBRE, MIDI SCORE and VOICE each own a score-player slot
-        // (P5-M4): the LED is the module's ACTIVE (enable) state, not the
-        // transport — ○ deactivated / ● active & playing / ◐ active & stopped.
+        // (P5-M4): ○ deactivated / ● feeding its chains / ◐ active but
+        // injecting nothing. Like the media sources, the LED follows the
+        // REAL flux, not the transport: play, scrub, tail runout — and the
+        // P8 parked hold (VOICE with a generated take drones while stopped,
+        // so its LED stays full exactly like a loaded IMAGE's).
         case ModuleType::Score:
         case ModuleType::Timbre:
         case ModuleType::MidiScore:
@@ -1250,7 +1309,7 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const j
             if (! paramOn(scoreActiveParam(slot)))
                 return LedState::Off;                 // deactivated
             auto* sc = processor.getScoreChannelForSlot(slot);
-            return (sc != nullptr && sc->isScorePlaying()) ? LedState::Active
+            return (sc != nullptr && sc->isScoreFeeding()) ? LedState::Active
                                                            : LedState::Idle;
         }
 
@@ -1262,6 +1321,18 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(ModuleType type, const j
                 return LedState::Off;
             auto* raw = processor.getAPVTS().getRawParameterValue(vsParam(engineSlot, "enabled"));
             return (raw && raw->load() >= 0.5f) ? LedState::Active : LedState::Off;
+        }
+
+        case ModuleType::MidiTap:
+        {
+            // ○ disabled / ● notes were emitted since the last refresh /
+            // ◐ armed but silent (unfed chain, or nothing above threshold).
+            // Same heartbeat idiom as the FX inserts.
+            if (engineSlot < 0)
+                return LedState::Off;
+            auto* st = midi_tap_instance(engineSlot);
+            return fxLed(st ? st->config.enabled : 0,
+                         st ? midi_tap_active_ticks(st) : 0u);
         }
 
         default:
@@ -1292,6 +1363,6 @@ void ChainRackComponent::updateLeds()
     {
         int c = -1, i = -1;
         const ModuleInstance* mi = model.find(blk->getUuid(), c, i);
-        blk->setLed(ledFor(blk->getType(), blk->getUuid(), mi ? mi->slot : -1));
+        blk->setLed(ledFor(*blk, mi ? mi->slot : -1));
     }
 }

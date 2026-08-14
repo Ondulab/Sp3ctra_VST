@@ -4,6 +4,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "../ui/Sp3ctraBarSlider.h"
 #include "../midi/MidiLearnAttachment.h"
 #include <array>
 #include <memory>
@@ -13,7 +14,7 @@
  * @brief Contextual zone-3 PLAY panel for a selected VIDEO SCROLL output module.
  *
  * Shows the Video Scroll display parameters — Mode / Speed / Line Pos / Thickness
- * / Zoom / Fade / Compression + Invert + Color(RGB). There is deliberately NO
+ * / Zoom / Fade / Gamma / Compression + Invert + Color(RGB). There is deliberately NO
  * source selector: the source IS the module's position in the chain.
  *
  * Per-instance: setSlot(slot) rebinds every APVTS attachment to the bank
@@ -23,7 +24,7 @@
 class VideoScrollPage : public juce::Component
 {
 public:
-    static constexpr int kPreferredH = 440;
+    static constexpr int kPreferredH = 472;
 
     explicit VideoScrollPage(Sp3ctraAudioProcessor& proc) : processor_(proc)
     {
@@ -39,6 +40,7 @@ public:
         styleH(thicknessSlider_);
         styleH(zoomSlider_, " x");
         styleH(fadeSlider_);
+        styleH(gammaSlider_);
         styleH(compressSlider_, " fr");
         for (auto* s : sliders()) addAndMakeVisible(*s);
 
@@ -89,6 +91,7 @@ public:
         drawLabel("Thickness",   L.yThickness);
         drawLabel("Zoom",        L.yZoom);
         drawLabel("Fade",        L.yFade);
+        drawLabel("Gamma",       L.yGamma);
         drawLabel("Compression", L.yCompress);
         drawLabel("Invert",      L.yInvert);
         drawLabel("Color",       L.yColor);
@@ -108,16 +111,13 @@ public:
         const Layout L = computeLayout(getWidth());
         const int x = L.ctrlX, w = L.ctrlW;
 
-        const int tbW = juce::jlimit(48, Sp3ctraTheme::kTbStd, w / 3);
-        for (auto* s : sliders())
-            s->setTextBoxStyle(juce::Slider::TextBoxRight, false, tbW, kCH);
-
         modeCombo_     .setBounds(x, L.yMode,      w, kCH);
         speedSlider_   .setBounds(x, L.ySpeed,     w, kCH);
         linePosSlider_ .setBounds(x, L.yLinePos,   w, kCH);
         thicknessSlider_.setBounds(x, L.yThickness, w, kCH);
         zoomSlider_    .setBounds(x, L.yZoom,      w, kCH);
         fadeSlider_    .setBounds(x, L.yFade,      w, kCH);
+        gammaSlider_   .setBounds(x, L.yGamma,     w, kCH);
         compressSlider_.setBounds(x, L.yCompress,  w, kCH);
         invertCombo_   .setBounds(x, L.yInvert,    w, kCH);
         colorButton_   .setBounds(x, L.yColor,     w, kCH);
@@ -136,7 +136,7 @@ private:
     {
         int labelW, ctrlX, ctrlW;
         int secScroll, yMode, ySpeed, yLinePos;
-        int secDisplay, yThickness, yZoom, yFade, yCompress, yInvert, yColor;
+        int secDisplay, yThickness, yZoom, yFade, yGamma, yCompress, yInvert, yColor;
     };
 
     Layout computeLayout(int width) const
@@ -155,23 +155,21 @@ private:
         L.yThickness = L.secDisplay + kStep;
         L.yZoom      = L.secDisplay + 2 * kStep;
         L.yFade      = L.secDisplay + 3 * kStep;
-        L.yCompress  = L.secDisplay + 4 * kStep;
-        L.yInvert    = L.secDisplay + 5 * kStep;
-        L.yColor     = L.secDisplay + 6 * kStep;
+        L.yGamma     = L.secDisplay + 4 * kStep;
+        L.yCompress  = L.secDisplay + 5 * kStep;
+        L.yInvert    = L.secDisplay + 6 * kStep;
+        L.yColor     = L.secDisplay + 7 * kStep;
         return L;
     }
 
-    std::array<juce::Slider*, 6> sliders()
+    std::array<Sp3ctraBarSlider*, 7> sliders()
     {
         return { &speedSlider_, &linePosSlider_, &thicknessSlider_,
-                 &zoomSlider_, &fadeSlider_, &compressSlider_ };
+                 &zoomSlider_, &fadeSlider_, &gammaSlider_, &compressSlider_ };
     }
 
-    static void styleH(juce::Slider& s, const juce::String& suffix = "")
+    static void styleH(Sp3ctraBarSlider& s, const juce::String& suffix = "")
     {
-        s.setSliderStyle(juce::Slider::LinearHorizontal);
-        s.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                          Sp3ctraTheme::kTbStd, Sp3ctraTheme::kTextBoxH);
         if (suffix.isNotEmpty()) s.setTextValueSuffix(suffix);
     }
 
@@ -184,6 +182,7 @@ private:
 
         modeAtt_.reset();  speedAtt_.reset();  linePosAtt_.reset();
         thickAtt_.reset(); zoomAtt_.reset();   fadeAtt_.reset();
+        gammaAtt_.reset();
         compAtt_.reset();  invertAtt_.reset(); colorAtt_.reset();
         learnAtts_.clear();
 
@@ -196,6 +195,7 @@ private:
         thickAtt_   = std::make_unique<SA>(apvts, vsParam(slot_, "thickness"), thicknessSlider_);
         zoomAtt_    = std::make_unique<SA>(apvts, vsParam(slot_, "zoom"),      zoomSlider_);
         fadeAtt_    = std::make_unique<SA>(apvts, vsParam(slot_, "fade"),      fadeSlider_);
+        gammaAtt_   = std::make_unique<SA>(apvts, vsParam(slot_, "gamma"),     gammaSlider_);
         compAtt_    = std::make_unique<SA>(apvts, vsParam(slot_, "compress"),   compressSlider_);
         invertAtt_  = std::make_unique<CA>(apvts, vsParam(slot_, "invertMode"), invertCombo_);
         colorAtt_   = std::make_unique<BA>(apvts, vsParam(slot_, "colorMode"),  colorButton_);
@@ -213,6 +213,7 @@ private:
         learn(thicknessSlider_, "thickness");
         learn(zoomSlider_,      "zoom");
         learn(fadeSlider_,      "fade");
+        learn(gammaSlider_,     "gamma");
         learn(compressSlider_,  "compress");
         learn(invertCombo_,     "invertMode");
         learn(colorButton_,     "colorMode");
@@ -223,13 +224,13 @@ private:
     int slot_ { -1 };
 
     juce::ComboBox  modeCombo_, invertCombo_;
-    juce::Slider    speedSlider_, linePosSlider_, thicknessSlider_,
-                    zoomSlider_, fadeSlider_, compressSlider_;
+    Sp3ctraBarSlider speedSlider_, linePosSlider_, thicknessSlider_,
+                     zoomSlider_, fadeSlider_, gammaSlider_, compressSlider_;
     juce::ToggleButton colorButton_;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> modeAtt_, invertAtt_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   speedAtt_, linePosAtt_,
-        thickAtt_, zoomAtt_, fadeAtt_, compAtt_;
+        thickAtt_, zoomAtt_, fadeAtt_, gammaAtt_, compAtt_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   colorAtt_;
     std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
 

@@ -1,5 +1,8 @@
 #include "VideoMixerComponent.h"
+#include "ModuleCatalog.h"
+#include "../session/MachinePrefs.h"   // detached-window state is machine-scoped
 #include <cmath>
+#include <map>                         // per-chain row-label occurrence counts
 
 //==============================================================================
 // Detached master window — shows the composited master at any size / fullscreen.
@@ -47,12 +50,33 @@ public:
         v->onFullscreenRequested = [this] { toggleFullscreen(); };
         setContentOwned(v, false);
         centreWithSize(800, 600);
+        // Machine-scoped: reopen on the display/bounds the user last used.
+        if (const auto st = MachinePrefs::file().getValue("videoMixWin.state");
+            st.isNotEmpty())
+            restoreWindowStateFromString(st);
         setVisible(true);
     }
 
+    ~MasterWindow() override { saveWindowState(); }
+
     void closeButtonPressed() override { if (onCloseRequested) onCloseRequested(); }
 
-    void toggleFullscreen() { setFullScreen(! isFullScreen()); }
+    void toggleFullscreen()
+    {
+        setFullScreen(! isFullScreen());
+        saveWindowState();
+    }
+
+    /** Bounds + fullscreen → machine.settings (the "open" flag is written by
+     *  the explicit open/close paths only, so an app quit with the window up
+     *  reopens it on the next launch). */
+    void saveWindowState()
+    {
+        auto& prefs = MachinePrefs::file();
+        prefs.setValue("videoMixWin.fullscreen", isFullScreen());
+        if (! isFullScreen())
+            prefs.setValue("videoMixWin.state", getWindowStateAsString());
+    }
 
     std::function<void()> onCloseRequested;
 };
@@ -422,6 +446,17 @@ VideoMixerComponent::VideoMixerComponent(Sp3ctraAudioProcessor& proc)
     renderer_ = std::make_unique<Renderer>(proc);
     refreshActiveSlots();
     startTimerHz(kFps);
+
+    // Reopen the detached master window where the user left it (machine
+    // prefs). Editor rebuilds (session restore) pass through here too — the
+    // outgoing instance saved its bounds in ~MasterWindow.
+    if (MachinePrefs::file().getBoolValue("videoMixWin.open", false))
+    {
+        toggleDetachedWindow();
+        if (window_ != nullptr
+            && MachinePrefs::file().getBoolValue("videoMixWin.fullscreen", false))
+            window_->toggleFullscreen();
+    }
 }
 
 VideoMixerComponent::~VideoMixerComponent()
@@ -439,7 +474,11 @@ void VideoMixerComponent::refreshActiveSlots()
     if (slots == activeSlots_)
         return;                 // unchanged — keep existing cores/attachments
     activeSlots_ = slots;
-    renderer_->setSlots(slots);
+    std::vector<int> slotList;
+    slotList.reserve(activeSlots_.size());
+    for (const auto& [slot, chain] : activeSlots_)
+        slotList.push_back(slot);
+    renderer_->setSlots(slotList);   // compositing follows the rack order too
     rebuildStrip();
 }
 
@@ -448,13 +487,22 @@ void VideoMixerComponent::rebuildStrip()
     voices_.clear();
     auto& apvts = processor_.getAPVTS();
 
-    for (int slot : activeSlots_)
+    // Per-chain occurrence counts, to suffix rows of a chain hosting SEVERAL
+    // VideoScroll probes ("CHAIN 2a" / "CHAIN 2b") — a bare duplicate label
+    // would leave two identical rows with different faders.
+    std::map<int, int> perChain, seen;
+    for (const auto& [slot, chain] : activeSlots_)
+        ++perChain[chain];
+
+    for (const auto& [slot, chain] : activeSlots_)
     {
         auto v = std::make_unique<Voice>();
-        v->slot = slot;
+        v->slot  = slot;
+        v->label = "CHAIN " + juce::String(chain + 1);
+        if (perChain[chain] > 1)
+            v->label += juce::String::charToString((juce::juce_wchar) ('a' + seen[chain]++));
 
-        v->level.setSliderStyle(juce::Slider::LinearHorizontal);
-        v->level.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        v->level.setTextBoxStyle(juce::Slider::NoTextBox, true, 0, 0);
         v->level.setRange(0.0, 1.0, 0.01);
         addAndMakeVisible(v->level);
 
@@ -492,6 +540,9 @@ void VideoMixerComponent::layoutStrip()
     const int stripH = (n > 0) ? (kStripPad + n * (kRowH + kRowGap)) : 0;
 
     stripArea_  = r.removeFromTop(stripH);
+    // Fader rows follow the strip area, which stops stretching with a very
+    // wide zone (paint() walks the same rect, so labels stay aligned).
+    stripArea_.setWidth(juce::jmin(stripArea_.getWidth(), Sp3ctraTheme::kMaxContentW));
 
     // The preview is kept square so it reads correctly whatever the scroll
     // direction is. Fit the largest centred square inside the remaining area.
@@ -499,13 +550,13 @@ void VideoMixerComponent::layoutStrip()
     const int side = juce::jmin(avail.getWidth(), avail.getHeight());
     masterArea_ = juce::Rectangle<int>(0, 0, side, side).withCentre(avail.getCentre());
 
-    // Lay out each fader row: [label 38][level slider …][blend 72]
+    // Lay out each fader row: [label kLabelW][level slider …][blend 72]
     auto strip = stripArea_.reduced(kStripPad, kStripPad / 2);
     for (auto& v : voices_)
     {
         auto row = strip.removeFromTop(kRowH);
         strip.removeFromTop(kRowGap);
-        row.removeFromLeft(40);                      // label drawn in paint()
+        row.removeFromLeft(kLabelW);                 // label drawn in paint()
         v->blend.setBounds(row.removeFromRight(72).reduced(0, 1));
         row.removeFromRight(6);
         v->level.setBounds(row.reduced(0, 2));
@@ -523,7 +574,10 @@ void VideoMixerComponent::renderMaster(juce::Graphics& g, juce::Rectangle<int> d
     if (frame.isValid())
     {
         g.setImageResamplingQuality(juce::Graphics::highResamplingQuality);
-        g.drawImage(frame, dest.toFloat(), juce::RectanglePlacement::stretchToFit);
+        // Uniform fit (letterbox on white): the published frame's aspect can lag
+        // the destination (resize in flight, square column preview vs detached
+        // window) — never crop or distort it.
+        g.drawImage(frame, dest.toFloat(), juce::RectanglePlacement::centred);
     }
 }
 
@@ -586,9 +640,9 @@ void VideoMixerComponent::paint(juce::Graphics& g)
     {
         auto row = strip.removeFromTop(kRowH);
         strip.removeFromTop(kRowGap);
-        g.setColour(juce::Colour(0xff5ad0c8));
-        g.drawText("OUT " + juce::String(v->slot + 1),
-                   row.removeFromLeft(40).reduced(2, 0),
+        g.setColour(moduleColour(ModuleType::VideoScroll));
+        g.drawText(v->label,
+                   row.removeFromLeft(kLabelW).reduced(2, 0),
                    juce::Justification::centredLeft, false);
     }
 }
@@ -663,10 +717,14 @@ void VideoMixerComponent::toggleDetachedWindow()
             juce::MessageManager::callAsync([this]
             {
                 window_.reset();
+                // Explicit close — do NOT reopen on the next launch.
+                MachinePrefs::file().setValue("videoMixWin.open", false);
                 if (onWindowStateChanged) onWindowStateChanged();
             });
         };
     }
+    // Explicit open/close (or the ctor reopen, which re-asserts true).
+    MachinePrefs::file().setValue("videoMixWin.open", window_ != nullptr);
     if (onWindowStateChanged) onWindowStateChanged();
 }
 

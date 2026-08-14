@@ -59,6 +59,17 @@ struct SpectroCalibration
  *  {valid=false} for non-Sp3ctra images (arbitrary user PNGs) or non-PNG. */
 SpectroCalibration readCalibration(const juce::File& pngFile);
 
+/** Same, from an in-memory PNG (e.g. a persisted session take). */
+SpectroCalibration readCalibration(const void* pngData, size_t numBytes);
+
+/** PNG-encodes @p img with the "Sp3ctraCal" chunk embedded — the in-memory
+ *  counterpart of exportImage(asPng=true, cal). The bytes round-trip through
+ *  readCalibration() + ScorePlayerService::buildFramesFromImage back to the
+ *  exact frames the generator loaded. Empty block on invalid image/encoder
+ *  failure or a non-valid calibration (nothing to rebuild from). */
+juce::MemoryBlock encodeCalibratedPng(const juce::Image& img,
+                                      const SpectroCalibration& cal);
+
 /** Loaded-file probe shown in the UI before generation. */
 struct WavInfo
 {

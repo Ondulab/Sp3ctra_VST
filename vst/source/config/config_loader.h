@@ -22,21 +22,23 @@ enum {
   LUXSTRAL_PHASE_MODE_BREATH = 4,  /* reed/flute: fresh random per attack     */
 };
 
-/* ── Per-OUT (send) conditioning bank — synth-split P1 ─────────────────────
- * One entry per OUT-module pool slot (0..7). An OUT module conditions its
- * chain's image flux before sending it to the global synthesis engine.
- * Values come from the luxstralOut{N}_* / luxsynthOut{N}_* / luxwaveOut{N}_*
- * APVTS banks — the ONLY conditioning authority (the legacy global fields
- * were deleted on 2026-07-12). One bank slot per OUT-module instance.
- * contrast_min / range_db are LuxStral-only (ignored by the other banks). */
+/* ── Per-OUT (send) bank — synth-split P1 ──────────────────────────────────
+ * One entry per OUT-module pool slot (0..7). Purge 2026-08-05: the per-OUT
+ * conditioning KNOBS are gone — flux conditioning is the chain's business
+ * (LEVELS + DC modules). applyConfigurationToCore writes the CANONICAL
+ * decode into every slot: negative=1 (intrinsic to the inverse-dB law),
+ * dc_blocking=0, gamma=1.0, intensity=1.0. The fields stay so the pipeline
+ * code is untouched; only range_db (global SETUP knob luxstralRangeDb) and
+ * enabled (per-send rack LED) are still user-driven. (2026-08-13: the last
+ * per-send knob, contrast_min, left for the LEVELS module's CONTRAST — the
+ * variance dimming now happens in the visual domain, the sound follows.) */
 #define LUX_OUT_MAX_SLOTS 8
 typedef struct {
-    int   negative;      /* Negative (inversion) toggle                     */
-    int   dc_blocking;   /* DC blocking (per-line mean removal) toggle      */
-    float gamma;         /* photographic gamma pow(x, 1/g); 1.0 = off       */
-    float contrast_min;  /* LuxStral: contrast floor for blurred images     */
-    float range_db;      /* LuxStral: inverse-dB decode window (Range dB)   */
-    float intensity;     /* pre-engine mix weight of this send (1.0=unity)  */
+    int   negative;      /* inversion — ALWAYS 1 (canonical decode)         */
+    int   dc_blocking;   /* per-line mean removal — ALWAYS 0 (DC module)    */
+    float gamma;         /* photographic gamma — ALWAYS 1.0 (LEVELS module) */
+    float range_db;      /* LuxStral: inverse-dB decode window (SETUP knob) */
+    float intensity;     /* pre-engine mix weight — ALWAYS 1.0 (unity)      */
     int   enabled;       /* per-send power (rack LED); off = silent send    */
 } lux_out_params_t;
 
@@ -62,11 +64,10 @@ typedef struct {
     int physiological_filter_enabled;       // Enable/disable A-weighting inverse compensation (0/1)
     float physiological_correction_depth;   // Correction depth in dB-domain (0.0=none, 1.0=full, default 0.3)
     
-    // Image processing parameters - LUXSTRAL SYNTHESIS
-    // (inversion/gamma/contrast_min are per-OUT bank fields now — see
-    // lux_out_params_t; only the contrast-scan tuning stays global.)
-    float additive_contrast_stride;            // Pixel sampling stride for optimization
-    float additive_contrast_adjustment_power;  // Exponent for adjusting the contrast curve
+    // Contrast-curve exponent — shared by the LEVELS module's CONTRAST knob
+    // (lux_drive contrast_power); the audio-side variance auto-volume it
+    // originally served was removed 2026-08-13.
+    float additive_contrast_adjustment_power;
 
     // Envelope slew parameters (runtime configurable; defaults from compile-time defines)
     float tau_up_base_ms;             // Base attack time in milliseconds
@@ -158,8 +159,6 @@ typedef struct {
 
     /* sampler_gamma : gamma applied to LuxSampler playback frames (1.0=off)  */
     float sampler_gamma;
-    /* sampler_contrast_min : min intensity floor for sampler frames            */
-    float sampler_contrast_min;
     /* sampler_freeze_mode : 0=PLAY, 1=PAUSE (freeze sampler last frame)        */
     int sampler_freeze_mode;
 
@@ -179,21 +178,19 @@ typedef struct {
     /* ── Inverse-dB decode law — ALWAYS ON (single decode chain) ─────────────
      * The grey → amplitude decode law is the exact inverse of the SCORE
      * encoder's linear-in-dB brightness map (score_engine.c):
-     * amplitude = 10^((x−1)·range/20), applied AFTER the gamma stage (gamma
-     * 1.0 = pure dB decode).
-     * No toggle, no forcing — every stage keeps its own knob.  The exact
-     * inverse of the SCORE encoder is recovered PER SEND with the OUT bank:
-     *   Negative ON · DC Blocking OFF · Gamma 1.0 · Contrast Min 1.0 ·
-     *   Attack 2 ms · Release 6 ms · Equal-Loudness OFF
-     * (decay_freq_beta = 0 and phase reset are already law-independent).
-     * The dB window is the PER-OUT range_db (luxstralOut{N}_rangeDb) and MUST
-     * match the dynamicRangeDB the score was generated with (default 50).    */
+     * amplitude = 10^((x−1)·range/20). Since the 2026-08-05 purge the OUT
+     * stage is CANONICAL by construction (Negative ON · DC OFF · Gamma 1.0 —
+     * no knobs left); the encoder inverse only needs Contrast Min 1.0 ·
+     * Attack 2 ms · Release 6 ms · Equal-Loudness OFF (decay_freq_beta = 0
+     * and phase reset are already law-independent).
+     * The dB window is the GLOBAL SETUP knob (luxstralRangeDb → range_db of
+     * every send) and MUST match the dynamicRangeDB the score was generated
+     * with (default 50).                                                     */
 
-    /* ── Per-OUT conditioning banks (synth-split P1) ─────────────────────────
-     * Written from the luxstralOut{N}_* / luxsynthOut{N}_* / luxwaveOut{N}_*
-     * APVTS banks by applyConfigurationToCore(); read by the pipeline config
-     * builders (image_pipeline.c), preprocess_luxsynth() and the LuxWave feed.
-     * The ONLY conditioning authority (legacy globals deleted 2026-07-12).   */
+    /* ── Per-OUT banks (synth-split P1) ──────────────────────────────────────
+     * Written by applyConfigurationToCore() (canonical decode + the surviving
+     * user knobs — see lux_out_params_t above); read by the pipeline config
+     * builders (image_pipeline.c), preprocess_luxsynth() and the LuxWave feed. */
     lux_out_params_t luxstral_out[LUX_OUT_MAX_SLOTS];
     lux_out_params_t luxsynth_out[LUX_OUT_MAX_SLOTS];
     lux_out_params_t luxwave_out[LUX_OUT_MAX_SLOTS];

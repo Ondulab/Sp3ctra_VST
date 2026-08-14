@@ -51,7 +51,14 @@ enum class ChainBlockId
     Voice,                             // UTILS — TTS vocal-spectrum generator (appended: ordinals persist)
     Harmonize,                         // FX — SCALE quantizer insert (appended: ordinals persist)
     LuxGrain,                          // OUT — "→ LUXGRAIN" granular send (appended: ordinals persist)
+    MidiTap,                           // OUT — MIDI note probe (appended: ordinals persist)
+    Centroid,                          // FX — CENTROID mass→barycentre insert (appended: ordinals persist)
+    Drive,                             // FX — LEVELS gain/saturation/floor insert (appended: ordinals persist)
+    DcBlock,                           // FX — DC BLOCK per-line mean removal insert (appended: ordinals persist)
     None                               // empty rack — no module selected
+    // NOTE: appending shifts None's ordinal. A session that persisted the OLD
+    // None decodes as DcBlock, but such a session has an empty rack so
+    // hasBlock(DcBlock) is false and the editor falls back to firstBlockId().
 };
 
 /** Maps a selection key to its module type (sources → Sp3ctra). */
@@ -147,6 +154,10 @@ private:
                            public juce::SettableTooltipClient
     {
     public:
+        // Blocks inherit moduleColour (= the category colour), matching the
+        // catalogue chips. The two racks stay visually distinct by TREATMENT:
+        // chips are filled/outlined in the colour, blocks keep a dark body
+        // with the colour on border + text.
         BlockComponent(ModuleType t, juce::Uuid uidIn)
             : type(t), uid(uidIn), name(moduleDisplayName(t)),
               colour(moduleColour(t)), enableParam(moduleEnableParam(t))
@@ -163,6 +174,16 @@ private:
         juce::String getEnableParam() const noexcept { return enableParam; }
 
         void setLed(LedState s)    { if (led != s)       { led = s;        repaint(); } }
+
+        /** Sample an engine's activity heartbeat: true when it moved since the
+         *  previous LED refresh, i.e. the module produced something. Latches
+         *  the new value — one call per refresh, from updateLeds(). */
+        bool ledTickMoved(juce::uint32 t) noexcept
+        {
+            const bool moved = (t != ledTick);
+            ledTick = t;
+            return moved;
+        }
         void setSelected(bool sel) { if (selected != sel) { selected = sel; repaint(); } }
 
         /** Override the APVTS enable param this block's LED toggles — e.g. a
@@ -193,6 +214,7 @@ private:
         juce::Colour colour;
         juce::String enableParam;
         LedState     led       { LedState::Off };
+        juce::uint32 ledTick   { 0 };   ///< last engine heartbeat sampled
         bool         selected  { false };
         bool         removable { true };
         bool         overDot   { false };
@@ -232,9 +254,10 @@ private:
     void removeInstance(const juce::Uuid& id);
 
     void updateLeds();
-    // uid: the module instance (pool-state lookup for Pitch/Mask/FX).
+    // blk: the block being refreshed — its uuid keys the pool-state lookup
+    //      (Pitch/Mask/FX) and it carries the FX activity-heartbeat sample.
     // engineSlot: per-instance engine index (LuxStral/Sampler A=0/B=1); -1 = n/a.
-    LedState ledFor(ModuleType type, const juce::Uuid& uid, int engineSlot = -1) const;
+    LedState ledFor(BlockComponent& blk, int engineSlot = -1) const;
 
     void selectInstance(const juce::Uuid& id, bool notify);
     juce::Uuid   firstInstanceId() const;

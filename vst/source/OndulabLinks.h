@@ -13,7 +13,9 @@ namespace OndulabLinks
 constexpr const char* kWebsiteUrl   = "https://www.ondulab.com";
 constexpr const char* kDownloadsUrl = "https://www.ondulab.com/telechargement.html";
 constexpr const char* kBuyUrl       = "https://www.ondulab.com/acheter.html";
-constexpr const char* kDonateUrl    = "https://paypal.me/Ondulab";
+// Don désactivé : paypal.me/Ondulab ouvrait un paiement à montant nul. À
+// réactiver — avec l'URL de don Ondulab, pas PayPal — quand elle existera.
+// constexpr const char* kDonateUrl = "https://paypal.me/Ondulab";
 constexpr const char* kLicenseUrl   = "https://www.gnu.org/licenses/gpl-3.0.html";
 constexpr const char* kSourceUrl    = "https://github.com/Ondulab/Sp3ctra_VST";
 constexpr const char* kReleasesUrl  = "https://github.com/Ondulab/Sp3ctra_VST/releases";

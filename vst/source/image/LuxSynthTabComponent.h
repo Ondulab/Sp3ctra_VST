@@ -25,12 +25,15 @@
  */
 #pragma once
 
+#include "../ui/ModuleCatalog.h"
+
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
 #include "../ui/AudioPanelWidgets.h"      // AudioPanelLayout + AudioPanelUI (shared look)
 #include "../ui/EnvelopeEditorComponent.h"
+#include "../ui/Sp3ctraBarSlider.h"
 #include "VisualizerMode.h"
 
 class LuxSynthTabComponent : public juce::Component
@@ -45,13 +48,6 @@ public:
         initLabel(volumeLabel, "Volume");
         initSlider(volumeSlider);
         volumeAttach.reset(new SldAttach(apvts, "luxsynthVolume", volumeSlider));
-
-        // ── IMAGE — the per-OUT conditioning (Negative/DC/Gamma/Intensity)
-        // moved to the OUT/send page (synth-split P2). Only the SAMPLER-stream
-        // contrast floor remains here (samplerContrastMin — not per-OUT).
-        initLabel(contrastMinLabel, "Contrast Min");
-        initSlider(contrastMinSlider);
-        contrastMinAttach.reset(new SldAttach(apvts, "samplerContrastMin", contrastMinSlider));
 
         // ── OSCILLATORS — additive voice: volume ADSR + oscillator count ─────
         volEnv = std::make_unique<EnvelopeEditorComponent>(
@@ -135,7 +131,6 @@ public:
             learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, c, id));
         };
         learn(volumeSlider,        "luxsynthVolume");
-        learn(contrastMinSlider,   "samplerContrastMin");
         learn(numOscSlider,        "luxsynthNumOscillators");
         learn(blobThreshSlider,    "lxBlobThreshold");
         learn(blobMinWidthSlider,  "lxBlobMinWidth");
@@ -166,7 +161,7 @@ public:
 
         // ── Module identity chip — mirrors the LuxStral engine chip ─────────
         {
-            const juce::Colour tagCol(0xffb07af0);   // LUXSYNTH rack accent
+            const juce::Colour tagCol = moduleColour(ModuleType::LuxSynth);   // inherited module colour
             const auto chip = L.moduleChip.toFloat();
             g.setColour(tagCol.withAlpha(0.12f));
             g.fillRoundedRectangle(chip, 4.f);
@@ -177,11 +172,6 @@ public:
             g.drawText("LUXSYNTH  --  FFT ADDITIVE", L.moduleChip,
                        juce::Justification::centred);
         }
-
-        // ── LEFT: IMAGE ─────────────────────────────────────────────────────
-        drawSectionBg(g, L.imgBg.getX(), L.imgBg.getY(), L.imgBg.getWidth(), L.imgBg.getHeight());
-        drawBadge(g, L.imgBadge.getX(), L.imgBadge.getY(), L.imgBadge.getWidth(),
-                  0xff20303c, 0xff7aade0, "IMAGE");
 
         // ── LEFT: OSCILLATORS ───────────────────────────────────────────────
         drawSectionBg(g, L.oscBg.getX(), L.oscBg.getY(), L.oscBg.getWidth(), L.oscBg.getHeight());
@@ -227,8 +217,6 @@ public:
         volumeLabel.setBounds(L.volLabel);
         volumeSlider.setBounds(L.volSlider);
 
-        contrastMinLabel.setBounds(L.contrastLabel); contrastMinSlider.setBounds(L.contrastSlider);
-
         volEnv->setBounds(L.oscEnv);
         AudioPanelUI::placeKnob(numOscSlider, L.oscGridX, L.oscGridW, L.oscGridY, 0);
 
@@ -268,13 +256,12 @@ private:
     static constexpr int kEnvH      = AudioPanelLayout::kEnvH;        // 124
     static constexpr int kEnvGap    = AudioPanelLayout::kEnvGap;      // 10
 
-    static constexpr int kImgSecH = kBadgeH + kBadgeGap + (1 * kRowH) + kSecPadB;   // Contrast Min only
     static constexpr int kOscSecH = kBadgeH + kBadgeGap + kCapH + kEnvH + kEnvGap + kKnobH + kSecPadB; // 254
     static constexpr int kAnaSecH = kBadgeH + kBadgeGap + kCapH + (4 * kRowH + 3 * kRowGap) + kDivGap
                                   + kCapH + (2 * kRowH + kRowGap) + kSecPadB;                        // 220
     static constexpr int kFltSecH = kBadgeH + kBadgeGap + kCapH + kEnvH + kEnvGap + kKnobH + kSecPadB; // 254
 
-    static constexpr int kLeftColH  = kHeaderH + kSecGapV + kImgSecH + kSecGapV + kOscSecH;          // 414
+    static constexpr int kLeftColH  = kHeaderH + kSecGapV + kOscSecH;
     static constexpr int kRightColH = kHeaderH + kSecGapV + kAnaSecH + kSecGapV + kFltSecH;          // 524
 
 public:
@@ -289,7 +276,6 @@ private:
         int gx = 0, gw = 0, colW = 0, leftX = 0, rightX = 0;
         // left
         juce::Rectangle<int> volStrip, volLabel, volSlider;
-        juce::Rectangle<int> imgBg, imgBadge, contrastLabel, contrastSlider;
         juce::Rectangle<int> oscBg, oscBadge, oscEnv;
         int oscCaptionY = 0, oscGridX = 0, oscGridW = 0, oscGridY = 0;
         // right
@@ -327,19 +313,12 @@ private:
             }
             y += kHeaderH + kSecGapV;
 
-            // IMAGE — Contrast Min (sampler stream floor) only; the per-OUT
-            // conditioning moved to the OUT/send page (synth-split P2).
-            L.imgBg    = { leftX - 2, y, colW + 4, kImgSecH };
-            L.imgBadge = { leftX, y, colW, kBadgeH };
-            int cy = y + kBadgeH + kBadgeGap;
-            L.contrastLabel  = { cx, cy, kLabelW, kRowH };
-            L.contrastSlider = { cx + kLabelW + gap, cy, cw - kLabelW - gap, kRowH };
-            y += kImgSecH + kSecGapV;
-
-            // OSCILLATORS
+            // OSCILLATORS — directly under the Volume strip (the IMAGE section
+            // died with samplerContrastMin: conditioning is the chain's
+            // business — LEVELS carries the CONTRAST floor now).
             L.oscBg    = { leftX - 2, y, colW + 4, kOscSecH };
             L.oscBadge = { leftX, y, colW, kBadgeH };
-            cy = y + kBadgeH + kBadgeGap;
+            int cy = y + kBadgeH + kBadgeGap;
             L.oscCaptionY = cy;
             cy += kCapH;
             L.oscEnv = { cx, cy, cw, kEnvH };
@@ -403,17 +382,14 @@ private:
         addAndMakeVisible(lbl);
     }
 
-    void initSlider(juce::Slider& s)
+    void initSlider(Sp3ctraBarSlider& s)
     {
-        s.setSliderStyle(juce::Slider::LinearHorizontal);
-        s.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, Sp3ctraTheme::kControlH);
         addAndMakeVisible(s);
     }
 
     // ── Controls ────────────────────────────────────────────────────────────
-    juce::Slider       volumeSlider;                               // master (left top)
-    juce::Label        volumeLabel, contrastMinLabel;
-    juce::Slider       contrastMinSlider;
+    Sp3ctraBarSlider   volumeSlider;                               // master (left top)
+    juce::Label        volumeLabel;
 
     // OSCILLATORS (left)
     std::unique_ptr<EnvelopeEditorComponent> volEnv;
@@ -421,10 +397,10 @@ private:
 
     // ANALYSIS — blob detection + FFT (right)
     juce::Label    blobThreshLabel, blobMinWidthLabel, blobMergeGapLabel, blobColorSplitLabel;
-    juce::Slider   blobThreshSlider, blobMinWidthSlider, blobMergeGapSlider, blobColorSplitSlider;
+    Sp3ctraBarSlider blobThreshSlider, blobMinWidthSlider, blobMergeGapSlider, blobColorSplitSlider;
     juce::Label    fftBinsLabel, fftSmoothingLabel;
     juce::ComboBox fftBinsCombo;
-    juce::Slider   fftSmoothingSlider;
+    Sp3ctraBarSlider fftSmoothingSlider;
 
     // FILTER & LFO (right)
     std::unique_ptr<EnvelopeEditorComponent> fltEnv;
@@ -436,7 +412,7 @@ private:
     using CmbAttach = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
 
     std::unique_ptr<CmbAttach> fftBinsAttach;
-    std::unique_ptr<SldAttach> volumeAttach, contrastMinAttach,
+    std::unique_ptr<SldAttach> volumeAttach,
                                numOscAttach,
                                blobThreshAttach, blobMinWidthAttach,
                                blobMergeGapAttach, blobColorSplitAttach,

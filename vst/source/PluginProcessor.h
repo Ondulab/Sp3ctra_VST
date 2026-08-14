@@ -13,6 +13,8 @@
 #include "session/Sp3ctraPaths.h"   // PathKeys:: + last-dir chooser memory
 #include <map>                  // chainPoolSlots_ (stable chain → pool-slot binding)
 #include <vector>               // activeVideoSlots()
+#include <utility>              // std::pair — activeVideoSlots() {slot, chain}
+#include <array>                // midiTapSinks_ (one per probe slot)
 
 // M9 — IMAGE / VIDEO / CAMERA source engines (owned here, UI binds to them)
 class ImageSourceEngine;
@@ -24,6 +26,7 @@ class SessionManager;   // working-session (project) persistence — session/Ses
 // VIDEO MIX + master-audio recorder (AVAssetWriter → HEVC .mov). Owned here so
 // the RT audio tap in processBlock can feed it and it outlives the editor.
 class VideoRecorder;
+class MidiTapSink;
 
 // C headers for RT profiling
 extern "C" {
@@ -144,10 +147,18 @@ public:
     void clearLuxGrainSample();
     const juce::String& luxgrainSamplePath() const { return luxgrainSamplePath_; }
 
-    /** Slots (0..7) of every VIDEO SCROLL output instance currently patched into
-     *  a chain, ascending. Drives the right-band mixer's dynamic voice list.
+    /** Every VIDEO SCROLL output instance currently patched into a chain, as
+     *  {slot 0..7, chainIdx} pairs in CHAIN ORDER (rack top→bottom, then
+     *  position inside the chain). Drives the right-band mixer's dynamic voice
+     *  list: row order and compositing follow the rack, and each row is
+     *  labelled by its host chain ("CHAIN n"), not by its pool slot.
      *  Message-thread only (reads the editable chain model). */
-    std::vector<int> activeVideoSlots() const;
+    std::vector<std::pair<int, int>> activeVideoSlots() const;
+
+    /** Slots of every MIDI TAP instance currently in a chain, ascending.
+     *  Drives the right-band MIDI MIX strip (one row per probe) — pure model
+     *  read, no plan and no APVTS, like activeVideoSlots(). */
+    std::vector<int> activeMidiTapSlots() const;
 
     /** UI hook (message thread only): set by the editor, cleared in its
      *  destructor, invoked after a full state restore so an OPEN editor
@@ -227,6 +238,23 @@ public:
         return slot >= 0 && slot < 8
             && ((scoreSlotsPresentMask_ >> slot) & 1u) != 0;
     }
+    /** P7 — fired (message thread) when a score-player pool slot loses its
+     *  module: the slot is about to be reused by the NEXT score-family module
+     *  placed anywhere, so every per-instance store keyed by it (the generator
+     *  pages' documents, the SCORE settings + take) must be wiped. Without
+     *  this, adding a SCORE to chain 2 would inherit the file and settings of
+     *  a SCORE deleted from chain 1. Set by the editor. */
+    std::function<void(int slot)> onScoreSlotReleased;
+
+    /** P7 — is pool slot @p slot owned by a placed module of type @p t? The
+     *  per-instance transport banks route through this: a bank whose instance
+     *  is absent from the rack drives nothing (its value is still remembered).
+     *  Any thread (atomic map maintained by deriveAndPublishChainPlan). */
+    bool scoreSlotHostsType(int slot, ModuleType t) const noexcept
+    {
+        return slot >= 0 && slot < ScorePlayerService::kMaxSlots
+            && scoreSlotType_[slot].load(std::memory_order_acquire) == (int) t;
+    }
 
     // M9 — IMAGE / VIDEO / CAMERA source engines (message-thread accessors)
     /** P5-M3 — one IMAGE engine per instance slot (0..7); slot 0 = legacy. */
@@ -243,9 +271,13 @@ public:
         return cameraSources_[(size_t) juce::jlimit(0, 7, slot)].get();
     }
 
-    /** Persisted camera device name (restored/reopened on session load). */
+    /** Persisted camera device name (restored/reopened on session load).
+     *  Lives outside the APVTS → mark the session dirty explicitly. */
     void setCameraDeviceName(int slot, const juce::String& n)
-    { cameraDeviceNames_[(size_t) juce::jlimit(0, 7, slot)] = n; }
+    {
+        cameraDeviceNames_[(size_t) juce::jlimit(0, 7, slot)] = n;
+        if (sessions_) sessions_->markStateDirty();
+    }
     juce::String getCameraDeviceName(int slot) const
     { return cameraDeviceNames_[(size_t) juce::jlimit(0, 7, slot)]; }
 
@@ -254,7 +286,19 @@ public:
     // Owned here so the PLAY page (Generate) and the SETUP panel (parameters)
     // edit the SAME settings. NOT in the APVTS (offline, not host-automatable).
     // -------------------------------------------------------------------------
-    ScoreSettings& getScoreSettings() noexcept { return scoreSettings_; }
+    /** P7 — one settings block PER SCORE INSTANCE (player-pool slot). The
+     *  no-argument overload returns the block of the instance the UI currently
+     *  views, so the PLAY page and the SETUP panel always edit the same one
+     *  and selecting another SCORE swaps both at once. */
+    ScoreSettings& getScoreSettings(int slot) noexcept
+    { return scoreSettings_[(size_t) juce::jlimit(0, ScorePlayerService::kMaxSlots - 1, slot)]; }
+    ScoreSettings& getScoreSettings() noexcept { return getScoreSettings(scoreUiSlot_); }
+
+    /** Instance whose SCORE settings / WAV the UI is editing. Pushed by the
+     *  editor when a SCORE module is selected (P7). */
+    void setScoreUiSlot(int slot) noexcept
+    { scoreUiSlot_ = juce::jlimit(0, ScorePlayerService::kMaxSlots - 1, slot); }
+    int  getScoreUiSlot() const noexcept { return scoreUiSlot_; }
 
     // -------------------------------------------------------------------------
     // SCORE source-audio preview — auditions the selected WAV region through the
@@ -284,8 +328,26 @@ public:
 
     /** Path of the WAV last loaded in the SCORE PLAY page. Persisted in the
      *  APVTS state blob so the page reloads it on the next launch. */
-    void         setScoreWavPath(const juce::String& p) { scoreWavPath = p; }
-    juce::String getScoreWavPath()                const { return scoreWavPath; }
+    void setScoreWavPath(int slot, const juce::String& p)
+    {
+        scoreWavPath[(size_t) juce::jlimit(0, ScorePlayerService::kMaxSlots - 1, slot)] = p;
+        if (sessions_) sessions_->markStateDirty();   // root prop, outside the APVTS tree
+    }
+    juce::String getScoreWavPath(int slot) const
+    { return scoreWavPath[(size_t) juce::jlimit(0, ScorePlayerService::kMaxSlots - 1, slot)]; }
+    void         setScoreWavPath(const juce::String& p) { setScoreWavPath(scoreUiSlot_, p); }
+    juce::String getScoreWavPath()                const { return getScoreWavPath(scoreUiSlot_); }
+
+    /** P9 — persisted generated take of score pool slot @p slot: the exact
+     *  calibrated PNG its frames were built from (empty = no take). Captured
+     *  on every loadScoreFramesFromImage, embedded in the DAW blob
+     *  (captureFullState SCORE_TAKES) and written as takes/slotN.png sidecars
+     *  by the SessionManager. Message thread only. */
+    const juce::MemoryBlock& getScoreTakePng(int slot) const
+    {
+        return scoreTakePng_[(size_t) juce::jlimit(
+            0, ScorePlayerService::kMaxSlots - 1, slot)];
+    }
 
     /** Musical frequency range (Hz) driven by LuxStral's Tuning + Root Note +
      *  Octaves (the values LuxStral itself uses). */
@@ -414,6 +476,38 @@ public:
     /** Render thread: hand the latest composite to the recorder (no-op if idle). */
     void pushRecordVideoFrame(const juce::Image& composite, double tSeconds);
 
+    // ── MIDI MIX capture — one .mid per ARMED probe, all sharing ONE t0 so the
+    // files align on a single DAW timeline. Owned by the processor (like the
+    // video recorder) so REC survives closing the editor. Message thread.
+    /** Arm the master transport and open one file per armed probe in `dir`.
+     *  Returns false + fills `err` if nothing could be opened. */
+    bool startMidiCapture(const juce::File& dir, const juce::String& stem,
+                          juce::String& err);
+    /** Stop every take, release held notes and write the files. Safe if idle. */
+    void stopMidiCapture();
+    bool isMidiCapturing() const noexcept;
+    /** Seconds since the master t0 (0 when idle) — the MIDI MIX time readout. */
+    double midiCaptureElapsed() const noexcept;
+    /** Note-ons written across every open take. */
+    int  midiCaptureNoteCount() const noexcept;
+    /** Re-open the real-time port of every probe ("" = none, "Virtual" = a
+     *  virtual source per probe, else a device name). */
+    void setMidiTapDestination(const juce::String& deviceName);
+    juce::String midiTapDestination() const;
+    /** Last error surfaced by any sink (empty when clean). */
+    juce::String midiTapLastError() const;
+
+private:
+    /** Lazily create the sink of `slot` and push the current channel/latency
+     *  settings onto it. Message thread. */
+    MidiTapSink* midiTapSink(int slot);
+    /** Sink C: append every due MIDI TAP event to the plugin's MIDI output bus.
+     *  AUDIO THREAD ONLY — owns busCursor_/busHeld_/busGen_ exclusively. */
+    void drainMidiTapToBus(juce::MidiBuffer& out, int numSamples);
+    void flushBusHeld(juce::MidiBuffer& out, int slot, int ch);
+
+public:
+
     /** AUDIO MIX — number of OUT sends placed per engine across all chains
      *  (deriveAndPublishChainPlan). 0 = the engine is hidden from the mixer
      *  AND its render is skipped entirely (zero-CPU contract). */
@@ -502,6 +596,10 @@ public:
      *  thread). Called after a legacy bank import so labels/params restored
      *  from the bank file are overridden by the newer state values. */
     void applySamplerParamsFromState();
+    /** Machine-scoped params (LINK/UDP, device IP, DPI, log level, workers,
+     *  MIDI-follow) override the restored blob's values — see MachinePrefs.h.
+     *  Called at the end of every state restore (session AND DAW blob). */
+    void applyMachineParamOverrides();
 
 private:
 
@@ -567,6 +665,11 @@ private:
      *  by getScoreChannel() — atomics so the transport mirror in the timer
      *  and MIDI-mapped param changes need no model lock. */
     std::atomic<int> scoreFamilySlot_[4] { {-1}, {-1}, {-1}, {-1} };
+    /** P7 — inverse map: ModuleType hosted by each pool slot, -1 = free.
+     *  Written at plan derivation, read by scoreSlotHostsType() so the
+     *  per-instance transport banks reach exactly their own instance. */
+    std::atomic<int> scoreSlotType_[ScorePlayerService::kMaxSlots] {
+        {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1} };
     /** Pool slots present in the model at the LAST derivation — the diff
      *  discards a removed instance's frames (per-slot teardown). */
     uint8_t scoreSlotsPresentMask_ = 0;
@@ -597,9 +700,13 @@ private:
     // APVTS params.
     AcquisitionGate acqGate_;
 
-    // SCORE generation settings — shared between PLAY page and SETUP panel.
-    ScoreSettings     scoreSettings_ {};
+    // SCORE generation settings — one block PER INSTANCE (P7), shared between
+    // the PLAY page and the SETUP panel of the instance the UI views.
+    // The frequency override stays GLOBAL: it describes the INSTRUMENT's
+    // tuning span (mirrored by TIMBRE / MIDI SCORE / VOICE too), not a score.
+    std::array<ScoreSettings, ScorePlayerService::kMaxSlots> scoreSettings_ {};
     ScoreFreqOverride scoreFreq_ {};
+    int               scoreUiSlot_ = 0;   ///< instance the SCORE UI is editing
 
     // SCORE source-audio preview (decoded on message thread, mixed RT-safe).
     juce::SpinLock           scorePreviewLock_;
@@ -643,10 +750,9 @@ private:
     // are migrated in setStateInformation via the legacy SEQ pattern tree.
 
     // SCORE playback transport parameter IDs (relayed to LuxSampler)
-    static constexpr const char* PARAM_SCORE_PLAYING = "scorePlaying";
-    static constexpr const char* PARAM_SCORE_LOOP    = "scoreLoop";
-    static constexpr const char* PARAM_SCORE_REVERSE = "scoreReverse";
-    static constexpr const char* PARAM_SCORE_SPEED   = "scoreSpeed";
+    // (P7 — the score-family transports became per-INSTANCE banks: build their
+    // ids with scoreXportParam(type, slot, "Playing"/"Speed"/"Loop"/"Reverse").
+    // Slot 0 still resolves to the legacy "scorePlaying"/"scoreLoop"/… ids.)
 
     // M9 — IMAGE / VIDEO / CAMERA source parameter IDs (relayed to the engines)
     static constexpr const char* PARAM_IMGSRC_POS     = "imgSrcPos";
@@ -761,6 +867,10 @@ private:
     // previously-used slot must not inherit the removed instance's parameter
     // bank / automation values (see teardownAbsentModules).
     std::map<int, juce::Uuid> videoScrollSlotIds_;
+    // MIDI TAP probe slots (0..7) present last edit — diffed to release the
+    // held notes of any probe that was just removed. No SlotIds_ twin: bank
+    // hygiene is owned by updateInsertParamMemory (see teardownAbsentModules).
+    std::set<int>        midiTapSlots_;
     // LuxStral send slots present last edit — diffed so the engine enable
     // (deviceEnabled) follows the presence of ANY "→ LUXSTRAL" send.
     std::set<int>        luxstralSends_;
@@ -798,16 +908,19 @@ private:
     juce::Uuid vizTapModuleId_;
     // Per-type masks of pool slots whose binding changed in the LAST rebind
     // (released or freshly assigned) — their pool state is stale.
-    struct PoolStale { uint32_t pitch = 0, mask = 0, reverb = 0, echo = 0, eq = 0, harmo = 0; };
-    // Pool slots owning a Pitch/Mask/Reverb/Echo/EQ/Harmo instance after the
-    // LAST derive — diffed to reset instances whose module (or whole chain) was
-    // just removed.
+    struct PoolStale { uint32_t pitch = 0, mask = 0, reverb = 0, echo = 0, eq = 0, harmo = 0, centro = 0, drive = 0, dcblock = 0; };
+    // Pool slots owning a Pitch/Mask/Reverb/Echo/EQ/Harmo/Centro instance after
+    // the LAST derive — diffed to reset instances whose module (or whole chain)
+    // was just removed.
     uint32_t prevPitchSlots_  { 0 };
     uint32_t prevMaskSlots_   { 0 };
     uint32_t prevReverbSlots_ { 0 };
     uint32_t prevEchoSlots_   { 0 };
     uint32_t prevEqSlots_     { 0 };
     uint32_t prevHarmoSlots_  { 0 };
+    uint32_t prevCentroSlots_ { 0 };
+    uint32_t prevDriveSlots_  { 0 };
+    uint32_t prevDcBlockSlots_ { 0 };
     // Bit i set ⇒ the chain bound to pool slot i has a Pitch/Mask instance →
     // fan MIDI to pool slot i. Default bit 0 = legacy single-instance behaviour.
     std::atomic<uint32_t> chainPitchMask_ { 1 };
@@ -817,6 +930,12 @@ private:
     std::atomic<uint32_t> chainEchoMask_   { 0 };
     std::atomic<uint32_t> chainEqMask_     { 0 };
     std::atomic<uint32_t> chainHarmoMask_  { 0 };
+    std::atomic<uint32_t> chainCentroMask_ { 0 };
+    std::atomic<uint32_t> chainDriveMask_  { 0 };
+    std::atomic<uint32_t> chainDcBlockMask_ { 0 };
+    // MIDI TAP presence, indexed by ModuleInstance.slot (its own pool) — the
+    // pooled masks above are indexed by poolSlotForInstance instead.
+    std::atomic<uint32_t> chainMidiTapMask_ { 0 };
 
     // ── UI VU meters (AUDIO MIX) — written by processBlock only ─────────────
     // Per-block peak accumulators (RT thread locals, folded + reset each block)
@@ -830,6 +949,22 @@ private:
     // processBlock skip the audio tap entirely when not recording.
     std::unique_ptr<VideoRecorder> videoRecorder_;
     std::atomic<bool>              recActive_ { false };
+
+    // MIDI MIX capture: one sink per probe slot (file + real-time port). The
+    // plugin-bus sink is NOT here — it drains in processBlock with its own
+    // cursor, which the broadcast ring allows (see midi_tap.h).
+    // ChainModel::kMaxChains is static_asserted == CHAIN_MAX_CHAINS (which lives
+    // in chain_plan.h, not included here).
+    std::array<std::unique_ptr<MidiTapSink>, ChainModel::kMaxChains> midiTapSinks_;
+    juce::String       midiTapDestName_;
+    std::atomic<bool>  midiCaptureActive_ { false };
+    juce::uint64       midiCaptureT0Us_   { 0 };
+    // Audio-thread-owned bus-sink state (never touched off the audio thread).
+    uint32_t busCursor_[ChainModel::kMaxChains] {};
+    uint8_t  busHeld_[ChainModel::kMaxChains][128] {};
+    uint32_t busGen_[ChainModel::kMaxChains] {};
+    int      busChannel_[ChainModel::kMaxChains] {}; // published by the config sync
+    std::atomic<uint32_t> midiBusMask_ { 0 };   // armed probes, gated by midiBusEnable
     // Per-engine OUT send counts (message thread writes in
     // deriveAndPublishChainPlan; UI + processBlock read). 0 → the engine's
     // render is skipped (no CPU) and its AUDIO MIX strip is hidden.
@@ -853,6 +988,13 @@ private:
     int  engineDrainBlocks_[4] { 0, 0, 0, 0 };
     bool engineFed_[4]  { false, false, false, false };   // this block
     bool engineGate_[4] { false, false, false, false };   // fed OR draining
+    // Per-engine enable fade (audio thread only): current gain of the
+    // per-sample ramp toward fed ? 1 : 0, applied at each engine's buffer
+    // write so the power LEDs / send starvation never step the output
+    // (audible click). ~8 ms tau: fast enough to complete inside the drain
+    // window even at tiny host buffers, slow enough to kill the step.
+    static constexpr float kEngineFadeTauSec = 0.008f;
+    float engineFadeGain_[4] { 0.0f, 0.0f, 0.0f, 0.0f };
     // Per-engine sampler presence in the model (message thread, set in
     // deriveChainRouting) — combined with EACH engine's own enable param
     // (fsEngineParam(e,"Enabled")) to drive that engine's setEnabled().
@@ -868,8 +1010,12 @@ private:
     void applyChainEnableBridge();         // presence → enable params (diff vs chainActiveTypes_)
 
     // Non-APVTS state ↔ session blob (see the public flags above).
-    juce::ValueTree scoreStateToTree() const;                 // SCORE settings + freq override
-    void restoreScoreStateFromTree(const juce::ValueTree& t);
+    /** SCORE settings of instance @p slot (+ the global freq override on
+     *  slot 0). One child per instance: "SCORE" (slot 0, legacy) / "SCORE1"…*/
+    static juce::String scoreStateTag(int slot)
+    { return slot <= 0 ? juce::String("SCORE") : "SCORE" + juce::String(slot); }
+    juce::ValueTree scoreStateToTree(int slot) const;
+    void restoreScoreStateFromTree(int slot, const juce::ValueTree& t);
     juce::ValueTree luxstralWavetableToTree() const;          // user timbre wavetable (harmonics)
     void restoreLuxstralWavetableFromTree(const juce::ValueTree& t);
     /** Timbre scan position (luxstralTimbrePos) — changes are coalesced here
@@ -924,7 +1070,23 @@ private:
     juce::String lastSessionPath;
 
     /** WAV last loaded in the SCORE PLAY page (see get/setScoreWavPath). */
-    juce::String scoreWavPath;
+    std::array<juce::String, ScorePlayerService::kMaxSlots> scoreWavPath;
+
+    // P9 — per-slot persisted take (calibrated PNG bytes; empty = none) and
+    // its generation counter: bumped on every capture, restore and slot
+    // release so an in-flight background encode/rebuild whose gen no longer
+    // matches is dropped instead of clobbering newer content. Message thread.
+    std::array<juce::MemoryBlock, ScorePlayerService::kMaxSlots> scoreTakePng_;
+    juce::uint32 scoreTakeGen_[ScorePlayerService::kMaxSlots] {};
+    // P9 — transports the incoming state saved RUNNING, harvested in
+    // applyStateXml BEFORE the never-auto-run patch folds them to Stop.
+    // Atomics: the harvest may run on a host loader thread; consumers run on
+    // the message thread. Score/img/vid: one bit per slot. Seq: 2 bits per
+    // engine (SeqTransport choice 0=Stop 1=Play 2=Hold).
+    std::atomic<juce::uint32> pendingResumeScore_ { 0 };
+    std::atomic<juce::uint32> pendingResumeSeq_   { 0 };
+    std::atomic<juce::uint32> pendingResumeImg_   { 0 };
+    std::atomic<juce::uint32> pendingResumeVid_   { 0 };
     
     // Note: RT Profiler is now global (g_vst_rt_profiler) to be accessible from C threads
 
@@ -941,6 +1103,34 @@ private:
     // Non-APVTS part of setStateInformation (chain model, SCORE/SEQ trees,
     // sampler params…) — mutates state read by UI timers, message thread only.
     void applyRestoredStateOnMessageThread();
+
+    // ── P9 — persisted score takes + resume-playback-on-load ─────────────────
+    // The generated content of every score-family module (SCORE/TIMBRE/MIDI
+    // SCORE/VOICE) survives the session: each loadScoreFramesFromImage is
+    // captured as a calibrated PNG (scoreTakePng_), and the restore rebuilds
+    // the slot frames from it headless (no editor, no re-render). The optional
+    // machine pref (MachinePrefs::resumePlaybackOnLoad) then re-presses PLAY
+    // on whatever the session saved running — head at 0, param-visible.
+    /** Encode slot @p slot's freshly loaded take off-thread (image copied
+     *  first — COW pixels are shared with the page). Message thread. */
+    void captureScoreTake(int slot, const juce::Image& image,
+                          juce::Rectangle<int> band, double minHz, double maxHz,
+                          bool stereo);
+    /** Encode completion (message thread): store into the cache + write the
+     *  Standalone sidecar. Dropped when @p gen is stale (newer take/restore). */
+    void storeScoreTake(int slot, juce::uint32 gen, const juce::MemoryBlock& png);
+    /** Refill the take cache from the restored state (SCORE_TAKES blob in a
+     *  DAW, takes/ sidecars in Standalone) and rebuild each in-use slot's
+     *  frames off-thread. End of applyRestoredStateOnMessageThread. */
+    void restoreScoreTakes();
+    /** Frame-rebuild completion (message thread): hot-swap the frames in and
+     *  consume the slot's armed resume-play bit. */
+    void finishScoreTakeRestore(int slot, juce::uint32 gen,
+                                std::vector<CapturedFrame>&& frames);
+    /** Re-press the media-source / sequencer transports the session saved
+     *  running (machine opt-in); clears every armed bit when the pref is off.
+     *  Score slots are consumed later, in finishScoreTakeRestore. */
+    void applyPendingResumeTransports();
     // 30 ms message-thread tick: drains dirty deferred params and executes
     // pending pool resets (see pendingPitchResets_ below).
     void timerCallback() override;
@@ -953,7 +1143,12 @@ private:
     std::map<juce::String, int>           paramIndexById_;
     std::unique_ptr<std::atomic<bool>[]>  paramDirty_;
     std::atomic<bool>                     anyParamDirty_ { false };
-    int                                   scorePlayingParamIdx_ { -1 }; // SCORE mirror guard
+    /** Deferred-queue index of each score-family PLAY bank ([family][slot],
+     *  -1 = unknown): the transport mirror in timerCallback() must not fold a
+     *  bank whose change is still pending. The param pointers are cached
+     *  alongside so the 30 ms mirror builds no id strings. */
+    int scorePlayIdx_[4][ScorePlayerService::kMaxSlots] {};
+    juce::RangedAudioParameter* scorePlayParam_[4][ScorePlayerService::kMaxSlots] {};
 
     // Config-resync coalescing (message thread only). applyConfigurationToCore()
     // re-reads ~60 APVTS params into g_sp3ctra_config on EVERY call — firing it
@@ -982,7 +1177,15 @@ private:
     uint32_t pendingEchoResets_       { 0 };
     uint32_t pendingEqResets_         { 0 };
     uint32_t pendingHarmoResets_      { 0 };
+    uint32_t pendingCentroResets_     { 0 };
+    uint32_t pendingDriveResets_      { 0 };
+    uint32_t pendingDcBlockResets_    { 0 };
     uint32_t pendingVideoScrollInits_ { 0 };
+    // MIDI TAP teardown is two-stage: panic (push the note-offs, so the sinks
+    // still see them) then, one defer window later, init (wipe the ring +
+    // bump the generation). Collapsing them would swallow the note-offs.
+    uint32_t pendingMidiTapPanics_ { 0 };
+    uint32_t pendingMidiTapInits_  { 0 };
     // M3 — chain slots whose "→ LUXSTRAL" send disappeared: their staging must
     // go inactive (silence) once the in-flight frame is done.
     uint32_t pendingStagingResets_    { 0 };

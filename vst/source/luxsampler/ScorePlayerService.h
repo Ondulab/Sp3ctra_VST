@@ -15,8 +15,9 @@
  * P4 chain walk (chain_player_execute_owned) on the frame — OUT staging at
  * exact positions, post-marker FX/probes, downstream SAMPLER records,
  * selection taps — plus the polyphonic Path-B commit and the visual mix bus
- * (single display owner: the lowest feeding slot; the sampler engines defer
- * via score_player_any_playing()).
+ * (single display owner: the lowest slot playing/scrubbing/running-out; the
+ * sampler engines + producers defer via score_player_owns_display(). A
+ * PARKED hold (P8, VOICE) feeds audio but never claims the bus).
  *
  * There is NO relay and NO cross-player eviction here: score slots are
  * independent players (chain doctrine). The sampler-resume relay existed
@@ -29,6 +30,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <vector>
 #include "LuxSampler.h"   // CapturedFrame, LoopMode, LuxSamplerConstants
@@ -57,6 +59,10 @@ public:
      *  playing; reactivating resumes it (no need to re-press PLAY). */
     bool isScoreActive() const noexcept;
     void setScoreActive(bool active) noexcept;
+    /** True while this slot writes its chains (playing, scrubbing, parked
+     *  hold or a tail runout) — the rack LED reads the real flux, not the
+     *  transport (same semantics as the media sources' "loaded" LED). */
+    bool isScoreFeeding() const noexcept;
     bool uiBeginScoreScrub() noexcept;
     void uiEndScoreScrub() noexcept;
     void uiSetScorePaused(bool paused) noexcept;
@@ -108,6 +114,16 @@ public:
         return (slot >= 0 && slot < kMaxSlots) ? &channels_[slot] : nullptr;
     }
 
+    /** Fired (message thread) after a successful loadFramesFromImage with the
+     *  exact image + calibration the frames were built from — the processor
+     *  persists it as the slot's session take (see captureScoreTake). Hot
+     *  swaps (uiHotSwapScoreFrames) do NOT fire: they carry prebuilt frames
+     *  without the source image, and their callers reload through this path
+     *  on the next full (re)generate anyway. */
+    std::function<void(int slot, const juce::Image& image,
+                       juce::Rectangle<int> band, double scoreMinHz,
+                       double scoreMaxHz, bool stereo)> onFramesLoaded;
+
     // ── Transport / content (message thread) ────────────────────────────────
     bool isPlaying(int slot) const noexcept;      // UI transport state (not scrub)
     bool hasContent(int slot) const noexcept;
@@ -141,10 +157,24 @@ public:
      *  ScoreChannel::uiHotSwapScoreFrames). Empty input is ignored. */
     void hotSwapFrames(int slot, std::vector<CapturedFrame>&& frames) noexcept;
 
-    /** C-hook backend: slot may still write its chains (play, scrub or a
-     *  session winding down). Any-thread safe. */
+    /** P8 — "feed like a media source" (VOICE): with content loaded and the
+     *  module ACTIVE the session stays alive when the transport stops, the
+     *  column under the head re-injected every tick (a parked drone — the
+     *  exact analogue of a loaded IMAGE's frozen line). PLAY animates the
+     *  head; STOP parks it in place instead of rewinding. Set per slot from
+     *  the chain-plan derivation (slot type map). */
+    void setHoldWhenStopped(int slot, bool hold) noexcept;
+
+    /** C-hook backend: slot may still write its chains (play, scrub, parked
+     *  hold or a session winding down). Any-thread safe. */
     bool slotIsFeeding(int slot) const noexcept;
     bool anyFeeding() const noexcept;
+
+    /** Display arbitration ONLY (single visual mix bus): true while a slot
+     *  plays, scrubs or runs out a tail. A PARKED hold (P8) keeps feeding its
+     *  chains but never claims the bus — a parked VOICE must not freeze the
+     *  live view for hours. Any-thread safe. */
+    bool ownsDisplay() const noexcept;
 
     void run() override;
 
@@ -169,12 +199,20 @@ private:
 
         // Player-side session flag (published for the ownership gates)
         std::atomic<bool> sessionActive { false };
+        // Player-side runout mirror (published for the DISPLAY arbitration:
+        // a tail runout still writes blank paper to the bus, a parked hold
+        // does not — see ownsDisplay()).
+        std::atomic<bool> runoutActive  { false };
 
         // Module ACTIVE state (rack LED enable), independent of the transport.
         // Deactivating stops the run and latches resumeOnReactivate so the
         // next re-activate replays from resumeHead. Default ON.
         std::atomic<bool> active             { true };
         std::atomic<bool> resumeOnReactivate { false };
+
+        // P8 — VOICE-hosted slots: active + content ⇒ the session persists
+        // with the transport stopped (parked column drone, IMAGE parity).
+        std::atomic<bool> holdWhenStopped    { false };
     };
 
     /** Player-thread-private session state (one per slot). */
@@ -184,10 +222,41 @@ private:
         int      direction     = 1;
         float    frameAcc      = 0.0f;
         LoopMode prevLoopMode  = LoopMode::NONE;
+
+        // FX tail runout: the transport is already STOPped but the chain's
+        // Reverb/Echo still have something to print, so the session stays
+        // alive injecting blank paper at the same 1 kHz until they are spent
+        // (see runout() / chain_player_fx_tail_alive).
+        bool     runout        = false;
+        int      runoutTicks   = 0;
+        int      lastNb        = 0;   // pixel count of the last injected frame
     };
+
+    /** Hard ceiling on a tail runout (1 ms ticks). The tail query is the real
+     *  terminator; this only bounds a pathological setting (max decay + near-
+     *  unity echo feedback) so a stopped score can never hold its chains
+     *  forever. 60 s is well past any musically useful tail. */
+    static constexpr int kRunoutMaxTicks = 60000;
+
+    /** P8 hold predicate: the slot wants a live session even with the
+     *  transport stopped (VOICE parity with a loaded IMAGE). */
+    bool slotWantsHold(int slot) const noexcept
+    {
+        const ScoreSlot& s = slots_[slot];
+        return s.holdWhenStopped.load(std::memory_order_acquire)
+            && s.active.load(std::memory_order_acquire)
+            && s.hasContent.load(std::memory_order_acquire);
+    }
 
     void beginSession(int slot) noexcept;
     void endSession(int slot, bool wasDisplayOwner) noexcept;
+    /** Enter the tail runout if anything downstream still rings; otherwise
+     *  tear the session down now. Returns true when the runout took over. */
+    bool beginRunoutOrEnd(int slot, bool isDisplayOwner) noexcept;
+    /** One runout tick: blank paper through the same chain walk as a played
+     *  frame, so the FX see a silent line and decay exactly as they would on
+     *  a silent passage of the score. */
+    void injectRunout(int slot, bool displayOwner) noexcept;
     /** Advance the head one 1 ms tick and copy the current frame into the
      *  work buffers. Returns false when a LoopMode::NONE run reached its
      *  end (nb stays 0 — nothing injected that tick, like the legacy path). */

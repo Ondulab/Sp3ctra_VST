@@ -12,6 +12,9 @@
 #include "image/LuxEchoTabComponent.h"
 #include "image/LuxEqTabComponent.h"
 #include "image/LuxHarmoTabComponent.h"
+#include "image/LuxCentroTabComponent.h"
+#include "image/LuxDriveTabComponent.h"
+#include "image/LuxDcBlockTabComponent.h"
 #include "image/LuxStralTabComponent.h"
 #include "image/LuxSynthTabComponent.h"
 #include "image/ScoreGenTabComponent.h"
@@ -20,6 +23,8 @@
 #include "image/VoiceGenTabComponent.h"
 #include "image/VisualizerMode.h"
 #include "video/VideoScrollPage.h"
+#include "midi/MidiTapPage.h"
+#include "midi/MidiLearnAttachment.h"
 #include "sampler/SamplerPageComponent.h"
 #include "ui/ChainRackComponent.h"
 #include "ui/KeyboardRulerComponent.h"
@@ -27,6 +32,7 @@
 #include "ui/LuxGrainPanel.h"
 #include "ui/SynthOutPageComponent.h"
 #include "ui/AudioMixPanel.h"
+#include "ui/MidiMixPanel.h"
 #include "ui/VideoMixerColumn.h"
 #include "ui/ModuleCatalogComponent.h"
 #include "ui/SplitterBar.h"
@@ -476,9 +482,20 @@ private:
     int  luxStralSendSlot_ { 0 };   // selected LuxStral SEND slot (0..7, OUT bank)
     int  samplerEngineIndex_  { 0 };   // selected Sampler engine (0 = A, 1 = B)
     int  videoSlotIndex_      { 0 };   // selected VideoScroll instance slot (0..7)
+    int  midiTapSlotIndex_    { 0 };   // selected MIDI TAP instance slot (0..7)
+    // zone2Width/zone4Width hold the USER INTENT (persisted in the session);
+    // zone2Eff_/zone4Eff_ are what layoutZones() actually displayed after
+    // clamping to the current window width. Keeping them separate stops a
+    // narrow-window launch from permanently shrinking the saved widths — the
+    // clamp used to write straight back into the persisted members.
     int zone2Width { kZone2DefaultW };
     int zone4Width { kZone4DefaultW };
+    int zone2Eff_  { kZone2DefaultW };
+    int zone4Eff_  { kZone4DefaultW };
     int splitterDragStartW { 0 };
+    /** False until the ctor has read the persisted layout AND set the initial
+     *  size — persistLayoutProps() is a no-op before that (see the ctor). */
+    bool layoutRestoreDone_ { false };
 
     // ── ZONE 1: CIS Visualizer ────────────────────────────────────────────────
     std::unique_ptr<CisVisualizerComponent> cisVisualizer;
@@ -507,6 +524,7 @@ private:
     FaceSwitchBar   faceSwitch;        // PLAY | SETUP (every block has a SETUP face)
     ModulePowerButton modulePowerButton; // power switch at the right of the face row
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> modulePowerAttachment;
+    std::unique_ptr<MidiLearnAttachment> modulePowerLearn; // right-click MIDI learn on the enable
     juce::Viewport  zone3Viewport;
     juce::Component zone3Content;
 
@@ -525,7 +543,11 @@ private:
     std::unique_ptr<LuxEchoTabComponent>   echoPage;         // FX > ECHO
     std::unique_ptr<LuxEqTabComponent>     eqPage;           // FX > EQ
     std::unique_ptr<LuxHarmoTabComponent>  harmoPage;        // FX > SCALE
+    std::unique_ptr<LuxCentroTabComponent> centroPage;       // FX > CENTROID
+    std::unique_ptr<LuxDriveTabComponent> drivePage;         // FX > LEVELS
+    std::unique_ptr<LuxDcBlockTabComponent> dcBlockPage;     // FX > DC BLOCK
     std::unique_ptr<VideoScrollPage>      videoScrollPage;   // OUT > VIDEO SCROLL (per-instance)
+    std::unique_ptr<MidiTapPage>          midiTapPage;       // OUT > MIDI TAP (per-instance)
     std::unique_ptr<AudioWavePanel>       audioWavePanel;
     std::unique_ptr<LuxGrainPanel>        luxGrainPanel;    // LUXGRAIN engine page (M4)
     std::unique_ptr<SynthOutPageComponent> synthOutPage;   // OUT/send page (synth-split P2)
@@ -556,6 +578,7 @@ private:
     // MASTER as vertical faders with VU meters. In the collapsed ZONE-4 band
     // it shrinks to a bare vertical MASTER fader (mini mode).
     std::unique_ptr<AudioMixPanel> audioMixPanel;
+    std::unique_ptr<MidiMixPanel>  midiMixPanel;   // shown only when a probe is patched
 
     // ── LookAndFeel (declared before all JUCE components that use it) ─────────
     Sp3ctraLookAndFeel sp3ctraLaf;

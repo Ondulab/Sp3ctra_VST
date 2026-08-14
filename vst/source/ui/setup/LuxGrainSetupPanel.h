@@ -17,6 +17,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "../../PluginProcessor.h"
 #include "../../UITheme.h"
+#include "../Sp3ctraBarSlider.h"
 
 extern "C" {
     #include "synthesis/luxgrain/luxgrain_vst_adapter.h"
@@ -35,9 +36,6 @@ public:
         bandsLabel.setColour(juce::Label::textColourId, juce::Colour(0xffb8c4d0));
         addAndMakeVisible(bandsLabel);
 
-        bandsSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        bandsSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 52,
-                                    Sp3ctraTheme::kControlH - 4);
         addAndMakeVisible(bandsSlider);
         bandsAttach = std::make_unique<
             juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -149,7 +147,7 @@ private:
     juce::Colour accent;
 
     juce::Label  bandsLabel, infoLabel;
-    juce::Slider bandsSlider;
+    Sp3ctraBarSlider bandsSlider;
     juce::TextButton loadButton, clearButton;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> bandsAttach;
     std::unique_ptr<juce::FileChooser> chooser;

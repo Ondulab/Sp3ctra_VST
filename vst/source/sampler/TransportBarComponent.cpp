@@ -59,10 +59,8 @@ TransportBarComponent::TransportBarComponent(Sp3ctraAudioProcessor& proc)
     updateTransportButtons();
 
     // ── BPM ──────────────────────────────────────────────────────────────────
-    bpmSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    bpmSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                              Sp3ctraTheme::kTbWide, Sp3ctraTheme::kTextBoxH);
     bpmSlider.setTextValueSuffix(" BPM");
+    bpmSlider.setDoubleClickReturnValue(true, 120.0);   // cycle centre
     addAndMakeVisible(bpmSlider);
     bpmLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
     bpmLabel.setJustificationType(juce::Justification::centredRight);
@@ -73,7 +71,6 @@ TransportBarComponent::TransportBarComponent(Sp3ctraAudioProcessor& proc)
     // matches the 8×2 display grid in SequencerComponent. The attachment sets
     // range/interval from the int param and relays edits; the processor's
     // parameter listener forwards them to FrameSequencer::setNumSteps.
-    stepsSlider.setSliderStyle(juce::Slider::LinearBar);
     addAndMakeVisible(stepsSlider);
     stepsLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
     stepsLabel.setJustificationType(juce::Justification::centredRight);

@@ -35,6 +35,7 @@ namespace PathKeys
     // Exports (seed = active session exports/ when standalone, else last used)
     constexpr const char* exportDir     = "exportDir";      // renders, PNG/WAV/.fslot
     constexpr const char* videoCapture  = "videoCapture";   // VIDEO MIX .mov
+    constexpr const char* midiCapture   = "midiCapture";    // MIDI MIX .mid
     constexpr const char* sessionParent = "sessionParent";  // where sessions are created
 }
 

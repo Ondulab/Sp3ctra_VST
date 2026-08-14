@@ -18,19 +18,22 @@
  */
 #pragma once
 
+#include "../ui/ModuleCatalog.h"
+
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
 #include "../ui/EnvelopeEditorComponent.h"
 #include "../ui/MaskFilterEditorComponent.h"
+#include "../ui/Sp3ctraBarSlider.h"
 #include "VisualizerMode.h"
 
 class LuxMaskTabComponent : public juce::Component
 {
 public:
     /** Accent colour for the LUXMASK page. */
-    static constexpr uint32_t kAccentARGB = 0xff6be0d0; // teal/cyan, complement of LuxPitch pink
+    static inline const uint32_t kAccentARGB = moduleColour(ModuleType::Mask).getARGB();   ///< inherited module colour
 
     explicit LuxMaskTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p),
@@ -206,8 +209,8 @@ private:
     // Controls — ADSR + filter controls are inside the graphic editors.
     juce::ToggleButton velCouplingToggle;
     juce::ComboBox     bgCombo;
-    juce::Slider       glideSlider;
-    juce::Slider       lfoPosRateSlider, lfoPosDepthSlider;
+    Sp3ctraBarSlider   glideSlider;
+    Sp3ctraBarSlider   lfoPosRateSlider, lfoPosDepthSlider;
 
     // Attachments — ADSR + filter attachments handled by the editors.
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>
@@ -245,11 +248,8 @@ private:
         addAndMakeVisible(lbl);
     }
 
-    void initSlider(juce::Slider& s)
+    void initSlider(Sp3ctraBarSlider& s)
     {
-        s.setSliderStyle(juce::Slider::LinearHorizontal);
-        s.setTextBoxStyle(juce::Slider::TextBoxRight, false,
-                          50, Sp3ctraTheme::kControlH);
         addAndMakeVisible(s);
     }
 

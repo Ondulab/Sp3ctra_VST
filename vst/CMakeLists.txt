@@ -101,7 +101,11 @@ juce_add_plugin(Sp3ctraVST
     COMPANY_NAME "Ondulab"
     IS_SYNTH TRUE
     NEEDS_MIDI_INPUT TRUE
-    NEEDS_MIDI_OUTPUT FALSE
+    # TRUE since the MIDI TAP module: the plugin can emit extracted notes on a
+    # MIDI output bus (producesMidi() follows automatically via
+    # JucePlugin_ProducesMidiOutput). This changes the DECLARED BUS LAYOUT, so
+    # hosts must re-scan/re-validate the plugin after this build.
+    NEEDS_MIDI_OUTPUT TRUE
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
     COPY_PLUGIN_AFTER_BUILD ${SP3CTRA_COPY_PLUGIN}
@@ -127,6 +131,7 @@ target_sources(Sp3ctraVST
         source/PluginProcessor.h
         source/session/SessionManager.cpp
         source/session/SessionManager.h
+        source/session/MachinePrefs.h
         source/session/Sp3sImporter.cpp
         source/session/Sp3sImporter.h
         source/PluginEditor.cpp
@@ -161,8 +166,6 @@ target_sources(Sp3ctraVST
         source/ui/EngineAudioPanels.h
         source/ui/LuxGrainPanel.h
         source/ui/AudioPanelWidgets.h
-        source/ui/WaterfallColumnComponent.cpp
-        source/ui/WaterfallColumnComponent.h
         source/ui/SplitterBar.h
 
         # M6 — editable chain model + drag-and-drop module catalogue
@@ -210,8 +213,6 @@ target_sources(Sp3ctraVST
         source/sources/VideoFileReader.h
         source/sources/ui/MediaSourcePage.cpp
         source/sources/ui/MediaSourcePage.h
-        source/sources/ui/MediaSourceSetupPanel.cpp
-        source/sources/ui/MediaSourceSetupPanel.h
 
         # VOICE module — offline TTS (Piper voices via sherpa-onnx)
         source/tts/PiperTts.cpp
@@ -223,6 +224,9 @@ target_sources(Sp3ctraVST
         source/midi/MidiMappingEngine.cpp
         source/midi/MidiMappingEngine.h
         source/midi/MidiLearnAttachment.h
+        source/midi/MidiTapPage.h
+        source/midi/MidiTapSink.cpp
+        source/midi/MidiTapSink.h
 
         # LuxSampler subsystem
         source/luxsampler/LuxSampler.cpp
@@ -241,8 +245,6 @@ target_sources(Sp3ctraVST
         source/sampler/SlotEditorComponent.h
         source/sampler/SlotSpectralEditorComponent.cpp
         source/sampler/SlotSpectralEditorComponent.h
-        source/sampler/SlotTimelineComponent.cpp
-        source/sampler/SlotTimelineComponent.h
         source/sampler/SequencerComponent.cpp
         source/sampler/SequencerComponent.h
         source/sampler/TransportBarComponent.cpp
@@ -331,12 +333,6 @@ target_sources(Sp3ctraVST
 
         # Video scroll system
         source/video/VideoScrollMode.h
-        source/video/VideoDisplayComponent.cpp
-        source/video/VideoDisplayComponent.h
-        source/video/VideoWindow.cpp
-        source/video/VideoWindow.h
-        source/video/VideoScrollTab.cpp
-        source/video/VideoScrollTab.h
         source/video/VideoScrollPage.h
         source/video/VideoScrollRenderCore.cpp
         source/video/VideoScrollRenderCore.h
@@ -457,8 +453,16 @@ target_sources(Sp3ctraVST
         source/processing/lux_eq.h
         source/processing/lux_harmo.c
         source/processing/lux_harmo.h
+        source/processing/lux_centro.c
+        source/processing/lux_centro.h
+        source/processing/lux_drive.c
+        source/processing/lux_drive.h
+        source/processing/lux_dcblock.c
+        source/processing/lux_dcblock.h
         source/processing/video_scroll.c
         source/processing/video_scroll.h
+        source/processing/midi_tap.c
+        source/processing/midi_tap.h
         source/processing/internal_source.c
         source/processing/internal_source.h
 

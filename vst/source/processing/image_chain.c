@@ -14,7 +14,11 @@
 #include "lux_echo.h"
 #include "lux_eq.h"
 #include "lux_harmo.h"
+#include "lux_centro.h"
+#include "lux_drive.h"
+#include "lux_dcblock.h"
 #include "video_scroll.h"
+#include "midi_tap.h"
 
 /* ── M6 Phase 2 — per-chain executor (explicit ordered state list) ──────────── */
 void image_chain_run(
@@ -53,6 +57,13 @@ void image_chain_run(
                 video_scroll_capture_line((VideoScrollState *)insert_states[i],
                                           cr, cg, cb, pixel_count);
                 break;
+            case IMAGE_CHAIN_INSERT_MIDITAP:
+                /* PASS-THROUGH PROBE: extract notes then forward unchanged.
+                 * nr/ng/nb already equal cr/cg/cb. */
+                midi_tap_process_line((MidiTapState *)insert_states[i],
+                                      cr, cg, cb, pixel_count,
+                                      luxstral_num_octaves);
+                break;
             case IMAGE_CHAIN_INSERT_LUXREVERB:
                 lux_reverb_process_frame((LuxReverbState *)insert_states[i],
                                          cr, cg, cb, pixel_count,
@@ -72,6 +83,21 @@ void image_chain_run(
                 lux_harmo_process_frame((LuxHarmoState *)insert_states[i],
                                         cr, cg, cb, pixel_count,
                                         luxstral_num_octaves, &nr, &ng, &nb);
+                break;
+            case IMAGE_CHAIN_INSERT_LUXCENTRO:
+                lux_centro_process_frame((LuxCentroState *)insert_states[i],
+                                         cr, cg, cb, pixel_count,
+                                         luxstral_num_octaves, &nr, &ng, &nb);
+                break;
+            case IMAGE_CHAIN_INSERT_LUXDRIVE:
+                lux_drive_process_frame((LuxDriveState *)insert_states[i],
+                                        cr, cg, cb, pixel_count,
+                                        luxstral_num_octaves, &nr, &ng, &nb);
+                break;
+            case IMAGE_CHAIN_INSERT_LUXDCBLOCK:
+                lux_dcblock_process_frame((LuxDcBlockState *)insert_states[i],
+                                          cr, cg, cb, pixel_count,
+                                          luxstral_num_octaves, &nr, &ng, &nb);
                 break;
             default:
                 break;   /* unknown insert → pass-through */

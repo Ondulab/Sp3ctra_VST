@@ -19,8 +19,12 @@ SamplerPageComponent::SamplerPageComponent(Sp3ctraAudioProcessor& proc)
       seqTransport(proc)
 {
     slotGrid.onSlotSelected = [this](int idx) { onSlotSelected(idx); };
-    slotGrid  .setSelectedSlot(0);
-    slotEditor.setSelectedSlot(0);
+    // Reopen on the bank the user was editing (the processor mirrors the last
+    // selection; the editor restores it across launches via "selSamplerBank").
+    const int sel = juce::jlimit(0, LuxSamplerConstants::NUM_SLOTS - 1,
+                                 proc.getSamplerSelectedSlot());
+    slotGrid  .setSelectedSlot(sel);
+    slotEditor.setSelectedSlot(sel);
 
     addAndMakeVisible(slotGrid);
     addAndMakeVisible(slotEditor);

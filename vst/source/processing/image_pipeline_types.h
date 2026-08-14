@@ -85,7 +85,6 @@ typedef struct {
     int        freeze_mode;             /* 0 = PLAY, 1 = HOLD, 2 = STOP/WHITE */
     int        fade_in_ms;              /* Ramp duration in ms (0 = instant) */
     float      stream_opacity;          /* Per-stream opacity [0.0, 1.0] */
-    float      contrast_min;            /* Minimum contrast value for this stream */
     /* M8 — 1 = the stream is sampler/score-relayed (player or idle
      * passthrough of a sampler chain): the RAW upstream transport gate is
      * skipped (a stopped RAW input must not silence a playing sampler). */
@@ -145,7 +144,6 @@ static inline PipelineConfig pipeline_config_default(void)
     cfg.freeze_mode    = 0;     /* PLAY */
     cfg.fade_in_ms     = 0;
     cfg.stream_opacity = 1.0f;
-    cfg.contrast_min   = 0.05f;
     cfg.sampler_relayed = 0;
 
     /* Per-OUT conditioning defaults (unity send) */

@@ -17,12 +17,16 @@
  */
 #pragma once
 
+#include "../ui/ModuleCatalog.h"
+
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <cmath>
 #include <vector>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
+#include "ScoreTransportBinding.h"
+#include "../ui/Sp3ctraBarSlider.h"
 #include "../IconPaths.h"
 #include "../licensing/ActivationDialog.h"
 #include "ScoreGenThread.h"
@@ -35,7 +39,7 @@ class ScoreGenTabComponent : public juce::Component,
                              private juce::ScrollBar::Listener
 {
 public:
-    static constexpr uint32_t kAccentARGB = 0xffe0a24a;   // amber (SCORE identity)
+    static inline const uint32_t kAccentARGB = moduleColour(ModuleType::Score).getARGB();   ///< inherited module colour
 
     explicit ScoreGenTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p)
@@ -96,37 +100,23 @@ public:
         addAndMakeVisible(playStopButton);
 
         // Loop + Inverse as compact pictogram toggles (replace the old text Loop).
-        // APVTS-bound (scoreLoop / scoreReverse) so the DAW can automate /
-        // MIDI-map them; the processor derives the engine LoopMode from the
-        // two params (reverse → INVERSE, else loop → LOOP, else NONE).
+        // APVTS-bound so the DAW can automate / MIDI-map them; the processor
+        // derives the engine LoopMode from the two params (reverse → INVERSE,
+        // else loop → LOOP, else NONE). P7: the ids are the SELECTED instance's
+        // bank — bindTransport() re-points them on every setScoreSlot().
         loopBtn.setEnabled(false);
         loopBtn.setTooltip("Loop playback");
         addAndMakeVisible(loopBtn);
-        loopAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            processor.getAPVTS(), "scoreLoop", loopBtn);
 
         reverseBtn.setEnabled(false);
         reverseBtn.setTooltip("Reverse (play the score backward)");
         addAndMakeVisible(reverseBtn);
-        reverseAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            processor.getAPVTS(), "scoreReverse", reverseBtn);
 
         initLabel(speedLabel, "Speed");
         initKnob(speedSlider, 0.1, 6.0, 0.01, 1.0, "x");
         speedSlider.setSkewFactorFromMidPoint(1.0); // 1.0× sits at the knob's centre (log feel)
-        // APVTS-bound (scoreSpeed) — the processor relays changes to the engine
-        // live, whether they come from this knob, DAW automation or MIDI.
-        speedAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-            processor.getAPVTS(), "scoreSpeed", speedSlider);
 
-        // Right-click MIDI Learn on the transport (SCORE is a singleton).
-        {
-            auto& mm = processor.getMidiMap();
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, playStopButton, "scorePlaying"));
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, loopBtn,        "scoreLoop"));
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, reverseBtn,     "scoreReverse"));
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, speedSlider,    "scoreSpeed"));
-        }
+        bindTransport();
 
         // Disabled (greyed) until a score is generated — but frames generated
         // in a PREVIOUS life of this page survive in the engine (the page is
@@ -211,12 +201,18 @@ public:
         // the WAV path + extraction start live in the processor and were
         // restored by setStateInformation before this page is built.
         {
-            const juce::String eq = processor.getAPVTS().state
-                .getProperty("scoreEqCurve", "").toString();
-            if (eq.isNotEmpty())
-                eqEditor.decodeState(eq);
+            restoreEqCurves();
+            docSlot_ = juce::jlimit(0, kMaxDocs - 1, processor.getScoreUiSlot());
+            for (int i = 0; i < kMaxDocs; ++i)
+            {
+                const juce::File w(processor.getScoreWavPath(i));
+                if (w.existsAsFile())
+                    docs_[(size_t) i].loadedWav = w;
+            }
+            if (docs_[(size_t) docSlot_].eqState.isNotEmpty())
+                eqEditor.decodeState(docs_[(size_t) docSlot_].eqState);
 
-            const juce::File wav(processor.getScoreWavPath());
+            const juce::File wav = docs_[(size_t) docSlot_].loadedWav;
             if (wav.existsAsFile())
                 setLoadedFile(wav, /*restoreRegion*/ true);
         }
@@ -248,6 +244,11 @@ public:
                     self->onRenderFinished(std::move(r));
             });
         };
+
+        // The take is not persisted (see hadTakeKey) — re-render it now when
+        // the restored session had one. After the job wiring above, so a very
+        // fast render can never fire into an unset onDone.
+        autoRegenerateIfArmed();
 
         juce::ignoreUnused(accent);
     }
@@ -895,7 +896,7 @@ private:
             if (! isEnabled())
                 Icons::fillPath(g, Icons::play(), inner, juce::Colour(0xff555a62));
             else if (playing)
-                Icons::fillPath(g, Icons::stop(), inner, juce::Colour(0xffe0a24a)); // amber = stop
+                Icons::fillPath(g, Icons::stop(), inner, juce::Colour(kAccentARGB)); // accent = stop
             else
                 Icons::fillPath(g, Icons::play(), inner, juce::Colour(0xff66cc88)); // green = go
         }
@@ -1018,10 +1019,8 @@ private:
         addAndMakeVisible(lbl);
     }
 
-    void initSlider(juce::Slider& s, double lo, double hi, double step, double val)
+    void initSlider(Sp3ctraBarSlider& s, double lo, double hi, double step, double val)
     {
-        s.setSliderStyle(juce::Slider::LinearHorizontal);
-        s.setTextBoxStyle(juce::Slider::TextBoxRight, false, 64, Sp3ctraTheme::kControlH);
         s.setRange(lo, hi, step);
         s.setValue(val, juce::dontSendNotification);
         addAndMakeVisible(s);
@@ -1068,6 +1067,48 @@ private:
                     self->setLoadedFile(f);
                 }
             });
+    }
+
+    /** APVTS key of instance @p slot's EQ curve (slot 0 = legacy key). */
+    static juce::String eqCurveKey(int slot)
+    {
+        return slot <= 0 ? juce::String("scoreEqCurve")
+                         : "scoreEqCurve" + juce::String(juce::jlimit(1, 7, slot));
+    }
+
+    /** APVTS key of instance @p slot's "a take was generated" flag. The take
+     *  pixels themselves are NOT persisted (megabytes in every autosave) —
+     *  they re-render deterministically from the persisted WAV + settings +
+     *  EQ, so the flag arms an automatic background GENERATE at restore /
+     *  instance switch instead (same idea as VOICE's renderOnly path). */
+    static juce::String hadTakeKey(int slot)
+    {
+        return "scoreHadTake" + juce::String(juce::jlimit(0, 7, slot));
+    }
+
+    /** Auto-regenerate the viewed doc's take when the session says one
+     *  existed and it is not in RAM (fresh editor / instance switch). */
+    void autoRegenerateIfArmed()
+    {
+        if (busy || generatedImage.isValid() || ! loadedWav.existsAsFile())
+            return;
+        if ((bool) processor.getAPVTS().state
+                .getProperty(juce::Identifier(hadTakeKey(docSlot_)), false))
+            startGenerate();
+    }
+
+    void persistEqCurves() const
+    {
+        for (int i = 0; i < kMaxDocs; ++i)
+            processor.getAPVTS().state.setProperty(
+                juce::Identifier(eqCurveKey(i)), docs_[(size_t) i].eqState, nullptr);
+    }
+
+    void restoreEqCurves()
+    {
+        for (int i = 0; i < kMaxDocs; ++i)
+            docs_[(size_t) i].eqState = processor.getAPVTS().state
+                .getProperty(juce::Identifier(eqCurveKey(i)), "").toString();
     }
 
     /** @p restoreRegion true when reloading the persisted WAV on construction:
@@ -1139,6 +1180,7 @@ private:
         genMaxFreq = hi;   // 1:1 onto the synth's log oscillators (= CIS scan)
         genDpi     = s.printerDpi;   // DPI actually rendered → stamped into the export
         busy = true;
+        genSlot_ = docSlot_;
         progress = 0.0;
         generateButton.setEnabled(false);
         exportButton.setEnabled(false);
@@ -1184,6 +1226,9 @@ private:
             scrubHead = -1;             // fresh score → play head sits at the start
             setTransportEnabled(true);
             refreshPlayButton();
+            // Arm the auto-regenerate for the next restore (see hadTakeKey).
+            processor.getAPVTS().state.setProperty(
+                juce::Identifier(hadTakeKey(genSlot_)), true, nullptr);
         }
         else
         {
@@ -1196,6 +1241,8 @@ private:
                 fs->uiStopScore();
             setTransportEnabled(false);
             refreshPlayButton();
+            processor.getAPVTS().state.setProperty(
+                juce::Identifier(hadTakeKey(genSlot_)), false, nullptr);
         }
         repaint();
     }
@@ -1489,7 +1536,7 @@ private:
         // Route through the scorePlaying param so the DAW sees the transport;
         // the processor pushes speed/loop and starts/stops the engine. If the
         // param already matches (brief drift window), drive the engine directly.
-        if (auto* p = processor.getAPVTS().getParameter("scorePlaying"))
+        if (auto* p = processor.getAPVTS().getParameter(xport_.playParamId()))
         {
             const float norm = play ? 1.0f : 0.0f;
             if (! juce::approximatelyEqual(p->getValue(), norm))
@@ -1553,9 +1600,10 @@ private:
         if (eqDirty && ! eqEditor.isDragging())
         {
             eqDirty = false;
-            // Persist the curve — rides in apvts.state so it survives close.
-            processor.getAPVTS().state
-                .setProperty("scoreEqCurve", eqEditor.encodeState(), nullptr);
+            // P7 - the curve belongs to THIS instance: park it in its doc and
+            // persist every doc's curve (apvts.state, survives close).
+            docs_[(size_t) docSlot_].eqState = eqEditor.encodeState();
+            persistEqCurves();
             if (baseImage.isValid())
                 applyEqToImageAndReload();
         }
@@ -1568,7 +1616,7 @@ private:
         // lane stays truthful when playback ends on its own (one-shot end) or
         // is stopped by internal reload flows. parameterChanged() ignores
         // writes that already match the engine state, so this cannot retrigger.
-        if (auto* p = processor.getAPVTS().getParameter("scorePlaying"))
+        if (auto* p = processor.getAPVTS().getParameter(xport_.playParamId()))
         {
             const float norm = (fs != nullptr && fs->isScorePlaying()) ? 1.0f : 0.0f;
             if (! juce::approximatelyEqual(p->getValue(), norm))
@@ -1611,10 +1659,155 @@ public:
         scrubAuditioning = false;
         scrubHead        = -1;
         boundScoreSlot_  = slot;
+        bindTransport();   // P7 — the transport follows the selected instance
+        viewDoc(slot >= 0 ? slot : transportSlot());   // …and so do the take, the EQ and the render
         repaint();
     }
 
 private:
+    //==========================================================================
+    // P7 — one page, N instances. This component is a VIEW over a single SCORE
+    // instance at a time: everything the instance owns lives in an InstanceDoc
+    // keyed by the module's score-player pool slot (the offline generation
+    // settings and the WAV path live in the PROCESSOR, also per slot, because
+    // the SETUP panel edits them too). Selecting another SCORE parks the live
+    // members into their doc and pulls the target's out, so two SCORE modules
+    // in two chains keep entirely separate takes, EQ curves and renders.
+    //==========================================================================
+    static constexpr int kMaxDocs = 8;   // == ScorePlayerService::kMaxSlots
+
+    struct InstanceDoc
+    {
+        juce::File   loadedWav;
+        juce::String eqState;                  // encoded EQ spline
+        // Renders (copy-on-write: an untouched instance costs nothing).
+        juce::Image          generatedImage, baseImage, previewImage;
+        juce::Rectangle<int> spectroBand;
+        double genMinFreq = 0.0, genMaxFreq = 0.0;
+        bool   generatedStereo = false;
+        double genDynRangeDB = 50.0, genDpi = 400.0;
+        double lastEqMinFreq = 0.0, lastEqMaxFreq = 0.0;
+        double previewWp = 1.0;
+        juce::String previewStats;
+    };
+
+    /** Parks the live members into the doc the page is currently viewing. */
+    void captureDoc()
+    {
+        auto& d = docs_[(size_t) docSlot_];
+        d.loadedWav       = loadedWav;
+        d.eqState         = eqEditor.encodeState();
+        d.generatedImage  = generatedImage;
+        d.baseImage       = baseImage;
+        d.previewImage    = previewImage;
+        d.spectroBand     = spectroBand;
+        d.genMinFreq      = genMinFreq;
+        d.genMaxFreq      = genMaxFreq;
+        d.generatedStereo = generatedStereo;
+        d.genDynRangeDB   = genDynRangeDB;
+        d.genDpi          = genDpi;
+        d.lastEqMinFreq   = lastEqMinFreq;
+        d.lastEqMaxFreq   = lastEqMaxFreq;
+        d.previewWp       = previewWp_;
+        d.previewStats    = previewStats;
+    }
+
+    /** Pulls the viewed doc back into the live members and refreshes the UI.
+     *  Constructor-unsafe — call it only once the page is built. */
+    void applyDoc()
+    {
+        const auto& d = docs_[(size_t) docSlot_];
+        loadedWav       = d.loadedWav;
+        generatedImage  = d.generatedImage;
+        baseImage       = d.baseImage;
+        previewImage    = d.previewImage;
+        spectroBand     = d.spectroBand;
+        genMinFreq      = d.genMinFreq;
+        genMaxFreq      = d.genMaxFreq;
+        generatedStereo = d.generatedStereo;
+        genDynRangeDB   = d.genDynRangeDB;
+        genDpi          = d.genDpi;
+        lastEqMinFreq   = d.lastEqMinFreq;
+        lastEqMaxFreq   = d.lastEqMaxFreq;
+        previewWp_      = d.previewWp;
+        previewStats    = d.previewStats;
+
+        // View state that never belongs to an instance: void the zoom tile so
+        // no pixel of the previous instance can leak into this one's preview.
+        hiResTile_ = juce::Image();
+        tileFx0_ = tileFx1_ = tileFy0_ = tileFy1_ = 0.0;
+        tileDensity_ = 0.0;
+        ++tileEpoch_;
+        previewZoom_ = 1.0; previewCx_ = 0.5; previewCy_ = 0.5;
+        eqDirty = false;
+
+        if (d.eqState.isNotEmpty())
+            eqEditor.decodeState(d.eqState);
+        // The offline settings already switched with the processor's UI slot.
+        auto& sset = processor.getScoreSettings();
+        wsSlider.setValue(sset.writingSpeed, juce::dontSendNotification);
+        stereoToggle  .setToggleState(sset.enableStereoMode != 0, juce::dontSendNotification);
+        multiResToggle.setToggleState(sset.enableMultiRes  != 0, juce::dontSendNotification);
+        shownPageFormat_ = sset.pageFormat;
+        if (loadedWav.existsAsFile())
+            setLoadedFile(loadedWav, /*restoreRegion*/ true);
+        else
+        {
+            fileLabel.setText("No file loaded", juce::dontSendNotification);
+            waveform.setFile(juce::File());
+            previewButton.setEnabled(false);
+            refreshPreviewButton();
+        }
+        // First visit of a restored instance: its take only exists as the
+        // hadTake flag — re-render it in the background (lazy per instance).
+        autoRegenerateIfArmed();
+        resized();
+        repaint();
+    }
+
+    /** P7 — instance @p slot left the rack: its document dies with it, so the
+     *  next module that lands on this pool slot (possibly in another chain)
+     *  starts from the page defaults instead of inheriting a stranger's work.
+     *  Wiping the LIVE members too when the page is viewing that slot. */
+public:
+    void forgetScoreSlot(int slot)
+    {
+        slot = juce::jlimit(0, kMaxDocs - 1, slot);
+        docs_[(size_t) slot] = defaultDoc_;
+        processor.getAPVTS().state.setProperty(
+            juce::Identifier(hadTakeKey(slot)), false, nullptr);
+        persistEqCurves();
+        if (slot == docSlot_)
+        {
+            processor.setScoreUiSlot(docSlot_);
+            applyDoc();
+            boundScoreSlot_ = -1;
+        }
+    }
+private:
+
+    /** Switches the page to instance @p slot (parking the current one). */
+    void viewDoc(int slot)
+    {
+        slot = juce::jlimit(0, kMaxDocs - 1, slot);
+        if (slot == docSlot_)
+            return;
+        if (processor.isScorePreviewPlaying())
+            processor.stopScorePreview();   // the take being auditioned is leaving
+        captureDoc();
+        docSlot_ = slot;
+        // The offline settings + WAV path live in the PROCESSOR (the SETUP
+        // panel edits them too): keep its UI slot glued to our document.
+        processor.setScoreUiSlot(docSlot_);
+        applyDoc();
+    }
+
+    std::array<InstanceDoc, kMaxDocs> docs_ {};
+    InstanceDoc defaultDoc_ {};   ///< pristine page — what a freed slot reverts to
+    int docSlot_ = 0;          ///< instance whose doc is live in the members
+    int genSlot_ = 0;          ///< instance that launched the running render
+                               ///  (hadTake stamps IT, not the viewed slot)
+
     /** The bound score channel: the selected instance's slot while it is
      *  still in the rack, else the first placed instance of this type. */
     ScoreChannel* boundChannel() const
@@ -1623,6 +1816,23 @@ private:
             && processor.scorePlayerSlotInUse(boundScoreSlot_))
             return processor.getScoreChannelForSlot(boundScoreSlot_);
         return processor.getScoreChannel(ModuleType::Score);
+    }
+    /** Player-pool slot whose transport bank the widgets are bound to. Falls
+     *  back to the first placed SCORE (then slot 0) so the page always has a
+     *  valid bank to show, even with no module in the rack. */
+    int transportSlot() const
+    {
+        if (boundScoreSlot_ >= 0 && processor.scorePlayerSlotInUse(boundScoreSlot_))
+            return boundScoreSlot_;
+        if (auto* sc = processor.getScoreChannel(ModuleType::Score))
+            return sc->slot();
+        return 0;
+    }
+    void bindTransport()
+    {
+        xport_.rebind(processor.getAPVTS(), processor.getMidiMap(),
+                      ModuleType::Score, transportSlot(),
+                      playStopButton, loopBtn, reverseBtn, speedSlider);
     }
     int boundScoreSlot_ = -1;
 
@@ -1636,17 +1846,14 @@ private:
 
     // Writing Speed — essential generation control kept on the PLAY page.
     juce::Label  wsLabel;
-    juce::Slider wsSlider;
+    Sp3ctraBarSlider wsSlider;
 
-    // Playback transport (CHAIN 1 — reuses the LuxSampler engine).
+    // Playback transport (this instance's own score-player slot).
     TransportPlayButton playStopButton;
     ScoreIconToggle     loopBtn    { ScoreIconToggle::Glyph::Loop };
     ScoreIconToggle     reverseBtn { ScoreIconToggle::Glyph::Inverse };
     juce::Slider        speedSlider;
     juce::Label         speedLabel, playHint;
-    // APVTS bindings (declared after the widgets → destroyed first).
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> loopAttach, reverseAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> speedAttach;
     int                 scrubHead { -1 }; // armed/displayed score head when stopped (-1 = none)
     bool                scrubbing { false };
     bool                scrubAuditioning { false }; // true while a stopped-score scrub plays audio
@@ -1700,7 +1907,9 @@ private:
 
     ScoreGenJob job;
 
-    std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
+    // Transport bank of the SELECTED instance (attachments + MIDI-Learn).
+    // Declared LAST so it is destroyed before the widgets it binds.
+    ScoreTransportBinding xport_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ScoreGenTabComponent)
 };

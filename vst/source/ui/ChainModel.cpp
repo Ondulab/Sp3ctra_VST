@@ -3,16 +3,21 @@
 
 static_assert(ChainModel::kMaxVideoSlots == CHAIN_MAX_CHAINS,
               "ChainModel::kMaxVideoSlots must equal CHAIN_MAX_CHAINS (chain_plan.h)");
+static_assert(ChainModel::kMaxMidiTaps == CHAIN_MAX_CHAINS,
+              "ChainModel::kMaxMidiTaps must equal CHAIN_MAX_CHAINS (chain_plan.h) — "
+              "midi_tap_instance() clamps to that pool size.");
 static_assert(ChainModel::kMaxChains == CHAIN_MAX_CHAINS,
               "ChainModel::kMaxChains must equal CHAIN_MAX_CHAINS (chain_plan.h) — "
               "every per-chain RT pool is sized with it.");
-static_assert(CHAIN_PLAN_MAX_INSERTS >= 16,
-              "The insert list holds Pitch + Mask + Reverb + Echo + EQ + up to 8 "
-              "VideoScroll probes AND up to 2 Sampler position markers AND 1 Score "
-              "position marker in a single chain = 16 entries, so "
-              "CHAIN_PLAN_MAX_INSERTS must be >= 16 or deriveAndPublishChainPlan "
-              "silently drops probes/markers (a dropped marker misroutes every "
-              "probe/FX placed after it).");
+static_assert(CHAIN_PLAN_MAX_INSERTS >= 38,
+              "One chain may legally hold: 6 pooled processors (Pitch + Mask + "
+              "Reverb + Echo + EQ + Harmo) + 8 VideoScroll probes + 8 Sampler "
+              "position markers + 4 score-family markers (1 per type) + 4 OUT "
+              "send markers (LuxStral/LuxSynth/LuxWave/LuxGrain) + 8 MidiTap "
+              "probes = 38 entries, so CHAIN_PLAN_MAX_INSERTS must be >= 38 or "
+              "deriveAndPublishChainPlan silently drops probes/markers (a "
+              "dropped marker misroutes every probe/FX placed after it). Keep "
+              "this count in sync with the table in chain_plan.h.");
 
 //==============================================================================
 const juce::Identifier ChainModel::kChainsTag   { "CHAINS" };
@@ -72,6 +77,34 @@ int ChainModel::firstFreeVideoSlot(const juce::Uuid* movingId) const
             if (m.slot >= 0 && m.slot < kMaxVideoSlots) used[m.slot] = true;
         }
     for (int s = 0; s < kMaxVideoSlots; ++s)
+        if (! used[s]) return s;
+    return -1;
+}
+
+int ChainModel::midiTapCount(const juce::Uuid* exclude) const
+{
+    int n = 0;
+    for (const auto& ch : chains)
+        for (const auto& m : ch.modules)
+        {
+            if (! isMidiTap(m.type)) continue;
+            if (exclude != nullptr && m.id == *exclude) continue;
+            ++n;
+        }
+    return n;
+}
+
+int ChainModel::firstFreeMidiTapSlot(const juce::Uuid* movingId) const
+{
+    bool used[kMaxMidiTaps] = { false };
+    for (const auto& ch : chains)
+        for (const auto& m : ch.modules)
+        {
+            if (! isMidiTap(m.type)) continue;
+            if (movingId != nullptr && m.id == *movingId) continue;
+            if (m.slot >= 0 && m.slot < kMaxMidiTaps) used[m.slot] = true;
+        }
+    for (int s = 0; s < kMaxMidiTaps; ++s)
         if (! used[s]) return s;
     return -1;
 }
@@ -146,6 +179,11 @@ bool ChainModel::canInsertIntoNewChain(ModuleType type, const juce::Uuid* moving
     if (isSlottedType(type) && firstFreeVideoSlot(movingId) < 0)
         return false;   // pool full (8 used)
 
+    // MidiTap is the second multi-per-chain probe, on its OWN 8-slot pool
+    // (independent of VideoScroll's — see ChainModel.h).
+    if (isMidiTap(type) && firstFreeMidiTapSlot(movingId) < 0)
+        return false;   // pool full (8 used)
+
     // Sampler is multi-instance too (engines 0..7 since P6), bounded by its own pool.
     if (isSamplerEngine(type) && firstFreeSamplerSlot(movingId) < 0)
         return false;   // both sampler engines (A + B) already placed
@@ -199,8 +237,8 @@ bool ChainModel::canInsert(int chainIdx, ModuleType type, const juce::Uuid* movi
     {
         if (movingId != nullptr && m.id == *movingId)
             continue;  // the instance being moved doesn't block itself
-        if (m.type == type && ! isSlottedType(type) && ! isSamplerEngine(type))
-            return false;             // duplicate type per chain (VideoScroll/Sampler may repeat)
+        if (m.type == type && ! mayRepeatInChain(type))
+            return false;             // duplicate type per chain (pooled probes/samplers may repeat)
         if (wantSource && moduleRole(m.type) == ModuleRole::Source)
             return false;                         // at most one source per chain
     }
@@ -216,6 +254,7 @@ bool ChainModel::insert(int chainIdx, ModuleType type, int dropIdx)
         return false;
 
     const int slot = isSlottedType(type)   ? firstFreeVideoSlot()
+                   : isMidiTap(type)       ? firstFreeMidiTapSlot()
                    : isSamplerEngine(type) ? firstFreeSamplerSlot()
                    : isEngineSend(type)    ? firstFreeEngineSendSlot(type)
                    : isMediaSource(type)   ? firstFreeMediaSlot(type)
@@ -475,6 +514,7 @@ void ChainModel::validateAndRepair()
 
     std::set<ModuleType> seenSingletons;   // synth/util types already placed (global)
     int videoBudget    = kMaxVideoSlots;    // at most 8 slotted instances model-wide
+    int midiTapBudget  = kMaxMidiTaps;      // at most 8 MIDI TAP probes model-wide
     int samplerBudget  = kMaxSamplerEngines;// at most kMaxSamplerEngines engines model-wide
     // M6 — engine sends: up to 8 per TYPE model-wide (independent pools).
     auto sendIdx = [](ModuleType t) noexcept {
@@ -504,6 +544,14 @@ void ChainModel::validateAndRepair()
                 if (videoBudget <= 0)
                     continue;            // 9th+ slotted instance across model → drop
                 --videoBudget;
+                kept.push_back(m);
+                continue;
+            }
+            if (isMidiTap(m.type))       // exempt from the per-chain duplicate rule
+            {
+                if (midiTapBudget <= 0)
+                    continue;            // 9th+ MIDI TAP across model → drop
+                --midiTapBudget;
                 kept.push_back(m);
                 continue;
             }
@@ -574,12 +622,16 @@ void ChainModel::validateAndRepair()
         chains.push_back(Chain{ juce::Uuid(), {}, {} });   // always keep ≥1 chain
 
     // Heal slots: PRESERVE valid unique slots (automation-lane stability); only
-    // reassign -1 / out-of-range / colliding ones. Two INDEPENDENT pools:
-    // VideoScroll (kMaxVideoSlots) and Sampler engines (kMaxSamplerEngines).
+    // reassign -1 / out-of-range / colliding ones. INDEPENDENT pools:
+    // VideoScroll (kMaxVideoSlots), MidiTap (kMaxMidiTaps), Sampler engines
+    // (kMaxSamplerEngines), engine sends, media kinds and score players.
     // Non-slotted types forced to -1.
     bool usedVid[kMaxVideoSlots]     = { false };
+    bool usedTap[kMaxMidiTaps]       = { false };
     bool usedSmp[kMaxSamplerEngines] = { false };
-    bool usedSend[3][kMaxEngineSends] = {{ false }};
+    // 4 send pools, NOT 3: sendIdx() returns 3 for LuxGrain (a [3] first
+    // dimension made every LuxGrain send write past the end of this array).
+    bool usedSend[4][kMaxEngineSends] = {{ false }};
     bool usedMedia[3][kMaxMediaSlots] = {{ false }};
     bool usedScore[kMaxScorePlayers]  = { false };
     for (auto& ch : chains)
@@ -589,6 +641,13 @@ void ChainModel::validateAndRepair()
             {
                 if (m.slot >= 0 && m.slot < kMaxVideoSlots && ! usedVid[m.slot])
                     usedVid[m.slot] = true;
+                else
+                    m.slot = -1;
+            }
+            else if (isMidiTap(m.type))
+            {
+                if (m.slot >= 0 && m.slot < kMaxMidiTaps && ! usedTap[m.slot])
+                    usedTap[m.slot] = true;
                 else
                     m.slot = -1;
             }
@@ -633,6 +692,12 @@ void ChainModel::validateAndRepair()
                 for (int s = 0; s < kMaxVideoSlots; ++s)
                     if (! usedVid[s]) { m.slot = s; usedVid[s] = true; break; }
                 jassert(m.slot >= 0);   // guaranteed by the videoBudget cap above
+            }
+            else if (isMidiTap(m.type) && m.slot < 0)
+            {
+                for (int s = 0; s < kMaxMidiTaps; ++s)
+                    if (! usedTap[s]) { m.slot = s; usedTap[s] = true; break; }
+                jassert(m.slot >= 0);   // guaranteed by the midiTapBudget cap above
             }
             else if (isSamplerEngine(m.type) && m.slot < 0)
             {

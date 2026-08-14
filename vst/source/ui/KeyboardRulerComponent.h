@@ -28,6 +28,8 @@
  */
 #pragma once
 
+#include "ModuleCatalog.h"
+
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "../PluginProcessor.h"
@@ -72,7 +74,7 @@ private:
     Sp3ctraAudioProcessor& processor;
     Module       module { Module::Pitch };
     int          slot_  { 0 };              // pool slot of the mirrored instance
-    juce::Colour accent { 0xffe06bb8 };     // pink (PITCH) / teal (MASK)
+    juce::Colour accent = moduleColour(ModuleType::Pitch);   // PITCH / MASK (set per selection)
 
     // ── Mapping snapshot (mirrors lux_pitch.c / lux_mask.c) ──────────────────
     float pixelCount { 3456.0f };

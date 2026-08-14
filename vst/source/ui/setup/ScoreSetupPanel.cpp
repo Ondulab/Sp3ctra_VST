@@ -5,13 +5,12 @@
 ScoreSetupPanel::ScoreSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour)
     : proc(processor),
       apvts(processor.getAPVTS()),
-      accent(accentColour),
-      settings(processor.getScoreSettings())
+      accent(accentColour)
 {
     // ── Frequency range section (mirror LuxStral or manual override) ─────
     freqSectionLabel.setText("Frequency Range", juce::dontSendNotification);
     freqSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
-    freqSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
+    freqSectionLabel.setColour(juce::Label::textColourId, accent);
     addAndMakeVisible(freqSectionLabel);
 
     manualToggle.setButtonText("Manual (override LuxStral)");
@@ -32,10 +31,9 @@ ScoreSetupPanel::ScoreSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
     addAndMakeVisible(manualToggle);
 
     initLabel(tuningLabel, "Tuning (A4)");
-    tuningSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    tuningSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, Sp3ctraTheme::kControlH);
     tuningSlider.setTextValueSuffix(" Hz");
     tuningSlider.setRange(415.0, 466.0, 0.1);
+    tuningSlider.setDoubleClickReturnValue(true, 440.0);   // cycle centre
     tuningSlider.onValueChange = [this]
     {
         auto& ov = proc.getScoreFreqOverride();
@@ -59,8 +57,6 @@ ScoreSetupPanel::ScoreSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
     addAndMakeVisible(rootCombo);
 
     initLabel(octavesLabel, "Octaves");
-    octavesSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    octavesSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, Sp3ctraTheme::kControlH);
     octavesSlider.setRange(1, 10, 1);
     octavesSlider.onValueChange = [this]
     {
@@ -75,13 +71,13 @@ ScoreSetupPanel::ScoreSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
 
     // ── Image processing — only the PhonoPaper-conforming Dynamic Range ────
     initLabel(dynLabel, "Dynamic Range (dB)");
-    initSlider(dynSlider, 20.0, 120.0, 1.0, settings.dynamicRangeDB);
-    dynSlider.onValueChange = [this] { settings.dynamicRangeDB = dynSlider.getValue(); };
+    initSlider(dynSlider, 20.0, 120.0, 1.0, settings().dynamicRangeDB);
+    dynSlider.onValueChange = [this] { settings().dynamicRangeDB = dynSlider.getValue(); };
 
     // ── Print size — spectro band height = CIS sensor length ───────────────
     printSectionLabel.setText("Print Size", juce::dontSendNotification);
     printSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
-    printSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
+    printSectionLabel.setColour(juce::Label::textColourId, accent);
     addAndMakeVisible(printSectionLabel);
 
     heightManualToggle.setButtonText("Manual (override CIS height)");
@@ -89,31 +85,31 @@ ScoreSetupPanel::ScoreSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
         "Locked to the Sp3ctra CIS sensor length (219.456 mm = 8.64\"). Print the\n"
         "score at 100% / real size so the band height matches the sensor and plays\n"
         "in tune. Enable only to compensate a printer that can't scale to 100%.");
-    heightManualToggle.setToggleState(settings.spectroHeightManual != 0, juce::dontSendNotification);
+    heightManualToggle.setToggleState(settings().spectroHeightManual != 0, juce::dontSendNotification);
     heightManualToggle.onClick = [this]
     {
         const bool man = heightManualToggle.getToggleState();
-        settings.spectroHeightManual = man ? 1 : 0;
+        settings().spectroHeightManual = man ? 1 : 0;
         if (! man)
-            settings.spectroHeightMM = SCORE_CIS_HEIGHT_MM;   // re-lock to the sensor
+            settings().spectroHeightMM = SCORE_CIS_HEIGHT_MM;   // re-lock to the sensor
         refreshHeightControls();
     };
     addAndMakeVisible(heightManualToggle);
 
     initLabel(heightLabel, "Band Height (mm)");
-    initSlider(heightSlider, 180.0, 260.0, 0.001, settings.spectroHeightMM);
+    initSlider(heightSlider, 180.0, 260.0, 0.001, settings().spectroHeightMM);
     heightSlider.setNumDecimalPlacesToDisplay(3);
     heightSlider.setTextValueSuffix(" mm");
     heightSlider.onValueChange = [this]
     {
-        if (settings.spectroHeightManual)
-            settings.spectroHeightMM = heightSlider.getValue();
+        if (settings().spectroHeightManual)
+            settings().spectroHeightMM = heightSlider.getValue();
     };
 
     // ── Export — format / sheet size / DPI (moved off the PLAY page) ───────
     exportSectionLabel.setText("Export", juce::dontSendNotification);
     exportSectionLabel.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSettings)).boldened());
-    exportSectionLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
+    exportSectionLabel.setColour(juce::Label::textColourId, accent);
     addAndMakeVisible(exportSectionLabel);
 
     initLabel(formatLabel, "Image Format");
@@ -138,12 +134,12 @@ ScoreSetupPanel::ScoreSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
                          "free region in the waveform (drag its edges to "
                          "resize); the sheet stretches to hold it. Takes "
                          "effect on the next GENERATE.");
-    pageCombo.setSelectedId(juce::jlimit(0, 2, settings.pageFormat) + 1,
+    pageCombo.setSelectedId(juce::jlimit(0, 2, settings().pageFormat) + 1,
                             juce::dontSendNotification);
     pageCombo.onChange = [this]
     {
         // The PLAY page's timer mirrors this into the region-picker window.
-        settings.pageFormat = pageCombo.getSelectedId() - 1;
+        settings().pageFormat = pageCombo.getSelectedId() - 1;
     };
     addAndMakeVisible(pageCombo);
 
@@ -153,9 +149,9 @@ ScoreSetupPanel::ScoreSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour 
     dpiCombo.setTooltip("Output resolution — 400 DPI matches the CIS sensor "
                         "(print at 100% to play in tune). Takes effect on the "
                         "next GENERATE.");
-    dpiCombo.setSelectedId((int) settings.printerDpi, juce::dontSendNotification);
+    dpiCombo.setSelectedId((int) settings().printerDpi, juce::dontSendNotification);
     dpiCombo.onChange = [this]
-    { settings.printerDpi = (double) juce::jmax(72, dpiCombo.getSelectedId()); };
+    { settings().printerDpi = (double) juce::jmax(72, dpiCombo.getSelectedId()); };
     addAndMakeVisible(dpiCombo);
 
     refreshFreqControls();
@@ -173,10 +169,8 @@ void ScoreSetupPanel::initLabel(juce::Label& l, const juce::String& text)
     addAndMakeVisible(l);
 }
 
-void ScoreSetupPanel::initSlider(juce::Slider& s, double lo, double hi, double step, double val)
+void ScoreSetupPanel::initSlider(Sp3ctraBarSlider& s, double lo, double hi, double step, double val)
 {
-    s.setSliderStyle(juce::Slider::LinearHorizontal);
-    s.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, Sp3ctraTheme::kControlH);
     s.setRange(lo, hi, step);
     s.setValue(val, juce::dontSendNotification);
     addAndMakeVisible(s);
@@ -229,7 +223,7 @@ void ScoreSetupPanel::refreshFreqControls()
 
 void ScoreSetupPanel::refreshHeightControls()
 {
-    const bool man = settings.spectroHeightManual != 0;
+    const bool man = settings().spectroHeightManual != 0;
 
     heightManualToggle.setToggleState(man, juce::dontSendNotification);
     heightSlider.setEnabled(man);
@@ -240,7 +234,7 @@ void ScoreSetupPanel::refreshHeightControls()
     heightLabel.setAlpha(a);
 
     // Show the live override, or the locked CIS length when following the sensor.
-    heightSlider.setValue(man ? settings.spectroHeightMM : SCORE_CIS_HEIGHT_MM,
+    heightSlider.setValue(man ? settings().spectroHeightMM : SCORE_CIS_HEIGHT_MM,
                           juce::dontSendNotification);
 }
 
@@ -251,6 +245,24 @@ void ScoreSetupPanel::updateRangeInfo()
     rangeInfoLabel.setText("Range: " + juce::String(lo, 1) + " Hz  -  "
                                + juce::String(hi, 0) + " Hz",
                            juce::dontSendNotification);
+}
+
+void ScoreSetupPanel::refreshFromSettings()
+{
+    // P7 — the panel now views ANOTHER SCORE instance: re-read every widget
+    // from its settings block (no notifications: nothing must be written back).
+    dynSlider.setValue(settings().dynamicRangeDB, juce::dontSendNotification);
+    heightManualToggle.setToggleState(settings().spectroHeightManual != 0,
+                                      juce::dontSendNotification);
+    pageCombo.setSelectedId(juce::jlimit(0, 2, settings().pageFormat) + 1,
+                            juce::dontSendNotification);
+    dpiCombo.setSelectedId((int) settings().printerDpi, juce::dontSendNotification);
+    formatCombo.setSelectedId(
+        (bool) apvts.state.getProperty("scoreExportPng", true) ? 1 : 2,
+        juce::dontSendNotification);
+    refreshHeightControls();
+    refreshFreqControls();
+    updateRangeInfo();
 }
 
 void ScoreSetupPanel::timerCallback()

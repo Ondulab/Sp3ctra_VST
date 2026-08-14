@@ -19,6 +19,8 @@
  */
 #pragma once
 
+#include "../ui/ModuleCatalog.h"
+
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <array>
 #include <cmath>
@@ -26,6 +28,8 @@
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
+#include "ScoreTransportBinding.h"
+#include "../ui/Sp3ctraBarSlider.h"
 #include "../IconPaths.h"
 #include "../licensing/ActivationDialog.h"
 #include "TimbreGenRenderer.h"
@@ -35,7 +39,7 @@ class TimbreGenTabComponent : public juce::Component,
                               private juce::ScrollBar::Listener
 {
 public:
-    static constexpr uint32_t kAccentARGB = 0xffd97b52;   // terracotta (TIMBRE identity)
+    static inline const uint32_t kAccentARGB = moduleColour(ModuleType::Timbre).getARGB();   ///< inherited module colour
     static constexpr int      kPreferredH = 640;
 
     explicit TimbreGenTabComponent(Sp3ctraAudioProcessor& p)
@@ -49,7 +53,11 @@ public:
             slots[(size_t) i].enabled  = true;
             slots[(size_t) i].midiNote = 57;   // A3
         }
-        restoreState();   // overwrite with the persisted page when present
+        // P7 — every instance starts from this default page, then the
+        // persisted per-instance docs overwrite whichever were saved.
+        defaultDoc_.slots = slots; defaultDoc_.pageSettings = pageSettings;
+        for (auto& d : docs_) d = defaultDoc_;
+        restoreState();   // overwrite with the persisted pages when present
 
         // ── Slot tabs ────────────────────────────────────────────────────────
         for (int i = 0; i < timbregen::kNumSlots; ++i)
@@ -211,20 +219,16 @@ public:
             addChildComponent(sb);
         }
 
-        // ── Audition transport (shared SCORE player channel) ────────────────
+        // ── Audition transport (this instance's own score-player slot) ──────
         playStopButton.setTooltip("Play / stop the timbre page through the score player");
         playStopButton.onClick = [this] { togglePlay(); };
         addAndMakeVisible(playStopButton);
 
         loopBtn.setTooltip("Loop playback");
         addAndMakeVisible(loopBtn);
-        loopAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            processor.getAPVTS(), "timbreLoop", loopBtn);
 
         reverseBtn.setTooltip("Reverse (play the timbre page backward)");
         addAndMakeVisible(reverseBtn);
-        reverseAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            processor.getAPVTS(), "timbreReverse", reverseBtn);
 
         initLabel(speedLabel, "Speed");
         speedSlider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
@@ -236,17 +240,10 @@ public:
         speedSlider.setTextValueSuffix("x");
         speedSlider.setSkewFactorFromMidPoint(1.0);
         addAndMakeVisible(speedSlider);
-        speedAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-            processor.getAPVTS(), "timbreSpeed", speedSlider);
 
-        // Right-click MIDI Learn — TIMBRE's own transport (play/loop/reverse/speed).
-        {
-            auto& mm = processor.getMidiMap();
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, playStopButton, "timbrePlaying"));
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, loopBtn,        "timbreLoop"));
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, reverseBtn,     "timbreReverse"));
-            learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, speedSlider,    "timbreSpeed"));
-        }
+        // P7 — transport attachments + MIDI-Learn follow the SELECTED
+        // instance: bindTransport() re-points them on every setScoreSlot().
+        bindTransport();
 
         playHint.setText("PLAY loads the page into the score player "
                          "(set LuxStral source = Sampler to hear it).",
@@ -1067,10 +1064,8 @@ private:
         addAndMakeVisible(lbl);
     }
 
-    void initSlider(juce::Slider& s, double lo, double hi, double step, double val)
+    void initSlider(Sp3ctraBarSlider& s, double lo, double hi, double step, double val)
     {
-        s.setSliderStyle(juce::Slider::LinearHorizontal);
-        s.setTextBoxStyle(juce::Slider::TextBoxRight, false, 78, Sp3ctraTheme::kControlH);
         s.setRange(lo, hi, step);
         s.setValue(val, juce::dontSendNotification);
         addAndMakeVisible(s);
@@ -1294,7 +1289,7 @@ private:
 
         // Route through TIMBRE's own play param so the DAW sees the transport;
         // the processor pushes speed/loop and starts/stops its slot.
-        if (auto* p = processor.getAPVTS().getParameter("timbrePlaying"))
+        if (auto* p = processor.getAPVTS().getParameter(xport_.playParamId()))
         {
             const float norm = play ? 1.0f : 0.0f;
             if (! juce::approximatelyEqual(p->getValue(), norm))
@@ -1364,7 +1359,7 @@ private:
 
         // Mirror TIMBRE's play param on the real engine state (DAW lane truthful
         // when a one-shot ends / an internal reload stops playback).
-        if (auto* p = processor.getAPVTS().getParameter("timbrePlaying"))
+        if (auto* p = processor.getAPVTS().getParameter(xport_.playParamId()))
         {
             const float norm = (fs != nullptr && fs->isScorePlaying() && framesAreOurs)
                                  ? 1.0f : 0.0f;
@@ -1375,11 +1370,45 @@ private:
 
     //==========================================================================
     // Persistence — one JSON blob in apvts.state (like scoreEqCurve).
-    void persistState()
+    //==========================================================================
+    // P7 — one page, N instances. This component is a VIEW over a single
+    // TIMBRE instance at a time: everything the instance owns lives in an
+    // InstanceDoc, keyed by the module's score-player pool slot. Selecting
+    // another TIMBRE parks the live members into their doc and pulls the
+    // target's out, so two TIMBRE modules in two chains keep entirely separate
+    // sounds, page settings and renders. Docs persist one APVTS key each.
+    //==========================================================================
+    static constexpr int kMaxDocs = 8;   // == ScorePlayerService::kMaxSlots
+
+    struct InstanceDoc
     {
-        stateDirty = false;
+        std::array<timbregen::TimbreSlotParams, timbregen::kNumSlots> slots {};
+        timbregen::TimbrePageSettings pageSettings {};
+        int  selectedSlot     = 0;
+        bool exportAsPng      = true;
+        // Renders travel with the doc so switching back is instant (juce::Image
+        // is copy-on-write: an untouched instance costs nothing).
+        juce::Image          previewImage, fullImage;
+        juce::Rectangle<int> fullBand;
+        double fullMinFreq    = 0.0, fullMaxFreq = 0.0;
+        bool   previewDirty   = true, fullDirty = true;
+        bool   framesAreOurs  = false;
+        int    loadedFrameCount = 0;
+    };
+
+    /** APVTS state key of instance @p slot's page (slot 0 = legacy key, so
+     *  sessions saved before P7 restore into the first instance). */
+    static juce::String stateKey(int slot)
+    {
+        return slot <= 0 ? juce::String("timbreGenState")
+                         : "timbreGenState" + juce::String(juce::jlimit(1, 7, slot));
+    }
+
+    /** Serialises ONE instance doc into its APVTS key. */
+    void persistDoc(int slot, const InstanceDoc& d) const
+    {
         juce::Array<juce::var> arr;
-        for (const auto& q : slots)
+        for (const auto& q : d.slots)
         {
             auto* o = new juce::DynamicObject();
             o->setProperty("en",    q.enabled);
@@ -1401,23 +1430,38 @@ private:
         }
         auto* root = new juce::DynamicObject();
         root->setProperty("slots", arr);
-        root->setProperty("ws",     pageSettings.writingSpeed);
-        root->setProperty("line",   pageSettings.lineWidthMM);
-        root->setProperty("dpi",    pageSettings.printerDpi);
-        root->setProperty("labels", pageSettings.showLabels);
-        root->setProperty("png",    exportAsPng_);
+        root->setProperty("ws",     d.pageSettings.writingSpeed);
+        root->setProperty("line",   d.pageSettings.lineWidthMM);
+        root->setProperty("dpi",    d.pageSettings.printerDpi);
+        root->setProperty("labels", d.pageSettings.showLabels);
+        root->setProperty("png",    d.exportAsPng);
         processor.getAPVTS().state.setProperty(
-            "timbreGenState", juce::JSON::toString(juce::var(root), true), nullptr);
+            stateKey(slot), juce::JSON::toString(juce::var(root), true), nullptr);
     }
 
-    void restoreState()
+    /** Parks the live members into their doc, then writes EVERY instance doc
+     *  (a doc only exists once its instance was edited, so untouched slots
+     *  cost one small default blob each). */
+    void persistState()
+    {
+        stateDirty = false;
+        captureDoc();
+        for (int i = 0; i < kMaxDocs; ++i)
+            persistDoc(i, docs_[(size_t) i]);
+    }
+
+    /** Reads instance @p slot's page back from its APVTS key. */
+    void restoreDoc(int slot, InstanceDoc& d)
     {
         const juce::String blob = processor.getAPVTS().state
-            .getProperty("timbreGenState", "").toString();
+            .getProperty(stateKey(slot), "").toString();
         if (blob.isEmpty()) return;
         const juce::var root = juce::JSON::parse(blob);
         auto* o = root.getDynamicObject();
         if (o == nullptr) return;
+        auto& pageSettings = d.pageSettings;
+        auto& slots        = d.slots;
+        bool& exportAsPng_ = d.exportAsPng;
 
         if (o->hasProperty("ws"))     pageSettings.writingSpeed = (double) o->getProperty("ws");
         if (o->hasProperty("line"))   pageSettings.lineWidthMM  = (double) o->getProperty("line");
@@ -1450,6 +1494,17 @@ private:
             q.bellMode      = (bool) so->getProperty("bell");
             q.bellTable     = (int) get("bellT", q.bellTable);
         }
+        d.previewDirty = true;
+        d.fullDirty    = true;
+    }
+
+    /** Loads every instance doc, then makes the live one current. Data only:
+     *  the constructor calls this before the widgets exist. */
+    void restoreState()
+    {
+        for (int i = 0; i < kMaxDocs; ++i)
+            restoreDoc(i, docs_[(size_t) i]);
+        applyDocToMembers();
     }
 
     //==========================================================================
@@ -1471,6 +1526,8 @@ public:
         scrubHead        = -1;
         scrubbing        = false;
         boundScoreSlot_  = slot;
+        bindTransport();   // P7 — the transport follows the selected instance
+        viewDoc(slot >= 0 ? slot : transportSlot());   // …and so do the page's own settings
         repaint();
     }
 
@@ -1501,6 +1558,101 @@ public:
     }
 
 private:
+    /** Parks the live members into the doc the page is currently viewing. */
+    void captureDoc()
+    {
+        auto& d = docs_[(size_t) docSlot_];
+        d.slots            = slots;
+        d.pageSettings     = pageSettings;
+        d.selectedSlot     = selectedSlot;
+        d.exportAsPng      = exportAsPng_;
+        d.previewImage     = previewImage;
+        d.fullImage        = fullImage;
+        d.fullBand         = fullBand;
+        d.fullMinFreq      = fullMinFreq;
+        d.fullMaxFreq      = fullMaxFreq;
+        d.previewDirty     = previewDirty;
+        d.fullDirty        = fullDirty;
+        d.framesAreOurs    = framesAreOurs;
+        d.loadedFrameCount = loadedFrameCount;
+    }
+
+    /** Pulls the viewed doc back into the live members (data only — safe
+     *  before the widgets exist, i.e. from the constructor). */
+    void applyDocToMembers()
+    {
+        const auto& d = docs_[(size_t) docSlot_];
+        slots            = d.slots;
+        pageSettings     = d.pageSettings;
+        selectedSlot     = juce::jlimit(0, timbregen::kNumSlots - 1, d.selectedSlot);
+        exportAsPng_     = d.exportAsPng;
+        previewImage     = d.previewImage;
+        fullImage        = d.fullImage;
+        fullBand         = d.fullBand;
+        fullMinFreq      = d.fullMinFreq;
+        fullMaxFreq      = d.fullMaxFreq;
+        previewDirty     = d.previewDirty;
+        fullDirty        = d.fullDirty;
+        framesAreOurs    = d.framesAreOurs;
+        loadedFrameCount = d.loadedFrameCount;
+
+        // View state that never belongs to an instance: reset the zoom tile so
+        // no pixel of the previous instance can leak into this one's preview.
+        hiResTile_ = juce::Image();
+        tileFx0_ = tileFx1_ = tileFy0_ = tileFy1_ = 0.0;
+        tileDensity_ = 0.0;
+        ++tileEpoch_;
+        previewZoom_ = 1.0; previewCx_ = 0.5; previewCy_ = 0.5;
+    }
+
+    /** Pushes the live members onto the widgets. Constructor-unsafe (the slot
+     *  tabs and sliders must exist) — call it only after the page is built. */
+    void refreshUiFromMembers()
+    {
+        wsSlider  .setValue(pageSettings.writingSpeed, juce::dontSendNotification);
+        lineSlider.setValue(pageSettings.lineWidthMM,  juce::dontSendNotification);
+        labelsToggle.setToggleState(pageSettings.showLabels, juce::dontSendNotification);
+        refreshSlotControls();
+        for (auto& t : slotTabs) if (t != nullptr) t->repaint();
+        resized();
+        repaint();
+    }
+
+    /** P7 — instance @p slot left the rack: its document dies with it, so the
+     *  next module that lands on this pool slot (possibly in another chain)
+     *  starts from the page defaults instead of inheriting a stranger's work.
+     *  Wiping the LIVE members too when the page is viewing that slot. */
+public:
+    void forgetScoreSlot(int slot)
+    {
+        slot = juce::jlimit(0, kMaxDocs - 1, slot);
+        docs_[(size_t) slot] = defaultDoc_;
+        stateDirty = true;            // the wipe must reach the next save
+        if (slot == docSlot_)
+        {
+            applyDocToMembers();
+            refreshUiFromMembers();
+            boundScoreSlot_ = -1;
+        }
+    }
+private:
+
+    /** Switches the page to instance @p slot (parking the current one). */
+    void viewDoc(int slot)
+    {
+        slot = juce::jlimit(0, kMaxDocs - 1, slot);
+        if (slot == docSlot_)
+            return;
+        captureDoc();
+        docSlot_ = slot;
+        applyDocToMembers();
+        refreshUiFromMembers();
+    }
+
+    std::array<InstanceDoc, kMaxDocs> docs_ {};
+    InstanceDoc defaultDoc_ {};   ///< pristine page — what a freed slot reverts to
+    int docSlot_ = 0;          ///< instance whose doc is live in the members
+
     /** The bound score channel: the selected instance's slot while it is
      *  still in the rack, else the first placed instance of this type. */
     ScoreChannel* boundChannel() const
@@ -1509,6 +1661,23 @@ private:
             && processor.scorePlayerSlotInUse(boundScoreSlot_))
             return processor.getScoreChannelForSlot(boundScoreSlot_);
         return processor.getScoreChannel(ModuleType::Timbre);
+    }
+    /** Player-pool slot whose transport bank the widgets are bound to. Falls
+     *  back to the first placed instance of this type (then slot 0) so the page
+     *  always shows a valid bank, even with no module in the rack. */
+    int transportSlot() const
+    {
+        if (boundScoreSlot_ >= 0 && processor.scorePlayerSlotInUse(boundScoreSlot_))
+            return boundScoreSlot_;
+        if (auto* sc = processor.getScoreChannel(ModuleType::Timbre))
+            return sc->slot();
+        return 0;
+    }
+    void bindTransport()
+    {
+        xport_.rebind(processor.getAPVTS(), processor.getMidiMap(),
+                      ModuleType::Timbre, transportSlot(),
+                      playStopButton, loopBtn, reverseBtn, speedSlider);
     }
     int boundScoreSlot_ = -1;
 
@@ -1528,16 +1697,14 @@ private:
     juce::ToggleButton activeToggle, labelsToggle;
     TimbreIconToggle   loopBtn    { TimbreIconToggle::Glyph::Loop };
     TimbreIconToggle   reverseBtn { TimbreIconToggle::Glyph::Inverse };
-    juce::Slider   noteSlider, partialsSlider, slopeSlider, oddSlider, inharmSlider,
-                   combSlider, combPosSlider, attackSlider, decaySlider, hfDampSlider,
-                   levelSlider, wsSlider, lineSlider, speedSlider;
+    Sp3ctraBarSlider noteSlider, partialsSlider, slopeSlider, oddSlider, inharmSlider,
+                     combSlider, combPosSlider, attackSlider, decaySlider, hfDampSlider,
+                     levelSlider, wsSlider, lineSlider;
+    juce::Slider   speedSlider;   // rotary transport knob — NOT a bar
     TimbreExportButton exportButton;
     bool exportAsPng_ = true;            // SETUP face: PNG (true) / JPEG
     bool exportBusy_  = false;           // one export at a time
     TimbrePlayButton playStopButton;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> loopAttach, reverseAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> speedAttach;
-    std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
 
     juce::Rectangle<int>   previewArea;
     juce::Rectangle<float> previewImgArea;
@@ -1566,6 +1733,10 @@ private:
     int  loadedFrameCount = 0;
     int  scrubHead = -1;
     bool scrubbing = false, scrubAuditioning = false;
+
+    // Transport bank of the SELECTED instance (attachments + MIDI-Learn).
+    // Declared LAST so it is destroyed before the widgets it binds.
+    ScoreTransportBinding xport_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TimbreGenTabComponent)
 };

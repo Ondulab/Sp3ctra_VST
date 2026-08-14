@@ -1,4 +1,5 @@
 #include "VideoMixerColumn.h"
+#include "ModuleCatalog.h"
 #include "../licensing/ActivationDialog.h"
 
 //==============================================================================
@@ -190,13 +191,21 @@ VideoMixerColumn::VideoMixerColumn(Sp3ctraAudioProcessor& p)
             startRecordingFlow();
         }
     };
+    // Persisted as a state property (auto-dirty via the session listener).
+    recordHeight_ = (int) processor_.getAPVTS().state
+                        .getProperty("videoRecHeight", 1440);
     recBtn_.onRightClick = [this]
     {
         juce::PopupMenu m;
         m.addSectionHeader("Recording resolution");
         for (int hgt : { 1080, 1440, 2160 })
             m.addItem(juce::String(hgt) + "p", true, recordHeight_ == hgt,
-                      [this, hgt] { recordHeight_ = hgt; });
+                      [this, hgt]
+                      {
+                          recordHeight_ = hgt;
+                          processor_.getAPVTS().state
+                              .setProperty("videoRecHeight", hgt, nullptr);
+                      });
         m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&recBtn_));
     };
     addAndMakeVisible(recBtn_);
@@ -233,7 +242,7 @@ void VideoMixerColumn::paint(juce::Graphics& g)
     if (collapsed_)
         return;
 
-    g.setColour(juce::Colour(0xff5ad0c8));
+    g.setColour(moduleColour(ModuleType::VideoScroll));
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
     g.drawText("VIDEO MIX", 8, 0, getWidth() - 16, kHeaderH,
                juce::Justification::centredLeft, false);

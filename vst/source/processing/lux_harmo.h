@@ -114,7 +114,12 @@ typedef struct {
 typedef struct {
     LuxHarmoConfig config;
 
-    int  harmo_active;   /* nonzero while quantizing a stream (rack LED) */
+    int  harmo_active;   /* latch: a stream was quantized at least once since
+                          * the last reset — NOT an activity indicator */
+
+    /* Rack-LED heartbeat: bumped once per line the module actually CHANGED
+     * (output != input) — both render paths, MASK and WARP. See lux_reverb.h. */
+    uint32_t active_ticks;
     int  last_bg_mode;   /* RESOLVED polarity the floor was learned in */
 
     /* AUTO background — learned over a short window after each reset, then
@@ -125,8 +130,8 @@ typedef struct {
     int  auto_max_mean;
     int  auto_min_mean;
 
-    /* Background's own energy, slow EMA fed ONLY by near-background lines
-     * (see lux_echo.c). -1 = unseeded. */
+    /* Paper level — EMA of the per-line 10th-percentile energy (see
+     * lux_drive.c: grey-bands fix). -1 = unseeded. */
     float floor_ema;
 
     /* Displacement grids: disp[i] = (nearest allowed degree centre − i) in

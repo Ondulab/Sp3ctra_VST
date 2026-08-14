@@ -164,6 +164,7 @@ private:
     float wsLinePos_   { 1e9f };
     float wsCompress_  { 1e9f };
     float wsFade_      { 1e9f };
+    float wsGamma_     { 1e9f };
     int   wsBufW_      { -1 };
     int   wsCompH_     { -1 };
 

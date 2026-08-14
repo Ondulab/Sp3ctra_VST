@@ -1,4 +1,5 @@
 #include "SlotGridComponent.h"
+#include "../ui/ModuleCatalog.h"
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "../Sp3ctraDialog.h"            // destructive-action confirmations
@@ -14,19 +15,22 @@ SlotGridComponent::SlotGridComponent(Sp3ctraAudioProcessor& proc)
     {
         // ── Level fader — fade to white (engine param = 1 − brightnessLift) ──
         auto& sl = levelSlider[i];
-        sl.setSliderStyle(juce::Slider::LinearHorizontal);
-        sl.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        sl.setTextBoxStyle(juce::Slider::NoTextBox, true, 0, 0);
         sl.setRange(0.0, 1.0, 0.01);
         sl.setValue(1.0, juce::dontSendNotification);
-        sl.setColour(juce::Slider::trackColourId, juce::Colour(0xffcc88ff).withAlpha(0.55f));
-        sl.setColour(juce::Slider::thumbColourId, juce::Colour(0xffcc88ff));
+        sl.setAccent(moduleColour(ModuleType::Sampler));
+        sl.setColour(juce::Slider::trackColourId, moduleColour(ModuleType::Sampler).withAlpha(0.55f));
         sl.setTooltip("Bank " + juce::String(i + 1)
                       + " level: fades the bank to white (silence) in the mix");
         sl.onValueChange = [this, i]
         {
             if (auto* fs = processor.getSampler(samplerIndex_))
+            {
                 fs->setSlotBrightnessLift(i,
                     1.0f - static_cast<float>(levelSlider[i].getValue()));
+                // Engine-held param (not APVTS) — mark the session dirty.
+                processor.sessions()->markStateDirty();
+            }
         };
         addAndMakeVisible(sl);
 
@@ -45,7 +49,10 @@ SlotGridComponent::SlotGridComponent(Sp3ctraAudioProcessor& proc)
             const int id = modeBox[i].getSelectedId();
             if (id > 0)
                 if (auto* fs = processor.getSampler(samplerIndex_))
+                {
                     fs->setSlotMixMode(i, static_cast<SlotMixMode>(id - 1));
+                    processor.sessions()->markStateDirty();
+                }
         };
         addAndMakeVisible(box);
     }

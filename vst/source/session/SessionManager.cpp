@@ -123,7 +123,10 @@ void SessionManager::relativizeAssetPaths(juce::ValueTree state, const juce::Fil
             t.setProperty(prop, rel, nullptr);
     };
 
-    handle(state, "scoreWavPath",      "audio");
+    for (int i = 0; i < 8; ++i)   // P7 — one SCORE take per instance
+        handle(state, juce::Identifier(i == 0 ? juce::String("scoreWavPath")
+                                              : "scoreWavPath" + juce::String(i)),
+               "audio");
     handle(state, "luxgrainSamplePath","audio");
     if (auto wt = state.getChildWithName("LUXSTRAL_WAVETABLE"); wt.isValid())
         handle(wt, "sourcePath", "audio");
@@ -154,7 +157,9 @@ void SessionManager::absolutizeAssetPaths(juce::XmlElement& xml, const juce::Fil
         e->setAttribute(attr, resolved.getFullPathName());
     };
 
-    handle(&xml, "scoreWavPath");
+    for (int i = 0; i < 8; ++i)   // P7 — one SCORE take per instance
+        handle(&xml, i == 0 ? juce::String("scoreWavPath")
+                            : "scoreWavPath" + juce::String(i));
     handle(&xml, "luxgrainSamplePath");
     handle(xml.getChildByName("LUXSTRAL_WAVETABLE"), "sourcePath");
     if (auto* ms = xml.getChildByName("MEDIA_SOURCES"))
@@ -273,6 +278,38 @@ bool SessionManager::onStateRestored()
     return loadBanksFrom(sessionDir_);
 }
 
+//== P9 — score-take sidecars ==================================================
+void SessionManager::writeTakeTo(const juce::File& dir, int slot)
+{
+    const juce::File f = dir.getChildFile("takes")
+                            .getChildFile("slot" + juce::String(slot) + ".png");
+    const juce::MemoryBlock& png = proc_.getScoreTakePng(slot);
+    if (png.isEmpty())
+    {
+        f.deleteFile();   // released slot / no take — never leave a stale one
+        return;
+    }
+    f.getParentDirectory().createDirectory();
+    juce::TemporaryFile tmp(f);
+    if (! (tmp.getFile().replaceWithData(png.getData(), png.getSize())
+           && tmp.overwriteTargetFileWithTemporary()))
+        log_warning("VST", "Session take save FAILED: %s",
+                    f.getFullPathName().toRawUTF8());
+}
+
+void SessionManager::writeTakesTo(const juce::File& dir)
+{
+    for (int s = 0; s < 8; ++s)
+        writeTakeTo(dir, s);
+}
+
+void SessionManager::saveScoreTakeNow(int slot)
+{
+    if (! isStandalone()) return;
+    if (! LicenseManager::isLicensed()) return;   // demo — see saveStateNow
+    writeTakeTo(sessionDir_, slot);
+}
+
 //== Launch wiring ============================================================
 void SessionManager::openOnLaunch(const juce::File& dir)
 {
@@ -357,6 +394,7 @@ bool SessionManager::newSession(const juce::File& parentDir, const juce::String&
     setActive(dir, dir.getFileName());
     saveStateNow();
     saveBanksNow();
+    writeTakesTo(dir);   // P9 — the live takes follow the state
     return true;
 }
 
@@ -386,6 +424,7 @@ bool SessionManager::saveAs(const juce::File& parentDir, const juce::String& nam
     setActive(dir, dir.getFileName());
     saveStateNow();
     saveBanksNow();
+    writeTakesTo(dir);   // P9 — the live takes follow the duplicated state
     return true;
 }
 
@@ -431,6 +470,10 @@ void SessionManager::markBanksDirty()
     if (! isStandalone() || suppressAutosave_ || saving_) return;
     banksDirty_.store(true);
     lastBanksDirtyMs_ = juce::Time::getMillisecondCounter();
+    // Every bank mutation (record, clear, crop, load, paste) also rewrites
+    // per-slot play params that persist in project.sp3ctra, not in the banks —
+    // keep both files in step instead of leaving the state to the 60 s net.
+    markStateDirty();
 }
 
 void SessionManager::autosaveTick(juce::int64 /*nowMsIgnored*/)
@@ -456,10 +499,10 @@ void SessionManager::autosaveTick(juce::int64 /*nowMsIgnored*/)
         if (quiet || capHit)
             saveStateNow();
     }
-    // Safety net: non-APVTS edits (per-slot sampler params, sequencer steps,
-    // SCORE settings…) have no dirty hook — a slow unconditional state save
-    // caps their loss window at ~60 s. Cheap: atomic snapshot + ~100 KB write.
-    else if (nowMs - lastSafetySaveMs_ >= 60000)
+    // Safety net: non-APVTS edits (MIDI-driven sampler params, SCORE settings…)
+    // have no dirty hook — a slow unconditional state save caps their loss
+    // window at ~15 s. Cheap: atomic snapshot + ~100 KB write.
+    else if (nowMs - lastSafetySaveMs_ >= 15000)
     {
         lastSafetySaveMs_ = nowMs;
         saveStateNow();

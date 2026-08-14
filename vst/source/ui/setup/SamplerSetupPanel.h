@@ -23,6 +23,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "../../PluginProcessor.h"
+#include "../Sp3ctraBarSlider.h"
 
 class SamplerSetupPanel final : public juce::Component,
                                 private juce::Timer
@@ -62,7 +63,7 @@ private:
 
     // Max Duration
     juce::Label  maxDurationLabel;
-    juce::Slider maxDurationSlider;
+    Sp3ctraBarSlider maxDurationSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> maxDurationAttachment;
 
     // REC button mode (Toggle / Momentary) — per engine

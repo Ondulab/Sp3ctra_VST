@@ -515,7 +515,7 @@ void CisVisualizerComponent::paintSourceLabel(
         case VisualizerMode::SYNTH_FFT_COLOR:
             accent = juce::Colour(0xffcc88cc); break;
         case VisualizerMode::GRAIN_GRAY:
-            accent = juce::Colour(0xffd0a25a); break;   // LuxGrain identity
+            accent = juce::Colour(0xffd0a25a); break;   // warm amber (GRAIN modes)
         case VisualizerMode::GRAIN_COLOR:
             accent = juce::Colour(0xffe0c07a); break;
         default:

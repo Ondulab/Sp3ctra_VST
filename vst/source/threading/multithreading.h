@@ -213,4 +213,30 @@ int chain_pathb_player_candidate(int is_score, int engine_slot);
 void chain_player_stagings_set_inactive(int engine_slot);
 void score_player_stagings_set_inactive(int score_slot);
 
+/* Player stop → downstream blend-reference silence: whiten the MIX/darken-
+ * blend input cache of every SAMPLER marker BELOW the stopping player's own
+ * marker in its owned chains. Companion of the staging deactivation — without
+ * it, a downstream sampler keeps blending the stopped player's LAST column
+ * (e.g. a VOICE head position) into its playback. Same split as above:
+ *   chain_player_whiten_downstream_inputs — sampler engines;
+ *   score_player_whiten_downstream_inputs — score-player slots. Non-RT. */
+void chain_player_whiten_downstream_inputs(int engine_slot);
+void score_player_whiten_downstream_inputs(int score_slot);
+
+/* ── FX tail runout ──────────────────────────────────────────────────────────
+ * Reverb/Echo keep printing after their input goes silent — that IS the
+ * module. A chain whose feed stops must therefore keep being walked on blank
+ * paper until its tails are spent, or the decay is truncated on the spot.
+ *
+ *   chain_player_fx_tail_alive — 1 while a chain owned by THIS player still
+ *     has a tail BELOW its owning marker. A stopping player keeps its session
+ *     alive and injects blank paper while this holds (ScorePlayerService), so
+ *     the decay runs at the player's own line rate. VST only.
+ *   chain_any_fx_tail_alive — pool-wide, no plan needed: lets the media source
+ *     feeder stay at source rate through a runout instead of dropping to its
+ *     20 Hz idle poll.
+ * The producers' own runout is internal (chain_span_fx_tail_alive). Non-RT. */
+int chain_player_fx_tail_alive(int is_score, int engine_slot);
+int chain_any_fx_tail_alive(void);
+
 #endif

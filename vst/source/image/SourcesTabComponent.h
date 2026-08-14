@@ -22,6 +22,7 @@
 #include "../midi/MidiLearnAttachment.h"
 #include "../sampler/TransportBarComponent.h"   // IconTextButton
 #include "VisualizerMode.h"
+#include "../ui/Sp3ctraBarSlider.h"
 
 class SourcesTabComponent : public juce::Component,
                             private juce::Timer
@@ -44,8 +45,6 @@ public:
 
         // Fade-In (ms) — SP3CTRA input source (Chain 2) only. The sampler
         // (Chain 1) has no transport fade, so this row is hidden there.
-        fadeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        fadeSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, kTextBoxW, kCtrlH);
         fadeSlider.setTextValueSuffix(" ms");
         fadeSlider.setNumDecimalPlacesToDisplay(0);
         addChildComponent(fadeSlider);   // visibility toggled per chain in setChain()
@@ -64,8 +63,6 @@ public:
             apvts, "acqGateMode", acqModeCombo));
         acqModeCombo.onChange = [this]{ updateAcqEnabled(); };
 
-        acqRateSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-        acqRateSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, kTextBoxW, kCtrlH);
         acqRateSlider.setTextValueSuffix(" ms");
         addAndMakeVisible(acqRateSlider);
         acqRateAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
@@ -195,13 +192,13 @@ private:
     int activeChain_ { 1 };
 
     IconTextButton playBtn, holdBtn, stopBtn;
-    juce::Slider   fadeSlider;
+    Sp3ctraBarSlider fadeSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> fadeAttach;
     std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
 
     // ── Acquisition speed (global frame-advance brake) ──────────────────────────
     juce::ComboBox acqModeCombo, acqDivCombo, acqMultDivCombo;
-    juce::Slider   acqRateSlider;
+    Sp3ctraBarSlider acqRateSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> acqModeAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> acqDivAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> acqMultDivAttach;

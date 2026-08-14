@@ -59,7 +59,7 @@ public:
                 moduleEnableParam(kEngines[i].t), *s.led);
 
             s.fader = std::make_unique<juce::Slider>();
-            initFader(*s.fader, true);
+            initFader(*s.fader, true, s.colour);
             s.faderAttach = std::make_unique<SldAttach>(p.getAPVTS(),
                 kEngines[i].volumeId, *s.fader);
             setPercentDisplay(*s.fader);
@@ -73,7 +73,7 @@ public:
         m.colour = juce::Colour(0xffc9d4e0);
         m.name   = "MASTER";
         m.fader  = std::make_unique<juce::Slider>();
-        initFader(*m.fader, true);
+        initFader(*m.fader, true, m.colour);
         m.faderAttach = std::make_unique<SldAttach>(processor.getAPVTS(),
                                                     "masterVolume", *m.fader);
         setPercentDisplay(*m.fader);
@@ -81,7 +81,7 @@ public:
                                                         *m.fader, "masterVolume");
 
         // MINI (collapsed band): a bare vertical MASTER fader + VU strip.
-        initFader(miniMaster, false);
+        initFader(miniMaster, false, m.colour);
         miniMaster.setTooltip("Master volume");
         addChildComponent(miniMaster);
         miniMasterAttach = std::make_unique<SldAttach>(processor.getAPVTS(),
@@ -200,8 +200,9 @@ public:
         int nStrips = 0;
         for (auto& s : strips)
             if (isShown(s)) ++nStrips;
-        const int stripW = juce::jmax(40, (getWidth() - 2 * pad
-                                           - (nStrips - 1) * gap) / nStrips);
+        const int stripW = juce::jlimit(40, kMaxStripW,
+                                        (getWidth() - 2 * pad
+                                         - (nStrips - 1) * gap) / nStrips);
         int x = pad;
         int y = kHeaderH;
         const int h = getHeight() - y - pad;
@@ -265,6 +266,7 @@ public:
 private:
     static constexpr int kHeaderH = 24;
     static constexpr int kMiniFaderMaxH = 180;   // mini MASTER fader cap
+    static constexpr int kMaxStripW     = 120;   // strips stop widening past this
 
     //── Power LED — same visual language as the rack block dot ───────────────
     struct LedButton : juce::ToggleButton
@@ -297,9 +299,17 @@ private:
         std::unique_ptr<MidiLearnAttachment> learn;
     };
 
-    void initFader(juce::Slider& s, bool withTextBox)
+    void initFader(juce::Slider& s, bool withTextBox, juce::Colour accent)
     {
         s.setSliderStyle(juce::Slider::LinearVertical);
+        // Sp3ctraBarSlider::setAccent's colour scheme — the LookAndFeel's
+        // LinearVertical branch reads these ids to draw the thin DC-block bar
+        // in the strip's own colour.
+        s.setColour(juce::Slider::trackColourId,             accent.withAlpha(0.22f));
+        s.setColour(juce::Slider::backgroundColourId,        juce::Colour(0xff181820));
+        s.setColour(juce::Slider::textBoxTextColourId,       juce::Colours::white.withAlpha(0.92f));
+        s.setColour(juce::Slider::textBoxOutlineColourId,    accent.withAlpha(0.3f));
+        s.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colour(0xff181820));
         if (withTextBox)
             s.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 40, 15);
         else
