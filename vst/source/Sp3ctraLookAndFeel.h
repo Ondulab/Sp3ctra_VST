@@ -21,12 +21,29 @@ class Sp3ctraLookAndFeel : public juce::LookAndFeel_V4
 public:
     Sp3ctraLookAndFeel()
     {
-        // Toggle accent when no module page overrides it: the UI blue.
-        // Module pages tint their toggles by setting this colour id on the
-        // zone-3 page host (selectBlock) — drawToggleButton reads it with
-        // parent inheritance, so every toggle inside a page follows its
-        // block colour like the page's bar sliders do.
-        setColour(juce::ToggleButton::tickColourId, juce::Colour(0xff4fa3e0));
+        // Toggle accent = THE control colour (Sp3ctraTheme::kColHandle): a
+        // toggle is something you touch, so it takes the handle hue on every
+        // page, never the module colour (drawToggleButton reads tickColourId
+        // with parent inheritance — a host may still override it locally).
+        setColour(juce::ToggleButton::tickColourId, juce::Colour(Sp3ctraTheme::kColHandle));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Bar-slider value label — the LinearBar text box covers the whole bar
+    // and, by default, draws ITS OWN outline (Label::outlineColourId) on top
+    // of the one drawLinearSlider paints. Sp3ctra paints the bar chrome in
+    // ONE place (the LinearBar branch below, with hover/drag states), so the
+    // label is text-only: transparent background, no outline.
+    // ─────────────────────────────────────────────────────────────────────────
+    juce::Label* createSliderTextBox(juce::Slider& slider) override
+    {
+        auto* l = LookAndFeel_V4::createSliderTextBox(slider);
+        if (slider.isBar())
+        {
+            l->setColour(juce::Label::outlineColourId,    juce::Colours::transparentBlack);
+            l->setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
+        }
+        return l;
     }
     ~Sp3ctraLookAndFeel() override = default;
 
@@ -107,9 +124,8 @@ public:
     // ToggleButton — sliding switch in the DC-block bar language: dark
     // interior, translucent accent fill when ON, 1 px accent outline, and a
     // solid-accent square knob (the power-LED cue). The accent is the nearest
-    // ancestor's ToggleButton::tickColourId — module pages set their block
-    // colour on the zone-3 host, so toggles tint like the page's bar sliders;
-    // the LookAndFeel default (UI blue) covers everything else.
+    // ancestor's ToggleButton::tickColourId — the handle colour by default
+    // (a toggle is a control), so toggles tint like the bar sliders.
     // ─────────────────────────────────────────────────────────────────────────
     void drawToggleButton(juce::Graphics& g,
                           juce::ToggleButton& button,
@@ -130,7 +146,7 @@ public:
         constexpr float r = 2.0f;   // same corner family as the bars
 
         // Track — dark interior; accent fill when ON (the bar's "value" look)
-        g.setColour(juce::Colour(0xff181820));
+        g.setColour(juce::Colour(Sp3ctraTheme::kColBarBg));
         g.fillRoundedRectangle(track, r);
         if (on)
         {
@@ -206,6 +222,50 @@ public:
             return;
         }
 
+        if (style == juce::Slider::LinearBar)
+        {
+            // Sp3ctraBarSlider's DC-block bar, with the control's three
+            // states painted here and nowhere else:
+            //   idle   dark interior, translucent handle-colour fill, 35 % outline
+            //   hover  brighter fill, 70 % outline, solid value edge
+            //   drag   brightest fill, solid outline, WHITE value edge
+            // Colours come from the slider's colour ids (Sp3ctraBarSlider::
+            // setAccent — the handle colour by default, an engine tint on the
+            // mixer strips), so the recipe is shared by every bar.
+            const juce::Rectangle<float> r((float) x, (float) y, (float) width, (float) height);
+            const bool en   = slider.isEnabled();
+            const bool drag = en && slider.isMouseButtonDown(true);
+            const bool over = en && ! drag && slider.isMouseOverOrDragging(true);
+
+            g.setColour(slider.findColour(juce::Slider::backgroundColourId));
+            g.fillRect(r);
+
+            const float pos = juce::jlimit(r.getX(), r.getRight(), sliderPos);
+            auto fill = slider.findColour(juce::Slider::trackColourId);
+            if (drag)      fill = fill.withMultipliedAlpha(1.8f);
+            else if (over) fill = fill.withMultipliedAlpha(1.35f);
+            g.setColour(fill);
+            g.fillRect(juce::Rectangle<float>(r.getX() + 1.0f, r.getY() + 1.0f,
+                                              juce::jmax(0.0f, pos - r.getX() - 1.0f),
+                                              r.getHeight() - 2.0f));
+
+            auto outline = slider.findColour(juce::Slider::textBoxOutlineColourId);
+            if (over || drag)
+            {
+                // Value edge — a crisp cursor at the end of the fill: the
+                // thing you are moving.
+                g.setColour(drag ? juce::Colour(Sp3ctraTheme::kColHandleHot)
+                                 : outline.withAlpha(1.0f));
+                g.fillRect(juce::Rectangle<float>(juce::jlimit(r.getX(), r.getRight() - 2.0f, pos - 1.0f),
+                                                  r.getY() + 1.0f, 2.0f, r.getHeight() - 2.0f));
+            }
+            if (drag)      outline = outline.withAlpha(1.0f);
+            else if (over) outline = outline.withMultipliedAlpha(2.0f);
+            g.setColour(outline);
+            g.drawRect(r, 1.0f);
+            return;
+        }
+
         if (style != juce::Slider::LinearHorizontal)
         {
             LookAndFeel_V4::drawLinearSlider(g, x, y, width, height, sliderPos,
@@ -224,17 +284,18 @@ public:
         g.setColour(juce::Colour(0xff1a1f2a));
         g.fillRoundedRectangle(trackX, trackY - trackH * 0.5f, trackW, trackH, trackH * 0.5f);
 
-        // Filled portion (left of thumb) — accent blue (muted when disabled)
+        // Filled portion (left of thumb) — handle colour (muted when disabled)
         const float filledW = thumbX - trackX;
         if (filledW > 0.f)
         {
-            g.setColour(juce::Colour(en ? 0xff4fa3e0 : 0xff363f4d));
+            g.setColour(en ? juce::Colour(Sp3ctraTheme::kColHandle).withAlpha(0.7f)
+                           : juce::Colour(0xff363f4d));
             g.fillRoundedRectangle(trackX, trackY - trackH * 0.5f, filledW, trackH, trackH * 0.5f);
         }
 
-        // Thumb — circle (muted when disabled)
+        // Thumb — circle in the handle colour (muted when disabled)
         constexpr float thumbR = 7.0f;
-        g.setColour(juce::Colour(en ? 0xffa0c4e8 : 0xff555a62));
+        g.setColour(en ? juce::Colour(Sp3ctraTheme::kColHandle) : juce::Colour(0xff555a62));
         g.fillEllipse(thumbX - thumbR, trackY - thumbR, thumbR * 2.f, thumbR * 2.f);
 
         if (slider.isMouseOverOrDragging())
@@ -255,9 +316,9 @@ public:
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Rotary Slider — dark knob body with an accent-blue value arc + pointer.
-    // Visual language matches drawLinearSlider: track #1a1f2a, accent #4fa3e0,
-    // pointer #a0c4e8. Used by the audio-parameter knob grids.
+    // Rotary Slider — dark knob body with a handle-colour value arc + pointer
+    // (Sp3ctraTheme::kColHandle: a knob is something you touch). Track
+    // #1a1f2a. Used by the audio-parameter knob grids.
     // ─────────────────────────────────────────────────────────────────────────
     void drawRotarySlider(juce::Graphics& g,
                           int x, int y, int width, int height,
@@ -282,13 +343,13 @@ public:
         g.setColour(juce::Colour(0xff1a1f2a));
         g.strokePath(bgArc, arcStroke);
 
-        // Filled arc (start → value) — accent blue
+        // Filled arc (start → value) — handle colour
         if (slider.isEnabled() && angle > rotaryStartAngle)
         {
             juce::Path valArc;
             valArc.addCentredArc(cx, cy, radius, radius, 0.0f,
                                  rotaryStartAngle, angle, true);
-            g.setColour(juce::Colour(0xff4fa3e0));
+            g.setColour(juce::Colour(Sp3ctraTheme::kColHandle).withAlpha(0.75f));
             g.strokePath(valArc, arcStroke);
         }
 
@@ -310,7 +371,8 @@ public:
         juce::Path pointer;
         pointer.startNewSubPath(0.0f, -knobR * 0.35f);
         pointer.lineTo(0.0f, -knobR * 0.92f);
-        g.setColour(juce::Colour(slider.isEnabled() ? 0xffa0c4e8 : 0xff555a62));
+        g.setColour(slider.isEnabled() ? juce::Colour(Sp3ctraTheme::kColHandle)
+                                       : juce::Colour(0xff555a62));
         g.strokePath(pointer,
                      juce::PathStrokeType(2.5f, juce::PathStrokeType::curved,
                                           juce::PathStrokeType::rounded),
@@ -318,7 +380,9 @@ public:
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // ComboBox — dark background + small white filled-triangle arrow
+    // ComboBox — a control, so it speaks the bar language: dark interior,
+    // handle-colour outline (brighter on hover / press) and a handle-colour
+    // arrow. Same outline alphas as the bar sliders (35 % idle, 70 % hot).
     // ─────────────────────────────────────────────────────────────────────────
 
     /** Uniform font for combo box selected text. */
@@ -341,18 +405,21 @@ public:
     {
         const juce::Rectangle<float> boxR(0.f, 0.f, (float)width, (float)height);
         constexpr float radius = 3.0f;
+        const bool en  = box.isEnabled();
+        const bool hot = en && (isButtonDown || box.isMouseOver(true));
+        const auto handle = juce::Colour(Sp3ctraTheme::kColHandle);
 
-        // Background
-        g.setColour(juce::Colour(Sp3ctraTheme::kColBtnBg)
+        // Background — the bar interior
+        g.setColour(juce::Colour(en ? Sp3ctraTheme::kColBarBg : Sp3ctraTheme::kColBarBgOff)
                         .brighter(isButtonDown ? 0.12f : 0.0f));
         g.fillRoundedRectangle(boxR, radius);
 
-        // Border
-        g.setColour(juce::Colour(Sp3ctraTheme::kColBorder));
+        // Border — handle colour like a bar's outline
+        g.setColour(handle.withAlpha(! en ? 0.10f : hot ? 0.7f : 0.35f));
         g.drawRoundedRectangle(boxR.reduced(0.5f), radius, 1.0f);
 
         // Small filled downward triangle, centred in the arrow-button zone
-        if (box.isEnabled())
+        if (en)
         {
             constexpr float aw = 6.0f; // arrow base width
             constexpr float ah = 4.0f; // arrow height
@@ -363,7 +430,7 @@ public:
             tri.addTriangle(ax,          ay,
                             ax + aw,     ay,
                             ax + aw * 0.5f, ay + ah);
-            g.setColour(juce::Colours::white.withAlpha(0.85f));
+            g.setColour(handle.withAlpha(hot ? 1.0f : 0.85f));
             g.fillPath(tri);
         }
     }

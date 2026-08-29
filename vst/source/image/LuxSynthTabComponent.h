@@ -253,7 +253,7 @@ private:
     static constexpr int kDivGap    = 10;                          // blob/FFT divider gap
     static constexpr int kCapH      = AudioPanelLayout::kEnvCaptionH; // 13
     static constexpr int kKnobH     = AudioPanelLayout::kKnobCellH;   // 71
-    static constexpr int kEnvH      = AudioPanelLayout::kEnvH;        // 124
+    static constexpr int kEnvH      = AudioPanelLayout::kEnvH;        // 140
     static constexpr int kEnvGap    = AudioPanelLayout::kEnvGap;      // 10
 
     static constexpr int kOscSecH = kBadgeH + kBadgeGap + kCapH + kEnvH + kEnvGap + kKnobH + kSecPadB; // 254

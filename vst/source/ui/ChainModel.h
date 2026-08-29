@@ -55,7 +55,18 @@ struct Chain
      *  inheritance); the memory dies with the chain. Serialized as MEMORY
      *  children of the CHAIN node (subsumes the legacy INSERT_MEMORY blob). */
     std::map<ModuleType, juce::ValueTree> typeMemory;
+
+    /** Which pole of the image is the BACKGROUND (the silence) for every
+     *  module of this chain — the C-side convention shared by all inserts
+     *  (LUX_*_BG_*): 0 = Black, 1 = White, 2 = Auto (each module's own
+     *  learn-then-lock detector). Chain-owned since schema 4 — the former
+     *  per-module BackgroundMode params are gone; applyConfigurationToCore
+     *  projects this value onto every member module's config. */
+    int backgroundMode { 1 };   // White — paper is the typical Sp3ctra stream
 };
+
+/** Chain::backgroundMode poles (C-side LUX_*_BG_* convention). */
+enum ChainBackground { kChainBgBlack = 0, kChainBgWhite = 1, kChainBgAuto = 2 };
 
 //==============================================================================
 class ChainModel
@@ -203,6 +214,19 @@ public:
      *  empty residue but always keeps ≥1 chain. Safe to call after load. */
     void validateAndRepair();
 
+    /** Schema-4 migration — normalize a legacy per-module BackgroundMode raw
+     *  value (a VALUES/MEMORY attribute) onto the C-side convention
+     *  (0 = Black, 1 = White, 2 = Auto), undoing the three legacy choice
+     *  orders. Returns -1 when this tree/type carries no background. Shared
+     *  by fromValueTree() and the .sp3chain preset loader. */
+    static int legacyBackgroundOf(ModuleType t, const juce::ValueTree& values);
+
+    /** In-place migration of one module's VALUES / MEMORY tree written by an
+     *  older build: keys that did not exist yet are seeded from their legacy
+     *  source so the module renders as it did. Called on every tree read from
+     *  a session (fromValueTree) or a .sp3chain preset (loadChainPreset). */
+    static void migrateModuleValues(ModuleType t, juce::ValueTree& values);
+
     /** Fresh-session topology — used on a fresh session / failed load:
      *  two empty chains, the rack is built by the user from the catalogue. */
     static ChainModel makeDefault();
@@ -217,6 +241,7 @@ public:
     static const juce::Identifier kSlotProp;    // "slot" (VideoScroll bank index)
     static const juce::Identifier kValuesTag;   // "VALUES" (J2 — chain-owned settings)
     static const juce::Identifier kMemoryTag;   // "MEMORY" (J3 — chain type memory)
+    static const juce::Identifier kBackgroundProp; // "background" (schema 4 — chain-owned pole)
 
     /** CHAINS schema version written by toValueTree(). Migrations gate on the
      *  version read back from a loaded tree:
@@ -226,8 +251,17 @@ public:
      *   3 — each MODULE may carry a VALUES child (its settings at rest) —
      *       the chain owns its modules' settings; projected onto the runtime
      *       banks at load.
+     *   4 — the CHAIN node carries "background" (the chain-owned pole). The
+     *       former per-module BackgroundMode params are gone; a CHAIN without
+     *       the attribute is migrated by fromValueTree() from the first
+     *       member VALUES carrying one (per-family choice-order normalized).
+     *   5 — the EQ banks (EQUALIZER + CENTROID/LEVELS output EQ) are typed
+     *       handles (Sh{0..3}Type/Freq/Gain/Width — shape_eq.h). Legacy
+     *       Band0..8 + NumPoints VALUES attributes no longer match any
+     *       manifest suffix and are silently skipped on projection: old
+     *       curves reload FLAT, by design (no spline→handle fitting).
      *  The SEQUENCER rack module was retired (the sequencer is internal to
      *  each sampler engine): "Sequencer" MODULE entries in old trees no longer
      *  resolve to a type and are silently dropped by fromValueTree(). */
-    static constexpr int kSchemaVersion = 3;
+    static constexpr int kSchemaVersion = 5;
 };

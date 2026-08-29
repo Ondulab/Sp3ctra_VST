@@ -28,6 +28,18 @@
  *      it). Steady partials stay single held notes; attack/min_on collapse to
  *      0 while dense (they contradict per-frame fidelity); restrikes bypass
  *      the note-on budget (retrig_ms bounds their per-band rate).
+ *   7. VIBRATO GLUE: crest positions are refined to sub-band precision
+ *      (centroid of the 3-band window — near-unbiased on the boxcar-
+ *      integrated band scores, where a parabola over-reports the offset),
+ *      then every HELD note claims the nearest
+ *      unclaimed crest within MIDI_TAP_GLUE_BANDS and keeps sounding from its
+ *      energy. A line wobbling across a semitone boundary therefore feeds ONE
+ *      note wherever its crest hops, instead of retriggering both neighbours
+ *      ("vibrato chatter"); a slow glissando renders as overlapped semitone
+ *      ties (the old note is still releasing while the next one strikes); a
+ *      genuine step (crest jumps a full band) articulates exactly as before.
+ *      A claimed crest is withdrawn from the strike pass — it cannot open a
+ *      second note on its own band. Always on, no knob.
  *
  * Threading:
  *   PRODUCER (single) : the chain's producer thread (udpThread / media feeder /
@@ -90,9 +102,18 @@ extern "C" {
 /* Capacity matches LuxPitch/LuxMask/LuxEq/LuxHarmo (>6912 for 400 DPI CIS). */
 #define MIDI_TAP_MAX_PIXELS   8192
 #define MIDI_TAP_NUM_NOTES    128
-#define MIDI_TAP_MAX_POLY     16
-/* Power of two. Worst case 1000 lines/s x (8 offs + 8 ons) = 16 000 events/s;
- * 4096 slots = ~256 ms of headroom for a sink polling every 10 ms. */
+/* 128 = the ENTIRE note axis: black MIDI wants the whole stack, and MIDI
+ * itself has nothing above 128 simultaneous pitches — this is the format's
+ * ceiling, not a tunable. */
+#define MIDI_TAP_MAX_POLY     128
+/* Vibrato-glue claim window, in bands (step 7). 0.75 = a crest may wander
+ * three quarters of a semitone off a held note and still feed it — wide
+ * enough to swallow a boundary-straddling vibrato, narrow enough that a
+ * genuine one-semitone step (crest JUMPS by 1.0) still articulates. */
+#define MIDI_TAP_GLUE_BANDS   0.75f
+/* Power of two. Sustained worst case is retrig-bound: 128 bands restriking
+ * every 5 ms (retrig_ms floor) x 2 events = ~51 200 events/s; 4096 slots =
+ * ~80 ms of headroom for a sink polling every 10 ms. */
 #define MIDI_TAP_RING_SLOTS   4096
 #define MIDI_TAP_RING_MASK    (MIDI_TAP_RING_SLOTS - 1)
 
@@ -144,13 +165,20 @@ extern "C" {
 /* Lines the AUTO polarity learner observes before locking (lux_harmo: 96). */
 #define MIDI_TAP_BG_LOCK_LINES 96
 
-/* One extracted event. Exactly 16 B, no padding. */
+/* One extracted event. Exactly 16 B, no padding.
+ *
+ * status 0x90/0x80 — note on/off (the sinks add the channel).
+ * status 0xE0     — CREST BEND (dense mode only): the refined crest position
+ *                   of held note `note` moved; `flags` carries the offset from
+ *                   the note in SIGNED CENTIBANDS (cents), cast to uint8_t.
+ *                   Consumed by the MPE file sink alone — the bus and port
+ *                   sinks are single-channel and must skip it. */
 typedef struct {
     uint64_t t_us;    /* absolute CLOCK_MONOTONIC us, stamped once per line */
-    uint8_t  status;  /* 0x90 note-on / 0x80 note-off (the sinks add the channel) */
+    uint8_t  status;  /* 0x90 / 0x80 / 0xE0 — see above */
     uint8_t  note;    /* 0..127 */
-    uint8_t  vel;     /* 1..127 on, 0 off */
-    uint8_t  flags;   /* reserved (0) */
+    uint8_t  vel;     /* 1..127 on, 0 off / unused for 0xE0 */
+    uint8_t  flags;   /* 0xE0: (int8_t) crest offset in cents; else 0 */
     uint32_t pad;     /* explicit — keeps sizeof == 16 on every target */
 } MidiTapEvent;
 
@@ -191,7 +219,8 @@ typedef struct {
     float    e;            /* smoothed band density — THE decision variable */
     uint8_t  held;         /* 1 = note-on emitted, not yet released         */
     uint8_t  vel;          /* velocity latched at note-on                   */
-    uint8_t  pad[2];
+    int8_t   bend_cb;      /* last EMITTED crest offset, cents (0xE0 stream) */
+    uint8_t  bend_lines;   /* lines since the last 0xE0 (saturating)        */
     uint16_t on_lines;     /* lines since note-on (saturating)              */
     uint16_t off_lines;    /* consecutive lines failing the hold test       */
     uint16_t cand_lines;   /* consecutive lines passing the gate while idle */

@@ -2,10 +2,11 @@
  * @file LuxDcBlockTabComponent.h
  * @brief Tab — DC BLOCK: per-line mean removal on the image-line stream.
  *
- * Mirrors the LEVELS page layout: a graphic view on top (DcBlockEditorComponent
- * — the live stream profile with the measured DC reference line and the
- * display-only BLOCK line; Amount is set from the box below), then the
- * remaining discrete controls below (Background).
+ * The graphic view fills the page (DcBlockEditorComponent — the live stream
+ * profile with the measured DC reference line and the display-only BLOCK
+ * line; Amount is set from the box below). The background pole is chain-owned
+ * (rack header selector), not a module setting. Page skeleton (padding,
+ * "--- DC BLOCK ---" caption, height) = ModuleChrome.
  *
  * Power lives in the zone-3 header switch + the rack LED.
  * Per-instance: setSlot(slot) rebinds every control to the luxdcblock{slot}_*
@@ -18,6 +19,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "../ui/ModuleEditorChrome.h"
 #include "../ui/DcBlockEditorComponent.h"
 
 class LuxDcBlockTabComponent : public juce::Component
@@ -28,22 +30,15 @@ public:
 
     static constexpr int kEditorsH = DcBlockEditorComponent::kPreferredH;
 
-    static constexpr int kPreferredH = kEditorsH + 4 + 22 + 30 + 8;
+    // top pad + editor + "--- DC BLOCK ---" + bottom pad
+    static constexpr int kPreferredH = ModuleChrome::pageHeight(kEditorsH);
 
     explicit LuxDcBlockTabComponent(Sp3ctraAudioProcessor& p)
-        : processor(p),
-          editor(p.getAPVTS(), juce::Colour(kAccentARGB))
+        : editor(p.getAPVTS(), juce::Colour(kAccentARGB))
     {
         // ── Interactive DC-removal editor (Amount) ─────────────────────────
         editor.setMidiMap(&p.getMidiMap());   // right-click MIDI Learn
         addAndMakeVisible(editor);
-
-        // ── Background mode (which pole carries the material) ──────────
-        initLabel(bgLabel, "Background");
-        addAndMakeVisible(bgCombo);
-        bgCombo.addItem("Auto",  1);
-        bgCombo.addItem("Black", 2);
-        bgCombo.addItem("White", 3);
 
         setSlot(0);   // bind to bank 0 until a block is selected
     }
@@ -52,60 +47,27 @@ public:
     void setSlot(int slot)
     {
         slot_ = juce::jlimit(0, 7, slot);
-        bgAttach.reset();
         editor.setInstance(slot_, dcbParam(slot_, "Amount"));
-        bgAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            processor.getAPVTS(), dcbParam(slot_, "BackgroundMode"), bgCombo));
-        bgLearn_ = std::make_unique<MidiLearnAttachment>(
-            processor.getMidiMap(), bgCombo, dcbParam(slot_, "BackgroundMode"));
     }
 
     int slot() const noexcept { return slot_; }
 
     void paint(juce::Graphics& g) override
     {
-        const juce::Colour accent (kAccentARGB);
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
-        g.setColour(accent.withAlpha(0.55f));
-        g.drawText("--- DC BLOCK ---", kPad,
-                   kEditorsH + 6,
-                   getWidth() - 2 * kPad, 12, juce::Justification::centred);
+        ModuleChrome::drawSectionCaption(g, ModuleChrome::kPageTop + kEditorsH, getWidth(),
+                                         juce::Colour(kAccentARGB), "DC BLOCK");
     }
 
     void resized() override
     {
-        const int labelW = 80;
-        const int gap    = Sp3ctraTheme::kGap;
-        const int ch     = Sp3ctraTheme::kControlH;
-        const int w      = getWidth() - 2 * kPad;
-
-        editor.setBounds(kPad, 4, w, DcBlockEditorComponent::kPreferredH);
-
-        const int rowY = kEditorsH + 4 + 22;
-        bgLabel.setBounds(kPad, rowY, labelW, ch);
-        bgCombo.setBounds(kPad + labelW + gap, rowY, 120, ch);
+        editor.setBounds(ModuleChrome::kPagePad, ModuleChrome::kPageTop,
+                         getWidth() - 2 * ModuleChrome::kPagePad, kEditorsH);
     }
 
 private:
-    Sp3ctraAudioProcessor& processor;
     int slot_ { 0 };   // pool slot of the bound instance
 
     DcBlockEditorComponent editor;   // the DC BLOCK editor
-
-    juce::Label    bgLabel;
-    juce::ComboBox bgCombo;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> bgAttach;
-    std::unique_ptr<MidiLearnAttachment> bgLearn_;
-
-    static constexpr int kPad = 8;
-
-    void initLabel(juce::Label& lbl, const juce::String& text)
-    {
-        lbl.setText(text, juce::dontSendNotification);
-        lbl.setJustificationType(juce::Justification::centredRight);
-        lbl.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-        addAndMakeVisible(lbl);
-    }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxDcBlockTabComponent)
 };

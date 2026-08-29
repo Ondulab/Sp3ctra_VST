@@ -1,12 +1,14 @@
 /**
  * @file LuxMaskTabComponent.h
- * @brief Tab — LUXMASK: MIDI-driven mobile spotlight ("synesthetic EQ") controls
- *        + pipeline output node.
+ * @brief Tab — LUXMASK: MIDI-driven mobile spotlight ("synesthetic EQ") controls.
  *
- * Two-column layout (mirrors LuxPitchTabComponent):
- *   Left  — LuxMask controls (enable, background, width, ADSR,
- *           width-bloom horizons, glide, position LFO, velocity)
- *   Right — pipeline output node (contextual selection-tap view)
+ * Module page on the ModuleChrome skeleton (single column, mirrors
+ * LuxPitchTabComponent):
+ *   • the graphic ADSR editor (frame + its A/D/S/R box row) at kPageTop,
+ *     then the FILTER editor (frame + Width / Offset / Slope box row);
+ *   • the "--- MODULATION ---" caption right below, then two label-above
+ *     control rows: Glide / LFO Pos Rate / LFO Pos Depth, and Velocity.
+ *   The background pole is chain-owned (rack header selector).
  *
  * ── Channel model (since "Modulated/Live" refactor) ─────────────────────────
  * LuxMask no longer has a Source selector.  It now lives permanently as an
@@ -26,6 +28,7 @@
 #include "../midi/MidiLearnAttachment.h"
 #include "../ui/EnvelopeEditorComponent.h"
 #include "../ui/MaskFilterEditorComponent.h"
+#include "../ui/ModuleEditorChrome.h"
 #include "../ui/Sp3ctraBarSlider.h"
 #include "VisualizerMode.h"
 
@@ -34,6 +37,13 @@ class LuxMaskTabComponent : public juce::Component
 public:
     /** Accent colour for the LUXMASK page. */
     static inline const uint32_t kAccentARGB = moduleColour(ModuleType::Mask).getARGB();   ///< inherited module colour
+
+    /** Stacked editors' height (ADSR + gap + FILTER) and the page's natural
+     *  height: editors + "--- MODULATION ---" + 2 control rows. */
+    static constexpr int kEditorsH   = EnvelopeEditorComponent::kPreferredH
+                                     + ModuleChrome::kEditorGap
+                                     + MaskFilterEditorComponent::kPreferredH;    // 140 + 4 + 108 = 252
+    static constexpr int kPreferredH = ModuleChrome::pageHeight(kEditorsH, 2);   // 4 + 252 + 22 + 2*36 + 8 = 358
 
     explicit LuxMaskTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p),
@@ -58,30 +68,17 @@ public:
 
         // ── Enable toggle ── moved to the rack LED + zone-3 header power switch
 
-        // ── Background mode ────────────────────────────────────────────
-        initLabel(bgLabel, "Background");
-        addAndMakeVisible(bgCombo);
-        bgCombo.addItem("Black", 1);
-        bgCombo.addItem("White", 2);
+        // ── Background ── chain-owned (rack header selector) ──
 
         // ── Step Mode / px-per-semitone / PB Range ── moved to MASK SETUP ──
 
         // ── ADSR + Filter ── both moved into graphic editors (curve/handles
         //    + value boxes).  The ADSR output drives the filter openness.
 
-        // ── Glide ──────────────────────────────────────────────────────
-        initLabel(glideLabel, "Glide");
+        // ── MODULATION rows — labels are painted above the controls (paint()).
         initSlider(glideSlider);
-
-        // ── LFO position ───────────────────────────────────────────────
-        initLabel(lfoPosRateLabel,  "LFO Pos Rate");
         initSlider(lfoPosRateSlider);
-
-        initLabel(lfoPosDepthLabel, "LFO Pos Depth");
         initSlider(lfoPosDepthSlider);
-
-        // ── Velocity coupling ──────────────────────────────────────────
-        initLabel(velCouplingLabel, "Velocity");
         velCouplingToggle.setButtonText("Active");
         addAndMakeVisible(velCouplingToggle);
 
@@ -95,7 +92,7 @@ public:
         slot_ = juce::jlimit(0, 7, slot);
         auto& apvts = processor.getAPVTS();
 
-        bgAttach.reset(); glideAttach.reset();
+        glideAttach.reset();
         lfoPosRateAttach.reset(); lfoPosDepthAttach.reset(); velCouplingAttach.reset();
 
         envelopeEditor.setParamIds(
@@ -107,8 +104,6 @@ public:
             lmParam(slot_, "FilterWidth"), lmParam(slot_, "FilterOffset"),
             lmParam(slot_, "FilterSlope"));
 
-        bgAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            apvts, lmParam(slot_, "BackgroundMode"), bgCombo));
         glideAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
             apvts, lmParam(slot_, "GlideMs"), glideSlider));
         lfoPosRateAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
@@ -130,93 +125,59 @@ public:
         learn(lfoPosRateSlider,  "LfoPosRate");
         learn(lfoPosDepthSlider, "LfoPosDepth");
         learn(velCouplingToggle, "VelocityCoupling");
-        learn(bgCombo,           "BackgroundMode");
     }
 
     int slot() const noexcept { return slot_; }
 
     void paint(juce::Graphics& g) override
     {
-        const int W = getWidth();
-        computeColumns(W, leftX_, leftW_, rightX_, rightW_);
-
         const juce::Colour accent (kAccentARGB);
 
-        auto sectionHeader = [&](int row, const char* text)
-        {
-            g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
-            g.setColour(accent.withAlpha(0.55f));
-            g.drawText(text, leftX_, rowY(row) + 2, leftW_, 12,
-                       juce::Justification::centred);
-        };
-
-        // Filter lives in its own graphic editor now; only MODULATION remains.
-        sectionHeader(1, "--- MODULATION ---");
+        // "--- MODULATION ---" right below the last editor (the FILTER strip),
+        // then the labels above each control of the two rows (ModuleChrome).
+        ModuleChrome::drawSectionCaption(g, filterEditor.getBottom(), getWidth(), accent, "MODULATION");
+        ModuleChrome::drawBoxLabel(g, glideSlider,       accent, "Glide");
+        ModuleChrome::drawBoxLabel(g, lfoPosRateSlider,  accent, "LFO Pos Rate");
+        ModuleChrome::drawBoxLabel(g, lfoPosDepthSlider, accent, "LFO Pos Depth");
+        ModuleChrome::drawBoxLabel(g, velCouplingToggle, accent, "Velocity");
     }
 
     void resized() override
     {
-        const int W = getWidth();
-        computeColumns(W, leftX_, leftW_, rightX_, rightW_);
+        const int x = ModuleChrome::kPagePad;
+        const int w = getWidth() - 2 * ModuleChrome::kPagePad;
 
-        const int labelW = 80;
-        const int gap    = Sp3ctraTheme::kGap;
-        const int ch     = Sp3ctraTheme::kControlH;
+        // Graphic envelope editor at the top, the live filter-response strip
+        // right below it (kEditorGap apart).
+        envelopeEditor.setBounds(x, ModuleChrome::kPageTop, w, envelopeEditor.preferredHeight());
+        filterEditor.setBounds(x, envelopeEditor.getBottom() + ModuleChrome::kEditorGap,
+                               w, filterEditor.preferredHeight());
 
-        auto lb = [&](int row) -> juce::Rectangle<int>
-        { return { leftX_, rowY(row), labelW, ch }; };
-        auto cb = [&](int row) -> juce::Rectangle<int>
-        { return { leftX_ + labelW + gap, rowY(row), leftW_ - labelW - gap, ch }; };
-
-        // Graphic envelope editor — top of the left column (rows shifted down
-        // by kEnvHeaderH, see rowY()).  The live filter-response strip sits
-        // right below it, mirroring the old ADSR + width two-lane layout.
-        envelopeEditor.setBounds(leftX_, 4, leftW_,
-                                 envelopeEditor.preferredHeight());
-        filterEditor.setBounds(leftX_, 4 + envelopeEditor.preferredHeight() + 4,
-                               leftW_, filterEditor.preferredHeight());
-
-        // Row 0: Background  (Enable row removed — power lives in rack/header)
-        bgLabel      .setBounds(lb(0));
-        bgCombo      .setBounds(cb(0));
-        // [Step mode / px-per-semitone / PB Range moved to MASK SETUP]
-        // [MODULATION section header drawn in paint at row 1]
-        // Row 2: Glide
-        glideLabel    .setBounds(lb(2));
-        glideSlider   .setBounds(cb(2));
-        // Row 3: LFO Pos Rate
-        lfoPosRateLabel  .setBounds(lb(3));
-        lfoPosRateSlider .setBounds(cb(3));
-        // Row 4: LFO Pos Depth
-        lfoPosDepthLabel .setBounds(lb(4));
-        lfoPosDepthSlider.setBounds(cb(4));
-        // Row 5: Velocity
-        velCouplingLabel .setBounds(lb(5));
-        velCouplingToggle.setBounds(cb(5).withWidth(80));
+        // MODULATION: caption band, then two label-above rows.
+        int y = filterEditor.getBottom() + ModuleChrome::kSectionCaptionH;
+        ModuleChrome::layoutBoxRow({ x, y, w, ModuleChrome::kBoxRowH },
+                                   { &glideSlider, &lfoPosRateSlider, &lfoPosDepthSlider });
+        y += ModuleChrome::kBoxRowH + ModuleChrome::kRowGap;
+        ModuleChrome::layoutBoxRow({ x, y, w, ModuleChrome::kBoxRowH }, { &velCouplingToggle });
+        velCouplingToggle.setSize(juce::jmin(kToggleW, velCouplingToggle.getWidth()),
+                                  velCouplingToggle.getHeight());
     }
 
 private:
     Sp3ctraAudioProcessor& processor;
     int slot_ { 0 };   // pool slot of the bound instance
 
-    // Labels — ADSR labels removed (now inside the graphic editor);
-    //          Step Mode / px-per-semitone / PB Range moved to MASK SETUP.
-    juce::Label bgLabel;
-    juce::Label glideLabel;
-    juce::Label lfoPosRateLabel, lfoPosDepthLabel;
-    juce::Label velCouplingLabel;
+    static constexpr int kToggleW = 120;   ///< velocity toggle width cap (row 2)
 
-    // Controls — ADSR + filter controls are inside the graphic editors.
+    // Controls — ADSR + filter controls are inside the graphic editors; the
+    // row labels are painted above the controls (ModuleChrome::drawBoxLabel).
     juce::ToggleButton velCouplingToggle;
-    juce::ComboBox     bgCombo;
     Sp3ctraBarSlider   glideSlider;
     Sp3ctraBarSlider   lfoPosRateSlider, lfoPosDepthSlider;
 
     // Attachments — ADSR + filter attachments handled by the editors.
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>
         velCouplingAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>
-        bgAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
         glideAttach,
         lfoPosRateAttach, lfoPosDepthAttach;
@@ -228,40 +189,10 @@ private:
     // Interactive filter editor (Width / Bias / Slope) — sits below the ADSR.
     MaskFilterEditorComponent filterEditor;
 
-    mutable int leftX_ = 0, leftW_ = 0, rightX_ = 0, rightW_ = 0;
-
-    // Controls span the full width (pipeline-output node removed).
-    static void computeColumns(int totalW, int& lx, int& lw, int& rx, int& rw) noexcept
-    {
-        constexpr int kPad = 8;
-        lx = kPad;
-        lw = totalW - 2 * kPad;
-        rx = totalW - kPad;   // unused
-        rw = 0;
-    }
-
-    void initLabel(juce::Label& lbl, const juce::String& text)
-    {
-        lbl.setText(text, juce::dontSendNotification);
-        lbl.setJustificationType(juce::Justification::centredRight);
-        lbl.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-        addAndMakeVisible(lbl);
-    }
-
     void initSlider(Sp3ctraBarSlider& s)
     {
         addAndMakeVisible(s);
     }
-
-    /** Vertical offset reserved for the two graphic editors (ADSR + filter).
-     *  The ADSR editor is alpha-only (it drives the filter openness); the
-     *  filter shape is edited in the interactive strip below it. */
-    static constexpr int kEnvHeaderH =
-        EnvelopeEditorComponent::kPreferredH + 4
-            + MaskFilterEditorComponent::kPreferredH + 4;
-
-    int rowY(int row) const noexcept
-    { return kEnvHeaderH + 6 + row * (Sp3ctraTheme::kControlH + 6); }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxMaskTabComponent)
 };

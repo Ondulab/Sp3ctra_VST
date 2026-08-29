@@ -2,8 +2,10 @@
  * @file SynthOutPageComponent.h
  * @brief OUT (send) page — synth-split P2.
  *
- * Shown in ZONE 3 when a rack OUT block (→ LuxStral / → LuxSynth / → LuxWave)
- * is selected. Purge 2026-08-05: the per-OUT conditioning knobs (Negative /
+ * Shown in ZONE 3 when a rack OUT block (→ LuxSynth / → LuxWave / → LuxGrain)
+ * is selected — the → LuxStral tile skips it since 2026-08-20 and lands on
+ * the engine page directly (selectBlock coerces the engine view).
+ * Purge 2026-08-05: the per-OUT conditioning knobs (Negative /
  * DC Blocking / Gamma / Intensity / Range dB) are gone — flux conditioning is
  * the chain's business (LEVELS + DC modules), the decode window (Range dB)
  * is a machine setting on the LUXSTRAL SETUP face, and the OUT stage applies

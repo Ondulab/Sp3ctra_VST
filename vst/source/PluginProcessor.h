@@ -160,6 +160,22 @@ public:
      *  read, no plan and no APVTS, like activeVideoSlots(). */
     std::vector<int> activeMidiTapSlots() const;
 
+    /** Same probes as {slot, chainIdx} pairs, slot-ascending — the MIDI MIX
+     *  strip labels each row by its HOST CHAIN ("CHAIN n"), not by its pool
+     *  slot, mirroring activeVideoSlots(). Message-thread only. */
+    std::vector<std::pair<int, int>> activeMidiTapSlotChains() const;
+
+    /** The probe's outward identity: "CHAIN 4" (or "CHAIN 4a"/"4b" when one
+     *  chain hosts several probes). Names the MIDI MIX tile, the take files
+     *  and the virtual port. Empty when the slot is not patched.
+     *  Message-thread only. */
+    juce::String midiTapLabel(int slot) const;
+
+    /** Push each probe's chain label onto its sink (port + take naming).
+     *  Called by the MIDI MIX strip whenever the topology it displays
+     *  changes. Message thread. */
+    void refreshMidiTapDisplayNames();
+
     /** UI hook (message thread only): set by the editor, cleared in its
      *  destructor, invoked after a full state restore so an OPEN editor
      *  rebuilds its rack from the new model instead of keeping the old
@@ -405,11 +421,11 @@ public:
     /** Pending MIDI EQ-band value for (engine, slot, band): a normalised 0..1
      *  gain latched by the audio thread, or -1 when nothing is pending. Drained
      *  by the open SlotEditor (message thread) which applies it via
-     *  LuxSampler::setSlotEqBandGain (non-RT). */
-    float consumeSmpEqPending(int e, int s, int band) noexcept
+     *  LuxSampler::setSlotEqHandleParam (non-RT). */
+    float consumeSmpEqSelPending(int e, int s, int which) noexcept
     {
         auto& a = smpEqPending[(size_t) juce::jlimit(0, LuxSampler::kMaxEngines - 1, e)][s % LuxSamplerConstants::NUM_SLOTS]
-                              [band % LuxSampler::kEqBands];
+                              [juce::jlimit(0, 2, which)];
         if (a.load(std::memory_order_relaxed) < 0.0f) return -1.0f;
         return a.exchange(-1.0f, std::memory_order_acq_rel);
     }
@@ -421,14 +437,39 @@ public:
     int      smpValueTouchWhere() const noexcept { return smpValueTouchWhere_.load(std::memory_order_relaxed); }
 
     //==========================================================================
-    // IVirtualMidiSink — NON-APVTS mapping targets for the sampler play params /
-    // action buttons (implemented in PluginProcessor.cpp via SamplerMidiTargets).
+    // IVirtualMidiSink — NON-APVTS mapping targets: the sampler play params /
+    // action buttons (SamplerMidiTargets) and the "selected EQ handle" trio
+    // (EqHandleMidiTargets). Implemented in PluginProcessor.cpp.
     //==========================================================================
     int   virtualResolve(const juce::String& paramId) const override;
     int   virtualSteps  (int targetId) const noexcept override;
     float virtualRead   (int targetId) const noexcept override;
     void  virtualApply  (int targetId, float norm01) noexcept override;
     void  virtualRelease(int targetId) noexcept override;
+
+    //==========================================================================
+    // "Selected EQ handle" — which handle (0..3) the ShapeEq editor of a given
+    // family (0=EQUALIZER, 1=CENTROID, 2=LEVELS) × pool slot last selected.
+    // Written by the UI on click, read by the virtual MIDI sink on the audio
+    // thread so the 3 mapped CCs (Freq/Gain/Width) steer that handle even with
+    // the editor closed. Not persisted (defaults back to handle 0).
+    //==========================================================================
+    static constexpr int kEqFamilies   = 3;
+    static constexpr int kEqPoolSlots  = 8;   // CHAIN_MAX_CHAINS
+    static constexpr int kEqHandles    = 4;   // SHAPE_EQ_MAX_HANDLES
+    void setEqSelectedHandle(int family, int slot, int handle) noexcept
+    {
+        eqSelHandle_[juce::jlimit(0, kEqFamilies - 1, family)]
+                    [juce::jlimit(0, kEqPoolSlots - 1, slot)]
+            .store(juce::jlimit(0, kEqHandles - 1, handle),
+                   std::memory_order_release);
+    }
+    int getEqSelectedHandle(int family, int slot) const noexcept
+    {
+        return eqSelHandle_[juce::jlimit(0, kEqFamilies - 1, family)]
+                           [juce::jlimit(0, kEqPoolSlots - 1, slot)]
+            .load(std::memory_order_acquire);
+    }
 
     /** All Notes Off (panic): ask the audio thread to release every held/stuck
      *  note next block. Safe to call from the UI (message) thread. */
@@ -558,6 +599,18 @@ public:
      *  exhausted pools — are dropped). Returns the new chain's index or -1.
      *  Message thread. */
     int duplicateChain(int chainIdx);
+
+    /** Chain-owned background pole (schema 4): set chain `chainIdx`'s
+     *  backgroundMode (ChainBackground: 0 = Black, 1 = White, 2 = Auto),
+     *  project it onto every member module's config and persist the model.
+     *  Message thread (rack header UI). */
+    void setChainBackground(int chainIdx, int mode);
+    int  chainBackground(int chainIdx) const noexcept
+    {
+        return (chainIdx >= 0 && chainIdx < chainModel_.numChains())
+                   ? chainModel_.chains[(size_t) chainIdx].backgroundMode
+                   : kChainBgWhite;
+    }
 
     /** J4 — write chain `chainIdx` (fresh VALUES + type memory) as a
      *  .sp3chain preset. Atomic write; returns false on any I/O error. */
@@ -908,7 +961,7 @@ private:
     juce::Uuid vizTapModuleId_;
     // Per-type masks of pool slots whose binding changed in the LAST rebind
     // (released or freshly assigned) — their pool state is stale.
-    struct PoolStale { uint32_t pitch = 0, mask = 0, reverb = 0, echo = 0, eq = 0, harmo = 0, centro = 0, drive = 0, dcblock = 0; };
+    struct PoolStale { uint32_t pitch = 0, mask = 0, reverb = 0, echo = 0, eq = 0, harmo = 0, centro = 0, drive = 0, dcblock = 0, gain = 0; };
     // Pool slots owning a Pitch/Mask/Reverb/Echo/EQ/Harmo/Centro instance after
     // the LAST derive — diffed to reset instances whose module (or whole chain)
     // was just removed.
@@ -921,6 +974,7 @@ private:
     uint32_t prevCentroSlots_ { 0 };
     uint32_t prevDriveSlots_  { 0 };
     uint32_t prevDcBlockSlots_ { 0 };
+    uint32_t prevGainSlots_   { 0 };
     // Bit i set ⇒ the chain bound to pool slot i has a Pitch/Mask instance →
     // fan MIDI to pool slot i. Default bit 0 = legacy single-instance behaviour.
     std::atomic<uint32_t> chainPitchMask_ { 1 };
@@ -933,6 +987,7 @@ private:
     std::atomic<uint32_t> chainCentroMask_ { 0 };
     std::atomic<uint32_t> chainDriveMask_  { 0 };
     std::atomic<uint32_t> chainDcBlockMask_ { 0 };
+    std::atomic<uint32_t> chainGainMask_   { 0 };
     // MIDI TAP presence, indexed by ModuleInstance.slot (its own pool) — the
     // pooled masks above are indexed by poolSlotForInstance instead.
     std::atomic<uint32_t> chainMidiTapMask_ { 0 };
@@ -964,6 +1019,7 @@ private:
     uint8_t  busHeld_[ChainModel::kMaxChains][128] {};
     uint32_t busGen_[ChainModel::kMaxChains] {};
     int      busChannel_[ChainModel::kMaxChains] {}; // published by the config sync
+    std::atomic<float> busLevel_[ChainModel::kMaxChains] {}; // live-output velocity scale
     std::atomic<uint32_t> midiBusMask_ { 0 };   // armed probes, gated by midiBusEnable
     // Per-engine OUT send counts (message thread writes in
     // deriveAndPublishChainPlan; UI + processBlock read). 0 → the engine's
@@ -1000,6 +1056,7 @@ private:
     // (fsEngineParam(e,"Enabled")) to drive that engine's setEnabled().
     std::array<bool, LuxSampler::kMaxEngines> samplerPresent_ {};
     void deriveChainRouting();              // model → pool bindings + enable bridge + plan
+    void applyChainBackgrounds();           // chain backgroundMode → member configs (msg thread)
     void primeScoreTransports();            // push each family type's speed/loop/reverse → its slot
     PoolStale updateModulePoolBindings();   // model → modulePoolSlots_; returns per-type slots to reset
     void deriveAndPublishChainPlan();       // model → RT-safe per-synth ChainPlan
@@ -1053,14 +1110,25 @@ private:
     std::atomic<bool> smpPlayReleased[LuxSampler::kMaxEngines][kSmpSlots] {};
     std::atomic<bool> smpSaveTrigger [LuxSampler::kMaxEngines][kSmpSlots] {};
     std::atomic<bool> smpClearTrigger[LuxSampler::kMaxEngines][kSmpSlots] {};
-    // Pending MIDI EQ-band values (normalised 0..1; -1 = none). Applied on the
-    // message thread (setSlotEqBandGain is non-RT). Seeded to -1 in the ctor.
-    std::atomic<float> smpEqPending[LuxSampler::kMaxEngines][kSmpSlots][LuxSampler::kEqBands];
+    // Pending MIDI selected-handle EQ values (Freq/Gain/Width, normalised
+    // 0..1; -1 = none). Applied on the message thread (setSlotEqHandleParam
+    // is non-RT). Seeded to -1 in the ctor.
+    std::atomic<float> smpEqPending[LuxSampler::kMaxEngines][kSmpSlots][3];
 
     // MIDI-touch signal for VALUE targets (see smpValueTouchGen/Where above):
     // bumped by virtualApply so the open SlotEditor can refresh its sliders.
     std::atomic<uint32_t> smpValueTouchGen_   { 0 };
     std::atomic<int>      smpValueTouchWhere_ { -1 };
+
+    // "Selected EQ handle" (see the public accessors) + cached handle param
+    // pointers (family × slot × handle × which[Freq/Gain/Width]). The cache
+    // is filled once in the constructor — after the APVTS layout exists,
+    // before audio starts — and NEVER rebuilt: the virtual MIDI sink
+    // dereferences it from the audio thread.
+    std::atomic<int> eqSelHandle_[kEqFamilies][kEqPoolSlots] {};
+    juce::RangedAudioParameter*
+        eqHandleParam_[kEqFamilies][kEqPoolSlots][kEqHandles][3] {};
+    void buildEqHandleParamCache();
 
 
     /** LEGACY — full path of the last .sp3s written by the retired sampler
@@ -1180,6 +1248,7 @@ private:
     uint32_t pendingCentroResets_     { 0 };
     uint32_t pendingDriveResets_      { 0 };
     uint32_t pendingDcBlockResets_    { 0 };
+    uint32_t pendingGainResets_       { 0 };
     uint32_t pendingVideoScrollInits_ { 0 };
     // MIDI TAP teardown is two-stage: panic (push the note-offs, so the sinks
     // still see them) then, one defer window later, init (wipe the ring +

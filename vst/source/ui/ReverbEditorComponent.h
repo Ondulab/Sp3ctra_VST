@@ -2,10 +2,12 @@
  * @file ReverbEditorComponent.h
  * @brief Interactive editor for the LuxReverb tail (Decay / Diffusion / Mix).
  *
- * Mirrors the MaskFilterEditorComponent feel: a graphic with draggable handles
- * plus compact numeric boxes, all bound to APVTS params (host-automatable,
- * MIDI-mappable).  The x-axis is time (skewed like the Decay param), y is the
- * tail level; the dry impulse sits at t = 0.
+ * Standard module editor (ModuleChrome skeleton): a graphic frame holding the
+ * tail response and its draggable handles (Sp3ctraHandles — lime, hover and
+ * drag distinct), plus compact numeric boxes in their own row BELOW the
+ * frame, all bound to APVTS params (host-automatable, MIDI-mappable).  The
+ * x-axis is time (skewed like the Decay param), y is the tail level; the dry
+ * impulse sits at t = 0.
  *
  *   • Mix node (left, filled)    → drag vertically → wet level of the tail.
  *   • Decay node (bottom, filled)→ drag horizontally → -60 dB point.
@@ -22,6 +24,8 @@
 #include <memory>
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
+#include "ModuleEditorChrome.h"
+#include "Sp3ctraHandles.h"
 #include "Sp3ctraBarSlider.h"
 #include "../processing/lux_reverb.h"   // self-manages extern "C" linkage
 
@@ -29,7 +33,9 @@ class ReverbEditorComponent : public juce::Component,
                               private juce::Timer
 {
 public:
-    static constexpr int kPreferredH = 110;  // graphic + box row
+    static constexpr int kGraphH     = 82;   // the graphic frame alone (plot 56 px)
+    // frame + gap + label + box row
+    static constexpr int kPreferredH = kGraphH + ModuleChrome::kBelowFrameH;
 
     ReverbEditorComponent(juce::AudioProcessorValueTreeState& apvtsIn,
                           juce::Colour accentColour)
@@ -78,27 +84,18 @@ public:
     //==========================================================================
     void resized() override
     {
-        auto area = getLocalBounds().reduced(6);
-        const int boxRowH = kLabelH + kBoxH;
-        graphRect_ = area.removeFromTop(juce::jmax(24, area.getHeight() - boxRowH - kRowGap)).toFloat();
-        area.removeFromTop(kRowGap);
-
-        auto row = area.removeFromTop(boxRowH);
-        row.removeFromTop(kLabelH);
-        const int gap = 5, n = 3;
-        const int bw = (row.getWidth() - (n - 1) * gap) / n;
-        boxD.setBounds(row.getX(),                  row.getY(), bw, kBoxH);
-        boxF.setBounds(row.getX() + (bw + gap),     row.getY(), bw, kBoxH);
-        boxM.setBounds(row.getX() + 2 * (bw + gap), row.getY(), bw, kBoxH);
+        auto area = getLocalBounds();
+        // Controls OUT of the graphic frame — box row below it.
+        auto row = area.removeFromBottom(ModuleChrome::kBoxRowH);
+        area.removeFromBottom(ModuleChrome::kRowGap);
+        frameRect_ = area.toFloat();
+        graphRect_ = ModuleChrome::graphOf(frameRect_);
+        ModuleChrome::layoutBoxRow(row, { &boxD, &boxF, &boxM });
     }
 
     void paint(juce::Graphics& g) override
     {
-        const auto bounds = getLocalBounds().toFloat();
-        g.setColour(juce::Colour(0xff20202a));
-        g.fillRoundedRectangle(bounds.reduced(0.5f), 4.0f);
-        g.setColour(accent.withAlpha(0.25f));
-        g.drawRoundedRectangle(bounds.reduced(0.5f), 4.0f, 1.0f);
+        ModuleChrome::drawFrame(g, frameRect_, accent);
 
         const Geometry geo = computeGeometry();
         if (geo.valid)
@@ -151,19 +148,10 @@ public:
             drawNode(g, handlePos(Handle::Decay, geo), Handle::Decay);
         }
 
-        g.setColour(accent.withAlpha(0.45f));
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontMicro));
-        g.drawText("TAIL", (int) bounds.getX() + 8, (int) bounds.getY() + 2,
-                   90, 9, juce::Justification::centredLeft, false);
-
-        g.setColour(accent.withAlpha(0.6f));
-        auto label = [&g](const juce::Slider& box, const juce::String& t)
-        {
-            auto bb = box.getBounds();
-            g.drawText(t, bb.getX(), bb.getY() - kLabelH, bb.getWidth(), kLabelH,
-                       juce::Justification::centred, false);
-        };
-        label(boxD, "Decay"); label(boxF, "Diffusion"); label(boxM, "Mix");
+        ModuleChrome::drawCaption(g, frameRect_, accent, "TAIL");
+        ModuleChrome::drawBoxLabel(g, boxD, accent, "Decay");
+        ModuleChrome::drawBoxLabel(g, boxF, accent, "Diffusion");
+        ModuleChrome::drawBoxLabel(g, boxM, accent, "Mix");
     }
 
     //==========================================================================
@@ -233,7 +221,7 @@ private:
     {
         Geometry geo;
         if (graphRect_.getWidth() < 30.0f || graphRect_.getHeight() < 16.0f) return geo;
-        geo.plot      = graphRect_.reduced(8.0f, 7.0f);
+        geo.plot      = ModuleChrome::plotOf(frameRect_);
         geo.x0        = geo.plot.getX() + 4.0f;
         geo.topY      = geo.plot.getY();
         geo.botY      = geo.plot.getBottom();
@@ -302,19 +290,12 @@ private:
         return best;
     }
 
-    void drawNode(juce::Graphics& g, juce::Point<float> pt, Handle h)
+    /** Handle painter — filled lime node (Sp3ctraHandles: Idle / Hover /
+     *  Drag are distinct states). */
+    void drawNode(juce::Graphics& g, juce::Point<float> pt, Handle h) const
     {
-        const bool active = (h == dragging) || (dragging == Handle::None && h == hovered);
-        const float rad   = active ? kNodeR + 1.5f : kNodeR;
-        if (active)
-        {
-            g.setColour(accent.withAlpha(0.25f));
-            g.fillEllipse(pt.x - rad - 2.5f, pt.y - rad - 2.5f, 2 * (rad + 2.5f), 2 * (rad + 2.5f));
-        }
-        g.setColour(active ? accent.brighter(0.3f) : juce::Colour(0xff20202a));
-        g.fillEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad);
-        g.setColour(active ? juce::Colours::white : accent.withAlpha(0.9f));
-        g.drawEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad, 1.4f);
+        Sp3ctraHandles::drawNode(g, pt,
+            Sp3ctraHandles::stateOf(h == dragging, dragging == Handle::None && h == hovered));
     }
 
     //==========================================================================
@@ -360,16 +341,12 @@ private:
     void initBox(Sp3ctraBarSlider& box, const juce::String& id,
                  std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>& att)
     {
-        box.setAccent(accent);
         addAndMakeVisible(box);
         att = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, id, box);
     }
 
-    static constexpr float kNodeR = 4.5f;
+    static constexpr float kNodeR = Sp3ctraHandles::kNodeR;   // handle inset from the plot edges
     static constexpr float kHitR  = 12.0f;
-    static constexpr int   kBoxH   = 16;
-    static constexpr int   kLabelH = 9;
-    static constexpr int   kRowGap = 3;
 
     juce::AudioProcessorValueTreeState& apvts;
     juce::Colour accent;
@@ -381,7 +358,8 @@ private:
     MidiMappingEngine* midiMap_ = nullptr;
     std::unique_ptr<MidiLearnAttachment> learnD_, learnF_, learnM_;
 
-    juce::Rectangle<float> graphRect_;
+    juce::Rectangle<float> frameRect_;   // the graphic window (frame only)
+    juce::Rectangle<float> graphRect_;   // graph area inside the frame (ModuleChrome::graphOf)
     Handle hovered  { Handle::None };
     Handle dragging { Handle::None };
 

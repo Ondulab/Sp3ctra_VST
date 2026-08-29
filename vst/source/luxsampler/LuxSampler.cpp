@@ -10,7 +10,7 @@
 #include "score_player_hooks.h"  // P5-M4 — display-bus deferral to the score service
 #include "ScorePlayerService.h"  // buildFramesFromImage — calibrated image reload
 #include "../image/ScoreGenRenderer.h" // scoregen::readCalibration / SpectroCalibration
-#include "../image/EqCurve.h"          // shared Catmull-Rom EQ evaluator (drawn == applied)
+#include "../image/ShapeEqCodec.h"     // typed-handle EQ codec (drawn == applied)
 
 extern "C" {
     #include "audio_image_buffers.h"
@@ -1012,6 +1012,7 @@ void LuxSampler::copySlotTo(int srcIdx, int dstIdx)
     setSlotDecayCurveType  (dstIdx, getSlotDecayCurveType  (srcIdx));
     setSlotDecayCurvePower (dstIdx, getSlotDecayCurvePower (srcIdx));
     setSlotEq            (dstIdx, getSlotEq            (srcIdx));
+    setSlotEqSelHandle   (dstIdx, getSlotEqSelHandle   (srcIdx));
     setSlotEqFloor       (dstIdx, getSlotEqFloor       (srcIdx));
 
     // The duplicate keeps the source image binding (rotation stays possible).
@@ -1344,33 +1345,31 @@ void LuxSampler::cropSlotToBounds(int slotIndex)
 }
 
 // ============================================================================
-// Image EQ (SCORE-style ±dB, boost + cut) — LUT build + publish (message thread)
+// Image EQ (typed handles, ±dB) — LUT build + publish (message thread)
 //
-// The per-slot EQ is stored as an encoded string in the SAME format as
-// ScoreEqComponent::encodeState():  "minF|maxF|g0;g1;…"  where the gains sit on
-// octave-boundary nodes. rebuildFreqLut() parses it and fills the double-buffered
-// freqLut_ with a GAIN IN dB per normalised pixel position (left=bass … right=
-// treble); the RT loop turns that into a darkness shift (see FramePlayerThread).
-// freqCurveActive_ stays false while the curve is flat so the RT loop skips it.
+// The per-slot EQ is stored as an encoded string in ShapeEqCodec format
+// ("H1|minF|maxF|t,f,g,w;×4"). rebuildFreqLut() decodes it and fills the
+// double-buffered freqLut_ with a GAIN IN dB per normalised pixel position
+// (left=bass … right=treble), sampled from the SAME evaluator the ShapeEq
+// editor draws (shape_eq_db); the RT loop turns that into a darkness shift
+// (see FramePlayerThread). freqCurveActive_ stays false while the curve is
+// flat so the RT loop skips it. Legacy spline strings decode to FLAT (the
+// schema-5 EQ migration — no curve fitting).
 // ============================================================================
 namespace {
-/** Parse the gains list out of an "minF|maxF|g0;g1;…" EQ string.
- *  @return the number of gains written to @p out (0 → treat as flat). */
-int parseEqGains(const juce::String& s, float* out, int maxN) noexcept
+/** Decode a slot EQ string into handles + level (legacy / empty → all Off,
+ *  level 0 = flat). @return true when the string was a valid payload. */
+bool decodeEqHandles(const juce::String& s, ShapeEqHandle* out,
+                     float& levelDb, double& minF, double& maxF)
 {
-    if (s.isEmpty()) return 0;
-    const int bar2 = s.lastIndexOfChar('|');
-    if (bar2 < 0) return 0;
-    const juce::String gainsStr = s.substring(bar2 + 1);
-    juce::StringArray toks;
-    toks.addTokens(gainsStr, ";", "");
-    int n = 0;
-    for (const auto& t : toks)
-    {
-        if (n >= maxN) break;
-        out[n++] = juce::jlimit(-24.0f, 24.0f, t.getFloatValue());
-    }
-    return n;
+    if (ShapeEqCodec::decode(s, out, levelDb, minF, maxF))
+        return true;
+    if (s.isNotEmpty())
+        DBG("LuxSampler: legacy slot-EQ payload ignored — curve reset to flat");
+    for (int h = 0; h < SHAPE_EQ_MAX_HANDLES; ++h)
+        shape_eq_default(&out[h]);
+    levelDb = 0.0f;
+    return false;
 }
 } // namespace
 
@@ -1384,6 +1383,7 @@ void LuxSampler::initFreqCurveDefaults() noexcept
                 freqLut_[i][b][j] = 0.0f;                 // 0 dB everywhere
         freqLutActive_[i].store(0, std::memory_order_relaxed);
         freqCurveActive_[i].store(false, std::memory_order_relaxed);
+        slotEqSelHandle_[i].store(0, std::memory_order_relaxed);
     }
 }
 
@@ -1398,26 +1398,28 @@ void LuxSampler::rebuildFreqLut(int i) noexcept
 {
     if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return;
 
-    float gains[LuxSamplerConstants::MAX_EQ_NODES];
-    const int ng = parseEqGains(eqState_[i], gains, LuxSamplerConstants::MAX_EQ_NODES);
+    ShapeEqHandle handles[SHAPE_EQ_MAX_HANDLES];
+    float lvl = 0.0f;
+    double lo = kEqMinHz, hi = kEqMaxHz;
+    decodeEqHandles(eqState_[i], handles, lvl, lo, hi);
 
-    // Fill the inactive buffer with a per-position GAIN IN dB, then publish.
-    // Nodes sit on octave boundaries → position xn maps linearly onto the node
-    // index axis (idx = xn·(ng-1)); between nodes the dB is the shared
-    // Catmull-Rom spline (EqCurve.h) — the same curve ScoreEqComponent draws.
+    // Fill the inactive buffer with a per-position GAIN IN dB, then publish —
+    // sampled from the shared typed-handle evaluator (shape_eq.h), the same
+    // curve the ShapeEq editor draws.
     const int cur    = freqLutActive_[i].load(std::memory_order_relaxed);
     const int target = 1 - cur;
     float*    lut    = freqLut_[i][target];
 
-    bool active = false;
-    if (ng >= 2)
+    const bool active = ! shape_eq_is_flat_level(handles, SHAPE_EQ_MAX_HANDLES,
+                                                 lvl);
+    if (active)
     {
+        const float span = (float) (std::log(hi / lo) / std::log(2.0));
         for (int j = 0; j < LuxSamplerConstants::FREQ_LUT_N; ++j)
         {
             const float xn = (float) j / (float) (LuxSamplerConstants::FREQ_LUT_N - 1);
-            const float g  = eqCurveDbAt(gains, ng, xn * (float) (ng - 1), 24.0f);
-            lut[j] = g;
-            if (std::abs(g) > 0.01f) active = true;
+            lut[j] = shape_eq_db_level(handles, SHAPE_EQ_MAX_HANDLES, lvl,
+                                       xn, span);
         }
     }
     else
@@ -1436,43 +1438,47 @@ void LuxSampler::setSlotEq(int i, const juce::String& encoded) noexcept
     rebuildFreqLut(i);
 }
 
-float LuxSampler::getSlotEqBandGain(int slot, int band) const noexcept
+float LuxSampler::getSlotEqHandleParam(int slot, int handle, int which) const noexcept
 {
     if (slot < 0 || slot >= LuxSamplerConstants::NUM_SLOTS) return 0.0f;
-    if (band < 0 || band >= kEqBands) return 0.0f;
-    float g[LuxSamplerConstants::MAX_EQ_NODES];
-    const int n = parseEqGains(eqState_[slot], g, LuxSamplerConstants::MAX_EQ_NODES);
-    return (band < n) ? g[band] : 0.0f;
+    if (handle < 0 || handle >= SHAPE_EQ_MAX_HANDLES) return 0.0f;
+    ShapeEqHandle h[SHAPE_EQ_MAX_HANDLES];
+    float lvl = 0.0f;
+    double lo = kEqMinHz, hi = kEqMaxHz;
+    decodeEqHandles(eqState_[slot], h, lvl, lo, hi);
+    switch (which)
+    {
+        case 0:  return h[handle].freq01;
+        case 1:  return (h[handle].gain_db + SHAPE_EQ_DB_MAX)
+                      / (2.0f * SHAPE_EQ_DB_MAX);
+        default: return h[handle].width01;
+    }
 }
 
-void LuxSampler::setSlotEqBandGain(int slot, int band, float gainDb) noexcept
+void LuxSampler::setSlotEqHandleParam(int slot, int handle, int which,
+                                      float norm01) noexcept
 {
     if (slot < 0 || slot >= LuxSamplerConstants::NUM_SLOTS) return;
-    if (band < 0 || band >= kEqBands) return;
+    if (handle < 0 || handle >= SHAPE_EQ_MAX_HANDLES) return;
 
-    // Start from the current gains (missing/empty → flat), overwrite one band,
-    // and re-encode in ScoreEqComponent's string format. The slot's node count
-    // (the editor's "points" dropdown) is PRESERVED: an empty slot gets the
-    // default 2-point grid, and a band that doesn't exist on the current grid
-    // is ignored so a CC can't silently re-grid the curve.
-    float parsed[LuxSamplerConstants::MAX_EQ_NODES];
-    const int n = parseEqGains(eqState_[slot], parsed, LuxSamplerConstants::MAX_EQ_NODES);
-    const int count = (n >= 2) ? n : 2;
-    if (band >= count) return;
+    // Start from the current handles (missing/legacy → flat), steer ONE field
+    // of the addressed handle, and re-encode. A CC on an Off handle is ignored
+    // — there is no shape to steer, and silently spawning one would surprise.
+    ShapeEqHandle h[SHAPE_EQ_MAX_HANDLES];
+    float lvl = 0.0f;
+    double lo = kEqMinHz, hi = kEqMaxHz;
+    decodeEqHandles(eqState_[slot], h, lvl, lo, hi);
+    if (h[handle].type == SHAPE_EQ_OFF) return;
 
-    float g[LuxSamplerConstants::MAX_EQ_NODES] = { 0.0f };
-    for (int i = 0; i < count; ++i)
-        g[i] = (i < n) ? parsed[i] : 0.0f;
-    g[band] = juce::jlimit(-24.0f, 24.0f, gainDb);
-
-    juce::String enc;
-    enc << juce::String(kEqMinHz, 3) << '|' << juce::String(kEqMaxHz, 3) << '|';
-    for (int i = 0; i < count; ++i)
+    norm01 = juce::jlimit(0.0f, 1.0f, norm01);
+    switch (which)
     {
-        if (i) enc << ';';
-        enc << juce::String(g[i], 2);
+        case 0:  h[handle].freq01  = norm01; break;
+        case 1:  h[handle].gain_db = norm01 * 2.0f * SHAPE_EQ_DB_MAX
+                                   - SHAPE_EQ_DB_MAX; break;
+        default: h[handle].width01 = norm01; break;
     }
-    setSlotEq(slot, enc);   // stores + rebuildFreqLut()
+    setSlotEq(slot, ShapeEqCodec::encode(h, lvl, lo, hi));   // stores + rebuildFreqLut()
 }
 
 juce::String LuxSampler::getSlotEq(int i) const
@@ -2055,6 +2061,7 @@ void LuxSampler::slotParamsToXml(int slotIndex, juce::XmlElement& xml) const
     xml.setAttribute("bassCut",        static_cast<double>(getSlotBassCut(slotIndex)));
     // Image EQ (SCORE-style ±dB) → encoded "minF|maxF|g0;g1;…" + pre-EQ floor.
     xml.setAttribute("imageEq",  getSlotEq(slotIndex));
+    xml.setAttribute("eqSel",    getSlotEqSelHandle(slotIndex));
     xml.setAttribute("eqFloor",  static_cast<double>(getSlotEqFloor(slotIndex)));
     xml.setAttribute("fadeCurveType",  static_cast<int>(getSlotFadeCurveType(slotIndex)));
     xml.setAttribute("fadeCurvePower", static_cast<double>(getSlotFadeCurvePower(slotIndex)));
@@ -2107,6 +2114,7 @@ void LuxSampler::slotParamsFromXml(int slotIndex, const juce::XmlElement& xml)
     // Image EQ (SCORE-style ±dB). Legacy freqCurveLF/HF / trebleCut / bassCut are
     // no longer restored (the EQ was redesigned); a flat EQ is the safe default.
     setSlotEq(slotIndex, xml.getStringAttribute("imageEq", ""));
+    setSlotEqSelHandle(slotIndex, xml.getIntAttribute("eqSel", 0));
     setSlotEqFloor(slotIndex, static_cast<float>(xml.getDoubleAttribute("eqFloor", 0.0)));
     // Apply the label whenever the attribute is PRESENT — an empty value is a
     // deliberate clear and must round-trip (slotParamsToXml always writes it).
@@ -2535,12 +2543,11 @@ void FramePlayerThread::injectWhiteFrame() noexcept
             doubleBuffer->dataReady = 1;
             pthread_mutex_unlock(&doubleBuffer->mutex);
 
-            // Per-engine input taps (per-chain display): mirror the silence
-            // injection above so the head panels show "unfed" (white) instead
-            // of the last playback frame.
-            audio_image_buffers_publish_engine_input(
-                audioBuffers, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL,
-                nullptr, nullptr, nullptr, nbPx);
+            // Path-B input tap (per-chain display): mirror the silence
+            // injection above so the head panel shows "unfed" (white) instead
+            // of the last playback frame. (The LuxStral tap needs no teardown
+            // here: its single writer is the audio-thread pull-mix, which
+            // debounces the deactivated stagings to a white publish itself.)
             if (pbOwned)
                 audio_image_buffers_publish_engine_input(
                     audioBuffers, AUDIO_IMAGE_ENGINE_TAP_PATHB,
@@ -3094,10 +3101,15 @@ void FramePlayerThread::outputFrame(uint8_t* workR, uint8_t* workG,
             //    follow-up). P5-M4: the samplers defer to the
             //    ScorePlayerService while a score slot claims the display
             //    (P8: a parked hold feeds audio only and defers to us).
+            //    (2026-08-20) Ownership-aware: an engine whose markers are
+            //    all masked by a feeding source below them injects nowhere —
+            //    the producers keep the bus (mirror of the score-side rule).
             const bool mixBusOwner =
                 ! score_player_owns_display()
                 && (lux_sampler_playing_engine()
-                    == sampler.getEngineIndex());
+                    == sampler.getEngineIndex())
+                && chain_player_owns_any_stream(
+                       /*is_score*/ 0, sampler.getEngineIndex()) != 0;
             uint8_t* wR = nullptr;
             uint8_t* wG = nullptr;
             uint8_t* wB = nullptr;

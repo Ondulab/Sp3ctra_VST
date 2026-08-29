@@ -34,9 +34,11 @@ typedef struct {
     int               bank_slot;
     int               num_notes;
     int               stereo_valid;
+    int               nb_pixels;
     float             notes[PREPROCESS_MAX_NOTES];
     float             left_gains[PREPROCESS_MAX_NOTES];
     float             right_gains[PREPROCESS_MAX_NOTES];
+    uint8_t           rgb[3][CIS_MAX_PIXELS_NB];  /* raw stream at the OUT */
 } LsSendStaging;
 
 static LsSendStaging s_ls_staging[CHAIN_MAX_CHAINS];
@@ -46,12 +48,16 @@ static LsSendStaging s_mix_snap;
 
 void synth_staging_stage_luxstral(int chain_idx, int bank_slot,
                                   const PreprocessedImageData* pp,
-                                  int num_notes, int stereo_valid)
+                                  int num_notes, int stereo_valid,
+                                  const uint8_t* r, const uint8_t* g,
+                                  const uint8_t* b, int nb_pixels)
 {
     if (chain_idx < 0 || chain_idx >= CHAIN_MAX_CHAINS || pp == NULL)
         return;
     if (num_notes < 0) num_notes = 0;
     if (num_notes > PREPROCESS_MAX_NOTES) num_notes = PREPROCESS_MAX_NOTES;
+    if (nb_pixels < 0) nb_pixels = 0;
+    if (nb_pixels > CIS_MAX_PIXELS_NB) nb_pixels = CIS_MAX_PIXELS_NB;
 
     LsSendStaging* s = &s_ls_staging[chain_idx];
 
@@ -60,6 +66,7 @@ void synth_staging_stage_luxstral(int chain_idx, int bank_slot,
                          ? bank_slot : 0;
     s->num_notes       = num_notes;
     s->stereo_valid    = stereo_valid ? 1 : 0;
+    s->nb_pixels       = nb_pixels;
     memcpy(s->notes, pp->additive.notes, (size_t) num_notes * sizeof(float));
     if (stereo_valid)
     {
@@ -67,6 +74,19 @@ void synth_staging_stage_luxstral(int chain_idx, int bank_slot,
                (size_t) num_notes * sizeof(float));
         memcpy(s->right_gains, pp->stereo.right_gains,
                (size_t) num_notes * sizeof(float));
+    }
+    if (r && g && b)
+    {
+        memcpy(s->rgb[0], r, (size_t) nb_pixels);
+        memcpy(s->rgb[1], g, (size_t) nb_pixels);
+        memcpy(s->rgb[2], b, (size_t) nb_pixels);
+    }
+    else
+    {
+        /* White, not black: an unfed stream is blank paper. */
+        memset(s->rgb[0], 255, (size_t) nb_pixels);
+        memset(s->rgb[1], 255, (size_t) nb_pixels);
+        memset(s->rgb[2], 255, (size_t) nb_pixels);
     }
     s->active = 1;
     __atomic_fetch_add(&s->seq, 1, __ATOMIC_RELEASE);          /* → even */
@@ -109,7 +129,10 @@ static int staging_snapshot(const LsSendStaging* s, LsSendStaging* out)
 int synth_staging_mix_luxstral(const ChainPlan* plan,
                                float* notes_out, int max_notes,
                                float* left_out, float* right_out,
-                               int* stereo_valid_out)
+                               int* stereo_valid_out,
+                               uint8_t* r_out, uint8_t* g_out, uint8_t* b_out,
+                               int max_pixels, int* nb_pixels_out,
+                               uint32_t* generation_out)
 {
     if (plan == NULL || notes_out == NULL || max_notes <= 0)
         return 0;
@@ -120,10 +143,27 @@ int synth_staging_mix_luxstral(const ChainPlan* plan,
     if (left_out)  memset(left_out,  0, (size_t) max_notes * sizeof(float));
     if (right_out) memset(right_out, 0, (size_t) max_notes * sizeof(float));
 
-    int    mixed          = 0;
-    int    any_stereo     = 0;
-    int    out_notes      = 0;
-    int    contended      = 0;
+    /* RGB accumulators — INK-additive (paper-white = zero contribution),
+     * mirroring the audio law (notes SUM, silence adds nothing). A weighted
+     * AVERAGE dimmed every other send whenever one staged blank paper
+     * (score silences, loop points), pumping the head panel's brightness
+     * (MIX-view blink, 2026-08-16). ink = w·(255 - rgb), out = 255 - Σ ink,
+     * jointly clipped (hue preserved — lux_centro compose doctrine). */
+    static float s_ls_ink_acc[3][CIS_MAX_PIXELS_NB];   /* audio thread only */
+    if (r_out && max_pixels > 0)
+    {
+        if (max_pixels > CIS_MAX_PIXELS_NB) max_pixels = CIS_MAX_PIXELS_NB;
+        memset(s_ls_ink_acc, 0, sizeof(s_ls_ink_acc));
+    }
+    else
+        max_pixels = 0;
+
+    uint32_t gen            = 0;
+    int      mixed          = 0;
+    int      any_stereo     = 0;
+    int      out_notes      = 0;
+    int      out_px         = 0;
+    int      contended      = 0;
 
     for (int k = 0; k < plan->num_ls_sends && k < CHAIN_MAX_CHAINS; ++k)
     {
@@ -135,6 +175,8 @@ int synth_staging_mix_luxstral(const ChainPlan* plan,
         if (snap < 0) { contended = 1; break; }
         if (snap == 0)
             continue;
+        /* Generation from the SNAPPED seq (see mix_luxsynth). */
+        gen += s_mix_snap.seq + (uint32_t) (snd->chain_idx * 0x9E3779B9u);
 
         /* Weight = the send's bank intensity, gated by its per-send power.
          * Read the bank stored at STAGE time (follows the producer's plan). */
@@ -149,6 +191,19 @@ int synth_staging_mix_luxstral(const ChainPlan* plan,
         const int n = s_mix_snap.num_notes < max_notes ? s_mix_snap.num_notes
                                                        : max_notes;
         if (n > out_notes) out_notes = n;
+
+        if (max_pixels > 0)
+        {
+            const int np = s_mix_snap.nb_pixels < max_pixels
+                           ? s_mix_snap.nb_pixels : max_pixels;
+            if (np > out_px) out_px = np;
+            for (int i = 0; i < np; ++i)
+            {
+                s_ls_ink_acc[0][i] += w * (255.0f - (float) s_mix_snap.rgb[0][i]);
+                s_ls_ink_acc[1][i] += w * (255.0f - (float) s_mix_snap.rgb[1][i]);
+                s_ls_ink_acc[2][i] += w * (255.0f - (float) s_mix_snap.rgb[2][i]);
+            }
+        }
 
         if (s_mix_snap.stereo_valid && left_out && right_out)
         {
@@ -183,14 +238,42 @@ int synth_staging_mix_luxstral(const ChainPlan* plan,
     {
         __atomic_fetch_add(&s_contention_holds, 1, __ATOMIC_RELAXED);
         if (stereo_valid_out) *stereo_valid_out = 0;
+        if (nb_pixels_out)    *nb_pixels_out = 0;
+        if (generation_out)   *generation_out = 0;
         return -1;
     }
 
     if (mixed == 0)
     {
         if (stereo_valid_out) *stereo_valid_out = 0;
+        if (nb_pixels_out)    *nb_pixels_out = 0;
+        if (generation_out)   *generation_out = 0;
         return 0;
     }
+
+    if (r_out && g_out && b_out && max_pixels > 0)
+    {
+        for (int i = 0; i < out_px; ++i)
+        {
+            float ir = s_ls_ink_acc[0][i];
+            float ig = s_ls_ink_acc[1][i];
+            float ib = s_ls_ink_acc[2][i];
+            /* Joint clip: scale ALL channels by the same factor — a
+             * per-channel clamp crushes the hue toward grey. */
+            float mx = ir > ig ? ir : ig;
+            if (ib > mx) mx = ib;
+            if (mx > 255.0f)
+            {
+                const float s = 255.0f / mx;
+                ir *= s; ig *= s; ib *= s;
+            }
+            r_out[i] = (uint8_t) (255.5f - ir);
+            g_out[i] = (uint8_t) (255.5f - ig);
+            b_out[i] = (uint8_t) (255.5f - ib);
+        }
+    }
+    if (nb_pixels_out)  *nb_pixels_out  = out_px;
+    if (generation_out) *generation_out = gen;
 
     /* Normalise pan gains by the note's weighted amplitude (silent note →
      * constant-power centre so a fading note never slams to a channel). */
@@ -221,6 +304,46 @@ int synth_staging_mix_luxstral(const ChainPlan* plan,
     if (stereo_valid_out)
         *stereo_valid_out = any_stereo;
     return mixed;
+}
+
+int synth_staging_copy_luxstral_rgb(int chain_idx,
+                                    uint8_t* r, uint8_t* g, uint8_t* b,
+                                    int max_pixels, int* bank_slot_out)
+{
+    if (chain_idx < 0 || chain_idx >= CHAIN_MAX_CHAINS
+        || r == NULL || g == NULL || b == NULL || max_pixels <= 0)
+        return 0;
+    if (max_pixels > CIS_MAX_PIXELS_NB)
+        max_pixels = CIS_MAX_PIXELS_NB;
+
+    const LsSendStaging* s = &s_ls_staging[chain_idx];
+    for (int attempt = 0; attempt < 4; ++attempt)
+    {
+        const uint32_t s0 = __atomic_load_n(&s->seq, __ATOMIC_ACQUIRE);
+        if (s0 & 1u)
+            continue;                       /* writer inside — retry */
+        if (! s->active)
+            return 0;
+        const int n = s->nb_pixels < max_pixels ? s->nb_pixels : max_pixels;
+        memcpy(r, (const void*) s->rgb[0], (size_t) n);
+        memcpy(g, (const void*) s->rgb[1], (size_t) n);
+        memcpy(b, (const void*) s->rgb[2], (size_t) n);
+        const int bank = s->bank_slot;
+        const uint32_t s1 = __atomic_load_n(&s->seq, __ATOMIC_ACQUIRE);
+        if (s0 == s1)
+        {
+            if (n < max_pixels)
+            {
+                /* Shorter staged line → pad with blank paper. */
+                memset(r + n, 255, (size_t) (max_pixels - n));
+                memset(g + n, 255, (size_t) (max_pixels - n));
+                memset(b + n, 255, (size_t) (max_pixels - n));
+            }
+            if (bank_slot_out) *bank_slot_out = bank;
+            return 1;
+        }
+    }
+    return -1;   /* persistently torn — the caller holds its previous frame */
 }
 
 /* ══ M4 — LuxSynth sends (conditioned line + raw RGB) ══════════════════════ */

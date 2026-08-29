@@ -29,6 +29,7 @@ const juce::Identifier ChainModel::kVersionProp { "version" };
 const juce::Identifier ChainModel::kSlotProp    { "slot" };
 const juce::Identifier ChainModel::kValuesTag   { "VALUES" };
 const juce::Identifier ChainModel::kMemoryTag   { "MEMORY" };
+const juce::Identifier ChainModel::kBackgroundProp { "background" };
 
 //==============================================================================
 // Queries
@@ -384,6 +385,7 @@ juce::ValueTree ChainModel::toValueTree() const
     {
         juce::ValueTree ct(kChainTag);
         ct.setProperty(kUuidProp, ch.id.toString(), nullptr);
+        ct.setProperty(kBackgroundProp, ch.backgroundMode, nullptr);   // schema 4
         for (const auto& m : ch.modules)
         {
             juce::ValueTree mt(kModuleTag);
@@ -413,6 +415,62 @@ juce::ValueTree ChainModel::toValueTree() const
     return root;
 }
 
+/* THREE legacy choice orders existed: Pitch/Mask {Black, White} and MidiTap
+ * {Black, White, Auto} already match the C order; the pooled FX were
+ * {Auto, Black, White}. Values are stored as the raw choice index (double). */
+int ChainModel::legacyBackgroundOf(ModuleType t, const juce::ValueTree& values)
+{
+    if (! values.isValid())
+        return -1;
+    const juce::Identifier prop(t == ModuleType::MidiTap ? "backgroundMode"
+                                                         : "BackgroundMode");
+    if (! values.hasProperty(prop))
+        return -1;
+    const int raw = (int) (double) values.getProperty(prop);
+    switch (t)
+    {
+        case ModuleType::Pitch:
+        case ModuleType::Mask:
+            return juce::jlimit(0, 1, raw);
+        case ModuleType::MidiTap:
+            return juce::jlimit(0, 2, raw);
+        case ModuleType::Reverb:    case ModuleType::Echo:
+        case ModuleType::Equalizer: case ModuleType::Harmonize:
+        case ModuleType::Centroid:  case ModuleType::Drive:
+        case ModuleType::DcBlock:   case ModuleType::Gain:
+        {
+            static constexpr int kChoiceToMode[3] =
+                { kChainBgAuto, kChainBgBlack, kChainBgWhite };
+            return kChoiceToMode[juce::jlimit(0, 2, raw)];
+        }
+        default:
+            return -1;
+    }
+}
+
+void ChainModel::migrateModuleValues(ModuleType t, juce::ValueTree& values)
+{
+    if (! values.isValid())
+        return;
+    // 2026-08-28 — VideoScroll "fade" split into "fade" (dim + desaturate)
+    // and "blur" (horizontal smear). A tree written before the split rendered
+    // its blur FROM fade, so seed blur = fade when fade is present and blur is
+    // not; trees written after the split always carry blur → untouched.
+    if (t == ModuleType::VideoScroll)
+    {
+        static const juce::Identifier kFade("fade"), kBlur("blur");
+        if (values.hasProperty(kFade) && ! values.hasProperty(kBlur))
+            values.setProperty(kBlur, values.getProperty(kFade), nullptr);
+        // 2026-08-28 — the 4-way "mode" (0/90/180/270°) became the continuous
+        // "rotation" (degrees): rotation = mode × 90 when only mode is present.
+        static const juce::Identifier kMode("mode"), kRotation("rotation");
+        if (values.hasProperty(kMode) && ! values.hasProperty(kRotation))
+            values.setProperty(kRotation,
+                90.0 * juce::jlimit(0, 3, juce::roundToInt((double) values.getProperty(kMode))),
+                nullptr);
+    }
+}
+
 void ChainModel::fromValueTree(const juce::ValueTree& root)
 {
     chains.clear();
@@ -439,6 +497,7 @@ void ChainModel::fromValueTree(const juce::ValueTree& root)
                     juce::ValueTree mem(kValuesTag);
                     mem.copyPropertiesFrom(mt, nullptr);
                     mem.removeProperty(kTypeProp, nullptr);
+                    migrateModuleValues(type, mem);
                     ch.typeMemory[type] = std::move(mem);
                 }
                 continue;
@@ -455,9 +514,36 @@ void ChainModel::fromValueTree(const juce::ValueTree& root)
                 type, muuid.isNotEmpty() ? juce::Uuid(muuid) : juce::Uuid(), slot, {} };
             const auto values = mt.getChildWithName(kValuesTag);
             if (values.isValid())
+            {
                 mi.values = values.createCopy();   // J2 — settings at rest
+                migrateModuleValues(type, mi.values);
+            }
             ch.modules.push_back(std::move(mi));
         }
+
+        if (ct.hasProperty(kBackgroundProp))
+        {
+            ch.backgroundMode = juce::jlimit(0, 2,
+                (int) ct.getProperty(kBackgroundProp));
+        }
+        else
+        {
+            // Schema < 4 — the pole lived on each module. Adopt the first
+            // member that carried one (the user kept them aligned; module
+            // order is the chain order), falling back to the chain's type
+            // memory, else keep the White default.
+            int migrated = -1;
+            for (const auto& m : ch.modules)
+                if ((migrated = legacyBackgroundOf(m.type, m.values)) >= 0)
+                    break;
+            if (migrated < 0)
+                for (const auto& [type, mem] : ch.typeMemory)
+                    if ((migrated = legacyBackgroundOf(type, mem)) >= 0)
+                        break;
+            if (migrated >= 0)
+                ch.backgroundMode = migrated;
+        }
+
         chains.push_back(std::move(ch));
     }
 }
@@ -470,6 +556,7 @@ int ChainModel::duplicateChain(int chainIdx)
     Chain copy;
     copy.id = juce::Uuid();
     const Chain& src = chains[(size_t) chainIdx];
+    copy.backgroundMode = src.backgroundMode;
     for (const auto& m : src.modules)
     {
         ModuleInstance mi{ m.type, juce::Uuid(), -1, {} };   // fresh identity + slot

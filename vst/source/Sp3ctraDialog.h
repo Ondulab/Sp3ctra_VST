@@ -31,34 +31,34 @@ public:
     };
 
     /// Show an information dialog with a single OK button.
-    static void showInfo(juce::Component* parent,
-                         const char*      title,
-                         const char*      message,
+    static void showInfo(juce::Component*    parent,
+                         const juce::String& title,
+                         const juce::String& message,
                          std::function<void()> onClose = {})
     {
         show(parent, Kind::Info, title, message,
-             "OK", nullptr,
+             "OK", juce::String(),
              [cb = std::move(onClose)](bool) { if (cb) cb(); });
     }
 
     /// Show a warning dialog with a single OK button.
-    static void showWarning(juce::Component* parent,
-                            const char*      title,
-                            const char*      message,
+    static void showWarning(juce::Component*    parent,
+                            const juce::String& title,
+                            const juce::String& message,
                             std::function<void()> onClose = {})
     {
         show(parent, Kind::Warning, title, message,
-             "OK", nullptr,
+             "OK", juce::String(),
              [cb = std::move(onClose)](bool) { if (cb) cb(); });
     }
 
     /// Show a confirmation dialog with a confirm and a cancel button.
     /// @param onResult Called with true if the user confirmed, false otherwise.
     static void showConfirm(juce::Component*          parent,
-                            const char*               title,
-                            const char*               message,
-                            const char*               confirmLabel,
-                            const char*               cancelLabel,
+                            const juce::String&       title,
+                            const juce::String&       message,
+                            const juce::String&       confirmLabel,
+                            const juce::String&       cancelLabel,
                             std::function<void(bool)> onResult)
     {
         show(parent, Kind::Confirm, title, message,
@@ -69,11 +69,11 @@ public:
     /// @param onResult Called with the entered text when the user confirms;
     ///                 not called if the user cancels.
     static void showInput(juce::Component*                          parent,
-                          const char*                               title,
-                          const char*                               message,
+                          const juce::String&                       title,
+                          const juce::String&                       message,
                           const juce::String&                       defaultText,
-                          const char*                               confirmLabel,
-                          const char*                               cancelLabel,
+                          const juce::String&                       confirmLabel,
+                          const juce::String&                       cancelLabel,
                           std::function<void(const juce::String&)>  onResult)
     {
         if (parent == nullptr) return;
@@ -176,11 +176,11 @@ public:
     }
 
 private:
-    Sp3ctraDialog(Kind        kind,
-                  const char* title,
-                  const char* message,
-                  const char* confirmLabel,
-                  const char* cancelLabel)
+    Sp3ctraDialog(Kind                kind,
+                  const juce::String& title,
+                  const juce::String& message,
+                  const juce::String& confirmLabel,
+                  const juce::String& cancelLabel)
         : kind_(kind),
           title_(title),
           msg_(message)
@@ -192,7 +192,7 @@ private:
         confirmBtn_.setColour(B::textColourOffId, juce::Colour(0xffff6644));
         addAndMakeVisible(confirmBtn_);
 
-        if (cancelLabel != nullptr)
+        if (cancelLabel.isNotEmpty())
         {
             cancelBtn_ = std::make_unique<juce::TextButton>();
             cancelBtn_->setButtonText(cancelLabel);
@@ -233,10 +233,10 @@ private:
 
     static void show(juce::Component*          parent,
                      Kind                      kind,
-                     const char*               title,
-                     const char*               message,
-                     const char*               confirmLabel,
-                     const char*               cancelLabel,
+                     const juce::String&       title,
+                     const juce::String&       message,
+                     const juce::String&       confirmLabel,
+                     const juce::String&       cancelLabel,
                      std::function<void(bool)> onResult)
     {
         if (parent == nullptr) return;

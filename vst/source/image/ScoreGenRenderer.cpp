@@ -56,6 +56,82 @@ namespace
         }
     }
 
+    // ── Constant-Q analysis plan (multi-resolution STFT) ─────────────────────
+    //
+    // The printed image is LOG in frequency: every octave gets the same
+    // vertical space (432 rows/octave over the CIS sensor, 36 rows/semitone).
+    // A single STFT window cannot serve that, because its resolution is a fixed
+    // number of Hz while a semitone is a fixed RATIO: at 65 Hz a semitone spans
+    // 3.9 Hz, at 16 kHz it spans 1016 Hz. One window is therefore always wrong
+    // at both ends — too coarse in pitch at the bottom, needlessly fine (and so
+    // needlessly smeared in time) at the top.
+    //
+    // The fix is to hold the number of signal CYCLES inside the window constant
+    // instead of the number of Hz: a constant-Q filter bank, approximated here
+    // by one window per octave, halving as the octave doubles. Pitch blur then
+    // stays constant across the whole page, and the window shortens with pitch
+    // so transients stay sharp exactly where the ear expects them to.
+    struct LayerSpec
+    {
+        int    winSize = 0;
+        double fCross  = 0.0;   // rows with centre freq >= fCross prefer this layer
+    };
+
+    // Cycles held inside the analysis window. The Blackman-Harris window this
+    // engine applies has a -3 dB main lobe about 1.90 bins wide, so the pitch
+    // blur works out at ~31.9 / kCyclesTarget semitones at an octave's lower
+    // edge, and half that at its upper edge. 48 cycles => 2/3 .. 1/3 of a
+    // semitone, everywhere. Raise it for finer pitch and longer windows, lower
+    // it for sharper transients and coarser pitch.
+    constexpr double kCyclesTarget = 48.0;
+
+    // Floor on the window length, so the top octaves keep enough samples for
+    // the 4-term window to mean anything.
+    constexpr int kMinWindow = 128;
+
+    // Zero-padded FFT length for a layer. Kept a power of two (winSize itself
+    // is not) so kiss_fftr never falls back to its slow path on a large prime
+    // factor. 16x the window is plenty of frequency interpolation.
+    inline int padSizeFor(int winSize)
+    {
+        int pad = 2;
+        while (pad < winSize * 16 && pad < SCORE_FFT_EFFECTIVE_SIZE)
+            pad *= 2;
+        return juce::jmin(pad, SCORE_FFT_EFFECTIVE_SIZE);
+    }
+
+    // Builds the layer set, longest window first. `fftSize` caps the longest
+    // window, so the bottom octaves keep the legacy window (and the legacy
+    // sound) while the upper ones get progressively shorter and sharper. Every
+    // layer analyses the WHOLE signal; the renderer picks one per image row.
+    std::vector<LayerSpec> buildLayerPlan(int fftSize, int sampleRate,
+                                          double minFreq, double maxFreq,
+                                          bool multiRes)
+    {
+        std::vector<LayerSpec> plan;
+        plan.push_back({ juce::jmax(1, fftSize), 0.0 });
+        if (! multiRes || minFreq <= 0.0 || maxFreq <= minFreq || sampleRate <= 0)
+            return plan;                                  // legacy: one window
+
+        const int floorWin = juce::jmin(kMinWindow, plan.back().winSize);
+
+        for (double fLo = minFreq * 2.0; fLo < maxFreq; fLo *= 2.0)
+        {
+            const double want = kCyclesTarget * (double) sampleRate / fLo;
+            const int    win  = juce::jlimit(floorWin, plan.back().winSize,
+                                             (int) std::lround(want));
+
+            // Skip an octave whose ask is capped to (or barely under) the
+            // window already in use — a near-duplicate layer costs a full
+            // spectrogram and buys nothing.
+            if ((double) win > 0.75 * (double) plan.back().winSize)
+                continue;
+
+            plan.push_back({ win, fLo });
+        }
+        return plan;
+    }
+
     // Mono mix-down of a (possibly multichannel) reader into double[], starting
     // at `startSample` in the file.
     bool loadMono(juce::AudioFormatReader& reader, juce::int64 startSample,
@@ -219,6 +295,12 @@ RenderResult renderScore(const juce::File& wav,
     // A mono file (or <2 channels) falls back to the regular mono path.
     const bool stereo = (s.enableStereoMode != 0) && (reader->numChannels >= 2);
 
+    // ── Analysis layer plan ──────────────────────────────────────────────────
+    // Decided here, before the memory guard, so the guard prices the exact set
+    // of spectrograms that is about to be computed.
+    const std::vector<LayerSpec> layerPlan =
+        buildLayerPlan(fftSize, sampleRate, s.minFreq, s.maxFreq, s.enableMultiRes != 0);
+
     // ── Analysis memory guard — BEFORE any allocation ────────────────────────
     // The spectrogram stores num_windows × (padSize/2+1) doubles per layer per
     // channel, with windows zero-padded up to SCORE_FFT_EFFECTIVE_SIZE for
@@ -230,19 +312,10 @@ RenderResult renderScore(const juce::File& wav,
         const double windows = (double) framesToLoad
                                    / juce::jmax(1.0, (double) sampleRate / binsPerSecond)
                              + 2.0;
-        auto layerBytes = [&](int winSize)
-        {
-            const int pad = juce::jmin(SCORE_FFT_EFFECTIVE_SIZE, winSize * 16);
-            return windows * (double) (pad / 2 + 1) * (double) sizeof(double);
-        };
-        double bytes = layerBytes(fftSize);
-        if (s.enableMultiRes != 0)   // mirrors the layer set built below
-        {
-            const int mid  = juce::jmax(256, fftSize / 4);
-            const int high = juce::jmax(128, fftSize / 16);
-            if (mid  < fftSize) bytes += layerBytes(mid);
-            if (high < mid)     bytes += layerBytes(high);
-        }
+        double bytes = 0.0;
+        for (const auto& L : layerPlan)                  // the set built below
+            bytes += windows * (double) (padSizeFor(L.winSize) / 2 + 1)
+                             * (double) sizeof(double);
         if (stereo)
             bytes *= 2.0;                                    // dataR per layer
         bytes += (double) framesToLoad * 8.0 * (stereo ? 2.0 : 1.0);  // signal buffers
@@ -298,10 +371,12 @@ RenderResult renderScore(const juce::File& wav,
     //
     // Single-resolution (legacy): one layer, exact historical behaviour.
     //
-    // Multi-resolution (enableMultiRes): progressively shorter windows analyse
-    // the upper octaves — Gabor's time/frequency trade-off is applied PER BAND
-    // instead of globally. Lows keep the long window (full harmonic
-    // resolution); highs get windows short enough that transients stay sharp.
+    // Multi-resolution (enableMultiRes): one window per octave, halving as the
+    // octave doubles, so every band holds the same number of signal cycles —
+    // Gabor's time/frequency trade-off applied PER BAND instead of globally.
+    // See buildLayerPlan() for the constant-Q reasoning. Lows keep the long
+    // window (full harmonic resolution); highs get windows short enough that
+    // transients stay sharp.
     // Every layer's frames are CENTER-ALIGNED to layer 0's grid and magnitudes
     // are normalised by each window's coherent gain, so the layers splice into
     // one consistent dB map. Encoder-only: the printed image plays back through
@@ -316,22 +391,11 @@ RenderResult renderScore(const juce::File& wav,
         double fCross  = 0.0;   // rows with centre freq ≥ fCross prefer this layer
     };
 
-    std::vector<int> winSizes { fftSize };
-    if (s.enableMultiRes != 0)
-    {
-        const int mid  = juce::jmax(256, fftSize / 4);
-        const int high = juce::jmax(128, fftSize / 16);
-        if (mid  < winSizes.back()) winSizes.push_back(mid);
-        if (high < winSizes.back()) winSizes.push_back(high);
-    }
-    const bool multiRes = winSizes.size() > 1;
+    const bool multiRes = layerPlan.size() > 1;
 
-    // A layer takes over once its window still holds ≥ kCyclesTarget cycles —
-    // below that, pitch precision needs the longer window of the layer below.
-    constexpr double kCyclesTarget = 24.0;
-    constexpr double kBlend        = 1.1224620483; // 2^(1/6): ±1/6 octave crossfade
+    constexpr double kBlend = 1.1224620483; // 2^(1/6): ±1/6 octave crossfade
 
-    std::vector<SpecLayer> layers(winSizes.size());
+    std::vector<SpecLayer> layers(layerPlan.size());
     auto freeLayers = [&layers]()
     {
         for (auto& L : layers)
@@ -344,11 +408,10 @@ RenderResult renderScore(const juce::File& wav,
     for (size_t li = 0; li < layers.size(); ++li)
     {
         auto& L = layers[li];
-        L.winSize = winSizes[li];
-        L.padSize = juce::jmin(SCORE_FFT_EFFECTIVE_SIZE, L.winSize * 16);
+        L.winSize = layerPlan[li].winSize;
+        L.padSize = padSizeFor(L.winSize);
         L.freqRes = (double) sampleRate / (double) L.padSize;
-        L.fCross  = (li == 0) ? 0.0
-                              : kCyclesTarget * (double) sampleRate / (double) L.winSize;
+        L.fCross  = layerPlan[li].fCross;
 
         int rc = score_compute_spectrogram_ex(signal.data(), totalSamples, sampleRate,
                                               L.winSize, L.padSize, fftSize,

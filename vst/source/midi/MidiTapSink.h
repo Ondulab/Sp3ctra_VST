@@ -60,6 +60,25 @@ public:
     //── Settings (message thread) ─────────────────────────────────────────────
     void setChannel(int ch1to16) noexcept;
     void setPortLatencyMs(double ms) noexcept;
+    /** Live-output shaping. NONE of these touch the recorded files — a take
+     *  stays faithful whatever the monitoring does.
+     *   - setPortMpe(true): the port streams MPE voices (one member channel
+     *     per sounding note, crest bends as per-channel pitch wheel ±2 st,
+     *     level envelope as channel pressure + CC11) instead of
+     *     single-channel notes. The MPE zone RPNs are sent on switch-on.
+     *   - setOutEnabled(false): mutes the port stream (held notes released).
+     *   - setOutLevel: velocity scale (0..1) on the live stream. */
+    void setPortMpe(bool mpe) noexcept;
+    void setOutEnabled(bool on) noexcept;
+    void setOutLevel(double level01) noexcept;
+
+    /** Identity shown to the outside world — the HOST CHAIN's label
+     *  ("CHAIN 4", "CHAIN 4a"…), pushed by the processor whenever the chain
+     *  topology changes. Names the virtual port ("Sp3ctra CHAIN 4", applied
+     *  at the next port open) and the takes' track-name meta. The meta keeps
+     *  the "Sp3ctra MIDI TAP" prefix — MIDI SCORE's capture detection keys
+     *  on it. Message thread. */
+    void setDisplayName(const juce::String& name);
     /** Write-time rhythmic quantization, in TICKS of the 960 PPQ grid
      *  (0 = off, raw timing). Applied to both ends of every note when the file
      *  is written, so the .mid is readable by ANY player — MuseScore 4 dropped

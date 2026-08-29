@@ -5,6 +5,7 @@
 #include "MediaSourcePage.h"
 #include "../MediaSourceEngines.h"
 #include "../../UITheme.h"
+#include "../../Sp3ctraDialog.h"
 
 #include <cmath>
 
@@ -308,8 +309,7 @@ void MediaSourcePage::chooseMedia()
                 // the global dirty listener never sees it.
                 safe->processor.sessions()->markStateDirty();
             else if (err.isNotEmpty())
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::MessageBoxIconType::WarningIcon, "Load failed", err);
+                Sp3ctraDialog::showWarning(safe.getComponent(), "Load failed", err);
         });
 }
 
@@ -362,8 +362,7 @@ void MediaSourcePage::openSelectedDevice()
         if (e->openDevice(idx, err))
             processor.setCameraDeviceName(slot_, deviceCombo.getText());
         else
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::MessageBoxIconType::WarningIcon, "Camera", err);
+            Sp3ctraDialog::showWarning(this, "Camera", err);
     }
 }
 

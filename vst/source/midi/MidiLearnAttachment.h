@@ -30,21 +30,46 @@
  *  (e.g. the EQ picks the nearest band node). */
 namespace MidiLearnPopup
 {
-    inline void show(MidiMappingEngine& engine, const juce::String& paramId,
-                     juce::Component* target)
+    /** Item ids of one parameter's learn entries (offset by `base` so a menu
+     *  can host several parameters — one sub-menu each, see addItems). */
+    enum Item { kCancelLearn = 1, kLearn = 2, kRemove = 3, kItemCount = 4 };
+
+    /** Append the learn entries of `paramId` to `menu`, ids `base + Item`. */
+    inline void addItems(juce::PopupMenu& menu, MidiMappingEngine& engine,
+                         const juce::String& paramId, int base = 0)
     {
-        juce::PopupMenu menu;
         const juce::String mapped = engine.mappingDescription(paramId);
         const bool learningThis = engine.isLearning()
                                && engine.learningParamId() == paramId;
 
         if (learningThis)
-            menu.addItem(1, juce::String::fromUTF8("Learning\xE2\x80\xA6 (cancel)"),
-                         true, true);
+            menu.addItem(base + kCancelLearn,
+                         juce::String::fromUTF8("Learning\xE2\x80\xA6 (cancel)"), true, true);
         else
-            menu.addItem(2, "MIDI Learn");
+            menu.addItem(base + kLearn, "MIDI Learn");
         if (mapped.isNotEmpty())
-            menu.addItem(3, "Remove MIDI mapping (" + mapped + ")");
+            menu.addItem(base + kRemove, "Remove MIDI mapping (" + mapped + ")");
+    }
+
+    /** Act on a chosen id from addItems(base). Returns false when `choice` is
+     *  not one of this parameter's entries (dismissed, or another base). */
+    inline bool handle(MidiMappingEngine& engine, const juce::String& paramId,
+                       int choice, int base = 0)
+    {
+        switch (choice - base)
+        {
+            case kCancelLearn: engine.cancelLearn();             return true;
+            case kLearn:       engine.startLearn(paramId);       return true;
+            case kRemove:      engine.removeMappingFor(paramId); return true;
+            default:           return false;
+        }
+    }
+
+    inline void show(MidiMappingEngine& engine, const juce::String& paramId,
+                     juce::Component* target)
+    {
+        juce::PopupMenu menu;
+        addItems(menu, engine, paramId);
 
         // withMousePosition() AFTER withTargetComponent() so the popup opens at
         // the cursor. Canvas editors (EQ, envelope) pass the whole component as
@@ -53,16 +78,7 @@ namespace MidiLearnPopup
         menu.showMenuAsync(
             juce::PopupMenu::Options().withTargetComponent(target)
                                       .withMousePosition(),
-            [&engine, paramId](int choice)
-            {
-                switch (choice)
-                {
-                    case 1: engine.cancelLearn();             break;
-                    case 2: engine.startLearn(paramId);       break;
-                    case 3: engine.removeMappingFor(paramId); break;
-                    default: break;
-                }
-            });
+            [&engine, paramId](int choice) { handle(engine, paramId, choice); });
     }
 }
 

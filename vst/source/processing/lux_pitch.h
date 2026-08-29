@@ -35,9 +35,10 @@ extern "C" {
 /* Maximum polyphonic voices */
 #define LUX_PITCH_MAX_VOICES 10
 
-/* Background mode */
-#define LUX_PITCH_BG_BLACK  0
-#define LUX_PITCH_BG_WHITE  1
+/* Background mode — which pole is the "material" (mirrors LUX_EQ_BG_*). */
+#define LUX_PITCH_BG_BLACK  0   /* bright material on black background */
+#define LUX_PITCH_BG_WHITE  1   /* dark material on white background   */
+#define LUX_PITCH_BG_AUTO   2   /* detect from the stream (default)    */
 
 /* Step coupling mode */
 #define LUX_PITCH_COUPLING_LUXSTRAL  0
@@ -93,8 +94,8 @@ typedef struct {
 typedef struct {
     int   enabled;
     int   polyphony_enabled;        /* 0 = mono (legacy), 1 = poly (up to MAX_VOICES) */
-    int   background_mode;          /* LUX_PITCH_BG_BLACK or _WHITE */
-    int   reference_note;           /* MIDI note for zero shift (default 57 = A3) */
+    int   background_mode;          /* LUX_PITCH_BG_* (chain-owned since schema 4) */
+    int   reference_note;           /* MIDI note for zero shift (default 69 = A4) */
     int   coupling_mode;            /* COUPLING_LUXSTRAL or COUPLING_FREE */
     float free_pixels_per_semitone; /* User-defined step size (free mode) */
     float pitch_bend_range;         /* Pitch bend range in semitones (default 2) */
@@ -136,6 +137,14 @@ typedef struct {
     /* Global runtime state */
     float    lfo_phase;          /* LFO phase [0, 2*PI] */
     uint64_t last_frame_ts_us;   /* Timestamp of last frame for dt */
+
+    /* AUTO background — learned over a short window after each reset, then
+     * LOCKED (see lux_reverb.h: polarity is a property of the SOURCE). */
+    int  auto_bg_white;
+    int  auto_locked;
+    int  auto_lock_countdown;
+    int  auto_max_mean;
+    int  auto_min_mean;
 
     /* Preallocated output buffers */
     uint8_t  out_r[LUX_PITCH_MAX_PIXELS];

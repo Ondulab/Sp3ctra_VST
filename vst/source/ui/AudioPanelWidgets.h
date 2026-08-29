@@ -43,7 +43,7 @@ namespace AudioPanelLayout
     // Envelope-editor blocks (audio ADSR rendered as draggable curve, not knobs).
     constexpr int kEnvCaptionH  = 13;                      ///< caption strip above an editor
     constexpr int kEnvGap       = 10;                      ///< below the editor row
-    constexpr int kEnvH         = EnvelopeEditorComponent::kPreferredH; ///< 124
+    constexpr int kEnvH         = EnvelopeEditorComponent::kPreferredH; ///< 140
 
     /// Grid rows needed to host n knobs.
     constexpr int rows(int n)  { return (n + kKnobCols - 1) / kKnobCols; }

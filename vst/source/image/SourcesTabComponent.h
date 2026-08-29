@@ -2,12 +2,13 @@
  * @file SourcesTabComponent.h
  * @brief ZONE 3 (PLAY face) — SP3CTRA source MODULE transport.
  *
- * This is the SP3CTRA (live CIS) SOURCE MODULE's own transport — play / hold /
- * stop + Fade-In — and it is a property of the MODULE, not of the chain it
- * sits in. Both source blocks (chain 1 / chain 2) drive the SAME global
- * SP3CTRA transport (imageFreezeMode) and the SAME Fade-In (imageFadeInMs), so
- * the fade on play/pause/stop is chain-independent. The chain index only tints
- * the header so you can tell which block you selected.
+ * This is the SP3CTRA (live CIS) SOURCE MODULE's own transport — a PLAY/STOP
+ * toggle + PAUSE + Fade-In — and it is a property of the MODULE, not of the
+ * chain it sits in. Both source blocks (chain 1 / chain 2) drive the SAME
+ * global SP3CTRA transport (imageFreezeMode) and the SAME Fade-In
+ * (imageFadeInMs), so the fade on play/pause/stop is chain-independent. The
+ * chain index only tints the header so you can tell which block you selected.
+ * The rack block's LED drives the same play/stop switch.
  *
  * The RAW upstream UDP gate is the instrument's own signal and is not surfaced
  * here. The sampler has its own transport elsewhere (samplerFreezeMode) — this
@@ -31,17 +32,21 @@ public:
     explicit SourcesTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p)
     {
-        playBtn.setIconPath(Icons::play());
-        holdBtn.setIconPath(Icons::pause());
-        stopBtn.setIconPath(Icons::stop());
+        playStopBtn.setIconPath(Icons::play());
+        pauseBtn.setIconPath(Icons::pause());
 
-        playBtn.onClick = [this]{ setFreezeMode(0.f);  };
-        holdBtn.onClick = [this]{ setFreezeMode(0.5f); };
-        stopBtn.onClick = [this]{ setFreezeMode(1.f);  };
+        // PLAY/STOP is one toggle (like the rack LED); PAUSE toggles hold
+        // against play and is inert while stopped (holding black = stop).
+        playStopBtn.onClick = [this]{ setFreezeMode(currentMode() == 0 ? 1.f : 0.f); };
+        pauseBtn.onClick    = [this]
+        {
+            const int m = currentMode();
+            if (m == 0)      setFreezeMode(0.5f);   // playing → hold
+            else if (m == 1) setFreezeMode(0.f);    // held    → resume
+        };
 
-        addAndMakeVisible(playBtn);
-        addAndMakeVisible(holdBtn);
-        addAndMakeVisible(stopBtn);
+        addAndMakeVisible(playStopBtn);
+        addAndMakeVisible(pauseBtn);
 
         // Fade-In (ms) — SP3CTRA input source (Chain 2) only. The sampler
         // (Chain 1) has no transport fade, so this row is hidden there.
@@ -112,9 +117,8 @@ public:
         learnAtts_.clear();
         auto& mm = processor.getMidiMap();
         learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, fadeSlider, "imageFadeInMs"));
-        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, playBtn,       freezeParamId()));
-        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, holdBtn,       freezeParamId()));
-        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, stopBtn,       freezeParamId()));
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, playStopBtn,   freezeParamId()));
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, pauseBtn,      freezeParamId()));
         learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, acqRateSlider, "acqGateRateMs"));
         learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, acqModeCombo,    "acqGateMode"));
         learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, acqDivCombo,     "acqGateSyncDiv"));
@@ -171,11 +175,10 @@ public:
         constexpr int gap   = Sp3ctraTheme::kGap;
 
         // Transport row — centred.
-        const int totalW = btnSz * 3 + gap * 2;
+        const int totalW = btnSz * 2 + gap;
         const int startX = w / 2 - totalW / 2;
-        playBtn.setBounds(startX,                  transportY(), btnSz, btnSz);
-        holdBtn.setBounds(startX + btnSz + gap,    transportY(), btnSz, btnSz);
-        stopBtn.setBounds(startX + 2*(btnSz+gap),  transportY(), btnSz, btnSz);
+        playStopBtn.setBounds(startX,               transportY(), btnSz, btnSz);
+        pauseBtn   .setBounds(startX + btnSz + gap, transportY(), btnSz, btnSz);
 
         // Unified form grid — every control fills the same column [ctrlX, +ctrlW].
         const int cx = ctrlX();
@@ -190,8 +193,9 @@ public:
 private:
     Sp3ctraAudioProcessor& processor;
     int activeChain_ { 1 };
+    int shownMode_   { -1 };   ///< freeze mode the play/stop glyph reflects
 
-    IconTextButton playBtn, holdBtn, stopBtn;
+    IconTextButton playStopBtn, pauseBtn;
     Sp3ctraBarSlider fadeSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> fadeAttach;
     std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
@@ -214,6 +218,14 @@ private:
     {
         if (auto* param = processor.getAPVTS().getParameter(freezeParamId()))
             param->setValueNotifyingHost(v);
+    }
+
+    /** Current transport state: 0 = play / 1 = hold / 2 = stop. */
+    int currentMode() const noexcept
+    {
+        if (auto* raw = processor.getAPVTS().getRawParameterValue(freezeParamId()))
+            return juce::roundToInt(raw->load());
+        return 0;
     }
 
     // ── Unified form geometry ────────────────────────────────────────────────
@@ -257,14 +269,11 @@ private:
     {
         static const juce::Colour kPlay  { 0xff2a6040 };
         static const juce::Colour kHold  { 0xff6040a0 };
-        static const juce::Colour kStop  { 0xff5a2020 };
         static const juce::Colour kOff   { 0xff2a2a2a };
         static const juce::Colour kFgOn  = juce::Colours::white;
         static const juce::Colour kFgOff { 0xff888888 };
 
-        int mode = 0;
-        if (auto* raw = processor.getAPVTS().getRawParameterValue(freezeParamId()))
-            mode = juce::roundToInt(raw->load());
+        const int mode = currentMode();
 
         auto style = [](IconTextButton& btn, bool active, juce::Colour col)
         {
@@ -272,9 +281,17 @@ private:
             btn.setColour(juce::TextButton::textColourOffId,  active ? kFgOn : kFgOff);
         };
 
-        style(playBtn, mode == 0, kPlay);
-        style(holdBtn, mode == 1, kHold);
-        style(stopBtn, mode == 2, kStop);
+        // The toggle wears the glyph of what a click DOES next: ■ while
+        // playing (click → stop), ▶ while held/stopped (click → play).
+        // Guarded on the cached mode: setIconPath repaints unconditionally
+        // and this runs from a 200 ms timer.
+        if (mode != shownMode_)
+        {
+            playStopBtn.setIconPath(mode == 0 ? Icons::stop() : Icons::play());
+            shownMode_ = mode;
+        }
+        style(playStopBtn, mode == 0, kPlay);
+        style(pauseBtn,    mode == 1, kHold);
     }
 
     void timerCallback() override

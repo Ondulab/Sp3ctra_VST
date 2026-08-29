@@ -28,12 +28,6 @@
 
 namespace SamplerMidiTargets
 {
-    // The slot EQ is a 2..9-node grid over the fixed 65.41–16744 Hz span (node
-    // count = the editor's "points" dropdown, see ScoreEqComponent /
-    // LuxSampler::kEqBands). Targets cover the 9-node maximum; a CC on a band
-    // beyond the slot's current grid is ignored (setSlotEqBandGain).
-    constexpr int kEqBands = 9;
-
     // Scoped so the enumerators never collide with LuxSampler's LoopMode /
     // FadeCurveType types used in the read/apply casts below.
     enum class Kind
@@ -42,7 +36,11 @@ namespace SamplerMidiTargets
         FadeInType, FadeInPow, FadeOutType, FadeOutPow,
         Overdub,                     // engine-wide (slot ignored)
         Rec, Play, Save, Clear,      // action targets (slot-addressed)
-        EqBand,                      // per-slot EQ band gain (band in id bits 24+)
+        // Slot EQ "selected handle" trio — steers whichever typed handle the
+        // slot's ShapeEq editor last selected (LuxSampler::slotEqSelHandle_).
+        // The legacy per-band "eq{band}" ids no longer resolve: old saved
+        // mappings drop silently on restore (schema-5 EQ migration).
+        SelEqFreq, SelEqGain, SelEqWidth,
         MixMode,                     // per-bank composite rule (Mix/Add/Darken)
         CropStart, CropEnd,          // play-region bounds [0..1] of the take
         FadeInLen, FadeOutLen,       // fade widths [0..1] of the active region
@@ -69,7 +67,9 @@ namespace SamplerMidiTargets
             case Kind::Play:        return "play";
             case Kind::Save:        return "save";
             case Kind::Clear:       return "clear";
-            case Kind::EqBand:      return "eq";   // real id is "eq{band}" (makeEqBandId)
+            case Kind::SelEqFreq:   return "eqfreq";
+            case Kind::SelEqGain:   return "eqgain";
+            case Kind::SelEqWidth:  return "eqwidth";
             case Kind::MixMode:     return "mixmode";
             case Kind::CropStart:   return "cropstart";
             case Kind::CropEnd:     return "cropend";
@@ -100,14 +100,6 @@ namespace SamplerMidiTargets
     inline int  tSlot  (int t) noexcept { return (t >> 8)  & 0xFF; }
     inline Kind tKind  (int t) noexcept { return static_cast<Kind>(t & 0xFF); }
 
-    // EQ band targets carry the band index in the high byte (0..8).
-    inline juce::String makeEqBandId(int engine, int slot, int band)
-    { return "smp:e" + juce::String(engine) + ":s" + juce::String(slot)
-           + ":eq" + juce::String(band); }
-    inline int encodeEq(int engine, int slot, int band) noexcept
-    { return (band << 24) | (engine << 16) | ((slot & 0xFF) << 8) | (int) Kind::EqBand; }
-    inline int tBand(int t) noexcept { return (t >> 24) & 0xFF; }
-
     /** Resolve a synthetic id → targetId (>= 0), or -1 if not ours / malformed.
      *  Message thread (uses String tokenisation). */
     inline int resolve(const juce::String& id)
@@ -132,20 +124,11 @@ namespace SamplerMidiTargets
         else
             tok = parts[2];
 
-        // EQ band: "eq{band}" (per-slot only).
-        if (perSlot && tok.startsWith("eq") && tok.length() > 2)
-        {
-            const juce::String bs = tok.substring(2);
-            if (! bs.containsOnly("0123456789")) return -1;
-            const int band = bs.getIntValue();
-            if (band < 0 || band >= kEqBands) return -1;
-            return encodeEq(engine, slot, band);
-        }
-
+        // (Legacy per-band "eq{band}" ids are deliberately unresolvable —
+        // old saved mappings drop silently on restore.)
         for (int k = 0; k < (int) Kind::KindCount; ++k)
         {
             const Kind kind = static_cast<Kind>(k);
-            if (kind == Kind::EqBand) continue;   // handled above (needs a band)
             if (tok == token(kind))
             {
                 // Per-slot form must match a per-slot kind and vice-versa.
@@ -166,7 +149,8 @@ namespace SamplerMidiTargets
             case Kind::FadeInPow: case Kind::FadeOutPow:
             case Kind::CropStart: case Kind::CropEnd:
             case Kind::FadeInLen: case Kind::FadeOutLen:
-            case Kind::EqBand:                             return 0;    // continuous
+            case Kind::SelEqFreq: case Kind::SelEqGain:
+            case Kind::SelEqWidth:                         return 0;    // continuous
             case Kind::Resume: case Kind::Overdub:
             case Kind::LoopFwd: case Kind::LoopBwd:
             case Kind::LoopRepeat:                         return 2;    // 2-state

@@ -181,55 +181,40 @@ private:
         auto sl = [&v](const char* sec, const char* lbl, const char* sfx,
                        const char* unit = nullptr)
         { v.push_back(Row{ sec, lbl, sfx, Kind::Slider, unit, { nullptr }, {}, {}, {}, {}, {}, {}, {} }); };
-        auto cb = [&v](const char* sec, const char* lbl, const char* sfx,
-                       std::initializer_list<const char*> items)
-        {
-            Row r{ sec, lbl, sfx, Kind::Combo, nullptr, { nullptr }, {}, {}, {}, {}, {}, {}, {} };
-            int i = 0;
-            for (auto* it : items) r.choices[i++] = it;
-            r.choices[i] = nullptr;
-            v.push_back(std::move(r));
-        };
+        // (The Kind::Combo helper left with "backgroundMode" — the pole is
+        // chain-owned now; the Combo machinery stays for the next choice row.)
         auto tg = [&v](const char* sec, const char* lbl, const char* sfx)
         { v.push_back(Row{ sec, lbl, sfx, Kind::Toggle, nullptr, { nullptr }, {}, {}, {}, {}, {}, {}, {} }); };
 
-        // Fundamental = harmonic-stack detection; on a voice, Bands transcribes
-        // the octaves/fifths above the melody instead of the melody itself.
-        cb("DETECT", "Mode",        "mode",   { "Bands", "Fundamental" });
-        cb("DETECT", "Source",      "source", { "Luma", "R", "G", "B" });
-        sl("DETECT", "Threshold",   "threshold");
-        sl("DETECT", "Hysteresis",  "hysteresis");
-        sl("DETECT", "Relative",    "relative");
-        sl("DETECT", "Smooth",      "smooth");
-        tg("DETECT", "Peak only",   "peakOnly");
-        sl("DETECT", "Max poly",    "maxPoly");
-        cb("DETECT", "Background",  "backgroundMode", { "Black", "White", "Auto" });
+        // Three sections, split by DOMAIN (user request — the file/live divide
+        // must be structural, not marginal notes):
+        //   COMMON      — what counts as a note, and its velocity. Feeds the
+        //                 takes AND the live stream identically.
+        //   EXPORT .MID — the takes. They are ALWAYS black MIDI (dense);
+        //                 these knobs set the recorded envelope's resolution.
+        //                 (The live stream borrows them while Black MIDI/MPE
+        //                 is on — dense is dense.)
+        //   LIVE        — the real-time stream only: the Black MIDI toggle
+        //                 and the classic transcription timing. The rest of
+        //                 the live controls (OUT / MPE / Level / Channel)
+        //                 live on the probe's MIDI MIX tile.
+        // Brightness IS the signal (LuxStral's convention; the background
+        // pole is chain-owned — rack header selector) — Mode/Source/
+        // Relative/Smooth/PITCH remain retired.
+        sl("COMMON", "Threshold",   "threshold");
+        sl("COMMON", "Hysteresis",  "hysteresis");
+        tg("COMMON", "Peak only",   "peakOnly");
+        sl("COMMON", "Max poly",    "maxPoly");
+        sl("COMMON", "Vel. span",   "velSpan");
 
-        // Attack is the only knob that truly rejects short notes, and it costs
-        // that much uniform latency; Min length only delays the note-off.
-        sl("TIMING", "Attack",      "attackMs",   " ms");
-        sl("TIMING", "Release",     "releaseMs",  " ms");
-        sl("TIMING", "Min length",  "minOnMs",    " ms");
-        sl("TIMING", "Max length",  "maxOnMs",    " ms");
+        sl("EXPORT .MID", "Retrig",     "retrigMs",   " ms");
+        sl("EXPORT .MID", "Vel. delta", "retrigDelta");
 
-        // DENSE (black MIDI): velocity keeps tracking the band and the note is
-        // re-struck when it moves — the .mid carries each partial's envelope,
-        // so a voice stays intelligible. Attack/Min length collapse while on.
-        tg("DENSE",  "Black MIDI",  "dense");
-        sl("DENSE",  "Retrig",      "retrigMs",   " ms");
-        sl("DENSE",  "Vel. delta",  "retrigDelta");
-
-        sl("PITCH",  "Transpose",   "transpose",  " st");
-        sl("PITCH",  "Note low",    "noteLo");
-        sl("PITCH",  "Note high",   "noteHi");
-        cb("PITCH",  "Out of range","rangePolicy", { "Clamp", "Drop" });
-
-        cb("OUTPUT", "Vel. curve",  "velCurve",   { "Linear", "Soft", "Fixed" });
-        sl("OUTPUT", "Vel. span",   "velSpan");
-        sl("OUTPUT", "Fixed vel.",  "velFixed");
-        sl("OUTPUT", "Channel",     "channel");
-        sl("OUTPUT", "Level",       "level");
-        tg("OUTPUT", "Armed",       "arm");
+        tg("LIVE",   "Black MIDI",  "dense");
+        sl("LIVE",   "Attack",      "attackMs",   " ms");
+        sl("LIVE",   "Release",     "releaseMs",  " ms");
+        sl("LIVE",   "Min length",  "minOnMs",    " ms");
+        sl("LIVE",   "Max length",  "maxOnMs",    " ms");
         return v;
     }
 

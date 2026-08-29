@@ -20,7 +20,8 @@
  *     read-only) — use drag for precision, MIDI learn for automation;
  *   • right-click      — reserved: never drags nor edits the value, so the
  *     MidiLearnAttachment popup owns the gesture everywhere;
- *   • mouse wheel      — unchanged (pages opt out via ScrollWheelGuard).
+ *   • mouse wheel      — never changes the value (the wheel scrolls the
+ *                        hosting page; see ScrollWheelGuard for plain sliders).
  *
  * Rotary knobs keep their own style. The vertical mixer faders (AudioMixPanel)
  * reuse this bar's visual language — slimmer and vertical — via
@@ -31,12 +32,16 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <cmath>
+#include "../UITheme.h"
 
 class Sp3ctraBarSlider : public juce::Slider
 {
 public:
-    /** The UI's blue — same accent as Sp3ctraLookAndFeel's linear/rotary sliders. */
-    static constexpr juce::uint32 kDefaultAccent = 0xff4fa3e0;
+    /** THE control colour (Sp3ctraTheme::kColHandle) — a bar is something you
+     *  touch, so it takes the handle hue like every node and toggle. Module
+     *  editors keep this default; only identity strips (the mixer faders)
+     *  re-tint through setAccent. */
+    static constexpr juce::uint32 kDefaultAccent = Sp3ctraTheme::kColHandle;
 
     Sp3ctraBarSlider()
     {
@@ -44,17 +49,30 @@ public:
         // Read-only overlay: the value text is display-only (no double-click
         // editor) — double-click is the min/centre/max cycle instead.
         setTextBoxStyle(juce::Slider::TextBoxAbove, true, 0, 0);
+        // Wheel-inert from birth: inside the scrollable zone-3 pages a wheel
+        // gesture must scroll the page, never nudge the bar under the
+        // pointer. The one-shot ScrollWheelGuard walk only covers sliders
+        // that exist when the editor is built — pages built later (the
+        // VIDEO SCROLL "ALL" view) were slipping through.
+        setScrollWheelEnabled(false);
         setAccent(juce::Colour(kDefaultAccent));
     }
 
-    /** Re-tint the bar (chain-module editors pass their module accent). */
+    /** Re-tint the bar — for IDENTITY strips only (mixer levels per engine).
+     *  Module-page boxes keep the default handle colour. */
     void setAccent(juce::Colour accentColour)
     {
         accent_ = accentColour;
-        setColour(juce::Slider::trackColourId,          accent_.withAlpha(0.22f));
-        setColour(juce::Slider::backgroundColourId,     juce::Colour(0xff181820));
-        setColour(juce::Slider::textBoxTextColourId,    juce::Colours::white.withAlpha(0.92f));
-        setColour(juce::Slider::textBoxOutlineColourId, accent_.withAlpha(0.3f));
+        applyColours();
+    }
+
+    /** Disabled bars must READ disabled: the accent fill and outline all but
+     *  vanish and the interior darkens (the value text already dims through
+     *  the label's own enablement) — not just a slightly greyer number. */
+    void enablementChanged() override
+    {
+        applyColours();
+        repaint();
     }
 
     juce::Colour getAccent() const noexcept { return accent_; }
@@ -64,11 +82,18 @@ public:
     void setCycleEnabled(bool shouldCycle) noexcept { cycleEnabled_ = shouldCycle; }
 
     //==========================================================================
+    // Hover / press feedback — the LookAndFeel's LinearBar branch reads the
+    // live mouse state at paint time; these just make sure a paint happens
+    // on every transition (juce::Slider only repaints on value change).
+    void mouseEnter(const juce::MouseEvent& e) override { juce::Slider::mouseEnter(e); repaint(); }
+    void mouseExit (const juce::MouseEvent& e) override { juce::Slider::mouseExit(e);  repaint(); }
+
     void mouseDown(const juce::MouseEvent& e) override
     {
         // Right-click is the MIDI-learn gesture (MidiLearnAttachment listens
         // on this component) — it must never start a value drag.
         dragging_ = false;
+        repaint();
         if (e.mods.isPopupMenu() || ! isEnabled())
             return;
 
@@ -101,6 +126,7 @@ public:
     {
         if (dragging_) juce::Slider::mouseUp(e);
         dragging_ = false;
+        repaint();
     }
 
     void mouseDoubleClick(const juce::MouseEvent& e) override
@@ -141,6 +167,18 @@ public:
     }
 
 private:
+    void applyColours()
+    {
+        const bool en = isEnabled();
+        // Idle look; the LookAndFeel's LinearBar branch derives the hover /
+        // drag looks from these same ids (brighter fill, solid outline).
+        setColour(juce::Slider::trackColourId,          accent_.withAlpha(en ? 0.22f : 0.07f));
+        setColour(juce::Slider::backgroundColourId,     juce::Colour(en ? Sp3ctraTheme::kColBarBg
+                                                                        : Sp3ctraTheme::kColBarBgOff));
+        setColour(juce::Slider::textBoxTextColourId,    juce::Colours::white.withAlpha(0.92f));
+        setColour(juce::Slider::textBoxOutlineColourId, accent_.withAlpha(en ? 0.35f : 0.10f));
+    }
+
     juce::Colour accent_ { kDefaultAccent };
     bool   cycleEnabled_  = true;
     bool   dragging_      = false;

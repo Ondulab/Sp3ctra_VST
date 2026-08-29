@@ -6,7 +6,9 @@
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
 #include "Sp3ctraBarSlider.h"
+#include "ChainModel.h"                       // kMaxVideoSlots (solo preview slots)
 #include "../video/VideoScrollRenderCore.h"
+#include "../video/VideoScrollPreviewSource.h"
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -38,11 +40,22 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 class VideoMixerComponent : public juce::Component,
+                            public VideoScrollPreviewSource,
                             private juce::Timer
 {
 public:
     explicit VideoMixerComponent(Sp3ctraAudioProcessor& proc);
     ~VideoMixerComponent() override;
+
+    /** VideoScrollPreviewSource — the VIDEO SCROLL pages' VIEWPORT pad draws
+     *  the output it edits ALONE (not the composite) as its thumbnail and
+     *  mirrors the view aspect. Solo renders are demand-driven: a request
+     *  keeps the slot in the renderer's solo mask for kSoloHoldMs (the pad
+     *  re-requests on every 20 Hz tick while showing). Message thread. */
+    void             requestOutputPreview(int slot) override;
+    juce::Image      outputFrame(int slot) const override;
+    uint32_t         frameCounter() const override;
+    juce::Point<int> viewSize()     const override;
 
     /** Rebuild the voice list from processor.activeVideoSlots(). Cheap no-op when
      *  the active set is unchanged. Call whenever the chain model changes. */
@@ -60,6 +73,15 @@ public:
 
     int numActiveOutputs() const noexcept { return (int) voices_.size(); }
 
+    /** A click on a strip row's "CHAIN n" label — the column forwards it to
+     *  the editor, which opens that output's chain tab. */
+    std::function<void(int slot)> onOutputClicked;
+
+    /** Mixer width beyond which the square master preview stops growing at
+     *  this mixer height (it becomes height-limited) — extra width would be
+     *  dead space. The editor caps the ZONE-4 splitter with it. */
+    int maxUsefulWidth(int height) const noexcept;
+
     /** VIDEO MIX recording (macOS). Locks the render to a fixed hi-res composite
      *  (recW×recH derived from the current view aspect × `height`) and streams it
      *  plus the master audio to a .mov via the processor's recorder. Returns
@@ -70,6 +92,9 @@ public:
 
     void paint(juce::Graphics& g) override;
     void resized() override;
+    void mouseMove(const juce::MouseEvent& e) override;
+    void mouseExit(const juce::MouseEvent& e) override;
+    void mouseUp(const juce::MouseEvent& e) override;
 
 private:
     //==========================================================================
@@ -113,6 +138,14 @@ private:
         /** Message thread: latest published composite (ref-copy under lock). */
         juce::Image frontImage() const;
 
+        /** Message thread: which outputs (bit = slot) must ALSO be published
+         *  alone — the VIEWPORT pads' thumbnails. 0 = none (no extra work). */
+        void setSoloMask(uint32_t mask) noexcept { soloMask_.store(mask, std::memory_order_release); }
+
+        /** Message thread: latest published solo image of `slot` (ref-copy
+         *  under lock); invalid when that slot is not being soloed. */
+        juce::Image soloImage(int slot) const;
+
         uint32_t frameCounter() const noexcept { return frameCounter_.load(std::memory_order_acquire); }
 
         void run() override;
@@ -123,12 +156,18 @@ private:
             int slot { -1 };
             std::unique_ptr<VideoScrollRenderCore> core;
             juce::Image scratch;   // per-layer drawWarp target for the blend path
+            // Solo publish pool (only allocated while the slot is in the solo
+            // mask): the image a pad is painting is never drawn into.
+            juce::Image soloPool[2];
         };
 
         // One 60 fps pass: tick + warp every layer, composite, publish.
         // Returns true when a new frame was published.
         bool renderFrame(double nowMs, double dtMs);
-        juce::Image acquireTarget(int w, int h);
+        // Pick an image of `pool` that nothing else references (a published
+        // front, an in-flight paint), (re)sized to w×h. Invalid = all busy.
+        static juce::Image acquireFrom(juce::Image* pool, int n, int w, int h);
+        juce::Image acquireTarget(int w, int h) { return acquireFrom(pool_, 3, w, h); }
 
         Sp3ctraAudioProcessor& processor_;
 
@@ -136,12 +175,14 @@ private:
         std::vector<Layer> layers_;
 
         std::atomic<uint64_t> viewState_ { 0 };   // packed w:24 | h:24 | visible:1
+        std::atomic<uint32_t> soloMask_  { 0 };   // bit = slot to publish alone
         std::atomic<int>      clearGen_  { 0 };
         int                   lastClearGen_ { 0 };
         std::vector<float>    lastSig_;           // mix/draw param signature (change detection)
 
         mutable juce::CriticalSection frontLock_;
         juce::Image           front_;
+        juce::Image           soloFront_[ChainModel::kMaxVideoSlots];   // under frontLock_
         juce::Image           pool_[3];
         std::atomic<uint32_t> frameCounter_ { 0 };
         bool                  haveFrame_ { false };
@@ -161,8 +202,12 @@ private:
 
     //==========================================================================
     void timerCallback() override;    // presenter: push view state, repaint on new frames
+    // The view the renderer targets (logical px): the detached window content
+    // when open, else the column master area; `visible` = anything on screen.
+    void currentView(int& w, int& h, bool& visible) const;
     void rebuildStrip();
     void layoutStrip();
+    int  stripHeight() const noexcept;   // fader rows band (0 when no output)
     // Draw the latest published composite into `dest` (shared by the column
     // preview and the detached window).
     void renderMaster(juce::Graphics& g, juce::Rectangle<int> dest);
@@ -191,9 +236,14 @@ private:
 
     std::unique_ptr<Renderer> renderer_;
     uint32_t lastPresented_ { 0 };
+    // Last requestOutputPreview() time per slot (message thread); the
+    // presenter folds the recent ones into the renderer's solo mask.
+    double   soloReqMs_[ChainModel::kMaxVideoSlots] { };
 
     juce::Rectangle<int> masterArea_;
     juce::Rectangle<int> stripArea_;
+    int  hoverRow_ { -1 };                              // strip row whose label is hovered
+    int  rowLabelAt(juce::Point<int> p) const noexcept; // label hit-test (−1 = none)
 
     std::unique_ptr<MasterWindow> window_;
 
@@ -202,6 +252,7 @@ private:
     static constexpr int kRowGap   = 4;
     static constexpr int kLabelW   = 58;   // fits "CHAIN 8b" at kFontBadge bold
     static constexpr int kFps      = 60;   // presenter poll rate (renderer self-paces)
+    static constexpr double kSoloHoldMs = 300.0;   // request lifetime (pads tick at 20 Hz)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(VideoMixerComponent)
 };

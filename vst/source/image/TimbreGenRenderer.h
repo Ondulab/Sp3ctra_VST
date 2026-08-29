@@ -37,6 +37,9 @@ struct TimbreSlotParams
 {
     bool   enabled       = true;
     int    preset        = 0;      ///< index into presetName() (kPresetCustom = hand-tuned)
+    int    customBase    = -1;     ///< preset a Custom patch drifted from (-1 = none):
+                                   ///< lets the UI say "Custom (Piano)" instead of an
+                                   ///< anonymous "Custom" — display only, never rendered
     int    midiNote      = 57;     ///< fundamental (57 = A3 = 220 Hz)
     int    numPartials   = 24;     ///< harmonic mode only (bell tables are fixed)
     double slopeDbPerOct = -6.0;   ///< spectral tilt applied per octave of partial index

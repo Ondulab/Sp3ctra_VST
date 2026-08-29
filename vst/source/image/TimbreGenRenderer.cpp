@@ -137,7 +137,7 @@ std::vector<Partial> computePartials(const TimbreSlotParams& p)
         return out;
     }
 
-    const int N = juce::jlimit(1, 64, p.numPartials);
+    const int N = juce::jlimit(1, 128, p.numPartials);
     out.reserve((size_t) N);
     for (int n = 1; n <= N; ++n)
     {

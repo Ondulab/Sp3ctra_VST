@@ -54,7 +54,7 @@ MaskSetupPanel::MaskSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour ac
     octaveOffsetCombo.addItem("+2", 5);
     addAndMakeVisible(octaveOffsetCombo);
 
-    // ── Reference Note (C1..B6, default A3) ────────────────────────────
+    // ── Reference Note (C1..B6, default A4) ────────────────────────────
     refNoteLabel.setText("Reference Note", juce::dontSendNotification);
     refNoteLabel.setJustificationType(juce::Justification::centredRight);
     refNoteLabel.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));

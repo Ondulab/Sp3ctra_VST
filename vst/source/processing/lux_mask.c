@@ -31,6 +31,9 @@
 /* ── Instance pool (M6 Phase 2) ────────────────────────────────────────────────
  * Slot 0 is g_lux_mask_proc (legacy instance, also read by the UI). Slots 1..
  * are independent per-chain instances. */
+/* AUTO learning window (lines) — mirrors LUX_ECHO_BG_LOCK_LINES. */
+#define LUX_MASK_BG_LOCK_LINES 96
+
 LuxMaskState g_lux_mask_proc;
 static LuxMaskState s_lux_mask_extra[CHAIN_MAX_CHAINS - 1];
 
@@ -75,8 +78,8 @@ LuxMaskConfig lux_mask_config_default(void)
 
     cfg.enabled                  = 0;
     cfg.polyphony_enabled        = 0;
-    cfg.background_mode          = LUX_MASK_BG_BLACK;
-    cfg.reference_note           = 57;        /* A3 */
+    cfg.background_mode          = LUX_MASK_BG_AUTO;
+    cfg.reference_note           = 69;        /* A4 */
     cfg.coupling_mode            = LUX_MASK_COUPLING_LUXSTRAL;
     cfg.free_pixels_per_semitone = 36.0f;
     cfg.pitch_bend_range         = 2.0f;
@@ -132,6 +135,9 @@ void lux_mask_init(LuxMaskState *state)
     state->next_age         = 1;
     state->lfo_pos_phase    = 0.0f;
     state->last_frame_ts_us = 0;
+
+    state->auto_bg_white = 1;   /* paper is the typical Sp3ctra stream */
+    lux_mask_reset(state);
 }
 
 void lux_mask_reset(LuxMaskState *state)
@@ -150,6 +156,42 @@ void lux_mask_reset(LuxMaskState *state)
     }
     state->lfo_pos_phase    = 0.0f;
     state->last_frame_ts_us = 0;
+
+    /* AUTO background — re-arm the learn window (config untouched). */
+    state->auto_locked         = 0;
+    state->auto_lock_countdown = LUX_MASK_BG_LOCK_LINES;
+    state->auto_max_mean       = 0;
+    state->auto_min_mean       = 255;
+}
+
+/* Resolve the background pole for this frame — mean-based AUTO learn-then-LOCK
+ * (mirrors lux_eq/lux_gain; polarity is a property of the SOURCE). */
+static int lux_mask_resolve_bg(LuxMaskState *state,
+                               const uint8_t *in_r, const uint8_t *in_g,
+                               const uint8_t *in_b, int px)
+{
+    uint32_t sum = 0;
+    int      n   = 0;
+    int      i, mean;
+
+    const int mode = state->config.background_mode;
+    if (mode == LUX_MASK_BG_BLACK) return 0;
+    if (mode == LUX_MASK_BG_WHITE) return 1;
+    if (state->auto_locked)        return state->auto_bg_white;
+
+    for (i = 0; i < px; i += 8)
+    {
+        sum += (uint32_t)in_r[i] + in_g[i] + in_b[i];
+        n   += 3;
+    }
+    mean = (n > 0) ? (int)(sum / (uint32_t)n) : 255;
+
+    if (mean > state->auto_max_mean) state->auto_max_mean = mean;
+    if (mean < state->auto_min_mean) state->auto_min_mean = mean;
+    state->auto_bg_white = (state->auto_max_mean + state->auto_min_mean > 255) ? 1 : 0;
+    if (--state->auto_lock_countdown <= 0)
+        state->auto_locked = 1;
+    return state->auto_bg_white;
 }
 
 /* ── MIDI event helpers (audio thread — RT-safe) ───────────────────────────── */
@@ -517,8 +559,8 @@ void lux_mask_process_frame(
         }
     }
 
-    /* ── Background ───────────────────────────────────────────────────── */
-    bg   = (state->config.background_mode == LUX_MASK_BG_WHITE) ? 255 : 0;
+    /* ── Background — chain-owned mode, AUTO resolved per frame ───────── */
+    bg   = lux_mask_resolve_bg(state, in_r, in_g, in_b, pixel_count) ? 255 : 0;
     bg_f = (float)bg;
 
     max_voices = state->config.polyphony_enabled ? LUX_MASK_MAX_VOICES : 1;

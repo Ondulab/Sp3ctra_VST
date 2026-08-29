@@ -2,7 +2,11 @@
  * @file ChainRackComponent.h
  * @brief ZONE 2 — editable vertical chain rack (M6 drag & drop).
  *
- * Renders N chains from a ChainModel as stacked block lists. Modules are
+ * Renders N chains from a ChainModel as stacked block lists. Each chain is a
+ * CARD: a rounded envelope with a tinted numbered header, a chain-colour rail
+ * down its left edge, an IN marker above the first block and an END
+ * terminator below the last one; a send's exit arrow pierces the envelope
+ * toward its engine. Modules are
  * dragged in from the left ModuleCatalogComponent and reordered / moved /
  * removed by dragging existing blocks. Placement rules (one source per chain,
  * no duplicate type per chain, order matters) live in ChainModel::canInsert.
@@ -28,6 +32,7 @@
 #include "ChainModel.h"
 #include <functional>
 #include <memory>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -55,10 +60,11 @@ enum class ChainBlockId
     Centroid,                          // FX — CENTROID mass→barycentre insert (appended: ordinals persist)
     Drive,                             // FX — LEVELS gain/saturation/floor insert (appended: ordinals persist)
     DcBlock,                           // FX — DC BLOCK per-line mean removal insert (appended: ordinals persist)
+    Gain,                              // FX — GAIN per-line energy gain insert (appended: ordinals persist)
     None                               // empty rack — no module selected
     // NOTE: appending shifts None's ordinal. A session that persisted the OLD
-    // None decodes as DcBlock, but such a session has an empty rack so
-    // hasBlock(DcBlock) is false and the editor falls back to firstBlockId().
+    // None decodes as Gain, but such a session has an empty rack so
+    // hasBlock(Gain) is false and the editor falls back to firstBlockId().
 };
 
 /** Maps a selection key to its module type (sources → Sp3ctra). */
@@ -105,11 +111,25 @@ public:
     /** Updates the highlighted block (called back by the editor). */
     void setSelectedBlock(ChainBlockId id);
 
+    /** ALL view of a multi-instance module (the VIDEO SCROLL "ALL" page):
+     *  EVERY instance of `type` reads selected in the rack, since the page
+     *  shows them all — a single highlighted output under an "all outputs"
+     *  page was a lie. std::nullopt = back to the one selected instance. A
+     *  rack click (selectInstance with notify) drops it: a click IS a single
+     *  selection; the editor re-applies it from selectBlock when the ALL
+     *  view is (still) showing. */
+    void setHighlightAllOfType(std::optional<ModuleType> type);
+
     /** Programmatically select a module INSTANCE by id, firing the same pre-
      *  callbacks + onBlockSelected as a user click (so the editor rebinds pages
      *  and runs its selection path). No-op when the id isn't in the model. Used
      *  by MIDI-follow auto-navigation. */
     void selectInstanceById(const juce::Uuid& id);
+
+    /** Select the VIDEO SCROLL instance owning `slot` (0..7) exactly like a rack
+     *  click (pre-callbacks + onBlockSelected) — the zone-4 strip rows and the
+     *  zone-3 chain tabs navigate through this. False when no output owns it. */
+    bool selectVideoSlot(int slot);
 
     /** True if some instance in the model maps to this block id — used by the
      *  editor to validate a session-restored selection whose module may have
@@ -226,7 +246,10 @@ private:
 
     //── Layout bookkeeping (built in resized, used for paint + hit-testing) ───
     struct Slot  { int chainIdx; int moduleIdx; juce::Rectangle<int> bounds; };
-    struct Band  { int chainIdx; int headerY; int topY; int bottomY; bool empty; };
+    /** One chain card. headerY = envelope top; topY/bottomY = the block
+     *  column (or the drop zone when empty); envBottomY = envelope bottom. */
+    struct Band  { int chainIdx; int headerY; int topY; int bottomY; bool empty;
+                   int envBottomY; };
     struct DropTarget { int chainIdx; int index; bool valid; bool newChain; };
 
     //==========================================================================
@@ -270,6 +293,10 @@ private:
     //── Geometry helpers ──────────────────────────────────────────────────────
     juce::Rectangle<int> addChainRowBounds() const { return addRowRect; }
 
+    /** Chain-background badge in a band's header (schema 4 — the pole is
+     *  chain-owned): swatch + label, left of the delete ×. Click → popup. */
+    juce::Rectangle<int> bgBadgeRect(const Band& band) const;
+
     //==========================================================================
     Sp3ctraAudioProcessor& processor;
 
@@ -277,6 +304,8 @@ private:
     std::vector<std::unique_ptr<BlockComponent>> blocks;   // one per ModuleInstance
 
     juce::Uuid           selectedId;      // currently highlighted instance
+    std::optional<ModuleType> highlightType_;   // ALL view: every instance of this type reads selected
+    void applyHighlight();                // selectedId + highlightType_ → block selected flags
     bool                 locked { false };// performance mode: delete affordances off
 
     // J4 — .sp3chain presets: async FileChooser must outlive the callback
@@ -294,12 +323,26 @@ private:
     DropTarget  dropTarget { -1, 0, false, false };
 
     // ── Geometry ──────────────────────────────────────────────────────────────
+    // Every chain is a CARD: a rounded envelope (kEnvX inset from the rack
+    // edges) holding a tinted header strip, a chain-colour rail down the left
+    // edge, an IN marker strip above the first block, the blocks, and an END
+    // terminator strip below the last one. Blocks start kBlockX from the left
+    // edge and leave kBlockR on the right so a send's exit arrow can pierce
+    // the envelope toward its engine.
     static constexpr int kTopPad    = 6;
-    static constexpr int kPadX      = 8;
-    static constexpr int kHeaderH   = 18;
+    static constexpr int kPadX      = 8;    // header content inset (pastille / badge / ×)
+    static constexpr int kEnvX      = 3;    // envelope inset from the rack edges
+    static constexpr int kRailW     = 3;    // chain-colour rail inside the envelope
+    static constexpr int kBlockX    = 13;   // blocks' left edge
+    static constexpr int kBlockR    = 13;   // blocks' right margin (send exit arrow)
+    static constexpr int kHeaderH   = 24;
+    static constexpr int kBgBadgeW  = 52;   // chain-background badge width
+    static constexpr int kInH       = 14;   // IN marker strip (header → first block)
+    static constexpr int kEndH      = 14;   // END terminator strip (last block → envelope bottom)
+    static constexpr int kEmptyPad  = 4;    // empty chain: padding around the drop zone
     static constexpr int kBlockH    = 32;
     static constexpr int kBlockGap  = 12;   // connector arrow lives here
-    static constexpr int kChainGap  = 18;
+    static constexpr int kChainGap  = 14;   // gutter between two chain cards
     static constexpr int kEmptyH    = 30;   // empty-chain drop zone height
     static constexpr int kAddRowH   = 26;   // "+ CHAIN" row
     static constexpr int kBottomPad = 8;

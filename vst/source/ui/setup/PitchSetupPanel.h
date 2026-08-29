@@ -60,7 +60,7 @@ private:
     juce::ComboBox octaveOffsetCombo;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> octaveOffsetAttachment;
 
-    // Reference Note (C1..B6, default A3)
+    // Reference Note (C1..B6, default A4)
     juce::Label    refNoteLabel;
     juce::ComboBox refNoteCombo;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> refNoteAttachment;

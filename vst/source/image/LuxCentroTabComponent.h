@@ -2,12 +2,14 @@
  * @file LuxCentroTabComponent.h
  * @brief Tab — CENTROID: mass-to-barycentre simplifier on the image-line stream.
  *
- * Page layout, top to bottom: the live stream editor (CentroEditorComponent
- * — the real flux through the real algorithm with the floor line, its LINE
- * SHAPE child view and the numeric boxes), the module's OUTPUT EQ curve
- * (EqEditorComponent bound to the luxcentro Band bank — the gain applied
- * after the barycentre redraw), then the remaining discrete controls below
- * (Background).
+ * Page layout (ModuleChrome skeleton), top to bottom: the live stream editor
+ * (CentroEditorComponent — the real flux through the real algorithm with the
+ * floor line, its LINE SHAPE and WIDTH LAW child views and the numeric
+ * boxes), then the module's OUTPUT EQ curve (ShapeEqComponent bound to the
+ * luxcentro Sh* bank — the gain applied after the barycentre redraw), then
+ * the "--- CENTROID ---" section caption. The width law selector (PX / ERB)
+ * lives on the SETUP face (CentroSetupPanel); the background pole is
+ * chain-owned (rack header selector), not a module setting.
  *
  * Power lives in the zone-3 header switch + the rack LED.
  * Per-instance: setSlot(slot) rebinds every control to the luxcentro{slot}_*
@@ -20,8 +22,9 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "../ui/ModuleEditorChrome.h"
 #include "../ui/CentroEditorComponent.h"
-#include "../ui/EqEditorComponent.h"
+#include "../ui/ShapeEqComponent.h"
 #include "../processing/lux_centro.h"   // live glow reads the pool instance
 
 class LuxCentroTabComponent : public juce::Component
@@ -30,25 +33,27 @@ public:
     /** Accent colour for the CENTROID page (matches the catalogue chip). */
     static inline const uint32_t kAccentARGB = moduleColour(ModuleType::Centroid).getARGB();   ///< inherited module colour
 
-    /** The graphic editors stacked: stream (with its LINE SHAPE child and
-     *  box row), output EQ. */
+    /** The graphic editors stacked: stream (with its LINE SHAPE / WIDTH LAW
+     *  children and box row), output EQ. */
     static constexpr int kEditorsH =
-        CentroEditorComponent::kPreferredH + 4
-        + EqEditorComponent::kPreferredH;
+        CentroEditorComponent::kPreferredH + ModuleChrome::kEditorGap
+        + ShapeEqComponent::kPreferredH;
 
-    static constexpr int kPreferredH = kEditorsH + 4 + 22 + 30 + 8;
+    /** Editors + section caption (no extra control rows). */
+    static constexpr int kPreferredH = ModuleChrome::pageHeight(kEditorsH, 0);
 
     explicit LuxCentroTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p),
           editor(p.getAPVTS(), juce::Colour(kAccentARGB)),
           eqEditor(p.getAPVTS(), juce::Colour(kAccentARGB))
     {
-        // ── Live stream editor (Floor) + LINE SHAPE + numeric boxes ────
+        // ── Live stream editor (Floor) + LINE SHAPE + WIDTH LAW + boxes ─
         editor.setMidiMap(&p.getMidiMap());   // right-click MIDI Learn
         addAndMakeVisible(editor);
 
-        // ── Output EQ curve (Band0..Band8, applied after the redraw) ───
+        // ── Output EQ curve (Sh* handles, applied after the redraw) ────
         eqEditor.setMidiMap(&p.getMidiMap());
+        eqEditor.setTitle("OUTPUT EQ");
         eqEditor.liveProvider = [](int slot)
         {
             // Glow while the CENTROID instance runs AND its curve shapes the
@@ -59,13 +64,6 @@ public:
         };
         addAndMakeVisible(eqEditor);
 
-        // ── Background mode (which pole carries the material) ──────────
-        initLabel(bgLabel, "Background");
-        addAndMakeVisible(bgCombo);
-        bgCombo.addItem("Auto",  1);
-        bgCombo.addItem("Black", 2);
-        bgCombo.addItem("White", 3);
-
         setSlot(0);   // bind to bank 0 until a block is selected
     }
 
@@ -73,18 +71,16 @@ public:
     void setSlot(int slot)
     {
         slot_ = juce::jlimit(0, 7, slot);
-        bgAttach.reset();
         editor.setInstance(slot_,
                            ctParam(slot_, "Floor"), ctParam(slot_, "Thickness"),
-                           ctParam(slot_, "Edge"));
-        juce::StringArray bandIds;
-        for (int b = 0; b < LUX_EQ_NUM_BANDS; ++b)
-            bandIds.add(ctParam(slot_, ("Band" + juce::String(b)).toRawUTF8()));
-        eqEditor.setInstance(slot_, bandIds, ctParam(slot_, "NumPoints"));
-        bgAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            processor.getAPVTS(), ctParam(slot_, "BackgroundMode"), bgCombo));
-        bgLearn_ = std::make_unique<MidiLearnAttachment>(
-            processor.getMidiMap(), bgCombo, ctParam(slot_, "BackgroundMode"));
+                           ctParam(slot_, "Edge"), ctParam(slot_, "WidthTilt"));
+        constexpr int fam = EqHandleMidiTargets::FamilyCentro;
+        eqEditor.selectionSink     = [this](int h)
+        { processor.setEqSelectedHandle(fam, slot_, h); };
+        eqEditor.selectionProvider = [this]
+        { return processor.getEqSelectedHandle(fam, slot_); };
+        eqEditor.setInstance(fam, slot_, [this](const juce::String& sfx)
+                             { return ctParam(slot_, sfx.toRawUTF8()); });
     }
 
     int slot() const noexcept { return slot_; }
@@ -92,51 +88,27 @@ public:
     void paint(juce::Graphics& g) override
     {
         const juce::Colour accent (kAccentARGB);
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
-        g.setColour(accent.withAlpha(0.55f));
-        g.drawText("--- CENTROID ---", kPad,
-                   kEditorsH + 6,
-                   getWidth() - 2 * kPad, 12, juce::Justification::centred);
+        ModuleChrome::drawSectionCaption(g, ModuleChrome::kPageTop + kEditorsH,
+                                         getWidth(), accent, "CENTROID");
     }
 
     void resized() override
     {
-        const int labelW = 80;
-        const int gap    = Sp3ctraTheme::kGap;
-        const int ch     = Sp3ctraTheme::kControlH;
-        const int w      = getWidth() - 2 * kPad;
+        const int pad = ModuleChrome::kPagePad;
+        const int w   = getWidth() - 2 * pad;
 
-        int y = 4;
-        editor.setBounds(kPad, y, w, CentroEditorComponent::kPreferredH);
-        y += CentroEditorComponent::kPreferredH + 4;
-        eqEditor.setBounds(kPad, y, w, EqEditorComponent::kPreferredH);
-
-        const int rowY = kEditorsH + 4 + 22;
-        bgLabel.setBounds(kPad, rowY, labelW, ch);
-        bgCombo.setBounds(kPad + labelW + gap, rowY, 120, ch);
+        int y = ModuleChrome::kPageTop;
+        editor.setBounds(pad, y, w, CentroEditorComponent::kPreferredH);
+        y += CentroEditorComponent::kPreferredH + ModuleChrome::kEditorGap;
+        eqEditor.setBounds(pad, y, w, ShapeEqComponent::kPreferredH);
     }
 
 private:
     Sp3ctraAudioProcessor& processor;
     int slot_ { 0 };   // pool slot of the bound instance
 
-    CentroEditorComponent editor;     // stream + LINE SHAPE + numeric boxes
-    EqEditorComponent     eqEditor;   // output EQ — luxcentro Band bank
-
-    juce::Label    bgLabel;
-    juce::ComboBox bgCombo;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> bgAttach;
-    std::unique_ptr<MidiLearnAttachment> bgLearn_;
-
-    static constexpr int kPad = 8;
-
-    void initLabel(juce::Label& lbl, const juce::String& text)
-    {
-        lbl.setText(text, juce::dontSendNotification);
-        lbl.setJustificationType(juce::Justification::centredRight);
-        lbl.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-        addAndMakeVisible(lbl);
-    }
+    CentroEditorComponent editor;     // stream + LINE SHAPE + WIDTH LAW + boxes
+    ShapeEqComponent      eqEditor;   // output EQ — luxcentro Sh* bank
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxCentroTabComponent)
 };

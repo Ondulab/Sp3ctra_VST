@@ -251,7 +251,7 @@ void AppUpdater::runCheck()
 
     const auto body = fetchText (kReleasesApiUrl);
     if (body.isEmpty())
-        { fail ("Cannot reach github.com — check your internet connection."); return; }
+        { fail (juce::String::fromUTF8 ("Cannot reach github.com — check your internet connection.")); return; }
 
     const auto releases = juce::JSON::parse (body);
     if (! releases.isArray())
@@ -349,7 +349,7 @@ bool AppUpdater::downloadAsset (const juce::File& destZip, juce::String& err)
             .withNumRedirectsToFollow (5)
             .withExtraHeaders ("User-Agent: Sp3ctra-Updater"));
     if (stream == nullptr)
-        { err = "Download failed — check your internet connection."; return false; }
+        { err = juce::String::fromUTF8 ("Download failed — check your internet connection."); return false; }
 
     const auto total = stream->getTotalLength();
     bytesTotal_.store (total > 0 ? total : 0);

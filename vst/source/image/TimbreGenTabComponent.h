@@ -105,7 +105,7 @@ public:
         addAndMakeVisible(activeToggle);
 
         initLabel(noteLabel, "Note");
-        initSlider(noteSlider, 24, 108, 1, 57);
+        initSlider(noteSlider, 21, 120, 1, 57);
         noteSlider.textFromValueFunction = [](double v)
         { return timbregen::midiNoteLabel((int) v); };
         noteSlider.valueFromTextFunction = nullptr;
@@ -127,11 +127,11 @@ public:
         };
 
         initLabel(partialsLabel, "Partials");
-        initSlider(partialsSlider, 1, 64, 1, 24);
+        initSlider(partialsSlider, 1, 128, 1, 24);
         timbral(partialsSlider, [](timbregen::TimbreSlotParams& q, double v) { q.numPartials = (int) v; });
 
         initLabel(slopeLabel, "Slope (dB/oct)");
-        initSlider(slopeSlider, -24.0, 6.0, 0.1, -6.0);
+        initSlider(slopeSlider, -36.0, 12.0, 0.1, -6.0);
         timbral(slopeSlider, [](timbregen::TimbreSlotParams& q, double v) { q.slopeDbPerOct = v; });
 
         initLabel(oddLabel, "Odd bias");
@@ -139,8 +139,8 @@ public:
         timbral(oddSlider, [](timbregen::TimbreSlotParams& q, double v) { q.oddBias = v; });
 
         initLabel(inharmLabel, "Inharmonicity");
-        initSlider(inharmSlider, 0.0, 0.02, 0.0001, 0.0);
-        inharmSlider.setSkewFactor(0.4);
+        initSlider(inharmSlider, 0.0, 0.1, 0.0001, 0.0);
+        inharmSlider.setSkewFactor(0.3);
         timbral(inharmSlider, [](timbregen::TimbreSlotParams& q, double v) { q.inharmonicity = v; });
 
         initLabel(combLabel, "Pluck comb");
@@ -148,16 +148,17 @@ public:
         timbral(combSlider, [](timbregen::TimbreSlotParams& q, double v) { q.combDepth = v; });
 
         initLabel(combPosLabel, "Pluck position");
-        initSlider(combPosSlider, 0.05, 0.5, 0.005, 0.28);
+        initSlider(combPosSlider, 0.02, 0.5, 0.005, 0.28);
         timbral(combPosSlider, [](timbregen::TimbreSlotParams& q, double v) { q.combPos = v; });
 
         initLabel(attackLabel, "Attack (ms)");
-        initSlider(attackSlider, 0.0, 300.0, 1.0, 4.0);
-        attackSlider.setSkewFactor(0.5);
+        initSlider(attackSlider, 0.0, 1000.0, 1.0, 4.0);
+        attackSlider.setSkewFactor(0.4);
         timbral(attackSlider, [](timbregen::TimbreSlotParams& q, double v) { q.attackMs = v; });
 
         initLabel(decayLabel, "Decay (s)");
-        initSlider(decaySlider, 0.0, 8.0, 0.05, 0.0);
+        initSlider(decaySlider, 0.0, 20.0, 0.05, 0.0);
+        decaySlider.setSkewFactor(0.5);
         decaySlider.textFromValueFunction = [](double v)
         { return v <= 0.0 ? juce::String("sustain") : juce::String(v, 2); };
         timbral(decaySlider, [](timbregen::TimbreSlotParams& q, double v) { q.decaySec = v; });
@@ -167,7 +168,7 @@ public:
         timbral(hfDampSlider, [](timbregen::TimbreSlotParams& q, double v) { q.hfDamp = v; });
 
         initLabel(levelLabel, "Level (dB)");
-        initSlider(levelSlider, -24.0, 6.0, 0.1, 0.0);
+        initSlider(levelSlider, -36.0, 12.0, 0.1, 0.0);
         levelSlider.onValueChange = [this]
         {
             cur().levelDb = levelSlider.getValue();   // gain — preset stays
@@ -1481,7 +1482,7 @@ private:
             q.enabled       = (bool) so->getProperty("en");
             q.preset        = (int) get("preset", q.preset);
             q.midiNote      = juce::jlimit(0, 127, (int) get("note", q.midiNote));
-            q.numPartials   = juce::jlimit(1, 64, (int) get("part", q.numPartials));
+            q.numPartials   = juce::jlimit(1, 128, (int) get("part", q.numPartials));
             q.slopeDbPerOct = get("slope", q.slopeDbPerOct);
             q.oddBias       = get("odd",   q.oddBias);
             q.inharmonicity = get("inh",   q.inharmonicity);

@@ -42,8 +42,9 @@ extern "C" {
 #define LUX_MASK_MAX_VOICES 10
 
 /* Background mode (only meaningful when floor == 0 — pure spotlight). */
-#define LUX_MASK_BG_BLACK  0
-#define LUX_MASK_BG_WHITE  1
+#define LUX_MASK_BG_BLACK  0   /* bright material on black background */
+#define LUX_MASK_BG_WHITE  1   /* dark material on white background   */
+#define LUX_MASK_BG_AUTO   2   /* detect from the stream (default)    */
 
 /* Pixel-per-semitone coupling. */
 #define LUX_MASK_COUPLING_LUXSTRAL  0
@@ -103,7 +104,7 @@ typedef struct {
     int   enabled;
     int   polyphony_enabled;
     int   background_mode;          /* LUX_MASK_BG_* */
-    int   reference_note;           /* default 57 (A3) */
+    int   reference_note;           /* default 69 (A4) */
     int   coupling_mode;            /* LUX_MASK_COUPLING_* */
     float free_pixels_per_semitone;
     float pitch_bend_range;         /* in semitones */
@@ -167,6 +168,14 @@ typedef struct {
     /* Modulators */
     float    lfo_pos_phase;
     uint64_t last_frame_ts_us;
+
+    /* AUTO background — learned over a short window after each reset, then
+     * LOCKED (see lux_reverb.h: polarity is a property of the SOURCE). */
+    int  auto_bg_white;
+    int  auto_locked;
+    int  auto_lock_countdown;
+    int  auto_max_mean;
+    int  auto_min_mean;
 
     /* Last processed pixel count (image thread -> UI for the filter-response
      * overlay; plain int, tear-free enough for a display read). */

@@ -17,8 +17,8 @@ class Sp3ctraAudioProcessor;
  *     (grab anywhere BELOW the top fade strip). The region outside is dimmed.
  *   • Fade curves — drawn full-height ON the image, edited with two handles
  *     each (no widget row, no top strip):
- *       – END handle (top, coloured): drag horizontally = fade length;
- *       – MID handle (white, on the curve): drag vertically = shape — below
+ *       – END handle (top, filled node): drag horizontally = fade length;
+ *       – MID handle (ring, on the curve): drag vertically = shape — below
  *         the straight line → EXP, above → LOG, near it → LIN (power derived
  *         so the curve passes through the mouse); with an S curve the drag
  *         adjusts its power instead. Right-click a handle → LIN/EXP/LOG/S

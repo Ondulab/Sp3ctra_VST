@@ -21,9 +21,16 @@
  * The stream view carries ONE control — the FLOOR line (dashed): drag
  * vertically → écrêtage threshold, masses dipping under it die or split,
  * live in the view. Thickness / Edge are shaped in the LINE SHAPE view
- * (CentroLineEditorComponent, MASK-style window profile), a child stacked
- * under the frame, and the numeric boxes live in their own row at the very
- * bottom (double-click = default).
+ * (CentroLineEditorComponent, MASK-style window profile) and the width's
+ * frequency law in the WIDTH LAW view (CentroWidthLawEditorComponent),
+ * children stacked under the frame (ModuleChrome::kEditorGap apart); the
+ * numeric boxes live in their own ModuleChrome box row at the very bottom
+ * (double-click = default). The output preview applies the per-mass WIDTH
+ * LAW (ERB / WidthTilt) mirrored from lux_centro_redraw.
+ *
+ * Chrome (frame, caption, box row) = ModuleChrome; the floor line and its
+ * node = Sp3ctraHandles (lime, Idle/Hover/Drag); the module colour stays on
+ * the curves, captions and labels.
  *
  * The output profile brightens while the bound pool instance is actually
  * processing a stream, so you see the module living.
@@ -37,26 +44,33 @@
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
 #include "Sp3ctraBarSlider.h"
+#include "Sp3ctraHandles.h"
+#include "ModuleEditorChrome.h"
 #include "../processing/lux_centro.h"   // self-manages extern "C" linkage
 #include "CentroLineEditorComponent.h"
+#include "CentroWidthLawEditorComponent.h"
 
 class CentroEditorComponent : public juce::Component,
                               private juce::Timer
 {
 public:
     static constexpr int kGraphH     = 150;  // the graphic frame alone
-    static constexpr int kViewGap    = 4;    // frame → LINE SHAPE view
+    static constexpr int kViewGap    = ModuleChrome::kEditorGap;   // frame → child views
     static constexpr int kPreferredH = kGraphH + kViewGap
                                      + CentroLineEditorComponent::kPreferredH
-                                     + 6 + 10 + 18;  // + box row
+                                     + kViewGap
+                                     + CentroWidthLawEditorComponent::kPreferredH
+                                     + ModuleChrome::kBelowFrameH;  // + box row
 
     CentroEditorComponent(juce::AudioProcessorValueTreeState& apvtsIn,
                           juce::Colour accentColour)
-        : apvts(apvtsIn), accent(accentColour), lineEditor_(apvtsIn, accentColour)
+        : apvts(apvtsIn), accent(accentColour), lineEditor_(apvtsIn, accentColour),
+          widthLawEditor_(apvtsIn, accentColour)
     {
         // Unbound until the owning tab calls setInstance() with the selected
         // instance's bank ids (luxcentro{slot}_*).
         addAndMakeVisible(lineEditor_);
+        addAndMakeVisible(widthLawEditor_);
         setRepaintsOnMouseActivity(true);
         startTimerHz(30);   // fluid layers — the rémanence lives on screen
     }
@@ -66,31 +80,37 @@ public:
     /** Optional MIDI-learn wiring — set once (before the first setInstance);
      *  the right-click popups then follow every rebind. */
     void setMidiMap(MidiMappingEngine* m) noexcept
-    { midiMap_ = m; lineEditor_.setMidiMap(m); }
+    { midiMap_ = m; lineEditor_.setMidiMap(m); widthLawEditor_.setMidiMap(m); }
 
     /** (Re)bind the handles/boxes to one instance's bank and point the live
      *  activity overlay at that instance's pool slot. */
     void setInstance(int slot,
                      const juce::String& floorId,
                      const juce::String& thicknessId,
-                     const juce::String& edgeId)
+                     const juce::String& edgeId,
+                     const juce::String& widthTiltId)
     {
         slot_ = juce::jlimit(0, 7, slot);
         flr.attach.reset(); thk.attach.reset(); edg.attach.reset();
-        boxFAtt.reset(); boxTAtt.reset(); boxEAtt.reset();
+        wtl.attach.reset();
+        boxFAtt.reset(); boxTAtt.reset(); boxEAtt.reset(); boxWTAtt.reset();
         bind(flr, floorId);
         bind(thk, thicknessId);
         bind(edg, edgeId);
-        initBox(boxF, floorId,     boxFAtt, 10.0);
-        initBox(boxT, thicknessId, boxTAtt, 6.0);
-        initBox(boxE, edgeId,      boxEAtt, 0.0);
+        bind(wtl, widthTiltId);
+        initBox(boxF,  floorId,     boxFAtt,  10.0);
+        initBox(boxT,  thicknessId, boxTAtt,  6.0);
+        initBox(boxE,  edgeId,      boxEAtt,  0.0);
+        initBox(boxWT, widthTiltId, boxWTAtt, 0.0);
         lineEditor_.setInstance(slot_, thicknessId, edgeId);
-        learnF_.reset(); learnT_.reset(); learnE_.reset();
+        widthLawEditor_.setInstance(slot_, thicknessId, widthTiltId);
+        learnF_.reset(); learnT_.reset(); learnE_.reset(); learnWT_.reset();
         if (midiMap_ != nullptr)
         {
-            learnF_ = std::make_unique<MidiLearnAttachment>(*midiMap_, boxF, floorId);
-            learnT_ = std::make_unique<MidiLearnAttachment>(*midiMap_, boxT, thicknessId);
-            learnE_ = std::make_unique<MidiLearnAttachment>(*midiMap_, boxE, edgeId);
+            learnF_  = std::make_unique<MidiLearnAttachment>(*midiMap_, boxF, floorId);
+            learnT_  = std::make_unique<MidiLearnAttachment>(*midiMap_, boxT, thicknessId);
+            learnE_  = std::make_unique<MidiLearnAttachment>(*midiMap_, boxE, edgeId);
+            learnWT_ = std::make_unique<MidiLearnAttachment>(*midiMap_, boxWT, widthTiltId);
         }
         repaint();
     }
@@ -102,29 +122,24 @@ public:
     {
         auto area = getLocalBounds();
         // Numeric boxes OUT of the graphic frames — their own row at the very
-        // bottom, under the LINE SHAPE view.
-        auto row = area.removeFromBottom(kLabelH + kBoxH);
-        area.removeFromBottom(kRowGap);
+        // bottom, under the WIDTH LAW view.
+        auto row = area.removeFromBottom(ModuleChrome::kBoxRowH);
+        area.removeFromBottom(ModuleChrome::kRowGap);
+        widthLawEditor_.setBounds(
+            area.removeFromBottom(CentroWidthLawEditorComponent::kPreferredH));
+        area.removeFromBottom(kViewGap);
         lineEditor_.setBounds(
             area.removeFromBottom(CentroLineEditorComponent::kPreferredH));
         area.removeFromBottom(kViewGap);
         frameRect_ = area.toFloat();
-        graphRect_ = area.reduced(6).toFloat();
+        graphRect_ = ModuleChrome::graphOf(frameRect_);
 
-        row.removeFromTop(kLabelH);
-        const int gap = 8, n = 3;
-        const int bw = (row.getWidth() - (n - 1) * gap) / n;
-        boxF.setBounds(row.getX(),                  row.getY(), bw, kBoxH);
-        boxT.setBounds(row.getX() + (bw + gap),     row.getY(), bw, kBoxH);
-        boxE.setBounds(row.getX() + 2 * (bw + gap), row.getY(), bw, kBoxH);
+        ModuleChrome::layoutBoxRow(row, { &boxF, &boxT, &boxE, &boxWT });
     }
 
     void paint(juce::Graphics& g) override
     {
-        g.setColour(juce::Colour(0xff20202a));
-        g.fillRoundedRectangle(frameRect_.reduced(0.5f), 4.0f);
-        g.setColour(accent.withAlpha(0.25f));
-        g.drawRoundedRectangle(frameRect_.reduced(0.5f), 4.0f, 1.0f);
+        ModuleChrome::drawFrame(g, frameRect_, accent);
 
         const Geometry geo = computeGeometry();
         if (geo.valid)
@@ -189,42 +204,30 @@ public:
                 g.drawLine(x, geo.botY - 3.0f, x, geo.botY + 3.0f, 1.0f);
             }
 
-            // FLOOR — dashed écrêtage threshold across the plot, labelled on
-            // the line.
+            // FLOOR — grabbable dashed écrêtage threshold across the plot,
+            // labelled on the line; the label turns lime with its handle.
             {
-                const float y = yOf(geo, geo.floorN);
-                const float dash[2] = { 4.0f, 3.0f };
-                const bool  active = handleActive(Handle::Floor);
-                g.setColour(active ? juce::Colours::white : accent.withAlpha(0.7f));
-                g.drawDashedLine(juce::Line<float>(geo.plot.getX(), y,
-                                                   geo.plot.getRight(), y),
-                                 dash, 2, 1.2f);
+                const float y  = yOf(geo, geo.floorN);
+                const auto  fs = handleState(Handle::Floor);
+                Sp3ctraHandles::drawGrabLine(g, juce::Line<float>(geo.plot.getX(), y,
+                                                                  geo.plot.getRight(), y),
+                                             fs, /*dashed*/ true);
                 g.setFont(juce::FontOptions(Sp3ctraTheme::kFontMicro));
-                g.setColour(active ? juce::Colours::white.withAlpha(0.85f)
-                                   : accent.withAlpha(0.55f));
+                g.setColour(Sp3ctraHandles::isHot(fs) ? Sp3ctraHandles::colour()
+                                                      : accent.withAlpha(0.55f));
                 const float ly = (y - 11.0f > geo.topY) ? y - 11.0f : y + 3.0f;
                 g.drawText("Floor", (int) (geo.plot.getRight() - 94.0f), (int) ly,
                            70, 9, juce::Justification::centredRight, false);
+                Sp3ctraHandles::drawNode(g, handlePos(Handle::Floor, geo), fs);
             }
-
-            drawNode(g, handlePos(Handle::Floor, geo), Handle::Floor, /*hollow*/ false);
         }
 
-        g.setColour(accent.withAlpha(0.45f));
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontMicro));
-        g.drawText("MASSES - LINES", (int) frameRect_.getX() + 8,
-                   (int) frameRect_.getY() + 2,
-                   110, 9, juce::Justification::centredLeft, false);
+        ModuleChrome::drawCaption(g, frameRect_, accent, "MASSES - LINES");
 
-        g.setColour(accent.withAlpha(0.6f));
-        auto label = [&g](const juce::Slider& box, const juce::String& t)
-        {
-            auto bb = box.getBounds();
-            g.drawText(t, bb.getX(), bb.getY() - kLabelH, bb.getWidth(), kLabelH,
-                       juce::Justification::centred, false);
-        };
-        label(boxF, "Floor"); label(boxT, "Thickness");
-        label(boxE, "Edge");
+        ModuleChrome::drawBoxLabel(g, boxF,  accent, "Floor");
+        ModuleChrome::drawBoxLabel(g, boxT,  accent, "Thickness");
+        ModuleChrome::drawBoxLabel(g, boxE,  accent, "Edge");
+        ModuleChrome::drawBoxLabel(g, boxWT, accent, "Width Tilt");
     }
 
     //==========================================================================
@@ -273,16 +276,22 @@ private:
      *  stream's max-hold profile at this resolution). */
     static constexpr int kView = LUX_CENTRO_UI_BINS;
 
+    /** Preview mass capacity — worst case is a mass every other bin. The C
+     *  engine has no practical cap (4096): the preview must not silently
+     *  drop the right half of a dense stream. */
+    static constexpr int kMaxSegs = kView / 2;
+
     struct Geometry
     {
         juce::Rectangle<float> plot;
         float topY = 0, botY = 0;
-        float floorN = 0;                  // 0..1
-        float c = 3, p = 3, h = 3;         // half widths in demo px (pivot geometry)
-        // Segments of the demo line above the floor (mirrors the C pass).
+        float floorN = 0;                  // écrêtage threshold 0..1
+        // Segments of the remanent line above the floor (mirrors the C pass).
         int   numSegs = 0;
-        float segPos[8] {};
-        float segAmp[8] {};                // peak of the remanent envelope in the mass
+        float segPos[kMaxSegs] {};
+        float segAmp[kMaxSegs] {};         // peak of the remanent envelope in the mass
+        float segH[kMaxSegs] {},           // per-mass pivot geometry (width law
+              segP[kMaxSegs] {};           // applied, in VIEW BINS)
         int   mainSeg = -1;                // biggest mass — anchors the handles
         bool  valid = false;
     };
@@ -323,22 +332,74 @@ private:
         return juce::jlimit(0.0f, 1.0f, cst.ui_in_now[i]);
     }
 
+    /** View bin → axis position u (0 = bass end, 1 = treble end). */
+    static float uOf(float demoPx)
+    { return juce::jlimit(0.0f, 1.0f, demoPx / (float) (kView - 1)); }
+
+    /** One ERB in octaves at f — same law as lux_centro_erb_oct(). */
+    static float erbOct(float f)
+    {
+        const float erb = 24.7f * (4.37f * f * 0.001f + 1.0f);
+        return std::log2(1.0f + erb / f);
+    }
+
+    /** Width-law multiplier at u — mirrors lux_centro_redraw() (the bound
+     *  instance supplies the law + the axis frequencies). */
+    float widthMulAt(float u) const
+    {
+        const LuxCentroState& cst = *lux_centro_instance(slot_);
+        float m = 1.0f;
+        if (cst.config.width_law == LUX_CENTRO_WIDTH_ERB)
+        {
+            const float oct = (cst.ui_axis_oct > 0) ? (float) cst.ui_axis_oct : 8.0f;
+            const float low = (cst.config.axis_low_hz > 0.0f)
+                            ? cst.config.axis_low_hz : 65.406f;
+            m *= erbOct(low * std::exp2(u * oct))
+               / erbOct(low * std::exp2(0.5f * oct));
+        }
+        if (wtl.value != 0.0f)
+            m *= std::exp2(wtl.value * (u - 0.5f));
+        return m;
+    }
+
     Geometry computeGeometry() const
     {
         Geometry geo;
         if (graphRect_.getWidth() < 30.0f || graphRect_.getHeight() < 16.0f) return geo;
-        geo.plot      = graphRect_.reduced(8.0f, 7.0f);
+        geo.plot      = ModuleChrome::plotOf(frameRect_);
         geo.topY      = geo.plot.getY();
         geo.botY      = geo.plot.getBottom();
         geo.floorN    = juce::jlimit(0.0f, 1.0f, flr.value / 100.0f);
 
-        // Pivot geometry — MUST mirror lux_centro_redraw().
         const float thickness = juce::jlimit(1.0f, 64.0f, thk.value);
         const float soft      = juce::jlimit(0.0f, 1.0f,  edg.value);
-        geo.c = juce::jmax(0.5f, 0.5f * thickness);
-        const float skirt = soft * juce::jmax(geo.c, 1.0f);
-        geo.h = geo.c + skirt;
-        geo.p = juce::jmax(0.0f, geo.c - skirt);
+        const float hMax      = 0.5f * (float) (LUX_CENTRO_MAX_WIN - 4);
+
+        // Image px → view bins: the widths are honest fractions of the REAL
+        // line (a 12-px stroke on a 1728-px line is a sliver, not a block).
+        // 1:1 for the demo (no stream seen yet). A small floor keeps hair
+        // lines visible on screen.
+        const LuxCentroState& cst = *lux_centro_instance(slot_);
+        const float realPx   = (cst.ui_axis_px > 0) ? (float) cst.ui_axis_px
+                                                    : (float) kView;
+        const float pxToBins = (float) kView / realPx;
+
+        // Per-mass pivot geometry under the width law — MUST mirror
+        // lux_centro_redraw() (computed in image px, stored in view bins).
+        auto closeSeg = [&](float pos, float pk)
+        {
+            const float w = thickness * widthMulAt(uOf(pos));
+            const float c = juce::jmax(0.5f, 0.5f * w);
+            const float skirt = soft * juce::jmax(c, 1.0f);
+            geo.segPos[geo.numSegs] = pos;
+            geo.segAmp[geo.numSegs] = pk;
+            geo.segH[geo.numSegs]   = juce::jmax(0.35f,
+                juce::jmin(c + skirt, hMax) * pxToBins);
+            geo.segP[geo.numSegs]   = juce::jmax(0.0f, c - skirt) * pxToBins;
+            if (geo.mainSeg < 0 || pk > geo.segAmp[geo.mainSeg])
+                geo.mainSeg = geo.numSegs;
+            geo.numSegs++;
+        };
 
         // Segment pass on the remanent envelope — mirrors
         // lux_centro_find_masses(), on steady data (no per-frame jitter).
@@ -358,14 +419,8 @@ private:
             else if (open)
             {
                 open = 0;
-                if (geo.numSegs < 8 && wsum > 0)
-                {
-                    geo.segPos[geo.numSegs] = wxsum / wsum;
-                    geo.segAmp[geo.numSegs] = segPk;
-                    if (geo.mainSeg < 0 || segPk > geo.segAmp[geo.mainSeg])
-                        geo.mainSeg = geo.numSegs;
-                    geo.numSegs++;
-                }
+                if (geo.numSegs < kMaxSegs && wsum > 0)
+                    closeSeg(wxsum / wsum, segPk);
             }
         }
         geo.valid = true;
@@ -395,7 +450,8 @@ private:
     {
         float lines = 0.0f;
         for (int s = 0; s < geo.numSegs; ++s)
-            lines += geo.segAmp[s] * edgeWin(std::abs(x - geo.segPos[s]), geo.h, geo.p);
+            lines += geo.segAmp[s] * edgeWin(std::abs(x - geo.segPos[s]),
+                                             geo.segH[s], geo.segP[s]);
         return juce::jlimit(0.0f, 1.0f, lines);
     }
 
@@ -404,8 +460,12 @@ private:
         return { geo.plot.getRight() - 12.0f, yOf(geo, geo.floorN) };
     }
 
-    bool handleActive(Handle h) const
-    { return h == dragging || (dragging == Handle::None && h == hovered); }
+    /** Idle / Hover / Drag for a handle — Hover only while nothing drags. */
+    Sp3ctraHandles::State handleState(Handle h) const noexcept
+    {
+        return Sp3ctraHandles::stateOf(h == dragging,
+                                       dragging == Handle::None && h == hovered);
+    }
 
     Handle handleAt(juce::Point<float> p, const Geometry& geo) const
     {
@@ -416,28 +476,6 @@ private:
             && std::abs(p.y - y) < kHitR)
             return Handle::Floor;
         return Handle::None;
-    }
-
-    void drawNode(juce::Graphics& g, juce::Point<float> pt, Handle h, bool hollow)
-    {
-        const bool active = handleActive(h);
-        if (hollow)
-        {
-            const float rad = active ? kBendR + 1.2f : kBendR;
-            g.setColour(active ? juce::Colours::white : accent.withAlpha(0.55f));
-            g.drawEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad, active ? 1.6f : 1.2f);
-            return;
-        }
-        const float rad = active ? kNodeR + 1.5f : kNodeR;
-        if (active)
-        {
-            g.setColour(accent.withAlpha(0.25f));
-            g.fillEllipse(pt.x - rad - 2.5f, pt.y - rad - 2.5f, 2 * (rad + 2.5f), 2 * (rad + 2.5f));
-        }
-        g.setColour(active ? accent.brighter(0.3f) : juce::Colour(0xff20202a));
-        g.fillEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad);
-        g.setColour(active ? juce::Colours::white : accent.withAlpha(0.9f));
-        g.drawEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad, 1.4f);
     }
 
     //==========================================================================
@@ -468,33 +506,28 @@ private:
                  std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>& att,
                  double resetValue)
     {
-        box.setAccent(accent);
         box.setDoubleClickReturnValue(true, resetValue);
         addAndMakeVisible(box);
         att = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, id, box);
     }
 
-    static constexpr float kNodeR  = 4.5f;
-    static constexpr float kBendR  = 3.2f;
-    static constexpr float kHitR   = 12.0f;
-    static constexpr int   kBoxH   = 18;   // kPreferredH = kGraphH + gap + label + box
-    static constexpr int   kLabelH = 10;
-    static constexpr int   kRowGap = 6;
+    static constexpr float kHitR = 12.0f;
 
     juce::AudioProcessorValueTreeState& apvts;
     juce::Colour accent;
     int slot_ { 0 };   // pool slot of the bound instance (live overlay)
 
-    Bound flr, thk, edg;
-    CentroLineEditorComponent lineEditor_;   // LINE SHAPE — Thickness / Edge
-    Sp3ctraBarSlider boxF, boxT, boxE;
+    Bound flr, thk, edg, wtl;
+    CentroLineEditorComponent lineEditor_;         // LINE SHAPE — Thickness / Edge
+    CentroWidthLawEditorComponent widthLawEditor_; // WIDTH LAW — WidthTilt
+    Sp3ctraBarSlider boxF, boxT, boxE, boxWT;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
-        boxFAtt, boxTAtt, boxEAtt;
+        boxFAtt, boxTAtt, boxEAtt, boxWTAtt;
     MidiMappingEngine* midiMap_ = nullptr;
-    std::unique_ptr<MidiLearnAttachment> learnF_, learnT_, learnE_;
+    std::unique_ptr<MidiLearnAttachment> learnF_, learnT_, learnE_, learnWT_;
 
     juce::Rectangle<float> frameRect_;   // the graphic window (frame only)
-    juce::Rectangle<float> graphRect_;   // plot area inside the frame
+    juce::Rectangle<float> graphRect_;   // graph area inside the frame
     Handle hovered  { Handle::None };
     Handle dragging { Handle::None };
 

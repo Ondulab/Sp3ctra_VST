@@ -1,8 +1,8 @@
 #include "VideoMixerComponent.h"
 #include "ModuleCatalog.h"
 #include "../session/MachinePrefs.h"   // detached-window state is machine-scoped
+#include "../video/VideoScrollMode.h"  // videoScrollOutputLabels() (shared row labels)
 #include <cmath>
-#include <map>                         // per-chain row-label occurrence counts
 
 //==============================================================================
 // Detached master window — shows the composited master at any size / fullscreen.
@@ -91,7 +91,10 @@ namespace
     // keeps a fullscreen window affordable while the final blit upscales with no
     // visible loss for a waterfall. With N outputs the ceiling is divided by
     // sqrt(N) (floor kMinRenderDim) so the TOTAL pixel cost stays roughly
-    // constant as outputs are added instead of scaling linearly.
+    // constant as outputs are added instead of scaling linearly. Since the
+    // continuous rotation (2026-08-28) the render canvas is a SQUARE on the
+    // view diagonal, so the ceiling caps the DIAGONAL: the canvas never
+    // exceeds kMaxRenderDim² pixels, the same worst case as before.
     constexpr int kMaxRenderDim = 1600;
     constexpr int kMinRenderDim = 640;
 
@@ -175,6 +178,7 @@ void VideoMixerComponent::Renderer::setSlots(const std::vector<int>& slots)
             {
                 nl.core    = std::move(l.core);
                 nl.scratch = l.scratch;
+                for (int i = 0; i < 2; ++i) nl.soloPool[i] = l.soloPool[i];
                 break;
             }
         if (nl.core == nullptr)
@@ -197,6 +201,13 @@ juce::Image VideoMixerComponent::Renderer::frontImage() const
 {
     const juce::ScopedLock fl(frontLock_);
     return front_;
+}
+
+juce::Image VideoMixerComponent::Renderer::soloImage(int slot) const
+{
+    if (slot < 0 || slot >= ChainModel::kMaxVideoSlots) return {};
+    const juce::ScopedLock fl(frontLock_);
+    return soloFront_[slot];
 }
 
 void VideoMixerComponent::Renderer::setRecordTarget(int w, int h, bool on) noexcept
@@ -225,19 +236,18 @@ void VideoMixerComponent::Renderer::run()
     }
 }
 
-// Pick a pool image that nothing else references (not the published front, not
-// an in-flight paint), (re)sized to w×h. Invalid return = all busy (transient).
-juce::Image VideoMixerComponent::Renderer::acquireTarget(int w, int h)
+// Pick a pool image that nothing else references, (re)sized to w×h. Invalid
+// return = all busy (transient). The pool slot itself holds one reference, so
+// any other owner — the published front_ / soloFront_, a ref-copy taken by an
+// in-flight paint on the message thread — shows as refcount > 1: that image
+// may be on screen right now and is never drawn into (no tearing).
+juce::Image VideoMixerComponent::Renderer::acquireFrom(juce::Image* pool, int n, int w, int h)
 {
-    // Only this thread mutates front_, so reading it here without frontLock_ is
-    // safe; the lock is for readers on the message thread.
-    for (auto& im : pool_)
+    for (int i = 0; i < n; ++i)
     {
-        if (im.isValid())
-        {
-            if (im.getPixelData() == front_.getPixelData()) continue;  // on display
-            if (im.getReferenceCount() > 1)                 continue;  // being painted
-        }
+        auto& im = pool[i];
+        if (im.isValid() && im.getReferenceCount() > 1)
+            continue;
         if (! im.isValid() || im.getWidth() != w || im.getHeight() != h)
             // SoftwareImageType: peint/lu sur le thread de rendu VIDEO MIX —
             // les images Direct2D (défaut JUCE 8 Windows) y crashent (AV
@@ -302,9 +312,18 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
     }
 
     const uint64_t vs = viewState_.load(std::memory_order_acquire);
-    bool visible = (vs & 1u) != 0;
     int W = (int) ((vs >> 25) & 0xffffff);
     int H = (int) ((vs >> 1)  & 0xffffff);
+
+    // Outputs to publish ALONE (the VIEWPORT pads' thumbnails). A pad showing
+    // is a view too: it keeps the warp/composite pass alive even when no
+    // master view is on screen.
+    const uint32_t solo = soloMask_.load(std::memory_order_acquire);
+    auto wantsSolo = [solo](int slot)
+    {
+        return slot >= 0 && slot < ChainModel::kMaxVideoSlots && ((solo >> slot) & 1u) != 0;
+    };
+    bool visible = (vs & 1u) != 0 || solo != 0;
 
     // Recording overrides the view: render ONE fixed hi-res composite (no √N
     // budget) and force it visible so frames flow even when the preview is
@@ -325,9 +344,9 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
         int cap = kMaxRenderDim;
         if (n > 1)
             cap = juce::jmax(kMinRenderDim, (int) ((double) kMaxRenderDim / std::sqrt((double) n)));
-        const int big = juce::jmax(W, H);
-        if (big > cap) { W = juce::jmax(1, W * cap / big);
-                         H = juce::jmax(1, H * cap / big); }
+        const double diag = std::hypot((double) W, (double) H);
+        if (diag > (double) cap) { W = juce::jmax(1, (int) std::lround((double) W * cap / diag));
+                                   H = juce::jmax(1, (int) std::lround((double) H * cap / diag)); }
     }
 
     // Advance every output's waterfall (real-dt scroll + ring drain). This runs
@@ -358,9 +377,10 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
         return p ? p->load() : def;
     };
     std::vector<float> sig;
-    sig.reserve(2 + layers_.size() * 6);
+    sig.reserve(3 + layers_.size() * 8);
     sig.push_back((float) W);
     sig.push_back((float) H);
+    sig.push_back((float) solo);   // a pad appearing/leaving → (re)publish once
     for (auto& l : layers_)
     {
         sig.push_back((float) l.slot);
@@ -368,7 +388,9 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
         sig.push_back(rawOf(vsMixParam(l.slot, "blend"), 0.0f));
         sig.push_back(rawOf(vsParam(l.slot, "enabled"),  1.0f));
         sig.push_back(rawOf(vsParam(l.slot, "zoom"),     1.0f));
-        sig.push_back(rawOf(vsParam(l.slot, "mode"),     0.0f));
+        sig.push_back(rawOf(vsParam(l.slot, "rotation"), 0.0f));
+        sig.push_back(rawOf(vsParam(l.slot, "centerX"),  0.0f));
+        sig.push_back(rawOf(vsParam(l.slot, "centerY"),  0.0f));
     }
     if (sig != lastSig_) { lastSig_ = std::move(sig); changed = true; }
 
@@ -388,11 +410,28 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
     int numEnabled = 0;
     Layer* single = nullptr;
     for (auto& l : layers_)
+    {
         if (rawOf(vsParam(l.slot, "enabled"), 1.0f) >= 0.5f)
         {
             ++numEnabled;
             single = &l;
         }
+        // Solo pool released as soon as the slot is no longer requested.
+        if (! wantsSolo(l.slot))
+            for (auto& im : l.soloPool) im = juce::Image();
+    }
+
+    // Solo frames: an output drawn ALONE — full level, no blend, its own
+    // paper — for the pads that asked. drawAlone() targets the layer's own
+    // pool so the image a pad is painting is never written to. Invalid
+    // result = pool momentarily busy → that slot keeps its previous solo.
+    auto drawAlone = [&](Layer& l) -> juce::Image
+    {
+        juce::Image im = acquireFrom(l.soloPool, 2, W, H);
+        if (im.isValid()) { juce::Graphics gs(im); l.core->drawWarp(gs, W, H); }
+        return im;
+    };
+    juce::Image soloNew[ChainModel::kMaxVideoSlots];
 
     // Empty master (nothing enabled) = blank paper → WHITE. With layers the
     // compositing base stays black: Add/Screen accumulate light, so their
@@ -404,25 +443,51 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
     {
         // One output at full level: over a black base Mix/Add/Screen all reduce
         // to "just the source" — draw straight into the target, skip the blend.
-        juce::Graphics g(target);
-        single->core->drawWarp(g, W, H);
+        { juce::Graphics g(target); single->core->drawWarp(g, W, H); }
+        // The composite IS that output alone: its solo shares the image (no
+        // second warp draw). Any other requested output is disabled here.
+        for (auto& l : layers_)
+            if (wantsSolo(l.slot))
+                soloNew[l.slot] = (&l == single) ? target : drawAlone(l);
     }
-    else if (numEnabled > 0)
+    else
     {
         for (auto& l : layers_)
         {
-            if (rawOf(vsParam(l.slot, "enabled"), 1.0f) < 0.5f)
+            const bool enabled = rawOf(vsParam(l.slot, "enabled"), 1.0f) >= 0.5f;
+            const bool alone   = wantsSolo(l.slot);
+            if (! enabled && ! alone)
                 continue;
-            if (! l.scratch.isValid() || l.scratch.getWidth() != W || l.scratch.getHeight() != H)
-                l.scratch = juce::Image(juce::Image::ARGB, W, H, true, juce::SoftwareImageType());
-            { juce::Graphics gs(l.scratch); l.core->drawWarp(gs, W, H); }
-            blendLayer(target, l.scratch,
+            // A soloed layer's solo image doubles as its blend source (no
+            // extra warp draw); otherwise (or if its pool was busy) the
+            // reusable scratch.
+            juce::Image src;
+            if (alone)
+                src = soloNew[l.slot] = drawAlone(l);
+            if (! enabled)
+                continue;
+            if (! src.isValid())
+            {
+                if (! l.scratch.isValid() || l.scratch.getWidth() != W || l.scratch.getHeight() != H)
+                    l.scratch = juce::Image(juce::Image::ARGB, W, H, true, juce::SoftwareImageType());
+                { juce::Graphics gs(l.scratch); l.core->drawWarp(gs, W, H); }
+                src = l.scratch;
+            }
+            blendLayer(target, src,
                        rawOf(vsMixParam(l.slot, "level"), 1.0f),
                        (int) rawOf(vsMixParam(l.slot, "blend"), 0.0f));
         }
     }
 
-    { const juce::ScopedLock fl(frontLock_); front_ = target; }
+    {
+        const juce::ScopedLock fl(frontLock_);
+        front_ = target;
+        for (int s = 0; s < ChainModel::kMaxVideoSlots; ++s)
+        {
+            if (! wantsSolo(s))            soloFront_[s] = juce::Image();
+            else if (soloNew[s].isValid()) soloFront_[s] = soloNew[s];
+        }
+    }
     haveFrame_ = true;
     frameCounter_.fetch_add(1, std::memory_order_release);
 
@@ -487,20 +552,16 @@ void VideoMixerComponent::rebuildStrip()
     voices_.clear();
     auto& apvts = processor_.getAPVTS();
 
-    // Per-chain occurrence counts, to suffix rows of a chain hosting SEVERAL
-    // VideoScroll probes ("CHAIN 2a" / "CHAIN 2b") — a bare duplicate label
-    // would leave two identical rows with different faders.
-    std::map<int, int> perChain, seen;
-    for (const auto& [slot, chain] : activeSlots_)
-        ++perChain[chain];
-
-    for (const auto& [slot, chain] : activeSlots_)
+    // Row labels ("CHAIN n", suffixed a/b when a chain hosts SEVERAL probes)
+    // come from the shared helper, so the zone-3 chain tabs and the ALL view
+    // name every output exactly like this strip.
+    const auto labels = videoScrollOutputLabels(activeSlots_);
+    for (int i = 0; i < (int) activeSlots_.size(); ++i)
     {
+        const int slot = activeSlots_[(size_t) i].first;
         auto v = std::make_unique<Voice>();
         v->slot  = slot;
-        v->label = "CHAIN " + juce::String(chain + 1);
-        if (perChain[chain] > 1)
-            v->label += juce::String::charToString((juce::juce_wchar) ('a' + seen[chain]++));
+        v->label = labels[i];
 
         v->level.setTextBoxStyle(juce::Slider::NoTextBox, true, 0, 0);
         v->level.setRange(0.0, 1.0, 0.01);
@@ -533,13 +594,25 @@ void VideoMixerComponent::resized()
     layoutStrip();
 }
 
+int VideoMixerComponent::stripHeight() const noexcept
+{
+    const int n = (int) voices_.size();
+    return (n > 0) ? (kStripPad + n * (kRowH + kRowGap)) : 0;
+}
+
+int VideoMixerComponent::maxUsefulWidth(int height) const noexcept
+{
+    // layoutStrip(): avail = (bounds − strip).reduced(2), side = min(availW,
+    // availH). Width only helps while availW <= availH, i.e. up to
+    // height − stripHeight() (the ±4 of reduced(2) cancels on both axes).
+    return juce::jmax(0, height - stripHeight());
+}
+
 void VideoMixerComponent::layoutStrip()
 {
     auto r = getLocalBounds();
-    const int n = (int) voices_.size();
-    const int stripH = (n > 0) ? (kStripPad + n * (kRowH + kRowGap)) : 0;
 
-    stripArea_  = r.removeFromTop(stripH);
+    stripArea_  = r.removeFromTop(stripHeight());
     // Fader rows follow the strip area, which stops stretching with a very
     // wide zone (paint() walks the same rect, so labels stay aligned).
     stripArea_.setWidth(juce::jmin(stripArea_.getWidth(), Sp3ctraTheme::kMaxContentW));
@@ -581,16 +654,11 @@ void VideoMixerComponent::renderMaster(juce::Graphics& g, juce::Rectangle<int> d
     }
 }
 
-void VideoMixerComponent::timerCallback()
+void VideoMixerComponent::currentView(int& w, int& h, bool& visible) const
 {
-    // Presenter only: tell the renderer what to render (view size in LOGICAL px,
-    // window content when open, else the column preview) and whether anything is
-    // on screen, then invalidate the views ONLY when a new frame was published.
-    // A frozen output publishes nothing → its static image is never repainted →
-    // it can never be presented half-painted (the historical pause flicker).
-    int w = masterArea_.getWidth();
-    int h = masterArea_.getHeight();
-    bool visible = isShowing() && ! masterArea_.isEmpty();
+    w = masterArea_.getWidth();
+    h = masterArea_.getHeight();
+    visible = isShowing() && ! masterArea_.isEmpty();
     if (window_ != nullptr && window_->isVisible())
         if (auto* c = window_->getContentComponent())
             if (c->getWidth() > 0 && c->getHeight() > 0)
@@ -599,7 +667,54 @@ void VideoMixerComponent::timerCallback()
                 h = c->getHeight();
                 visible = true;
             }
+}
+
+void VideoMixerComponent::requestOutputPreview(int slot)
+{
+    if (slot >= 0 && slot < ChainModel::kMaxVideoSlots)
+        soloReqMs_[slot] = juce::Time::getMillisecondCounterHiRes();
+}
+
+juce::Image VideoMixerComponent::outputFrame(int slot) const
+{
+    return renderer_->soloImage(slot);
+}
+
+uint32_t VideoMixerComponent::frameCounter() const
+{
+    return renderer_->frameCounter();
+}
+
+juce::Point<int> VideoMixerComponent::viewSize() const
+{
+    int w = 0, h = 0;
+    bool visible = false;
+    currentView(w, h, visible);
+    return { w, h };
+}
+
+void VideoMixerComponent::timerCallback()
+{
+    // Presenter only: tell the renderer what to render (view size in LOGICAL px,
+    // window content when open, else the column preview) and whether anything is
+    // on screen, then invalidate the views ONLY when a new frame was published.
+    // A frozen output publishes nothing → its static image is never repainted →
+    // it can never be presented half-painted (the historical pause flicker).
+    int w = 0, h = 0;
+    bool visible = false;
+    currentView(w, h, visible);
     renderer_->setViewState(w, h, visible);
+
+    // Solo requests still alive → the outputs the renderer must also publish
+    // alone (a pad that hid or died simply stops requesting).
+    {
+        const double now = juce::Time::getMillisecondCounterHiRes();
+        uint32_t mask = 0;
+        for (int s = 0; s < ChainModel::kMaxVideoSlots; ++s)
+            if (soloReqMs_[s] > 0.0 && now - soloReqMs_[s] < kSoloHoldMs)
+                mask |= 1u << s;
+        renderer_->setSoloMask(mask);
+    }
 
     const uint32_t fc = renderer_->frameCounter();
     if (fc == lastPresented_)
@@ -634,17 +749,59 @@ void VideoMixerComponent::paint(juce::Graphics& g)
     g.setColour(juce::Colour(0xff14141c));
     g.fillRect(stripArea_);
 
+    // Labels are links to the output's chain tab (onOutputClicked): the
+    // hovered one brightens + underlines.
     auto strip = stripArea_.reduced(kStripPad, kStripPad / 2);
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
-    for (auto& v : voices_)
+    const auto accent = moduleColour(ModuleType::VideoScroll);
+    for (int i = 0; i < (int) voices_.size(); ++i)
+    {
+        auto& v  = voices_[(size_t) i];
+        auto row = strip.removeFromTop(kRowH);
+        strip.removeFromTop(kRowGap);
+        const bool hov = (i == hoverRow_);
+        const auto lab = row.removeFromLeft(kLabelW).reduced(2, 0);
+        g.setColour(hov ? accent.brighter(0.5f) : accent);
+        g.drawText(v->label, lab, juce::Justification::centredLeft, false);
+        if (hov)
+        {
+            const int tw = (int) std::ceil(juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), v->label));
+            g.fillRect(lab.getX(), lab.getBottom() - 5, juce::jmin(tw, lab.getWidth()), 1);
+        }
+    }
+}
+
+int VideoMixerComponent::rowLabelAt(juce::Point<int> p) const noexcept
+{
+    auto strip = stripArea_.reduced(kStripPad, kStripPad / 2);
+    for (int i = 0; i < (int) voices_.size(); ++i)
     {
         auto row = strip.removeFromTop(kRowH);
         strip.removeFromTop(kRowGap);
-        g.setColour(moduleColour(ModuleType::VideoScroll));
-        g.drawText(v->label,
-                   row.removeFromLeft(kLabelW).reduced(2, 0),
-                   juce::Justification::centredLeft, false);
+        if (row.removeFromLeft(kLabelW).contains(p))
+            return i;
     }
+    return -1;
+}
+
+void VideoMixerComponent::mouseMove(const juce::MouseEvent& e)
+{
+    const int r = rowLabelAt(e.getPosition());
+    setMouseCursor(r >= 0 ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+    if (r != hoverRow_) { hoverRow_ = r; repaint(stripArea_); }
+}
+
+void VideoMixerComponent::mouseExit(const juce::MouseEvent&)
+{
+    if (hoverRow_ != -1) { hoverRow_ = -1; repaint(stripArea_); }
+}
+
+void VideoMixerComponent::mouseUp(const juce::MouseEvent& e)
+{
+    if (! e.mouseWasClicked() || e.mods.isPopupMenu()) return;
+    const int r = rowLabelAt(e.getPosition());
+    if (r >= 0 && onOutputClicked)
+        onOutputClicked(voices_[(size_t) r]->slot);
 }
 
 //==============================================================================
@@ -670,7 +827,7 @@ void VideoMixerComponent::stopAll()
 //==============================================================================
 bool VideoMixerComponent::beginRecording(const juce::File& out, int height, juce::String& err)
 {
-    if (isRecording()) { err = "Already recording"; return false; }
+    if (isRecording()) { err = "Already recording."; return false; }
 
     // Record aspect = the current view aspect (detached window content if open,
     // else the square preview). `height` is the chosen vertical resolution.

@@ -2,10 +2,12 @@
  * @file LuxHarmoTabComponent.h
  * @brief Tab — SCALE: musical quantizer on the image-line stream.
  *
- * Mirrors the LuxEq page layout: an interactive scale-grid view on top
- * (HarmoEditorComponent — the comb over the frequency axis, click = root),
- * then the discrete controls below: Root / Scale / Mode combos, the
- * Strength / Width / Slope / Glide sliders and the Background combo.
+ * Standard module page (ModuleEditorChrome): the interactive scale-grid view
+ * on top (HarmoEditorComponent — the comb over the frequency axis, click =
+ * root), the "--- SCALE ---" section caption, then two label-above control
+ * rows: the Root / Scale / Mode combos and the Strength / Width / Slope /
+ * Glide bars. The background pole is chain-owned (rack header selector), not
+ * a module setting.
  *
  * Power lives in the zone-3 header switch + the rack LED.
  * Per-instance: setSlot(slot) rebinds every control to the luxharmo{slot}_*
@@ -19,6 +21,7 @@
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "../ui/HarmoEditorComponent.h"
+#include "../ui/ModuleEditorChrome.h"
 #include "../ui/Sp3ctraBarSlider.h"
 
 class LuxHarmoTabComponent : public juce::Component
@@ -27,8 +30,9 @@ public:
     /** Accent colour for the SCALE page (matches the catalogue chip). */
     static inline const uint32_t kAccentARGB = moduleColour(ModuleType::Harmonize).getARGB();   ///< inherited module colour
 
-    static constexpr int kPreferredH =
-        HarmoEditorComponent::kPreferredH + 4 + 22 + 3 * 30 + 30 + 8;
+    static constexpr int kEditorsH   = HarmoEditorComponent::kPreferredH;
+    /** Editor + section caption + 2 control rows (combos, bars). */
+    static constexpr int kPreferredH = ModuleChrome::pageHeight(kEditorsH, 2);
 
     explicit LuxHarmoTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p),
@@ -38,15 +42,13 @@ public:
         editor.setMidiMap(&p.getMidiMap());   // right-click canvas → learn Root
         addAndMakeVisible(editor);
 
-        // ── Musical grid: Root / Scale / Mode ──────────────────────────
-        initLabel(rootLabel, "Root");
+        // ── Musical grid: Root / Scale / Mode (labels painted above) ───
         addAndMakeVisible(rootCombo);
         for (int i = 0; i < 12; ++i)
             rootCombo.addItem(juce::StringArray{"C", "C#", "D", "D#", "E", "F",
                                                 "F#", "G", "G#", "A", "A#", "B"}[i],
                               i + 1);
 
-        initLabel(scaleLabel, "Scale");
         addAndMakeVisible(scaleCombo);
         {
             const juce::StringArray scales{"Chromatic", "Major", "Minor",
@@ -58,23 +60,13 @@ public:
                 scaleCombo.addItem(scales[i], i + 1);
         }
 
-        initLabel(modeLabel, "Mode");
         addAndMakeVisible(modeCombo);
         modeCombo.addItem("Mask", 1);   // comb: off-grid material fades out
         modeCombo.addItem("Warp", 2);   // reassign: material slides to the grid
 
-        // ── Morph + comb shape + chord-change glide ────────────────────
-        initSlider(strengthSlider, strengthLabel, "Strength");
-        initSlider(widthSlider,    widthLabel,    "Width");
-        initSlider(slopeSlider,    slopeLabel,    "Slope");
-        initSlider(glideSlider,    glideLabel,    "Glide");
-
-        // ── Background mode (which pole carries the material) ──────────
-        initLabel(bgLabel, "Background");
-        addAndMakeVisible(bgCombo);
-        bgCombo.addItem("Auto",  1);
-        bgCombo.addItem("Black", 2);
-        bgCombo.addItem("White", 3);
+        // ── Morph + comb shape + chord-change glide (lime bars) ────────
+        for (auto* s : { &strengthSlider, &widthSlider, &slopeSlider, &glideSlider })
+            addAndMakeVisible(*s);
 
         setSlot(0);   // bind to bank 0 until a block is selected
     }
@@ -88,7 +80,7 @@ public:
         // attachment must never see the new param through the old binding).
         rootAttach.reset();  scaleAttach.reset(); modeAttach.reset();
         strengthAttach.reset(); widthAttach.reset();
-        slopeAttach.reset(); glideAttach.reset(); bgAttach.reset();
+        slopeAttach.reset(); glideAttach.reset();
 
         editor.setInstance(slot_,
                            hmParam(slot_, "Root"),  hmParam(slot_, "Scale"),
@@ -104,7 +96,6 @@ public:
         widthAttach   .reset(new SL(ap, hmParam(slot_, "Width"),    widthSlider));
         slopeAttach   .reset(new SL(ap, hmParam(slot_, "Slope"),    slopeSlider));
         glideAttach   .reset(new SL(ap, hmParam(slot_, "Glide"),    glideSlider));
-        bgAttach      .reset(new CB(ap, hmParam(slot_, "BackgroundMode"), bgCombo));
 
         auto& mm = processor.getMidiMap();
         scaleLearn_    = std::make_unique<MidiLearnAttachment>(mm, scaleCombo,     hmParam(slot_, "Scale"));
@@ -113,7 +104,6 @@ public:
         widthLearn_    = std::make_unique<MidiLearnAttachment>(mm, widthSlider,    hmParam(slot_, "Width"));
         slopeLearn_    = std::make_unique<MidiLearnAttachment>(mm, slopeSlider,    hmParam(slot_, "Slope"));
         glideLearn_    = std::make_unique<MidiLearnAttachment>(mm, glideSlider,    hmParam(slot_, "Glide"));
-        bgLearn_       = std::make_unique<MidiLearnAttachment>(mm, bgCombo,        hmParam(slot_, "BackgroundMode"));
     }
 
     int slot() const noexcept { return slot_; }
@@ -121,55 +111,33 @@ public:
     void paint(juce::Graphics& g) override
     {
         const juce::Colour accent (kAccentARGB);
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
-        g.setColour(accent.withAlpha(0.55f));
-        g.drawText("--- SCALE ---", kPad,
-                   HarmoEditorComponent::kPreferredH + 6,
-                   getWidth() - 2 * kPad, 12, juce::Justification::centred);
+        ModuleChrome::drawSectionCaption(g, ModuleChrome::kPageTop + kEditorsH,
+                                         getWidth(), accent, "SCALE");
+        // Label-above idiom for every control row (combos and bars alike).
+        ModuleChrome::drawBoxLabel(g, rootCombo,      accent, "Root");
+        ModuleChrome::drawBoxLabel(g, scaleCombo,     accent, "Scale");
+        ModuleChrome::drawBoxLabel(g, modeCombo,      accent, "Mode");
+        ModuleChrome::drawBoxLabel(g, strengthSlider, accent, "Strength");
+        ModuleChrome::drawBoxLabel(g, widthSlider,    accent, "Width");
+        ModuleChrome::drawBoxLabel(g, slopeSlider,    accent, "Slope");
+        ModuleChrome::drawBoxLabel(g, glideSlider,    accent, "Glide");
     }
 
     void resized() override
     {
-        const int labelW = 58;
-        const int gap    = Sp3ctraTheme::kGap;
-        const int ch     = Sp3ctraTheme::kControlH;
-        const int w      = getWidth() - 2 * kPad;
+        const int pad = ModuleChrome::kPagePad;
+        const int w   = getWidth() - 2 * pad;
+        editor.setBounds(pad, ModuleChrome::kPageTop, w, kEditorsH);
 
-        editor.setBounds(kPad, 4, w, HarmoEditorComponent::kPreferredH);
-
-        int y = HarmoEditorComponent::kPreferredH + 4 + 22;
-
-        // Row 1 — Root | Scale | Mode.
-        {
-            const int comboW = juce::jmax(64, (w - 3 * (labelW + gap) - 2 * gap) / 3);
-            int x = kPad;
-            rootLabel .setBounds(x, y, labelW, ch); x += labelW + gap;
-            rootCombo .setBounds(x, y, comboW, ch); x += comboW + gap;
-            scaleLabel.setBounds(x, y, labelW, ch); x += labelW + gap;
-            scaleCombo.setBounds(x, y, comboW, ch); x += comboW + gap;
-            modeLabel .setBounds(x, y, labelW, ch); x += labelW + gap;
-            modeCombo .setBounds(x, y, comboW, ch);
-        }
-        y += 30;
-
-        // Rows 2/3 — the four sliders, two per row.
-        const int half = (w - gap) / 2;
-        auto sliderRow = [&](juce::Label& l1, juce::Slider& s1,
-                             juce::Label& l2, juce::Slider& s2)
-        {
-            l1.setBounds(kPad, y, labelW, ch);
-            s1.setBounds(kPad + labelW + gap, y, half - labelW - gap, ch);
-            l2.setBounds(kPad + half + gap, y, labelW, ch);
-            s2.setBounds(kPad + half + gap + labelW + gap, y,
-                         half - labelW - gap, ch);
-            y += 30;
-        };
-        sliderRow(strengthLabel, strengthSlider, widthLabel, widthSlider);
-        sliderRow(slopeLabel,    slopeSlider,    glideLabel, glideSlider);
-
-        // Row 4 — Background.
-        bgLabel.setBounds(kPad, y, labelW, ch);
-        bgCombo.setBounds(kPad + labelW + gap, y, 120, ch);
+        // Below the "--- SCALE ---" band: one label-above row of combos,
+        // then one of bars (ModuleChrome metrics).
+        int y = ModuleChrome::kPageTop + kEditorsH + ModuleChrome::kSectionCaptionH;
+        ModuleChrome::layoutBoxRow(juce::Rectangle<int>(pad, y, w, ModuleChrome::kBoxRowH),
+                                   { &rootCombo, &scaleCombo, &modeCombo });
+        y += ModuleChrome::kBoxRowH + ModuleChrome::kRowGap;
+        ModuleChrome::layoutBoxRow(juce::Rectangle<int>(pad, y, w, ModuleChrome::kBoxRowH),
+                                   { &strengthSlider, &widthSlider,
+                                     &slopeSlider, &glideSlider });
     }
 
 private:
@@ -178,34 +146,16 @@ private:
 
     HarmoEditorComponent editor;
 
-    juce::Label    rootLabel, scaleLabel, modeLabel, bgLabel;
-    juce::Label    strengthLabel, widthLabel, slopeLabel, glideLabel;
-    juce::ComboBox rootCombo, scaleCombo, modeCombo, bgCombo;
+    juce::ComboBox rootCombo, scaleCombo, modeCombo;
     Sp3ctraBarSlider strengthSlider, widthSlider, slopeSlider, glideSlider;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>
-        rootAttach, scaleAttach, modeAttach, bgAttach;
+        rootAttach, scaleAttach, modeAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
         strengthAttach, widthAttach, slopeAttach, glideAttach;
     std::unique_ptr<MidiLearnAttachment>
         scaleLearn_, modeLearn_, strengthLearn_, widthLearn_,
-        slopeLearn_, glideLearn_, bgLearn_;
-
-    static constexpr int kPad = 8;
-
-    void initLabel(juce::Label& lbl, const juce::String& text)
-    {
-        lbl.setText(text, juce::dontSendNotification);
-        lbl.setJustificationType(juce::Justification::centredRight);
-        lbl.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-        addAndMakeVisible(lbl);
-    }
-
-    void initSlider(Sp3ctraBarSlider& sld, juce::Label& lbl, const juce::String& text)
-    {
-        initLabel(lbl, text);
-        addAndMakeVisible(sld);
-    }
+        slopeLearn_, glideLearn_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxHarmoTabComponent)
 };

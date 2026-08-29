@@ -2,6 +2,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <cmath>   // std::ceil (FaceSwitchBar custom segments)
 #include "PluginProcessor.h"
 #include "AboutDialog.h"
 #include "CisVisualizerComponent.h"
@@ -15,6 +16,7 @@
 #include "image/LuxCentroTabComponent.h"
 #include "image/LuxDriveTabComponent.h"
 #include "image/LuxDcBlockTabComponent.h"
+#include "image/LuxGainTabComponent.h"
 #include "image/LuxStralTabComponent.h"
 #include "image/LuxSynthTabComponent.h"
 #include "image/ScoreGenTabComponent.h"
@@ -23,6 +25,7 @@
 #include "image/VoiceGenTabComponent.h"
 #include "image/VisualizerMode.h"
 #include "video/VideoScrollPage.h"
+#include "video/VideoScrollAllPage.h"
 #include "midi/MidiTapPage.h"
 #include "midi/MidiLearnAttachment.h"
 #include "sampler/SamplerPageComponent.h"
@@ -40,6 +43,7 @@
 #include "sources/ui/MediaSourcePage.h"        // M9 — IMAGE/VIDEO/CAMERA PLAY faces
 #include "ui/setup/PitchSetupPanel.h"
 #include "ui/setup/MaskSetupPanel.h"
+#include "ui/setup/CentroSetupPanel.h"
 #include "ui/setup/LuxStralSetupPanel.h"
 #include "ui/setup/LuxSynthSetupPanel.h"
 #include "ui/setup/LuxWaveSetupPanel.h"
@@ -49,7 +53,6 @@
 #include "ui/setup/MidiScoreSetupPanel.h"
 #include "ui/setup/TimbreSetupPanel.h"
 #include "ui/setup/VoiceSetupPanel.h"
-#include "ui/setup/VideoScrollSetupPanel.h"
 #include "UITheme.h"
 #include "Sp3ctraLookAndFeel.h"
 
@@ -231,8 +234,12 @@ class FaceSwitchBar : public juce::Component
 public:
     FaceSwitchBar() { setRepaintsOnMouseActivity(true); }
 
-    /** Fired when the user clicks the non-active segment. */
+    /** Fired when the user clicks the non-active segment (PLAY | SETUP mode). */
     std::function<void(bool setupFace)> onFaceChanged;
+
+    /** Fired when the user clicks another segment in CUSTOM mode (index into
+     *  the labels handed to setCustomSegments). */
+    std::function<void(int index)> onSegmentSelected;
 
     void setFace(bool setupFaceIn, bool notify)
     {
@@ -254,6 +261,19 @@ public:
         if (playOnly != po) { playOnly = po; repaint(); }
     }
 
+    /** CUSTOM mode — replace PLAY | SETUP by an arbitrary segment list (the
+     *  VIDEO SCROLL chain tabs: ALL | CHAIN 1 | CHAIN 2 …). An empty list
+     *  returns to PLAY | SETUP. `selected` is clamped to the list. */
+    void setCustomSegments(const juce::StringArray& labels, int selected)
+    {
+        customLabels = labels;
+        customSel    = labels.isEmpty() ? 0 : juce::jlimit(0, labels.size() - 1, selected);
+        repaint();
+    }
+
+    bool hasCustomSegments() const noexcept { return ! customLabels.isEmpty(); }
+    int  customSelected()    const noexcept { return customSel; }
+
     void setAccent(juce::Colour c)
     {
         if (accent != c) { accent = c; repaint(); }
@@ -267,6 +287,12 @@ public:
         g.fillRect(0, getHeight() - 1, getWidth(), 1);
 
         const auto mouse = getMouseXYRelative();
+        if (hasCustomSegments())
+        {
+            for (int i = 0; i < customLabels.size(); ++i)
+                drawSegment(g, customSegmentBounds(i), customLabels[i], i == customSel, mouse);
+            return;
+        }
         drawSegment(g, segmentBounds(false), "PLAY",  !setupFace, mouse);
         if (!playOnly)
             drawSegment(g, segmentBounds(true), "SETUP", setupFace, mouse);
@@ -276,6 +302,19 @@ public:
     {
         if (!e.mouseWasClicked())
             return;
+        if (hasCustomSegments())
+        {
+            for (int i = 0; i < customLabels.size(); ++i)
+                if (customSegmentBounds(i).contains(e.getPosition()))
+                {
+                    if (i == customSel) return;   // already there — keep the page's scroll
+                    customSel = i;
+                    repaint();
+                    if (onSegmentSelected) onSegmentSelected(i);
+                    return;
+                }
+            return;
+        }
         if (segmentBounds(false).contains(e.getPosition()))
             setFace(false, true);
         else if (!playOnly && segmentBounds(true).contains(e.getPosition()))
@@ -290,6 +329,24 @@ private:
         const int x0   = 8;
         return setupSegment ? juce::Rectangle<int>(x0 + segW + 3, 3, segW, h)
                             : juce::Rectangle<int>(x0,            3, segW, h);
+    }
+
+    /** Custom segments: text-fitted widths (never narrower than a PLAY
+     *  segment), laid out left to right with the same 3 px gap. */
+    juce::Rectangle<int> customSegmentBounds(int index) const
+    {
+        const int h = getHeight() - 7;
+        const juce::Font f(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontTab)).boldened());
+        int x = 8;
+        for (int i = 0; i < customLabels.size(); ++i)
+        {
+            const int w = juce::jmax(58, (int) std::ceil(
+                juce::GlyphArrangement::getStringWidth(f, customLabels[i])) + 20);
+            if (i == index)
+                return { x, 3, w, h };
+            x += w + 3;
+        }
+        return {};
     }
 
     void drawSegment(juce::Graphics& g, juce::Rectangle<int> r,
@@ -323,6 +380,8 @@ private:
 
     bool setupFace { false };
     bool playOnly  { false };
+    juce::StringArray customLabels;   // non-empty → custom mode
+    int  customSel { 0 };
     juce::Colour accent { juce::Colour(0xff4fa3e0) };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FaceSwitchBar)
@@ -417,7 +476,9 @@ private:
 
     // Default / limit window sizes (spec §1)
     static constexpr int kDefaultW = 1280, kDefaultH = 820;
-    static constexpr int kMinW = 1024, kMinH = 700, kMaxW = 4096, kMaxH = 2400;
+    // No practical width cap: capping X clips the UI on wide / multi-monitor
+    // setups. 32768 stays safely inside ComponentBoundsConstrainer arithmetic.
+    static constexpr int kMinW = 1024, kMinH = 700, kMaxW = 32768, kMaxH = 2400;
 
     static constexpr int kHPad = Sp3ctraTheme::kHPad;
 
@@ -430,6 +491,13 @@ private:
 
     /** Single selection model — drives zones 1 + 2 + 3. */
     void selectBlock(ChainBlockId id);
+
+    /** VIDEO SCROLL navigation (docs/PLAN_VIDEO_SCROLL_CHAIN_PAGES_ZOOM.md D1–D3):
+     *  showVideoAllView() lands on the ALL tab (VIDEO MIX banner / ALL segment);
+     *  refreshVideoTabs() rebuilds the chain tabs + the ALL view from the
+     *  patched outputs and highlights the bound instance's tab. */
+    void showVideoAllView();
+    void refreshVideoTabs();
     /** Contextual top-bandeau panels for LUXSTRAL: GRAY always, COLOR only when
      *  Stereo is on, BLOB only when StrokeForge is on. */
     std::vector<VisualizerMode> luxStralVisualizerSources() const;
@@ -482,6 +550,9 @@ private:
     int  luxStralSendSlot_ { 0 };   // selected LuxStral SEND slot (0..7, OUT bank)
     int  samplerEngineIndex_  { 0 };   // selected Sampler engine (0 = A, 1 = B)
     int  videoSlotIndex_      { 0 };   // selected VideoScroll instance slot (0..7)
+    // VIDEO SCROLL zone-3 view: false = the page of videoSlotIndex_ (its chain
+    // tab), true = the ALL tab (every output stacked). Persisted (selVideoAll).
+    bool videoAllView_        { false };
     int  midiTapSlotIndex_    { 0 };   // selected MIDI TAP instance slot (0..7)
     // zone2Width/zone4Width hold the USER INTENT (persisted in the session);
     // zone2Eff_/zone4Eff_ are what layoutZones() actually displayed after
@@ -546,7 +617,9 @@ private:
     std::unique_ptr<LuxCentroTabComponent> centroPage;       // FX > CENTROID
     std::unique_ptr<LuxDriveTabComponent> drivePage;         // FX > LEVELS
     std::unique_ptr<LuxDcBlockTabComponent> dcBlockPage;     // FX > DC BLOCK
+    std::unique_ptr<LuxGainTabComponent>  gainPage;          // FX > GAIN
     std::unique_ptr<VideoScrollPage>      videoScrollPage;   // OUT > VIDEO SCROLL (per-instance)
+    std::unique_ptr<VideoScrollAllPage>   videoScrollAllPage; // OUT > VIDEO SCROLL — ALL tab
     std::unique_ptr<MidiTapPage>          midiTapPage;       // OUT > MIDI TAP (per-instance)
     std::unique_ptr<AudioWavePanel>       audioWavePanel;
     std::unique_ptr<LuxGrainPanel>        luxGrainPanel;    // LUXGRAIN engine page (M4)
@@ -559,6 +632,7 @@ private:
     std::unique_ptr<SourceSetupPanel>     sourceSetup;   // SP3CTRA — network/CIS config
     std::unique_ptr<PitchSetupPanel>      pitchSetup;
     std::unique_ptr<MaskSetupPanel>       maskSetup;
+    std::unique_ptr<CentroSetupPanel>     centroSetup;   // width law (PX / ERB)
     std::unique_ptr<LuxStralSetupPanel>   stralSetup;
     std::unique_ptr<LuxSynthSetupPanel>   synthSetup;
     std::unique_ptr<LuxWaveSetupPanel>    waveSetup;
@@ -568,7 +642,6 @@ private:
     std::unique_ptr<MidiScoreSetupPanel>  midiScoreSetup;  // export prefs (PNG/JPEG, A4/A3/FULL, DPI)
     std::unique_ptr<TimbreSetupPanel>     timbreSetup;     // export prefs (PNG/JPEG, DPI)
     std::unique_ptr<VoiceSetupPanel>      voiceSetup;      // export prefs (PNG/JPEG, A4/A3/Selection, DPI)
-    std::unique_ptr<VideoScrollSetupPanel> videoScrollSetup;  // OUT > VIDEO SCROLL bg (per-instance)
     // (M9 media modules have no SETUP face — picking lives on MediaSourcePage)
 
     // ── ZONE 4: video scroll column (collapsible, detachable window) ──────────

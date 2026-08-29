@@ -174,6 +174,72 @@ static int run_dense(int dense, int *pair_errors, int *vel_spread)
     return n_on;
 }
 
+/* Vibrato glue: ONE line wobbling +/-0.6 semitone across the 67/68 band
+ * boundary. Without the glue the crest hops between the two bands and
+ * machine-guns off/on pairs; with it the held note claims the crest wherever
+ * it lands and the take stays a handful of events — while the 0xE0 crest-bend
+ * stream (for the MPE sink) carries the wobble continuously. Returns the
+ * note-on count. */
+static int run_vibrato(int *pair_errors, int *bends, int *bend_cb_max)
+{
+    MidiTapState *st = midi_tap_instance(0);
+    midi_tap_init(st);
+
+    MidiTapConfig c = midi_tap_config_default();
+    c.enabled          = 1;
+    c.mode             = MIDI_TAP_MODE_BANDS;
+    c.background_mode  = MIDI_TAP_BG_BLACK;
+    c.max_poly         = 4;
+    c.peak_only        = 1;
+    c.thresh           = 5.0f;
+    c.rel              = 0.0f;
+    c.smooth           = 1.0f;
+    c.attack_ms        = 1.0f;
+    c.min_on_ms        = 1.0f;
+    c.release_ms       = 8.0f;
+    c.vel_curve        = MIDI_TAP_VEL_LINEAR;
+    c.vel_span         = 200.0f;
+    c.max_events_per_s = 100000.0f;
+    c.axis_low_hz      = 65.406f;
+    c.dense            = 1;
+    c.retrig_ms        = 4.0f;
+    c.retrig_delta     = 5;      /* the shipping default: the ~1% window-sum
+                                  * ripple of a sliding line stays below it */
+    st->config = c;
+
+    for (int i = 0; i < 300; ++i) {
+        memset(r, 0, sizeof r); memset(g, 0, sizeof g); memset(b, 0, sizeof b);
+        bump(67.0 + 0.6 * sin(6.283185307179586 * (double) i / 60.0), 180.0);
+        midi_tap_process_line(st, r, g, b, PX, OCT);
+        usleep(2000);                        /* ~500 lines/s */
+    }
+
+    const uint32_t w = midi_tap_ring_writepos(st);
+    const uint32_t avail = (w > MIDI_TAP_RING_SLOTS) ? MIDI_TAP_RING_SLOTS : w;
+    int n_on = 0, errors = 0, n_bend = 0, cb_max = 0;
+    uint8_t held[128]; memset(held, 0, sizeof held);
+    for (uint32_t k = 0; k < avail; ++k) {
+        MidiTapEvent e;
+        if (!midi_tap_ring_get(st, w - avail + k, &e)) continue;
+        if (e.status == 0x90) {
+            if (held[e.note]) ++errors;
+            held[e.note] = 1; ++n_on;
+        } else if (e.status == 0x80) {
+            if (!held[e.note]) ++errors;
+            held[e.note] = 0;
+        } else if (e.status == 0xE0) {
+            ++n_bend;
+            const int cb = (int) (int8_t) e.flags;
+            const int a  = cb < 0 ? -cb : cb;
+            if (a > cb_max) cb_max = a;
+        }
+    }
+    if (pair_errors) *pair_errors = errors;
+    if (bends)       *bends       = n_bend;
+    if (bend_cb_max) *bend_cb_max = cb_max;
+    return n_on;
+}
+
 int main(void)
 {
     printf("voice line: f0=55 (amp 60), h2=67 (amp 200 <- loudest), "
@@ -195,6 +261,12 @@ int main(void)
     printf("dense=1      -> %4d note-on, vel spread %3d, %d pairing errors\n",
            onsD, sprD, errD);
 
+    printf("\nvibrato +/-0.6 st across the 67/68 boundary (glue test):\n");
+    int errV = 0, bendsV = 0, cbMaxV = 0;
+    const int onsV = run_vibrato(&errV, &bendsV, &cbMaxV);
+    printf("dense=1 glue -> %4d note-on, %d pairing errors, "
+           "%d crest-bends (max %d cents)\n", onsV, errV, bendsV, cbMaxV);
+
     printf("\n");
     int ok = 1;
     if (bands != 67) { printf("UNEXPECTED: BANDS should follow the loudest partial (67)\n"); ok = 0; }
@@ -206,6 +278,14 @@ int main(void)
         { printf("FAIL: dense should restrike (got %d ons vs %d classic)\n", onsD, onsC); ok = 0; }
     if (sprD < 20)
         { printf("FAIL: dense velocity should track the envelope (spread %d)\n", sprD); ok = 0; }
+    if (errV != 0)
+        { printf("FAIL: vibrato glue broke off/on pairing (%d)\n", errV); ok = 0; }
+    if (onsV > 6)
+        { printf("FAIL: vibrato should glue to a handful of notes, got %d\n", onsV); ok = 0; }
+    if (bendsV < 20)
+        { printf("FAIL: the crest-bend stream should carry the vibrato, got %d\n", bendsV); ok = 0; }
+    if (cbMaxV < 30 || cbMaxV > 80)
+        { printf("FAIL: crest-bend excursion out of range (max %d cents)\n", cbMaxV); ok = 0; }
     if (ok) printf("PASS: FUNDAMENTAL recovers f0 where BANDS follows the loudest\n"
                    "      partial and survives a missing harmonic; DENSE restrikes\n"
                    "      with envelope-tracking velocities and clean pairing.\n");

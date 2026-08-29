@@ -8,6 +8,29 @@ namespace midiscoregen
 //==============================================================================
 // MIDI parsing
 //==============================================================================
+namespace
+{
+    /** Slice the [t0..t1] window of a per-channel controller curve into
+     *  note-relative breakpoints, seeding the value in force at t0. Leaves
+     *  `dst` empty when the curve never departs from `def` over the note. */
+    void attachCurve(const std::vector<std::pair<double, float>>& src,
+                     double t0, double t1, float def,
+                     std::vector<std::pair<float, float>>& dst)
+    {
+        float cur = def;
+        for (const auto& p : src)
+        {
+            if (p.first <= t0) { cur = p.second; continue; }
+            if (p.first >= t1) break;
+            if (dst.empty())
+                dst.push_back({ 0.0f, cur });
+            dst.push_back({ (float) (p.first - t0), p.second });
+        }
+        if (dst.empty() && cur != def)
+            dst.push_back({ 0.0f, cur });   // constant but non-default
+    }
+}
+
 MidiScoreData parseMidiFile(const juce::File& file)
 {
     MidiScoreData d;
@@ -59,9 +82,16 @@ MidiScoreData parseMidiFile(const juce::File& file)
         return d;
     }
 
+    // Sp3ctra MIDI TAP takes carry their origin as the track name. An MPE
+    // take spreads ONE musical voice over 15 channels (pure allocation), so
+    // captures fold every channel into voice 0.
+    for (const auto& name : trackNames)
+        if (name.startsWith("Sp3ctra MIDI TAP"))
+            d.sp3ctraCapture = true;
+
     // Voice grouping: tracks when the file is multi-track (SMF type 1),
     // MIDI channels otherwise (SMF type 0 keeps everything on one track).
-    const bool byTrack = noteTracks.size() > 1;
+    const bool byTrack = ! d.sp3ctraCapture && noteTracks.size() > 1;
     std::vector<int> channelOrder;   // channel-mode keys, in order of appearance
     auto voiceForChannel = [&channelOrder](int ch) -> int
     {
@@ -80,6 +110,27 @@ MidiScoreData parseMidiFile(const juce::File& file)
         seq.updateMatchedPairs();
         const double trackEnd = seq.getEndTime();
 
+        // Per-channel controller curves (MPE takes: bend = the crest's real
+        // trajectory, pressure/CC11 = the level envelope). Bend range read as
+        // the MIDI default ±2 st — the writer's own RPN convention.
+        std::array<std::vector<std::pair<double, float>>, 16> chBend, chLvl;
+        for (int i = 0; i < seq.getNumEvents(); ++i)
+        {
+            const auto& m = seq.getEventPointer(i)->message;
+            const int   c = m.getChannel() - 1;
+            if (c < 0 || c > 15)
+                continue;
+            if (m.isPitchWheel())
+                chBend[(size_t) c].push_back({ m.getTimeStamp(),
+                    (float) ((m.getPitchWheelValue() - 8192) * (200.0 / 8192.0)) });
+            else if (m.isChannelPressure())
+                chLvl[(size_t) c].push_back({ m.getTimeStamp(),
+                    (float) m.getChannelPressureValue() });
+            else if (m.isController() && m.getControllerNumber() == 11)
+                chLvl[(size_t) c].push_back({ m.getTimeStamp(),
+                    (float) m.getControllerValue() });
+        }
+
         for (int i = 0; i < seq.getNumEvents(); ++i)
         {
             const auto* ev  = seq.getEventPointer(i);
@@ -87,7 +138,8 @@ MidiScoreData parseMidiFile(const juce::File& file)
             if (! msg.isNoteOn() || msg.getVelocity() == 0)
                 continue;
 
-            int voice = byTrack ? (int) ti : voiceForChannel(msg.getChannel());
+            int voice = d.sp3ctraCapture ? 0
+                      : byTrack ? (int) ti : voiceForChannel(msg.getChannel());
             if (voice >= kMaxVoices)
             {
                 voice = kMaxVoices - 1;   // overflow folds into the last voice
@@ -109,6 +161,13 @@ MidiScoreData parseMidiFile(const juce::File& file)
                 n.endSec = n.startSec + 0.05;   // zero-length guard (drum hits)
             n.voice = voice;
 
+            const size_t c = (size_t) juce::jlimit(0, 15, msg.getChannel() - 1);
+            if (! chBend[c].empty())
+                attachCurve(chBend[c], n.startSec, n.endSec, 0.0f, n.bendPts);
+            if (! chLvl[c].empty())
+                attachCurve(chLvl[c], n.startSec, n.endSec,
+                            (float) n.velocity, n.levelPts);
+
             d.notes.push_back(n);
             d.durationSec = juce::jmax(d.durationSec, n.endSec);
             d.voiceNoteCount[(size_t) voice]++;
@@ -120,7 +179,12 @@ MidiScoreData parseMidiFile(const juce::File& file)
               { return a.startSec < b.startSec; });
 
     // ── Voice names ──────────────────────────────────────────────────────────
-    if (byTrack)
+    if (d.sp3ctraCapture)
+    {
+        d.numVoices = 1;
+        d.voiceNames[0] = "Capture";
+    }
+    else if (byTrack)
     {
         d.numVoices = juce::jmin((int) noteTracks.size(), kMaxVoices);
         for (int v = 0; v < d.numVoices; ++v)
@@ -150,6 +214,9 @@ MidiScoreData parseMidiFile(const juce::File& file)
               + " notes, " + juce::String(d.numVoices)
               + (byTrack ? " track voice(s), " : " channel voice(s), ")
               + juce::String(d.durationSec, 1) + " s");
+    if (d.sp3ctraCapture)
+        lines.add("Sp3ctra capture: channels folded into one voice, "
+                  "timbre set to Sine (each note is already a partial)");
     if (mergedNotes > 0)
         lines.add("Voices beyond " + juce::String(kMaxVoices) + " merged into voice "
                   + juce::String(kMaxVoices) + " (" + juce::String(mergedNotes) + " notes)");
@@ -421,6 +488,47 @@ namespace
         }
     }
 
+    /** Captured curves of ONE note (Sp3ctra MPE takes), folded into the same
+     *  per-column arrays as the synthetic vibrato: bendPts waves the whole
+     *  partial stack along the note's REAL pitch trajectory, levelPts turns
+     *  the ink into the captured level envelope (its dB replaces the note-on
+     *  velocity's). Piecewise-constant walk — breakpoints are sorted and tau
+     *  grows with the column. */
+    void computeNoteCurves(const NoteEvent& n, const BandGeom& g,
+                           int x0, int x1, double pxPerCent, double velRangeDb,
+                           bool addToExisting,
+                           std::vector<double>& yOffPx, std::vector<double>& amDb)
+    {
+        const size_t nCols = (size_t) juce::jmax(0, x1 - x0);
+        if (! addToExisting)
+        {
+            yOffPx.assign(nCols, 0.0);
+            amDb.assign(nCols, 0.0);
+        }
+        const double baseDb = velocityDb(n.velocity, velRangeDb);
+        size_t ib = 0, il = 0;
+        for (size_t i = 0; i < nCols; ++i)
+        {
+            const double tau = (((double) (x0 + (int) i) + 0.5) - g.x0Px) / g.pxPerSec
+                             + g.t0 - n.startSec;
+            if (tau < 0.0)
+                continue;
+            if (! n.bendPts.empty())
+            {
+                while (ib + 1 < n.bendPts.size() && n.bendPts[ib + 1].first <= tau)
+                    ++ib;
+                yOffPx[i] += (double) n.bendPts[ib].second * pxPerCent;
+            }
+            if (! n.levelPts.empty())
+            {
+                while (il + 1 < n.levelPts.size() && n.levelPts[il + 1].first <= tau)
+                    ++il;
+                amDb[i] += velocityDb((int) n.levelPts[il].second, velRangeDb)
+                         - baseDb;
+            }
+        }
+    }
+
     /** Draws every note overlapping [t0..t1] into the band: one soft-edged
      *  horizontal line per partial, attack/decay envelope along the note,
      *  end fade for anti-click / bar separation, per-voice living vibrato
@@ -473,6 +581,14 @@ namespace
                        juce::jmin(p->getGreen(), juce::jmin(vL, vR)),
                        juce::jmin(p->getBlue(),  vL));
         };
+
+        // Per-voice EQ: the curve is a tone control of the VOICE, so its gain
+        // is read at each PARTIAL's frequency (not at an image row) — hoisted
+        // here so the inner loops only pay for voices that actually shape.
+        std::array<bool, kMaxVoices> eqOn {};
+        for (int v = 0; v < kMaxVoices; ++v)
+            eqOn[(size_t) v] = vps[(size_t) v].enabled
+                            && s.voiceEq[(size_t) v].active();
 
         // ── Pan automation → per-VOICE, per-column L/R attenuations (dB ≤ 0).
         // Linear balance: centre = 0 dB both sides (grey ink, historical
@@ -548,18 +664,39 @@ namespace
                 vibMarginPx = (int) std::ceil(vp.vibCents * 1.25 * pxPerCent);
             }
 
+            // Captured curves (MPE takes): the note's REAL pitch trajectory
+            // and level envelope, folded into the same arrays.
+            const bool hasCurves = (! n.bendPts.empty() || ! n.levelPts.empty())
+                                 && pxPerCent > 0.0 && x1 > x0;
+            if (hasCurves)
+            {
+                computeNoteCurves(n, g, x0, x1, pxPerCent, s.velocityRangeDb,
+                                  hasVib, vibYOff, vibAmDb);
+                double mxCents = 0.0;
+                for (const auto& bp : n.bendPts)
+                    mxCents = juce::jmax(mxCents, std::abs((double) bp.second));
+                vibMarginPx += (int) std::ceil(mxCents * pxPerCent) + 1;
+            }
+            const bool hasWave = hasVib || hasCurves;
+
             // This VOICE's pan attenuations (nullptr = centred voice).
             const double* vPanL = panDbL[(size_t) n.voice].empty()
                                       ? nullptr : panDbL[(size_t) n.voice].data();
             const double* vPanR = panDbR[(size_t) n.voice].empty()
                                       ? nullptr : panDbR[(size_t) n.voice].data();
 
+            const midiscoregen::MidiScoreSettings::VoiceEq* vEq =
+                eqOn[(size_t) n.voice] ? &s.voiceEq[(size_t) n.voice] : nullptr;
+
             for (const auto& pt : vp.rel)
             {
                 const double f = f0 * (pt.freqHz / vp.refHz);
                 if (f < s.minFreq || f > s.maxFreq)
                     continue;   // partial outside the instrument's span
-                const double baseDb = baseAll + pt.ampDb;
+                // This VOICE's EQ at THIS partial — an absolute gain (like
+                // levelDb), never folded into the normalisation.
+                const double eqDb   = vEq ? (double) vEq->gainDbAt(f) : 0.0;
+                const double baseDb = baseAll + pt.ampDb + eqDb;
                 if (baseDb <= -range)
                     continue;
 
@@ -590,7 +727,7 @@ namespace
                         envDb += 20.0 * std::log10(juce::jmax(tail / fadeSec, 1.0e-4));
 
                     double yCol = yC;
-                    if (hasVib)
+                    if (hasWave)
                     {
                         yCol -= vibYOff[(size_t) (x - x0)];          // +cents = higher = up
                         envDb += vibAmDb[(size_t) (x - x0)];

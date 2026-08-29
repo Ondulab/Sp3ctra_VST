@@ -89,6 +89,9 @@ inline juce::String dvParam(int slot, const char* suffix)
 inline juce::String dcbParam(int slot, const char* suffix)
 { return "luxdcblock" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
 
+inline juce::String gnParam(int slot, const char* suffix)
+{ return "luxgain" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
+
 // Media source banks (P5-M3) — slot 0 keeps the LEGACY global ids
 // ("imgSrcPos"…) so existing sessions and automation lanes load unchanged;
 // slots 1..7 own "imgSrc{N}_<suffix>". (VIDEO/CAMERA follow the same recipe
@@ -220,6 +223,7 @@ inline juce::String insertBankParam(ModuleType t, int slot, const char* suffix)
         case ModuleType::Centroid:  return ctParam(slot, suffix);
         case ModuleType::Drive:     return dvParam(slot, suffix);
         case ModuleType::DcBlock:   return dcbParam(slot, suffix);
+        case ModuleType::Gain:      return gnParam(slot, suffix);
         default:                    return {};
     }
 }
@@ -241,8 +245,11 @@ struct ModuleParamManifest
 
 namespace module_param_manifest_detail
 {
+    // (BackgroundMode left every bank on 2026-08-21 — the pole is chain-owned:
+    // Chain::backgroundMode, projected by applyChainBackgrounds(). Legacy
+    // VALUES attributes are consumed once by the schema-4 migration.)
     inline const char* const kPitch[] = {
-        "Enabled", "Polyphony", "BackgroundMode", "CouplingMode",
+        "Enabled", "Polyphony", "CouplingMode",
         "FreePixelsPerST", "PitchBendRange",
         "AttackMs", "DecayMs", "SustainLevel", "ReleaseMs",
         "AttackCurve", "DecayCurve", "ReleaseCurve",
@@ -250,7 +257,7 @@ namespace module_param_manifest_detail
         "MidiChannel", "OctaveOffset", "ReferenceNote",
     };
     inline const char* const kMask[] = {
-        "Enabled", "Polyphony", "BackgroundMode", "CouplingMode",
+        "Enabled", "Polyphony", "CouplingMode",
         "FreePixelsPerST", "PitchBendRange",
         "FilterWidth", "FilterOffset", "FilterSlope",
         "AttackMs", "DecayMs", "SustainLevel", "ReleaseMs",
@@ -259,41 +266,54 @@ namespace module_param_manifest_detail
         "MidiChannel", "OctaveOffset", "ReferenceNote",
     };
     inline const char* const kReverb[] = {
-        "Enabled", "Decay", "Diffusion", "Mix", "BackgroundMode",
+        "Enabled", "Decay", "Diffusion", "Mix",
     };
     inline const char* const kEcho[] = {
-        "Enabled", "Delay", "Feedback", "Mix", "BackgroundMode",
+        "Enabled", "Delay", "Feedback", "Mix",
     };
+    // Typed-handle EQ bank (schema 5 — shape_eq.h): 4 handles × Type/Freq/
+    // Gain/Width. Legacy Band0..8 + NumPoints VALUES are ignored on load
+    // (curve reloads flat, by design — no spline→handle fitting).
     inline const char* const kEq[] = {
-        "Enabled",
-        "Band0", "Band1", "Band2", "Band3", "Band4",
-        "Band5", "Band6", "Band7", "Band8",
-        "NumPoints", "BackgroundMode",
+        "Enabled", "Level",
+        "Sh0Type", "Sh0Freq", "Sh0Gain", "Sh0Width",
+        "Sh1Type", "Sh1Freq", "Sh1Gain", "Sh1Width",
+        "Sh2Type", "Sh2Freq", "Sh2Gain", "Sh2Width",
+        "Sh3Type", "Sh3Freq", "Sh3Gain", "Sh3Width",
     };
     inline const char* const kHarmo[] = {
         "Enabled", "Mode", "Root", "Scale",
         "Strength", "Width", "Slope", "Glide",
-        "BackgroundMode",
     };
     inline const char* const kCentro[] = {
         "Enabled", "Floor", "Thickness", "Edge",
-        "Band0", "Band1", "Band2", "Band3", "Band4",
-        "Band5", "Band6", "Band7", "Band8",
-        "NumPoints",   // output EQ — same node model as the kEq bank
-        "BackgroundMode",
+        "WidthTilt", "WidthLaw",   // frequency-weighted width law
+        // output EQ — same typed-handle model as the kEq bank
+        "Level",
+        "Sh0Type", "Sh0Freq", "Sh0Gain", "Sh0Width",
+        "Sh1Type", "Sh1Freq", "Sh1Gain", "Sh1Width",
+        "Sh2Type", "Sh2Freq", "Sh2Gain", "Sh2Width",
+        "Sh3Type", "Sh3Freq", "Sh3Gain", "Sh3Width",
     };
     inline const char* const kDrive[] = {
         "Enabled", "Gamma", "Saturation", "Floor", "ContrastMin", "InvertMode",
-        "Band0", "Band1", "Band2", "Band3", "Band4",
-        "Band5", "Band6", "Band7", "Band8",
-        "NumPoints",   // output EQ — same node model as the kEq bank
-        "BackgroundMode",
+        // output EQ — same typed-handle model as the kEq bank
+        "Level",
+        "Sh0Type", "Sh0Freq", "Sh0Gain", "Sh0Width",
+        "Sh1Type", "Sh1Freq", "Sh1Gain", "Sh1Width",
+        "Sh2Type", "Sh2Freq", "Sh2Gain", "Sh2Width",
+        "Sh3Type", "Sh3Freq", "Sh3Gain", "Sh3Width",
     };
     inline const char* const kDcBlock[] = {
-        "Enabled", "Amount", "BackgroundMode",
+        "Enabled", "Amount",
+    };
+    inline const char* const kGain[] = {
+        "Enabled", "Gain",
     };
     inline const char* const kVideoScroll[] = {
-        "mode", "speed", "linePos", "thickness", "zoom", "fade", "gamma",
+        "rotation", "speed", "linePos", "thickness", "zoom", "centerX", "centerY",
+        // ("mode" — the 4-way orientation — migrated to "rotation" 2026-08-28)
+        "fade", "blur", "gamma",
         "compress", "invert",   // "invert" = legacy bool, migrated to "invertMode"
         "invertMode", "colorMode", "bgR", "bgG", "bgB", "paused", "enabled",
         "MixLevel", "MixBlend",   // → videoMix{N}_level / _blend
@@ -309,11 +329,13 @@ namespace module_param_manifest_detail
         // timing (ms — converted to lines against the measured line rate)
         "attackMs", "releaseMs", "minOnMs", "maxOnMs",
         // pitch mapping
-        "transpose", "noteLo", "noteHi", "rangePolicy", "backgroundMode",
+        "transpose", "noteLo", "noteHi", "rangePolicy",
         // velocity + routing
         "velCurve", "velSpan", "velFixed", "channel",
         // dense ("black MIDI") — velocity-tracking restrikes
         "dense", "retrigMs", "retrigDelta",
+        // live-output shaping (files unaffected)
+        "portMpe",
     };
     // Purge 2026-08-05: the per-OUT conditioning knobs (negative / dcBlocking /
     // gamma / intensity / rangeDb) are gone — conditioning lives in the chain
@@ -363,6 +385,7 @@ namespace module_param_manifest_detail
     inline juce::String ctId(int s, const char* x) { return ctParam(s, x); }
     inline juce::String dvId(int s, const char* x) { return dvParam(s, x); }
     inline juce::String dcbId(int s, const char* x) { return dcbParam(s, x); }
+    inline juce::String gnId(int s, const char* x) { return gnParam(s, x); }
     inline juce::String lsId(int s, const char* x) { return lsOutParam(s, x); }
     inline juce::String lxId(int s, const char* x) { return lxOutParam(s, x); }
     inline juce::String lwId(int s, const char* x) { return lwOutParam(s, x); }
@@ -421,6 +444,10 @@ inline const ModuleParamManifest kModuleParamManifest[] = {
       module_param_manifest_detail::kDcBlock,
       (int) std::size(module_param_manifest_detail::kDcBlock),
       &module_param_manifest_detail::dcbId },
+    { ModuleType::Gain,        "luxgain",     8,
+      module_param_manifest_detail::kGain,
+      (int) std::size(module_param_manifest_detail::kGain),
+      &module_param_manifest_detail::gnId },
     { ModuleType::VideoScroll, "videoScroll", 8,
       module_param_manifest_detail::kVideoScroll,
       (int) std::size(module_param_manifest_detail::kVideoScroll),

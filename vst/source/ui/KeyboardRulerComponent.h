@@ -79,7 +79,7 @@ private:
     // ── Mapping snapshot (mirrors lux_pitch.c / lux_mask.c) ──────────────────
     float pixelCount { 3456.0f };
     float pps        { 24.0f };             // pixels per semitone
-    int   refNote    { 57 };                // engine reference note (MIDI)
+    int   refNote    { 69 };                // engine reference note (MIDI)
 
     // ── Voice snapshot, rebuilt at 30 Hz (POD → cheap change detection) ──────
     struct VoiceSnap

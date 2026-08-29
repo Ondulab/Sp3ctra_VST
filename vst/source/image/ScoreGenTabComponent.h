@@ -31,7 +31,7 @@
 #include "../licensing/ActivationDialog.h"
 #include "ScoreGenThread.h"
 #include "ScoreGenRenderer.h"
-#include "ScoreEqComponent.h"
+#include "../ui/ShapeEqComponent.h"
 #include "WaveformSelectorComponent.h"
 
 class ScoreGenTabComponent : public juce::Component,
@@ -789,7 +789,7 @@ public:
         // further than the column foot: when the panel is condensed it shrinks in
         // place instead of sliding under the controls / log, so nothing overlaps.
         const int eqTop = juce::jmax(colBottom + gap,
-                                     getHeight() - pad - ScoreEqComponent::kPreferredH);
+                                     getHeight() - pad - ShapeEqComponent::kPreferredH);
         const int eqH   = juce::jmax(0, getHeight() - pad - eqTop);
         eqEditor.setBounds(pad, eqTop, getWidth() - 2 * pad, eqH);
         const int contentBottom = eqTop - gap;     // controls + preview live above
@@ -1877,7 +1877,7 @@ private:
     // DPI and image format live on the SETUP face).
     juce::ToggleButton stereoToggle;          // generate L/R spectrograms (red=L, blue=R)
     juce::ToggleButton multiResToggle;        // multi-resolution STFT (encoder-only)
-    ScoreEqComponent eqEditor { juce::Colour(kAccentARGB) };
+    ShapeEqComponent eqEditor { juce::Colour(kAccentARGB) };
     WaveformSelectorComponent waveform { juce::Colour(kAccentARGB) };
     juce::TextButton previewButton;          // audition the selected source region
     juce::File previewFile;                  // region last handed to the preview…

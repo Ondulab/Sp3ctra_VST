@@ -10,6 +10,7 @@
 #include "../processing/midi_tap.h"
 #include "../licensing/ActivationDialog.h"   // LicenseGate::blockIfDemo
 #include "../session/MachinePrefs.h"         // MIDI OUT destination is machine-scoped
+#include "../Sp3ctraDialog.h"
 #include <functional>
 #include <memory>
 #include <vector>
@@ -17,9 +18,13 @@
 /**
  * @brief Right-band MIDI MIX strip — the MASTER of every MIDI TAP probe.
  *
- * Owns what the probes must AGREE on: the REC transport with its common t0
- * (so N takes land on one DAW timeline), the tempo, and the real-time
- * destination. Each probe keeps what "counts as a note" on its own zone-3 page.
+ * ONE button: REC captures every ENABLED probe into a faithful (black MIDI)
+ * .mid — dense mode is forced for the take by the processor, the write is
+ * never quantized, and the tempo is a fixed internal 120 (SMF timing is
+ * absolute, the value is pure display convention — so there is nothing to
+ * configure). The retired BPM / GRID / per-probe ARM controls are gone; their
+ * params survive only for session compatibility. Each probe keeps what
+ * "counts as a note" on its own zone-3 page.
  *
  * The section only EXISTS while at least one probe is patched: hasProbes() is
  * derived from processor.activeMidiTapSlots() in refreshActiveSlots(), and the
@@ -32,18 +37,23 @@ class MidiMixPanel : public juce::Component,
 {
 public:
     static constexpr int kHeaderH = 24;
-    static constexpr int kMasterH = 4 * 24 + 3 * 4;   // REC / BPM / GRID / OUT
+    static constexpr int kMasterH = 2 * 24 + 1 * 4;   // REC / OUT
     static constexpr int kRowH    = 24;
     static constexpr int kRowGap  = 4;
     static constexpr int kPad     = 6;
     static constexpr int kLabelW  = 46;               // painted master-row labels
+    /** Probe TILE: header row (chain label + OUT + MPE) over a control row
+     *  (level + channel) — survives narrow bands where a single row could
+     *  not fit five controls. */
+    static constexpr int kTileH   = 54;
+    static constexpr int kTileGap = 6;
 
-    /** Height for the CURRENT row count — the editor uses it to split zone 4. */
+    /** Height for the CURRENT tile count — the editor uses it to split zone 4. */
     int preferredHeight() const noexcept
     {
         if (voices_.empty()) return 0;
         return kHeaderH + kMasterH + kPad
-             + (int) voices_.size() * (kRowH + kRowGap) + kPad;
+             + (int) voices_.size() * (kTileH + kTileGap) + kPad;
     }
 
     bool hasProbes() const noexcept { return ! voices_.empty(); }
@@ -57,28 +67,15 @@ public:
     {
         addAndMakeVisible(recBtn_);
         recBtn_.onClick = [this] { toggleRecording(); };
-
-            // No " BPM" suffix: the painted row label carries the unit instead.
-        tempoSlider_.setDoubleClickReturnValue(true, 120.0);   // cycle centre
-        addAndMakeVisible(tempoSlider_);
-        tempoAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-            processor_.getAPVTS(), "midiTempo", tempoSlider_);
-        tempoLearn_ = std::make_unique<MidiLearnAttachment>(
-            processor_.getMidiMap(), tempoSlider_, "midiTempo");
+        recBtn_.setColour(juce::TextButton::buttonOnColourId,
+                          juce::Colour(0xffff3b30).withAlpha(0.85f));
+        recBtn_.setTooltip("Record every enabled probe to a .mid take "
+                           "(faithful black-MIDI capture, one shared timeline). "
+                           "Press again to stop and write the file.");
 
         addAndMakeVisible(destCombo_);
         destCombo_.onChange = [this] { applyDestination(); };
         rebuildDestinations();
-
-        // Write-time grid. FILE ONLY — the port and bus sinks stay unquantized.
-        for (const char* g : { "Off", "1/32", "1/16T", "1/16", "1/8T", "1/8", "1/4" })
-            gridCombo_.addItem(g, gridCombo_.getNumItems() + 1);
-        gridCombo_.setTooltip("Rhythmic grid applied when the .mid is written.\n"
-                              "MuseScore 4 has no MIDI import panel, so an "
-                              "unquantized file gets whatever the reader invents.");
-        addAndMakeVisible(gridCombo_);
-        gridAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-            processor_.getAPVTS(), "midiQuantize", gridCombo_);
 
         // A TextButton, not a ToggleButton: a bare tick box next to a combo read
         // as decoration — the label has to be ON the control.
@@ -99,11 +96,11 @@ public:
 
     ~MidiMixPanel() override { stopTimer(); }
 
-    /** Rebuild the rows from processor.activeMidiTapSlots(). Cheap no-op when
-     *  the slot list is unchanged (same contract as VideoMixerComponent). */
+    /** Rebuild the rows from processor.activeMidiTapSlotChains(). Cheap no-op
+     *  when the list is unchanged (same contract as VideoMixerComponent). */
     void refreshActiveSlots()
     {
-        auto slots = processor_.activeMidiTapSlots();
+        auto slots = processor_.activeMidiTapSlotChains();
         if (slots == activeSlots_) return;
         activeSlots_ = slots;
         rebuildStrip();
@@ -145,35 +142,30 @@ public:
         else
         {
             g.setColour(juce::Colour(0xff9aa6ba));
-            const int armed = armedCount();
-            g.drawText(armed == 0 ? juce::String("no probe armed")
-                                  : juce::String(armed) + (armed > 1 ? " probes armed"
-                                                                     : " probe armed"),
+            const int ready = enabledCount();
+            g.drawText(ready == 0 ? juce::String("no probe enabled")
+                                  : juce::String(ready) + (ready > 1 ? " probes ready"
+                                                                     : " probe ready"),
                        readoutArea_, juce::Justification::centredLeft, false);
         }
 
-        auto drawRowLabel = [&](const juce::String& t, juce::Rectangle<int> box)
+        if (! destLabelArea_.isEmpty())
         {
-            if (box.isEmpty()) return;
             g.setColour(juce::Colour(0xff9aa6ba));
             g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
-            g.drawText(t, box, juce::Justification::centredLeft, false);
-        };
-        drawRowLabel("BPM",  tempoLabelArea_);
-        drawRowLabel("GRID", gridLabelArea_);
-        drawRowLabel("OUT",  destLabelArea_);
+            g.drawText("OUT", destLabelArea_, juce::Justification::centredLeft, false);
+        }
 
         if (voices_.empty()) return;
 
-        g.setColour(juce::Colour(0xff14141c));
-        g.fillRoundedRectangle(stripArea_.toFloat(), 4.0f);
-
-        auto strip = stripArea_.reduced(kPad, kPad / 2);
+        auto strip = stripArea_;
         for (auto& v : voices_)
         {
-            auto row = strip.removeFromTop(kRowH);
-            strip.removeFromTop(kRowGap);
-            auto labelBox = row.removeFromLeft(kLabelW).reduced(2, 0);
+            auto tile = strip.removeFromTop(kTileH);
+            strip.removeFromTop(kTileGap);
+
+            g.setColour(juce::Colour(0xff14141c));
+            g.fillRoundedRectangle(tile.toFloat(), 4.0f);
 
             // Activity: ● notes flowing / ◐ enabled-idle / ○ disabled — the
             // same three states as the rack LED, read from the RT instance.
@@ -184,7 +176,8 @@ public:
             g.setColour(! on ? kAccent.withAlpha(0.25f)
                              : (hot ? kAccent : kAccent.withAlpha(0.6f)));
             g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
-            g.drawText("MIDI " + juce::String(v->slot + 1), labelBox,
+            g.drawText(v->label,
+                       tile.reduced(kPad, 0).removeFromTop(kTileH / 2),
                        juce::Justification::centredLeft, false);
         }
     }
@@ -200,13 +193,12 @@ public:
 
         const bool showFull = ! collapsed_;
         recBtn_     .setVisible(true);   // transport stays reachable when folded
-        tempoSlider_.setVisible(showFull);
-        gridCombo_  .setVisible(showFull);
         destCombo_  .setVisible(showFull);
         busBtn_     .setVisible(showFull);
         for (auto& v : voices_)
         {
-            v->arm  .setVisible(showFull);
+            v->out  .setVisible(showFull);
+            v->mpe  .setVisible(showFull);
             v->level.setVisible(showFull);
             v->chan .setVisible(showFull);
         }
@@ -214,8 +206,7 @@ public:
         if (collapsed_)
         {
             recBtn_.setBounds(4, 2, 44, 20);
-            stripArea_ = readoutArea_ = {};
-            tempoLabelArea_ = gridLabelArea_ = destLabelArea_ = {};
+            stripArea_ = readoutArea_ = destLabelArea_ = {};
             return;
         }
 
@@ -227,50 +218,43 @@ public:
         row1.removeFromLeft(6);
         readoutArea_ = row1;
 
-        // Row 2 — tempo, with a painted unit label instead of a truncated suffix.
+        // Row 2 — real-time destination + the plugin-bus toggle.
         master.removeFromTop(4);
         auto row2 = master.removeFromTop(24);
-        tempoLabelArea_ = row2.removeFromLeft(kLabelW);
-        tempoSlider_.setBounds(row2);
-
-        // Row 3 — write-time grid (file only).
-        master.removeFromTop(4);
-        auto row3 = master.removeFromTop(24);
-        gridLabelArea_ = row3.removeFromLeft(kLabelW);
-        gridCombo_.setBounds(row3);
-
-        // Row 4 — real-time destination + the plugin-bus toggle.
-        master.removeFromTop(4);
-        auto row4 = master.removeFromTop(24);
-        destLabelArea_ = row4.removeFromLeft(kLabelW);
-        busBtn_.setBounds(row4.removeFromRight(44).reduced(0, 1));
-        row4.removeFromRight(6);
-        destCombo_.setBounds(row4);
+        destLabelArea_ = row2.removeFromLeft(kLabelW);
+        busBtn_.setBounds(row2.removeFromRight(44).reduced(0, 1));
+        row2.removeFromRight(6);
+        destCombo_.setBounds(row2);
 
         r.removeFromTop(kPad);
-        stripArea_ = r.removeFromTop(juce::jmax(0, (int) voices_.size() * (kRowH + kRowGap)));
+        stripArea_ = r.removeFromTop(
+            juce::jmax(0, (int) voices_.size() * (kTileH + kTileGap)));
 
-        auto strip = stripArea_.reduced(kPad, kPad / 2);
+        auto strip = stripArea_;
         for (auto& v : voices_)
         {
-            auto row = strip.removeFromTop(kRowH);
-            strip.removeFromTop(kRowGap);
-            row.removeFromLeft(kLabelW);                  // painted "MIDI n"
-            // 54 px truncated "Ch 16" to "..." once the dropdown arrow was
-            // accounted for; the level slider has room to spare.
-            v->chan .setBounds(row.removeFromRight(66).reduced(0, 1));
-            row.removeFromRight(4);
-            v->arm  .setBounds(row.removeFromLeft(40).reduced(0, 2));
-            row.removeFromLeft(4);
-            v->level.setBounds(row.reduced(0, 2));
+            auto tile = strip.removeFromTop(kTileH).reduced(kPad, 3);
+            strip.removeFromTop(kTileGap);
+
+            // Header: painted chain label left, OUT + MPE right.
+            auto top = tile.removeFromTop(tile.getHeight() / 2);
+            v->mpe.setBounds(top.removeFromRight(40).reduced(0, 1));
+            top.removeFromRight(4);
+            v->out.setBounds(top.removeFromRight(40).reduced(0, 1));
+
+            // Controls: level takes the width, channel on the right.
+            tile.removeFromTop(2);
+            v->chan .setBounds(tile.removeFromRight(64).reduced(0, 1));
+            tile.removeFromRight(4);
+            v->level.setBounds(tile.reduced(0, 1));
         }
     }
 
     void mouseUp(const juce::MouseEvent& e) override
     {
         if (collapsed_ || ! stripArea_.contains(e.getPosition())) return;
-        const int idx = (e.getPosition().y - stripArea_.getY() - kPad / 2)
-                      / (kRowH + kRowGap);
+        const int idx = (e.getPosition().y - stripArea_.getY())
+                      / (kTileH + kTileGap);
         if (idx >= 0 && idx < (int) voices_.size() && onProbeSelected)
             onProbeSelected(voices_[(size_t) idx]->slot);
     }
@@ -280,14 +264,17 @@ private:
 
     struct Voice
     {
-        int slot { -1 };
-        juce::TextButton   arm;
+        int slot  { -1 };
+        int chain { -1 };
+        juce::String label;   // "CHAIN 3" (+ a/b when a chain hosts 2 probes)
+        juce::TextButton   out;   // live-output mute (historical "arm" param)
+        juce::TextButton   mpe;   // live-output MPE mode
         Sp3ctraBarSlider   level;
         juce::ComboBox     chan;
-        std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   armAtt;
+        std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   outAtt, mpeAtt;
         std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   levelAtt;
         std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> chanAtt;
-        std::unique_ptr<MidiLearnAttachment> armLearn, levelLearn, chanLearn;
+        std::unique_ptr<MidiLearnAttachment> outLearn, mpeLearn, levelLearn, chanLearn;
 
         uint32_t lastTicks { 0 };
         bool     seeded    { false };
@@ -305,21 +292,35 @@ private:
     {
         voices_.clear();
         auto& apvts = processor_.getAPVTS();
-        for (int slot : activeSlots_)
+        for (const auto& [slot, chain] : activeSlots_)
         {
             auto v = std::make_unique<Voice>();
-            v->slot = slot;
+            v->slot  = slot;
+            v->chain = chain;
 
-            v->arm.setButtonText("ARM");
-            v->arm.setClickingTogglesState(true);
-            v->arm.setColour(juce::TextButton::buttonOnColourId,
-                             juce::Colour(0xffff3b30).withAlpha(0.85f));
-            v->arm.setTooltip("Armed: this probe's notes reach the master REC "
-                              "and the real-time destination.");
-            addAndMakeVisible(v->arm);
+            v->out.setButtonText("OUT");
+            v->out.setClickingTogglesState(true);
+            v->out.setColour(juce::TextButton::buttonOnColourId,
+                             kAccent.withAlpha(0.85f));
+            v->out.setTooltip("Live MIDI output of this probe (port + BUS).\n"
+                              "Off mutes the stream; REC is never affected.");
+            addAndMakeVisible(v->out);
+
+            v->mpe.setButtonText("MPE");
+            v->mpe.setClickingTogglesState(true);
+            v->mpe.setColour(juce::TextButton::buttonOnColourId,
+                             kAccent.withAlpha(0.85f));
+            v->mpe.setTooltip("Stream the port as MPE: one channel per note, "
+                              "crest bends as per-note pitch (\xc2\xb1"
+                              "2 st) and the level envelope as pressure/CC11.\n"
+                              "Enable MPE on the receiving synth. Files are "
+                              "unaffected.");
+            addAndMakeVisible(v->mpe);
 
             v->level.setTextBoxStyle(juce::Slider::NoTextBox, true, 0, 0);
             v->level.setRange(0.0, 1.0, 0.01);
+            v->level.setTooltip("Live-output velocity scale (monitoring gain). "
+                                "Takes stay faithful.");
             addAndMakeVisible(v->level);
 
             for (int c = 1; c <= 16; ++c) v->chan.addItem("Ch " + juce::String(c), c);
@@ -328,17 +329,28 @@ private:
             using SA = juce::AudioProcessorValueTreeState::SliderAttachment;
             using CA = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
             using BA = juce::AudioProcessorValueTreeState::ButtonAttachment;
-            v->armAtt   = std::make_unique<BA>(apvts, mtParam(slot, "arm"),     v->arm);
+            v->outAtt   = std::make_unique<BA>(apvts, mtParam(slot, "arm"),     v->out);
+            v->mpeAtt   = std::make_unique<BA>(apvts, mtParam(slot, "portMpe"), v->mpe);
             v->levelAtt = std::make_unique<SA>(apvts, mtParam(slot, "level"),   v->level);
             v->chanAtt  = std::make_unique<CA>(apvts, mtParam(slot, "channel"), v->chan);
-            v->armLearn   = std::make_unique<MidiLearnAttachment>(
-                                processor_.getMidiMap(), v->arm,   mtParam(slot, "arm"));
+            v->outLearn   = std::make_unique<MidiLearnAttachment>(
+                                processor_.getMidiMap(), v->out,   mtParam(slot, "arm"));
+            v->mpeLearn   = std::make_unique<MidiLearnAttachment>(
+                                processor_.getMidiMap(), v->mpe,   mtParam(slot, "portMpe"));
             v->levelLearn = std::make_unique<MidiLearnAttachment>(
                                 processor_.getMidiMap(), v->level, mtParam(slot, "level"));
             v->chanLearn  = std::make_unique<MidiLearnAttachment>(
                                 processor_.getMidiMap(), v->chan,  mtParam(slot, "channel"));
             voices_.push_back(std::move(v));
         }
+
+        // Row identity = the HOST CHAIN (a probe is "the MIDI of chain 3",
+        // not "pool slot 2"); a chain hosting several probes gets a/b/c
+        // suffixes. One source of truth with the take files and the virtual
+        // ports — and the sinks learn their name right away.
+        for (auto& v : voices_)
+            v->label = processor_.midiTapLabel(v->slot);
+        processor_.refreshMidiTapDisplayNames();
         resized();
         repaint();
     }
@@ -378,8 +390,7 @@ private:
         MachinePrefs::file().setValue("midiTapDest", name);
         const auto err = processor_.midiTapLastError();
         if (err.isNotEmpty())
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::MessageBoxIconType::WarningIcon, "MIDI output", err, "OK");
+            Sp3ctraDialog::showWarning(this, "MIDI output", err);
     }
 
     void toggleRecording()
@@ -388,10 +399,11 @@ private:
         {
             processor_.stopMidiCapture();
             recBtn_.setToggleState(false, juce::dontSendNotification);
+            // Silent on success (the readout already told the story) — only a
+            // failure earns a dialog.
             const auto err = processor_.midiTapLastError();
             if (err.isNotEmpty())
-                juce::AlertWindow::showMessageBoxAsync(
-                    juce::MessageBoxIconType::WarningIcon, "MIDI recording", err, "OK");
+                Sp3ctraDialog::showWarning(this, "MIDI recording", err);
             repaint();
             return;
         }
@@ -419,10 +431,9 @@ private:
         if (! processor_.startMidiCapture(dir, "Sp3ctra_" + stamp, err))
         {
             recBtn_.setToggleState(false, juce::dontSendNotification);
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::MessageBoxIconType::WarningIcon, "MIDI recording",
-                err.isNotEmpty() ? err : juce::String("Could not start recording."),
-                "OK");
+            Sp3ctraDialog::showWarning(
+                this, "MIDI recording",
+                err.isNotEmpty() ? err : juce::String("Could not start recording."));
             return;
         }
         if (sessions != nullptr)
@@ -435,39 +446,36 @@ private:
     {
         if (! collapsed_) repaint(stripArea_.getUnion(readoutArea_));
         recBtn_.setToggleState(processor_.isMidiCapturing(), juce::dontSendNotification);
+        // Channel only addresses the classic notes stream (and BUS): while
+        // MPE streams, channels are allocated per note — grey it out.
+        for (auto& v : voices_)
+            v->chan.setEnabled(! v->mpe.getToggleState());
     }
 
     Sp3ctraAudioProcessor& processor_;
     std::vector<std::unique_ptr<Voice>> voices_;
-    std::vector<int> activeSlots_;
+    std::vector<std::pair<int, int>> activeSlots_;   // {slot, chain} pairs
 
-    /** Probes that would actually write a take (enabled AND armed). */
-    int armedCount() const
+    /** Probes that would actually write a take (module enabled). */
+    int enabledCount() const
     {
         int n = 0;
         auto& apvts = processor_.getAPVTS();
         for (const auto& v : voices_)
         {
-            auto* a = apvts.getRawParameterValue(mtParam(v->slot, "arm"));
             auto* e = apvts.getRawParameterValue(mtParam(v->slot, "enabled"));
-            if (a != nullptr && e != nullptr && a->load() >= 0.5f && e->load() >= 0.5f)
+            if (e != nullptr && e->load() >= 0.5f)
                 ++n;
         }
         return n;
     }
 
     juce::TextButton recBtn_ { "REC" };
-    Sp3ctraBarSlider tempoSlider_;
     juce::ComboBox   destCombo_;
-    juce::ComboBox   gridCombo_;
     juce::TextButton busBtn_;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> tempoAtt_;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   busAtt_;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> gridAtt_;
-    std::unique_ptr<MidiLearnAttachment> tempoLearn_;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> busAtt_;
 
-    juce::Rectangle<int> stripArea_, readoutArea_;
-    juce::Rectangle<int> tempoLabelArea_, gridLabelArea_, destLabelArea_;
+    juce::Rectangle<int> stripArea_, readoutArea_, destLabelArea_;
     bool collapsed_ { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MidiMixPanel)

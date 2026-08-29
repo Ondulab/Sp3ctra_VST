@@ -327,13 +327,18 @@ bool ScorePlayerService::ownsDisplay() const noexcept
 {
     // Same shape as the run loop's display-owner pick: playing, scrubbing or
     // a tail runout claims the bus; a PARKED hold (sessionActive without any
-    // of those) does not — the producers keep the live view.
+    // of those) does not — the producers keep the live view. (2026-08-20)
+    // Ownership-aware: a slot whose every marker sits above a feeding source
+    // (chain_source_mask_pos) injects nowhere — it must not claim the bus
+    // either, or the view keeps showing its frames while the audible stream
+    // is the source's ("VOICE keeps the hand over the IMAGE under it").
     for (int i = 0; i < kMaxSlots; ++i)
     {
         const ScoreSlot& s = slots_[i];
-        if (s.playRequested.load(std::memory_order_acquire)
-            || s.scrubbing.load(std::memory_order_acquire)
-            || s.runoutActive.load(std::memory_order_acquire))
+        if ((s.playRequested.load(std::memory_order_acquire)
+             || s.scrubbing.load(std::memory_order_acquire)
+             || s.runoutActive.load(std::memory_order_acquire))
+            && chain_player_owns_any_stream(/*is_score*/ 1, i) != 0)
             return true;
     }
     return false;
@@ -561,6 +566,9 @@ void ScorePlayerService::run()
         // claims it: the drone is audio-only, the live view stays with the
         // producers — but a session WINDING DOWN (runout/teardown tick) still
         // owns the bus so the final blank/white write lands as before.
+        // (2026-08-20) Ownership-aware, same rule as ownsDisplay(): a slot
+        // masked by a feeding source below its markers injects nowhere and
+        // leaves the bus — and its teardown white write — to the producers.
         int displayOwner = -1;
         for (int i = 0; i < kMaxSlots; ++i)
         {
@@ -568,7 +576,8 @@ void ScorePlayerService::run()
                 slots_[i].playRequested.load(std::memory_order_acquire)
                 || slots_[i].scrubbing.load(std::memory_order_acquire);
             const bool parkedHold = !transport && slotWantsHold(i);
-            if (transport || (sessions_[i].active && !parkedHold))
+            if ((transport || (sessions_[i].active && !parkedHold))
+                && chain_player_owns_any_stream(/*is_score*/ 1, i) != 0)
             { displayOwner = i; break; }
         }
 
@@ -721,13 +730,9 @@ void ScorePlayerService::endSession(int slot, bool wasDisplayOwner) noexcept
             audioBuffers_, AUDIO_IMAGE_ENGINE_TAP_PATHB,
             NULL, NULL, NULL, get_cis_pixels_nb());   // NULL = white
     }
-    // Same for the LuxStral head-panel tap when this slot's chain was the
-    // first "→ LUXSTRAL" send: show "unfed" (white) instead of freezing.
-    if (audioBuffers_ != nullptr
-        && chain_additive_player_candidate(/*is_score*/ 1, slot) != 0)
-        audio_image_buffers_publish_engine_input(
-            audioBuffers_, AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL,
-            NULL, NULL, NULL, get_cis_pixels_nb());
+    // The LuxStral head-panel tap needs no teardown here: its single writer
+    // is the audio-thread pull-mix, which debounces the deactivated stagings
+    // (score_player_stagings_set_inactive above) to a white publish itself.
 
     if (wasDisplayOwner)
         writeWhiteMixBus();   // blank paper on the visual mix bus

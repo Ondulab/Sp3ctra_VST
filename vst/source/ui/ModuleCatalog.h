@@ -47,7 +47,8 @@ enum class ModuleType
     Centroid,                      // FX — CENTROID mass→barycentre simplifier (appended to keep table indices stable)
     Drive,                         // FX — LEVELS gain/saturation/floor (appended to keep table indices
                                    // stable; renamed DRIVE → LEVELS, enum/persist id stay "Drive")
-    DcBlock                        // FX — DC BLOCK per-line mean removal (appended to keep table indices stable)
+    DcBlock,                       // FX — DC BLOCK per-line mean removal (appended to keep table indices stable)
+    Gain                           // FX — GAIN per-line energy gain (appended to keep table indices stable)
 };
 
 /** SCORE / TIMBRE / MIDI SCORE / VOICE all audition through the
@@ -91,9 +92,9 @@ struct ModuleDesc
 //==============================================================================
 /** The whole catalogue. Table order MUST match the enum order (descFor indexes
  *  by ordinal); the catalogue panel buckets rows by category for display. */
-inline const std::array<ModuleDesc, 24>& moduleTable()
+inline const std::array<ModuleDesc, 25>& moduleTable()
 {
-    static const std::array<ModuleDesc, 24> table = {{
+    static const std::array<ModuleDesc, 25> table = {{
         // type                  category          role                  name                       enableParam          id
         { ModuleType::Sp3ctra,     ModuleCat::SRC,   ModuleRole::Source,   "SP3CTRA",                 "",                  "Sp3ctra"  },
         // Media sources: the type-level id is slot 0's LEGACY global param
@@ -114,7 +115,7 @@ inline const std::array<ModuleDesc, 24>& moduleTable()
         { ModuleType::LuxStral,    ModuleCat::Out,   ModuleRole::Synth,    "\xE2\x86\x92 LUXSTRAL",   "deviceEnabled",     "LuxStral" },
         { ModuleType::LuxSynth,    ModuleCat::Out,   ModuleRole::Synth,    "\xE2\x86\x92 LUXSYNTH",   "luxsynthEnabled",   "LuxSynth" },
         { ModuleType::LuxWave,     ModuleCat::Out,   ModuleRole::Synth,    "\xE2\x86\x92 LUXWAVE",    "luxwaveEnabled",    "LuxWave"  },
-        { ModuleType::VideoScroll, ModuleCat::Out,   ModuleRole::Processor,"VIDEO SCROLL",            "",                  "VideoScroll" },
+        { ModuleType::VideoScroll, ModuleCat::Out,   ModuleRole::Processor,"\xE2\x86\x92 VIDEO SCROLL", "",                  "VideoScroll" },
         { ModuleType::Camera,      ModuleCat::SRC,   ModuleRole::Source,   "CAMERA",                  "camSrcEnabled",     "Camera"   },
         { ModuleType::Reverb,      ModuleCat::FX,    ModuleRole::Processor,"REVERB",                  "",                  "Reverb"   },
         { ModuleType::Echo,        ModuleCat::FX,    ModuleRole::Processor,"ECHO",                    "",                  "Echo"     },
@@ -124,16 +125,18 @@ inline const std::array<ModuleDesc, 24>& moduleTable()
         { ModuleType::Voice,       ModuleCat::UTILS, ModuleRole::Util,     "VOICE",                   "",                  "Voice"    },
         { ModuleType::Harmonize,   ModuleCat::FX,    ModuleRole::Processor,"SCALE",                   "",                  "Harmonize" },
         { ModuleType::LuxGrain,    ModuleCat::Out,   ModuleRole::Synth,    "\xE2\x86\x92 LUXGRAIN",   "luxgrainEnabled",   "LuxGrain" },
-        // MIDI TAP is a PROBE, not a send: no "→" prefix (that marks a flux
-        // leaving toward an audio ENGINE) and Processor role, exactly like
-        // VIDEO SCROLL. Its enable lives in the PER-INSTANCE bank
-        // (midiTap{slot}_enabled), so enableParamId stays empty here.
-        { ModuleType::MidiTap,     ModuleCat::Out,   ModuleRole::Processor,"MIDI TAP",                "",                  "MidiTap"  },
+        // MIDI TAP is a PROBE (Processor role, exactly like VIDEO SCROLL): the
+        // flux leaves the chain toward a MIDI port rather than an audio ENGINE,
+        // hence the same "→" OUT prefix as the sends. Its enable lives in the
+        // PER-INSTANCE bank (midiTap{slot}_enabled), so enableParamId stays
+        // empty here.
+        { ModuleType::MidiTap,     ModuleCat::Out,   ModuleRole::Processor,"\xE2\x86\x92 MIDI TAP",     "",                  "MidiTap"  },
         { ModuleType::Centroid,    ModuleCat::FX,    ModuleRole::Processor,"CENTROID",                "",                  "Centroid" },
         // Display name LEVELS (was DRIVE) — the persist id keeps "Drive" so
         // sessions saved under the old name load unchanged.
         { ModuleType::Drive,       ModuleCat::FX,    ModuleRole::Processor,"LEVELS",                  "",                  "Drive"    },
         { ModuleType::DcBlock,     ModuleCat::FX,    ModuleRole::Processor,"DC BLOCK",                "",                  "DcBlock"  },
+        { ModuleType::Gain,        ModuleCat::FX,    ModuleRole::Processor,"GAIN",                    "",                  "Gain"     },
     }};
     return table;
 }

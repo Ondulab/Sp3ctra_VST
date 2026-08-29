@@ -1,6 +1,8 @@
 #include "VideoMixerColumn.h"
 #include "ModuleCatalog.h"
 #include "../licensing/ActivationDialog.h"
+#include "../Sp3ctraDialog.h"
+#include <cmath>   // std::ceil (title hit box)
 
 //==============================================================================
 // MiniButton — header glyphs drawn with paths (ported from WaterfallColumnComponent).
@@ -157,6 +159,7 @@ VideoMixerColumn::VideoMixerColumn(Sp3ctraAudioProcessor& p)
     // paint() fills the whole column (bg + header). Opaque so the mixer's 60 fps
     // repaints don't cascade a parent-background repaint through this container.
     setOpaque(true);
+    mixer_.onOutputClicked = [this](int slot) { if (onOutputClicked) onOutputClicked(slot); };
     addAndMakeVisible(mixer_);
 
     // Outputs run by default → PlayPause shows ⏸ (toggle OFF = not paused).
@@ -242,10 +245,41 @@ void VideoMixerColumn::paint(juce::Graphics& g)
     if (collapsed_)
         return;
 
-    g.setColour(moduleColour(ModuleType::VideoScroll));
+    // Title = link to the ALL view (every output's page): brightens + underlines
+    // on hover so it reads as clickable.
+    const auto accent = moduleColour(ModuleType::VideoScroll);
+    g.setColour(titleHover_ ? accent.brighter(0.5f) : accent);
     g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
-    g.drawText("VIDEO MIX", 8, 0, getWidth() - 16, kHeaderH,
-               juce::Justification::centredLeft, false);
+    const auto tb = titleBounds();
+    g.drawText("VIDEO MIX", tb, juce::Justification::centredLeft, false);
+    if (titleHover_)
+        g.fillRect(tb.getX(), tb.getBottom() - 6, tb.getWidth(), 1);
+}
+
+juce::Rectangle<int> VideoMixerColumn::titleBounds() const
+{
+    const juce::Font f(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
+    const int w = (int) std::ceil(juce::GlyphArrangement::getStringWidth(f, "VIDEO MIX"));
+    return { 8, 0, juce::jmin(w, juce::jmax(0, getWidth() - 16)), kHeaderH };
+}
+
+void VideoMixerColumn::mouseMove(const juce::MouseEvent& e)
+{
+    const bool over = ! collapsed_ && titleBounds().contains(e.getPosition());
+    setMouseCursor(over ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+    if (over != titleHover_) { titleHover_ = over; repaint(titleBounds().expanded(2)); }
+}
+
+void VideoMixerColumn::mouseExit(const juce::MouseEvent&)
+{
+    if (titleHover_) { titleHover_ = false; repaint(titleBounds().expanded(2)); }
+}
+
+void VideoMixerColumn::mouseUp(const juce::MouseEvent& e)
+{
+    if (collapsed_ || ! e.mouseWasClicked() || e.mods.isPopupMenu()) return;
+    if (titleBounds().contains(e.getPosition()) && onHeaderClicked)
+        onHeaderClicked();
 }
 
 void VideoMixerColumn::resized()
@@ -308,11 +342,9 @@ void VideoMixerColumn::startRecordingFlow()
         if (mixer_.beginRecording(file, recordHeight_, err))
             recBtn_.setRecording(true);
         else
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::MessageBoxIconType::WarningIcon,
-                "Recording failed",
-                err.isNotEmpty() ? err : juce::String("Could not start the recorder."),
-                "OK");
+            Sp3ctraDialog::showWarning(
+                this, "Recording failed",
+                err.isNotEmpty() ? err : juce::String("Could not start the recorder."));
         return;
     }
 
@@ -346,10 +378,8 @@ void VideoMixerColumn::startRecordingFlow()
         if (mixer_.beginRecording(file, recordHeight_, err))
             recBtn_.setRecording(true);
         else
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::MessageBoxIconType::WarningIcon,
-                "Recording failed",
-                err.isNotEmpty() ? err : juce::String("Could not start the recorder."),
-                "OK");
+            Sp3ctraDialog::showWarning(
+                this, "Recording failed",
+                err.isNotEmpty() ? err : juce::String("Could not start the recorder."));
     });
 }

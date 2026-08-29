@@ -569,9 +569,27 @@ void SlotEditorComponent::rebindMidiLearn()
     add(saveBtn,  K::Save);
     add(clearBtn, K::Clear);
 
-    // Slot EQ: right-click the nearest band node → MIDI Learn (9 bands, this slot).
-    eqEditor.setBandMidiLearn(&mm, [e, s](int band)
-    { return SamplerMidiTargets::makeEqBandId(e, s, band); });
+    // Slot EQ — the "selected handle" CC trio (Freq/Gain/Width, this slot) +
+    // the selection plumbing so the mapped CCs steer whichever handle the
+    // editor last selected (LuxSampler::slotEqSelHandle_, also drives the
+    // fixed-slot drain when another slot is shown).
+    eqEditor.setMidiMap(&mm);
+    eqEditor.midiTargetIdFn = [e, s](int w)
+    {
+        const K k = (w == 0) ? K::SelEqFreq
+                  : (w == 1) ? K::SelEqGain : K::SelEqWidth;
+        return SamplerMidiTargets::makeId(e, s, k);
+    };
+    eqEditor.selectionSink = [this](int h)
+    {
+        if (auto* fs = processor.getSampler(samplerIndex_))
+            fs->setSlotEqSelHandle(selectedSlot, h);
+    };
+    eqEditor.selectionProvider = [this]
+    {
+        auto* fs = processor.getSampler(samplerIndex_);
+        return fs != nullptr ? fs->getSlotEqSelHandle(selectedSlot) : 0;
+    };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -699,15 +717,17 @@ void SlotEditorComponent::drainMidiActionPulses()
             processor.sessions()->markBanksDirty();   // same as the CLEAR button
         }
 
-        // EQ bands (continuous) → apply latched gains (non-RT), reload the curve
-        // if this slot's editor is on screen.
+        // Selected-handle EQ CCs (continuous) → apply latched values (non-RT:
+        // codec re-encode + LUT rebuild), reload the curve if this slot's
+        // editor is on screen. The handle addressed is the one the slot's
+        // editor last selected — fixed-slot semantics preserved.
         bool eqTouched = false;
-        for (int b = 0; b < LuxSampler::kEqBands; ++b)
+        for (int w = 0; w < 3; ++w)
         {
-            const float v = processor.consumeSmpEqPending(samplerIndex_, s, b);
+            const float v = processor.consumeSmpEqSelPending(samplerIndex_, s, w);
             if (v >= 0.0f)
             {
-                fs->setSlotEqBandGain(s, b, v * 48.0f - 24.0f);   // 0..1 → ±24 dB
+                fs->setSlotEqHandleParam(s, fs->getSlotEqSelHandle(s), w, v);
                 eqTouched = true;
             }
         }
@@ -863,7 +883,7 @@ void SlotEditorComponent::resized()
 
     // ── Image editor (middle) + param-box strip + EQ panel (bottom) ───────────
     const int edY   = edParamBottom() + kEdGap;
-    const int eqH   = juce::jmin(ScoreEqComponent::kPreferredH, (H - edY) / 2);
+    const int eqH   = juce::jmin(ShapeEqComponent::kPreferredH, (H - edY) / 2);
     const int eqY   = H - kEdPad - eqH;
     const int chipH = 16, chipGap = 2;
     const int infoH = 2 * chipH + chipGap + 2;  // two chip rows UNDER the image

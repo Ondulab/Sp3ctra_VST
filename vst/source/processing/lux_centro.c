@@ -60,8 +60,11 @@ LuxCentroConfig lux_centro_config_default(void)
     cfg.thickness_px    = 6.0f;
     cfg.edge_soft       = 0.0f;                 /* square edges */
     cfg.background_mode = LUX_CENTRO_BG_AUTO;
-    cfg.eq_num_bands    = 2;   /* one straight line — matches the UI default */
-    /* eq_band_gain_db[] all 0 dB — flat curve = output EQ bypassed */
+    cfg.width_tilt_oct  = 0.0f;                 /* no extra slope */
+    cfg.width_law       = LUX_CENTRO_WIDTH_ERB; /* perceptual width by default */
+    cfg.axis_low_hz     = 0.0f;                 /* → C2 fallback */
+    for (int h = 0; h < SHAPE_EQ_MAX_HANDLES; ++h)
+        shape_eq_default(&cfg.eq_handles[h]);   /* all Off — output EQ bypassed */
     return cfg;
 }
 
@@ -76,7 +79,6 @@ void lux_centro_reset(LuxCentroState *state)
     state->last_bg_mode  = -1;
     state->num_segs      = 0;
     state->eq_lut_px     = 0;   /* invalidate the output-EQ gain LUT */
-    state->eq_lut_bands  = 0;
     /* Re-arm the AUTO learning window + floor tracker. */
     state->auto_locked         = 0;
     state->auto_lock_countdown = LUX_CENTRO_BG_LOCK_LINES;
@@ -96,6 +98,8 @@ void lux_centro_init(LuxCentroState *state)
     memset(state->ui_in_now,  0, sizeof(state->ui_in_now));
     memset(state->ui_in_peak, 0, sizeof(state->ui_in_peak));
     state->ui_in_valid = 0;
+    state->ui_axis_oct = 0;
+    state->ui_axis_px  = 0;
     lux_centro_reset(state);
 }
 
@@ -168,49 +172,40 @@ static int lux_centro_resolve_bg(LuxCentroState *state,
  * Applied AFTER the redraw, on the composed output material — exactly a LuxEq
  * insert chained behind the module, sharing its floor tracking. */
 
-static int lux_centro_eq_active_bands(const LuxCentroConfig *cfg)
-{
-    int n = cfg->eq_num_bands;
-    if (n < 2)                n = 2;
-    if (n > LUX_EQ_NUM_BANDS) n = LUX_EQ_NUM_BANDS;
-    return n;
-}
-
-/* Nonzero when at least one active node is off 0 dB (flat = bypass). */
+/* Nonzero when the handle stack / level fader shapes anything (flat = bypass). */
 static int lux_centro_eq_shaping(const LuxCentroConfig *cfg)
 {
-    const int n = lux_centro_eq_active_bands(cfg);
-    for (int b = 0; b < n; ++b)
-        if (fabsf(cfg->eq_band_gain_db[b]) > 0.01f)
-            return 1;
-    return 0;
+    return !shape_eq_is_flat_level(cfg->eq_handles, SHAPE_EQ_MAX_HANDLES,
+                                   cfg->eq_level_db);
 }
 
-/* Rebuild the per-pixel linear-gain LUT when a band value, the node count or
- * the width changed — same LUT as lux_eq_update_lut, sampling the SHARED
- * Catmull-Rom spline (lux_eq_curve_db) so the CENTROID output EQ and the
+/* Rebuild the per-pixel linear-gain LUT when a handle, the pixel count or the
+ * octave span changed — same LUT as lux_eq_update_lut, sampling the SHARED
+ * typed-handle evaluator (shape_eq_db) so the CENTROID output EQ and the
  * LuxEq module apply the exact same curve. */
-static void lux_centro_eq_update_lut(LuxCentroState *state, int px)
+static void lux_centro_eq_update_lut(LuxCentroState *state, int px,
+                                     float span_oct)
 {
-    const int n = lux_centro_eq_active_bands(&state->config);
-
-    int dirty = (state->eq_lut_px != px) || (state->eq_lut_bands != n);
-    for (int b = 0; b < n && !dirty; ++b)
-        if (state->eq_lut_gains[b] != state->config.eq_band_gain_db[b])
-            dirty = 1;
-    if (!dirty)
+    if (state->eq_lut_px == px && state->eq_lut_span_oct == span_oct
+        && state->eq_lut_level_db == state->config.eq_level_db
+        && shape_eq_handles_equal(state->eq_lut_handles,
+                                  state->config.eq_handles,
+                                  SHAPE_EQ_MAX_HANDLES))
         return;
 
-    for (int b = 0; b < n; ++b)
-        state->eq_lut_gains[b] = state->config.eq_band_gain_db[b];
-    state->eq_lut_bands = n;
-    state->eq_lut_px    = px;
+    for (int h = 0; h < SHAPE_EQ_MAX_HANDLES; ++h)
+        state->eq_lut_handles[h] = state->config.eq_handles[h];
+    state->eq_lut_level_db = state->config.eq_level_db;
+    state->eq_lut_span_oct = span_oct;
+    state->eq_lut_px       = px;
 
     const float span = (px > 1) ? (float)(px - 1) : 1.0f;
     for (int i = 0; i < px; ++i)
     {
-        const float x  = ((float)i / span) * (float)(n - 1);
-        const float db = lux_eq_curve_db(state->eq_lut_gains, n, x);
+        const float db = shape_eq_db_level(state->eq_lut_handles,
+                                           SHAPE_EQ_MAX_HANDLES,
+                                           state->eq_lut_level_db,
+                                           (float)i / span, span_oct);
         state->eq_lut[i] = powf(10.0f, db * (1.0f / 20.0f));
     }
 }
@@ -324,6 +319,15 @@ static void lux_centro_find_masses(LuxCentroState *state,
     state->num_segs = n;
 }
 
+/* One ERB expressed in octaves at frequency f (Glasberg & Moore:
+ * ERB(f) = 24.7 · (4.37·f/1000 + 1) Hz) — the width of the ear's critical
+ * band on the log axis: ~0.6 oct near 65 Hz, ~0.15 oct in the treble. */
+static inline float lux_centro_erb_oct(float f)
+{
+    const float erb = 24.7f * (4.37f * f * 0.001f + 1.0f);
+    return log2f(1.0f + erb / f);
+}
+
 /* REDRAW pass: print each mass as one line centred on its barycentre, into
  * the per-channel accumulators, at the mass's colour reference (its most
  * significant sample) — constant colour at any thickness.
@@ -331,20 +335,29 @@ static void lux_centro_find_masses(LuxCentroState *state,
  * Geometry: c = half the EQUIVALENT width; the soft skirt pivots around c
  * (p = c - skirt, h = c + skirt) so softening never changes the equivalent
  * width. The skirt floor of 1 px lets a 1-px line soften into a real bump
- * instead of keeping a hard centre pixel with a fixed one-pixel gradient. */
-static void lux_centro_redraw(LuxCentroState *state, int px,
-                              float thickness, float edge_soft)
+ * instead of keeping a hard centre pixel with a fixed one-pixel gradient.
+ *
+ * The width is a POSITION LAW along the axis (u = pos/(px−1)): thickness_px
+ * × 2^(width_tilt·(u−½)), and under LUX_CENTRO_WIDTH_ERB × the ratio of the
+ * local critical band to the axis-centre one (wider bass, narrower treble —
+ * = thickness_px at the centre, so the knob keeps its meaning). Geometry is
+ * per MASS, so the law costs a couple of transcendentals per mass, not per
+ * pixel. */
+static void lux_centro_redraw(LuxCentroState *state, int px, int num_octaves)
 {
-    float c = 0.5f * thickness;
-    if (c < 0.5f) c = 0.5f;
+    const LuxCentroConfig *cfg = &state->config;
+
+    float edge_soft = cfg->edge_soft;
     if (edge_soft < 0.0f) edge_soft = 0.0f;
     if (edge_soft > 1.0f) edge_soft = 1.0f;
-    const float skirt = edge_soft * ((c > 1.0f) ? c : 1.0f);
-    float h = c + skirt;
     const float h_max = 0.5f * (float)(LUX_CENTRO_MAX_WIN - 4);
-    if (h > h_max) h = h_max;
-    float p = c - skirt;
-    if (p < 0.0f) p = 0.0f;
+    const float u_span = (px > 1) ? 1.0f / (float)(px - 1) : 0.0f;
+
+    /* ERB law inputs — axis centre is the normalisation point. */
+    const float oct = (num_octaves > 0) ? (float)num_octaves : 8.0f;
+    const float low = (cfg->axis_low_hz > 0.0f) ? cfg->axis_low_hz : 65.406f;
+    const float erb_ref = (cfg->width_law == LUX_CENTRO_WIDTH_ERB)
+        ? lux_centro_erb_oct(low * exp2f(0.5f * oct)) : 1.0f;
 
     for (int ch = 0; ch < 3; ch++)
         memset(state->accum[ch], 0, (size_t)px * sizeof(float));
@@ -352,6 +365,22 @@ static void lux_centro_redraw(LuxCentroState *state, int px,
     for (int s = 0; s < state->num_segs; s++)
     {
         const float pos = state->seg_pos[s];
+        const float u   = pos * u_span;
+
+        float w = cfg->thickness_px;
+        if (cfg->width_law == LUX_CENTRO_WIDTH_ERB)
+            w *= lux_centro_erb_oct(low * exp2f(u * oct)) / erb_ref;
+        if (cfg->width_tilt_oct != 0.0f)
+            w *= exp2f(cfg->width_tilt_oct * (u - 0.5f));
+
+        float c = 0.5f * w;
+        if (c < 0.5f) c = 0.5f;
+        const float skirt = edge_soft * ((c > 1.0f) ? c : 1.0f);
+        float h = c + skirt;
+        if (h > h_max) h = h_max;
+        float p = c - skirt;
+        if (p < 0.0f) p = 0.0f;
+
         int x0 = (int)floorf(pos - h);
         int x1 = (int)ceilf (pos + h);
         if (x0 < 0)      x0 = 0;
@@ -408,8 +437,6 @@ void lux_centro_process_frame(
     const uint8_t **out_g,
     const uint8_t **out_b)
 {
-    (void)luxstral_num_octaves;   /* pixel-space module — no pitch axis needed */
-
     *out_r = in_r; *out_g = in_g; *out_b = in_b;
     if (!state || !in_r || !in_g || !in_b || pixel_count <= 0)
         return;
@@ -435,6 +462,8 @@ void lux_centro_process_frame(
         state->last_bg_mode = bg_white;
     }
     state->centro_active = 1;
+    state->ui_axis_oct   = (luxstral_num_octaves > 0) ? luxstral_num_octaves : 8;
+    state->ui_axis_px    = px;
 
     lux_centro_ui_capture(state, in_r, in_g, in_b, px, bg_white, floor_e);
 
@@ -442,14 +471,14 @@ void lux_centro_process_frame(
                      : (cfg->floor_level > 1.0f) ? 1.0f : cfg->floor_level) * 255.0f;
 
     lux_centro_find_masses(state, in_r, in_g, in_b, px, bg_white, floor_e, thr);
-    lux_centro_redraw(state, px, cfg->thickness_px, cfg->edge_soft);
+    lux_centro_redraw(state, px, luxstral_num_octaves);
 
     /* Output EQ — flat curve marks the LUT stale (doubles as the UI's
      * "output EQ shaping" flag) and costs nothing per pixel. */
     const float *eqlut = 0;
     if (lux_centro_eq_shaping(cfg))
     {
-        lux_centro_eq_update_lut(state, px);
+        lux_centro_eq_update_lut(state, px, (float)state->ui_axis_oct);
         eqlut = state->eq_lut;
     }
     else

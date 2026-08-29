@@ -28,10 +28,15 @@
  *     rainbow (right), which IS the parameter's meaning. Drag anywhere to
  *     set, double-click = centre (neutral).
  *   • GAMMA / FLOOR / CONTRAST — numeric boxes in their own row (double-click
- *     = default; Gamma < 1 lifts the faint material, > 1 thins it; Contrast
+ *     = default; Gamma > 1 lifts the faint material (photo convention, same
+ *     direction as the VideoScroll gamma), < 1 thins it; Contrast
  *     is the CONTRAST MIN floor — 100 % = off, lower it and a flat/blurred
  *     stream dims on screen as it drops in volume). The accent output curve
  *     rides the live factor (contrast_ema), so the dimming shows in the view.
+ *
+ * Chrome (frame, caption, box row) = ModuleChrome; the floor line, its node
+ * and the ramp thumb = Sp3ctraHandles (lime, Idle/Hover/Drag); the module
+ * colour stays on the curves, captions and labels.
  *
  * The output profile brightens while the bound pool instance is actually
  * processing a stream, so you see the module living.
@@ -45,6 +50,8 @@
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
 #include "Sp3ctraBarSlider.h"
+#include "Sp3ctraHandles.h"
+#include "ModuleEditorChrome.h"
 #include "../processing/lux_drive.h"   // self-manages extern "C" linkage
 
 class DriveEditorComponent : public juce::Component,
@@ -53,8 +60,9 @@ class DriveEditorComponent : public juce::Component,
 public:
     static constexpr int kGraphH     = 150;  // the graphic frame alone
     static constexpr int kStripH     = 22;   // saturation ramp cursor
-    // frame + gap + ramp strip + gap + label + box row
-    static constexpr int kPreferredH = kGraphH + 6 + kStripH + 6 + 10 + 18;
+    // frame + gap + ramp strip + (gap + label + box row)
+    static constexpr int kPreferredH = kGraphH + ModuleChrome::kRowGap + kStripH
+                                     + ModuleChrome::kBelowFrameH;
 
     DriveEditorComponent(juce::AudioProcessorValueTreeState& apvtsIn,
                          juce::Colour accentColour)
@@ -116,27 +124,19 @@ public:
     {
         auto area = getLocalBounds();
         // Controls OUT of the graphic frame — ramp strip + box row below it.
-        auto row = area.removeFromBottom(kLabelH + kBoxH);
-        area.removeFromBottom(kRowGap);
+        auto row = area.removeFromBottom(ModuleChrome::kBoxRowH);
+        area.removeFromBottom(ModuleChrome::kRowGap);
         satStrip.setBounds(area.removeFromBottom(kStripH));
-        area.removeFromBottom(kRowGap);
+        area.removeFromBottom(ModuleChrome::kRowGap);
         frameRect_ = area.toFloat();
-        graphRect_ = area.reduced(6).toFloat();
+        graphRect_ = ModuleChrome::graphOf(frameRect_);
 
-        row.removeFromTop(kLabelH);
-        const int gap = 8, n = 3;
-        const int bw = (row.getWidth() - (n - 1) * gap) / n;
-        boxG.setBounds(row.getX(),                  row.getY(), bw, kBoxH);
-        boxF.setBounds(row.getX() +     (bw + gap), row.getY(), bw, kBoxH);
-        boxC.setBounds(row.getX() + 2 * (bw + gap), row.getY(), bw, kBoxH);
+        ModuleChrome::layoutBoxRow(row, { &boxG, &boxF, &boxC });
     }
 
     void paint(juce::Graphics& g) override
     {
-        g.setColour(juce::Colour(0xff20202a));
-        g.fillRoundedRectangle(frameRect_.reduced(0.5f), 4.0f);
-        g.setColour(accent.withAlpha(0.25f));
-        g.drawRoundedRectangle(frameRect_.reduced(0.5f), 4.0f, 1.0f);
+        ModuleChrome::drawFrame(g, frameRect_, accent);
 
         const Geometry geo = computeGeometry();
         if (geo.valid)
@@ -193,41 +193,30 @@ public:
                 g.strokePath(out, juce::PathStrokeType(1.2f));
             }
 
-            // FLOOR — dashed écrêtage threshold across the plot (HORIZONTAL,
-            // same reading as the CENTROID editor), labelled on the line.
+            // FLOOR — grabbable dashed écrêtage threshold across the plot
+            // (HORIZONTAL, same reading as the CENTROID editor), labelled on
+            // the line; the label turns lime with its handle.
             {
-                const float y = yOf(geo, geo.floorN);
-                const float dash[2] = { 4.0f, 3.0f };
-                const bool  active = handleActive(Handle::Floor);
-                g.setColour(active ? juce::Colours::white : accent.withAlpha(0.7f));
-                g.drawDashedLine(juce::Line<float>(geo.plot.getX(), y,
-                                                   geo.plot.getRight(), y),
-                                 dash, 2, 1.2f);
+                const float y  = yOf(geo, geo.floorN);
+                const auto  fs = handleState(Handle::Floor);
+                Sp3ctraHandles::drawGrabLine(g, juce::Line<float>(geo.plot.getX(), y,
+                                                                  geo.plot.getRight(), y),
+                                             fs, /*dashed*/ true);
                 g.setFont(juce::FontOptions(Sp3ctraTheme::kFontMicro));
-                g.setColour(active ? juce::Colours::white.withAlpha(0.85f)
-                                   : accent.withAlpha(0.55f));
+                g.setColour(Sp3ctraHandles::isHot(fs) ? Sp3ctraHandles::colour()
+                                                      : accent.withAlpha(0.55f));
                 const float ly = (y - 11.0f > geo.topY) ? y - 11.0f : y + 3.0f;
                 g.drawText("Floor", (int) (geo.plot.getRight() - 94.0f), (int) ly,
                            70, 9, juce::Justification::centredRight, false);
+                Sp3ctraHandles::drawNode(g, handlePos(Handle::Floor, geo), fs);
             }
-
-            drawNode(g, handlePos(Handle::Floor, geo), Handle::Floor, /*hollow*/ false);
         }
 
-        g.setColour(accent.withAlpha(0.45f));
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontMicro));
-        g.drawText("IN - OUT", (int) frameRect_.getX() + 8,
-                   (int) frameRect_.getY() + 2,
-                   110, 9, juce::Justification::centredLeft, false);
+        ModuleChrome::drawCaption(g, frameRect_, accent, "IN - OUT");
 
-        g.setColour(accent.withAlpha(0.6f));
-        auto label = [&g](const juce::Slider& box, const juce::String& t)
-        {
-            auto bb = box.getBounds();
-            g.drawText(t, bb.getX(), bb.getY() - kLabelH, bb.getWidth(), kLabelH,
-                       juce::Justification::centred, false);
-        };
-        label(boxG, "Gamma"); label(boxF, "Floor"); label(boxC, "Contrast");
+        ModuleChrome::drawBoxLabel(g, boxG, accent, "Gamma");
+        ModuleChrome::drawBoxLabel(g, boxF, accent, "Floor");
+        ModuleChrome::drawBoxLabel(g, boxC, accent, "Contrast");
     }
 
     //==========================================================================
@@ -328,7 +317,7 @@ private:
     {
         Geometry geo;
         if (graphRect_.getWidth() < 30.0f || graphRect_.getHeight() < 16.0f) return geo;
-        geo.plot    = graphRect_.reduced(8.0f, 7.0f);
+        geo.plot    = ModuleChrome::plotOf(frameRect_);
         geo.topY    = geo.plot.getY();
         geo.botY    = geo.plot.getBottom();
         geo.floorN = juce::jlimit(0.0f, 1.0f, flr.value / 100.0f);
@@ -344,8 +333,8 @@ private:
     float yOf(const Geometry& geo, float energyN) const
     { return geo.botY - juce::jlimit(0.0f, 1.0f, energyN) * (geo.botY - geo.topY); }
 
-    /** The REAL per-pixel transfer on the remanent envelope (already material
-     *  energy, floor_ema removed): the same lux_drive_transfer the RT LUT
+    /** The REAL per-pixel transfer on the remanent envelope (ABSOLUTE energy
+     *  from the background pole): the same lux_drive_transfer the RT LUT
      *  samples, normalized to 0..1, scaled by the live CONTRAST MIN factor
      *  the C side actually applies (contrast_ema; -1 = knob off → 1). */
     float outputAt(const Geometry& geo, float x) const
@@ -362,8 +351,12 @@ private:
         return { geo.plot.getRight() - 12.0f, yOf(geo, geo.floorN) };
     }
 
-    bool handleActive(Handle h) const
-    { return h == dragging || (dragging == Handle::None && h == hovered); }
+    /** Idle / Hover / Drag for a handle — Hover only while nothing drags. */
+    Sp3ctraHandles::State handleState(Handle h) const noexcept
+    {
+        return Sp3ctraHandles::stateOf(h == dragging,
+                                       dragging == Handle::None && h == hovered);
+    }
 
     Handle handleAt(juce::Point<float> p, const Geometry& geo) const
     {
@@ -374,28 +367,6 @@ private:
             && std::abs(p.y - y) < kHitR)
             return Handle::Floor;
         return Handle::None;
-    }
-
-    void drawNode(juce::Graphics& g, juce::Point<float> pt, Handle h, bool hollow)
-    {
-        const bool active = handleActive(h);
-        if (hollow)
-        {
-            const float rad = active ? kBendR + 1.2f : kBendR;
-            g.setColour(active ? juce::Colours::white : accent.withAlpha(0.55f));
-            g.drawEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad, active ? 1.6f : 1.2f);
-            return;
-        }
-        const float rad = active ? kNodeR + 1.5f : kNodeR;
-        if (active)
-        {
-            g.setColour(accent.withAlpha(0.25f));
-            g.fillEllipse(pt.x - rad - 2.5f, pt.y - rad - 2.5f, 2 * (rad + 2.5f), 2 * (rad + 2.5f));
-        }
-        g.setColour(active ? accent.brighter(0.3f) : juce::Colour(0xff20202a));
-        g.fillEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad);
-        g.setColour(active ? juce::Colours::white : accent.withAlpha(0.9f));
-        g.drawEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad, 1.4f);
     }
 
     //==========================================================================
@@ -426,18 +397,12 @@ private:
                  std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>& att,
                  double resetValue)
     {
-        box.setAccent(accent);
         box.setDoubleClickReturnValue(true, resetValue);
         addAndMakeVisible(box);
         att = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, id, box);
     }
 
-    static constexpr float kNodeR  = 4.5f;
-    static constexpr float kBendR  = 3.2f;
-    static constexpr float kHitR   = 12.0f;
-    static constexpr int   kBoxH   = 18;   // kPreferredH = kGraphH + gap + label + box
-    static constexpr int   kLabelH = 10;
-    static constexpr int   kRowGap = 6;
+    static constexpr float kHitR = 12.0f;
 
     juce::AudioProcessorValueTreeState& apvts;
     juce::Colour accent;
@@ -447,16 +412,14 @@ private:
      *  IS the parameter's meaning — a black & white ramp at the far left,
      *  natural colours at the centre tick, a hyper-vibrant rainbow at the
      *  far right. Plain Slider mechanics (drag anywhere, double-click =
-     *  centre, MIDI-learnable). */
+     *  centre, MIDI-learnable); the grab point is a lime Sp3ctraHandles thumb. */
     class RampSlider : public juce::Slider
     {
     public:
-        explicit RampSlider(DriveEditorComponent& ownerIn) : owner(ownerIn) {}
-
         void paint(juce::Graphics& g) override
         {
             const auto r = getLocalBounds().toFloat();
-            g.setColour(juce::Colour(0xff181820));
+            g.setColour(juce::Colour(Sp3ctraTheme::kColBarBg));
             g.fillRoundedRectangle(r.reduced(0.5f), 3.0f);
 
             const auto track = r.reduced(1.5f);
@@ -486,12 +449,6 @@ private:
                 g.fillRect(mx - 0.5f, r.getY() + 2.0f, 1.0f, r.getHeight() - 4.0f);
             }
 
-            // Accent cursor at the saturation value.
-            const float t  = (float) valueToProportionOfLength(getValue());
-            const float cx = track.getX() + t * track.getWidth();
-            g.setColour(owner.accent);
-            g.fillRect(cx - 1.2f, r.getY() + 1.0f, 2.4f, r.getHeight() - 2.0f);
-
             // Label + value — doubled dark/light so it reads on both ends
             // of the ramp.
             g.setFont(juce::FontOptions(Sp3ctraTheme::kFontMicro));
@@ -504,24 +461,29 @@ private:
             g.setColour(juce::Colours::white.withAlpha(0.85f));
             g.drawText(txt, tr, juce::Justification::centredLeft, false);
 
-            g.setColour(owner.accent.withAlpha(0.3f));
+            g.setColour(Sp3ctraHandles::colour().withAlpha(0.35f));   // control outline, like the bars
             g.drawRoundedRectangle(r.reduced(0.5f), 3.0f, 1.0f);
-        }
 
-    private:
-        DriveEditorComponent& owner;
+            // The grab point — a lime thumb at the saturation value, hot on
+            // hover / drag like every other handle.
+            const float t  = (float) valueToProportionOfLength(getValue());
+            const float cx = track.getX() + t * track.getWidth();
+            Sp3ctraHandles::drawThumb(g,
+                juce::Rectangle<float>(cx - 2.5f, r.getY() + 1.0f, 5.0f, r.getHeight() - 2.0f),
+                Sp3ctraHandles::stateOf(isMouseButtonDown(), isMouseOverOrDragging()));
+        }
     };
 
     Bound gm, flr;
     Sp3ctraBarSlider boxG, boxF, boxC;
-    RampSlider   satStrip { *this };
+    RampSlider   satStrip;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
         boxGAtt, boxFAtt, boxCAtt, stripAtt;
     MidiMappingEngine* midiMap_ = nullptr;
     std::unique_ptr<MidiLearnAttachment> learnG_, learnS_, learnF_, learnC_;
 
     juce::Rectangle<float> frameRect_;   // the graphic window (frame only)
-    juce::Rectangle<float> graphRect_;   // plot area inside the frame
+    juce::Rectangle<float> graphRect_;   // graph area inside the frame
     Handle hovered  { Handle::None };
     Handle dragging { Handle::None };
 

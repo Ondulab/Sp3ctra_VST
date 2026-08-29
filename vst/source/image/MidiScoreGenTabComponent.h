@@ -22,12 +22,21 @@
  *
  * PLAYBACK SHAPING (SAMPLER-style, playback-only — exports stay clean):
  * a crop window (green start / orange end bars dragged on the preview, or
- * the chips under it), edge fades (LIN/EXP/LOG/S curve + power, same
- * handles and chips as the SAMPLER slot editor) and a SCORE-style IMAGE EQ
- * shape what the score player receives: PLAY renders only the crop window,
- * then the fades darken→silence the edges and the EQ shifts each band
- * row's ink in dB, before the frames are loaded. The preview keeps showing
- * the raw piece with the shaping drawn as an overlay.
+ * the chips under it) and edge fades (LIN/EXP/LOG/S curve + power, same
+ * handles and chips as the SAMPLER slot editor) shape what the score player
+ * receives: PLAY renders only the crop window, then the fades
+ * darken→silence the edges before the frames are loaded. The preview keeps
+ * showing the raw piece with the shaping drawn as an overlay.
+ *
+ * PER-VOICE IDENTITY: every voice owns a fixed colour (voiceColour) worn by
+ * its tab, mute LED, every timbre slider and the VOICE EQ, so one glance
+ * says which voice is being edited. The VOICE EQ (under the preview) is a
+ * per-voice TIMBRE setting like Level (dB) — applied by the renderer at
+ * each partial's frequency, so preview, playback AND print all carry it
+ * (unlike the crop/fades above). Solo is the yellow square in the tab:
+ * soloing selects the voice for editing. Selecting a voice that is not
+ * audible (muted, or masked by the solo set) is refused with a message —
+ * you never edit a voice you cannot hear.
  */
 #pragma once
 
@@ -47,11 +56,11 @@
 #include "../ui/Sp3ctraBarSlider.h"
 #include "../IconPaths.h"
 #include "../licensing/ActivationDialog.h"
+#include "../Sp3ctraDialog.h"
 #include "../luxsampler/FadeCurve.h"       // fade curve shapes (LIN/EXP/LOG/S)
 #include "../sampler/SamplerValueBox.h"    // crop / fade param chips under the preview
 #include "MidiScoreGenRenderer.h"
-#include "ScoreEqComponent.h"
-#include "EqCurve.h"                       // shared Catmull-Rom EQ evaluator
+#include "../ui/ShapeEqComponent.h"
 
 class MidiScoreGenTabComponent : public juce::Component,
                                  private juce::Timer,
@@ -59,7 +68,27 @@ class MidiScoreGenTabComponent : public juce::Component,
 {
 public:
     static inline const uint32_t kAccentARGB = moduleColour(ModuleType::MidiScore).getARGB();   ///< inherited module colour
-    static constexpr int      kPreferredH = 920;          // + crop/fade chips + IMAGE EQ
+    static constexpr int      kPreferredH = 920;          // + crop/fade chips + VOICE EQ
+
+    /** Fixed identity colour of each of the six voices — the SAME colour
+     *  follows the voice everywhere (tab frame, mute LED, every timbre
+     *  slider, the VOICE EQ), so one glance says which voice is being
+     *  edited. Hues chosen to stay apart on the dark theme. */
+    static juce::Colour voiceColour(int idx)
+    {
+        static const juce::Colour kVoiceColours[midiscoregen::kMaxVoices] = {
+            juce::Colour(0xffe8a33d),   // voice 1 — amber
+            juce::Colour(0xff4fc3f7),   // voice 2 — sky blue
+            juce::Colour(0xffef6292),   // voice 3 — pink
+            juce::Colour(0xff7ec96b),   // voice 4 — leaf green
+            juce::Colour(0xffb388ff),   // voice 5 — violet
+            juce::Colour(0xff2fc6b0),   // voice 6 — teal
+        };
+        return kVoiceColours[juce::jlimit(0, midiscoregen::kMaxVoices - 1, idx)];
+    }
+
+    /** Classic mixer-desk solo yellow — the filled square in the voice tabs. */
+    static constexpr uint32_t kSoloARGB = 0xfff2c94c;
 
     explicit MidiScoreGenTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p)
@@ -91,15 +120,13 @@ public:
         for (int i = 0; i < midiscoregen::kMaxVoices; ++i)
         {
             auto tab = std::make_unique<VoiceTab>(i);
-            tab->onClick = [this, i] { selectVoice(i); };
+            tab->onClick = [this, i] { requestSelectVoice(i); };
             tab->textProvider = [this](int idx)
             {
                 const auto& q = voices[(size_t) idx];
                 const juce::String name = (idx < data.numVoices)
                     ? data.voiceNames[(size_t) idx] : juce::String("-");
-                const juce::String preset = (q.preset >= 0)
-                    ? timbregen::presetName(q.preset) : "Custom";
-                return name + "\n" + preset;
+                return name + "\n" + presetDisplayName(q);
             };
             tab->enabledProvider = [this](int idx)
             {
@@ -127,9 +154,16 @@ public:
                 for (auto& t : voiceTabs)
                     t->repaint();   // solo dims every OTHER tab too
                 markDirty();
+                // Soloing is asking to WORK on that voice — follow with the
+                // editor selection. Un-soloing is just releasing the solo:
+                // keep whatever voice was being edited.
+                if (voiceSolo[(size_t) idx])
+                    selectVoice(idx);
             };
-            tab->setTooltip("Dot = mute/unmute. S = solo: only soloed voices "
-                            "play/print (solo wins over mute).");
+            tab->setTooltip("Dot = mute/unmute. Square = solo: only soloed "
+                            "voices play/print (solo wins over mute); "
+                            "soloing also selects the voice for editing. "
+                            "Only audible voices can be selected for editing.");
             // Visibility follows the loaded file (see updateVoiceTabs) — a
             // single-channel MIDI shows ONE tab, not five dead ones.
             addChildComponent(tab.get());
@@ -164,11 +198,11 @@ public:
         };
 
         initLabel(partialsLabel, "Partials");
-        initSlider(partialsSlider, 1, 64, 1, 24);
+        initSlider(partialsSlider, 1, 128, 1, 24);
         timbral(partialsSlider, [](timbregen::TimbreSlotParams& q, double v) { q.numPartials = (int) v; });
 
         initLabel(slopeLabel, "Slope (dB/oct)");
-        initSlider(slopeSlider, -24.0, 6.0, 0.1, -6.0);
+        initSlider(slopeSlider, -36.0, 12.0, 0.1, -6.0);
         timbral(slopeSlider, [](timbregen::TimbreSlotParams& q, double v) { q.slopeDbPerOct = v; });
 
         initLabel(oddLabel, "Odd bias");
@@ -176,8 +210,8 @@ public:
         timbral(oddSlider, [](timbregen::TimbreSlotParams& q, double v) { q.oddBias = v; });
 
         initLabel(inharmLabel, "Inharmonicity");
-        initSlider(inharmSlider, 0.0, 0.02, 0.0001, 0.0);
-        inharmSlider.setSkewFactor(0.4);
+        initSlider(inharmSlider, 0.0, 0.1, 0.0001, 0.0);
+        inharmSlider.setSkewFactor(0.3);
         timbral(inharmSlider, [](timbregen::TimbreSlotParams& q, double v) { q.inharmonicity = v; });
 
         initLabel(combLabel, "Pluck comb");
@@ -185,16 +219,17 @@ public:
         timbral(combSlider, [](timbregen::TimbreSlotParams& q, double v) { q.combDepth = v; });
 
         initLabel(combPosLabel, "Pluck position");
-        initSlider(combPosSlider, 0.05, 0.5, 0.005, 0.28);
+        initSlider(combPosSlider, 0.02, 0.5, 0.005, 0.28);
         timbral(combPosSlider, [](timbregen::TimbreSlotParams& q, double v) { q.combPos = v; });
 
         initLabel(attackLabel, "Attack (ms)");
-        initSlider(attackSlider, 0.0, 300.0, 1.0, 4.0);
-        attackSlider.setSkewFactor(0.5);
+        initSlider(attackSlider, 0.0, 1000.0, 1.0, 4.0);
+        attackSlider.setSkewFactor(0.4);
         timbral(attackSlider, [](timbregen::TimbreSlotParams& q, double v) { q.attackMs = v; });
 
         initLabel(decayLabel, "Decay (s)");
-        initSlider(decaySlider, 0.0, 8.0, 0.05, 0.0);
+        initSlider(decaySlider, 0.0, 20.0, 0.05, 0.0);
+        decaySlider.setSkewFactor(0.5);
         decaySlider.textFromValueFunction = [](double v)
         { return v <= 0.0 ? juce::String("sustain") : juce::String(v, 2); };
         decaySlider.onValueChange = [this]
@@ -203,6 +238,7 @@ public:
             // HF damping only multiplies the DECAY rate of upper partials —
             // it has nothing to act on while the notes sustain.
             hfDampSlider.setEnabled(cur().decaySec > 0.0);
+            hfDampLabel .setEnabled(cur().decaySec > 0.0);
             becomeCustom();
             markDirty();
         };
@@ -214,7 +250,7 @@ public:
         timbral(hfDampSlider, [](timbregen::TimbreSlotParams& q, double v) { q.hfDamp = v; });
 
         initLabel(vibDepthLabel, "Vibrato (cents)");
-        initSlider(vibDepthSlider, 0.0, 100.0, 1.0, 0.0);
+        initSlider(vibDepthSlider, 0.0, 200.0, 1.0, 0.0);
         vibDepthSlider.setTooltip("Pitch wave of the whole partial stack, "
                                   "peak depth in cents. 0 = off.");
         vibDepthSlider.onValueChange = [this]
@@ -225,16 +261,19 @@ public:
             vibRateSlider .setEnabled(vib);
             vibOnsetSlider.setEnabled(vib);
             vibLifeSlider .setEnabled(vib);
+            vibRateLabel  .setEnabled(vib);
+            vibOnsetLabel .setEnabled(vib);
+            vibLifeLabel  .setEnabled(vib);
             becomeCustom();
             markDirty();
         };
 
         initLabel(vibRateLabel, "Vib rate (Hz)");
-        initSlider(vibRateSlider, 0.5, 10.0, 0.1, 5.5);
+        initSlider(vibRateSlider, 0.1, 16.0, 0.1, 5.5);
         timbral(vibRateSlider, [](timbregen::TimbreSlotParams& q, double v) { q.vibRateHz = v; });
 
         initLabel(vibOnsetLabel, "Vib onset (s)");
-        initSlider(vibOnsetSlider, 0.0, 2.0, 0.05, 0.4);
+        initSlider(vibOnsetSlider, 0.0, 5.0, 0.05, 0.4);
         vibOnsetSlider.setTooltip("Time for the vibrato to develop after the "
                                   "note starts (delay + smooth rise).");
         timbral(vibOnsetSlider, [](timbregen::TimbreSlotParams& q, double v) { q.vibOnsetSec = v; });
@@ -247,7 +286,7 @@ public:
         timbral(vibLifeSlider, [](timbregen::TimbreSlotParams& q, double v) { q.vibLife = v; });
 
         initLabel(levelLabel, "Level (dB)");
-        initSlider(levelSlider, -24.0, 6.0, 0.1, 0.0);
+        initSlider(levelSlider, -36.0, 12.0, 0.1, 0.0);
         levelSlider.setTooltip("Ink / playback gain of this voice "
                                "(0 dB = full black at maximum velocity).");
         levelSlider.onValueChange = [this]
@@ -356,7 +395,7 @@ public:
         playHint.setMinimumHorizontalScale(1.0f);
         addAndMakeVisible(playHint);
 
-        // ── Playback shaping: crop / fade chips (SAMPLER-style) + IMAGE EQ ──
+        // ── Playback shaping: crop / fade chips (SAMPLER-style) + VOICE EQ ──
         {
             const auto pct = [](float n)
             { return juce::String(juce::roundToInt(n * 100.0f)) + "%"; };
@@ -420,12 +459,21 @@ public:
             fadeInTypeBox_ .setChoices({ "LIN", "EXP", "LOG", "S" });
             fadeOutTypeBox_.setChoices({ "LIN", "EXP", "LOG", "S" });
 
-            // IMAGE EQ — shapes the PLAYED frames (never the export). The band
-            // grid follows the instrument's tuning; the saved curve was decoded
-            // by restoreState() above, syncEqRange() re-grids it if needed.
-            eqEditor.onChange = [this] { markShapeDirty(); };
+            // VOICE EQ — one curve PER VOICE, a timbre setting of the
+            // selected voice applied by the renderer itself (preview,
+            // playback AND print, unlike the crop/fades above). The band
+            // grid follows the instrument's tuning; the saved curves were
+            // decoded by restoreState() above, the load below pulls the
+            // selected voice's one into the editor.
+            eqEditor.setTitle("VOICE EQ");
+            eqEditor.onChange = [this]
+            {
+                if (eqSwitching_) return;
+                voiceEqState_[(size_t) selectedVoice] = eqEditor.encodeState();
+                markDirty();   // part of the score: preview + playback + export
+            };
             addAndMakeVisible(eqEditor);
-            syncEqRange();
+            loadEqEditorForSelectedVoice();
         }
 
         // ── Log ──────────────────────────────────────────────────────────────
@@ -1324,7 +1372,7 @@ public:
             b->repaint();
     }
 
-    /** A crop/fade/EQ edit: playback + saved state change, the preview strip
+    /** A crop/fade edit: playback + saved state change, the preview strip
      *  itself doesn't (the shaping is an overlay) — no strip re-render. */
     void markShapeDirty()
     {
@@ -1335,13 +1383,48 @@ public:
         repaint(previewArea);
     }
 
-    /** Re-grid the EQ nodes onto the instrument's current tuning span.
-     *  No-op (curve kept) while the span is unchanged. */
+    /** Re-grid the EQ nodes onto the instrument's current tuning span (no-op
+     *  — curve kept — while the span is unchanged), then keep the SELECTED
+     *  voice's parked copy in step with the editor. */
     void syncEqRange()
     {
         const auto s = settingsWithTuning();
         if (s.minFreq > 0.0 && s.maxFreq > s.minFreq)
             eqEditor.setRange(s.minFreq, s.maxFreq);
+        voiceEqState_[(size_t) selectedVoice] = eqEditor.encodeState();
+    }
+
+    /** Points the EQ editor at the SELECTED voice's parked curve (flat line
+     *  when the voice has none yet) and tints it with the voice's colour.
+     *  The guard keeps the programmatic reset from ringing onChange. */
+    void loadEqEditorForSelectedVoice()
+    {
+        eqSwitching_ = true;
+        if (voiceEqState_[(size_t) selectedVoice].isEmpty()
+            || ! eqEditor.decodeState(voiceEqState_[(size_t) selectedVoice]))
+            eqEditor.reset();
+        eqSwitching_ = false;
+        syncEqRange();
+        eqEditor.setAccent(voiceColour(selectedVoice));
+    }
+
+    /** ShapeEqCodec string (ShapeEqComponent::encodeState) → renderer
+     *  VoiceEq. Leaves the entry inactive on any mismatch — including every
+     *  legacy spline string (the schema-5 EQ migration). */
+    static void decodeVoiceEq(const juce::String& str,
+                              midiscoregen::MidiScoreSettings::VoiceEq& eq)
+    {
+        eq.minFreq = eq.maxFreq = 0.0;
+        eq.levelDb  = 0.0f;
+        eq.hasCurve = false;
+        double lo = 0.0, hi = 0.0;
+        float lvl = 0.0f;
+        if (! ShapeEqCodec::decode(str, eq.handles, lvl, lo, hi))
+            return;
+        eq.minFreq  = lo;
+        eq.maxFreq  = hi;
+        eq.levelDb  = lvl;
+        eq.hasCurve = true;
     }
 
     //==========================================================================
@@ -1488,7 +1571,7 @@ public:
         // ── Preview (right of the column) + shaping strip under it ──────────
         const int previewX = pad + colW + 10;
         const int chipH = 16, chipGap = 2;
-        const int eqH   = ScoreEqComponent::kPreferredH;
+        const int eqH   = ShapeEqComponent::kPreferredH;
         const int shapeH = chipH + 4 + eqH;
         previewArea = juce::Rectangle<int>(previewX, contentTop,
                                            juce::jmax(80, getWidth() - previewX - pad),
@@ -1978,11 +2061,12 @@ private:
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ExportZoneDialog)
     };
 
-    /** Top tab for one voice: track/channel name + timbre preset, dimmed when
-     *  the voice is inaudible (muted, un-soloed while another voice solos, or
-     *  absent from the loaded file). The left strip holds two mixer buttons
-     *  that act WITHOUT selecting the voice: the LED (top) mutes/unmutes,
-     *  the S (bottom) solos. */
+    /** Top tab for one voice: track/channel name + timbre preset, framed and
+     *  lit in the voice's identity colour, dimmed when the voice is inaudible
+     *  (muted, un-soloed while another voice solos, or absent from the loaded
+     *  file). The left strip holds two mixer buttons: the LED (top)
+     *  mutes/unmutes without selecting; the yellow square (bottom) solos AND
+     *  selects (soloing means "work on this voice"). */
     class VoiceTab : public juce::Button
     {
     public:
@@ -2003,20 +2087,20 @@ private:
             const bool on   = enabledProvider  && enabledProvider(index);
             const bool solo = soloProvider     && soloProvider(index);
             const bool aud  = audibleProvider  ? audibleProvider(index) : on;
-            const juce::Colour accent(kAccentARGB);
-            const juce::Colour soloCol(0xff58c470);
+            const juce::Colour vc = voiceColour(index);   // the voice's identity
+            const juce::Colour soloCol(kSoloARGB);
 
-            juce::Colour bg = sel ? accent.withAlpha(0.20f) : juce::Colour(0xff1a1d26);
+            juce::Colour bg = sel ? vc.withAlpha(0.18f) : juce::Colour(0xff1a1d26);
             g.setColour(down ? bg.brighter(0.25f) : over ? bg.brighter(0.10f) : bg);
             g.fillRoundedRectangle(b, 3.f);
-            g.setColour(sel ? accent.withAlpha(0.9f) : juce::Colour(0xff33373f));
-            g.drawRoundedRectangle(b, 3.f, sel ? 1.4f : 1.f);
+            g.setColour(vc.withAlpha(sel ? 0.95f : 0.35f));
+            g.drawRoundedRectangle(b, 3.f, sel ? 1.6f : 1.f);
 
             // Mute LED (top of the strip): lit = the voice itself is on.
             const auto led = ledBounds();
             if (on)
             {
-                g.setColour(accent.withAlpha(hoverZone == Zone::led ? 1.0f : 0.85f));
+                g.setColour(vc.withAlpha(hoverZone == Zone::led ? 1.0f : 0.85f));
                 g.fillEllipse(led);
             }
             else
@@ -2026,14 +2110,41 @@ private:
                 g.drawEllipse(led.reduced(0.5f), 1.2f);
             }
 
-            // Solo letter (bottom of the strip).
-            g.setColour(solo ? soloCol.withAlpha(hoverZone == Zone::solo ? 1.0f : 0.9f)
-                             : juce::Colour(hoverZone == Zone::solo ? 0xff8a8f98
-                                                                    : 0xff555a62));
-            g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
-            g.drawText("S", soloZone(), juce::Justification::centred);
+            // Solo square (bottom of the strip): FILLED YELLOW while soloing —
+            // readable across the room, unlike the old grey/green letter.
+            {
+                const auto z = soloZone().toFloat();
+                const float d = 9.f;
+                const juce::Rectangle<float> sq(z.getCentreX() - d * 0.5f,
+                                                z.getCentreY() - d * 0.5f - 1.f,
+                                                d, d);
+                if (solo)
+                {
+                    g.setColour(soloCol.withAlpha(
+                        hoverZone == Zone::solo ? 1.0f : 0.92f));
+                    g.fillRoundedRectangle(sq, 2.f);
+                    // Centre the glyph's actual INK box on the square — at
+                    // this size, font-metric centring visibly drifts.
+                    juce::GlyphArrangement ga;
+                    ga.addLineOfText(juce::Font(juce::FontOptions(8.0f, juce::Font::bold)),
+                                     "S", 0.0f, 0.0f);
+                    const auto gb = ga.getBoundingBox(0, -1, true);
+                    ga.moveRangeOfGlyphs(0, -1,
+                                         sq.getCentreX() - gb.getCentreX(),
+                                         sq.getCentreY() - gb.getCentreY());
+                    g.setColour(juce::Colour(0xff1a1d26));
+                    ga.draw(g);
+                }
+                else
+                {
+                    g.setColour(hoverZone == Zone::solo
+                                    ? soloCol.withAlpha(0.9f)
+                                    : juce::Colour(0xff555a62));
+                    g.drawRoundedRectangle(sq.reduced(0.5f), 2.f, 1.2f);
+                }
+            }
 
-            g.setColour(aud ? (sel ? accent : juce::Colour(0xffb8c0d0))
+            g.setColour(aud ? (sel ? vc.brighter(0.10f) : juce::Colour(0xffb8c0d0))
                             : juce::Colour(0xff555a62));
             g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
             g.drawFittedText(textProvider ? textProvider(index) : juce::String(index + 1),
@@ -2170,7 +2281,11 @@ private:
         const int n = visibleVoiceCount();
         if (selectedVoice >= n)
         {
+            // Park the out-of-range voice's EQ before jumping to voice 1 —
+            // this path bypasses selectVoice (no user gesture).
+            voiceEqState_[(size_t) selectedVoice] = eqEditor.encodeState();
             selectedVoice = 0;
+            loadEqEditorForSelectedVoice();
             refreshVoiceControls();
         }
         for (int i = 0; i < midiscoregen::kMaxVoices; ++i)
@@ -2198,19 +2313,64 @@ private:
     void selectVoice(int i)
     {
         if (i == selectedVoice) return;
+        // Park the outgoing voice's EQ curve before the editor is re-pointed.
+        voiceEqState_[(size_t) selectedVoice] = eqEditor.encodeState();
         selectedVoice = juce::jlimit(0, midiscoregen::kMaxVoices - 1, i);
+        loadEqEditorForSelectedVoice();
         refreshVoiceControls();
         for (auto& t : voiceTabs) t->repaint();
         repaint(previewArea);   // the pan overlay follows the selected voice
+    }
+
+    /** Tab click: editing a voice you cannot hear is refused — a voice must
+     *  be audible (not muted, not masked by the solo set) to be selected.
+     *  Clicks on the S square never land here: they solo AND select by
+     *  themselves (soloing makes the voice audible). */
+    void requestSelectVoice(int i)
+    {
+        if (i == selectedVoice || voiceAudible(i))
+        {
+            selectVoice(i);
+            return;
+        }
+        if (anyVoiceSoloed())
+            Sp3ctraDialog::showInfo(
+                this, "Voice not audible",
+                "This voice is masked by the solo set - it cannot be edited "
+                "while inaudible. Solo it (yellow square) or release the "
+                "solos first.");
+        else
+            Sp3ctraDialog::showInfo(
+                this, "Voice not audible",
+                "This voice is muted - it cannot be edited while inaudible. "
+                "Unmute it (dot) first.");
+    }
+
+    /** What a voice's timbre is called: its preset, or — once hand-tuned —
+     *  "Custom (Piano)" so two Customs from different templates stay apart. */
+    static juce::String presetDisplayName(const timbregen::TimbreSlotParams& q)
+    {
+        if (q.preset >= 0)
+            return timbregen::presetName(q.preset);
+        return q.customBase >= 0
+            ? "Custom (" + juce::String(timbregen::presetName(q.customBase)) + ")"
+            : juce::String("Custom");
     }
 
     /** Pushes the SELECTED voice's params into the widgets (no notifications). */
     void refreshVoiceControls()
     {
         const auto& q = cur();
-        presetCombo.setSelectedId(q.preset >= 0 ? q.preset + 1
-                                                : timbregen::numPresets() + 1,
-                                  juce::dontSendNotification);
+        // The "Custom" combo entry names the template it drifted from — the
+        // item text is re-pointed at the CURRENT voice's base every refresh.
+        const int customId = timbregen::numPresets() + 1;
+        presetCombo.changeItemText(customId,
+                                   q.preset >= 0 ? juce::String("Custom")
+                                                 : presetDisplayName(q));
+        if (q.preset >= 0)
+            presetCombo.setSelectedId(q.preset + 1, juce::dontSendNotification);
+        else   // setText: setSelectedId short-circuits when the id is unchanged
+            presetCombo.setText(presetDisplayName(q), juce::dontSendNotification);
         partialsSlider.setValue(q.numPartials,  juce::dontSendNotification);
         slopeSlider  .setValue(q.slopeDbPerOct, juce::dontSendNotification);
         oddSlider    .setValue(q.oddBias,       juce::dontSendNotification);
@@ -2226,32 +2386,54 @@ private:
         vibLifeSlider .setValue(q.vibLife,      juce::dontSendNotification);
         levelSlider  .setValue(q.levelDb,       juce::dontSendNotification);
 
-        // Bell presets fix their partial set — grey the harmonic-series fields.
+        // Bell presets fix their partial set — grey the harmonic-series
+        // fields, LABEL AND BAR (a dim number alone reads as "small value",
+        // not "inert control").
         const bool harmonic = ! q.bellMode;
-        partialsSlider.setEnabled(harmonic);
-        slopeSlider.setEnabled(harmonic);
-        oddSlider.setEnabled(harmonic);
-        inharmSlider.setEnabled(harmonic);
-        combSlider.setEnabled(harmonic);
-        combPosSlider.setEnabled(harmonic);
+        for (auto* c : std::initializer_list<juce::Component*>{
+                 &partialsSlider, &partialsLabel, &slopeSlider, &slopeLabel,
+                 &oddSlider, &oddLabel, &inharmSlider, &inharmLabel,
+                 &combSlider, &combLabel, &combPosSlider, &combPosLabel })
+            c->setEnabled(harmonic);
         // HF damping is a decay-rate multiplier — inert on sustained notes.
         hfDampSlider.setEnabled(q.decaySec > 0.0);
+        hfDampLabel .setEnabled(q.decaySec > 0.0);
         // Vibrato works in both harmonic and bell modes; its shape controls
         // only matter once there is a depth to shape.
         const bool vib = q.vibCents > 0.0;
         vibRateSlider .setEnabled(vib);
         vibOnsetSlider.setEnabled(vib);
         vibLifeSlider .setEnabled(vib);
+        vibRateLabel  .setEnabled(vib);
+        vibOnsetLabel .setEnabled(vib);
+        vibLifeLabel  .setEnabled(vib);
+
+        // Every per-voice control wears the selected voice's identity colour
+        // (the page-level sliders below the column keep the neutral blue).
+        const juce::Colour vc = voiceColour(selectedVoice);
+        for (auto* sl : { &partialsSlider, &slopeSlider, &oddSlider,
+                          &inharmSlider, &combSlider, &combPosSlider,
+                          &attackSlider, &decaySlider, &hfDampSlider,
+                          &vibDepthSlider, &vibRateSlider, &vibOnsetSlider,
+                          &vibLifeSlider, &levelSlider })
+            sl->setAccent(vc);
+        presetCombo.setColour(juce::ComboBox::outlineColourId,
+                              vc.withAlpha(0.55f));
+        eqEditor.setAccent(vc);
     }
 
-    /** A timbral tweak turns the voice into a hand-tuned "Custom" patch. */
+    /** A timbral tweak turns the voice into a hand-tuned "Custom" patch —
+     *  remembering WHICH template it drifted from ("Custom (Piano)"). */
     void becomeCustom()
     {
         if (cur().preset != timbregen::kPresetCustom)
         {
-            cur().preset = timbregen::kPresetCustom;
-            presetCombo.setSelectedId(timbregen::numPresets() + 1,
-                                      juce::dontSendNotification);
+            cur().customBase = cur().preset;   // the template it just left
+            cur().preset     = timbregen::kPresetCustom;
+            const int customId = timbregen::numPresets() + 1;
+            presetCombo.changeItemText(customId, presetDisplayName(cur()));
+            presetCombo.setText(presetDisplayName(cur()),
+                                juce::dontSendNotification);
             voiceTabs[(size_t) selectedVoice]->repaint();
         }
     }
@@ -2283,6 +2465,22 @@ private:
         double lo = 0.0, hi = 0.0;
         processor.getScoreFrequencyRange(lo, hi);   // follows the musical tuning
         if (lo > 0.0 && hi > lo) { s.minFreq = lo; s.maxFreq = hi; }
+        // Per-voice EQ: the SELECTED voice reads the live editor (mid-drag
+        // truth), the parked voices their encoded curves.
+        for (int v = 0; v < midiscoregen::kMaxVoices; ++v)
+        {
+            auto& eq = s.voiceEq[(size_t) v];
+            if (v == selectedVoice)
+            {
+                eq.minFreq = eqEditor.getMinFreq();
+                eq.maxFreq = eqEditor.getMaxFreq();
+                eqEditor.getHandles(eq.handles);
+                eq.levelDb  = eqEditor.getLevelDb();
+                eq.hasCurve = true;
+            }
+            else
+                decodeVoiceEq(voiceEqState_[(size_t) v], eq);
+        }
         return s;
     }
 
@@ -2314,6 +2512,15 @@ private:
     void loadMidiFile(const juce::File& f)
     {
         data = midiscoregen::parseMidiFile(f);
+        if (data.ok && data.sp3ctraCapture)
+        {
+            // A capture's notes ARE partials: any harmonic timbre would print
+            // harmonics of harmonics and drown the voice. Force the bare
+            // fundamental — the one setting this load cannot work without
+            // (the session may have memorised a rich timbre).
+            timbregen::applyPreset(voices[0], 0);   // "Sine"
+            voices[0].enabled = true;
+        }
         logLabel.setText(data.ok ? data.log : ("Failed: " + data.error),
                          juce::dontSendNotification);
         refreshFileLabel();
@@ -2412,8 +2619,10 @@ private:
     // (px/s ÷ 1000) on the Speed knob — logged.
     static constexpr int kMaxPlayFrames = 30000;   // ≈ 310 MB of frames
 
-    /** Message-thread copy of the playback shaping, safe to carry onto the
-     *  live-reload worker thread (the EQ curve is snapshotted as plain data). */
+    /** Message-thread copy of the playback shaping (crop + edge fades),
+     *  safe to carry onto the live-reload worker thread. The VOICE EQ is
+     *  NOT here: it is part of the voice's timbre, applied by the renderer
+     *  itself (it travels inside MidiScoreSettings::voiceEq). */
     struct ShapeSnapshot
     {
         float cropStart = 0.0f, cropEnd = 1.0f;
@@ -2421,20 +2630,9 @@ private:
         FadeCurveType fadeInType = FadeCurveType::LINEAR;
         FadeCurveType fadeOutType = FadeCurveType::LINEAR;
         float fadeInPow = 1.0f, fadeOutPow = 1.0f;
-        double eqMinF = 0.0, eqMaxF = 0.0;
-        std::vector<float> eqGains;
 
-        bool eqActive() const noexcept
-        {
-            if (eqGains.size() < 2 || eqMinF <= 0.0 || eqMaxF <= eqMinF)
-                return false;
-            for (float g : eqGains)
-                if (std::abs(g) > 0.01f) return true;
-            return false;
-        }
-        bool fadesActive() const noexcept
+        bool active() const noexcept
         { return fadeInLen > 1.0e-3f || fadeOutLen > 1.0e-3f; }
-        bool active() const noexcept { return eqActive() || fadesActive(); }
     };
 
     ShapeSnapshot shapeSnapshot() const
@@ -2448,19 +2646,16 @@ private:
         sp.fadeOutType = fadeOutType_;
         sp.fadeInPow   = fadeInPow_;
         sp.fadeOutPow  = fadeOutPow_;
-        sp.eqMinF      = eqEditor.getMinFreq();
-        sp.eqMaxF      = eqEditor.getMaxFreq();
-        sp.eqGains     = eqEditor.getGains();
         return sp;
     }
 
     /** Shapes a rendered PLAYBACK strip in place (never the preview / export):
-     *  each band row's ink shifts by the EQ gain over the score's dB range
-     *  (same convention as SCORE's applyEqToImage — a −cut lightens toward
-     *  silence, a +boost darkens, pure-white silence never gains energy) and
      *  the crop-window edges fade with the SAMPLER curves (linear gain →
-     *  dB → darkness shift, so a fade ends in actual silence). Static + pure:
-     *  called from the message thread AND the live-reload worker. */
+     *  dB → darkness shift, so a fade ends in actual silence). The VOICE EQ
+     *  is no longer applied here — it is part of each voice's timbre and is
+     *  rendered by drawNotes itself (preview, playback and print alike).
+     *  Static + pure: called from the message thread AND the live-reload
+     *  worker. */
     static void applyPlaybackShaping(juce::Image& img,
                                      juce::Rectangle<int> band, bool stereo,
                                      const ShapeSnapshot& sp,
@@ -2474,79 +2669,40 @@ private:
 
         const double range = juce::jmax(1.0, s.dynamicRangeDB);
 
-        // Per-row EQ darkness shift (constant along a row).
-        std::vector<float> rowShift((size_t) band.getHeight(), 0.0f);
-        if (sp.eqActive() && s.minFreq > 0.0 && s.maxFreq > s.minFreq)
-        {
-            const double bandBottom = (double) band.getBottom();
-            const double bandH      = (double) juce::jmax(1, band.getHeight());
-            const double ratio      = s.maxFreq / s.minFreq;
-            const int    n          = (int) sp.eqGains.size();
-            for (int yy = band.getY(); yy < band.getBottom(); ++yy)
-            {
-                const double pos  = juce::jlimit(0.0, 1.0, (bandBottom - (yy + 0.5)) / bandH);
-                const double freq = s.minFreq * std::pow(ratio, pos);
-                const double x    = std::log(freq / sp.eqMinF)
-                                  / std::log(sp.eqMaxF / sp.eqMinF) * (double) (n - 1);
-                const float gdb   = eqCurveDbAt(sp.eqGains.data(), n,
-                                                juce::jlimit(0.0f, (float) (n - 1), (float) x),
-                                                ScoreEqComponent::kGainRange);
-                rowShift[(size_t) (yy - band.getY())] = (float) (gdb / range);
-            }
-        }
-
-        // Per-column fade darkness shift (constant down a column). The strip
-        // IS the crop window, so the fades sit on its first/last fractions.
+        // Per-column fade darkness shift (constant down a column, ≤ 0 —
+        // fades only lighten toward silence). The strip IS the crop window,
+        // so the fades sit on its first/last fractions.
         std::vector<float> colShift((size_t) band.getWidth(), 0.0f);
-        if (sp.fadesActive())
+        const double bandW = (double) juce::jmax(1, band.getWidth());
+        for (int xx = 0; xx < band.getWidth(); ++xx)
         {
-            const double bandW = (double) juce::jmax(1, band.getWidth());
-            for (int xx = 0; xx < band.getWidth(); ++xx)
-            {
-                const double u = (xx + 0.5) / bandW;   // 0..1 across the window
-                float gain = 1.0f;
-                if (sp.fadeInLen > 1.0e-3f && u < (double) sp.fadeInLen)
-                    gain *= applyFadeCurve((float) (u / sp.fadeInLen),
-                                           sp.fadeInType, sp.fadeInPow);
-                if (sp.fadeOutLen > 1.0e-3f && u > 1.0 - (double) sp.fadeOutLen)
-                    gain *= applyFadeCurve((float) ((1.0 - u) / sp.fadeOutLen),
-                                           sp.fadeOutType, sp.fadeOutPow);
-                if (gain >= 0.999f)
-                    continue;
-                const double db = (gain <= 1.0e-6f)
-                    ? -range : juce::jmax(-range, 20.0 * std::log10((double) gain));
-                colShift[(size_t) xx] = (float) (db / range);
-            }
+            const double u = (xx + 0.5) / bandW;   // 0..1 across the window
+            float gain = 1.0f;
+            if (sp.fadeInLen > 1.0e-3f && u < (double) sp.fadeInLen)
+                gain *= applyFadeCurve((float) (u / sp.fadeInLen),
+                                       sp.fadeInType, sp.fadeInPow);
+            if (sp.fadeOutLen > 1.0e-3f && u > 1.0 - (double) sp.fadeOutLen)
+                gain *= applyFadeCurve((float) ((1.0 - u) / sp.fadeOutLen),
+                                       sp.fadeOutType, sp.fadeOutPow);
+            if (gain >= 0.999f)
+                continue;
+            const double db = (gain <= 1.0e-6f)
+                ? -range : juce::jmax(-range, 20.0 * std::log10((double) gain));
+            colShift[(size_t) xx] = (float) (db / range);
         }
 
         juce::Image::BitmapData bmp(img, juce::Image::BitmapData::readWrite);
         for (int yy = band.getY(); yy < band.getBottom(); ++yy)
         {
-            const float rs = rowShift[(size_t) (yy - band.getY())];
-            // Row LUT covers the EQ part; fade columns add their own shift.
-            juce::uint8 lut[256];
-            for (int v = 0; v < 256; ++v)
-            {
-                if (v >= 255 && rs > 0.0f) { lut[v] = 255; continue; }   // silence stays silent
-                const float dk = juce::jlimit(0.0f, 1.0f, (1.0f - (float) v / 255.0f) + rs);
-                lut[v] = (juce::uint8) juce::jlimit(0, 255,
-                             (int) std::lround((1.0f - dk) * 255.0f));
-            }
             juce::uint8* line = bmp.getLinePointer(yy);
             for (int xx = band.getX(); xx < band.getRight(); ++xx)
             {
-                const float cs = colShift[(size_t) (xx - band.getX())];
-                juce::uint8* p = line + xx * bmp.pixelStride;
-                if (cs == 0.0f)
-                {
-                    if (stereo) { p[0] = lut[p[0]]; p[1] = lut[p[1]]; p[2] = lut[p[2]]; }
-                    else        { p[0] = p[1] = p[2] = lut[p[0]]; }
+                const float shift = colShift[(size_t) (xx - band.getX())];
+                if (shift == 0.0f)
                     continue;
-                }
-                const float shift = rs + cs;
+                juce::uint8* p = line + xx * bmp.pixelStride;
                 auto shape = [shift](juce::uint8 v) -> juce::uint8
                 {
-                    if (v >= 255 && shift > 0.0f) return 255;
                     const float dk = juce::jlimit(0.0f, 1.0f,
                                                   (1.0f - (float) v / 255.0f) + shift);
                     return (juce::uint8) juce::jlimit(0, 255,
@@ -2564,7 +2720,7 @@ private:
         if (fs == nullptr || ! data.ok || data.notes.empty())
             return false;
 
-        syncEqRange();   // playback maps EQ rows onto the current tuning span
+        syncEqRange();   // keep the VOICE EQ node grids on the current tuning span
         const auto s = settingsWithTuning();
         const double dur = juce::jmax(0.05, data.durationSec);
         const double t0  = juce::jlimit(0.0, dur, (double) cropStart_ * dur);
@@ -2834,8 +2990,9 @@ private:
             persistState();
         }
 
-        // Crop/fade/EQ edits change no preview strip (overlay only) — persist
-        // them on their own debounce, once the gesture has settled.
+        // Crop/fade edits change no preview strip (overlay only) — persist
+        // them on their own debounce, once the gesture has settled. (VOICE
+        // EQ edits go through markDirty → the preview branch above.)
         if (stateDirty && ! previewDirty
             && shapeDrag_ == ShapeDrag::None && ! eqEditor.isDragging()
             && juce::Time::getMillisecondCounter() - lastEditMs > 400)
@@ -3152,13 +3309,14 @@ private:
         midiscoregen::MidiScoreSettings pageSettings {};
         int  selectedVoice = 0;
         bool exportAsPng   = true;
-        // Playback shaping (crop window, edge fades, IMAGE EQ curve).
+        // Playback shaping (crop window, edge fades).
         float cropStart = 0.0f, cropEnd = 1.0f;
         float fadeInLen = 0.0f, fadeOutLen = 0.0f;
         FadeCurveType fadeInType  = FadeCurveType::LINEAR;
         FadeCurveType fadeOutType = FadeCurveType::LINEAR;
         float fadeInPow = 1.0f, fadeOutPow = 1.0f;
-        juce::String eqState;                             // encoded EQ spline
+        // Encoded VOICE EQ splines, one per voice (empty = flat).
+        std::array<juce::String, midiscoregen::kMaxVoices> voiceEqState {};
         // Render (copy-on-write: an untouched instance costs nothing).
         juce::Image previewImage;
         bool previewDirty = true, playDirty = true;
@@ -3207,7 +3365,9 @@ private:
             o->setProperty("pan",   pan);
             o->setProperty("en",    q.enabled);
             o->setProperty("solo",  voiceSolo[(size_t) vi]);
+            o->setProperty("eq",    d.voiceEqState[(size_t) vi]);
             o->setProperty("preset",q.preset);
+            o->setProperty("cbase", q.customBase);
             o->setProperty("part",  q.numPartials);
             o->setProperty("slope", q.slopeDbPerOct);
             o->setProperty("odd",   q.oddBias);
@@ -3236,7 +3396,8 @@ private:
         root->setProperty("labels", pageSettings.showLabels);
         root->setProperty("fmt",    pageSettings.pageFormat);
         root->setProperty("png",    d.exportAsPng);
-        // Playback shaping — crop window, edge fades, IMAGE EQ curve.
+        // Playback shaping — crop window, edge fades. (The per-voice EQ
+        // curves are saved INSIDE each voice object above.)
         root->setProperty("cropS",  (double) d.cropStart);
         root->setProperty("cropE",  (double) d.cropEnd);
         root->setProperty("fiL",    (double) d.fadeInLen);
@@ -3245,7 +3406,6 @@ private:
         root->setProperty("foL",    (double) d.fadeOutLen);
         root->setProperty("foT",    (int) d.fadeOutType);
         root->setProperty("foP",    (double) d.fadeOutPow);
-        root->setProperty("eq",     d.eqState);
         processor.getAPVTS().state.setProperty(
             stateKey(slot), juce::JSON::toString(juce::var(root), true), nullptr);
     }
@@ -3292,7 +3452,7 @@ private:
             juce::jlimit(0, 2, (int) o->getProperty("fmt"));
         if (o->hasProperty("png"))    exportAsPng_                 = (bool)   o->getProperty("png");
 
-        // Playback shaping — crop window, edge fades, IMAGE EQ curve.
+        // Playback shaping — crop window, edge fades.
         if (o->hasProperty("cropS")) cropStart_ =
             juce::jlimit(0.0f, 0.99f, (float) (double) o->getProperty("cropS"));
         if (o->hasProperty("cropE")) cropEnd_ =
@@ -3309,7 +3469,16 @@ private:
             juce::jlimit(0, kNumFadeCurveTypes - 1, (int) o->getProperty("foT"));
         if (o->hasProperty("foP"))   fadeOutPow_ =
             juce::jlimit(0.1f, 10.0f, (float) (double) o->getProperty("foP"));
-        d.eqState = o->getProperty("eq").toString();
+
+        // Legacy GLOBAL playback EQ (root "eq", pre-per-voice): it shaped
+        // every band row — the closest per-voice reading is the same curve
+        // on every voice (per-voice curves below override it).
+        {
+            const juce::String legacy = o->getProperty("eq").toString();
+            if (legacy.isNotEmpty())
+                for (auto& es : d.voiceEqState)
+                    es = legacy;
+        }
 
         auto readPanArray = [](const juce::var& v,
                                std::vector<midiscoregen::PanPoint>& out)
@@ -3349,12 +3518,16 @@ private:
                 { return so->hasProperty(k) ? (double) so->getProperty(k) : d; };
                 readPanArray(so->getProperty("pan"),
                              pageSettings.panPoints[(size_t) i]);
+                if (so->hasProperty("eq"))
+                    d.voiceEqState[(size_t) i] = so->getProperty("eq").toString();
                 // Missing "en" (state saved while the toggle was absent) = on.
                 q.enabled       = ! so->hasProperty("en")
                                   || (bool) so->getProperty("en");
                 voiceSolo[(size_t) i] = (bool) so->getProperty("solo");
                 q.preset        = (int) get("preset", q.preset);
-                q.numPartials   = juce::jlimit(1, 64, (int) get("part", q.numPartials));
+                q.customBase    = juce::jlimit(-1, timbregen::numPresets() - 1,
+                                               (int) get("cbase", q.customBase));
+                q.numPartials   = juce::jlimit(1, 128, (int) get("part", q.numPartials));
                 q.slopeDbPerOct = get("slope", q.slopeDbPerOct);
                 q.oddBias       = get("odd",   q.oddBias);
                 q.inharmonicity = get("inh",   q.inharmonicity);
@@ -3467,7 +3640,8 @@ private:
         d.fadeOutLen       = fadeOutLen_;
         d.fadeOutType      = fadeOutType_;
         d.fadeOutPow       = fadeOutPow_;
-        d.eqState          = eqEditor.encodeState();
+        voiceEqState_[(size_t) selectedVoice] = eqEditor.encodeState();
+        d.voiceEqState     = voiceEqState_;
         d.previewImage     = previewImage;
         d.previewDirty     = previewDirty;
         d.playDirty        = playDirty;
@@ -3494,6 +3668,7 @@ private:
         fadeOutLen_      = d.fadeOutLen;
         fadeOutType_     = d.fadeOutType;
         fadeOutPow_      = d.fadeOutPow;
+        voiceEqState_    = d.voiceEqState;
         previewImage     = d.previewImage;
         previewDirty     = d.previewDirty;
         playDirty        = d.playDirty;
@@ -3512,9 +3687,7 @@ private:
      *  tabs and sliders must exist) — call it only after the page is built. */
     void refreshUiFromMembers()
     {
-        if (docs_[(size_t) docSlot_].eqState.isNotEmpty())
-            eqEditor.decodeState(docs_[(size_t) docSlot_].eqState);
-        syncEqRange();
+        loadEqEditorForSelectedVoice();
         wsSlider   .setValue(pageSettings.writingSpeed,    juce::dontSendNotification);
         lineSlider .setValue(pageSettings.lineWidthMM,     juce::dontSendNotification);
         velSlider  .setValue(pageSettings.velocityRangeDb, juce::dontSendNotification);
@@ -3596,6 +3769,10 @@ private:
     std::array<bool, midiscoregen::kMaxVoices> voiceSolo {};
     midiscoregen::MidiScoreSettings pageSettings;
     int selectedVoice = 0;
+    /** Parked VOICE EQ curves (encodeState strings; the SELECTED voice's
+     *  truth lives in eqEditor and is parked here on every switch). */
+    std::array<juce::String, midiscoregen::kMaxVoices> voiceEqState_ {};
+    bool eqSwitching_ = false;   // guards programmatic EQ editor swaps
 
     std::array<std::unique_ptr<VoiceTab>, midiscoregen::kMaxVoices> voiceTabs;
 
@@ -3659,7 +3836,7 @@ private:
     ShapeDrag shapeDrag_  = ShapeDrag::None;
     int       shapeHover_ = 0;   // 1=in end · 2=out end · 3=in mid · 4=out mid
 
-    ScoreEqComponent eqEditor { juce::Colour(kAccentARGB) };
+    ShapeEqComponent eqEditor { juce::Colour(kAccentARGB) };
     SamplerValueBox cropStartBox_   { "start", juce::Colour(0xff33ff99), false };
     SamplerValueBox cropEndBox_     { "end",   juce::Colour(0xffff6633), false };
     SamplerValueBox fadeInLenBox_   { "in",    juce::Colour(0xff44ee88), false };

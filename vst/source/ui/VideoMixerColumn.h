@@ -28,14 +28,36 @@ public:
     /** Fired AFTER the collapse state changed (editor relayouts + persists). */
     std::function<void(bool collapsed)> onCollapseToggled;
 
+    /** Navigation (docs/PLAN_VIDEO_SCROLL_CHAIN_PAGES_ZOOM.md D3): a click on
+     *  the "VIDEO MIX" title → the editor's ALL view of every output's page;
+     *  a click on a "CHAIN n" strip row → that output's chain tab. */
+    std::function<void()>         onHeaderClicked;
+    std::function<void(int slot)> onOutputClicked;
+
     void setCollapsed(bool shouldCollapse, bool notify);
     bool isCollapsed() const noexcept { return collapsed_; }
 
     /** Forwarded to the mixer when the chain model changes (outputs added/removed). */
     void refreshActiveSlots() { mixer_.refreshActiveSlots(); }
 
+    /** The hosted mixer — the VIDEO SCROLL pages' VIEWPORT pad reads the
+     *  solo image of its output / the view size through the
+     *  VideoScrollPreviewSource interface. */
+    VideoMixerComponent& mixer() noexcept { return mixer_; }
+
+    /** Column width beyond which the (height-limited, square) video preview
+     *  stops growing at this column height — extra width would be dead space.
+     *  The editor uses it to cap the ZONE-4 splitter. */
+    int maxUsefulWidth(int columnHeight) const noexcept
+    {
+        return mixer_.maxUsefulWidth(juce::jmax(0, columnHeight - kHeaderH));
+    }
+
     void paint(juce::Graphics& g) override;
     void resized() override;
+    void mouseMove(const juce::MouseEvent& e) override;
+    void mouseExit(const juce::MouseEvent& e) override;
+    void mouseUp(const juce::MouseEvent& e) override;
 
 private:
     //==========================================================================
@@ -117,6 +139,8 @@ private:
     std::unique_ptr<juce::FileChooser> fileChooser_;
 
     bool collapsed_ { false };
+    bool titleHover_ { false };   // "VIDEO MIX" title is a link to the ALL view
+    juce::Rectangle<int> titleBounds() const;
 
     static constexpr int kHeaderH = 24;
 

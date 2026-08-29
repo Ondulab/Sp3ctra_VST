@@ -33,14 +33,14 @@ extern "C" {
  * score family emit one marker PER TYPE):
  *
  *   Pitch + Mask + Reverb + Echo + EQ + Harmo
- *          + Centro + Drive + DcBlock           9   1 each (per-chain dup rule)
+ *          + Centro + Drive + DcBlock + Gain   10   1 each (per-chain dup rule)
  *   VideoScroll probes                          8   dup rule relaxed, pool of 8
  *   Sampler position markers                    8   dup rule relaxed, 8 engines
  *   Score-family markers                        4   1 per type per chain
  *   OUT send markers                            4   LuxStral/Synth/Wave/Grain
  *   MidiTap probes                              8   dup rule relaxed, pool of 8
  *                                             ---
- *                                              41
+ *                                              42
  *
  * The `num_inserts < CHAIN_PLAN_MAX_INSERTS` gate in deriveAndPublishChainPlan
  * is a defensive cap: at 44 it stays unreachable for any legal model (an
@@ -71,6 +71,14 @@ typedef struct {
                          * pools, 0..7); 0 for SP3CTRA/none. M1: the runtime
                          * still reads kind-wide state (internal_source_copy
                          * ignores it) — consumed from P5-M2 on. */
+    int source_pos;     /* 2026-08-20 — the source module's POSITION in insert
+                         * coordinates (value of num_inserts when the source
+                         * was reached; 0 = top / no source). synth_source_base
+                         * hoists the source to the chain's base frame, which
+                         * erases its order: a score/sampler marker placed
+                         * ABOVE the source used to own the stream below it
+                         * anyway. Ownership scans start here while the source
+                         * FEEDS (chain_source_mask_pos, multithreading.c). */
     int has_sampler;    /* a Sampler module sits upstream in the chain */
     int has_score;      /* a Score module sits upstream in the chain */
     int num_inserts;    /* ordered Pitch/Mask inserts before the synth */

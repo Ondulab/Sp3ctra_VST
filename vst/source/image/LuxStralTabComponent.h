@@ -507,7 +507,7 @@ private:
     static constexpr int kCapH      = AudioPanelLayout::kEnvCaptionH; // 13
     static constexpr int kToggleGap = AudioPanelLayout::kToggleGap;   // 6
     static constexpr int kKnobH     = AudioPanelLayout::kKnobCellH;   // 71
-    static constexpr int kEnvH      = AudioPanelLayout::kEnvH;        // 124
+    static constexpr int kEnvH      = AudioPanelLayout::kEnvH;        // 140
     static constexpr int kEnvGap    = AudioPanelLayout::kEnvGap;      // 10
     static constexpr juce::uint32 kDimText = 0xff5a5a66;             // greyed labels/captions
 

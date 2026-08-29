@@ -2,6 +2,7 @@
 #include "../ui/ModuleCatalog.h"
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "../ui/Sp3ctraHandles.h"
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -236,8 +237,9 @@ void SlotSpectralEditorComponent::paint(juce::Graphics& g)
 }
 
 // Fade curves drawn full-height ON the image (no widget row, no top strip).
-// Each fade has two handles: END (coloured, at the peak) = length; MID
-// (white, on the curve) = shape — drag bends the curve through the mouse.
+// Each fade has two lime handles (Sp3ctraHandles): END (node, at the peak) =
+// length; MID (hollow ring, on the curve) = shape — drag bends the curve
+// through the mouse.
 void SlotSpectralEditorComponent::drawFades(juce::Graphics& g, juce::Rectangle<float> img)
 {
     auto* fs = processor.getSampler(samplerIndex_);
@@ -284,39 +286,23 @@ void SlotSpectralEditorComponent::drawFades(juce::Graphics& g, juce::Rectangle<f
             g.strokePath(curve, juce::PathStrokeType(1.8f, juce::PathStrokeType::curved));
         }
 
-        // Handle at the "full" (peak) end — small node, EQ-sized.
+        // Handle at the "full" (peak) end — lime node, EQ-sized (hover /
+        // drag states from the shared painter).
         const float hx = rising ? x1 : x0;
-        const float r  = (active || hover) ? (float) kHandleR + 1.0f : (float) kHandleR;
-        if (active || hover)
-        {
-            g.setColour(col.withAlpha(0.25f));
-            g.fillEllipse(hx - r - 2.5f, hy - r - 2.5f, 2 * (r + 2.5f), 2 * (r + 2.5f));
-        }
-        g.setColour(active ? col.brighter(0.3f) : juce::Colour(0xff20202a));
-        g.fillEllipse(hx - r, hy - r, 2 * r, 2 * r);
-        g.setColour(active ? juce::Colours::white : col.withAlpha(0.9f));
-        g.drawEllipse(hx - r, hy - r, 2 * r, 2 * r, 1.4f);
+        Sp3ctraHandles::drawNode(g, { hx, hy }, Sp3ctraHandles::stateOf(active, hover),
+                                 (float) kHandleR);
 
-        // MID (shape) handle — white node ON the curve at mid-span. Hidden
-        // for near-zero fades (nothing to bend).
+        // MID (shape) handle — hollow lime ring ON the curve at mid-span
+        // (reads apart from the END node). Hidden for near-zero fades
+        // (nothing to bend).
         if (x1 > x0 + 8.0f)
         {
             const float mx = (x0 + x1) * 0.5f;
             const float mg = applyFadeCurve(0.5f, type, power);
             const float my = sBot - mg * H;
-            const float mr = (midActive || midHover) ? (float) kHandleR + 1.5f
-                                                     : (float) kHandleR + 0.5f;
-            if (midActive || midHover)
-            {
-                g.setColour(juce::Colours::white.withAlpha(0.25f));
-                g.fillEllipse(mx - mr - 2.5f, my - mr - 2.5f,
-                              2 * (mr + 2.5f), 2 * (mr + 2.5f));
-            }
-            g.setColour(juce::Colour(0xff20202a));
-            g.fillEllipse(mx - mr, my - mr, 2 * mr, 2 * mr);
-            g.setColour(midActive ? col.brighter(0.5f)
-                                  : juce::Colours::white.withAlpha(0.9f));
-            g.drawEllipse(mx - mr, my - mr, 2 * mr, 2 * mr, 1.6f);
+            Sp3ctraHandles::drawRing(g, { mx, my },
+                                     Sp3ctraHandles::stateOf(midActive, midHover),
+                                     (float) kHandleR + 0.5f);
         }
     };
 
@@ -634,6 +620,7 @@ void SlotSpectralEditorComponent::mouseUp(const juce::MouseEvent& e)
 {
     mode_ = Mode::None;
     mouseMove(e);
+    repaint();   // Drag → Hover/Idle look even when the cursor stays on the handle
 }
 
 void SlotSpectralEditorComponent::timerCallback()

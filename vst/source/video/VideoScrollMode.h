@@ -1,44 +1,49 @@
 #pragma once
 
 #include <juce_core/juce_core.h>
+#include <map>
+#include <utility>
+#include <vector>
 
 /**
  * @file VideoScrollMode.h
- * @brief Video orientation modes — 4 simple rotation angles.
+ * @brief Shared VIDEO SCROLL constants + helpers (param bounds, output labels).
  *
- * The internal scroll buffer always advances row-by-row (vertical).
- * The orientation angle is applied as an AffineTransform in paint(),
- * rotating the rendered waterfall to the desired screen direction.
- *
- *   Deg0   — vertical scroll, new data arrives at bottom  (↑ scroll up)
- *   Deg90  — horizontal scroll, new data at right         (← scroll left = L->R)
- *   Deg180 — vertical scroll, new data at top             (↓ scroll down)
- *   Deg270 — horizontal scroll, new data at left          (→ scroll right = R->L)
+ * Historically hosted the 4-way orientation enum (0/90/180/270°). Since
+ * 2026-08-28 the orientation is the continuous "rotation" param — degrees,
+ * clockwise on screen: 0 = new lines at the bottom / scroll up, 90 = at the
+ * left, 180 = scroll down, 270 = at the right (the former mode × 90°). See
+ * docs/PLAN_VIDEO_SCROLL_CHAIN_PAGES_ZOOM.md.
  */
-enum class VideoScrollMode : int
-{
-    Deg0   = 0,   ///< 0°   — new data at bottom, waterfall scrolls up
-    Deg90  = 1,   ///< 90°  — new data at right,  waterfall scrolls left  (L->R)
-    Deg180 = 2,   ///< 180° — new data at top,    waterfall scrolls down
-    Deg270 = 3,   ///< 270° — new data at left,   waterfall scrolls right (R->L)
-    COUNT  = 4
-};
 
-/** Rotation angle in radians for each mode (used by AffineTransform in paint()). */
-inline float videoScrollModeAngle(VideoScrollMode m)
+/** Bounds shared by the APVTS param ranges (PluginProcessor) and the renderer
+ *  clamps (VideoScrollRenderCore). Zoom is the width of the generation band
+ *  relative to the visible span (D5/D7). */
+namespace VideoScrollLimits
 {
-    return static_cast<int>(m) * juce::MathConstants<float>::halfPi;
+    constexpr float kZoomMin     = 0.05f;
+    constexpr float kZoomMax     = 4.0f;
+    constexpr float kRotationMax = 360.0f;   // degrees, wraps
 }
 
-/** Short label shown in the toolbar overlay. */
-inline const char* videoScrollModeLabel(VideoScrollMode m)
+/** Display labels of the patched VIDEO SCROLL outputs — "CHAIN n", suffixed
+ *  a/b/… when one chain hosts several probes. `slotsChains` = {slot, chainIdx}
+ *  in RACK order (Sp3ctraAudioProcessor::activeVideoSlots()). ONE helper for
+ *  the VIDEO MIX strip, the zone-3 chain tabs and the ALL view, so the three
+ *  always name an output the same way. */
+inline juce::StringArray videoScrollOutputLabels(const std::vector<std::pair<int, int>>& slotsChains)
 {
-    switch (m)
+    std::map<int, int> perChain, seen;
+    for (const auto& sc : slotsChains)
+        ++perChain[sc.second];
+
+    juce::StringArray out;
+    for (const auto& sc : slotsChains)
     {
-        case VideoScrollMode::Deg0:   return "0 deg";
-        case VideoScrollMode::Deg90:  return "90 deg";
-        case VideoScrollMode::Deg180: return "180 deg";
-        case VideoScrollMode::Deg270: return "270 deg";
-        default:                      return "???";
+        juce::String label = "CHAIN " + juce::String(sc.second + 1);
+        if (perChain[sc.second] > 1)
+            label += juce::String::charToString((juce::juce_wchar) ('a' + seen[sc.second]++));
+        out.add(label);
     }
+    return out;
 }

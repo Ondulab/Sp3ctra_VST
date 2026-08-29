@@ -78,6 +78,11 @@ public:
     // render thread only (same single-consumer discipline as tick()).
     void clear();
 
+    // The display colour law itself (pure, static) — shared with the page's
+    // VIEWPORT pad so its "no frame yet" paper matches the output's frame
+    // colour. See the private colour-law section below for the members.
+    static void applyDisplayColour(int& r, int& g, int& b, bool colorMode, int invMode);
+
 private:
     // ── Ring drain (replaces CaptureThread + buildLineImage's ring access) ────
     // Pulls up to RING_SLOTS fresh scanlines from the per-instance ring into
@@ -96,6 +101,45 @@ private:
 
     // APVTS convenience: load a slot-scoped raw param with a null-guarded default.
     float param(const char* suffix, float defaultValue) const;
+
+    // ── Output geometry (zoom / centre / birth line) ──────────────────────────
+    // The canvas is ALWAYS the whole output window (the sweep spans it edge to
+    // edge). Zoom = width of the generation band on the transverse axis, applied
+    // rigidly at draw time; centerX/centerY (window space) move the band and
+    // the zoom frame hosting the birth line. docs/PLAN_VIDEO_SCROLL_CHAIN_PAGES_ZOOM.md
+    float zoomParam() const;     // clamped to VideoScrollLimits
+    float rotationRad() const;   // "rotation" (degrees, clockwise) → radians
+    // Bounding box of the ROTATED view inside the square canvas (canvas px):
+    // the extent the sweep must cover transversally (sx) and along the scroll
+    // axis (sy). Equals the view dims at 0°/180°, swapped at 90°/270°. Used
+    // for VISIBILITY only (warp/blur culling, birth-line clamp) — never to
+    // size anything, or the picture would breathe with the angle.
+    void  visibleSpans(float& sx, float& sy) const;
+    // The zoom FRAME (what Zoom scales), rotation-INVARIANT: the view's own
+    // dims (W transverse, H along the scroll axis, canvas px), like a camera
+    // viewfinder turning over the scene. At zoom 1 the stamped line spans W
+    // px whatever the angle — rotating never changes the apparent zoom (it
+    // used to follow the bounding box, +41 % at 45° on a square view).
+    void  frameSpans(float& fx, float& fy) const;
+    // centerX/centerY (window space) → offset of the generation centre in the
+    // canvas frame (canvas px): transverse (ox) and along the scroll axis (oy).
+    void  centreOffset(float& ox, float& oy) const;
+    // Birth-line position along the scroll axis, 0..1 of the canvas: the zoom
+    // frame (z × sy, centred by Center Y) hosts the line via Line Pos; clamped
+    // to the visible span. Shared by scrollStep() and buildWarp() so both agree.
+    float birthLine01() const;
+
+    // ── Display colour law (ONE path for everything that reaches the screen) ──
+    // Color(RGB) off folds to luma, then Invert (Off / Negative / Luminance)
+    // flips it. buildLineImage applies it to the stamped lines; the blank paper
+    // (clear / allocate / vacated rows) and the frame border (drawWarp) go
+    // through the SAME law, so a Luminance-inverted white paper shows a black
+    // paper AND a black border — never a white frame around a black image.
+    int  invertMode() const;   // 0 Off / 1 Negative / 2 Luminance (legacy bool folded in)
+    juce::Colour displayColourOf(float r01, float g01, float b01) const;
+    juce::Colour paperColour() const { return displayColourOf(1.f, 1.f, 1.f); }
+    juce::Colour frameColour() const;   // bgR/bgG/bgB through the law
+    void fillPaperRow(uint8_t* row, int pixelStride, juce::Colour paper) const;
 
     // ── Processor reference (for APVTS + ring instance lookup) ────────────────
     Sp3ctraAudioProcessor& processor_;
@@ -143,8 +187,13 @@ private:
     std::vector<int> accR_, accG_, accB_;
     std::vector<int> psR_, psG_, psB_;
 
-    int  compW_   { 0 };       // viewport width
-    int  compH_   { 0 };       // viewport height
+    // View dims (budgeted logical px) the canvas was sized for. The canvas is
+    // a SQUARE on their diagonal (compW_ = compH_ = ceil(hypot(viewW_, viewH_)))
+    // so any rotation sweeps the whole view without ever reallocating.
+    int  viewW_   { 0 };
+    int  viewH_   { 0 };
+    int  compW_   { 0 };       // canvas width  (= D)
+    int  compH_   { 0 };       // canvas height (= D)
     int  bufW_    { 0 };       // history width  (= compW_)
     int  bufH_    { 0 };       // history height (= 4 × compH_)
     bool buffersInit_ { false };
@@ -161,9 +210,13 @@ private:
     // scrollStep() sets warpDirty_ whenever it mutates the history; clear()/alloc
     // reset it too.
     bool  warpDirty_   { true };
-    float wsLinePos_   { 1e9f };
+    float wsBirth_     { 1e9f };   // resolved birth line (linePos/zoom/centerY/rotation)
+    float wsRot_       { 1e9f };   // rotation → visible span (aging distances)
+    int   wsViewW_     { -1 };
+    int   wsViewH_     { -1 };
     float wsCompress_  { 1e9f };
     float wsFade_      { 1e9f };
+    float wsBlur_      { 1e9f };
     float wsGamma_     { 1e9f };
     int   wsBufW_      { -1 };
     int   wsCompH_     { -1 };

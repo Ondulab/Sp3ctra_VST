@@ -6,6 +6,10 @@
  * WIDTH equals the seconds of audio that fill one page at the current writing
  * speed + page format — can be dragged along the file to choose WHERE the score
  * is extracted from. Emits the new start offset (seconds) via onStartChange.
+ *
+ * Frame + readout = the shared ModuleEditorChrome; the grab triangle and the
+ * free-mode edge grips are controls, painted lime by Sp3ctraHandles (the
+ * accent stays on the window outline and its highlight).
  */
 #pragma once
 
@@ -14,6 +18,8 @@
 #include <cmath>
 #include <functional>
 #include "../UITheme.h"
+#include "../ui/ModuleEditorChrome.h"
+#include "../ui/Sp3ctraHandles.h"
 
 class WaveformSelectorComponent : public juce::Component,
                                   private juce::ChangeListener
@@ -37,7 +43,10 @@ public:
     void setFile(const juce::File& f)
     {
         startSec = 0.0;
-        if (f.existsAsFile()) thumb.setSource(new juce::FileInputSource(f));
+        // useFileTimeInHashGeneration=true: takes are re-recorded/re-synthesized
+        // to the SAME path, and the thumbnail cache is keyed by this hash — a
+        // path-only hash would keep showing the previous take's waveform.
+        if (f.existsAsFile()) thumb.setSource(new juce::FileInputSource(f, true));
         else                  thumb.setSource(nullptr);
         clampStart();
         repaint();
@@ -72,11 +81,8 @@ public:
     //==========================================================================
     void paint(juce::Graphics& g) override
     {
-        auto bf = getLocalBounds().toFloat();
-        g.setColour(juce::Colour(0xff15151c));
-        g.fillRoundedRectangle(bf.reduced(0.5f), 4.0f);
-        g.setColour(accent.withAlpha(0.18f));
-        g.drawRoundedRectangle(bf.reduced(0.5f), 4.0f, 1.0f);
+        const auto bf = getLocalBounds().toFloat();
+        ModuleChrome::drawFrame(g, bf, accent);
 
         const double total = totalSeconds();
         if (total <= 0.0)
@@ -115,34 +121,39 @@ public:
             g.fillRect(px - 0.75f, (float) area.getY(), 1.5f, (float) area.getHeight());
         }
 
-        // Window outline + grab handle.
+        // Window outline (display) + lime grab triangle (control — white
+        // rim while the window is being dragged).
         g.setColour(accent.withAlpha(0.95f));
         g.drawRect(sel, 1.5f);
         juce::Path tri;
         tri.addTriangle(selX, (float) area.getY(),
                         selX + 11.0f, (float) area.getY(),
                         selX, (float) area.getY() + 11.0f);
+        const bool down = isMouseButtonDown();
+        g.setColour(Sp3ctraHandles::colour());
         g.fillPath(tri);
+        if (down && dragMode == DragMode::move)
+        {
+            g.setColour(Sp3ctraHandles::hot());
+            g.strokePath(tri, juce::PathStrokeType(1.2f));
+        }
 
-        // Free mode: edge grips advertise that the region is resizable.
+        // Free mode: edge grips (lime thumbs) advertise that the region is
+        // resizable — hover / drag states per edge.
         if (freeSelection)
         {
             const float gy = sel.getCentreY();
-            for (const float gx : { sel.getX(), sel.getRight() })
-            {
-                g.setColour(accent);
-                g.fillRoundedRectangle(gx - 2.0f, gy - 9.0f, 4.0f, 18.0f, 2.0f);
-                g.setColour(juce::Colour(0xff15151c));
-                g.fillRect(gx - 0.5f, gy - 6.0f, 1.0f, 12.0f);
-            }
+            Sp3ctraHandles::drawThumb(g, { sel.getX() - 2.0f, gy - 9.0f, 4.0f, 18.0f },
+                Sp3ctraHandles::stateOf(down && dragMode == DragMode::resizeL, hotEdge == 1));
+            Sp3ctraHandles::drawThumb(g, { sel.getRight() - 2.0f, gy - 9.0f, 4.0f, 18.0f },
+                Sp3ctraHandles::stateOf(down && dragMode == DragMode::resizeR, hotEdge == 2));
         }
 
-        // Readout: window length @ start.
-        g.setColour(accent.withAlpha(0.85f));
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
-        g.drawText(juce::String(win, 1) + "s  @ " + juce::String(startSec, 1) + "s",
-                   area.getRight() - 150, area.getY() + 1, 148, 11,
-                   juce::Justification::right, false);
+        // Readout: window length @ start (shared frame readout).
+        ModuleChrome::drawReadout(g, bf, accent,
+                                  juce::String(win, 1) + "s  @ "
+                                      + juce::String(startSec, 1) + "s",
+                                  0.85f);
     }
 
     void mouseDown(const juce::MouseEvent& e) override
@@ -215,12 +226,13 @@ public:
         notify();
         repaint();
     }
-    void mouseUp(const juce::MouseEvent&) override { dragMode = DragMode::move; }
+    void mouseUp(const juce::MouseEvent&) override { dragMode = DragMode::move; repaint(); }
 
     void mouseMove(const juce::MouseEvent& e) override
     {
-        // Resize cursor over the edges in free mode.
+        // Resize cursor + hot grip over the edges in free mode.
         auto cursor = juce::MouseCursor::NormalCursor;
+        int  edge   = 0;
         const double total = totalSeconds();
         if (freeSelection && total > 0.0)
         {
@@ -229,12 +241,21 @@ public:
             const float selX = (float) area.getX()
                              + (float) (startSec / total) * area.getWidth();
             const float selW = (float) (win / total) * area.getWidth();
-            if (selW > 24.0f
-                && (std::abs(e.position.x - selX) <= kEdgePx
-                    || std::abs(e.position.x - (selX + selW)) <= kEdgePx))
+            if (selW > 24.0f)
+            {
+                if      (std::abs(e.position.x - selX) <= kEdgePx)          edge = 1;
+                else if (std::abs(e.position.x - (selX + selW)) <= kEdgePx) edge = 2;
+            }
+            if (edge != 0)
                 cursor = juce::MouseCursor::LeftRightResizeCursor;
         }
         setMouseCursor(cursor);
+        if (edge != hotEdge) { hotEdge = edge; repaint(); }
+    }
+
+    void mouseExit(const juce::MouseEvent&) override
+    {
+        if (hotEdge != 0) { hotEdge = 0; repaint(); }
     }
 
 private:
@@ -287,6 +308,7 @@ private:
     double anchorEnd    = 0.0;  // fixed right edge during a left-edge resize
     float  dragStartX   = 0.0f;
     bool   freeSelection = false;
+    int    hotEdge = 0;         // grip under the cursor: 1 = left, 2 = right
     DragMode dragMode = DragMode::move;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WaveformSelectorComponent)

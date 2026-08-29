@@ -89,7 +89,7 @@ public:
                 status = juce::String::fromUTF8("Installing…"); break;
             case AppUpdater::State::readyToRestart:
                 status = "Update v" + up->latestVersion()
-                       + " is ready — restart Sp3ctra to run it.";
+                       + juce::String::fromUTF8(" is ready — restart Sp3ctra to run it.");
                 break;
             case AppUpdater::State::failed:
                 status = up->errorMessage();

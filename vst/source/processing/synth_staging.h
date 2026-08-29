@@ -22,6 +22,10 @@
  *                 (the louder contributor drives the note's pan; centre when
  *                  the note is silent everywhere)
  *   contrast    = Σ_k  w_k·contrast_k / Σ_k w_k
+ *   display RGB = 255 − Σ_k  w_k·(255 − rgb_k[i]), jointly clipped (INK sum:
+ *                 paper-white contributes ZERO — mirrors the audio note sum;
+ *                 an averaging law dimmed every send whenever another staged
+ *                 blank paper, pumping the MIX head panel)
  * Disabled sends (bank .enabled == 0) and inactive slots contribute nothing.
  */
 #ifndef SYNTH_STAGING_H
@@ -39,10 +43,14 @@ extern "C" {
 
 /* Producer (single writer per chain slot): stage one conditioned send frame.
  * Copies additive.notes (num_notes), stereo gains when stereo_valid, and the
- * contrast factor from `pp`. Marks the slot active. */
+ * contrast factor from `pp`, plus the raw RGB stream AT the OUT position
+ * (head-panel display: per-send view + the mixer's blended tap). Marks the
+ * slot active. NULL rgb → white (blank-paper contract). */
 void synth_staging_stage_luxstral(int chain_idx, int bank_slot,
                                   const PreprocessedImageData* pp,
-                                  int num_notes, int stereo_valid);
+                                  int num_notes, int stereo_valid,
+                                  const uint8_t* r, const uint8_t* g,
+                                  const uint8_t* b, int nb_pixels);
 
 /* Producer: the send currently produces NO signal (chain no-signal contract)
  * — the slot contributes silence to the mix until staged again. */
@@ -53,6 +61,9 @@ void synth_staging_set_inactive(int chain_idx);
  * pixels_per_note == 1 they are the same axis), left/right gain arrays and
  * the blended contrast factor. Weights come from
  * g_sp3ctra_config.luxstral_out[bank_slot] (intensity × enabled).
+ * r/g/b_out (optional, may be NULL): the weighted-average RGB of the mixed
+ * sends — the head-panel MIX view line; nb_pixels_out its pixel count and
+ * generation_out a change counter (snapped seqs) for gen-gated publishes.
  * Returns the number of sends actually mixed; 0 → the caller must commit
  * silence; -1 → a slot was torn by a concurrent staging (writer mid-copy on
  * every retry) — the caller must HOLD its previous commit untouched, the
@@ -61,7 +72,19 @@ void synth_staging_set_inactive(int chain_idx);
 int synth_staging_mix_luxstral(const ChainPlan* plan,
                                float* notes_out, int max_notes,
                                float* left_out, float* right_out,
-                               int* stereo_valid_out);
+                               int* stereo_valid_out,
+                               uint8_t* r_out, uint8_t* g_out, uint8_t* b_out,
+                               int max_pixels, int* nb_pixels_out,
+                               uint32_t* generation_out);
+
+/* UI/message-thread reader (SPCTR per-send view): copy ONE send's staged RGB
+ * stream (the line AT its "→ LUXSTRAL" position). Returns 1 = copied (and
+ * *bank_slot_out = the send's conditioning bank), 0 = slot inactive (unfed
+ * send → the caller shows white), -1 = torn by a concurrent staging — the
+ * caller must HOLD its previous frame. NOT for RT threads. */
+int synth_staging_copy_luxstral_rgb(int chain_idx,
+                                    uint8_t* r, uint8_t* g, uint8_t* b,
+                                    int max_pixels, int* bank_slot_out);
 
 /* ── M4 — LuxSynth sends (conditioned LINE + raw RGB at the OUT position) ──
  * Producers stage the send's conditioned grayscale line (luxsynth_condition_

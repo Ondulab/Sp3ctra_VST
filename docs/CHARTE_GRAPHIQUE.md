@@ -23,35 +23,54 @@
 | Fond bouton | `kColBtnBg` | `#2a2a2a` | ▓ |
 | Bouton actif | `kColBtnActive` | `#3a3a3a` | ▓ |
 
-**Couleurs fonctionnelles (hors tokens, codées dans les composants) :**
+**Couleur des CONTRÔLES — « ce qu'on touche » (tokens, 2026-08-28) :**
+
+| Rôle | Token | Hex |
+|------|-------|-----|
+| **Poignée / contrôle** — nœuds, chevrons, thumbs, lignes saisissables, barres (`Sp3ctraBarSlider`), toggles, combos, puces de type, knobs | `kColHandle` | `#dcff3c` (lime acide) |
+| Anneau d'une poignée en cours de DRAG, bord de valeur d'une barre pressée | `kColHandleHot` | `#ffffff` |
+| Cœur sombre d'une poignée au repos (= fond du cadre) | `kColHandleCore` | `#20202a` |
+| Fond du cadre graphique des éditeurs | `kColFrameBg` | `#20202a` |
+| Intérieur d'une barre (actif / désactivé) | `kColBarBg` / `kColBarBgOff` | `#181820` / `#121216` |
+
+Le lime est choisi **hors des cinq teintes de catégorie** (cyan / magenta / violet / ambre / vert) : un contrôle ressort sur toutes les pages. Règle : *ce qu'on regarde* (courbes, cadres, titres, labels) = couleur du module ; *ce qu'on touche* = `kColHandle`. Recettes de peinture : [`ui/Sp3ctraHandles.h`](../vst/source/ui/Sp3ctraHandles.h) (poignées) et [`ui/ModuleEditorChrome.h`](../vst/source/ui/ModuleEditorChrome.h) (chrome d'affichage).
+
+**Grammaire d'état d'une poignée** (une teinte, quatre états, chacun plus « chaud ») :
+
+| État | Rendu |
+|------|-------|
+| Idle | creux : cœur sombre + anneau lime 1.4 px |
+| Selected | cœur lime plein + anneau lime + fin anneau extérieur (sélection persistante : la poignée que pilotent les boîtes / CC MIDI) |
+| Hover | cœur lime plein + halo doux |
+| Drag | cœur lime plein + anneau BLANC + halo + readout lime (pilule sombre) |
+
+Barres (`Sp3ctraBarSlider`, branche `LinearBar` du LookAndFeel) : idle = remplissage lime 22 % / liseré 35 % ; hover = remplissage 30 % / liseré 70 % / bord de valeur lime ; drag = remplissage 40 % / liseré plein / bord de valeur blanc.
+
+**Autres couleurs fonctionnelles (hors tokens) :**
 
 | Rôle | Hex |
 |------|-----|
-| Accent bleu (slider/knob rempli, valeur) | `#4fa3e0` |
-| Pointeur / thumb bleu pâle | `#a0c4e8` |
 | Piste/arc non rempli (très sombre) | `#1a1f2a` |
 | Corps de knob | `#22272f` (bordure `#33373f`) |
 | Vert accent (menus : tick, section header) | `#66cc88` |
+| Ambre MIDI (badge « mappé », hint temporisé) | `#e0a24a` |
+| Texte de hint inactif | `#55606f` |
 | Rouge PANIC | rouge vif adaptatif |
 | Jaune réglages (gear) | jaune/orange adaptatif |
 
-### 1.2 Couleurs d'identité des blocs (chain rack)
+### 1.2 Couleurs d'identité des modules (chain rack)
 
-Chaque bloc possède une couleur d'accent utilisée **partout** où il apparaît (fond du bloc, surbrillance d'onglet, en-tête SETUP, accent des graphes/éditeurs).
+Depuis 2026-08-14 un module n'a **pas** de couleur propre : sa couleur est celle de sa **catégorie** de catalogue (`moduleColour(t)` = `moduleCatColour(category)`, [`ui/ModuleCatalog.h`](../vst/source/ui/ModuleCatalog.h)). Elle est utilisée partout où le module apparaît **en tant qu'affichage** : puce catalogue, bloc du rack, barre PLAY/SETUP, bouton power, courbes / cadres / titres / labels de ses éditeurs, tranche mixeur.
 
-| Bloc | Hex | Couleur |
-|------|-----|---------|
-| SOURCE CIS (chain 1 & 2) | `#68788f` | gris-bleu |
-| PITCH | `#e06bb8` | rose |
-| MASK | `#6be0d0` | teal |
-| SAMPLER | `#4fa3e0` | bleu |
-| SCORE | `#e0a24a` | ambre |
-| LUXSTRAL | `#6b4fa3` | violet |
-| LUXSYNTH | `#e08844` | orange |
-| LUXWAVE | `#4ae0a0` | vert |
+| Catégorie | Hex | Couleur | Modules |
+|-----------|-----|---------|---------|
+| SRC | `#00d9ff` | cyan électrique | SP3CTRA, IMAGE, VIDEO, CAMERA |
+| MIDI | `#ff2ed0` | magenta | PITCH, MASK |
+| FX | `#b44dff` | violet néon | REVERB, ECHO, EQ, SCALE, CENTROID, LEVELS, DC BLOCK, GAIN |
+| UTILS | `#ffb020` | ambre vif | SAMPLER, SCORE, TIMBRE, MIDI SCORE, VOICE |
+| OUT | `#45ff8c` | vert néon | → LUXSTRAL / LUXSYNTH / LUXWAVE / LUXGRAIN, → VIDEO SCROLL, → MIDI TAP |
 
-**Accents de sous-onglets (héritage IMAGE)** : Sources `#7aade0`, LuxStral `#4fa3e0`, LuxSynth `#e08844`.
-**Accent underline onglet actif** : `kColTabAccent` = `#c89650` (ambre chaud).
+Jamais de teinte de module en littéral local : toujours `moduleColour(ModuleType::X)`. Les contrôles, eux, ne prennent **jamais** la couleur du module (§1.1).
 
 ### 1.3 Typographie
 
@@ -95,10 +114,11 @@ Hérite de `juce::LookAndFeel_V4`. Instancié une fois dans l'éditeur, posé vi
 |-------------------|--------------|
 | `drawButtonBackground` | Boutons-onglets (`isTab`) : fond transparent + overlay hover/press subtil. Boutons standards : rect arrondi 3 px, bordure subtile, fond adaptatif. |
 | `drawButtonText` | Police uniforme `kFontBtn` (11 px), couleur selon état toggle + alpha si désactivé. |
-| `drawLinearSlider` | Horizontal uniquement : piste sombre `#1a1f2a`, remplissage `#4fa3e0`, thumb circulaire `#a0c4e8` + halo hover. Autres styles → délégués à V4. |
-| `drawRotarySlider` | Cadran : arc fond `#1a1f2a`, arc valeur `#4fa3e0`, corps `#22272f`, pointeur `#a0c4e8`, halo hover. |
-| `drawToggleButton` | **Switch type iOS** : piste arrondie (off `#33373f` / on `#4fa3e0`), pastille blanche glissante, label à droite police `kFontBtn`. |
-| `getComboBoxFont` / `drawComboBox` | Police `kFontSettings`, fond arrondi + petit triangle blanc plein (remplace le chevron Unicode JUCE). |
+| `createSliderTextBox` | Barres : le label superposé est texte seul (fond et liseré transparents) — le chrome de la barre est peint UNE fois, dans `drawLinearSlider`. |
+| `drawLinearSlider` | **`LinearBar`** (Sp3ctraBarSlider) : intérieur `kColBarBg`, remplissage / liseré lime avec les 3 états idle · hover · drag (bord de valeur lime puis blanc). **`LinearVertical`** (faders mixeur) : même langage, barre 12 px, teinte posée par `AudioMixPanel::initFader`. `LinearHorizontal` (résiduel) : piste `#1a1f2a`, remplissage et thumb lime. |
+| `drawRotarySlider` | Cadran : arc fond `#1a1f2a`, arc valeur lime 75 %, corps `#22272f`, pointeur lime, halo hover. |
+| `drawToggleButton` | **Switch glissant** langage barre : piste `kColBarBg`, remplissage lime 25 % si ON, liseré lime, pastille carrée lime (OFF : grise). Accent = `ToggleButton::tickColourId` du plus proche ancêtre — `kColHandle` par défaut (PluginEditor le pose explicitement sur l'hôte zone 3). |
+| `getComboBoxFont` / `drawComboBox` | Police `kFontSettings` ; intérieur `kColBarBg`, liseré lime 35 % (70 % au survol / pressé), triangle lime plein. |
 | `getPopupMenuFont` / `drawPopupMenu*` | Menus sombres `kFontSmall`, header de section vert `#66cc88`, tick ✓ vert, séparateurs fins. |
 
 ---
@@ -107,14 +127,33 @@ Hérite de `juce::LookAndFeel_V4`. Instancié une fois dans l'éditeur, posé vi
 
 | Widget JUCE | Style Sp3ctra | Où |
 |-------------|---------------|-----|
-| `Slider` LinearHorizontal | piste + thumb accent | sliders spatiaux/bipolaires (video scroll), settings |
-| `Slider` LinearBar | boîte numérique compacte | boîtes A/D/S/R des éditeurs de courbe, filtre masque |
-| `Slider` Rotary | knob à cadran | **volumes & paramètres continus** des panneaux audio |
-| `ToggleButton` | switch iOS | **Enable** des modules, booléens (loop, sync, velocity…) |
+| **`Sp3ctraBarSlider`** ([`ui/Sp3ctraBarSlider.h`](../vst/source/ui/Sp3ctraBarSlider.h)) | LE slider horizontal unique : barre lime, texte superposé lecture seule, double-clic = cycle min → centre → max, clic droit = MIDI learn | **toutes** les valeurs horizontales (boîtes des éditeurs, modulation, video scroll, mixeurs) |
+| `Slider` LinearVertical | fader barre 12 px, teinte moteur | AudioMixPanel |
+| `Slider` Rotary | knob à cadran, arc lime | paramètres continus des panneaux moteurs (LuxSynth / LuxGrain / LuxWave) |
+| `ToggleButton` | switch glissant lime | **Enable** des modules, booléens (loop, sync, velocity…) |
 | `TextButton` | rect arrondi 3 px | actions (GENERATE, LOAD, REC…), transport |
 | `ComboBox` | fond arrondi + triangle | sélecteurs (mode, source, note MIDI…) |
 | `Label` | texte plat | labels read-only, en-têtes |
 | `Viewport` | scroll vertical sobre | zones 2, 3, 4 |
+
+### Squelette standard d'un éditeur de module (zone 3, 2026-08-28)
+
+Tous les éditeurs FX / MIDI (DC BLOCK, GAIN, LEVELS, CENTROID, ECHO, REVERB, EQ, FILTER, ADSR…) partagent le même squelette, fourni par [`ui/ModuleEditorChrome.h`](../vst/source/ui/ModuleEditorChrome.h) (`namespace ModuleChrome`) :
+
+```
+┌ cadre (kColFrameBg, liseré module 25 %, r = 4) ─────────────────┐
+│ TITRE (kFontTiny gras, module 75 %)              readout (60 %)  │
+│    plot = plotOf(cadre) : courbe (module) + poignées (lime)      │
+└──────────────────────────────────────────────────────────────────┘
+  kRowGap 6
+  Label      Label      Label        kLabelH 12 (kFontTiny, module 60 %)
+  [ barre ]  [ barre ]  [ barre ]    kBoxH 18 (Sp3ctraBarSlider lime), kBoxGap 8
+```
+
+- Le cadre ne contient **que** la visu et ses poignées ; les boîtes numériques vivent dans leur rangée **sous** le cadre (`layoutBoxRow`, `drawBoxLabel`). Un éditeur à deux vues (ADSR + largeur, CENTROID) répète le motif cadre + rangée.
+- Une page (`image/Lux*TabComponent.h`) empile ses éditeurs (`kEditorGap` 4, premier à `kPageTop` 4, marge `kPagePad` 8), ferme par la caption `--- NOM ---` (`drawSectionCaption`, `kSectionCaptionH` 22) et place ses rangées de contrôles supplémentaires (combos Root/Scale/Mode, Invert, Glide/LFO + toggle Velocity) dans le **même** idiome label-au-dessus. Hauteur : `pageHeight(editorsH, extraRows)`.
+- Helpers : `drawFrame`, `drawCaption`, `drawReadout`, `drawBoxLabel`, `layoutBoxRow`, `drawSectionCaption`, `graphOf` / `plotOf`.
+- Poignées : `Sp3ctraHandles::drawNode` (nœud plein), `drawRing` (poignée secondaire creuse : courbure, pente), `drawThumb` (thumb de fader, grip), `drawGrabLine` (ligne saisissable, ex. Floor), `drawChevron` + `drawLink` (2ᵉ réglage de l'EQ), `drawChip` (puces BELL/LP/HP/DJ/TILT), `drawReadout` (valeur pendant le drag) ; état via `stateOf(dragging, hovered, selected)`.
 
 ### Patterns de layout récurrents
 
@@ -198,7 +237,8 @@ Défini dans [`PluginEditor.h`](../vst/source/PluginEditor.h) — fenêtre redim
 | Composant | Fichier | Rôle |
 |-----------|---------|------|
 | `WaterfallColumnComponent` | [`ui/WaterfallColumnComponent.h`](../vst/source/ui/WaterfallColumnComponent.h) | Colonne repliable, mini-header (détacher/replier), toolbar display. |
-| `VideoScrollTab` | [`video/VideoScrollTab.h`](../vst/source/video/VideoScrollTab.h) | Contrôles waterfall : speed (bipolaire), line pos, thickness, zoom, fade, compression. |
+| `VideoScrollPage` | [`video/VideoScrollPage.h`](../vst/source/video/VideoScrollPage.h) | Page zone 3 d'une sortie VIDEO SCROLL, squelette `ModuleChrome` : cadre VIEWPORT + rangées Rotation · Zoom · Center X/Y · Line Pos / Speed · Thickness · Compression · Fade · Blur · Gamma / Invert · Color · Background. |
+| `VideoScrollViewportEditor` | [`video/VideoScrollViewportEditor.h`](../vst/source/video/VideoScrollViewportEditor.h) | Pad VIEWPORT (2026-08-28) : la fenêtre de sortie à son vrai rapport, vignette live du VIDEO MIX, cadre de zoom saisissable — glisser = Center X/Y, coin = Zoom, levier / cadran = Rotation, ligne de naissance = Line Pos, pincement ou ⌘+molette = Zoom, double-clic = reset, clic droit = MIDI Learn. Affichage = couleur module, poignées = lime. |
 | `VideoWindow` | [`video/VideoWindow.h`](../vst/source/video/VideoWindow.h) | Fenêtre waterfall détachée. |
 
 ### Settings (fenêtre flottante)
@@ -238,16 +278,17 @@ Composants à rendu vectoriel custom (graphes, courbes, glyphes) :
 ## 7. Conventions de design
 
 1. **Tokens d'abord** — jamais de littéral de couleur/taille/espacement hors `UITheme.h` (sauf couleurs fonctionnelles documentées §1.1).
-2. **Couleur = identité de bloc** — un module garde sa couleur d'accent partout (rack, onglet, en-tête, graphe).
+2. **Couleur = identité de catégorie pour l'AFFICHAGE, lime pour les CONTRÔLES** — un module garde sa couleur (rack, onglet, en-tête, courbes, cadres, labels) ; tout ce qui se saisit (poignées, barres, toggles, combos, puces, knobs) est `kColHandle`, avec les états idle / selected / hover / drag de `Sp3ctraHandles`.
 3. **Hauteur de contrôle unique** — `kControlH` (22 px) pour boutons, sliders, combos → alignement parfait des rangées.
 4. **Choix du contrôle selon la nature du paramètre** :
-   - continu « audio » (volume, gain, cutoff, depth) → **knob rotatif** ;
-   - enveloppe temporelle (ADSR) → **éditeur de courbe** (nodes draggables + boîtes numériques) ;
-   - bipolaire/spatial (position, vitesse −1..+1) → **slider linéaire** ;
+   - valeur numérique d'un module (temps, dB, %, Hz…) → **`Sp3ctraBarSlider`** dans la rangée sous le cadre ;
+   - forme / enveloppe / courbe → **éditeur graphique** (poignées lime `Sp3ctraHandles` + boîtes en dessous) ;
+   - continu « moteur » (panneaux LuxSynth / LuxGrain / LuxWave) → **knob rotatif** ;
    - booléen / activation → **toggle switch** ;
-   - discret/énuméré → **combo** (ou stepper).
-5. **Rendu sombre cohérent** — fonds `#1e1e1e`/`#282828`, accents froids (bleu) pour les valeurs, accents chauds (ambre) pour la navigation.
+   - discret/énuméré → **combo**, dans une rangée label-au-dessus comme les barres.
+5. **Rendu sombre cohérent** — fonds `#1e1e1e`/`#282828`, couleur de catégorie pour l'affichage, lime pour les contrôles, ambre pour la navigation et le MIDI.
+6. **Squelette unique des pages de module** — `ModuleChrome` (cadre, titre, rangée de boîtes, caption de section) ; aucune page ne redessine son propre cadre, sa propre caption `--- X ---` ni sa propre recette de poignée.
 
 ---
 
-*Document généré dans le cadre de la refonte UI (sliders → knobs/éditeurs). À tenir à jour lors de l'ajout de nouveaux composants ou tokens.*
+*Document généré dans le cadre de la refonte UI (sliders → knobs/éditeurs) ; mis à jour le 2026-08-28 (couleur de contrôle lime + squelette `ModuleChrome` / `Sp3ctraHandles`). À tenir à jour lors de l'ajout de nouveaux composants ou tokens.*

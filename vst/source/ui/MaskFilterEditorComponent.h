@@ -2,10 +2,11 @@
  * @file MaskFilterEditorComponent.h
  * @brief Interactive editor for the LuxMask bandpass filter (Width / Bias / Slope).
  *
- * Mirrors the EnvelopeEditorComponent feel: a graphic with draggable handles
- * plus compact numeric boxes, all bound to APVTS params (host-automatable,
- * MIDI-mappable).  The x-axis is the pitch offset from the played note (note
- * marker at centre); y is the reveal alpha.
+ * Mirrors the EnvelopeEditorComponent feel: a ModuleChrome frame ("FILTER")
+ * holding the graphic + its lime handles (Sp3ctraHandles), with the compact
+ * numeric boxes in a row BELOW the frame — all bound to APVTS params
+ * (host-automatable, MIDI-mappable).  The x-axis is the pitch offset from the
+ * played note (note marker at centre); y is the reveal alpha.
  *
  *   • Left / Right edge handles  → drag the band edges → set Width + Offset.
  *   • Slope handle (right foot)   → drag horizontally → set the edge softness.
@@ -21,14 +22,17 @@
 #include <memory>
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
+#include "ModuleEditorChrome.h"
 #include "Sp3ctraBarSlider.h"
+#include "Sp3ctraHandles.h"
 #include "../processing/lux_mask.h"   // self-manages extern "C" linkage
 
 class MaskFilterEditorComponent : public juce::Component,
                                   private juce::Timer
 {
 public:
-    static constexpr int kPreferredH = 100;  // graphic + box row
+    static constexpr int kFrameH     = 72;   // graphic frame (plot = plotOf(frame), 46 px)
+    static constexpr int kPreferredH = kFrameH + ModuleChrome::kBelowFrameH;   // 108 — frame + box row below
 
     MaskFilterEditorComponent(juce::AudioProcessorValueTreeState& apvtsIn,
                               juce::Colour accentColour,
@@ -79,94 +83,57 @@ public:
     //==========================================================================
     void resized() override
     {
-        auto area = getLocalBounds().reduced(6);
-        const int boxRowH = kLabelH + kBoxH;
-        graphRect_ = area.removeFromTop(juce::jmax(24, area.getHeight() - boxRowH - kRowGap)).toFloat();
-        area.removeFromTop(kRowGap);
-
-        auto row = area.removeFromTop(boxRowH);
-        row.removeFromTop(kLabelH);
-        const int gap = 5, n = 3;
-        const int bw = (row.getWidth() - (n - 1) * gap) / n;
-        boxW.setBounds(row.getX(),                  row.getY(), bw, kBoxH);
-        boxO.setBounds(row.getX() + (bw + gap),     row.getY(), bw, kBoxH);
-        boxS.setBounds(row.getX() + 2 * (bw + gap), row.getY(), bw, kBoxH);
+        auto area = getLocalBounds();
+        // Frame = the graphic only; the Width / Offset / Slope boxes sit below
+        // it (label strip + boxes — ModuleChrome::kBoxRowH).
+        frameRect_ = area.removeFromTop(juce::jmax(2 * ModuleChrome::kFrameInset + 16,
+                                               area.getHeight() - ModuleChrome::kBelowFrameH)).toFloat();
+        area.removeFromTop(ModuleChrome::kRowGap);
+        ModuleChrome::layoutBoxRow(area.removeFromTop(ModuleChrome::kBoxRowH), { &boxW, &boxO, &boxS });
     }
 
     void paint(juce::Graphics& g) override
     {
-        const auto bounds = getLocalBounds().toFloat();
-        g.setColour(juce::Colour(0xff20202a));
-        g.fillRoundedRectangle(bounds.reduced(0.5f), 4.0f);
-        g.setColour(accent.withAlpha(0.25f));
-        g.drawRoundedRectangle(bounds.reduced(0.5f), 4.0f, 1.0f);
+        // Chrome: frame + caption, box labels below the frame (module colour).
+        ModuleChrome::drawFrame   (g, frameRect_, accent);
+        ModuleChrome::drawCaption (g, frameRect_, accent, "FILTER");
+        ModuleChrome::drawBoxLabel(g, boxW, accent, "Width");
+        ModuleChrome::drawBoxLabel(g, boxO, accent, "Offset");
+        ModuleChrome::drawBoxLabel(g, boxS, accent, "Slope");
 
         const Geometry geo = computeGeometry();
-        if (geo.valid)
+        if (!geo.valid) return;
+
+        // Note anchor marker.
+        g.setColour(accent.withAlpha(0.30f));
+        g.drawVerticalLine((int) geo.xN, geo.topY, geo.botY);
+
+        // Live reveal fill (ADSR openness breathing inside the outline).
+        const float liveOpen = liveOpenness();
+        if (liveOpen > 0.001f)
         {
-            // Note anchor marker.
-            g.setColour(accent.withAlpha(0.30f));
-            g.drawVerticalLine((int) geo.xN, geo.topY, geo.botY);
-
-            // Live reveal fill (ADSR openness breathing inside the outline).
-            const float liveOpen = liveOpenness();
-            if (liveOpen > 0.001f)
-            {
-                juce::Path live = buildCurve(geo, liveOpen);
-                g.setColour(accent.withAlpha(0.22f));
-                g.fillPath(live);
-            }
-
-            // Editable full-open outline.
-            juce::Path outline = buildCurve(geo, 1.0f);
-            g.setColour(accent.withAlpha(0.07f));
-            g.fillPath(outline);
-            g.setColour(accent.withAlpha(0.85f));
-            g.strokePath(outline, juce::PathStrokeType(1.5f));
-
-            // Edge handles — filled "node" style (like the ADSR A/D/S/R nodes).
-            for (Handle h : { Handle::LeftEdge, Handle::RightEdge })
-            {
-                const auto pt     = handlePos(h, geo);
-                const bool active = (h == dragging) || (dragging == Handle::None && h == hovered);
-                const float rad   = active ? kNodeR + 1.5f : kNodeR;
-                if (active)
-                {
-                    g.setColour(accent.withAlpha(0.25f));
-                    g.fillEllipse(pt.x - rad - 2.5f, pt.y - rad - 2.5f,
-                                  2 * (rad + 2.5f), 2 * (rad + 2.5f));
-                }
-                g.setColour(active ? accent.brighter(0.3f) : juce::Colour(0xff20202a));
-                g.fillEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad);
-                g.setColour(active ? juce::Colours::white : accent.withAlpha(0.9f));
-                g.drawEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad, 1.4f);
-            }
-
-            // Slope handle — hollow "bend" style (like the ADSR curve handles).
-            {
-                const auto pt     = handlePos(Handle::Slope, geo);
-                const bool active = (Handle::Slope == dragging)
-                                  || (dragging == Handle::None && hovered == Handle::Slope);
-                const float rad   = active ? kBendR + 1.2f : kBendR;
-                g.setColour(active ? juce::Colours::white : accent.withAlpha(0.55f));
-                g.drawEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad, active ? 1.6f : 1.2f);
-            }
+            juce::Path live = buildCurve(geo, liveOpen);
+            g.setColour(accent.withAlpha(0.22f));
+            g.fillPath(live);
         }
 
-        // Title + box labels.
-        g.setColour(accent.withAlpha(0.45f));
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontMicro));
-        g.drawText("FILTER", (int) bounds.getX() + 8, (int) bounds.getY() + 2,
-                   90, 9, juce::Justification::centredLeft, false);
+        // Editable full-open outline.
+        juce::Path outline = buildCurve(geo, 1.0f);
+        g.setColour(accent.withAlpha(0.07f));
+        g.fillPath(outline);
+        g.setColour(accent.withAlpha(0.85f));
+        g.strokePath(outline, juce::PathStrokeType(1.5f));
 
-        g.setColour(accent.withAlpha(0.6f));
-        auto label = [&g](const juce::Slider& box, const juce::String& t)
+        // Handles — Sp3ctraHandles (lime): filled nodes for the edges, a hollow
+        // ring for the slope. Hover and Drag are distinct states.
+        auto handleState = [this](Handle h)
         {
-            auto bb = box.getBounds();
-            g.drawText(t, bb.getX(), bb.getY() - kLabelH, bb.getWidth(), kLabelH,
-                       juce::Justification::centred, false);
+            return Sp3ctraHandles::stateOf(h == dragging,
+                                           dragging == Handle::None && h == hovered);
         };
-        label(boxW, "Width"); label(boxO, "Offset"); label(boxS, "Slope");
+        for (Handle h : { Handle::LeftEdge, Handle::RightEdge })
+            Sp3ctraHandles::drawNode(g, handlePos(h, geo), handleState(h));
+        Sp3ctraHandles::drawRing(g, handlePos(Handle::Slope, geo), handleState(Handle::Slope));
     }
 
     //==========================================================================
@@ -228,9 +195,10 @@ private:
     Geometry computeGeometry() const
     {
         Geometry geo;
-        if (graphRect_.getWidth() < 30.0f || graphRect_.getHeight() < 16.0f) return geo;
+        const auto graph = ModuleChrome::graphOf(frameRect_);
+        if (graph.getWidth() < 30.0f || graph.getHeight() < 16.0f) return geo;
 
-        geo.plot = graphRect_.reduced(8.0f, 7.0f);
+        geo.plot = ModuleChrome::plotOf(frameRect_);
         float N = (float) lux_mask_instance(slot_)->last_pixel_count;
         if (N <= 0.0f) N = (float) (LUX_MASK_MAX_PIXELS / 2);
         geo.Nimg = N;
@@ -399,17 +367,12 @@ private:
     void initBox(Sp3ctraBarSlider& box, const juce::String& id,
                  std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>& att)
     {
-        box.setAccent(accent);
-        addAndMakeVisible(box);
+        addAndMakeVisible(box);   // bars keep the handle colour (Sp3ctraBarSlider default)
         att = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, id, box);
     }
 
-    static constexpr float kNodeR = 4.5f;
-    static constexpr float kBendR = 3.2f;   // hollow slope handle (ADSR-style)
-    static constexpr float kHitR  = 12.0f;
-    static constexpr int   kBoxH   = 16;
-    static constexpr int   kLabelH = 9;
-    static constexpr int   kRowGap = 3;
+    static constexpr float kNodeR = Sp3ctraHandles::kNodeR;   // drawn node radius (pin margin)
+    static constexpr float kHitR  = 12.0f;                    // grab radius
 
     juce::AudioProcessorValueTreeState& apvts;
     juce::Colour accent;
@@ -421,7 +384,7 @@ private:
     MidiMappingEngine* midiMap_ = nullptr;
     std::unique_ptr<MidiLearnAttachment> learnW_, learnO_, learnS_;
 
-    juce::Rectangle<float> graphRect_;
+    juce::Rectangle<float> frameRect_;   // graphic frame (ModuleChrome); plot = plotOf(frameRect_)
     Handle hovered  { Handle::None };
     Handle dragging { Handle::None };
     float  dragFixedOff_ = 0.0f;

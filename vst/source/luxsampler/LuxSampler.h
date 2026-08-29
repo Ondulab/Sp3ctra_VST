@@ -14,6 +14,7 @@
  */
 
 #include "FadeCurve.h"
+#include "../processing/shape_eq.h"   // typed-handle EQ model (slot image EQ)
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <atomic>
 #include <memory>
@@ -55,7 +56,6 @@ namespace LuxSamplerConstants
     // axis, converted to a darkness shift (gain / EQ_DYN_RANGE_DB) at playback.
     // 24 dB maps to the full darkness span, so a band at +24 dB reaches full black
     // (max material) and at −24 dB reaches full white (total mask/silence).
-    constexpr int     MAX_EQ_NODES        = 16;    // ≥ (octaves+1) of the widest range
     constexpr float   EQ_DYN_RANGE_DB     = 24.0f; // dB span that maps to full darkness
 
     // (The former C1..B1 PLAY-note range was removed with the multi-bank mixer:
@@ -795,28 +795,37 @@ public:
         if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0.0f;
         return slotParams[i].eqFloor.load(std::memory_order_relaxed);
     }
-    // ── Image EQ (SCORE-style ±dB, boost + cut) — message thread writes, RT reads LUT ──
-    // Stored as an encoded string in ScoreEqComponent::encodeState() format
-    // ("minF|maxF|g0;g1;…"); rebuildFreqLut() turns it into a per-position dB LUT.
+    // ── Image EQ (typed handles, ±dB) — message thread writes, RT reads LUT ──
+    // Stored as an encoded string in ShapeEqCodec format
+    // ("H1|minF|maxF|t,f,g,w;×4"); rebuildFreqLut() turns it into a
+    // per-position dB LUT. Legacy spline strings decode to FLAT (the schema-5
+    // EQ migration — no curve fitting).
     /** Set slot i's EQ from an encoded curve string; republishes the LUT. Non-RT. */
     void setSlotEq(int i, const juce::String& encoded) noexcept;
     /** Return slot i's encoded EQ string ("" when flat). Non-RT. */
     juce::String getSlotEq(int i) const;
 
-    // Per-band EQ gain access (message thread) — the slot EQ is a 2..9-node
-    // grid over kEqMinHz..kEqMaxHz (node count = the editor's "points"
-    // dropdown, see ScoreEqComponent; default 2 = one straight line). Lets the
-    // MIDI mapping tweak one band without the curve editor. Non-RT.
-    static constexpr int    kEqBands = 9;   // max nodes / MIDI band targets
     static constexpr double kEqMinHz = 65.41;
     static constexpr double kEqMaxHz = 16744.04;
-    /** Gain (dB, ±24) of EQ band @p band [0..8] on slot @p slot; 0 when flat
-     *  or when the band doesn't exist on the slot's current grid. */
-    float getSlotEqBandGain(int slot, int band) const noexcept;
-    /** Set EQ band @p band [0..8] of slot @p slot to @p gainDb (clamped ±24),
-     *  preserving the other bands and the slot's node count (a band beyond the
-     *  current grid is ignored); republishes the LUT. Non-RT. */
-    void  setSlotEqBandGain(int slot, int band, float gainDb) noexcept;
+
+    // "Selected handle" MIDI access (message thread) — the mapped CC trio
+    // (eqfreq/eqgain/eqwidth) steers whichever handle the slot's ShapeEq
+    // editor last selected. `which`: 0 = Freq, 1 = Gain, 2 = Width, all
+    // normalised 0..1 (Gain maps to ±24 dB). A CC on an Off handle is
+    // ignored (there is nothing selected to steer). Non-RT.
+    void  setSlotEqHandleParam(int slot, int handle, int which, float norm01) noexcept;
+    float getSlotEqHandleParam(int slot, int handle, int which) const noexcept;
+    void setSlotEqSelHandle(int i, int h) noexcept
+    {
+        if (i >= 0 && i < LuxSamplerConstants::NUM_SLOTS)
+            slotEqSelHandle_[i].store(juce::jlimit(0, SHAPE_EQ_MAX_HANDLES - 1, h),
+                                      std::memory_order_release);
+    }
+    int  getSlotEqSelHandle(int i) const noexcept
+    {
+        if (i < 0 || i >= LuxSamplerConstants::NUM_SLOTS) return 0;
+        return slotEqSelHandle_[i].load(std::memory_order_acquire);
+    }
     /** RT: true when the curve is not flat (worth applying). */
     bool isFreqCurveActive(int i) const noexcept
     {
@@ -1291,13 +1300,15 @@ private:
     SlotPlayParams slotParams[LuxSamplerConstants::NUM_SLOTS];
 
     // -------------------------------------------------------------------------
-    // Per-slot image EQ (SCORE-style ±dB, boost + cut).
+    // Per-slot image EQ (typed handles, ±dB).
     //   eqState_ : authoritative encoded curve (message thread only), in
-    //     ScoreEqComponent::encodeState() format ("minF|maxF|g0;g1;…").
+    //     ShapeEqCodec format ("H1|minF|maxF|t,f,g,w;×4").
     //   freqLut_ (double-buffered) + freqLutActive_ : RT-published look-up table
     //     holding a GAIN IN dB per normalised pixel position, evaluated per pixel
     //     by FramePlayerThread. freqCurveActive_ lets the RT loop skip the effect
     //     entirely when the curve is flat.
+    //   slotEqSelHandle_ : handle the slot's editor last selected — the mapped
+    //     CC trio steers it (persisted as @eqSel next to @imageEq).
     // Single-writer (message thread) / single-reader (player thread) publish.
     // -------------------------------------------------------------------------
     // Source image behind a bank loaded via loadSlotFromImageFile (message
@@ -1312,6 +1323,7 @@ private:
                                  [LuxSamplerConstants::FREQ_LUT_N];
     std::atomic<int>     freqLutActive_[LuxSamplerConstants::NUM_SLOTS];
     std::atomic<bool>    freqCurveActive_[LuxSamplerConstants::NUM_SLOTS];
+    std::atomic<int>     slotEqSelHandle_[LuxSamplerConstants::NUM_SLOTS] {};
 
     /** Initialise every slot's curve to flat (2 points, level 1.0). */
     void initFreqCurveDefaults() noexcept;

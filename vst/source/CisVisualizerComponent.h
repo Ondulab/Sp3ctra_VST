@@ -81,6 +81,16 @@ public:
      *  read that instance's own line from the (kind, slot) pool. */
     void setSelectedSourceSlot(int slot) { selectedSourceSlot_ = juce::jlimit(0, 7, slot); }
 
+    /** SPCTR head panels — which "→ LUXSTRAL" stream they show.
+     *  -1  = engine MIX view (AUDIO MIX row): the engine tap, i.e. the
+     *        weighted blend the audio mixer actually feeds the engine;
+     *  >=0 = that MODEL chain's own send (rack click): its staged RGB
+     *        conditioned by ITS bank. Message thread only. */
+    void setSpctrViewChain(int modelChain)
+    {
+        spctrViewChain_ = juce::jlimit(-1, 7, modelChain);
+    }
+
 private:
     // ── Per-panel frame buffers ────────────────────────────────────────────────
     /**
@@ -287,6 +297,7 @@ private:
     // Badge for the SELECTED_TAP panel — module + chain of the selection.
     juce::String selectedTapLabel_;
     int selectedSourceSlot_ { 0 };   // P5-M2 — media slot of the selected source
+    int spctrViewChain_    { -1 };   // SPCTR view: -1 = MIX, >=0 = model chain
 
     // ── Blob overlay ──────────────────────────────────────────────────────────
     bool blobOverlayVisible = false;

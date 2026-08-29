@@ -36,7 +36,7 @@
 #include "../licensing/ActivationDialog.h"
 #include "../session/MachinePrefs.h"   // TTS install prefs are machine-scoped
 #include "ScoreGenRenderer.h"
-#include "ScoreEqComponent.h"
+#include "../ui/ShapeEqComponent.h"
 #include "WaveformSelectorComponent.h"
 #include "../tts/PiperTts.h"
 #include "../tts/VoiceGenJob.h"
@@ -212,6 +212,13 @@ public:
         playStopButton.onClick = [this] { togglePlay(); };
         addAndMakeVisible(playStopButton);
 
+        pauseButton.setEnabled(false);
+        pauseButton.setTooltip("Freeze the current instant: the held column "
+                               "keeps sounding; click/drag the preview to move "
+                               "it. Works while playing or from stop.");
+        pauseButton.onClick = [this] { togglePause(); };
+        addAndMakeVisible(pauseButton);
+
         loopBtn.setEnabled(false);
         loopBtn.setTooltip("Loop playback");
         addAndMakeVisible(loopBtn);
@@ -230,10 +237,10 @@ public:
 
         setTransportEnabled(false);
 
-        // P8 — VOICE feeds like a media source: once generated and active,
-        // the parked column sounds even with the transport stopped.
-        playHint.setText("Generated + active: the parked column keeps sounding "
-                         "(drag it). PLAY scans the text; the LED silences.",
+        // Transport contract (P8 hold retired 2026-08-20): STOP silences —
+        // the sounding hold is the PAUSE button's job now.
+        playHint.setText("PLAY scans the text. PAUSE holds the sounding "
+                         "column (drag it). STOP silences.",
                          juce::dontSendNotification);
         playHint.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
         playHint.setColour(juce::Label::textColourId, juce::Colour(0xff8890a0));
@@ -305,6 +312,7 @@ public:
                     setTransportEnabled(true);   // PLAY re-encodes then plays
                 }
             }
+            maybeRestoreRenderFromCache();   // …and the render itself (PNG)
         }
 
         // ── Log ────────────────────────────────────────────────────────────
@@ -393,18 +401,19 @@ public:
             if (fs != nullptr && framesAreOurs)
             {
                 const bool playing = fs->isScorePlaying();
+                const bool paused  = pauseMode != PauseMode::none;
                 int headFrame = -1;
-                if (playing)             headFrame = fs->getScorePlayHead();
+                if (playing || paused)   headFrame = fs->getScorePlayHead();
                 else if (scrubHead >= 0) headFrame = scrubHead;
                 else                     headFrame = fs->getScorePlayHead();
-                // ^ stopped: the PARKED column (P8 — it keeps sounding, like
-                //   a loaded IMAGE's frozen line; drag to move the drone).
+                // ^ stopped: the resting head (0 after STOP) — silent; the
+                //   sounding hold is PAUSE's job since the P8 hold retired.
                 if (headFrame >= 0)
                 {
                     const int n = juce::jmax(1, fs->getScoreFrameCount());
                     const float frac = juce::jlimit(0.f, 1.f, (float) headFrame / (float) n);
                     const float lx = imgArea.getX() + frac * imgArea.getWidth();
-                    g.setColour(accent.withAlpha(playing ? 0.9f : 0.6f));
+                    g.setColour(accent.withAlpha(playing || paused ? 0.9f : 0.6f));
                     g.fillRect(lx - 0.75f, imgArea.getY(), 1.5f, imgArea.getHeight());
                 }
             }
@@ -766,9 +775,13 @@ public:
                  && previewArea.contains(e.getPosition());
         if (! scrubbing) return;
         scrubTo(e);
-        if (auto* fs = boundChannel())
-            if (! fs->isScorePlaying())
-                scrubAuditioning = fs->uiBeginScoreScrub();
+        // Pause mode already sustains a session (held or frozen transport):
+        // the seek above moved its column — no transient audition to start,
+        // and mouseUp must NOT end the held session.
+        if (pauseMode == PauseMode::none)
+            if (auto* fs = boundChannel())
+                if (! fs->isScorePlaying())
+                    scrubAuditioning = fs->uiBeginScoreScrub();
     }
     void mouseDrag(const juce::MouseEvent& e) override { if (scrubbing) scrubTo(e); }
     void mouseUp  (const juce::MouseEvent&)   override
@@ -868,6 +881,7 @@ public:
 
             int x = pad;
             playStopButton.setBounds(x, y + (blockH - btn) / 2, btn, btn);   x += btn + gap;
+            pauseButton.setBounds  (x, y + (blockH - btn) / 2, btn, btn);    x += btn + gap;
             loopBtn.setBounds   (x, y + (blockH - icon) / 2, icon, icon);    x += icon + 4;
             reverseBtn.setBounds(x, y + (blockH - icon) / 2, icon, icon);    x += icon + gap;
 
@@ -882,7 +896,7 @@ public:
 
         // ── Image EQ strip across the bottom (full width) ───────────────────
         const int eqTop = juce::jmax(colBottom + gap,
-                                     getHeight() - pad - ScoreEqComponent::kPreferredH);
+                                     getHeight() - pad - ShapeEqComponent::kPreferredH);
         const int eqH   = juce::jmax(0, getHeight() - pad - eqTop);
         eqEditor.setBounds(pad, eqTop, getWidth() - 2 * pad, eqH);
         const int contentBottom = eqTop - gap;
@@ -993,6 +1007,52 @@ private:
     private:
         bool playing = false;
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportPlayButton)
+    };
+
+    /** Square pause toggle: freeze the transport on the CURRENT column — the
+     *  player keeps re-injecting that instant every tick (sustained sound)
+     *  and the head can be dragged in the preview while frozen. Same visual
+     *  language as the MIDI SCORE page's pause. */
+    class TransportPauseButton : public juce::Button
+    {
+    public:
+        TransportPauseButton() : juce::Button("voicePause") {}
+
+        void setPaused(bool p)
+        {
+            if (p == paused) return;
+            paused = p;
+            repaint();
+        }
+
+        void paintButton(juce::Graphics& g, bool over, bool down) override
+        {
+            const auto b = getLocalBounds().toFloat().reduced(1.f);
+            const bool on = paused && isEnabled();
+            const juce::Colour accent(kAccentARGB);
+
+            const juce::Colour bg = on ? accent.withAlpha(0.22f)
+                                       : juce::Colour(0xff222230);
+            g.setColour(down ? bg.brighter(0.30f) : over ? bg.brighter(0.12f) : bg);
+            g.fillRoundedRectangle(b, 3.f);
+            g.setColour(on ? accent.withAlpha(0.9f) : juce::Colour(0xff33373f));
+            g.drawRoundedRectangle(b, 3.f, 1.f);
+
+            const auto inner = b.reduced(b.getHeight() * 0.32f);
+            const juce::Colour fg = on ? accent
+                                       : juce::Colour(isEnabled() ? 0xff9aa6ba
+                                                                  : 0xff555a62);
+            const float bw = inner.getWidth() * 0.30f;
+            g.setColour(fg);
+            g.fillRoundedRectangle(inner.getX(), inner.getY(),
+                                   bw, inner.getHeight(), 1.5f);
+            g.fillRoundedRectangle(inner.getRight() - bw, inner.getY(),
+                                   bw, inner.getHeight(), 1.5f);
+        }
+
+    private:
+        bool paused = false;
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TransportPauseButton)
     };
 
     /** Compact loop/inverse pictogram toggle — same glyph as the SCORE page,
@@ -1296,8 +1356,13 @@ private:
         generateButton.setEnabled(false);
         exportButton.setEnabled(false);
         if (auto* fs = boundChannel())
+        {
+            if (framesAreOurs && pauseMode == PauseMode::held)
+                fs->uiEndScoreScrub();
             if (framesAreOurs)
                 fs->uiStopScore();
+        }
+        releasePauseState();
         processor.stopScorePreview();
         refreshPreviewButton();
         setTransportEnabled(false);
@@ -1326,6 +1391,9 @@ private:
             framesAreOurs  = false;
             const juce::String why = r.error.isNotEmpty() ? r.error : r.render.log;
             logLabel.setText("Failed: " + why, juce::dontSendNotification);
+            // The take may have been re-synthesized before the render failed:
+            // a stale sidecar must not be restored against the newer WAV.
+            cacheImageFile(docSlot_).deleteFile();
             if (auto* fs = boundChannel())
                 if (framesAreOurs)
                     fs->uiStopScore();
@@ -1378,6 +1446,7 @@ private:
                     p->setValueNotifyingHost(1.0f);
         }
 
+        saveRenderToCacheAsync();   // the render survives the app (PNG sidecar)
         persistState();
         repaint();
     }
@@ -1435,7 +1504,8 @@ private:
         if (auto* fs = boundChannel())
         {
             const bool wasPlaying = fs->isScorePlaying() && framesAreOurs;
-            const int savedHead = wasPlaying ? fs->getScorePlayHead() : 0;
+            const bool wasHeld    = framesAreOurs && pauseMode == PauseMode::held;
+            const int savedHead = (wasPlaying || wasHeld) ? fs->getScorePlayHead() : 0;
             fs->loadScoreFramesFromImage(generatedImage, spectroBand,
                                          genMinFreq, genMaxFreq, false);
             framesAreOurs    = true;
@@ -1444,6 +1514,17 @@ private:
             {
                 fs->setScoreResumeHead(savedHead);
                 fs->uiPlayScore();
+                // A frozen transport survives the reload: same instant, new EQ.
+                if (pauseMode == PauseMode::playing)
+                    fs->uiSetScorePaused(true);
+            }
+            else if (wasHeld)
+            {
+                // The load stopped the player and ended the sticky scrub —
+                // re-arm it on the same column (same instant, new EQ).
+                fs->uiSeekScore(savedHead);
+                if (! fs->uiBeginScoreScrub())
+                    releasePauseState();
             }
         }
         repaint();
@@ -1620,10 +1701,69 @@ private:
     }
 
     //==========================================================================
+    /** PAUSE = keep delivering the same image instant. Two flavours sharing
+     *  one button (same contract as the MIDI SCORE page): freezing a RUNNING
+     *  transport rides the player's scrub-hold (session alive, held column
+     *  re-injected every tick); from STOP it is a sticky scrub session (the
+     *  drag-audition without holding the mouse — the parked-drone gesture,
+     *  explicit since the P8 always-hold retired and STOP silences).
+     *  In both, clicking/dragging the preview moves the held column live. */
+    enum class PauseMode { none, playing, held };
+
+    void togglePause()
+    {
+        auto* fs = boundChannel();
+        if (fs == nullptr || busy) return;
+
+        if (pauseMode != PauseMode::none)   // release
+        {
+            if (pauseMode == PauseMode::playing) fs->uiSetScorePaused(false);
+            else                                 fs->uiEndScoreScrub();
+            pauseMode = PauseMode::none;
+            pauseButton.setPaused(false);
+            repaint(previewArea);
+            return;
+        }
+
+        if (fs->isScorePlaying() && framesAreOurs)
+        {
+            fs->uiSetScorePaused(true);
+            pauseMode = PauseMode::playing;
+        }
+        else
+        {
+            if (! framesAreOurs)
+            {
+                if (! generatedImage.isValid())
+                {
+                    logLabel.setText("GENERATE first", juce::dontSendNotification);
+                    return;
+                }
+                // Another module took the shared channel — reclaim it.
+                applyEqToImageAndReload();
+            }
+            if (! fs->uiBeginScoreScrub())
+                return;
+            pauseMode = PauseMode::held;   // holds wherever the head sits
+        }
+        pauseButton.setPaused(true);
+        repaint(previewArea);
+    }
+
+    void releasePauseState()
+    {
+        pauseMode = PauseMode::none;
+        pauseButton.setPaused(false);
+    }
+
     void togglePlay()
     {
         auto* fs = boundChannel();
         if (fs == nullptr || busy) return;
+
+        // PLAY and STOP both leave pause mode (play() / stop() clear the
+        // player-side hold themselves; the held session just becomes ours).
+        releasePauseState();
 
         const bool play = ! (fs->isScorePlaying() && framesAreOurs);
 
@@ -1674,6 +1814,7 @@ private:
     void setTransportEnabled(bool on)
     {
         playStopButton.setEnabled(on);
+        pauseButton.setEnabled(on);
         loopBtn.setEnabled(on);
         reverseBtn.setEnabled(on);
         speedSlider.setEnabled(on);
@@ -1724,6 +1865,7 @@ private:
             {
                 framesAreOurs = false;
                 scrubHead     = -1;
+                releasePauseState();   // whoever reclaimed the slot ended it
                 repaint(previewArea);
             }
             else if (fs->isScorePlaying())
@@ -1851,6 +1993,19 @@ private:
         root->setProperty("lang",  d.lastLang);
         root->setProperty("vname", d.lastVoiceName);
         root->setProperty("eq",    d.eqState);
+        // Render metadata — present ⇒ the PNG sidecar (cacheImageFile) can be
+        // restored without a GENERATE. Written only once a render exists.
+        if (! d.spectroBand.isEmpty() && d.genMinFreq > 0.0)
+        {
+            root->setProperty("bandX", d.spectroBand.getX());
+            root->setProperty("bandY", d.spectroBand.getY());
+            root->setProperty("bandW", d.spectroBand.getWidth());
+            root->setProperty("bandH", d.spectroBand.getHeight());
+            root->setProperty("gmin",  d.genMinFreq);
+            root->setProperty("gmax",  d.genMaxFreq);
+            root->setProperty("gdyn",  d.genDynRangeDB);
+            root->setProperty("gdpi",  d.genDpi);
+        }
         root->setProperty("extdir", externalVoicesDir.getFullPathName());
         auto* prefs = new juce::DynamicObject();
         for (int i = 0; i < langPref.size(); ++i)
@@ -1914,6 +2069,15 @@ private:
         d.lastLang      = o->getProperty("lang").toString();
         d.lastVoiceName = o->getProperty("vname").toString();
         d.eqState       = o->getProperty("eq").toString();
+        if (o->hasProperty("bandW"))
+            d.spectroBand = { (int) o->getProperty("bandX"),
+                              (int) o->getProperty("bandY"),
+                              (int) o->getProperty("bandW"),
+                              (int) o->getProperty("bandH") };
+        if (o->hasProperty("gmin")) d.genMinFreq    = (double) o->getProperty("gmin");
+        if (o->hasProperty("gmax")) d.genMaxFreq    = (double) o->getProperty("gmax");
+        if (o->hasProperty("gdyn")) d.genDynRangeDB = (double) o->getProperty("gdyn");
+        if (o->hasProperty("gdpi")) d.genDpi        = (double) o->getProperty("gdpi");
         // Shared TTS install prefs — only the slot-0 blob carries the truth.
         const juce::String extdir = o->getProperty("extdir").toString();
         if (extdir.isNotEmpty() && juce::File(extdir).isDirectory())
@@ -1932,9 +2096,15 @@ public:
     {
         if (slot == boundScoreSlot_)
             return;
-        if (scrubAuditioning)
-            if (auto* fs = boundChannel())
+        if (auto* fs = boundChannel())
+        {
+            if (scrubAuditioning)
                 fs->uiEndScoreScrub();
+            // Don't leave the OLD instance frozen with no UI bound to it.
+            if (pauseMode == PauseMode::playing) fs->uiSetScorePaused(false);
+            if (pauseMode == PauseMode::held)    fs->uiEndScoreScrub();
+        }
+        releasePauseState();
         scrubAuditioning = false;
         framesAreOurs    = false;
         loadedFrameCount = 0;
@@ -1990,6 +2160,87 @@ private:
                 .getChildFile("Application Support/Sp3ctra/voice_renders");
         return slot <= 0 ? dir.getChildFile("voice_last.wav")
                          : dir.getChildFile("voice_last" + juce::String(slot) + ".wav");
+    }
+
+    /** The RENDER survives the app too (2026-08-20): baseImage saved as a PNG
+     *  sidecar next to the cached take, its metadata (band, freq range, dyn
+     *  range, DPI) in the doc blob. Restored lazily when the doc is viewed —
+     *  PLAY then re-encodes frames from the image instantly, no GENERATE. */
+    static juce::File cacheImageFile(int slot)
+    {
+        return cacheWavFile(slot).withFileExtension("png");
+    }
+
+    void saveRenderToCacheAsync()
+    {
+        if (! baseImage.isValid()) return;
+        // baseImage's pixels are never mutated in place (the EQ works on a
+        // createCopy) — sharing the ref-counted bitmap with the writer thread
+        // is safe. Temp-file + move so a mid-write kill can't leave a torn PNG.
+        juce::Thread::launch([img = baseImage, f = cacheImageFile(docSlot_)]
+        {
+            f.getParentDirectory().createDirectory();
+            juce::TemporaryFile tmp(f);
+            {
+                juce::FileOutputStream os(tmp.getFile());
+                juce::PNGImageFormat png;
+                if (! os.openedOk() || ! png.writeImageToStream(img, os))
+                    return;
+            }
+            tmp.overwriteTargetFileWithTemporary();
+        });
+    }
+
+    void maybeRestoreRenderFromCache()
+    {
+        if (baseImage.isValid() || busy || restoringRenderSlot_ >= 0)
+            return;
+        // Metadata gate: a doc that never generated (or was forgotten) has no
+        // band/range — a stray sidecar PNG alone must not resurrect a render.
+        if (spectroBand.isEmpty() || genMinFreq <= 0.0 || genMaxFreq <= genMinFreq)
+            return;
+        const juce::File f = cacheImageFile(docSlot_);
+        if (! f.existsAsFile())
+            return;
+        restoringRenderSlot_ = docSlot_;
+        juce::Thread::launch(
+            [safe = juce::Component::SafePointer<VoiceGenTabComponent>(this),
+             f, slot = docSlot_]
+            {
+                juce::Image img = juce::ImageFileFormat::loadFrom(f);
+                juce::MessageManager::callAsync([safe, img, slot]
+                {
+                    if (auto* self = safe.getComponent())
+                        self->adoptRestoredRender(img, slot);
+                });
+            });
+    }
+
+    void adoptRestoredRender(const juce::Image& img, int slot)
+    {
+        restoringRenderSlot_ = -1;
+        if (slot != docSlot_)
+        {
+            // The page moved on to another doc while this PNG loaded — that
+            // doc's own restore was gated by the in-flight flag: retry it.
+            maybeRestoreRenderFromCache();
+            return;
+        }
+        if (! img.isValid() || baseImage.isValid() || busy)
+            return;
+        baseImage = img;
+        if (genMinFreq != lastEqMinFreq || genMaxFreq != lastEqMaxFreq)
+        {
+            eqEditor.setRange(genMinFreq, genMaxFreq);
+            lastEqMinFreq = genMinFreq;
+            lastEqMaxFreq = genMaxFreq;
+        }
+        applyEqToImage();   // the doc's restored EQ curve shapes the render
+        buildPreview();     // recomputes previewStats + white-point
+        exportButton.setEnabled(true);
+        logLabel.setText("Render restored\n" + previewStats,
+                         juce::dontSendNotification);
+        repaint();
     }
 
     /** Parks the live members into the doc the page is currently viewing. */
@@ -2097,6 +2348,7 @@ private:
             previewButton.setEnabled(false);
             setTransportEnabled(false);
         }
+        maybeRestoreRenderFromCache();   // sidecar PNG of the viewed instance
         resized();
         repaint();
     }
@@ -2197,9 +2449,11 @@ private:
     ScoreSettings    settings_ {};     // VOICE's own page settings (persisted in the blob)
 
     // Playback transport (this instance's own score-player slot).
-    TransportPlayButton playStopButton;
-    VoiceIconToggle     loopBtn    { VoiceIconToggle::Glyph::Loop };
-    VoiceIconToggle     reverseBtn { VoiceIconToggle::Glyph::Inverse };
+    TransportPlayButton  playStopButton;
+    TransportPauseButton pauseButton;
+    PauseMode            pauseMode = PauseMode::none;
+    VoiceIconToggle      loopBtn    { VoiceIconToggle::Glyph::Loop };
+    VoiceIconToggle      reverseBtn { VoiceIconToggle::Glyph::Inverse };
     juce::Slider        speedSlider;
     juce::Label         speedLabel, playHint;
     int  scrubHead { -1 };
@@ -2222,7 +2476,7 @@ private:
     juce::uint32 lastViewChangeMs_ = 0;
 
     // Waveform strip + source audition + image EQ.
-    ScoreEqComponent eqEditor { juce::Colour(kAccentARGB) };
+    ShapeEqComponent eqEditor { juce::Colour(kAccentARGB) };
     WaveformSelectorComponent waveform { juce::Colour(kAccentARGB) };
     juce::TextButton previewButton;
     juce::File previewFile;
@@ -2244,6 +2498,7 @@ private:
     double genDynRangeDB { 50.0 };
     double genDpi { 400.0 };
     double lastEqMinFreq { 0.0 }, lastEqMaxFreq { 0.0 };
+    int    restoringRenderSlot_ { -1 };   ///< doc slot with a PNG load in flight
     bool busy { false };
     bool pendingAutoPlay { false };
     bool framesAreOurs { false };

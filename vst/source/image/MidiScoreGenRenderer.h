@@ -15,7 +15,10 @@
  *     printed piece carries the instrument's spectrum, not just its pitch;
  *   - a time→pan automation line (MidiScoreSettings::panPoints) tints the
  *     ink with SCORE's stereo convention (left = red, right = blue,
- *     centre = grey/mono) so the piece can wander between the ears.
+ *     centre = grey/mono) so the piece can wander between the ears;
+ *   - a graphic EQ PER VOICE (MidiScoreSettings::voiceEq) shifts each
+ *     partial's level at its own frequency, so a voice can be brightened or
+ *     tamed against the others without touching the rest of the score.
  *
  * Voices: notes are grouped into up to kMaxVoices voices (MIDI tracks when
  * the file is multi-track, MIDI channels otherwise); each voice owns one
@@ -41,10 +44,12 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <functional>
 #include <vector>
 #include <juce_audio_basics/juce_audio_basics.h>
 #include "TimbreGenRenderer.h"   // timbregen partial model + scoregen::RenderResult
+#include "../processing/shape_eq.h"   // typed-handle EQ evaluator (ShapeEqComponent)
 
 namespace midiscoregen
 {
@@ -61,6 +66,18 @@ struct NoteEvent
     double startSec = 0.0;
     double endSec   = 0.0;
     int    voice    = 0;     ///< 0..kMaxVoices-1
+
+    /** Continuous curves captured with the note (Sp3ctra MPE takes, where one
+     *  channel carries one voice at a time). Piecewise-constant breakpoints,
+     *  times in seconds RELATIVE to startSec:
+     *   - bendPts:  pitch offset in CENTS (per-channel pitch wheel, ±2 st —
+     *     the writer's RPN convention; general files are read with the same
+     *     MIDI-default range);
+     *   - levelPts: 0..127 level (channel pressure / CC11) whose ink dB
+     *     REPLACES the note-on velocity's from that breakpoint on.
+     *  Empty on plain note files — the renderer then draws flat bars. */
+    std::vector<std::pair<float, float>> bendPts;
+    std::vector<std::pair<float, float>> levelPts;
 };
 
 /** Parsed MIDI file — everything the renderer and the UI need. */
@@ -69,6 +86,10 @@ struct MidiScoreData
     bool         ok = false;
     juce::String error;                   ///< set when !ok
     juce::String sourcePath;              ///< the .mid file this came from
+    /** True when the file is a Sp3ctra MIDI TAP take (track-name marker):
+     *  every channel is then folded into ONE voice — an MPE take spreads its
+     *  voices over 15 channels that mean allocation, not musical parts. */
+    bool         sp3ctraCapture = false;
     std::vector<NoteEvent> notes;         ///< sorted by startSec
     double       durationSec = 0.0;       ///< last note-off
     int          numVoices   = 0;         ///< voices actually used (≤ kMaxVoices)
@@ -128,6 +149,50 @@ struct MidiScoreSettings
      *  stereo=true for LuxStral's colour-temperature panning. Voices with an
      *  empty curve keep printing grey (centre) next to panned ones. */
     std::array<std::vector<PanPoint>, kMaxVoices> panPoints;
+
+    /** ONE GRAPHIC EQ PER VOICE — the voice's own tone control, not a global
+     *  image filter. Every partial's level is shifted by the curve's gain at
+     *  the PARTIAL's frequency before its ink is drawn, so the EQ belongs to
+     *  the voice exactly like Level (dB): preview, playback and print all
+     *  carry it, and two voices can be EQ'd against each other.
+     *
+     *  Like levelDb it is deliberately EXCLUDED from the global ink
+     *  normalisation (globalMaxDb) — a boost darkens toward full black, a cut
+     *  lightens toward silence, instead of being cancelled by a rescale.
+     *  A flat/empty curve is a strict no-op (historical bytes). */
+    struct VoiceEq
+    {
+        double minFreq = 0.0, maxFreq = 0.0;   ///< log span the handles cover
+        ShapeEqHandle handles[SHAPE_EQ_MAX_HANDLES] {};   ///< typed curve handles
+        float levelDb = 0.0f;                  ///< whole-curve gain fader
+        bool hasCurve = false;                 ///< a curve was decoded / captured
+
+        /** False when there is nothing to apply — callers hoist this out of
+         *  their inner loops. */
+        bool active() const noexcept
+        {
+            return hasCurve && minFreq > 0.0 && maxFreq > minFreq
+                && shape_eq_is_flat_level(handles, SHAPE_EQ_MAX_HANDLES,
+                                          levelDb) == 0;
+        }
+
+        /** Gain (dB) at @p hz — the same curve ShapeEqComponent draws,
+         *  clamped to the span's edges outside it. 0 dB when inactive. */
+        float gainDbAt(double hz) const noexcept
+        {
+            if (! hasCurve || minFreq <= 0.0 || maxFreq <= minFreq)
+                return 0.0f;
+            if (hz < minFreq) hz = minFreq;
+            if (hz > maxFreq) hz = maxFreq;
+            const float x01  = (float) (std::log(hz / minFreq)
+                                        / std::log(maxFreq / minFreq));
+            const float span = (float) (std::log(maxFreq / minFreq)
+                                        / std::log(2.0));
+            return shape_eq_db_level(handles, SHAPE_EQ_MAX_HANDLES, levelDb,
+                                     x01, span);
+        }
+    };
+    std::array<VoiceEq, kMaxVoices> voiceEq;
 };
 
 /** Seconds of music one page band holds at these settings (A4 or A3 width —

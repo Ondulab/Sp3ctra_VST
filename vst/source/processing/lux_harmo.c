@@ -85,7 +85,7 @@ LuxHarmoConfig lux_harmo_config_default(void)
     cfg.strength        = 1.0f;
     cfg.width_st        = 0.35f;
     cfg.slope           = 0.5f;
-    cfg.glide_lines     = 64;
+    cfg.glide_lines     = 128;
     cfg.background_mode = LUX_HARMO_BG_AUTO;
     cfg.axis_low_hz     = 0.0f;                   /* → C2 fallback */
     return cfg;

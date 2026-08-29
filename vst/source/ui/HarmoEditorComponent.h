@@ -2,10 +2,12 @@
  * @file HarmoEditorComponent.h
  * @brief Interactive scale-grid view for the LuxHarmo (SCALE) insert.
  *
- * Same visual idiom as EqEditorComponent (X = frequency log axis, octave grid
+ * Same visual idiom as ShapeEqComponent (X = frequency log axis, octave grid
  * + Hz labels over the instrument's default 8-octave range) but the drawn
  * object is the QUANTIZER COMB: one tooth per allowed degree of (root,
- * scale), tooth width = the Width param in semitones, root degrees accented.
+ * scale), tooth width = the Width param in semitones; the root degrees carry
+ * the SELECTED-key marker (a lime Sp3ctraHandles node). Frame, caption and
+ * hint are the shared ModuleEditorChrome.
  * A piano strip along the bottom gives the pitch-class orientation; clicking
  * anywhere sets the ROOT to the clicked pitch class (right-click = MIDI
  * Learn on the Root param).
@@ -22,6 +24,8 @@
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
 #include "../processing/lux_harmo.h"   // self-manages extern "C" linkage
+#include "Sp3ctraHandles.h"
+#include "ModuleEditorChrome.h"
 
 class HarmoEditorComponent : public juce::Component,
                              private juce::Timer
@@ -61,11 +65,8 @@ public:
     //==========================================================================
     void paint(juce::Graphics& g) override
     {
-        auto bf = getLocalBounds().toFloat();
-        g.setColour(juce::Colour(0xff20202a));
-        g.fillRoundedRectangle(bf.reduced(0.5f), 4.0f);
-        g.setColour(accent.withAlpha(0.25f));
-        g.drawRoundedRectangle(bf.reduced(0.5f), 4.0f, 1.0f);
+        const auto bf = getLocalBounds().toFloat();
+        ModuleChrome::drawFrame(g, bf, accent);
 
         const auto plot = plotArea();
         const LuxHarmoState& st = *lux_harmo_instance(slot_);
@@ -87,8 +88,8 @@ public:
                     ? juce::String(f / 1000.0, f >= 10000.0 ? 0 : 1) + "k"
                     : juce::String((int) std::lround(f));
                 g.setColour(accent.withAlpha(0.4f));
-                g.drawText(lbl, (int) x - 16, (int) plot.getBottom() + 1, 32, 10,
-                           juce::Justification::centred, false);
+                g.drawText(lbl, (int) x - 16, (int) stripArea().getBottom() + 1, 32, 10,
+                           juce::Justification::centred, false);   // under the piano strip
             }
         }
 
@@ -108,11 +109,6 @@ public:
             const bool  isRoot = (cls == rootCls);
             g.setColour(accent.withAlpha(isRoot ? topAlpha : topAlpha * 0.55f));
             g.fillRect(x - toothW * 0.5f, plot.getY(), toothW, plot.getHeight());
-            if (isRoot)
-            {
-                g.setColour(accent.withAlpha(0.9f));
-                g.fillEllipse(x - 2.0f, plot.getBottom() - 4.5f, 4.0f, 4.0f);
-            }
         }
 
         // Piano strip (pitch-class orientation, black keys darker).
@@ -127,16 +123,20 @@ public:
             g.fillRect(x0 + 0.5f, strip.getY(), pxPerSt - 1.0f, strip.getHeight());
         }
 
-        // Title + hint.
-        g.setColour(accent.withAlpha(0.75f));
-        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontTiny)).boldened());
-        g.drawText("SCALE GRID", (int) plot.getX(), (int) bf.getY() + 2, 90, 10,
-                   juce::Justification::left, false);
-        g.setColour(juce::Colour(0xff55606f));
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
-        g.drawText("click a key to set the root",
-                   (int) plot.getRight() - 220, (int) bf.getY() + 2, 220, 10,
-                   juce::Justification::right, false);
+        // Root markers — the SELECTED key, one per octave, at the foot of
+        // the root teeth (lime handle node; painted after the strip so its
+        // ring is never covered).
+        if ((mask & 1u) != 0)
+            for (int n = 0; n <= kOctaves * 12; ++n)
+                if (n % 12 == rootCls)
+                    Sp3ctraHandles::drawNode(g, { plot.getX() + (float) n * pxPerSt,
+                                                  plot.getBottom() - 2.5f },
+                                             Sp3ctraHandles::State::Selected, 2.5f);
+
+        // Caption + hint (shared chrome).
+        ModuleChrome::drawCaption(g, bf, accent, "SCALE GRID");
+        ModuleChrome::drawReadout(g, bf, juce::Colour(0xff55606f),
+                                  "click a key to set the root", 1.0f);
     }
 
     //==========================================================================

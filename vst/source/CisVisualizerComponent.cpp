@@ -11,6 +11,7 @@ extern "C" {
     #include "processing/image_pipeline_types.h"
     #include "processing/image_chain.h"
     #include "processing/chain_plan.h"
+    #include "processing/synth_staging.h"
     #include "processing/lux_pitch.h"
     #include "processing/lux_mask.h"
     #include "processing/internal_source.h"
@@ -483,10 +484,18 @@ void CisVisualizerComponent::paintSourceLabel(
     juce::ignoreUnused(W, H);
     // SELECTED_TAP badges the actual module + chain ("MASK - CHAIN 2"),
     // pushed by the editor on selection; other modes use the static label.
-    const juce::String label =
+    juce::String label =
         (source == VisualizerMode::SELECTED_TAP && selectedTapLabel_.isNotEmpty())
             ? selectedTapLabel_
             : juce::String(visualizerModeLabel(source));
+    // SPCTR panels badge WHICH "→ LUXSTRAL" stream they show: one send's own
+    // (rack click) or the engine mix (AUDIO MIX row).
+    if (source == VisualizerMode::SPCTR_GRAY
+     || source == VisualizerMode::SPCTR_COLOR
+     || source == VisualizerMode::SPCTR_BLOB)
+        label += spctrViewChain_ >= 0
+                 ? " - CHAIN " + juce::String(spctrViewChain_ + 1)
+                 : " - MIX";
 
     // Semi-transparent pill badge — top-left corner
     juce::GlyphArrangement ga;
@@ -675,7 +684,13 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
         const SynthChainPlan* spGate = nullptr;
         if (isSpctrLocal)
         {
-            if (gatePlan.num_ls_sends > 0)
+            /* Per-send view: gate on the DISPLAYED send's own chain (a HOLD
+             * on chain 2 must never freeze chain 1's panel). MIX view: first
+             * send (multi-transport approximation, as before). */
+            if (spctrViewChain_ >= 0 && spctrViewChain_ < gatePlan.num_chains
+                && gatePlan.chain[spctrViewChain_].present)
+                spGate = &gatePlan.chain[spctrViewChain_];
+            else if (gatePlan.num_ls_sends > 0)
                 spGate = &gatePlan.ls_send[0].recipe;
         }
         else if (isGrainLocal)
@@ -791,12 +806,32 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
                            || vizSource == VisualizerMode::SPCTR_BLOB);
         const bool isGrain = (vizSource == VisualizerMode::GRAIN_GRAY
                            || vizSource == VisualizerMode::GRAIN_COLOR);
-        audio_image_buffers_get_engine_input_pointers(
-            buffers,
-            isSpctr ? AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL
-            : isGrain ? AUDIO_IMAGE_ENGINE_TAP_LUXGRAIN
-                      : AUDIO_IMAGE_ENGINE_TAP_PATHB,
-            &pR, &pG, &pB);
+        if (isSpctr && spctrViewChain_ >= 0)
+        {
+            /* Per-send SPCTR view (a "→ LUXSTRAL" clicked in the rack): THAT
+             * send's own staged RGB — never the engine tap, which carries
+             * the MIX. Inactive → white (unfed send); torn by a concurrent
+             * staging → hold this panel's previous frame. */
+            const int got = synth_staging_copy_luxstral_rgb(
+                spctrViewChain_, localDataR.data(), localDataG.data(),
+                localDataB.data(), cisPixelsCount, nullptr);
+            if (got == 0)
+            {
+                std::fill(localDataR.begin(), localDataR.end(), uint8_t{255});
+                std::fill(localDataG.begin(), localDataG.end(), uint8_t{255});
+                std::fill(localDataB.begin(), localDataB.end(), uint8_t{255});
+            }
+            else if (got < 0)
+                goto done;
+            // pR/pG/pB stay null — the data is already in localData*.
+        }
+        else
+            audio_image_buffers_get_engine_input_pointers(
+                buffers,
+                isSpctr ? AUDIO_IMAGE_ENGINE_TAP_LUXSTRAL
+                : isGrain ? AUDIO_IMAGE_ENGINE_TAP_LUXGRAIN
+                          : AUDIO_IMAGE_ENGINE_TAP_PATHB,
+                &pR, &pG, &pB);
     }
     if (pR != nullptr)   // null for SRC_* views (already filled localData* above)
     {
@@ -856,16 +891,42 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
             }
         }
 
+        /* SPCTR_*: condition with the bank of the send actually displayed —
+         * the SELECTED send's own bank (per-send view), or the first send's
+         * (MIX view, same approximation as GRAIN). The old hardcoded slot 0
+         * showed chain 2's stream with chain 1's conditioning. */
+        int spctrViewSlot = 0;
+        if (isSpctrView)
+        {
+            ChainPlan condPlan;
+            chain_plan_get(&condPlan);
+            int vc = spctrViewChain_;
+            if (vc < 0 && condPlan.num_ls_sends > 0)
+                vc = condPlan.ls_send[0].chain_idx;
+            if (vc >= 0 && vc < condPlan.num_chains
+                && condPlan.chain[vc].present)
+            {
+                const SynthChainPlan& sp = condPlan.chain[vc];
+                for (int i = 0; i < sp.num_inserts; ++i)
+                    if (sp.insert_id[i] == IMAGE_CHAIN_INSERT_OUT_LUXSTRAL)
+                    {
+                        spctrViewSlot = juce::jlimit(
+                            0, LUX_OUT_MAX_SLOTS - 1, sp.insert_state_idx[i]);
+                        break;
+                    }
+            }
+        }
+
         /* Per-path flags — synth-split P1: read the per-OUT conditioning banks
-         * (SPCTR_* = LuxStral OUT slot 0, SYNTH_* = LuxSynth OUT slot 0,
-         * GRAIN_* = LuxGrain OUT slot 0), the same values the pipeline
+         * (SPCTR_* = the displayed send's bank, SYNTH_* = LuxSynth OUT slot 0,
+         * GRAIN_* = the first send's bank), the same values the pipeline
          * consumes. */
         const int doInvert = isSourceView ? 0
-                           : (isSpctrView ? g_sp3ctra_config.luxstral_out[0].negative
+                           : (isSpctrView ? g_sp3ctra_config.luxstral_out[spctrViewSlot].negative
                            : isGrainView  ? g_sp3ctra_config.luxgrain_out[grainViewSlot].negative
                                           : g_sp3ctra_config.luxsynth_out[0].negative);
         const int doDcBlock = isSourceView ? 0
-                            : (isSpctrView ? g_sp3ctra_config.luxstral_out[0].dc_blocking
+                            : (isSpctrView ? g_sp3ctra_config.luxstral_out[spctrViewSlot].dc_blocking
                             : isGrainView  ? g_sp3ctra_config.luxgrain_out[grainViewSlot].dc_blocking
                                            : g_sp3ctra_config.luxsynth_out[0].dc_blocking);
 
@@ -876,7 +937,7 @@ void CisVisualizerComponent::fillSourceBuffers(PanelData& out, bool isPrimary)
             gammaVal = 0.0f;
             gammaOn  = 0;
         } else if (isSpctrView) {
-            gammaVal = g_sp3ctra_config.luxstral_out[0].gamma;
+            gammaVal = g_sp3ctra_config.luxstral_out[spctrViewSlot].gamma;
             gammaOn  = (gammaVal > 0.0f && gammaVal != 1.0f) ? 1 : 0;
         } else if (isGrainView) {
             gammaVal = g_sp3ctra_config.luxgrain_out[grainViewSlot].gamma;

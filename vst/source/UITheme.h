@@ -167,6 +167,41 @@ namespace Sp3ctraTheme
     constexpr uint32_t kColBtnActive  = 0xff3a3a3a;
 
     // ──────────────────────────────────────────────────────────────────────────
+    // HANDLE / CONTROL ACCENT  ("what you touch")
+    // ──────────────────────────────────────────────────────────────────────────
+    //
+    // Every module page paints its DISPLAY (curves, frames, captions, box
+    // labels, section captions) in the module's category colour — see
+    // ModuleCatalog::moduleColour. Everything the user can GRAB is painted in
+    // ONE vivid hue instead, deliberately outside the five category hues
+    // (cyan / magenta / violet / amber / green) so a control pops on every
+    // page: graphic-editor handles (nodes, chevrons, fader thumbs, grabbable
+    // lines), bar sliders, toggles, type chips.
+    //
+    //   "what you look at" = module colour     "what you touch" = kColHandle
+    //
+    // Painting recipes live in ui/Sp3ctraHandles.h — never restate these
+    // literals in an editor.
+
+    /// THE handle / control colour (acid lime).
+    constexpr uint32_t kColHandle     = 0xffdcff3c;
+
+    /// Ring of a handle while it is being DRAGGED (and the bar's drag edge).
+    constexpr uint32_t kColHandleHot  = 0xffffffff;
+
+    /// Dark core of an IDLE handle — the lime ring reads on top of it. Same
+    /// value as the graphic-frame fill so an idle node looks punched out.
+    constexpr uint32_t kColHandleCore = 0xff20202a;
+
+    /// Graphic-editor frame fill (the window every module editor draws its
+    /// visualisation in) — the module outline sits on it at 25 %.
+    constexpr uint32_t kColFrameBg    = 0xff20202a;
+
+    /// Bar-slider interior (enabled / disabled).
+    constexpr uint32_t kColBarBg      = 0xff181820;
+    constexpr uint32_t kColBarBgOff   = 0xff121216;
+
+    // ──────────────────────────────────────────────────────────────────────────
     // TAB DESIGN TOKENS  (main tabs + sub-tabs)
     // ──────────────────────────────────────────────────────────────────────────
 

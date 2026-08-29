@@ -4,7 +4,7 @@
  *
  * A preset is a readable XML ValueTree:
  *
- *   <SP3CHAIN version="1" chainsSchema="3" name="…">
+ *   <SP3CHAIN version="1" chainsSchema="5" name="…">
  *     <CHAIN>
  *       <MODULE type="pitch"> <VALUES AttackMs="12.0" …/> </MODULE>
  *       …
@@ -42,6 +42,7 @@ namespace ChainPresetIO
         root.setProperty(kNameProp, name, nullptr);
 
         juce::ValueTree ct(ChainModel::kChainTag);
+        ct.setProperty(ChainModel::kBackgroundProp, chain.backgroundMode, nullptr);
         for (const auto& m : chain.modules)
         {
             juce::ValueTree mt(ChainModel::kModuleTag);

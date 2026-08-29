@@ -1,15 +1,13 @@
 /*
  * lux_eq.h
  *
- * LuxEq — graphic equalizer on the image-line stream.
+ * LuxEq — typed-handle equalizer on the image-line stream.
  *
  * The pixel axis IS the instrument's frequency axis (log-mapped, pixel 0 =
- * low_frequency, last pixel = high_frequency — see wave_generation.c), so a
- * "band" is simply a node on that axis: `num_bands` nodes (2..LUX_EQ_NUM_BANDS,
- * user-selectable, default 2 = one straight line) spread evenly over it and
- * the per-pixel gain is a smooth Catmull-Rom spline through them in dB
- * (lux_eq_curve_db — shared with the UI editor, so the drawn curve IS the
- * applied gain).
+ * low_frequency, last pixel = high_frequency — see wave_generation.c). The
+ * curve is a stack of up to SHAPE_EQ_MAX_HANDLES typed handles (Bell / LP /
+ * HP / DJ / Tilt — see shape_eq.h), evaluated per pixel in dB by shape_eq_db
+ * (shared with the UI editor, so the drawn curve IS the applied gain).
  *
  * Gain applies to the MATERIAL energy only (input minus the tracked PAPER
  * level — 10th-percentile estimator, see lux_drive.c): boosting must re-print
@@ -37,6 +35,7 @@
 
 #include <stdint.h>
 #include "chain_plan.h"   /* CHAIN_MAX_CHAINS — per-chain instance pool size */
+#include "shape_eq.h"     /* ShapeEqHandle + shared curve evaluator */
 
 #ifdef __cplusplus
 extern "C" {
@@ -45,58 +44,19 @@ extern "C" {
 /* Capacity matches LuxPitch/LuxMask (>6912 for 400 DPI CIS). */
 #define LUX_EQ_MAX_PIXELS  8192
 
-/* MAXIMUM node count — one node per octave boundary of the default 8-octave
- * range (C2..~16.7k), matching ScoreEqComponent's grid. The ACTIVE count is
- * config.num_bands (2..LUX_EQ_NUM_BANDS). The curve is positional: the active
- * nodes spread evenly over the pixel axis whatever the configured span. */
-#define LUX_EQ_NUM_BANDS   9
-#define LUX_EQ_GAIN_DB_MAX 24.0f   /* band range: ±24 dB */
-
 /* Background mode — which pole is the "material" (mirrors LUX_ECHO_BG_*). */
 #define LUX_EQ_BG_BLACK  0   /* bright material on black background */
 #define LUX_EQ_BG_WHITE  1   /* dark material on white background   */
 #define LUX_EQ_BG_AUTO   2   /* detect from the stream (default)    */
 
-/* Gain curve in dB at position x ∈ [0, n-1] over the n active node gains —
- * uniform Catmull-Rom spline (C1-smooth, interpolates every node; end nodes
- * duplicated). Single source of truth: the RT LUT builder and the UI editor
- * both sample THIS, so what is drawn is what is applied. Overshoot between
- * nodes is clamped to the band range (±24 dB). */
-static inline float lux_eq_curve_db(const float g[/*n*/], int n, float x)
-{
-    if (n > LUX_EQ_NUM_BANDS) n = LUX_EQ_NUM_BANDS;
-    if (n < 2)                return (n == 1) ? g[0] : 0.0f;
-    const int last = n - 1;
-    if (x <= 0.0f)          return g[0];
-    if (x >= (float)last)   return g[last];
-    /* Two nodes = ONE STRAIGHT LINE (the duplicated-endpoint spline below
-     * would ease in/out into an S shape between them). */
-    if (n == 2)             return g[0] + (g[1] - g[0]) * x;
-    int k = (int)x;
-    if (k > last - 1) k = last - 1;
-    const float t  = x - (float)k;
-    const float p0 = g[(k > 0) ? k - 1 : 0];
-    const float p1 = g[k];
-    const float p2 = g[k + 1];
-    const float p3 = g[(k + 2 <= last) ? k + 2 : last];
-    const float t2 = t * t, t3 = t2 * t;
-    float db = 0.5f * ((2.0f * p1)
-                     + (p2 - p0) * t
-                     + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2
-                     + (3.0f * p1 - p0 - 3.0f * p2 + p3) * t3);
-    if (db >  LUX_EQ_GAIN_DB_MAX) db =  LUX_EQ_GAIN_DB_MAX;
-    if (db < -LUX_EQ_GAIN_DB_MAX) db = -LUX_EQ_GAIN_DB_MAX;
-    return db;
-}
-
 /* ============================================================================
  * LuxEqConfig — Parameters synced from APVTS (image thread copy).
  * ============================================================================ */
 typedef struct {
-    int   enabled;
-    int   background_mode;                  /* LUX_EQ_BG_* */
-    int   num_bands;                        /* active nodes, 2..LUX_EQ_NUM_BANDS */
-    float band_gain_db[LUX_EQ_NUM_BANDS];   /* -24..+24 dB per node */
+    int           enabled;
+    int           background_mode;                  /* LUX_EQ_BG_* */
+    float         level_db;                         /* whole-curve gain fader */
+    ShapeEqHandle handles[SHAPE_EQ_MAX_HANDLES];    /* typed curve handles */
 } LuxEqConfig;
 
 /* ============================================================================
@@ -128,11 +88,12 @@ typedef struct {
      * streams). -1 = unseeded. */
     float floor_ema;
 
-    /* Per-pixel LINEAR gain, rebuilt only when the bands / width change. */
-    float lut[LUX_EQ_MAX_PIXELS];
-    float lut_gains[LUX_EQ_NUM_BANDS];   /* band values the LUT was built from */
-    int   lut_bands;                     /* node count it was built for */
-    int   lut_px;                        /* pixel count it was built for; 0 = stale */
+    /* Per-pixel LINEAR gain, rebuilt only when the handles / width change. */
+    float         lut[LUX_EQ_MAX_PIXELS];
+    ShapeEqHandle lut_handles[SHAPE_EQ_MAX_HANDLES]; /* handles it was built from */
+    float         lut_level_db;          /* level fader it was built from */
+    float         lut_span_oct;          /* octave span it was built for */
+    int           lut_px;                /* pixel count it was built for; 0 = stale */
 
     /* Preallocated output buffers. */
     uint8_t out_r[LUX_EQ_MAX_PIXELS];

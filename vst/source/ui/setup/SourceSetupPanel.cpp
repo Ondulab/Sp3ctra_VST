@@ -3,6 +3,7 @@
 #include "../../Sp3ctraConstants.h"
 #include "../../UITheme.h"
 #include "../../session/MachinePrefs.h"
+#include "../../Sp3ctraDialog.h"
 
 using DC = Sp3ctraDeviceClient;
 
@@ -591,16 +592,16 @@ void SourceSetupPanel::uploadFirmware()
     }
 
     juce::Component::SafePointer<SourceSetupPanel> safe (this);
-    juce::AlertWindow::showOkCancelBox (
-        juce::AlertWindow::WarningIcon,
+    Sp3ctraDialog::showConfirm (
+        this,
         "Upload firmware?",
         "This will flash \"" + firmwareFile.getFileName() + "\" to the device and reboot it.\n"
         "Do not disconnect during the transfer.",
-        "Upload", "Cancel", this,
-        juce::ModalCallbackFunction::create ([safe] (int result)
+        "Upload", "Cancel",
+        [safe] (bool confirmed)
     {
         auto* s = safe.getComponent();
-        if (s == nullptr || result == 0)
+        if (s == nullptr || ! confirmed)
             return;
 
         s->uploadProgress = 0.0;
@@ -619,26 +620,26 @@ void SourceSetupPanel::uploadFirmware()
                                      ok ? "Firmware uploaded -- device rebooting" : "Firmware upload failed");
                 }
             });
-    }));
+    });
 }
 
 void SourceSetupPanel::confirmFactoryReset()
 {
     juce::Component::SafePointer<SourceSetupPanel> safe (this);
-    juce::AlertWindow::showOkCancelBox (
-        juce::AlertWindow::WarningIcon,
+    Sp3ctraDialog::showConfirm (
+        this,
         "Factory reset?",
         "This resets ALL device settings (including network) to defaults and reboots it.",
-        "Reset", "Cancel", this,
-        juce::ModalCallbackFunction::create ([safe] (int result)
+        "Reset", "Cancel",
+        [safe] (bool confirmed)
     {
-        if (auto* s = safe.getComponent(); s != nullptr && result != 0)
+        if (auto* s = safe.getComponent(); s != nullptr && confirmed)
         {
             s->deviceClient.postForm ("factoryReset", "START_FACTORY_RESET", {});
             s->setConnState (DC::State::Connecting, "Factory reset -- device rebooting");
             s->setDeviceControlsEnabled (false);
         }
-    }));
+    });
 }
 
 //==============================================================================

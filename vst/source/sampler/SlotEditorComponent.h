@@ -6,7 +6,7 @@
 #include <vector>
 #include "../luxsampler/LuxSampler.h"
 #include "SlotSpectralEditorComponent.h"
-#include "../image/ScoreEqComponent.h"
+#include "../ui/ShapeEqComponent.h"
 #include "../midi/MidiLearnAttachment.h"   // right-click MIDI-Learn on play controls
 #include "SamplerValueBox.h"               // crop / fade param chips under the image
 #include "../ui/Sp3ctraBarSlider.h"
@@ -322,7 +322,7 @@ private:
 
     // ── Image + time + fades editor (middle) and SCORE-style EQ panel (bottom) ──
     SlotSpectralEditorComponent spectralEditor;
-    ScoreEqComponent            eqEditor { moduleColour(ModuleType::Sampler) };
+    ShapeEqComponent            eqEditor { moduleColour(ModuleType::Sampler) };
     bool                        suppressEqPush_ = false; // guard during refresh
 
     /** Reload the EQ curve into eqEditor from the current slot (silent). */

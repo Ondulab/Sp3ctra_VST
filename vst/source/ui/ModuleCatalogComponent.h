@@ -21,7 +21,7 @@
 class ModuleCatalogComponent : public juce::Component
 {
 public:
-    static constexpr int kRailW   = 156;   // wide enough for "VIDEO SCROLL" / "→ LUXSTRAL" un-elided
+    static constexpr int kRailW   = 172;   // wide enough for "→ VIDEO SCROLL" (longest chip) un-elided
     static constexpr int kHeaderH = 16;
     static constexpr int kChipH   = 26;
     static constexpr int kChipGap = 5;

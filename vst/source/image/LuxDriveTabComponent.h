@@ -3,12 +3,14 @@
  * @brief Tab — LEVELS (internal type "Drive"): gain / saturation / floor stage
  *        on the image-line stream.
  *
- * Mirrors the LuxCentro page layout: an interactive graphic editor on top
- * (DriveEditorComponent — the live stream profile through the real transfer,
- * with the HORIZONTAL Floor line + Gain / Saturation handles + numeric
- * boxes), then the module's OUTPUT EQ curve (EqEditorComponent bound to the
- * luxdrive Band bank — the gain applied after the transfer), then the
- * remaining discrete controls below (Background).
+ * Mirrors the LuxCentro page layout (ModuleChrome skeleton): an interactive
+ * graphic editor on top (DriveEditorComponent — the live stream profile
+ * through the real transfer, with the HORIZONTAL Floor line, the saturation
+ * ramp and the numeric boxes), then the module's OUTPUT EQ curve
+ * (ShapeEqComponent bound to the luxdrive Sh* bank — the gain applied after
+ * the transfer), the "--- LEVELS ---" section caption, then the remaining
+ * discrete control as a label-above row (Invert combo). The background pole
+ * is chain-owned (rack header selector), not a module setting.
  *
  * Power lives in the zone-3 header switch + the rack LED.
  * Per-instance: setSlot(slot) rebinds every control to the luxdrive{slot}_*
@@ -21,8 +23,9 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
+#include "../ui/ModuleEditorChrome.h"
 #include "../ui/DriveEditorComponent.h"
-#include "../ui/EqEditorComponent.h"
+#include "../ui/ShapeEqComponent.h"
 #include "../processing/lux_drive.h"   // live glow reads the pool instance
 
 class LuxDriveTabComponent : public juce::Component
@@ -33,9 +36,11 @@ public:
 
     /** Both graphic editors stacked: transfer on top, output EQ below. */
     static constexpr int kEditorsH =
-        DriveEditorComponent::kPreferredH + 4 + EqEditorComponent::kPreferredH;
+        DriveEditorComponent::kPreferredH + ModuleChrome::kEditorGap
+        + ShapeEqComponent::kPreferredH;
 
-    static constexpr int kPreferredH = kEditorsH + 4 + 22 + 30 + 8;
+    /** Editors + section caption + one control row (Invert). */
+    static constexpr int kPreferredH = ModuleChrome::pageHeight(kEditorsH, 1);
 
     explicit LuxDriveTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p),
@@ -46,8 +51,9 @@ public:
         editor.setMidiMap(&p.getMidiMap());   // right-click MIDI Learn
         addAndMakeVisible(editor);
 
-        // ── Output EQ curve (Band0..Band8, applied after the transfer) ─────
+        // ── Output EQ curve (Sh* handles, applied after the transfer) ──────
         eqEditor.setMidiMap(&p.getMidiMap());
+        eqEditor.setTitle("OUTPUT EQ");
         eqEditor.liveProvider = [](int slot)
         {
             // Glow while the LEVELS instance runs AND its curve shapes the
@@ -59,18 +65,10 @@ public:
         addAndMakeVisible(eqEditor);
 
         // ── Output inversion (Off / Negative / Luminance) ──────────────
-        initLabel(invLabel, "Invert");
         addAndMakeVisible(invCombo);
         invCombo.addItem("Off",       1);
         invCombo.addItem("Negative",  2);
         invCombo.addItem("Luminance", 3);
-
-        // ── Background mode (which pole carries the material) ──────────
-        initLabel(bgLabel, "Background");
-        addAndMakeVisible(bgCombo);
-        bgCombo.addItem("Auto",  1);
-        bgCombo.addItem("Black", 2);
-        bgCombo.addItem("White", 3);
 
         setSlot(0);   // bind to bank 0 until a block is selected
     }
@@ -79,23 +77,21 @@ public:
     void setSlot(int slot)
     {
         slot_ = juce::jlimit(0, 7, slot);
-        bgAttach.reset();
         invAttach.reset();
         editor.setInstance(slot_,
                            dvParam(slot_, "Gamma"), dvParam(slot_, "Saturation"),
                            dvParam(slot_, "Floor"), dvParam(slot_, "ContrastMin"));
-        juce::StringArray bandIds;
-        for (int b = 0; b < LUX_EQ_NUM_BANDS; ++b)
-            bandIds.add(dvParam(slot_, ("Band" + juce::String(b)).toRawUTF8()));
-        eqEditor.setInstance(slot_, bandIds, dvParam(slot_, "NumPoints"));
+        constexpr int fam = EqHandleMidiTargets::FamilyDrive;
+        eqEditor.selectionSink     = [this](int h)
+        { processor.setEqSelectedHandle(fam, slot_, h); };
+        eqEditor.selectionProvider = [this]
+        { return processor.getEqSelectedHandle(fam, slot_); };
+        eqEditor.setInstance(fam, slot_, [this](const juce::String& sfx)
+                             { return dvParam(slot_, sfx.toRawUTF8()); });
         invAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
             processor.getAPVTS(), dvParam(slot_, "InvertMode"), invCombo));
         invLearn_ = std::make_unique<MidiLearnAttachment>(
             processor.getMidiMap(), invCombo, dvParam(slot_, "InvertMode"));
-        bgAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            processor.getAPVTS(), dvParam(slot_, "BackgroundMode"), bgCombo));
-        bgLearn_ = std::make_unique<MidiLearnAttachment>(
-            processor.getMidiMap(), bgCombo, dvParam(slot_, "BackgroundMode"));
     }
 
     int slot() const noexcept { return slot_; }
@@ -103,30 +99,28 @@ public:
     void paint(juce::Graphics& g) override
     {
         const juce::Colour accent (kAccentARGB);
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
-        g.setColour(accent.withAlpha(0.55f));
-        g.drawText("--- LEVELS ---", kPad,
-                   kEditorsH + 6,
-                   getWidth() - 2 * kPad, 12, juce::Justification::centred);
+        ModuleChrome::drawSectionCaption(g, ModuleChrome::kPageTop + kEditorsH,
+                                         getWidth(), accent, "LEVELS");
+        ModuleChrome::drawBoxLabel(g, invCombo, accent, "Invert");
     }
 
     void resized() override
     {
-        const int labelW = 80;
-        const int gap    = Sp3ctraTheme::kGap;
-        const int ch     = Sp3ctraTheme::kControlH;
-        const int w      = getWidth() - 2 * kPad;
+        const int pad = ModuleChrome::kPagePad;
+        const int w   = getWidth() - 2 * pad;
 
-        editor.setBounds(kPad, 4, w, DriveEditorComponent::kPreferredH);
-        eqEditor.setBounds(kPad, 4 + DriveEditorComponent::kPreferredH + 4,
-                           w, EqEditorComponent::kPreferredH);
+        int y = ModuleChrome::kPageTop;
+        editor.setBounds(pad, y, w, DriveEditorComponent::kPreferredH);
+        y += DriveEditorComponent::kPreferredH + ModuleChrome::kEditorGap;
+        eqEditor.setBounds(pad, y, w, ShapeEqComponent::kPreferredH);
+        y += ShapeEqComponent::kPreferredH;          // = kPageTop + kEditorsH
 
-        const int rowY = kEditorsH + 4 + 22;
-        invLabel.setBounds(kPad, rowY, labelW, ch);
-        invCombo.setBounds(kPad + labelW + gap, rowY, 120, ch);
-        const int bgX = kPad + labelW + gap + 120 + 16;
-        bgLabel.setBounds(bgX, rowY, labelW, ch);
-        bgCombo.setBounds(bgX + labelW + gap, rowY, 120, ch);
+        // Control row under the section caption — label-above idiom; the
+        // combo takes the left part of the row only.
+        y += ModuleChrome::kSectionCaptionH;
+        ModuleChrome::layoutBoxRow(juce::Rectangle<int>(pad, y, w, ModuleChrome::kBoxRowH),
+                                   { &invCombo });
+        invCombo.setBounds(invCombo.getBounds().withWidth(juce::jmin(kComboW, w)));
     }
 
 private:
@@ -134,27 +128,13 @@ private:
     int slot_ { 0 };   // pool slot of the bound instance
 
     DriveEditorComponent editor;   // the LEVELS transfer-curve editor
-    EqEditorComponent    eqEditor; // output EQ — luxdrive Band bank
+    ShapeEqComponent     eqEditor; // output EQ — luxdrive Sh* bank
 
-    juce::Label    invLabel;
     juce::ComboBox invCombo;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> invAttach;
     std::unique_ptr<MidiLearnAttachment> invLearn_;
 
-    juce::Label    bgLabel;
-    juce::ComboBox bgCombo;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> bgAttach;
-    std::unique_ptr<MidiLearnAttachment> bgLearn_;
-
-    static constexpr int kPad = 8;
-
-    void initLabel(juce::Label& lbl, const juce::String& text)
-    {
-        lbl.setText(text, juce::dontSendNotification);
-        lbl.setJustificationType(juce::Justification::centredRight);
-        lbl.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-        addAndMakeVisible(lbl);
-    }
+    static constexpr int kComboW = 160;   // a combo never stretches to the page width
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LuxDriveTabComponent)
 };

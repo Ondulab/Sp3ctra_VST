@@ -73,7 +73,9 @@ extern "C" {
                                             * tanh saturation (per-chain pool) */
 #define IMAGE_CHAIN_INSERT_LUXDCBLOCK  16  /* FX — DC BLOCK: per-line mean removal
                                             * (per-chain pool) */
-#define IMAGE_CHAIN_NUM_INSERTS        17
+#define IMAGE_CHAIN_INSERT_LUXGAIN     17  /* FX — GAIN: per-line energy gain
+                                            * (per-chain pool) */
+#define IMAGE_CHAIN_NUM_INSERTS        18
 
 /*
  * M6 Phase 2 — generalised executor driven by an explicit ordered insert list

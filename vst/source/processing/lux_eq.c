@@ -11,10 +11,9 @@
  *                                                 pixel's own pedestal stays)
  *   4. out   = polarity(clamp(e_out))
  *
- * The per-pixel LUT samples the shared Catmull-Rom dB spline through the band
- * nodes (lux_eq_curve_db — nodes evenly spread over the pixel axis ==
- * log-frequency axis), converted to linear gain. It is rebuilt only when a
- * band value or the width changes.
+ * The per-pixel LUT samples the shared typed-handle evaluator (shape_eq_db —
+ * pixel axis == log-frequency axis), converted to linear gain. It is rebuilt
+ * only when a handle or the width/span changes.
  *
  * RT-safety: Pure C, allocation-free, bounded O(N).
  *
@@ -55,8 +54,8 @@ LuxEqConfig lux_eq_config_default(void)
 
     cfg.enabled         = 0;
     cfg.background_mode = LUX_EQ_BG_AUTO;
-    cfg.num_bands       = 2;   /* one straight line — matches the UI default */
-    /* band_gain_db[] all 0 dB — flat curve */
+    for (int h = 0; h < SHAPE_EQ_MAX_HANDLES; ++h)
+        shape_eq_default(&cfg.handles[h]);   /* all Off — flat curve */
     return cfg;
 }
 
@@ -70,7 +69,6 @@ void lux_eq_reset(LuxEqState *state)
     state->eq_active    = 0;
     state->last_bg_mode = -1;
     state->lut_px       = 0;    /* invalidate the gain LUT */
-    state->lut_bands    = 0;
     /* Re-arm the AUTO learning window + floor tracker. */
     state->auto_locked         = 0;
     state->auto_lock_countdown = LUX_EQ_BG_LOCK_LINES;
@@ -154,40 +152,31 @@ static int lux_eq_resolve_bg(LuxEqState *state,
     return bg_white;
 }
 
-/* Clamp the configured node count to the valid range. */
-static int lux_eq_active_bands(const LuxEqConfig *cfg)
+/* Rebuild the per-pixel linear-gain LUT when a handle, the pixel count or the
+ * octave span changed. The curve is positional (x01 == pixel axis == log-
+ * frequency axis); the dB value is the shared typed-handle evaluator
+ * (shape_eq_db). */
+static void lux_eq_update_lut(LuxEqState *state, int px, float span_oct)
 {
-    int n = cfg->num_bands;
-    if (n < 2)                n = 2;
-    if (n > LUX_EQ_NUM_BANDS) n = LUX_EQ_NUM_BANDS;
-    return n;
-}
-
-/* Rebuild the per-pixel linear-gain LUT when a band value, the node count or
- * the width changed. The active nodes spread evenly over the pixel axis
- * (== log-frequency axis); the dB curve is the shared Catmull-Rom spline
- * (lux_eq_curve_db). */
-static void lux_eq_update_lut(LuxEqState *state, int px)
-{
-    const int n = lux_eq_active_bands(&state->config);
-
-    int dirty = (state->lut_px != px) || (state->lut_bands != n);
-    for (int b = 0; b < n && !dirty; ++b)
-        if (state->lut_gains[b] != state->config.band_gain_db[b])
-            dirty = 1;
-    if (!dirty)
+    if (state->lut_px == px && state->lut_span_oct == span_oct
+        && state->lut_level_db == state->config.level_db
+        && shape_eq_handles_equal(state->lut_handles, state->config.handles,
+                                  SHAPE_EQ_MAX_HANDLES))
         return;
 
-    for (int b = 0; b < n; ++b)
-        state->lut_gains[b] = state->config.band_gain_db[b];
-    state->lut_bands = n;
-    state->lut_px    = px;
+    for (int h = 0; h < SHAPE_EQ_MAX_HANDLES; ++h)
+        state->lut_handles[h] = state->config.handles[h];
+    state->lut_level_db = state->config.level_db;
+    state->lut_span_oct = span_oct;
+    state->lut_px       = px;
 
     const float span = (px > 1) ? (float)(px - 1) : 1.0f;
     for (int i = 0; i < px; ++i)
     {
-        const float x  = ((float)i / span) * (float)(n - 1);
-        const float db = lux_eq_curve_db(state->lut_gains, n, x);
+        const float db = shape_eq_db_level(state->lut_handles,
+                                           SHAPE_EQ_MAX_HANDLES,
+                                           state->lut_level_db,
+                                           (float)i / span, span_oct);
         state->lut[i] = powf(10.0f, db * (1.0f / 20.0f));
     }
 }
@@ -229,18 +218,13 @@ void lux_eq_process_frame(
     const uint8_t **out_g,
     const uint8_t **out_b)
 {
-    (void)luxstral_num_octaves;
-
     *out_r = in_r; *out_g = in_g; *out_b = in_b;
     if (!state || !in_r || !in_g || !in_b || pixel_count <= 0)
         return;
 
     const LuxEqConfig *cfg = &state->config;
-    const int nb = lux_eq_active_bands(cfg);
-    int flat = 1;
-    for (int b = 0; b < nb && flat; ++b)
-        if (fabsf(cfg->band_gain_db[b]) > 0.01f)
-            flat = 0;
+    const int flat = shape_eq_is_flat_level(cfg->handles, SHAPE_EQ_MAX_HANDLES,
+                                            cfg->level_db);
     if (!cfg->enabled || flat)
     {
         /* Lazy one-shot re-arm so a re-enable relearns the AUTO polarity/floor. */
@@ -263,7 +247,9 @@ void lux_eq_process_frame(
     }
     state->eq_active = 1;
 
-    lux_eq_update_lut(state, px);
+    lux_eq_update_lut(state, px,
+                      (float)((luxstral_num_octaves > 0) ? luxstral_num_octaves
+                                                         : 8));
 
     int diff = lux_eq_channel(in_r, state->out_r, state->lut, px, bg_white, floor_e);
     diff |= lux_eq_channel(in_g, state->out_g, state->lut, px, bg_white, floor_e);

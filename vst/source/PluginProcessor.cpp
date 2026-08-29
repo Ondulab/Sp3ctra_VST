@@ -9,6 +9,7 @@
 #include "sources/MediaSourceEngines.h"              // M9 — IMAGE/VIDEO/CAMERA engines
 #include "sources/MediaSourceService.h"              // M9 — source service thread
 #include "sampler/SamplerMidiTargets.h"              // MIDI-Learn virtual targets (sampler play params)
+#include "midi/EqHandleMidiTargets.h"                // MIDI-Learn virtual targets (selected EQ handle)
 #include "tts/PiperTts.h"                            // VOICE — offline TTS (startup smoke test)
 #include "recorder/VideoRecorder.h"                  // VIDEO MIX + master-audio recorder
 #include "image/ScoreGenRenderer.h"                  // P9 — calibrated-PNG session takes
@@ -33,6 +34,7 @@ extern "C" {
     #include "processing/lux_centro.h"                        // LuxCentro/CENTROID FX (g_lux_centro_proc)
     #include "processing/lux_drive.h"                         // LuxDrive/LEVELS FX (g_lux_drive_proc)
     #include "processing/lux_dcblock.h"                       // LuxDcBlock/DC BLOCK FX (g_lux_dcblock_proc)
+    #include "processing/lux_gain.h"                          // LuxGain/GAIN FX (g_lux_gain_proc)
     #include "processing/video_scroll.h"                      // VideoScroll capture-ring pool
     #include "processing/midi_tap.h"                          // MidiTap note-extraction pool
     #include "midi/MidiTapSink.h"                             // MidiTap file + port sinks
@@ -41,6 +43,7 @@ extern "C" {
     #include "processing/synth_staging.h"                      // deferred staging resets (M3)
 }
 #include "ui/ChainPresetIO.h"                                  // J4 — .sp3chain presets
+#include "video/VideoScrollMode.h"                             // VideoScrollLimits (zoom bounds)
 extern "C" {
     #include "audio/buffers/audio_image_buffers.h"             // selection tap (contextual zone 1)
     #include "synthesis/luxsynth/luxsynth_vst_adapter.h"      // luxsynth_push_midi_event(), buffers, engine
@@ -94,7 +97,7 @@ namespace
             || t == ModuleType::Reverb || t == ModuleType::Echo
             || t == ModuleType::Equalizer || t == ModuleType::Harmonize
             || t == ModuleType::Centroid || t == ModuleType::Drive
-            || t == ModuleType::DcBlock;
+            || t == ModuleType::DcBlock || t == ModuleType::Gain;
     }
 }
 
@@ -777,7 +780,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         for (int i = 1; i <= 16; ++i)
             midiChNames.add("Channel " + juce::String(i));
         const juce::StringArray octNames { "-2", "-1", " 0", "+1", "+2" };
-        juce::StringArray noteNames;   // C1..B6 (72 items), default A3 = index 33
+        juce::StringArray noteNames;   // C1..B6 (72 items), default A4 = index 45
         {
             const char* noteLetters[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
             for (int oct = 1; oct <= 6; ++oct)
@@ -794,9 +797,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
                 id("Enabled"), tag + "Enabled", false));
             params.push_back(std::make_unique<juce::AudioParameterBool>(
                 id("Polyphony"), tag + "Polyphony", true));
-            params.push_back(std::make_unique<juce::AudioParameterChoice>(
-                id("BackgroundMode"), tag + "Background",
-                juce::StringArray{"Black", "White"}, 1));
+            // (BackgroundMode retired — the pole is chain-owned, Chain::backgroundMode.)
             params.push_back(std::make_unique<juce::AudioParameterChoice>(
                 id("CouplingMode"), tag + "Coupling",
                 juce::StringArray{"LuxStral", "Free"}, 0, kHiddenChoice));
@@ -854,7 +855,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
                 id("OctaveOffset"), tag + "Octave Offset", octNames, 2, kHiddenChoice));
             params.push_back(std::make_unique<juce::AudioParameterChoice>(
                 id("ReferenceNote"), tag + "Reference Note",
-                noteNames, 33, kHiddenChoice));  // A3 = index 33
+                noteNames, 45, kHiddenChoice));  // A4 = index 45
         }
 
         // ── MASK banks — spatial bandpass filter driven by the ADSR ──────────
@@ -872,9 +873,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
                 id("Enabled"), tag + "Enabled", false));
             params.push_back(std::make_unique<juce::AudioParameterBool>(
                 id("Polyphony"), tag + "Polyphony", true));
-            params.push_back(std::make_unique<juce::AudioParameterChoice>(
-                id("BackgroundMode"), tag + "Background",
-                juce::StringArray{"Black", "White"}, 1));
+            // (BackgroundMode retired — the pole is chain-owned, Chain::backgroundMode.)
             params.push_back(std::make_unique<juce::AudioParameterChoice>(
                 id("CouplingMode"), tag + "Coupling",
                 juce::StringArray{"LuxStral", "Free"}, 0, kHiddenChoice));
@@ -943,7 +942,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
                 id("OctaveOffset"), tag + "Octave Offset", octNames, 2, kHiddenChoice));
             params.push_back(std::make_unique<juce::AudioParameterChoice>(
                 id("ReferenceNote"), tag + "Reference Note",
-                noteNames, 33, kHiddenChoice));  // A3 = index 33
+                noteNames, 45, kHiddenChoice));  // A4 = index 45
         }
     }
 
@@ -967,9 +966,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             id("Mix"), tag + "Mix",
             juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 60.0f,
             juce::AudioParameterFloatAttributes{}.withLabel("%")));
-        params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            id("BackgroundMode"), tag + "Background",
-            juce::StringArray{"Auto", "Black", "White"}, 2));
+        // (BackgroundMode retired — the pole is chain-owned, Chain::backgroundMode.)
     }
     for (int n = 0; n < 8; ++n)
     {
@@ -990,10 +987,44 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             id("Mix"), tag + "Mix",
             juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 60.0f,
             juce::AudioParameterFloatAttributes{}.withLabel("%")));
-        params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            id("BackgroundMode"), tag + "Background",
-            juce::StringArray{"Auto", "Black", "White"}, 2));
+        // (BackgroundMode retired — the pole is chain-owned, Chain::backgroundMode.)
     }
+    // Typed-handle EQ bank (shape_eq.h) — SHAPE_EQ_MAX_HANDLES handles, each
+    // Type (Off/Bell/LP/HP/DJ/Tilt, order == the SHAPE_EQ_* enum) + Freq
+    // (0..1 position on the log-f pixel axis; the DJ bipolar knob) + Gain
+    // (±dB, Bell peak / Tilt endpoints) + Width (0..1 bandwidth / resonance).
+    // All Off by default = flat curve = pass-through. Shared by the EQUALIZER
+    // module and the CENTROID / LEVELS output EQ banks.
+    auto addShapeEqHandles =
+        [&params](const juce::String& tag,
+                  const std::function<juce::String(const juce::String&)>& pid)
+    {
+        // Whole-curve gain fader (the ShapeEq editor's left-margin LEVEL).
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{pid("Level"), 1}, tag + "Level",
+            juce::NormalisableRange<float>(-SHAPE_EQ_DB_MAX,
+                                           SHAPE_EQ_DB_MAX, 0.1f), 0.0f,
+            juce::AudioParameterFloatAttributes{}.withLabel("dB")));
+        for (int h = 0; h < SHAPE_EQ_MAX_HANDLES; ++h)
+        {
+            const juce::String sh = "Sh" + juce::String(h);
+            params.push_back(std::make_unique<juce::AudioParameterChoice>(
+                juce::ParameterID{pid(sh + "Type"), 1}, tag + sh + " Type",
+                juce::StringArray{"Off", "Bell", "Low-pass", "High-pass",
+                                  "DJ Filter", "Tilt"}, 0));
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID{pid(sh + "Freq"), 1}, tag + sh + " Freq",
+                juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.5f));
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID{pid(sh + "Gain"), 1}, tag + sh + " Gain",
+                juce::NormalisableRange<float>(-SHAPE_EQ_DB_MAX,
+                                               SHAPE_EQ_DB_MAX, 0.1f), 0.0f,
+                juce::AudioParameterFloatAttributes{}.withLabel("dB")));
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID{pid(sh + "Width"), 1}, tag + sh + " Width",
+                juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.5f));
+        }
+    };
     for (int n = 0; n < 8; ++n)
     {
         const juce::String tag = "EQ" + juce::String(n) + " ";
@@ -1001,25 +1032,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
 
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             id("Enabled"), tag + "Enabled", false));
-        // Up to LUX_EQ_NUM_BANDS gain nodes spread evenly over the
-        // pixel/frequency axis — 0 dB default = flat curve = pass-through.
-        // NumPoints picks how many are active (default 2 = one straight line).
-        for (int b = 0; b < LUX_EQ_NUM_BANDS; ++b)
-        {
-            const auto sfx = "Band" + juce::String(b);
-            params.push_back(std::make_unique<juce::AudioParameterFloat>(
-                juce::ParameterID{eqParam(n, sfx.toRawUTF8()), 1},
-                tag + sfx,
-                juce::NormalisableRange<float>(-LUX_EQ_GAIN_DB_MAX,
-                                               LUX_EQ_GAIN_DB_MAX, 0.1f), 0.0f,
-                juce::AudioParameterFloatAttributes{}.withLabel("dB")));
-        }
-        params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            id("NumPoints"), tag + "Points",
-            juce::StringArray{"2", "3", "4", "5", "6", "7", "8", "9"}, 0));
-        params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            id("BackgroundMode"), tag + "Background",
-            juce::StringArray{"Auto", "Black", "White"}, 2));
+        addShapeEqHandles(tag, [n](const juce::String& s)
+                          { return eqParam(n, s.toRawUTF8()); });
+        // (BackgroundMode retired — the pole is chain-owned, Chain::backgroundMode.)
     }
     for (int n = 0; n < 8; ++n)
     {
@@ -1055,11 +1070,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.5f));
         params.push_back(std::make_unique<juce::AudioParameterInt>(
             id("Glide"), tag + "Glide",
-            0, 1000, 64,
+            0, 1000, 128,
             juce::AudioParameterIntAttributes{}.withLabel("lines")));
-        params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            id("BackgroundMode"), tag + "Background",
-            juce::StringArray{"Auto", "Black", "White"}, 2));
+        // (BackgroundMode retired — the pole is chain-owned, Chain::backgroundMode.)
     }
     for (int n = 0; n < 8; ++n)
     {
@@ -1088,25 +1101,26 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             id("Edge"), tag + "Edge",
             juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
-        // Output EQ — same node model as the LuxEq bank: up to
-        // LUX_EQ_NUM_BANDS gain nodes applied AFTER the barycentre redraw
-        // (0 dB default = flat curve = pass-through).
-        for (int b = 0; b < LUX_EQ_NUM_BANDS; ++b)
-        {
-            const auto sfx = "Band" + juce::String(b);
-            params.push_back(std::make_unique<juce::AudioParameterFloat>(
-                juce::ParameterID{ctParam(n, sfx.toRawUTF8()), 1},
-                tag + sfx,
-                juce::NormalisableRange<float>(-LUX_EQ_GAIN_DB_MAX,
-                                               LUX_EQ_GAIN_DB_MAX, 0.1f), 0.0f,
-                juce::AudioParameterFloatAttributes{}.withLabel("dB")));
-        }
+        // Width tilt — exponential slope of the redrawn width along the
+        // pixel/frequency axis: ×2^(tilt·(u−½)), u = 0 at the bass end.
+        // 0 = uniform (a fixed px width is already a fixed musical interval).
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("WidthTilt"), tag + "WidthTilt",
+            juce::NormalisableRange<float>(-3.0f, 3.0f, 0.01f), 0.0f,
+            juce::AudioParameterFloatAttributes{}.withLabel("oct")));
+        // Width law — PX: uniform width (constant interval, so chorus in the
+        // bass turns to roughness then noise up the axis); ERB (default):
+        // constant PERCEPTUAL width (a fixed ratio of the ear's critical
+        // band — wider bass, narrower treble, = Thickness at the axis
+        // centre). Lives on the SETUP face.
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            id("NumPoints"), tag + "Points",
-            juce::StringArray{"2", "3", "4", "5", "6", "7", "8", "9"}, 0));
-        params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            id("BackgroundMode"), tag + "Background",
-            juce::StringArray{"Auto", "Black", "White"}, 2));
+            id("WidthLaw"), tag + "WidthLaw",
+            juce::StringArray{"PX", "ERB"}, 1));
+        // Output EQ — same typed-handle model as the LuxEq bank, applied
+        // AFTER the barycentre redraw (all Off = flat = pass-through).
+        addShapeEqHandles(tag, [n](const juce::String& s)
+                          { return ctParam(n, s.toRawUTF8()); });
+        // (BackgroundMode retired — the pole is chain-owned, Chain::backgroundMode.)
     }
     for (int n = 0; n < 8; ++n)
     {
@@ -1118,9 +1132,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             id("Enabled"), tag + "Enabled", false));
         // Mid-tone gamma on the material energy (both ends anchored — never
-        // clips): < 1 lifts the faint material, > 1 thins it. Log-skewed
-        // around 1 (the Photoshop Levels middle slider); a flat OUTPUT-EQ
-        // curve covers global gain.
+        // clips). Photo convention pow(x, 1/gamma), same direction as the
+        // VideoScroll display gamma: > 1 lifts the faint material (brighter),
+        // < 1 thins it. Log-skewed around 1 (the Photoshop Levels middle
+        // slider); a flat OUTPUT-EQ curve covers global gain.
         juce::NormalisableRange<float> gammaRange(LUX_DRIVE_GAMMA_MIN,
                                                   LUX_DRIVE_GAMMA_MAX, 0.01f);
         gammaRange.setSkewForCentre(1.0f);
@@ -1132,8 +1147,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             id("Saturation"), tag + "Saturation",
             juce::NormalisableRange<float>(-100.0f, 100.0f, 0.1f), 0.0f,
             juce::AudioParameterFloatAttributes{}.withLabel("%")));
-        // Écrêtage bas: material below Floor (% of full scale above the
-        // background floor) is clipped to the background.
+        // Écrêtage bas ABSOLU: energy within Floor (% of full scale) of the
+        // background pole is clipped to the EXACT pole — the only value the
+        // LuxStral inverse-dB decode reads as silence.
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             id("Floor"), tag + "Floor",
             juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 0.0f,
@@ -1152,25 +1168,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             id("InvertMode"), tag + "Invert",
             juce::StringArray{"Off", "Negative", "Luminance"}, 0));
-        // Output EQ — same node model as the LuxEq bank: up to
-        // LUX_EQ_NUM_BANDS gain nodes applied AFTER the transfer
-        // (0 dB default = flat curve = pass-through). Mirrors CENTROID.
-        for (int b = 0; b < LUX_EQ_NUM_BANDS; ++b)
-        {
-            const auto sfx = "Band" + juce::String(b);
-            params.push_back(std::make_unique<juce::AudioParameterFloat>(
-                juce::ParameterID{dvParam(n, sfx.toRawUTF8()), 1},
-                tag + sfx,
-                juce::NormalisableRange<float>(-LUX_EQ_GAIN_DB_MAX,
-                                               LUX_EQ_GAIN_DB_MAX, 0.1f), 0.0f,
-                juce::AudioParameterFloatAttributes{}.withLabel("dB")));
-        }
-        params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            id("NumPoints"), tag + "Points",
-            juce::StringArray{"2", "3", "4", "5", "6", "7", "8", "9"}, 0));
-        params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            id("BackgroundMode"), tag + "Background",
-            juce::StringArray{"Auto", "Black", "White"}, 2));
+        // Output EQ — same typed-handle model as the LuxEq bank, applied
+        // AFTER the transfer (all Off = flat = pass-through). Mirrors CENTROID.
+        addShapeEqHandles(tag, [n](const juce::String& s)
+                          { return dvParam(n, s.toRawUTF8()); });
+        // (BackgroundMode retired — the pole is chain-owned, Chain::backgroundMode.)
     }
     for (int n = 0; n < 8; ++n)
     {
@@ -1187,9 +1189,24 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
             id("Amount"), tag + "Amount",
             juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), 100.0f,
             juce::AudioParameterFloatAttributes{}.withLabel("%")));
-        params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            id("BackgroundMode"), tag + "Background",
-            juce::StringArray{"Auto", "Black", "White"}, 2));
+        // (BackgroundMode retired — the pole is chain-owned, Chain::backgroundMode.)
+    }
+    for (int n = 0; n < 8; ++n)
+    {
+        // GAIN bank — per-line energy gain (dB; overflow joint-clips toward
+        // the line's own hue).
+        const juce::String tag = "GN" + juce::String(n) + " ";
+        auto id = [n](const char* sfx) { return juce::ParameterID{gnParam(n, sfx), 1}; };
+
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            id("Enabled"), tag + "Enabled", false));
+        // Same span as the EQ handles — 0 dB = unity = pass-through.
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            id("Gain"), tag + "Gain",
+            juce::NormalisableRange<float>(-SHAPE_EQ_DB_MAX,
+                                           SHAPE_EQ_DB_MAX, 0.1f), 0.0f,
+            juce::AudioParameterFloatAttributes{}.withLabel("dB")));
+        // (BackgroundMode retired — the pole is chain-owned, Chain::backgroundMode.)
     }
 
     // Fade-in duration [ms] — applied when restarting the live stream after Stop.
@@ -1729,9 +1746,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         const juce::String mx = "videoMix"    + juce::String(n) + "_";
         const juce::String tag = "VS" + juce::String(n) + " ";
 
-        params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            juce::ParameterID{p + "mode", 1}, tag + "Mode",
-            juce::StringArray{"0 deg", "90 deg", "180 deg", "270 deg"}, 0));
+        // Orientation = continuous rotation of the waterfall (degrees,
+        // clockwise; 0 = new lines at the bottom / scroll up, 90 = at the
+        // left, 180 = scroll down, 270 = at the right). Supersedes the 4-way
+        // "mode" choice (2026-08-28) — migrated in setStateInformation and
+        // ChainModel::migrateModuleValues (rotation = mode × 90).
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{p + "rotation", 1}, tag + "Rotation",
+            juce::NormalisableRange<float>(0.0f, VideoScrollLimits::kRotationMax, 0.1f), 0.0f,
+            juce::AudioParameterFloatAttributes{}.withLabel("deg")));
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID{p + "speed", 1}, tag + "Speed",
             juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.33f));
@@ -1741,12 +1764,39 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID{p + "thickness", 1}, tag + "Thickness",
             juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+        // Zoom = width of the generation band relative to the output window
+        // (transverse axis only — the sweep always spans the whole window,
+        // see VideoScrollRenderCore::drawWarp). Skewed so the slider's
+        // physical centre (the double-click cycle) is 1.0×. Bounds shared
+        // with the renderer (VideoScrollLimits). Chain VALUES store raw
+        // values, so widening the range needs no migration.
+        {
+            juce::NormalisableRange<float> zoomRange(VideoScrollLimits::kZoomMin,
+                                                     VideoScrollLimits::kZoomMax, 0.01f);
+            zoomRange.setSkewForCentre(1.0f);
+            params.push_back(std::make_unique<juce::AudioParameterFloat>(
+                juce::ParameterID{p + "zoom", 1}, tag + "Zoom", zoomRange, 1.0f,
+                juce::AudioParameterFloatAttributes{}.withLabel("x")));
+        }
+        // Centre of the generation in OUTPUT-WINDOW space (-1..1; X → right,
+        // Y → down whatever the orientation): ±1 puts the band centre on the
+        // window edge. 2026-08-28 — docs/PLAN_VIDEO_SCROLL_CHAIN_PAGES_ZOOM.md.
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID{p + "zoom", 1}, tag + "Zoom",
-            juce::NormalisableRange<float>(0.5f, 4.0f, 0.05f), 1.0f,
-            juce::AudioParameterFloatAttributes{}.withLabel("x")));
+            juce::ParameterID{p + "centerX", 1}, tag + "Center X",
+            juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{p + "centerY", 1}, tag + "Center Y",
+            juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID{p + "fade", 1}, tag + "Fade",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+        // Distance-driven horizontal blur (radius grows with the age of the
+        // line). Split out of "fade" 2026-08-28: fade = dim + desaturate only,
+        // blur = smear only, so each can be dosed independently. Sessions and
+        // .sp3chain presets that predate the split seed blur = fade (same look
+        // as before) — see setStateInformation / ChainModel::migrateModuleValues.
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{p + "blur", 1}, tag + "Blur",
             juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
         // Display gamma gain (photo convention pow(x, 1/gamma) — same range as
         // the per-OUT banks): >1 brightens midtones, <1 darkens, identity at 1.
@@ -1843,7 +1893,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         params.push_back(std::make_unique<juce::AudioParameterBool>(
             id("peakOnly"), tag + "Peak Only", true));
         params.push_back(std::make_unique<juce::AudioParameterInt>(
-            id("maxPoly"), tag + "Max Poly", 1, MIDI_TAP_MAX_POLY, 8));
+            id("maxPoly"), tag + "Max Poly", 1, MIDI_TAP_MAX_POLY, 16));
 
         // attackMs is THE reject-short-notes knob (it costs that much uniform
         // latency); minOnMs only DELAYS the note-off — see midi_tap.h.
@@ -1869,9 +1919,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             id("rangePolicy"), tag + "Out Of Range",
             juce::StringArray{"Clamp", "Drop"}, 0));
-        params.push_back(std::make_unique<juce::AudioParameterChoice>(
-            id("backgroundMode"), tag + "Background",
-            juce::StringArray{"Black", "White", "Auto"}, 2));
+        // (backgroundMode retired — the pole is chain-owned, Chain::backgroundMode.)
 
         params.push_back(std::make_unique<juce::AudioParameterChoice>(
             id("velCurve"), tag + "Velocity Curve",
@@ -1887,6 +1935,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         // layer of the feedback-loop mitigation (see midi_tap.h).
         params.push_back(std::make_unique<juce::AudioParameterInt>(
             id("channel"), tag + "Channel", 1, 16, 16));
+
+        // Live MIDI output as MPE: the port stream allocates one member
+        // channel per sounding note and carries the crest bends + level
+        // envelope (pressure/CC11) — for MPE synths (Surge XT, Vital…).
+        // Off = classic single-channel notes. The FILES are unaffected.
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            id("portMpe"), tag + "Port MPE", false));
 
         // DENSE ("black MIDI") — velocity-tracking restrikes: the .mid carries
         // each partial's amplitude envelope instead of one latched velocity,
@@ -1956,6 +2011,10 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
         for (auto& slot : engine)
             for (auto& band : slot)
                 band.store(-1.0f, std::memory_order_relaxed);
+    // "Selected EQ handle" param cache — MUST be complete before audio starts
+    // (the virtual MIDI sink dereferences it on the audio thread) and is never
+    // rebuilt afterwards.
+    buildEqHandleParamCache();
 
     // Cache raw-parameter pointers read by processBlock (audio thread) —
     // getRawParameterValue("literal") allocates a juce::String per call.
@@ -2316,6 +2375,7 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     lux_centro_init_all();
     lux_drive_init_all();
     lux_dcblock_init_all();
+    lux_gain_init_all();
     video_scroll_init_all();   // init 8 VideoScroll capture rings (RT pool) before the synth thread starts
     midi_tap_init_all();       // init 8 MidiTap note-extraction rings (RT pool), same reason
 
@@ -2486,7 +2546,7 @@ Sp3ctraAudioProcessor::~Sp3ctraAudioProcessor()
 bool Sp3ctraAudioProcessor::startVideoRecording(const juce::File& out, int w, int h,
                                                 double fps, juce::String& err)
 {
-    if (videoRecorder_ == nullptr) { err = "Recorder unavailable"; return false; }
+    if (videoRecorder_ == nullptr) { err = "Recorder unavailable."; return false; }
 
     const double sr = getSampleRate() > 0.0 ? getSampleRate() : 48000.0;
     const int    ch = juce::jmax(1, getTotalNumOutputChannels());
@@ -2583,13 +2643,22 @@ void Sp3ctraAudioProcessor::drainMidiTapToBus(juce::MidiBuffer& out, int numSamp
             if (e.t_us > winEnd)
                 break;         // not due yet — leave the cursor here, retry next block
 
+            if (e.status != 0x90 && e.status != 0x80)
+                continue;   // 0xE0 crest-bend: the single-channel bus skips it
+
             int off = (e.t_us > winStart)
                     ? (int) ((double) (e.t_us - winStart) / usPerSample) : 0;
             off = juce::jlimit(0, numSamples - 1, off);
 
             const bool on = (e.status == 0x90) && e.vel > 0;
+            // Per-probe live level — a velocity scale on the OUTPUT only, the
+            // capture stays faithful (never below 1: a scaled-to-0 note-on
+            // would read as a note-off).
+            const float lvl = busLevel_[slot].load(std::memory_order_relaxed);
+            const int   vel = juce::jlimit(1, 127,
+                                (int) std::lround((float) e.vel * lvl));
             out.addEvent(on ? juce::MidiMessage::noteOn (ch, (int) e.note,
-                                                         (juce::uint8) e.vel)
+                                                         (juce::uint8) vel)
                             : juce::MidiMessage::noteOff(ch, (int) e.note), off);
             busHeld_[slot][e.note] = on ? 1 : 0;
         }
@@ -2618,6 +2687,9 @@ MidiTapSink* Sp3ctraAudioProcessor::midiTapSink(int slot)
     if (s == nullptr)
     {
         s = std::make_unique<MidiTapSink>(slot);
+        // Name BEFORE the port opens — the virtual port takes its identity
+        // ("Sp3ctra CHAIN 2") at creation time.
+        s->setDisplayName(midiTapLabel(slot));
         if (midiTapDestName_.isNotEmpty())
         {
             juce::String err;
@@ -2629,10 +2701,16 @@ MidiTapSink* Sp3ctraAudioProcessor::midiTapSink(int slot)
     static const double kLat[5] = { 0.0, 2.0, 5.0, 10.0, 20.0 };
     if (auto* p = apvts.getRawParameterValue("midiPortLatency"))
         s->setPortLatencyMs(kLat[juce::jlimit(0, 4, (int) p->load())]);
-    // Grid in ticks of the writer's 960 PPQ: Off, 1/32, 1/16T, 1/16, 1/8T, 1/8, 1/4.
-    static const int kGrid[7] = { 0, 120, 160, 240, 320, 480, 960 };
-    if (auto* p = apvts.getRawParameterValue("midiQuantize"))
-        s->setQuantizeTicks(kGrid[juce::jlimit(0, 6, (int) p->load())]);
+    // Never quantized: a take is a faithful (black MIDI) capture — snapping
+    // the restrike staircase to a grid would erase the amplitude envelopes.
+    // (The retired "midiQuantize" param survives for session compatibility.)
+    s->setQuantizeTicks(0);
+    if (auto* p = apvts.getRawParameterValue(mtParam(slot, "portMpe")))
+        s->setPortMpe(p->load() >= 0.5f);
+    if (auto* p = apvts.getRawParameterValue(mtParam(slot, "arm")))
+        s->setOutEnabled(p->load() >= 0.5f);
+    if (auto* p = apvts.getRawParameterValue(mtParam(slot, "level")))
+        s->setOutLevel(p->load());
     return s.get();
 }
 
@@ -2642,7 +2720,7 @@ bool Sp3ctraAudioProcessor::startMidiCapture(const juce::File& dir,
 {
     if (midiCaptureActive_.load(std::memory_order_acquire))
     {
-        err = "Already recording";
+        err = "Already recording.";
         return false;
     }
 
@@ -2653,15 +2731,18 @@ bool Sp3ctraAudioProcessor::startMidiCapture(const juce::File& dir,
         return false;
     }
 
-    auto armed = [this](int slot)
+    // Every ENABLED probe records — "what plays is what lands in the take"
+    // (the per-probe ARM concept is retired).
+    auto recording = [this](int slot)
     {
-        auto* p = apvts.getRawParameterValue(mtParam(slot, "arm"));
         auto* e = apvts.getRawParameterValue(mtParam(slot, "enabled"));
-        return p != nullptr && p->load() >= 0.5f && e != nullptr && e->load() >= 0.5f;
+        return e != nullptr && e->load() >= 0.5f;
     };
 
-    double bpm = 120.0;
-    if (auto* p = apvts.getRawParameterValue("midiTempo")) bpm = p->load();
+    // The written tempo is a pure display convention (SMF timing is absolute
+    // ticks x tempo, so ANY value plays back identically). 120 keeps DAW bar
+    // rulers sane; there is nothing to configure.
+    const double bpm = 120.0;
 
     // Arm the transport FIRST: every file opened below stamps against the SAME
     // t0, which is the whole point of a master strip.
@@ -2670,10 +2751,17 @@ bool Sp3ctraAudioProcessor::startMidiCapture(const juce::File& dir,
     int opened = 0;
     for (int slot : slots)
     {
-        if (! armed(slot)) continue;
+        if (! recording(slot)) continue;
         auto* sink = midiTapSink(slot);
         if (sink == nullptr) continue;
-        const auto f = dir.getChildFile(stem + "_TAP" + juce::String(slot + 1) + ".mid");
+        // Takes are named by the probe's HOST CHAIN ("…_CHAIN4.mid", a/b when
+        // a chain hosts two probes) — the identity a musician thinks in.
+        const juce::String label = midiTapLabel(slot);
+        const juce::String tag   = label.isNotEmpty()
+            ? label.removeCharacters(" ")
+            : "TAP" + juce::String(slot + 1);
+        sink->setDisplayName(label);
+        const auto f = dir.getChildFile(stem + "_" + tag + ".mid");
         juce::String e1;
         if (sink->startFile(f, bpm, midiCaptureT0Us_, e1)) ++opened;
         else if (err.isEmpty()) err = e1;
@@ -2683,9 +2771,18 @@ bool Sp3ctraAudioProcessor::startMidiCapture(const juce::File& dir,
     {
         midi_tap_transport_disarm();
         if (err.isEmpty())
-            err = "No MIDI TAP is armed — arm at least one probe in the MIDI MIX strip.";
+            err = juce::String::fromUTF8(
+                "No MIDI TAP probe is enabled — switch one on in its chain first.");
         return false;
     }
+
+    // Force the faithful (black MIDI) capture on every recorded probe for the
+    // take's duration. Message-thread plain stores, the documented CONTROL
+    // path (midi_tap.h); the config sync keeps re-forcing it while capturing
+    // and restores the per-probe APVTS value at the next sync after stop.
+    for (int slot : slots)
+        if (recording(slot))
+            midi_tap_instance(slot)->config.dense = 1;
 
     midiCaptureActive_.store(true, std::memory_order_release);
     log_info("VST", "MIDI capture started: %d take(s) in %s",
@@ -2701,6 +2798,17 @@ void Sp3ctraAudioProcessor::stopMidiCapture()
     midi_tap_transport_disarm();
     for (auto& s : midiTapSinks_)
         if (s) s->stopFile();
+    // Hand dense back to each probe's own toggles (it was forced for the take
+    // and the config sync only runs on the next parameter change). MPE keeps
+    // implying dense, as in the sync.
+    for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
+    {
+        auto* d = apvts.getRawParameterValue(mtParam(i, "dense"));
+        auto* m = apvts.getRawParameterValue(mtParam(i, "portMpe"));
+        midi_tap_instance(i)->config.dense =
+            ((d != nullptr && d->load() >= 0.5f)
+             || (m != nullptr && m->load() >= 0.5f)) ? 1 : 0;
+    }
     log_info("VST", "MIDI capture stopped");
 }
 
@@ -4471,6 +4579,54 @@ void Sp3ctraAudioProcessor::applyStateXml(std::unique_ptr<juce::XmlElement> xmlS
                     e->setAttribute("value", 1.0);   // Negative
                 }
             }
+            // Migration 2026-08-28 — the per-instance VideoScroll "fade" split
+            // into "fade" (dim + desaturate) + "blur" (horizontal smear). A
+            // session saved before the split rendered its blur FROM fade, so
+            // seed blur = fade when the state carries a fade entry but no blur
+            // entry (new sessions always write blur → untouched).
+            for (int s = 0; s < CHAIN_MAX_CHAINS; ++s)
+            {
+                const juce::String fadeId = vsParam(s, "fade");
+                const juce::String blurId = vsParam(s, "blur");
+                juce::XmlElement* fadeEl = nullptr;
+                bool haveBlur = false;
+                for (auto* e : xmlState->getChildWithTagNameIterator("PARAM"))
+                {
+                    const auto pid = e->getStringAttribute("id");
+                    if      (pid == fadeId) fadeEl = e;
+                    else if (pid == blurId) haveBlur = true;
+                }
+                if (! haveBlur && fadeEl != nullptr)
+                {
+                    auto* e = xmlState->createNewChildElement("PARAM");
+                    e->setAttribute("id", blurId);
+                    e->setAttribute("value", fadeEl->getDoubleAttribute("value"));
+                }
+            }
+            // Migration 2026-08-28 — the per-instance VideoScroll "mode" choice
+            // (0/90/180/270°) became the continuous "rotation" (degrees). Seed
+            // rotation = mode × 90 when the state carries a mode entry but no
+            // rotation entry (new sessions always write rotation → untouched).
+            for (int s = 0; s < CHAIN_MAX_CHAINS; ++s)
+            {
+                const juce::String modeId = vsParam(s, "mode");
+                const juce::String rotId  = vsParam(s, "rotation");
+                juce::XmlElement* modeEl = nullptr;
+                bool haveRot = false;
+                for (auto* e : xmlState->getChildWithTagNameIterator("PARAM"))
+                {
+                    const auto pid = e->getStringAttribute("id");
+                    if      (pid == modeId) modeEl = e;
+                    else if (pid == rotId)  haveRot = true;
+                }
+                if (! haveRot && modeEl != nullptr)
+                {
+                    auto* e = xmlState->createNewChildElement("PARAM");
+                    e->setAttribute("id", rotId);
+                    e->setAttribute("value", 90.0 * juce::jlimit(0, 3,
+                        juce::roundToInt(modeEl->getDoubleAttribute("value"))));
+                }
+            }
             // P9 — remember which audio transports this state saved RUNNING
             // before the never-auto-run patch below folds them all to Stop.
             // Consumed on the message thread at the end of the restore
@@ -5091,6 +5247,7 @@ void Sp3ctraAudioProcessor::timerCallback()
     if ((pendingPitchResets_ | pendingMaskResets_ | pendingReverbResets_
          | pendingEchoResets_ | pendingEqResets_ | pendingHarmoResets_
          | pendingCentroResets_ | pendingDriveResets_ | pendingDcBlockResets_
+         | pendingGainResets_
          | pendingVideoScrollInits_ | pendingMidiTapPanics_ | pendingMidiTapInits_
          | pendingStagingResets_) != 0
         && juce::Time::getMillisecondCounter() - poolResetArmedMs_ >= 40)
@@ -5106,6 +5263,7 @@ void Sp3ctraAudioProcessor::timerCallback()
             if ((pendingCentroResets_ >> i) & 1u) lux_centro_reset(lux_centro_instance(i));
             if ((pendingDriveResets_  >> i) & 1u) lux_drive_reset(lux_drive_instance(i));
             if ((pendingDcBlockResets_ >> i) & 1u) lux_dcblock_reset(lux_dcblock_instance(i));
+            if ((pendingGainResets_   >> i) & 1u) lux_gain_reset(lux_gain_instance(i));
             if ((pendingVideoScrollInits_ >> i) & 1u)
                 video_scroll_init(video_scroll_instance(i));
             // MIDI TAP teardown is TWO-STAGE and order matters: panic first
@@ -5129,6 +5287,7 @@ void Sp3ctraAudioProcessor::timerCallback()
         pendingReverbResets_ = pendingEchoResets_ = pendingEqResets_ = 0;
         pendingHarmoResets_ = pendingCentroResets_ = pendingDriveResets_ = 0;
         pendingDcBlockResets_ = 0;
+        pendingGainResets_    = 0;
         pendingStagingResets_ = 0;
         // Hand the panicked slots to the init stage and re-arm the timer, so
         // the ring wipe lands one full defer window after the note-offs.
@@ -5693,7 +5852,8 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
     // mask, indexed by the INSTANCE'S pool slot (stable across edits and
     // chain moves).
     uint32_t pitchMask = 0, maskMask = 0, reverbMask = 0, echoMask = 0, eqMask = 0,
-             harmoMask = 0, centroMask = 0, driveMask = 0, dcBlockMask = 0;
+             harmoMask = 0, centroMask = 0, driveMask = 0, dcBlockMask = 0,
+             gainMask = 0;
     for (int c = 0; c < chainModel_.numChains(); ++c)
     {
         for (const auto& m : chainModel_.chains[(size_t) c].modules)
@@ -5708,6 +5868,7 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
             if (m.type == ModuleType::Centroid)  centroMask |= (1u << slot);
             if (m.type == ModuleType::Drive)     driveMask  |= (1u << slot);
             if (m.type == ModuleType::DcBlock)   dcBlockMask |= (1u << slot);
+            if (m.type == ModuleType::Gain)      gainMask   |= (1u << slot);
         }
     }
     chainPitchMask_.store(pitchMask, std::memory_order_relaxed);
@@ -5719,6 +5880,7 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
     chainCentroMask_.store(centroMask, std::memory_order_relaxed);
     chainDriveMask_.store(driveMask,   std::memory_order_relaxed);
     chainDcBlockMask_.store(dcBlockMask, std::memory_order_relaxed);
+    chainGainMask_.store(gainMask,       std::memory_order_relaxed);
 
     // MIDI TAP presence mask — keyed by ModuleInstance.slot (its OWN pool),
     // NOT by poolSlotForInstance: like VideoScroll, the model assigns the slot.
@@ -5758,12 +5920,18 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
                 (bankOn(dvParam(i, "Enabled")) && ((driveMask  >> i) & 1u)) ? 1 : 0;
             lux_dcblock_instance(i)->config.enabled =
                 (bankOn(dcbParam(i, "Enabled")) && ((dcBlockMask >> i) & 1u)) ? 1 : 0;
+            lux_gain_instance(i)->config.enabled =
+                (bankOn(gnParam(i, "Enabled")) && ((gainMask    >> i) & 1u)) ? 1 : 0;
             // A probe removed from the rack must stop extracting immediately;
             // midi_tap_process_line's lazy re-arm then releases its held notes.
             midi_tap_instance(i)->config.enabled =
                 (bankOn(mtParam(i, "enabled")) && ((midiTapMask >> i) & 1u)) ? 1 : 0;
         }
     }
+
+    // The background pole is chain-owned: a module moved to another chain must
+    // adopt the destination's pole with the same immediacy as `enabled`.
+    applyChainBackgrounds();
 
     // Per-engine sampler enable: a Sampler instance carries its engine index
     // in `slot` (0..7 since P6). An engine is enabled iff its instance is
@@ -5813,6 +5981,7 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
         const uint32_t lostCentro = (prevCentroSlots_ & ~centroMask) | staleSlots.centro;
         const uint32_t lostDrive  = (prevDriveSlots_  & ~driveMask)  | staleSlots.drive;
         const uint32_t lostDcBlock = (prevDcBlockSlots_ & ~dcBlockMask) | staleSlots.dcblock;
+        const uint32_t lostGain   = (prevGainSlots_   & ~gainMask)   | staleSlots.gain;
         pendingPitchResets_  |= lostPitch;
         pendingMaskResets_   |= lostMask;
         pendingReverbResets_ |= lostReverb;
@@ -5822,6 +5991,7 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
         pendingCentroResets_ |= lostCentro;
         pendingDriveResets_  |= lostDrive;
         pendingDcBlockResets_ |= lostDcBlock;
+        pendingGainResets_    |= lostGain;
         // A slot ACTIVE in the new plan must not be reset by a pending bit
         // armed for a previous removal (remove + re-add within the 40 ms
         // window): the deferred reset would wipe — and race — the freshly
@@ -5836,8 +6006,9 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
         pendingCentroResets_ &= ~centroMask;
         pendingDriveResets_  &= ~driveMask;
         pendingDcBlockResets_ &= ~dcBlockMask;
+        pendingGainResets_    &= ~gainMask;
         if ((lostPitch | lostMask | lostReverb | lostEcho | lostEq | lostHarmo
-             | lostCentro | lostDrive | lostDcBlock) != 0)
+             | lostCentro | lostDrive | lostDcBlock | lostGain) != 0)
             poolResetArmedMs_ = juce::Time::getMillisecondCounter();
         prevPitchSlots_  = pitchMask;
         prevMaskSlots_   = maskMask;
@@ -5848,6 +6019,7 @@ void Sp3ctraAudioProcessor::deriveChainRouting()
         prevCentroSlots_ = centroMask;
         prevDriveSlots_  = driveMask;
         prevDcBlockSlots_ = dcBlockMask;
+        prevGainSlots_   = gainMask;
     }
 }
 
@@ -5874,6 +6046,7 @@ Sp3ctraAudioProcessor::PoolStale Sp3ctraAudioProcessor::updateModulePoolBindings
             case ModuleType::Centroid:  return stale.centro;
             case ModuleType::Drive:     return stale.drive;
             case ModuleType::DcBlock:   return stale.dcblock;
+            case ModuleType::Gain:      return stale.gain;
             case ModuleType::Echo:
             default:                    return stale.echo;
         }
@@ -5884,7 +6057,7 @@ Sp3ctraAudioProcessor::PoolStale Sp3ctraAudioProcessor::updateModulePoolBindings
             || t == ModuleType::Reverb || t == ModuleType::Echo
             || t == ModuleType::Equalizer || t == ModuleType::Harmonize
             || t == ModuleType::Centroid || t == ModuleType::Drive
-            || t == ModuleType::DcBlock;
+            || t == ModuleType::DcBlock || t == ModuleType::Gain;
     };
 
     std::map<juce::Uuid, ModuleType> live;
@@ -5994,10 +6167,13 @@ Sp3ctraAudioProcessor::navTargetForParam(const juce::String& id) const
     else if (banked("luxcentro", slot)) { t.type = ModuleType::Centroid;   t.instanceId = poolInstance (t.type, slot); }
     else if (banked("luxdrive",  slot)) { t.type = ModuleType::Drive;      t.instanceId = poolInstance (t.type, slot); }
     else if (banked("luxdcblock", slot)) { t.type = ModuleType::DcBlock;   t.instanceId = poolInstance (t.type, slot); }
+    else if (banked("luxgain",   slot)) { t.type = ModuleType::Gain;       t.instanceId = poolInstance (t.type, slot); }
     else if (banked("videoScroll", slot) || banked("videoMix", slot))
                                         { t.type = ModuleType::VideoScroll; t.instanceId = chainInstance(t.type, slot); }
     else if (banked("midiTap",   slot)) { t.type = ModuleType::MidiTap;    t.instanceId = chainInstance(t.type, slot); }
-    else if (banked("luxstralOut", slot)) { t.type = ModuleType::LuxStral; t.instanceId = chainInstance(t.type, slot); }
+    // Per-send LuxStral params land on the ENGINE page too (the OUT page is
+    // gone); the header power still binds the touched send's enable.
+    else if (banked("luxstralOut", slot)) { t.type = ModuleType::LuxStral; t.engineView = true; t.instanceId = chainInstance(t.type, slot); }
     else if (banked("luxsynthOut", slot)) { t.type = ModuleType::LuxSynth; t.instanceId = chainInstance(t.type, -1); }
     else if (banked("luxwaveOut",  slot)) { t.type = ModuleType::LuxWave;  t.instanceId = chainInstance(t.type, -1); }
     else if (banked("luxgrainOut", slot)) { t.type = ModuleType::LuxGrain; t.instanceId = chainInstance(t.type, -1); }
@@ -6017,6 +6193,25 @@ Sp3ctraAudioProcessor::navTargetForParam(const juce::String& id) const
                                              t.instanceId = chainInstance(t.type,
                                                  juce::jlimit(0, LuxSampler::kMaxEngines - 1,
                                                               id.substring(5).getIntValue())); }
+    // Virtual "selected EQ handle" targets — "eqh:{luxeq|luxcentro|luxdrive}{S}:
+    // {freq|gain|width}" (EqHandleMidiTargets). They never reach the banked
+    // "luxeq…" tests above because the id starts with "eqh:", so decode the
+    // family/slot here: the slot IS the pool slot of the EQUALIZER / CENTROID /
+    // LEVELS instance the three CCs steer, hence MIDI-follow lands on its page.
+    else if (id.startsWith("eqh:"))
+    {
+        const int tg = EqHandleMidiTargets::resolve(id);
+        if (tg < 0)
+            return t;   // malformed id — nothing to navigate to
+        switch (EqHandleMidiTargets::tFamily(tg))
+        {
+            case EqHandleMidiTargets::FamilyEq:     t.type = ModuleType::Equalizer; break;
+            case EqHandleMidiTargets::FamilyCentro: t.type = ModuleType::Centroid;  break;
+            case EqHandleMidiTargets::FamilyDrive:  t.type = ModuleType::Drive;     break;
+            default:                                return t;
+        }
+        t.instanceId = poolInstance(t.type, EqHandleMidiTargets::tSlot(tg));
+    }
     // Synth ENGINE params (own page). StrokeForge (sf*) / blob (spctr*) belong
     // to LuxStral.
     else if (id.startsWith("luxstral") || id.startsWith("sf") || id.startsWith("spctr"))
@@ -6039,18 +6234,52 @@ Sp3ctraAudioProcessor::navTargetForParam(const juce::String& id) const
 // virtualResolve runs on the message thread; the rest run on the audio thread
 // and only touch atomics (LuxSampler setters + the per-slot action pulses).
 //==============================================================================
+void Sp3ctraAudioProcessor::buildEqHandleParamCache()
+{
+    for (int f = 0; f < kEqFamilies; ++f)
+        for (int s = 0; s < kEqPoolSlots; ++s)
+            for (int h = 0; h < kEqHandles; ++h)
+                for (int w = 0; w < 3; ++w)
+                {
+                    const juce::String sfx =
+                        EqHandleMidiTargets::paramSuffix(h, w);
+                    const juce::String id =
+                          (f == EqHandleMidiTargets::FamilyEq)
+                            ? eqParam(s, sfx.toRawUTF8())
+                        : (f == EqHandleMidiTargets::FamilyCentro)
+                            ? ctParam(s, sfx.toRawUTF8())
+                            : dvParam(s, sfx.toRawUTF8());
+                    eqHandleParam_[f][s][h][w] = apvts.getParameter(id);
+                    jassert(eqHandleParam_[f][s][h][w] != nullptr);
+                }
+}
+
 int Sp3ctraAudioProcessor::virtualResolve(const juce::String& paramId) const
 {
+    const int t = EqHandleMidiTargets::resolve(paramId);
+    if (t >= 0) return t;
     return SamplerMidiTargets::resolve(paramId);
 }
 
 int Sp3ctraAudioProcessor::virtualSteps(int targetId) const noexcept
 {
+    if (EqHandleMidiTargets::isEqHandle(targetId))
+        return 0;   // Freq / Gain / Width — continuous
     return SamplerMidiTargets::steps(SamplerMidiTargets::tKind(targetId));
 }
 
 float Sp3ctraAudioProcessor::virtualRead(int targetId) const noexcept
 {
+    if (EqHandleMidiTargets::isEqHandle(targetId))
+    {
+        const int f = juce::jlimit(0, kEqFamilies  - 1, EqHandleMidiTargets::tFamily(targetId));
+        const int s = juce::jlimit(0, kEqPoolSlots - 1, EqHandleMidiTargets::tSlot(targetId));
+        const int w = juce::jlimit(0, 2,                EqHandleMidiTargets::tWhich(targetId));
+        const int h = getEqSelectedHandle(f, s);
+        if (auto* p = eqHandleParam_[f][s][h][w])
+            return p->getValue();
+        return 0.0f;
+    }
     const int  e = SamplerMidiTargets::tEngine(targetId);
     LuxSampler* fs = getSampler(e);
     if (fs == nullptr) return 0.0f;
@@ -6060,6 +6289,20 @@ float Sp3ctraAudioProcessor::virtualRead(int targetId) const noexcept
 
 void Sp3ctraAudioProcessor::virtualApply(int targetId, float norm01) noexcept
 {
+    // Selected EQ handle — write the real APVTS param of whichever handle the
+    // editor last selected (audio thread; setValueNotifyingHost is the same
+    // path MidiMappingEngine::applyEvent uses for direct params).
+    if (EqHandleMidiTargets::isEqHandle(targetId))
+    {
+        const int f = juce::jlimit(0, kEqFamilies  - 1, EqHandleMidiTargets::tFamily(targetId));
+        const int s = juce::jlimit(0, kEqPoolSlots - 1, EqHandleMidiTargets::tSlot(targetId));
+        const int w = juce::jlimit(0, 2,                EqHandleMidiTargets::tWhich(targetId));
+        const int h = getEqSelectedHandle(f, s);
+        if (auto* p = eqHandleParam_[f][s][h][w])
+            p->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, norm01));
+        return;
+    }
+
     const auto kind = SamplerMidiTargets::tKind(targetId);
     const int  e    = juce::jlimit(0, LuxSampler::kMaxEngines - 1,
                                    SamplerMidiTargets::tEngine(targetId));
@@ -6090,13 +6333,17 @@ void Sp3ctraAudioProcessor::virtualApply(int targetId, float norm01) noexcept
         return;
     }
 
-    // EQ band — non-RT to apply (parse + LUT rebuild), so latch the normalised
-    // value; the open SlotEditor drains it on the message thread.
-    if (kind == SamplerMidiTargets::Kind::EqBand)
+    // Selected-handle EQ trio — non-RT to apply (codec re-encode + LUT
+    // rebuild), so latch the normalised value; the open SlotEditor drains it
+    // on the message thread.
+    if (kind == SamplerMidiTargets::Kind::SelEqFreq
+     || kind == SamplerMidiTargets::Kind::SelEqGain
+     || kind == SamplerMidiTargets::Kind::SelEqWidth)
     {
-        const int band = SamplerMidiTargets::tBand(targetId) % LuxSampler::kEqBands;
-        smpEqPending[e][s][band].store(juce::jlimit(0.0f, 1.0f, norm01),
-                                       std::memory_order_release);
+        const int w = (kind == SamplerMidiTargets::Kind::SelEqFreq) ? 0
+                    : (kind == SamplerMidiTargets::Kind::SelEqGain) ? 1 : 2;
+        smpEqPending[e][s][w].store(juce::jlimit(0.0f, 1.0f, norm01),
+                                    std::memory_order_release);
         smpValueTouchWhere_.store((e << 8) | s, std::memory_order_relaxed);
         smpValueTouchGen_  .fetch_add(1u, std::memory_order_release);
         return;
@@ -6113,6 +6360,9 @@ void Sp3ctraAudioProcessor::virtualApply(int targetId, float norm01) noexcept
 
 void Sp3ctraAudioProcessor::virtualRelease(int targetId) noexcept
 {
+    if (EqHandleMidiTargets::isEqHandle(targetId))
+        return;   // value targets — nothing to release
+
     const auto kind = SamplerMidiTargets::tKind(targetId);
     const int  e    = juce::jlimit(0, LuxSampler::kMaxEngines - 1,
                                    SamplerMidiTargets::tEngine(targetId));
@@ -6426,6 +6676,7 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
         sp.source_kind    = sourceKind(ch, limitIdx, &sp.source_slot);
         sp.viz_tap_insert = -1;   // set below when this chain hosts the selection
 
+        bool srcSeen = false;     // source_pos = first source module's position
         for (int i = 0; i < limitIdx && i < (int) ch.modules.size(); ++i)
         {
             const ModuleInstance& mi = ch.modules[(size_t) i];
@@ -6434,7 +6685,7 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
                  || t == ModuleType::Reverb || t == ModuleType::Echo
                  || t == ModuleType::Equalizer || t == ModuleType::Harmonize
                  || t == ModuleType::Centroid || t == ModuleType::Drive
-                 || t == ModuleType::DcBlock)
+                 || t == ModuleType::DcBlock || t == ModuleType::Gain)
                 && sp.num_inserts < CHAIN_PLAN_MAX_INSERTS)
             {
                 sp.insert_id[sp.num_inserts] =
@@ -6446,6 +6697,7 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
                     : (t == ModuleType::Centroid)  ? IMAGE_CHAIN_INSERT_LUXCENTRO
                     : (t == ModuleType::Drive)     ? IMAGE_CHAIN_INSERT_LUXDRIVE
                     : (t == ModuleType::DcBlock)   ? IMAGE_CHAIN_INSERT_LUXDCBLOCK
+                    : (t == ModuleType::Gain)      ? IMAGE_CHAIN_INSERT_LUXGAIN
                     :                            IMAGE_CHAIN_INSERT_LUXEQ;
                 // Pool slot bound to THIS INSTANCE's UUID — stable across edits
                 // and chain moves (must match deriveChainRouting's masks).
@@ -6523,6 +6775,20 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
                         juce::jlimit(0, ChainModel::kMaxScorePlayers - 1,
                                      mi.slot >= 0 ? mi.slot : 0);
                     sp.num_inserts++;
+                }
+            }
+            else if (t == ModuleType::Sp3ctra || t == ModuleType::Image
+                     || t == ModuleType::Video || t == ModuleType::Camera)
+            {
+                // 2026-08-20 — the module sourceKind() hoisted to the base
+                // frame: record its POSITION so the executor gates can mask
+                // every player marker placed ABOVE a feeding source (order is
+                // the law for sources too — a playing VOICE must not keep the
+                // hand over an IMAGE dropped under it).
+                if (! srcSeen)
+                {
+                    sp.source_pos = sp.num_inserts;
+                    srcSeen = true;
                 }
             }
 
@@ -6667,12 +6933,11 @@ void Sp3ctraAudioProcessor::deriveAndPublishChainPlan()
         for (int s = 0; s < ScorePlayerService::kMaxSlots; ++s)
         {
             scoreSlotType_[s].store(slotType[s], std::memory_order_release);
-            // P8 — VOICE feeds like a media source: active + take generated
-            // ⇒ the parked column flows with the transport stopped (IMAGE
-            // parity). Only VOICE-hosted slots get the hold behaviour.
+            // (P8 hold retired 2026-08-20 — VOICE's transport gained a real
+            // PAUSE button whose sticky scrub-hold provides the parked drone
+            // on demand, so STOP must actually silence. No slot holds.)
             if (scorePlayerService_ != nullptr)
-                scorePlayerService_->setHoldWhenStopped(
-                    s, slotType[s] == (int) ModuleType::Voice);
+                scorePlayerService_->setHoldWhenStopped(s, false);
         }
 
         const uint8_t gone = (uint8_t) (scoreSlotsPresentMask_ & ~present);
@@ -6799,6 +7064,50 @@ std::vector<int> Sp3ctraAudioProcessor::activeMidiTapSlots() const
                 out.push_back(m.slot);
     std::sort(out.begin(), out.end());
     return out;
+}
+
+std::vector<std::pair<int, int>> Sp3ctraAudioProcessor::activeMidiTapSlotChains() const
+{
+    std::vector<std::pair<int, int>> out;
+    for (int c = 0; c < (int) chainModel_.chains.size(); ++c)
+        for (const auto& m : chainModel_.chains[(size_t) c].modules)
+            if (m.type == ModuleType::MidiTap && m.slot >= 0)
+                out.emplace_back(m.slot, c);
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+juce::String Sp3ctraAudioProcessor::midiTapLabel(int slot) const
+{
+    const auto pairs = activeMidiTapSlotChains();
+    int chain = -1, same = 0, before = 0;
+    for (const auto& [s, c] : pairs)
+        if (s == slot) chain = c;
+    if (chain < 0)
+        return {};
+    for (const auto& [s, c] : pairs)
+    {
+        if (c != chain) continue;
+        ++same;
+        if (s < slot) ++before;
+    }
+    return "CHAIN " + juce::String(chain + 1)
+         + (same > 1 ? juce::String::charToString((juce::juce_wchar) ('a' + before))
+                     : juce::String());
+}
+
+void Sp3ctraAudioProcessor::refreshMidiTapDisplayNames()
+{
+    for (const auto& [slot, chain] : activeMidiTapSlotChains())
+    {
+        juce::ignoreUnused(chain);
+        // The CREATING getter, deliberately: a freshly patched probe must get
+        // its sink — and therefore its virtual port — the moment its tile
+        // appears, not at the next REC or destination change (a probe added
+        // mid-session used to stay silent until then).
+        if (auto* s = midiTapSink(slot))
+            s->setDisplayName(midiTapLabel(slot));
+    }
 }
 
 //==============================================================================
@@ -7638,6 +7947,7 @@ Sp3ctraAudioProcessor::loadChainPreset(const juce::ValueTree& preset,
                 juce::ValueTree mem(ChainModel::kValuesTag);
                 mem.copyPropertiesFrom(mt, nullptr);
                 mem.removeProperty(ChainModel::kTypeProp, nullptr);
+                ChainModel::migrateModuleValues(type, mem);
                 ch.typeMemory[type] = std::move(mem);
             }
             continue;
@@ -7664,7 +7974,10 @@ Sp3ctraAudioProcessor::loadChainPreset(const juce::ValueTree& preset,
         ModuleInstance& mi = ch.modules[(size_t) at];
         const auto values = mt.getChildWithName(ChainModel::kValuesTag);
         if (values.isValid())
+        {
             mi.values = values.createCopy();
+            ChainModel::migrateModuleValues(type, mi.values);
+        }
 
         // J5 pre-seed: reuse the old composition's slot for this type.
         const auto it = oldSlot.find(type);
@@ -7677,12 +7990,114 @@ Sp3ctraAudioProcessor::loadChainPreset(const juce::ValueTree& preset,
             oldSlot.erase(it);
         }
     }
+
+    // Chain-owned background (schema 4). Older presets: derive it from the
+    // first member VALUES/MEMORY that carried the per-module knob; when
+    // nothing carried one, the target chain keeps its current pole.
+    if (ct.hasProperty(ChainModel::kBackgroundProp))
+    {
+        ch.backgroundMode = juce::jlimit(0, 2,
+            (int) ct.getProperty(ChainModel::kBackgroundProp));
+    }
+    else
+    {
+        int migrated = -1;
+        for (const auto& m : ch.modules)
+            if ((migrated = ChainModel::legacyBackgroundOf(m.type, m.values)) >= 0)
+                break;
+        if (migrated < 0)
+            for (const auto& [type, mem] : ch.typeMemory)
+                if ((migrated = ChainModel::legacyBackgroundOf(type, mem)) >= 0)
+                    break;
+        if (migrated >= 0)
+            ch.backgroundMode = migrated;
+    }
+
     chainModel_.validateAndRepair();
 
     onChainModelEdited();          // bindings + reset/inherit + bridge + plan
     projectChainValuesToBanks();   // preset VALUES → the fresh banks
     res.chainIdx = target;
     return res;
+}
+
+void Sp3ctraAudioProcessor::applyChainBackgrounds()
+{
+    // The pole is chain-owned (schema 4): THE writer of every member module's
+    // config.background_mode. The per-type sync blocks in
+    // applyConfigurationToCore round-trip the instance's current value, so
+    // this projection survives their whole-struct config rebuilds. Message
+    // thread; unplaced pool instances keep their C-side default (disabled).
+    for (const auto& ch : chainModel_.chains)
+    {
+        const int bg = ch.backgroundMode;
+        for (const auto& m : ch.modules)
+        {
+            switch (m.type)
+            {
+                case ModuleType::Pitch:
+                    lux_pitch_instance(poolSlotForInstance(m.id))
+                        ->config.background_mode = bg;
+                    break;
+                case ModuleType::Mask:
+                    lux_mask_instance(poolSlotForInstance(m.id))
+                        ->config.background_mode = bg;
+                    break;
+                case ModuleType::Reverb:
+                    lux_reverb_instance(poolSlotForInstance(m.id))
+                        ->config.background_mode = bg;
+                    break;
+                case ModuleType::Echo:
+                    lux_echo_instance(poolSlotForInstance(m.id))
+                        ->config.background_mode = bg;
+                    break;
+                case ModuleType::Equalizer:
+                    lux_eq_instance(poolSlotForInstance(m.id))
+                        ->config.background_mode = bg;
+                    break;
+                case ModuleType::Harmonize:
+                    lux_harmo_instance(poolSlotForInstance(m.id))
+                        ->config.background_mode = bg;
+                    break;
+                case ModuleType::Centroid:
+                    lux_centro_instance(poolSlotForInstance(m.id))
+                        ->config.background_mode = bg;
+                    break;
+                case ModuleType::Drive:
+                    lux_drive_instance(poolSlotForInstance(m.id))
+                        ->config.background_mode = bg;
+                    break;
+                case ModuleType::DcBlock:
+                    lux_dcblock_instance(poolSlotForInstance(m.id))
+                        ->config.background_mode = bg;
+                    break;
+                case ModuleType::Gain:
+                    lux_gain_instance(poolSlotForInstance(m.id))
+                        ->config.background_mode = bg;
+                    break;
+                case ModuleType::MidiTap:
+                    if (m.slot >= 0 && m.slot < CHAIN_MAX_CHAINS)
+                        midi_tap_instance(m.slot)->config.background_mode = bg;
+                    break;
+                default:
+                    break;   // sources, sends, probes: no background semantics
+            }
+        }
+    }
+}
+
+void Sp3ctraAudioProcessor::setChainBackground(int chainIdx, int mode)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    if (chainIdx < 0 || chainIdx >= chainModel_.numChains())
+        return;
+    mode = juce::jlimit(0, 2, mode);
+    auto& ch = chainModel_.chains[(size_t) chainIdx];
+    if (ch.backgroundMode == mode)
+        return;
+    ch.backgroundMode = mode;
+    applyChainBackgrounds();
+    persistChainModel();   // CHAINS → apvts.state + session dirty
 }
 
 int Sp3ctraAudioProcessor::duplicateChain(int chainIdx)
@@ -7973,7 +8388,9 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
                 LuxPitchConfig c;
                 c.enabled                  = static_cast<int>(raw("Enabled"));
                 c.polyphony_enabled        = static_cast<int>(raw("Polyphony"));
-                c.background_mode          = static_cast<int>(raw("BackgroundMode"));
+                // background is chain-owned — round-trip the instance's value
+                // (applyChainBackgrounds is THE writer).
+                c.background_mode          = lux_pitch_instance(i)->config.background_mode;
                 c.coupling_mode            = static_cast<int>(raw("CouplingMode"));
                 c.free_pixels_per_semitone = raw("FreePixelsPerST");
                 c.pitch_bend_range         = raw("PitchBendRange");
@@ -8005,7 +8422,8 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
                 LuxMaskConfig c;
                 c.enabled                  = static_cast<int>(raw("Enabled"));
                 c.polyphony_enabled        = static_cast<int>(raw("Polyphony"));
-                c.background_mode          = static_cast<int>(raw("BackgroundMode"));
+                // background is chain-owned — round-trip the instance's value.
+                c.background_mode          = lux_mask_instance(i)->config.background_mode;
                 c.coupling_mode            = static_cast<int>(raw("CouplingMode"));
                 c.free_pixels_per_semitone = raw("FreePixelsPerST");
                 c.pitch_bend_range         = raw("PitchBendRange");
@@ -8031,21 +8449,16 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
 
         // ── Sync LuxReverb configs — one APVTS bank per pool instance ──
         {
-            // Choice order is {Auto, Black, White} — map onto the C-side modes.
-            static const int kRvBgChoiceToMode[3] =
-                { LUX_REVERB_BG_AUTO, LUX_REVERB_BG_BLACK, LUX_REVERB_BG_WHITE };
             const uint32_t rmask = chainReverbMask_.load(std::memory_order_relaxed);
             for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
             {
                 auto raw = [&, i](const char* sfx)
                 { return apvts.getRawParameterValue(rvParam(i, sfx))->load(); };
 
-                int bgChoice = static_cast<int>(raw("BackgroundMode"));
-                if (bgChoice < 0 || bgChoice > 2) bgChoice = 0;
-
                 LuxReverbConfig c  = lux_reverb_config_default();
                 c.enabled          = static_cast<int>(raw("Enabled"));
-                c.background_mode  = kRvBgChoiceToMode[bgChoice];
+                // background is chain-owned — round-trip the instance's value.
+                c.background_mode  = lux_reverb_instance(i)->config.background_mode;
                 c.decay_s          = raw("Decay");
                 c.diffusion        = raw("Diffusion") / 100.0f;
                 c.mix              = raw("Mix") / 100.0f;
@@ -8056,21 +8469,16 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
 
         // ── Sync LuxEcho configs — one APVTS bank per pool instance ──
         {
-            // Choice order is {Auto, Black, White} — map onto the C-side modes.
-            static const int kEcBgChoiceToMode[3] =
-                { LUX_ECHO_BG_AUTO, LUX_ECHO_BG_BLACK, LUX_ECHO_BG_WHITE };
             const uint32_t emask = chainEchoMask_.load(std::memory_order_relaxed);
             for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
             {
                 auto raw = [&, i](const char* sfx)
                 { return apvts.getRawParameterValue(ecParam(i, sfx))->load(); };
 
-                int bgChoice = static_cast<int>(raw("BackgroundMode"));
-                if (bgChoice < 0 || bgChoice > 2) bgChoice = 0;
-
                 LuxEchoConfig c   = lux_echo_config_default();
                 c.enabled         = static_cast<int>(raw("Enabled"));
-                c.background_mode = kEcBgChoiceToMode[bgChoice];
+                // background is chain-owned — round-trip the instance's value.
+                c.background_mode = lux_echo_instance(i)->config.background_mode;
                 c.delay_lines     = static_cast<int>(raw("Delay"));
                 c.feedback        = raw("Feedback") / 100.0f;
                 c.mix             = raw("Mix") / 100.0f;
@@ -8081,26 +8489,26 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
 
         // ── Sync LuxEq configs — one APVTS bank per pool instance ──
         {
-            // Choice order is {Auto, Black, White} — map onto the C-side modes.
-            static const int kEqBgChoiceToMode[3] =
-                { LUX_EQ_BG_AUTO, LUX_EQ_BG_BLACK, LUX_EQ_BG_WHITE };
             const uint32_t qmask = chainEqMask_.load(std::memory_order_relaxed);
             for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
             {
                 auto raw = [&, i](const char* sfx)
                 { return apvts.getRawParameterValue(eqParam(i, sfx))->load(); };
 
-                int bgChoice = static_cast<int>(raw("BackgroundMode"));
-                if (bgChoice < 0 || bgChoice > 2) bgChoice = 0;
-
                 LuxEqConfig c     = lux_eq_config_default();
                 c.enabled         = static_cast<int>(raw("Enabled"));
-                c.background_mode = kEqBgChoiceToMode[bgChoice];
-                c.num_bands       = juce::jlimit(2, LUX_EQ_NUM_BANDS,
-                                                 2 + (int) raw("NumPoints"));
-                for (int b = 0; b < LUX_EQ_NUM_BANDS; ++b)
-                    c.band_gain_db[b] =
-                        raw(("Band" + juce::String(b)).toRawUTF8());
+                // background is chain-owned — round-trip the instance's value.
+                c.background_mode = lux_eq_instance(i)->config.background_mode;
+                c.level_db        = raw("Level");
+                for (int h = 0; h < SHAPE_EQ_MAX_HANDLES; ++h)
+                {
+                    const juce::String sh = "Sh" + juce::String(h);
+                    c.handles[h].type    = juce::jlimit(0, SHAPE_EQ_NUM_TYPES - 1,
+                                             (int) raw((sh + "Type").toRawUTF8()));
+                    c.handles[h].freq01  = raw((sh + "Freq").toRawUTF8());
+                    c.handles[h].gain_db = raw((sh + "Gain").toRawUTF8());
+                    c.handles[h].width01 = raw((sh + "Width").toRawUTF8());
+                }
                 if (((qmask >> i) & 1u) == 0) c.enabled = 0;
                 lux_eq_instance(i)->config = c;
             }
@@ -8108,17 +8516,11 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
 
         // ── Sync LuxHarmo (SCALE) configs — one APVTS bank per pool instance ──
         {
-            // Choice order is {Auto, Black, White} — map onto the C-side modes.
-            static const int kHmBgChoiceToMode[3] =
-                { LUX_HARMO_BG_AUTO, LUX_HARMO_BG_BLACK, LUX_HARMO_BG_WHITE };
             const uint32_t hmask = chainHarmoMask_.load(std::memory_order_relaxed);
             for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
             {
                 auto raw = [&, i](const char* sfx)
                 { return apvts.getRawParameterValue(hmParam(i, sfx))->load(); };
-
-                int bgChoice = static_cast<int>(raw("BackgroundMode"));
-                if (bgChoice < 0 || bgChoice > 2) bgChoice = 0;
 
                 LuxHarmoConfig c  = lux_harmo_config_default();
                 c.enabled         = static_cast<int>(raw("Enabled"));
@@ -8129,7 +8531,8 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
                 c.width_st        = raw("Width");
                 c.slope           = raw("Slope");
                 c.glide_lines     = static_cast<int>(raw("Glide"));
-                c.background_mode = kHmBgChoiceToMode[bgChoice];
+                // background is chain-owned — round-trip the instance's value.
+                c.background_mode = lux_harmo_instance(i)->config.background_mode;
                 // Anchor the degree grid on the instrument's PHYSICAL axis so
                 // the allowed rows line up with its true pitch classes.
                 c.axis_low_hz     = g_sp3ctra_config.low_frequency;
@@ -8140,29 +8543,32 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
 
         // ── Sync LuxCentro (CENTROID) configs — one APVTS bank per pool instance ──
         {
-            // Choice order is {Auto, Black, White} — map onto the C-side modes.
-            static const int kCtBgChoiceToMode[3] =
-                { LUX_CENTRO_BG_AUTO, LUX_CENTRO_BG_BLACK, LUX_CENTRO_BG_WHITE };
             const uint32_t cmask = chainCentroMask_.load(std::memory_order_relaxed);
             for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
             {
                 auto raw = [&, i](const char* sfx)
                 { return apvts.getRawParameterValue(ctParam(i, sfx))->load(); };
 
-                int bgChoice = static_cast<int>(raw("BackgroundMode"));
-                if (bgChoice < 0 || bgChoice > 2) bgChoice = 0;
-
                 LuxCentroConfig c = lux_centro_config_default();
                 c.enabled         = static_cast<int>(raw("Enabled"));
                 c.floor_level     = raw("Floor") / 100.0f;
                 c.thickness_px    = raw("Thickness");
                 c.edge_soft       = raw("Edge");
-                c.background_mode = kCtBgChoiceToMode[bgChoice];
-                c.eq_num_bands    = juce::jlimit(2, LUX_EQ_NUM_BANDS,
-                                                 2 + (int) raw("NumPoints"));
-                for (int b = 0; b < LUX_EQ_NUM_BANDS; ++b)
-                    c.eq_band_gain_db[b] =
-                        raw(("Band" + juce::String(b)).toRawUTF8());
+                c.width_tilt_oct  = raw("WidthTilt");
+                c.width_law       = static_cast<int>(raw("WidthLaw"));
+                c.axis_low_hz     = g_sp3ctra_config.low_frequency;
+                // background is chain-owned — round-trip the instance's value.
+                c.background_mode = lux_centro_instance(i)->config.background_mode;
+                c.eq_level_db     = raw("Level");
+                for (int h = 0; h < SHAPE_EQ_MAX_HANDLES; ++h)
+                {
+                    const juce::String sh = "Sh" + juce::String(h);
+                    c.eq_handles[h].type    = juce::jlimit(0, SHAPE_EQ_NUM_TYPES - 1,
+                                                (int) raw((sh + "Type").toRawUTF8()));
+                    c.eq_handles[h].freq01  = raw((sh + "Freq").toRawUTF8());
+                    c.eq_handles[h].gain_db = raw((sh + "Gain").toRawUTF8());
+                    c.eq_handles[h].width01 = raw((sh + "Width").toRawUTF8());
+                }
                 if (((cmask >> i) & 1u) == 0) c.enabled = 0;
                 lux_centro_instance(i)->config = c;
             }
@@ -8170,17 +8576,11 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
 
         // ── Sync LuxDrive (LEVELS) configs — one APVTS bank per pool instance ─
         {
-            // Choice order is {Auto, Black, White} — map onto the C-side modes.
-            static const int kDvBgChoiceToMode[3] =
-                { LUX_DRIVE_BG_AUTO, LUX_DRIVE_BG_BLACK, LUX_DRIVE_BG_WHITE };
             const uint32_t dmask = chainDriveMask_.load(std::memory_order_relaxed);
             for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
             {
                 auto raw = [&, i](const char* sfx)
                 { return apvts.getRawParameterValue(dvParam(i, sfx))->load(); };
-
-                int bgChoice = static_cast<int>(raw("BackgroundMode"));
-                if (bgChoice < 0 || bgChoice > 2) bgChoice = 0;
 
                 LuxDriveConfig c  = lux_drive_config_default();
                 c.enabled         = static_cast<int>(raw("Enabled"));
@@ -8193,12 +8593,18 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
                     g_sp3ctra_config.additive_contrast_adjustment_power;
                 c.invert_mode     = juce::jlimit(0, 2,
                                         static_cast<int>(raw("InvertMode")));
-                c.background_mode = kDvBgChoiceToMode[bgChoice];
-                c.eq_num_bands    = juce::jlimit(2, LUX_EQ_NUM_BANDS,
-                                                 2 + (int) raw("NumPoints"));
-                for (int b = 0; b < LUX_EQ_NUM_BANDS; ++b)
-                    c.eq_band_gain_db[b] =
-                        raw(("Band" + juce::String(b)).toRawUTF8());
+                // background is chain-owned — round-trip the instance's value.
+                c.background_mode = lux_drive_instance(i)->config.background_mode;
+                c.eq_level_db     = raw("Level");
+                for (int h = 0; h < SHAPE_EQ_MAX_HANDLES; ++h)
+                {
+                    const juce::String sh = "Sh" + juce::String(h);
+                    c.eq_handles[h].type    = juce::jlimit(0, SHAPE_EQ_NUM_TYPES - 1,
+                                                (int) raw((sh + "Type").toRawUTF8()));
+                    c.eq_handles[h].freq01  = raw((sh + "Freq").toRawUTF8());
+                    c.eq_handles[h].gain_db = raw((sh + "Gain").toRawUTF8());
+                    c.eq_handles[h].width01 = raw((sh + "Width").toRawUTF8());
+                }
                 if (((dmask >> i) & 1u) == 0) c.enabled = 0;
                 lux_drive_instance(i)->config = c;
             }
@@ -8206,30 +8612,42 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
 
         // ── Sync LuxDcBlock (DC BLOCK) configs — one APVTS bank per pool instance ─
         {
-            // Choice order is {Auto, Black, White} — map onto the C-side modes.
-            static const int kDcbBgChoiceToMode[3] =
-                { LUX_DCBLOCK_BG_AUTO, LUX_DCBLOCK_BG_BLACK, LUX_DCBLOCK_BG_WHITE };
             const uint32_t bmask = chainDcBlockMask_.load(std::memory_order_relaxed);
             for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
             {
                 auto raw = [&, i](const char* sfx)
                 { return apvts.getRawParameterValue(dcbParam(i, sfx))->load(); };
 
-                int bgChoice = static_cast<int>(raw("BackgroundMode"));
-                if (bgChoice < 0 || bgChoice > 2) bgChoice = 0;
-
                 LuxDcBlockConfig c = lux_dcblock_config_default();
                 c.enabled          = static_cast<int>(raw("Enabled"));
                 c.amount           = raw("Amount") / 100.0f;
-                c.background_mode  = kDcbBgChoiceToMode[bgChoice];
+                // background is chain-owned — round-trip the instance's value.
+                c.background_mode  = lux_dcblock_instance(i)->config.background_mode;
                 if (((bmask >> i) & 1u) == 0) c.enabled = 0;
                 lux_dcblock_instance(i)->config = c;
             }
         }
 
+        // ── Sync LuxGain (GAIN) configs — one APVTS bank per pool instance ────
+        {
+            const uint32_t gmask = chainGainMask_.load(std::memory_order_relaxed);
+            for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
+            {
+                auto raw = [&, i](const char* sfx)
+                { return apvts.getRawParameterValue(gnParam(i, sfx))->load(); };
+
+                LuxGainConfig c    = lux_gain_config_default();
+                c.enabled          = static_cast<int>(raw("Enabled"));
+                c.gain_lin         = std::pow(10.0f, raw("Gain") / 20.0f);
+                // background is chain-owned — round-trip the instance's value.
+                c.background_mode  = lux_gain_instance(i)->config.background_mode;
+                if (((gmask >> i) & 1u) == 0) c.enabled = 0;
+                lux_gain_instance(i)->config = c;
+            }
+        }
+
         // ── Sync MIDI TAP configs — one APVTS bank per pool instance ──────────
         {
-            // Choice order is {Black, White, Auto} — already the C-side order.
             const uint32_t tmask = chainMidiTapMask_.load(std::memory_order_relaxed);
             for (int i = 0; i < CHAIN_MAX_CHAINS; ++i)
             {
@@ -8238,29 +8656,54 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
 
                 MidiTapConfig c    = midi_tap_config_default();
                 c.enabled          = static_cast<int>(raw("enabled"));
-                c.mode             = static_cast<int>(raw("mode"));
-                c.source           = static_cast<int>(raw("source"));
+                // Retired knobs (their APVTS params survive for session
+                // compatibility only — no UI, values ignored):
+                //  - mode: BANDS always. FUNDAMENTAL elects one melody note,
+                //    the opposite of a faithful capture.
+                //  - source: LUMA always — same convention as LuxStral, the
+                //    brightness plays (Background picks the polarity).
+                //  - rel: 0 — the peak-relative gate is a transcription
+                //    device; a capture must not drop the quiet lines.
+                //  - transpose/note range/policy: neutral — the printed axis
+                //    IS the pitch, silently truncating it cost a debugging
+                //    afternoon (Note high 72).
+                //  - smooth: 0.5 — the per-band anti-flicker EMA, an internal
+                //    constant, not a musical choice.
+                //  - vel_curve: SOFT (sqrt) — perceptual default.
+                c.mode             = MIDI_TAP_MODE_BANDS;
+                c.source           = MIDI_TAP_SRC_LUMA;
                 c.max_poly         = static_cast<int>(raw("maxPoly"));
                 c.thresh           = raw("threshold");
                 c.hyst             = raw("hysteresis");
-                c.rel              = raw("relative");
-                c.smooth           = raw("smooth");
+                c.rel              = 0.0f;
+                c.smooth           = 0.5f;
                 c.peak_only        = static_cast<int>(raw("peakOnly"));
                 c.attack_ms        = raw("attackMs");
                 c.release_ms       = raw("releaseMs");
                 c.min_on_ms        = raw("minOnMs");
                 c.max_on_ms        = raw("maxOnMs");
-                c.transpose        = static_cast<int>(raw("transpose"));
-                c.note_lo          = static_cast<int>(raw("noteLo"));
-                c.note_hi          = static_cast<int>(raw("noteHi"));
-                c.range_policy     = static_cast<int>(raw("rangePolicy"));
-                c.background_mode  = static_cast<int>(raw("backgroundMode"));
-                c.vel_curve        = static_cast<int>(raw("velCurve"));
+                c.transpose        = 0;
+                c.note_lo          = 0;
+                c.note_hi          = 127;
+                c.range_policy     = MIDI_TAP_RANGE_CLAMP;
+                // background is chain-owned — round-trip the instance's value.
+                c.background_mode  = midi_tap_instance(i)->config.background_mode;
+                c.vel_curve        = MIDI_TAP_VEL_SOFT;
                 c.vel_span         = raw("velSpan");
-                c.vel_fixed        = static_cast<int>(raw("velFixed"));
-                c.dense            = static_cast<int>(raw("dense"));
+                // MPE streaming IMPLIES dense: the whole point of MPE is the
+                // crest-bend stream and the pressure envelope, which only the
+                // dense machine emits — MPE without dense would be plain
+                // notes on rotating channels (inaudibly different).
+                c.dense            = (raw("dense") >= 0.5f
+                                      || raw("portMpe") >= 0.5f) ? 1 : 0;
                 c.retrig_ms        = raw("retrigMs");
                 c.retrig_delta     = static_cast<int>(raw("retrigDelta"));
+                // A running take is ALWAYS a faithful (black MIDI) capture:
+                // dense stays forced for its whole duration, whatever the
+                // per-probe toggle says. The toggle only shapes the real-time
+                // port/bus outputs (startMidiCapture set this, a mid-take
+                // param sync must not undo it).
+                if (isMidiCapturing()) c.dense = 1;
                 // Anchor the band grid on the instrument's PHYSICAL axis so a
                 // printed A really lands on MIDI A (same rule as LuxHarmo).
                 c.axis_low_hz      = g_sp3ctra_config.low_frequency;
@@ -8269,13 +8712,23 @@ void Sp3ctraAudioProcessor::applyConfigurationToCore(bool needsSocketRestart)
 
                 // Publish the audio thread's view of this probe (sink C).
                 busChannel_[i] = juce::jlimit(1, 16, (int) raw("channel"));
+                busLevel_[i].store(juce::jlimit(0.0f, 1.0f, raw("level")),
+                                   std::memory_order_relaxed);
                 if (auto* s = midiTapSinks_[(size_t) i].get())
+                {
                     s->setChannel(busChannel_[i]);
+                    s->setPortMpe(raw("portMpe") >= 0.5f);
+                    s->setOutEnabled(raw("arm") >= 0.5f);
+                    s->setOutLevel(raw("level"));
+                }
             }
 
-            // Bus sink arming: enabled AND armed AND present AND the global bus
-            // toggle. Published last so the audio thread never sees a probe
-            // armed before its channel is in place.
+            // Bus sink gating: enabled AND OUT (the per-row live-output
+            // toggle, stored as the historical "arm" param) AND present AND
+            // the global bus toggle. REC is deliberately NOT gated by OUT —
+            // muting the live stream must never silence a take. Published
+            // last so the audio thread never sees a probe live before its
+            // channel is in place.
             const bool busOn = apvts.getRawParameterValue("midiBusEnable")->load() >= 0.5f;
             uint32_t busMask = 0;
             if (busOn)

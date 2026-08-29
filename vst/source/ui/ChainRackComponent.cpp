@@ -16,6 +16,7 @@ extern "C" {
     #include "processing/lux_centro.h"
     #include "processing/lux_drive.h"
     #include "processing/lux_dcblock.h"
+    #include "processing/lux_gain.h"
     #include "processing/midi_tap.h"
     #include "audio/buffers/audio_image_buffers.h"    // lines_received counter
 }
@@ -27,6 +28,9 @@ namespace
     const juce::Colour kColChain2Hdr { 0xff4ae0a0 }; // green
     const juce::Colour kColChain3Hdr { 0xffc0c4cc }; // grey
     const juce::Colour kColConnector { 0xff3a4250 };
+    const juce::Colour kColGutter    { 0xff121218 }; // rack ground between chain cards
+    const juce::Colour kColCard      { 0xff181820 }; // chain card body (the former rack bg)
+    const juce::Colour kColMarkerTxt { 0xff6b7280 }; // IN / END captions
 
     juce::Colour chainHeaderColour(int idx)
     {
@@ -55,6 +59,7 @@ ModuleType chainBlockToModuleType(ChainBlockId id) noexcept
         case ChainBlockId::Centroid: return ModuleType::Centroid;
         case ChainBlockId::Drive:    return ModuleType::Drive;
         case ChainBlockId::DcBlock:  return ModuleType::DcBlock;
+        case ChainBlockId::Gain:     return ModuleType::Gain;
         case ChainBlockId::Sampler:  return ModuleType::Sampler;
         case ChainBlockId::Score:    return ModuleType::Score;
         case ChainBlockId::Timbre:   return ModuleType::Timbre;
@@ -337,7 +342,7 @@ void ChainRackComponent::rebuild()
                 || m.type == ModuleType::Reverb || m.type == ModuleType::Echo
                 || m.type == ModuleType::Equalizer || m.type == ModuleType::Harmonize
                 || m.type == ModuleType::Centroid || m.type == ModuleType::Drive
-                || m.type == ModuleType::DcBlock)
+                || m.type == ModuleType::DcBlock || m.type == ModuleType::Gain)
                 bp->setEnableParamOverride(insertBankParam(
                     m.type, processor.poolSlotForInstance(m.id), "Enabled"));
             // Score family (SCORE/TIMBRE/MIDI SCORE/VOICE): the LED is the
@@ -346,6 +351,12 @@ void ChainRackComponent::rebuild()
             // reading (remembering the head); reactivating resumes it.
             if (isScoreFamily(m.type))
                 bp->setEnableParamOverride(scoreActiveParam(m.slot >= 0 ? m.slot : 0));
+            // SP3CTRA source: the LED is the module's PLAY/STOP switch — it
+            // drives the global transport (imageFreezeMode, 0=play/1=hold/
+            // 2=stop). toggleEnable's normalized flip maps exactly: playing
+            // (0.0 < 0.5) → stop (1.0); paused (0.5) or stopped (1.0) → play.
+            if (m.type == ModuleType::Sp3ctra)
+                bp->setEnableParamOverride("imageFreezeMode");
             bp->onClick        = [this](juce::Uuid id) { selectInstance(id, true); };
             bp->onToggleEnable = [this, bp]            { toggleEnable(bp->getEnableParam()); };
             bp->onRemove       = [this](juce::Uuid id) { removeInstance(id); };
@@ -355,12 +366,12 @@ void ChainRackComponent::rebuild()
                 ? (locked ? "Click the LED to enable/disable - drag to reorder"
                           : "Click the LED to enable/disable - drag to reorder - x to remove")
                 : (locked ? "Drag to reorder" : "Drag to reorder - x to remove"));
-            bp->setSelected(m.id == selectedId);
             addAndMakeVisible(bp);
             blocks.push_back(std::move(blk));
         }
     }
 
+    applyHighlight();
     updateLeds();
     if (getWidth() > 0)
         resized();
@@ -384,8 +395,7 @@ void ChainRackComponent::refreshAfterModelEdit(bool notifySelection)
         selectedId     = firstInstanceId();
         notifySelection = true;
     }
-    for (auto& blk : blocks)
-        blk->setSelected(blk->getUuid() == selectedId);
+    applyHighlight();
 
     if (notifySelection && onBlockSelected)
     {
@@ -478,6 +488,7 @@ ChainBlockId ChainRackComponent::instanceToBlockId(ModuleType type, int chainIdx
         case ModuleType::Centroid: return ChainBlockId::Centroid;
         case ModuleType::Drive:    return ChainBlockId::Drive;
         case ModuleType::DcBlock:  return ChainBlockId::DcBlock;
+        case ModuleType::Gain:     return ChainBlockId::Gain;
         case ModuleType::Sampler:  return ChainBlockId::Sampler;
         case ModuleType::Score:    return ChainBlockId::Score;
         case ModuleType::Timbre:   return ChainBlockId::Timbre;
@@ -510,8 +521,9 @@ juce::Uuid ChainRackComponent::firstInstanceId() const
 void ChainRackComponent::selectInstance(const juce::Uuid& id, bool notify)
 {
     selectedId = id;
-    for (auto& blk : blocks)
-        blk->setSelected(blk->getUuid() == id);
+    if (notify)                    // a click / click-equivalent = single selection
+        highlightType_.reset();    // (the editor re-applies an ALL-view group)
+    applyHighlight();
 
     if (notify && onBlockSelected)
     {
@@ -529,11 +541,37 @@ void ChainRackComponent::selectInstance(const juce::Uuid& id, bool notify)
     }
 }
 
+void ChainRackComponent::setHighlightAllOfType(std::optional<ModuleType> type)
+{
+    if (highlightType_ == type) return;
+    highlightType_ = type;
+    applyHighlight();
+}
+
+void ChainRackComponent::applyHighlight()
+{
+    for (auto& blk : blocks)
+        blk->setSelected(blk->getUuid() == selectedId
+                         || (highlightType_.has_value() && blk->getType() == *highlightType_));
+}
+
 void ChainRackComponent::selectInstanceById(const juce::Uuid& id)
 {
     int c = -1, i = -1;
     if (model.find(id, c, i) != nullptr)
         selectInstance(id, true);   // fires the same callbacks as a rack click
+}
+
+bool ChainRackComponent::selectVideoSlot(int slot)
+{
+    for (const auto& ch : model.chains)
+        for (const auto& m : ch.modules)
+            if (m.type == ModuleType::VideoScroll && m.slot == slot)
+            {
+                selectInstance(m.id, true);
+                return true;
+            }
+    return false;
 }
 
 void ChainRackComponent::setSelectedBlock(ChainBlockId id)
@@ -543,8 +581,7 @@ void ChainRackComponent::setSelectedBlock(ChainBlockId id)
     if (auto* cur = model.find(selectedId, c, i))
         if (instanceToBlockId(cur->type, c) == id)
         {
-            for (auto& blk : blocks)
-                blk->setSelected(blk->getUuid() == selectedId);
+            applyHighlight();
             return;
         }
 
@@ -765,15 +802,17 @@ void ChainRackComponent::itemDropped(const SourceDetails& d)
 //==============================================================================
 int ChainRackComponent::preferredHeight() const noexcept
 {
+    // MUST mirror resized(): per chain a header, then either the padded drop
+    // zone (empty) or IN strip + blocks + END strip, then the card gutter.
     int h = kTopPad;
     for (const auto& ch : model.chains)
     {
-        h += kHeaderH + 2;
+        h += kHeaderH;
         const int n = (int) ch.modules.size();
         if (n == 0)
-            h += kEmptyH;
+            h += kEmptyPad + kEmptyH + kEmptyPad;
         else
-            h += n * kBlockH + (n - 1) * kBlockGap;
+            h += kInH + n * kBlockH + (n - 1) * kBlockGap + kEndH;
         h += kChainGap;
     }
     h += kAddRowH + kBottomPad;
@@ -785,8 +824,8 @@ void ChainRackComponent::resized()
     slots.clear();
     bands.clear();
 
-    const int bx = kPadX;
-    const int bw = juce::jmax(40, getWidth() - 2 * kPadX);
+    const int bx = kBlockX;
+    const int bw = juce::jmax(40, getWidth() - kBlockX - kBlockR);
 
     int y  = kTopPad;
     int bi = 0;
@@ -796,16 +835,19 @@ void ChainRackComponent::resized()
         const auto& mods = model.chains[(size_t) c].modules;
 
         const int headerY = y;
-        y += kHeaderH + 2;
-        const int topY = y;
+        y += kHeaderH;
 
         if (mods.empty())
         {
-            bands.push_back({ c, headerY, topY, topY + kEmptyH, true });
-            y += kEmptyH;
+            const int topY = y + kEmptyPad;
+            bands.push_back({ c, headerY, topY, topY + kEmptyH, true,
+                              topY + kEmptyH + kEmptyPad });
+            y = topY + kEmptyH + kEmptyPad;
         }
         else
         {
+            y += kInH;                       // IN marker strip
+            const int topY = y;
             for (int i = 0; i < (int) mods.size(); ++i)
             {
                 if (bi < (int) blocks.size())
@@ -816,7 +858,9 @@ void ChainRackComponent::resized()
                 if (i + 1 < (int) mods.size())
                     y += kBlockGap;
             }
-            bands.push_back({ c, headerY, topY, y, false });
+            const int bottomY = y;
+            y += kEndH;                      // END terminator strip
+            bands.push_back({ c, headerY, topY, bottomY, false, y });
         }
 
         y += kChainGap;
@@ -826,23 +870,123 @@ void ChainRackComponent::resized()
 }
 
 //==============================================================================
+juce::Rectangle<int> ChainRackComponent::bgBadgeRect(const Band& band) const
+{
+    // Right-aligned in the header band, left of the delete × (which is only
+    // shown when >1 chain and unlocked — the badge keeps a stable position
+    // regardless, so it never jumps when the × appears).
+    constexpr int badgeH = 16;
+    return { getWidth() - kPadX - 18 - kBgBadgeW,
+             band.headerY + (kHeaderH - badgeH) / 2, kBgBadgeW, badgeH };
+}
+
+//==============================================================================
 void ChainRackComponent::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colour(0xff181820));
+    g.fillAll(kColGutter);
 
-    // ── Per-chain headers, × buttons, empty drop zones ───────────────────────
+    const int w  = getWidth();
+    const int bw = juce::jmax(40, w - kBlockX - kBlockR);   // block column width
+
+    // ── One CARD per chain: envelope, header, rail, badge, ×, IN / END ──────
     for (const auto& band : bands)
     {
-        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
-        g.setColour(chainHeaderColour(band.chainIdx));
-        g.drawText("CHAIN " + juce::String(band.chainIdx + 1),
-                   kPadX + 2, band.headerY, getWidth() - 2 * kPadX, kHeaderH,
-                   juce::Justification::centredLeft, true);
+        const auto      chainCol = chainHeaderColour(band.chainIdx);
+        constexpr float kR       = 6.f;
+        const juce::Rectangle<float> env((float) kEnvX, (float) band.headerY,
+                                         (float) (w - 2 * kEnvX),
+                                         (float) (band.envBottomY - band.headerY));
+
+        // Envelope body (+ a faint chain tint), header strip on the top
+        // corners, 1 px rule under it, chain-colour rail, border.
+        g.setColour(kColCard);
+        g.fillRoundedRectangle(env, kR);
+        g.setColour(chainCol.withAlpha(0.05f));
+        g.fillRoundedRectangle(env, kR);
+        {
+            juce::Path hdr;
+            hdr.addRoundedRectangle(env.getX(), env.getY(), env.getWidth(),
+                                    (float) kHeaderH, kR, kR,
+                                    true, true, false, false);
+            g.setColour(chainCol.withAlpha(0.14f));
+            g.fillPath(hdr);
+        }
+        g.setColour(chainCol.withAlpha(0.30f));
+        g.fillRect(env.getX(), env.getY() + (float) kHeaderH - 1.f,
+                   env.getWidth(), 1.f);
+        g.setColour(chainCol.withAlpha(0.70f));   // rail stops short of the rounded corners
+        g.fillRect(env.getX() + 1.f, env.getY() + (float) kHeaderH,
+                   (float) kRailW, env.getHeight() - (float) kHeaderH - kR);
+        g.setColour(chainCol.withAlpha(0.40f));
+        g.drawRoundedRectangle(env, kR, 1.f);
+
+        // Header: numbered pastille + "CHAIN" — the NUMBER carries the
+        // identity (the header colour cycles every 3 chains).
+        {
+            const float d = 16.f;
+            const juce::Rectangle<float> dot((float) kPadX + 2.f,
+                                             (float) band.headerY
+                                                 + ((float) kHeaderH - d) * 0.5f,
+                                             d, d);
+            g.setColour(chainCol);
+            g.fillEllipse(dot);
+            g.setColour(kColGutter);
+            g.setFont(juce::Font(juce::FontOptions(11.0f)).boldened());
+            g.drawText(juce::String(band.chainIdx + 1), dot.toNearestInt(),
+                       juce::Justification::centred, false);
+
+            const int labelX = (int) dot.getRight() + 6;
+            g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
+            g.setColour(chainCol);
+            g.drawText("CHAIN", labelX, band.headerY,
+                       juce::jmax(10, bgBadgeRect(band).getX() - 4 - labelX), kHeaderH,
+                       juce::Justification::centredLeft, true);
+        }
+
+        // Chain background badge (schema 4 — the pole is chain-owned):
+        // swatch = the background pole, label = the mode.
+        {
+            const int  bg = processor.chainBackground(band.chainIdx);
+            const auto r  = bgBadgeRect(band).toFloat();
+            g.setColour(juce::Colour(0xff20242e));
+            g.fillRoundedRectangle(r, 3.f);
+            g.setColour(juce::Colour(0xff3a4250));
+            g.drawRoundedRectangle(r, 3.f, 1.f);
+
+            juce::Rectangle<float> sw(r.getX() + 4.f, r.getCentreY() - 4.f,
+                                      8.f, 8.f);
+            if (bg == kChainBgAuto)
+            {   // half white / half black — "detected from the stream"
+                g.setColour(juce::Colours::white);
+                g.fillRect(sw.removeFromLeft(4.f));
+                g.setColour(juce::Colours::black);
+                g.fillRect(sw);
+                sw = { r.getX() + 4.f, r.getCentreY() - 4.f, 8.f, 8.f };
+            }
+            else
+            {
+                g.setColour(bg == kChainBgWhite ? juce::Colours::white
+                                                : juce::Colours::black);
+                g.fillRect(sw);
+            }
+            g.setColour(juce::Colour(0xff6b7280));
+            g.drawRect(sw, 1.f);
+
+            g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
+            g.setColour(juce::Colour(0xff9aa4b4));
+            g.drawText(bg == kChainBgAuto  ? "AUTO"
+                     : bg == kChainBgBlack ? "BLACK" : "WHITE",
+                       (int) r.getX() + 14, (int) r.getY(),
+                       (int) r.getWidth() - 16, (int) r.getHeight(),
+                       juce::Justification::centredLeft, false);
+        }
 
         if (model.numChains() > 1 && ! locked)   // remove-chain × (hidden when locked)
         {
-            const juce::Rectangle<float> x((float) (getWidth() - kPadX - 14),
-                                           (float) band.headerY + 2.f, 12.f, 12.f);
+            const juce::Rectangle<float> x((float) (w - kPadX - 14),
+                                           (float) band.headerY
+                                               + ((float) kHeaderH - 12.f) * 0.5f,
+                                           12.f, 12.f);
             g.setColour(juce::Colour(0xff6b7280));
             const float pad = 2.5f;
             g.drawLine(x.getX() + pad, x.getY() + pad, x.getRight() - pad, x.getBottom() - pad, 1.3f);
@@ -851,8 +995,8 @@ void ChainRackComponent::paint(juce::Graphics& g)
 
         if (band.empty)
         {
-            juce::Rectangle<float> z((float) kPadX, (float) band.topY,
-                                     (float) juce::jmax(40, getWidth() - 2 * kPadX),
+            juce::Rectangle<float> z((float) kBlockX, (float) band.topY,
+                                     (float) bw,
                                      (float) (band.bottomY - band.topY));
             z = z.reduced(2.f);
             const bool hot = dragActive && ! dropTarget.newChain
@@ -864,6 +1008,50 @@ void ChainRackComponent::paint(juce::Graphics& g)
             g.setColour(juce::Colour(0xff5a6270));
             g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
             g.drawText("drop module", z.toNearestInt(), juce::Justification::centred, false);
+            continue;
+        }
+
+        // IN / END markers around the block column — where the flux enters
+        // the chain and where it stops.
+        const Slot* first = nullptr;
+        const Slot* last  = nullptr;
+        for (const auto& s : slots)
+            if (s.chainIdx == band.chainIdx)
+            {
+                if (first == nullptr) first = &s;
+                last = &s;
+            }
+        if (first == nullptr)
+            continue;
+
+        const float scx = (float) first->bounds.getCentreX();
+        g.setFont(juce::FontOptions(10.0f));
+
+        {   // IN — entry port: hollow ring, then a connector into the first block
+            const int   stripY = band.headerY + kHeaderH;
+            const float ringY  = (float) stripY + 4.5f;
+            const float tipY   = (float) first->bounds.getY() + 2.f;
+            g.setColour(chainCol.withAlpha(0.80f));
+            g.drawEllipse(scx - 3.f, ringY - 3.f, 6.f, 6.f, 1.4f);
+            g.drawLine(scx, ringY + 3.f, scx, tipY, 1.4f);
+            juce::Path a;
+            a.addTriangle(scx - 3.5f, tipY - 4.f, scx + 3.5f, tipY - 4.f, scx, tipY);
+            g.fillPath(a);
+            g.setColour(kColMarkerTxt);
+            g.drawText("IN", kBlockX + 2, stripY, 40, kInH,
+                       juce::Justification::centredLeft, false);
+        }
+
+        {   // END — terminator under the last block: stub + two shrinking bars
+            const float y0 = (float) last->bounds.getBottom() - 2.f;
+            const float e  = (float) band.bottomY;
+            g.setColour(chainCol.withAlpha(0.80f));
+            g.drawLine(scx, y0, scx, e + 6.f, 1.4f);
+            g.fillRect(scx - 8.f,  e + 6.f,  16.f, 1.6f);
+            g.fillRect(scx - 4.5f, e + 9.5f,  9.f, 1.6f);
+            g.setColour(kColMarkerTxt);
+            g.drawText("END", kBlockX + 2, band.bottomY, 40, kEndH,
+                       juce::Justification::centredLeft, false);
         }
     }
 
@@ -883,6 +1071,28 @@ void ChainRackComponent::paint(juce::Graphics& g)
         juce::Path arrow;
         arrow.addTriangle(cx - 3.5f, y1 - 4.f, cx + 3.5f, y1 - 4.f, cx, y1);
         g.fillPath(arrow);
+    }
+
+    // ── Exit arrows: a SEND's flux leaves the chain toward its engine ───────
+    // (→ LUXSTRAL / → LUXSYNTH / → LUXWAVE / → LUXGRAIN). Probes (VIDEO SCROLL,
+    // MIDI TAP) are pass-through and get none. Drawn after the cards so the
+    // arrow pierces the envelope border.
+    for (const auto& s : slots)
+    {
+        const auto& mods = model.chains[(size_t) s.chainIdx].modules;
+        if (s.moduleIdx < 0 || s.moduleIdx >= (int) mods.size())
+            continue;
+        const ModuleType t = mods[(size_t) s.moduleIdx].type;
+        if (! ChainModel::isEngineSend(t))
+            continue;
+        const float x0 = (float) s.bounds.getRight() - 2.f;
+        const float x1 = (float) w - 2.f;
+        const float cy = (float) s.bounds.getCentreY();
+        g.setColour(moduleColour(t).withAlpha(0.85f));
+        g.drawLine(x0, cy, x1 - 4.f, cy, 1.6f);
+        juce::Path a;
+        a.addTriangle(x1 - 5.f, cy - 3.5f, x1 - 5.f, cy + 3.5f, x1, cy);
+        g.fillPath(a);
     }
 
     // ── "+ CHAIN" row (greyed out at the kMaxChains cap) ─────────────────────
@@ -906,7 +1116,7 @@ void ChainRackComponent::paint(juce::Graphics& g)
     {
         // Resolve the Y of the insertion boundary inside the target chain.
         int lineY = -1;
-        int left  = kPadX, right = getWidth() - kPadX;
+        int left  = kBlockX, right = getWidth() - kBlockR;
         std::vector<const Slot*> chainSlots;
         for (const auto& s : slots)
             if (s.chainIdx == dropTarget.chainIdx)
@@ -920,7 +1130,7 @@ void ChainRackComponent::paint(juce::Graphics& g)
         }
         else if (dropTarget.index <= 0)
         {
-            lineY = chainSlots.front()->bounds.getY() - 2;
+            lineY = chainSlots.front()->bounds.getY() - kInH / 2;   // mid IN strip
         }
         else
         {
@@ -946,6 +1156,39 @@ void ChainRackComponent::mouseUp(const juce::MouseEvent& e)
 {
     if (! e.mouseWasClicked())
         return;
+
+    // Chain background badge (left-click): pick the chain's pole. Allowed
+    // even when locked — flipping the support (paper ↔ screen) is a
+    // performance action, not a structural edit.
+    if (! e.mods.isPopupMenu())
+    {
+        for (const auto& band : bands)
+        {
+            if (! bgBadgeRect(band).contains(e.getPosition()))
+                continue;
+            const int chainIdx = band.chainIdx;
+            const int current  = processor.chainBackground(chainIdx);
+            juce::PopupMenu menu;
+            menu.addItem(1 + kChainBgAuto,  "Auto",  true, current == kChainBgAuto);
+            menu.addItem(1 + kChainBgBlack, "Black", true, current == kChainBgBlack);
+            menu.addItem(1 + kChainBgWhite, "White", true, current == kChainBgWhite);
+            const auto click = e.getScreenPosition();
+            menu.showMenuAsync(
+                juce::PopupMenu::Options()
+                    .withTargetComponent(this)
+                    .withTargetScreenArea({ click.x, click.y, 1, 1 }),
+                [safe = juce::Component::SafePointer<ChainRackComponent>(this),
+                 chainIdx](int result)
+                {
+                    if (result == 0) return;
+                    auto* self = safe.getComponent();
+                    if (self == nullptr) return;
+                    self->processor.setChainBackground(chainIdx, result - 1);
+                    self->repaint();
+                });
+            return;
+        }
+    }
 
     // J3 — chain header context menu (right-click): duplicate the chain with
     // its modules AND their settings (dropped where a module can't be
@@ -1027,7 +1270,7 @@ void ChainRackComponent::mouseUp(const juce::MouseEvent& e)
                         ? (" and its " + juce::String(nModules) + " module(s)?")
                         : juce::String("?"));
                 Sp3ctraDialog::showConfirm(
-                    this, "Delete chain", msg.toRawUTF8(), "Delete", "Cancel",
+                    this, "Delete chain", msg, "Delete", "Cancel",
                     [safe = juce::Component::SafePointer<ChainRackComponent>(this),
                      chainIdx](bool ok)
                     {
@@ -1079,7 +1322,7 @@ void ChainRackComponent::savePresetFlow(int chainIdx)
                 const juce::String msg = "Could not write\n"
                                        + file.getFullPathName();
                 Sp3ctraDialog::showWarning(this, "Chain preset",
-                                           msg.toRawUTF8());
+                                           msg);
             }
         });
 }
@@ -1095,7 +1338,7 @@ void ChainRackComponent::loadPresetFlow(int targetChainIdx)
             "Loading a preset replaces the current modules of CHAIN "
             + juce::String(targetChainIdx + 1) + ".";
         Sp3ctraDialog::showConfirm(
-            this, "Load chain preset", msg.toRawUTF8(), "Continue", "Cancel",
+            this, "Load chain preset", msg, "Continue", "Cancel",
             [safe = juce::Component::SafePointer<ChainRackComponent>(this),
              targetChainIdx](bool ok)
             {
@@ -1133,7 +1376,7 @@ void ChainRackComponent::loadPresetFlowConfirmed(int targetChainIdx)
                 const juce::String msg = file.getFileName()
                                        + " is not a valid .sp3chain preset.";
                 Sp3ctraDialog::showWarning(this, "Chain preset",
-                                           msg.toRawUTF8());
+                                           msg);
                 return;
             }
             const auto res = processor.loadChainPreset(preset, targetChainIdx);
@@ -1151,7 +1394,7 @@ void ChainRackComponent::loadPresetFlowConfirmed(int targetChainIdx)
                     "(singleton already used elsewhere, or pool exhausted):\n\n"
                     + res.skipped.joinIntoString(", ");
                 Sp3ctraDialog::showInfo(this, "Chain preset",
-                                        msg.toRawUTF8());
+                                        msg);
             }
         });
 }
@@ -1267,6 +1510,11 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(BlockComponent& blk, int
             const LuxDcBlockState* st = lux_dcblock_instance(processor.poolSlotForInstance(uid));
             return fxLed(st->config.enabled, st->active_ticks);
         }
+        case ModuleType::Gain:
+        {
+            const LuxGainState* st = lux_gain_instance(processor.poolSlotForInstance(uid));
+            return fxLed(st->config.enabled, st->active_ticks);
+        }
 
         case ModuleType::Sampler:
             // Per-engine enable (P6): each Sampler instance reads ITS OWN engine
@@ -1343,20 +1591,30 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(BlockComponent& blk, int
 
 void ChainRackComponent::updateLeds()
 {
-    // Source activity: LED active while the UDP feed advances.
+    // Source LED = the transport state first (the dot IS the play/stop
+    // switch): ○ stopped / ◐ paused (the frozen frame still feeds the chain)
+    // / ● playing with the UDP feed advancing (◐ when live but feed idle).
     {
-        LedState src = LedState::Off;
+        bool advancing = false;
         if (auto* core = processor.getSp3ctraCore(); core != nullptr && core->isInitialized())
         {
             if (auto* buffers = core->getAudioImageBuffers();
                 buffers != nullptr && buffers->initialized)
             {
                 const juce::uint64 lines = (juce::uint64) buffers->lines_received;
-                src = (lines != lastLinesSeen) ? LedState::Active : LedState::Idle;
+                advancing = (lines != lastLinesSeen);
                 lastLinesSeen = lines;
             }
         }
-        sourceLed = src;
+
+        int mode = 0;   // imageFreezeMode: 0 = play / 1 = hold / 2 = stop
+        if (auto* raw = processor.getAPVTS().getRawParameterValue("imageFreezeMode"))
+            mode = juce::roundToInt(raw->load());
+
+        sourceLed = (mode == 2) ? LedState::Off
+                  : (mode == 1) ? LedState::Idle
+                  : advancing   ? LedState::Active
+                                : LedState::Idle;
     }
 
     for (auto& blk : blocks)

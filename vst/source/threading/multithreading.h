@@ -202,6 +202,13 @@ int chain_player_execute_owned(int is_score, int engine_slot, int force_play,
 int chain_additive_player_candidate(int is_score, int engine_slot);
 int chain_pathb_player_candidate(int is_score, int engine_slot);
 
+/* 1 while THIS player owns at least one present chain's stream — hosts a
+ * marker NOT masked by a feeding source placed below it (order is the law
+ * for sources too, 2026-08-20). The players' visual-bus claims must ride on
+ * it: a playing slot whose markers all sit above a feeding source injects
+ * nowhere and leaves the display to the producers. Non-RT. */
+int chain_player_owns_any_stream(int is_score, int engine_slot);
+
 /* Player stop → staging silence: deactivate the LuxStral/LuxSynth/LuxWave
  * stagings of every chain owned by THIS player. The stagings have no
  * timeout — without this, a stopped player on a sourceless chain leaves its

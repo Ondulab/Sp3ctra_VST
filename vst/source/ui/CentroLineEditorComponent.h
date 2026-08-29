@@ -11,12 +11,14 @@
  * h = c+skirt — the half-height point stays at c whatever the softness, so
  * the drawn equivalent width IS the Thickness parameter.
  *
- *   • WIDTH handles (filled, both half-height pivots) → drag horizontally →
- *     Thickness (relative/exponential drag: equal moves are equal width
- *     RATIOS, matching the log-skewed parameter).
- *   • EDGE handle (hollow, at the skirt's right foot) → drag horizontally →
- *     Edge softness (0 = square band, 1 = smooth bump).
+ *   • WIDTH handles (filled nodes, both half-height pivots) → drag
+ *     horizontally → Thickness (relative/exponential drag: equal moves are
+ *     equal width RATIOS, matching the log-skewed parameter).
+ *   • EDGE handle (hollow ring, at the skirt's right foot) → drag
+ *     horizontally → Edge softness (0 = square band, 1 = smooth bump).
  *
+ * Chrome (frame, caption, "px" readout) = ModuleChrome; the handles =
+ * Sp3ctraHandles (lime, Idle/Hover/Drag), their labels turn lime with them.
  * The profile brightens while the bound pool instance is actually
  * simplifying a stream. Right-click a handle → MIDI Learn for its param.
  */
@@ -28,6 +30,8 @@
 #include <memory>
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
+#include "Sp3ctraHandles.h"
+#include "ModuleEditorChrome.h"
 #include "../processing/lux_centro.h"   // self-manages extern "C" linkage
 
 class CentroLineEditorComponent : public juce::Component,
@@ -69,11 +73,8 @@ public:
     //==========================================================================
     void paint(juce::Graphics& g) override
     {
-        const auto bounds = getLocalBounds().toFloat();
-        g.setColour(juce::Colour(0xff20202a));
-        g.fillRoundedRectangle(bounds.reduced(0.5f), 4.0f);
-        g.setColour(accent.withAlpha(0.25f));
-        g.drawRoundedRectangle(bounds.reduced(0.5f), 4.0f, 1.0f);
+        const auto frame = getLocalBounds().toFloat();
+        ModuleChrome::drawFrame(g, frame, accent);
 
         const Geometry geo = computeGeometry();
         if (geo.valid)
@@ -114,39 +115,39 @@ public:
                 g.strokePath(p, juce::PathStrokeType(1.4f));
             }
 
-            drawNode(g, handlePos(Handle::WidthL, geo), Handle::WidthL, /*hollow*/ false);
-            drawNode(g, handlePos(Handle::WidthR, geo), Handle::WidthR, /*hollow*/ false);
-            drawNode(g, handlePos(Handle::Edge,   geo), Handle::Edge,   /*hollow*/ true);
+            const auto stL = handleState(Handle::WidthL);
+            const auto stR = handleState(Handle::WidthR);
+            const auto stE = handleState(Handle::Edge);
+            Sp3ctraHandles::drawNode(g, handlePos(Handle::WidthL, geo), stL);
+            Sp3ctraHandles::drawNode(g, handlePos(Handle::WidthR, geo), stR);
+            Sp3ctraHandles::drawRing(g, handlePos(Handle::Edge,   geo), stE);
 
-            // Handle labels — below the plot, following their handle.
+            // Handle labels — below the plot, following their handle, lime
+            // while the handle is hot.
             g.setFont(juce::FontOptions(Sp3ctraTheme::kFontMicro));
-            auto handleLabel = [&](Handle h, const juce::String& t, bool active)
+            auto handleLabel = [&](Handle h, const juce::String& t, bool hot,
+                                   bool leftOfHandle)
             {
                 const float x = handlePos(h, geo).x;
                 const int   w = 64;
+                // Anchored on the OUTER side of its handle: the text ends at
+                // the left pivot / starts at the right foot, so even a thin
+                // line (handles a few px apart) keeps the two labels apart.
                 const int   lx = juce::jlimit((int) geo.plot.getX(),
                                               (int) geo.plot.getRight() - w,
-                                              (int) x - w / 2);
-                g.setColour(active ? juce::Colours::white.withAlpha(0.85f)
-                                   : accent.withAlpha(0.55f));
+                                              leftOfHandle ? (int) x - w + 4 : (int) x - 4);
+                g.setColour(hot ? Sp3ctraHandles::colour() : accent.withAlpha(0.55f));
                 g.drawText(t, lx, (int) geo.botY + 2, w, 9,
-                           juce::Justification::centred, false);
+                           leftOfHandle ? juce::Justification::centredRight
+                                        : juce::Justification::centredLeft, false);
             };
-            // Thickness sits under the LEFT pivot, Edge under the right foot —
-            // opposite sides of the centre, so the labels never collide.
             handleLabel(Handle::WidthL, "Thickness",
-                        handleActive(Handle::WidthL) || handleActive(Handle::WidthR));
-            handleLabel(Handle::Edge, "Edge", handleActive(Handle::Edge));
+                        Sp3ctraHandles::isHot(stL) || Sp3ctraHandles::isHot(stR), true);
+            handleLabel(Handle::Edge, "Edge", Sp3ctraHandles::isHot(stE), false);
         }
 
-        g.setColour(accent.withAlpha(0.45f));
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontMicro));
-        g.drawText("LINE SHAPE", (int) bounds.getX() + 8, (int) bounds.getY() + 2,
-                   110, 9, juce::Justification::centredLeft, false);
-        g.setColour(accent.withAlpha(0.5f));
-        g.drawText(juce::String(thk.value, 1) + " px",
-                   (int) bounds.getRight() - 78, (int) bounds.getY() + 2,
-                   70, 9, juce::Justification::centredRight, false);
+        ModuleChrome::drawCaption(g, frame, accent, "LINE SHAPE");
+        ModuleChrome::drawReadout(g, frame, accent, juce::String(thk.value, 1) + " px");
     }
 
     //==========================================================================
@@ -222,6 +223,9 @@ private:
      *  (thickness 64 → c 32) plus a full soft skirt. */
     static constexpr float kHalfSpanPx = 68.0f;
 
+    /** Strip under the plot for the handle labels ("Thickness" / "Edge"). */
+    static constexpr float kLabelStripH = 10.0f;
+
     struct Geometry
     {
         juce::Rectangle<float> plot;
@@ -235,9 +239,9 @@ private:
     {
         Geometry geo;
         if (getWidth() < 60 || getHeight() < 30) return geo;
-        geo.plot  = getLocalBounds().toFloat().reduced(8.0f, 7.0f)
-                                    .withTrimmedTop(6.0f)
-                                    .withTrimmedBottom(10.0f);   // handle-label strip
+        // The standard plot of the frame, minus the handle-label strip.
+        geo.plot  = ModuleChrome::plotOf(getLocalBounds().toFloat())
+                        .withTrimmedBottom(kLabelStripH);
         geo.cx    = geo.plot.getCentreX();
         geo.topY  = geo.plot.getY();
         geo.botY  = geo.plot.getBottom();
@@ -303,29 +307,11 @@ private:
         return best;
     }
 
-    bool handleActive(Handle h) const
-    { return h == dragging || (dragging == Handle::None && h == hovered); }
-
-    void drawNode(juce::Graphics& g, juce::Point<float> pt, Handle h, bool hollow)
+    /** Idle / Hover / Drag for a handle — Hover only while nothing drags. */
+    Sp3ctraHandles::State handleState(Handle h) const noexcept
     {
-        const bool active = handleActive(h);
-        if (hollow)
-        {
-            const float rad = active ? kBendR + 1.2f : kBendR;
-            g.setColour(active ? juce::Colours::white : accent.withAlpha(0.55f));
-            g.drawEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad, active ? 1.6f : 1.2f);
-            return;
-        }
-        const float rad = active ? kNodeR + 1.5f : kNodeR;
-        if (active)
-        {
-            g.setColour(accent.withAlpha(0.25f));
-            g.fillEllipse(pt.x - rad - 2.5f, pt.y - rad - 2.5f, 2 * (rad + 2.5f), 2 * (rad + 2.5f));
-        }
-        g.setColour(active ? accent.brighter(0.3f) : juce::Colour(0xff20202a));
-        g.fillEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad);
-        g.setColour(active ? juce::Colours::white : accent.withAlpha(0.9f));
-        g.drawEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad, 1.4f);
+        return Sp3ctraHandles::stateOf(h == dragging,
+                                       dragging == Handle::None && h == hovered);
     }
 
     //==========================================================================
@@ -352,8 +338,7 @@ private:
         bnd.attach->sendInitialUpdate();
     }
 
-    static constexpr float kNodeR = 4.5f;
-    static constexpr float kBendR = 3.2f;
+    static constexpr float kNodeR = Sp3ctraHandles::kNodeR;   // handle clamp margin
     static constexpr float kHitR  = 12.0f;
     static constexpr float kEdgeA = 0.06f;   // curve alpha the Edge handle rides at
 

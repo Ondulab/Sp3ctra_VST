@@ -1,21 +1,17 @@
 #include "EnvelopeEditorComponent.h"
+#include "Sp3ctraHandles.h"
 #include "../processing/lux_env_shape.h"
 #include <cmath>
 
 namespace
 {
-    constexpr float kNodeR   = 4.5f;   // drawn A/D/S/R node radius
-    constexpr float kBendR   = 3.2f;   // drawn bend handle radius
+    // Handles are drawn by Sp3ctraHandles (kNodeR / kRingR); only the grab
+    // radius and the graph → plot insets are local.
     constexpr float kHitR    = 11.0f;  // grab radius
-    constexpr float kPadX    = 8.0f;
-    constexpr float kLaneTop = 9.0f;   // room for readouts inside each lane
-    constexpr float kLanePad = 6.0f;
+    constexpr float kPadX    = 8.0f;   // graph → plot, sides
+    constexpr float kLaneTop = ModuleChrome::kPlotInsetTop + Sp3ctraHandles::kNodeR;   // graph → plot, top: caption strip + a node on plot.y (halo included)
+    constexpr float kLanePad = 6.0f;   // graph → plot, bottom
     constexpr float kSusFrac = 0.16f;  // fixed sustain plateau display width
-
-    constexpr int kBoxH    = 16;
-    constexpr int kLabelH  = 9;
-    constexpr int kRowGap  = 3;
-    constexpr int kBoxRowH = kBoxH + kLabelH;
 
     juce::String formatTime(float ms)
     {
@@ -160,8 +156,7 @@ void EnvelopeEditorComponent::initBox(
         Sp3ctraBarSlider& box, const juce::String& paramId,
         std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>& att)
 {
-    box.setAccent(accent);
-    addAndMakeVisible(box);
+    addAndMakeVisible(box);   // bars keep the handle colour (Sp3ctraBarSlider default)
     att = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         apvts, paramId, box);
 }
@@ -196,51 +191,47 @@ float EnvelopeEditorComponent::curveFromHalfValue(float targetS) noexcept
 //==============================================================================
 void EnvelopeEditorComponent::resized()
 {
-    auto area = getLocalBounds().reduced(6);
-    const int rows        = hasWidth ? 2 : 1;
-    const int totalBoxRows = rows * kBoxRowH + rows * kRowGap;
-    const int laneTotal   = juce::jmax(20, area.getHeight() - totalBoxRows);
-    const int alphaLaneH  = hasWidth ? juce::roundToInt(laneTotal * 0.6f) : laneTotal;
-    const int widthLaneH  = hasWidth ? (laneTotal - alphaLaneH) : 0;
+    auto area = getLocalBounds();
 
-    alphaLaneRect_ = area.removeFromTop(alphaLaneH).toFloat();
+    // Frame = the lane only; its box row (label strip + boxes) sits below it.
+    // The width lane keeps a fixed frame height, the alpha lane takes the rest
+    // (never below the 24 px graph the geometry needs).
+    const int widthBlockH = hasWidth ? ModuleChrome::kEditorGap + kWidthFrameH
+                                       + ModuleChrome::kBelowFrameH
+                                     : 0;
+    const int alphaFrameH = juce::jmax(2 * ModuleChrome::kFrameInset + 24,
+                                       area.getHeight() - ModuleChrome::kBelowFrameH - widthBlockH);
 
-    auto layoutBoxRow = [](juce::Rectangle<int> row, std::initializer_list<juce::Slider*> boxes)
-    {
-        row.removeFromTop(kLabelH);                 // label strip above
-        const int n   = (int) boxes.size();
-        const int gap = 5;
-        const int bw  = (row.getWidth() - (n - 1) * gap) / juce::jmax(1, n);
-        int i = 0;
-        for (auto* b : boxes)
-        {
-            b->setBounds(row.getX() + i * (bw + gap), row.getY(), bw, kBoxH);
-            ++i;
-        }
-    };
+    alphaFrame_ = area.removeFromTop(alphaFrameH).toFloat();
+    area.removeFromTop(ModuleChrome::kRowGap);
+    if (isAR) ModuleChrome::layoutBoxRow(area.removeFromTop(ModuleChrome::kBoxRowH), { &boxA, &boxR });
+    else      ModuleChrome::layoutBoxRow(area.removeFromTop(ModuleChrome::kBoxRowH), { &boxA, &boxD, &boxS, &boxR });
 
-    if (isAR) layoutBoxRow(area.removeFromTop(kBoxRowH), { &boxA, &boxR });
-    else      layoutBoxRow(area.removeFromTop(kBoxRowH), { &boxA, &boxD, &boxS, &boxR });
-
+    widthFrame_ = {};
     if (hasWidth)
     {
-        area.removeFromTop(kRowGap);
-        widthLaneRect_ = area.removeFromTop(widthLaneH).toFloat();
-        area.removeFromTop(kRowGap);
-        layoutBoxRow(area.removeFromTop(kBoxRowH), { &boxWAtk, &boxW, &boxWRel });
+        area.removeFromTop(ModuleChrome::kEditorGap);
+        widthFrame_ = area.removeFromTop(kWidthFrameH).toFloat();
+        area.removeFromTop(ModuleChrome::kRowGap);
+        ModuleChrome::layoutBoxRow(area.removeFromTop(ModuleChrome::kBoxRowH), { &boxWAtk, &boxW, &boxWRel });
     }
 }
 
 EnvelopeEditorComponent::Geometry EnvelopeEditorComponent::computeGeometry() const
 {
     Geometry geo;
-    if (alphaLaneRect_.getWidth() < 60.0f || alphaLaneRect_.getHeight() < 24.0f)
+    const auto alphaGraph = ModuleChrome::graphOf(alphaFrame_);
+    if (alphaGraph.getWidth() < 60.0f || alphaGraph.getHeight() < 24.0f)
         return geo;
 
-    geo.alpha = alphaLaneRect_.reduced(kPadX, 0.0f)
-                    .withTrimmedTop(kLaneTop).withTrimmedBottom(kLanePad);
-    geo.width = widthLaneRect_.reduced(kPadX, 0.0f)
-                    .withTrimmedTop(kLaneTop).withTrimmedBottom(kLanePad);
+    // Plot = the frame's graph minus the caption / peak-node clearance on top,
+    // the baseline clearance below and the side padding.
+    auto lanePlot = [](juce::Rectangle<float> graph)
+    {
+        return graph.reduced(kPadX, 0.0f).withTrimmedTop(kLaneTop).withTrimmedBottom(kLanePad);
+    };
+    geo.alpha = lanePlot(alphaGraph);
+    geo.width = lanePlot(ModuleChrome::graphOf(widthFrame_));
 
     geo.aYBase = geo.alpha.getBottom();
     geo.aYPeak = geo.alpha.getY();
@@ -510,14 +501,35 @@ void EnvelopeEditorComponent::appendShapedSegment(juce::Path& p, float x0, float
 
 void EnvelopeEditorComponent::paint(juce::Graphics& g)
 {
-    const auto bounds = getLocalBounds().toFloat();
-    g.setColour(juce::Colour(0xff20202a));
-    g.fillRoundedRectangle(bounds.reduced(0.5f), 4.0f);
-    g.setColour(accent.withAlpha(0.25f));
-    g.drawRoundedRectangle(bounds.reduced(0.5f), 4.0f, 1.0f);
+    // ── Chrome: one frame per lane (caption top-left), box labels below ──────
+    ModuleChrome::drawFrame  (g, alphaFrame_, accent);
+    ModuleChrome::drawCaption(g, alphaFrame_, accent, "ENVELOPE");
+    ModuleChrome::drawBoxLabel(g, boxA, accent, "Atck");
+    if (!isAR)
+    {
+        ModuleChrome::drawBoxLabel(g, boxD, accent, "Dcay");
+        ModuleChrome::drawBoxLabel(g, boxS, accent, "Sus");
+    }
+    ModuleChrome::drawBoxLabel(g, boxR, accent, "Rel");
+    if (hasWidth)
+    {
+        ModuleChrome::drawFrame  (g, widthFrame_, accent);
+        ModuleChrome::drawCaption(g, widthFrame_, accent, "WIDTH");
+        ModuleChrome::drawBoxLabel(g, boxWAtk, accent, "W @ Atk");
+        ModuleChrome::drawBoxLabel(g, boxW,    accent, "Width");
+        ModuleChrome::drawBoxLabel(g, boxWRel, accent, "W @ Rel");
+    }
 
     const Geometry geo = computeGeometry();
     if (!geo.valid) return;
+
+    // Handle states — Hover and Drag are distinct: while one handle is dragged
+    // no other one reads as hovered.
+    auto handleState = [this](Handle h)
+    {
+        return Sp3ctraHandles::stateOf(h == dragging,
+                                       dragging == Handle::None && h == hovered);
+    };
 
     // ── Alpha lane ───────────────────────────────────────────────────────────
     g.setColour(juce::Colour(0x14ffffff));
@@ -543,32 +555,17 @@ void EnvelopeEditorComponent::paint(juce::Graphics& g)
     g.strokePath(env, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved,
                                            juce::PathStrokeType::rounded));
 
-    // Alpha node + bend handles
+    // Alpha nodes (filled) + bend rings — Sp3ctraHandles, lime.
     for (Handle h : { Handle::Attack, Handle::Decay, Handle::Sustain, Handle::Release })
     {
         if (isAR && (h == Handle::Decay || h == Handle::Sustain)) continue;
-        const auto pt     = handlePos(h, geo);
-        const bool active = (h == dragging) || (dragging == Handle::None && h == hovered);
-        const float rad   = active ? kNodeR + 1.5f : kNodeR;
-        if (active)
-        {
-            g.setColour(accent.withAlpha(0.25f));
-            g.fillEllipse(pt.x - rad - 2.5f, pt.y - rad - 2.5f, 2 * (rad + 2.5f), 2 * (rad + 2.5f));
-        }
-        g.setColour(active ? accent.brighter(0.3f) : juce::Colour(0xff20202a));
-        g.fillEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad);
-        g.setColour(active ? juce::Colours::white : accent.withAlpha(0.9f));
-        g.drawEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad, 1.4f);
+        Sp3ctraHandles::drawNode(g, handlePos(h, geo), handleState(h));
     }
     if (hasCurve)
         for (Handle h : { Handle::BendA, Handle::BendD, Handle::BendR })
         {
             if (isAR && h == Handle::BendD) continue;
-            const auto pt     = handlePos(h, geo);
-            const bool active = (h == dragging) || (dragging == Handle::None && h == hovered);
-            const float rad   = active ? kBendR + 1.2f : kBendR;
-            g.setColour(active ? juce::Colours::white : accent.withAlpha(0.55f));
-            g.drawEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad, active ? 1.6f : 1.2f);
+            Sp3ctraHandles::drawRing(g, handlePos(h, geo), handleState(h));
         }
 
     // ── Width lane (MASK) ─────────────────────────────────────────────────────
@@ -587,24 +584,11 @@ void EnvelopeEditorComponent::paint(juce::Graphics& g)
         g.strokePath(wp, juce::PathStrokeType(1.4f, juce::PathStrokeType::mitered,
                                               juce::PathStrokeType::rounded));
 
-        g.setColour(accent.withAlpha(0.4f));
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontMicro));
-        g.drawText("WIDTH", (int) geo.width.getX(), (int) widthLaneRect_.getY() + 1,
-                   42, 9, juce::Justification::centredLeft, false);
-
         for (Handle h : { Handle::WAttack, Handle::WBase, Handle::WRelease })
-        {
-            const auto pt     = handlePos(h, geo);
-            const bool active = (h == dragging) || (dragging == Handle::None && h == hovered);
-            const float rad   = active ? kNodeR + 1.0f : kNodeR - 0.5f;
-            g.setColour(active ? accent.brighter(0.3f) : juce::Colour(0xff20202a));
-            g.fillEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad);
-            g.setColour(active ? juce::Colours::white : accent.withAlpha(0.9f));
-            g.drawEllipse(pt.x - rad, pt.y - rad, 2 * rad, 2 * rad, 1.3f);
-        }
+            Sp3ctraHandles::drawNode(g, handlePos(h, geo), handleState(h));
     }
 
-    // ── Readout near the handle while dragging ─────────────────────────────────
+    // ── Readout next to the dragged handle (lime pill, kept inside its lane) ──
     if (dragging != Handle::None)
     {
         juce::String txt;
@@ -622,30 +606,9 @@ void EnvelopeEditorComponent::paint(juce::Graphics& g)
             case Handle::WRelease:txt = juce::String(juce::roundToInt(wRel.value))  + " px"; break;
             case Handle::None: default: break;
         }
-        const auto pt = handlePos(dragging, geo);
-        const int  w  = 76;
-        const int  x  = juce::jlimit((int) bounds.getX() + 2, (int) bounds.getRight() - w - 2,
-                                     (int) pt.x - w / 2);
-        const int  y  = (pt.y - geo.alpha.getY() < 14.0f) ? (int) pt.y + 8 : (int) pt.y - 16;
-        g.setColour(juce::Colours::white.withAlpha(0.92f));
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
-        g.drawText(txt, x, y, w, 12, juce::Justification::centred, false);
-    }
-
-    // ── Box labels ─────────────────────────────────────────────────────────────
-    g.setFont(juce::FontOptions(Sp3ctraTheme::kFontMicro));
-    g.setColour(accent.withAlpha(0.6f));
-    auto label = [&g](const juce::Slider& box, const juce::String& t)
-    {
-        auto b = box.getBounds();
-        g.drawText(t, b.getX(), b.getY() - kLabelH, b.getWidth(), kLabelH,
-                   juce::Justification::centred, false);
-    };
-    label(boxA, "Atck");
-    if (!isAR) { label(boxD, "Dcay"); label(boxS, "Sus"); }
-    label(boxR, "Rel");
-    if (hasWidth)
-    {
-        label(boxWAtk, "W @ Atk"); label(boxW, "Width"); label(boxWRel, "W @ Rel");
+        const bool inWidthLane = dragging == Handle::WAttack || dragging == Handle::WBase
+                              || dragging == Handle::WRelease;
+        Sp3ctraHandles::drawReadout(g, txt, handlePos(dragging, geo),
+                                    ModuleChrome::graphOf(inWidthLane ? widthFrame_ : alphaFrame_));
     }
 }

@@ -17,6 +17,14 @@
  *      stable by construction.
  *   2. BARYCENTRE — each mass is re-printed as ONE line centred on its
  *      energy barycentre, with a user thickness and a user edge shape.
+ *      The width is a POSITION LAW, not one number: the pixel axis is
+ *      log-frequency, so a fixed pixel width is a fixed musical interval —
+ *      which sounds like slow chorus in the bass, roughness in the mids and
+ *      a noisy band in the treble. width_tilt_oct tilts the width
+ *      exponentially along the axis (×2^(tilt·(u−½))), and width_law ERB
+ *      replaces the uniform width with a constant PERCEPTUAL width (one
+ *      fixed ratio of the ear's critical band — wider in the bass, narrower
+ *      in the treble, equal to thickness_px at the axis centre).
  *      The edge profile PIVOTS at half height around the half-thickness
  *      point: edge_soft 0 = square band, 1 = smooth bump — the plateau
  *      shrinks as the skirt grows outward, so the EQUIVALENT width (the
@@ -35,8 +43,8 @@
  *   3. EQ — an optional output gain curve applied AFTER the redraw, on the
  *      composed output material: the redrawn lines change LEVEL along the
  *      pixel/frequency axis, never position. Exactly a LuxEq insert chained
- *      behind the module (same node model, same shared Catmull-Rom spline —
- *      lux_eq_curve_db), without the extra chain block. Flat curve = bypass.
+ *      behind the module (same typed-handle model, same shared evaluator —
+ *      shape_eq_db), without the extra chain block. Flat curve = bypass.
  *
  * The tracked background floor only feeds the GATE (which runs are masses);
  * the output paper is the constant pole, and the line colour is sampled
@@ -57,8 +65,8 @@
 
 #include <stdint.h>
 #include "chain_plan.h"   /* CHAIN_MAX_CHAINS — per-chain instance pool size */
-#include "lux_eq.h"       /* LUX_EQ_NUM_BANDS + lux_eq_curve_db — the output
-                           * EQ IS the LuxEq curve (single source of truth) */
+#include "shape_eq.h"     /* ShapeEqHandle + shape_eq_db — the output EQ IS
+                           * the LuxEq curve (single source of truth) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -77,6 +85,12 @@ extern "C" {
 #define LUX_CENTRO_BG_BLACK  0   /* bright material on black background */
 #define LUX_CENTRO_BG_WHITE  1   /* dark material on white background   */
 #define LUX_CENTRO_BG_AUTO   2   /* detect from the stream (default)    */
+
+/* Width law — how the redrawn width reads along the pixel/frequency axis. */
+#define LUX_CENTRO_WIDTH_PX  0   /* uniform pixels = constant musical interval */
+#define LUX_CENTRO_WIDTH_ERB 1   /* constant perceptual width (critical-band
+                                  * ratio — wider bass, narrower treble,
+                                  * = thickness_px at the axis centre) */
 
 /* UI guide profile resolution — matches the editor's view width. */
 #define LUX_CENTRO_UI_BINS   128
@@ -98,12 +112,17 @@ typedef struct {
                              * bump (skirt >= 1 px so thin lines soften too) */
     int   background_mode;  /* LUX_CENTRO_BG_* */
 
+    /* Frequency-weighted width geometry (u = pos/(px-1), 0 = bass end). */
+    float width_tilt_oct;   /* -3..+3 — width ×2^(tilt·(u−½)); 0 = uniform */
+    int   width_law;        /* LUX_CENTRO_WIDTH_* */
+    float axis_low_hz;      /* pixel-0 frequency for the ERB law (synced from
+                             * g_sp3ctra_config.low_frequency; <=0 → C2) */
+
     /* Output EQ — gain curve applied AFTER the redraw, on the composed
-     * output material (levels move, barycentre positions don't). Same node
-     * model as LuxEq: eq_num_bands active nodes spread evenly over the
-     * pixel axis, curve = the shared lux_eq_curve_db spline. */
-    int   eq_num_bands;                        /* active nodes, 2..LUX_EQ_NUM_BANDS */
-    float eq_band_gain_db[LUX_EQ_NUM_BANDS];   /* -24..+24 dB per node */
+     * output material (levels move, barycentre positions don't). Same
+     * typed-handle model as LuxEq: curve = the shared shape_eq_db. */
+    float         eq_level_db;                      /* whole-curve gain fader */
+    ShapeEqHandle eq_handles[SHAPE_EQ_MAX_HANDLES];
 } LuxCentroConfig;
 
 /* ============================================================================
@@ -146,14 +165,15 @@ typedef struct {
     /* Per-frame scratch: simplified material accumulator, one per channel. */
     float accum[3][LUX_CENTRO_MAX_PIXELS];
 
-    /* Output-EQ per-pixel LINEAR gain, rebuilt only when the bands / width
+    /* Output-EQ per-pixel LINEAR gain, rebuilt only when the handles / width
      * change (mirrors LuxEq's LUT). eq_lut_px == 0 = stale AND doubles as
      * the "output EQ currently shaping" flag (cleared whenever the curve is
      * flat) — the UI live glow reads it. */
-    float eq_lut[LUX_CENTRO_MAX_PIXELS];
-    float eq_lut_gains[LUX_EQ_NUM_BANDS];   /* band values the LUT was built from */
-    int   eq_lut_bands;                     /* node count it was built for */
-    int   eq_lut_px;                        /* pixel count it was built for */
+    float         eq_lut[LUX_CENTRO_MAX_PIXELS];
+    ShapeEqHandle eq_lut_handles[SHAPE_EQ_MAX_HANDLES]; /* handles it was built from */
+    float         eq_lut_level_db;          /* level fader it was built from */
+    float         eq_lut_span_oct;          /* octave span it was built for */
+    int           eq_lut_px;                /* pixel count it was built for */
 
     /* UI guide — live profile of the input MATERIAL energy (0..1, above the
      * tracked background floor), downsampled to LUX_CENTRO_UI_BINS bins and
@@ -164,6 +184,12 @@ typedef struct {
     float ui_in_now [LUX_CENTRO_UI_BINS];
     float ui_in_peak[LUX_CENTRO_UI_BINS];
     int   ui_in_valid;      /* a stream line was captured at least once */
+    int   ui_axis_oct;      /* resolved LuxStral octave span of the last frame
+                             * (0 until a frame ran) — the editor mirrors the
+                             * ERB width law with it */
+    int   ui_axis_px;       /* pixel count of the last frame (0 until a frame
+                             * ran) — the editor scales image-px widths into
+                             * its bin view with it */
 
     /* Preallocated output buffers. */
     uint8_t out_r[LUX_CENTRO_MAX_PIXELS];

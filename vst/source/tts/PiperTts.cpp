@@ -123,16 +123,20 @@ bool PiperTts::writeWavFile (const Result& r, const juce::File& outFile)
 
     outFile.getParentDirectory().createDirectory();
     outFile.deleteFile();
-    auto stream = outFile.createOutputStream();
+    std::unique_ptr<juce::OutputStream> stream = outFile.createOutputStream();
     if (stream == nullptr)
         return false;
 
     juce::WavAudioFormat wav;
-    std::unique_ptr<juce::AudioFormatWriter> writer (
-        wav.createWriterFor (stream.get(), (double) r.sampleRate, 1, 16, {}, 0));
+    // JUCE 9: the options-taking overload takes the stream by unique_ptr& and
+    // transfers ownership itself on success (no manual release needed).
+    auto writer = wav.createWriterFor (stream,
+                                       juce::AudioFormatWriterOptions{}
+                                           .withSampleRate ((double) r.sampleRate)
+                                           .withNumChannels (1)
+                                           .withBitsPerSample (16));
     if (writer == nullptr)
         return false;
-    stream.release();   // writer owns it now
 
     const float* chans[1] = { r.samples.data() };
     return writer->writeFromFloatArrays (chans, 1, (int) r.samples.size());

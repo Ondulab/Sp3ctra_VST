@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.22)
 
 # ---------------------------------------------------------------------------
 # Windows CRT = STATIC (/MT). CMP0091 lets CMAKE_MSVC_RUNTIME_LIBRARY drive the
@@ -43,7 +43,7 @@ include(FetchContent)
 FetchContent_Declare(
     JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-    GIT_TAG        8.0.4
+    GIT_TAG        9.0.1
 )
 FetchContent_MakeAvailable(JUCE)
 
@@ -188,6 +188,8 @@ target_sources(Sp3ctraVST
         source/ui/setup/PitchSetupPanel.h
         source/ui/setup/MaskSetupPanel.cpp
         source/ui/setup/MaskSetupPanel.h
+        source/ui/setup/CentroSetupPanel.cpp
+        source/ui/setup/CentroSetupPanel.h
         source/ui/setup/LuxStralSetupPanel.cpp
         source/ui/setup/LuxStralSetupPanel.h
         source/ui/setup/LuxSynthSetupPanel.cpp
@@ -202,8 +204,6 @@ target_sources(Sp3ctraVST
         source/ui/setup/MidiScoreSetupPanel.h
         source/ui/setup/TimbreSetupPanel.h
         source/ui/setup/VoiceSetupPanel.h
-        source/ui/setup/VideoScrollSetupPanel.cpp
-        source/ui/setup/VideoScrollSetupPanel.h
 
         # M9 — IMAGE / VIDEO / CAMERA source modules (engines + service + UI)
         # (VideoFileReader impl is platform-specific — see block below)
@@ -334,6 +334,9 @@ target_sources(Sp3ctraVST
         # Video scroll system
         source/video/VideoScrollMode.h
         source/video/VideoScrollPage.h
+        source/video/VideoScrollAllPage.h
+        source/video/VideoScrollViewportEditor.h
+        source/video/VideoScrollPreviewSource.h
         source/video/VideoScrollRenderCore.cpp
         source/video/VideoScrollRenderCore.h
         source/ui/VideoMixerComponent.cpp
@@ -459,6 +462,8 @@ target_sources(Sp3ctraVST
         source/processing/lux_drive.h
         source/processing/lux_dcblock.c
         source/processing/lux_dcblock.h
+        source/processing/lux_gain.c
+        source/processing/lux_gain.h
         source/processing/video_scroll.c
         source/processing/video_scroll.h
         source/processing/midi_tap.c
@@ -742,7 +747,7 @@ endif()
 
 # ---------------------------------------------------------------------------
 # Suppress warnings from JUCE's bundled third-party libraries.
-# In JUCE 8, format-specific code (VST3 SDK, AU) is compiled in each format
+# In JUCE 8/9, format-specific code (VST3 SDK, AU) is compiled in each format
 # target rather than a shared SharedCode target.
 # Apply the suppression flags to all plugin format targets.
 # ---------------------------------------------------------------------------

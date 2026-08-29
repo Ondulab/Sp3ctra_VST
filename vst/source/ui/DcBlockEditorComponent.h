@@ -22,6 +22,9 @@
  * (no DC in the stream → the line snaps between 0 and full), so Amount is set
  * ONLY from the numeric box in its own row below the frame (double-click =
  * 100 %).
+ *
+ * Skeleton (frame, caption, box row + label) = ModuleChrome; the box is a
+ * Sp3ctraBarSlider in the shared handle colour.
  */
 #pragma once
 
@@ -31,6 +34,7 @@
 #include <memory>
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
+#include "ModuleEditorChrome.h"
 #include "Sp3ctraBarSlider.h"
 #include "../processing/lux_dcblock.h"   // self-manages extern "C" linkage
 
@@ -40,7 +44,7 @@ class DcBlockEditorComponent : public juce::Component,
 public:
     static constexpr int kGraphH     = 150;  // the graphic frame alone
     // frame + gap + label + box row
-    static constexpr int kPreferredH = kGraphH + 6 + 10 + 18;
+    static constexpr int kPreferredH = kGraphH + ModuleChrome::kBelowFrameH;
 
     DcBlockEditorComponent(juce::AudioProcessorValueTreeState& apvtsIn,
                            juce::Colour accentColour)
@@ -80,21 +84,16 @@ public:
     {
         auto area = getLocalBounds();
         // Controls OUT of the graphic frame — box row below it.
-        auto row = area.removeFromBottom(kLabelH + kBoxH);
-        area.removeFromBottom(kRowGap);
+        auto row = area.removeFromBottom(ModuleChrome::kBoxRowH);
+        area.removeFromBottom(ModuleChrome::kRowGap);
         frameRect_ = area.toFloat();
-        graphRect_ = area.reduced(6).toFloat();
-
-        row.removeFromTop(kLabelH);
-        boxA.setBounds(row.getX(), row.getY(), row.getWidth(), kBoxH);
+        graphRect_ = ModuleChrome::graphOf(frameRect_);
+        ModuleChrome::layoutBoxRow(row, { &boxA });
     }
 
     void paint(juce::Graphics& g) override
     {
-        g.setColour(juce::Colour(0xff20202a));
-        g.fillRoundedRectangle(frameRect_.reduced(0.5f), 4.0f);
-        g.setColour(accent.withAlpha(0.25f));
-        g.drawRoundedRectangle(frameRect_.reduced(0.5f), 4.0f, 1.0f);
+        ModuleChrome::drawFrame(g, frameRect_, accent);
 
         const Geometry geo = computeGeometry();
         if (geo.valid)
@@ -182,18 +181,8 @@ public:
             }
         }
 
-        g.setColour(accent.withAlpha(0.45f));
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontMicro));
-        g.drawText("IN - OUT", (int) frameRect_.getX() + 8,
-                   (int) frameRect_.getY() + 2,
-                   110, 9, juce::Justification::centredLeft, false);
-
-        g.setColour(accent.withAlpha(0.6f));
-        {
-            auto bb = boxA.getBounds();
-            g.drawText("Amount", bb.getX(), bb.getY() - kLabelH, bb.getWidth(),
-                       kLabelH, juce::Justification::centred, false);
-        }
+        ModuleChrome::drawCaption(g, frameRect_, accent, "IN - OUT");
+        ModuleChrome::drawBoxLabel(g, boxA, accent, "Amount");
     }
 
 private:
@@ -265,7 +254,7 @@ private:
         Geometry geo;
         if (graphRect_.getWidth() < 30.0f || graphRect_.getHeight() < 16.0f) return geo;
         const LuxDcBlockState& dst = *lux_dcblock_instance(slot_);
-        geo.plot = graphRect_.reduced(8.0f, 7.0f);
+        geo.plot = ModuleChrome::plotOf(frameRect_);
         geo.topY = geo.plot.getY();
         geo.botY = geo.plot.getBottom();
         geo.dcN  = dst.ui_in_valid ? juce::jlimit(0.0f, 1.0f, dst.ui_dc)
@@ -310,15 +299,10 @@ private:
                  std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>& att,
                  double resetValue)
     {
-        box.setAccent(accent);
         box.setDoubleClickReturnValue(true, resetValue);
         addAndMakeVisible(box);
         att = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(apvts, id, box);
     }
-
-    static constexpr int   kBoxH   = 18;
-    static constexpr int   kLabelH = 10;
-    static constexpr int   kRowGap = 6;
 
     juce::AudioProcessorValueTreeState& apvts;
     juce::Colour accent;
@@ -331,7 +315,7 @@ private:
     std::unique_ptr<MidiLearnAttachment> learnA_;
 
     juce::Rectangle<float> frameRect_;   // the graphic window (frame only)
-    juce::Rectangle<float> graphRect_;   // plot area inside the frame
+    juce::Rectangle<float> graphRect_;   // graph area inside the frame (ModuleChrome::graphOf)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DcBlockEditorComponent)
 };

@@ -177,8 +177,9 @@ void midi_tap_init(MidiTapState *state)
 /* ==========================================================================
  * Ring — single producer, N independent consumers (broadcast window)
  * ========================================================================== */
-static inline void midi_tap_push(MidiTapState *state, uint64_t t_us,
-                                 uint8_t status, uint8_t note, uint8_t vel)
+static inline void midi_tap_push_ex(MidiTapState *state, uint64_t t_us,
+                                    uint8_t status, uint8_t note, uint8_t vel,
+                                    uint8_t flags)
 {
     const uint32_t w = atomic_load_explicit(&state->write_index, memory_order_relaxed);
     MidiTapEvent  *e = &state->ring[w & MIDI_TAP_RING_MASK];
@@ -186,10 +187,16 @@ static inline void midi_tap_push(MidiTapState *state, uint64_t t_us,
     e->status = status;
     e->note   = note;
     e->vel    = vel;
-    e->flags  = 0;
+    e->flags  = flags;
     e->pad    = 0;
     /* Single release store publishes the slot. */
     atomic_store_explicit(&state->write_index, w + 1u, memory_order_release);
+}
+
+static inline void midi_tap_push(MidiTapState *state, uint64_t t_us,
+                                 uint8_t status, uint8_t note, uint8_t vel)
+{
+    midi_tap_push_ex(state, t_us, status, note, vel, 0);
 }
 
 uint32_t midi_tap_ring_writepos(const MidiTapState *state)
@@ -668,6 +675,84 @@ void midi_tap_process_line(MidiTapState *state,
     for (int k = 0; k < ntop; ++k)
         state->is_top[top_n[k]] = 1;
 
+    /* ── Vibrato glue (step 7 of the header comment) ──────────────────────── */
+    /* Refine each crest to sub-band precision, then let every held note claim
+     * the nearest unclaimed crest within MIDI_TAP_GLUE_BANDS and sound from
+     * ITS energy. Claimed crests leave is_top so the strike pass below cannot
+     * open a duplicate on their band. */
+    float   crest_pos[MIDI_TAP_MAX_POLY];
+    float   crest_sum[MIDI_TAP_MAX_POLY];
+    uint8_t crest_used[MIDI_TAP_MAX_POLY];
+    for (int k = 0; k < ntop; ++k)
+    {
+        const int   m   = top_n[k];
+        const float el  = (m > lo) ? state->score[m - 1] : 0.0f;
+        const float ec  = state->score[m];
+        const float er  = (m < hi) ? state->score[m + 1] : 0.0f;
+        const float tot = el + ec + er;
+        /* Sub-band offset = CENTROID of the 3-band window, not a parabolic
+         * fit: band scores are integrals (boxcar-filtered), and the parabola
+         * over-reports the offset on them (a crest truly at +0.60 lands at
+         * +0.78 — past the claim window, so every vibrato extreme broke the
+         * glue with a strike/release pair). The truncated-window centroid is
+         * near-unbiased for line widths well under a band and errs LOW for
+         * wide lines, which only makes the glue claim more readily. */
+        float d = (tot > 1e-9f) ? (er - el) / tot : 0.0f;
+        if (d < -0.5f) d = -0.5f;
+        if (d >  0.5f) d =  0.5f;
+        crest_pos[k]  = (float) m + d;
+        /* The crest's ENERGY is the 3-band window around it, not the centre
+         * band alone: a line sliding across a boundary splits its ink between
+         * two bands, and the single-band value dips ~40% with the line's real
+         * amplitude unchanged — dense mode would restrike on that phantom
+         * modulation. The window MEAN keeps that invariance AND stays on the
+         * historical 0..255 density scale: the raw sum (up to ~765) sailed
+         * past every possible vel_span (max 255) on solid dark strokes, which
+         * pinned their velocity at 127 and turned the Vel span knob inert. */
+        crest_sum[k]  = (el + ec + er) * (1.0f / 3.0f);
+        crest_used[k] = 0;
+    }
+    /* Per-band views, read by the note machine below. glue_* carries the
+     * claims for HELD bands (glue_sc read only where glue_sel is set);
+     * strike_sc carries every remaining crest's window energy so a fresh
+     * strike is calibrated like the holds. */
+    uint8_t glue_sel[MIDI_TAP_NUM_NOTES];
+    float   glue_sc[MIDI_TAP_NUM_NOTES];
+    int8_t  glue_off[MIDI_TAP_NUM_NOTES];    /* claimed crest offset, cents */
+    float   strike_sc[MIDI_TAP_NUM_NOTES];
+    int8_t  strike_off[MIDI_TAP_NUM_NOTES];  /* striking crest offset, cents */
+    memset(glue_sel,   0, sizeof(glue_sel));
+    memset(glue_off,   0, sizeof(glue_off));
+    memset(strike_sc,  0, sizeof(strike_sc));
+    memset(strike_off, 0, sizeof(strike_off));
+    for (int n = lo; n <= hi; ++n)
+    {
+        if (! state->bands[n].held) continue;
+        int   best  = -1;
+        float bestd = MIDI_TAP_GLUE_BANDS;
+        for (int k = 0; k < ntop; ++k)
+        {
+            if (crest_used[k]) continue;
+            const float dd = fabsf(crest_pos[k] - (float) n);
+            if (dd <= bestd) { bestd = dd; best = k; }
+        }
+        if (best < 0) continue;
+        crest_used[best]           = 1;
+        state->is_top[top_n[best]] = 0;
+        glue_sel[n] = 1;
+        glue_sc[n]  = crest_sum[best];
+        glue_off[n] = (int8_t) midi_tap_clampi(
+            (int) lroundf((crest_pos[best] - (float) n) * 100.0f), -127, 127);
+    }
+    for (int k = 0; k < ntop; ++k)
+        if (! crest_used[k])
+        {
+            const int m   = top_n[k];
+            strike_sc[m]  = crest_sum[k];
+            strike_off[m] = (int8_t) midi_tap_clampi(
+                (int) lroundf((crest_pos[k] - (float) m) * 100.0f), -127, 127);
+        }
+
     /* ── Note machine ─────────────────────────────────────────────────────── */
     const float span = (cfg->vel_span > 1.0f) ? cfg->vel_span : 1.0f;
     /* DENSE collapses the transcription delays: attack would postpone every
@@ -687,10 +772,14 @@ void midi_tap_process_line(MidiTapState *state,
 
         if (b->held)
         {
-            const int hold_ok = sel && (sc >= thr_off);
+            /* A held note lives on its CLAIMED crest (which may sit in a
+             * neighbouring band — the vibrato glue), not on its own band. */
+            const float scc     = glue_sel[n] ? glue_sc[n] : sc;
+            const int   hold_ok = glue_sel[n] && (scc >= thr_off);
             b->off_lines = hold_ok ? 0 : (uint16_t) (b->off_lines + 1);
             if (b->on_lines   < 0xFFFFu) b->on_lines++;
             if (b->trig_lines < 0xFFFFu) b->trig_lines++;
+            if (b->bend_lines < 0xFFu)   b->bend_lines++;
 
             const int expired = (state->max_on_lines > 0
                                  && b->on_lines >= (uint16_t) state->max_on_lines);
@@ -710,12 +799,12 @@ void midi_tap_process_line(MidiTapState *state,
             else if (dense && hold_ok
                      && b->trig_lines >= (uint16_t) state->retrig_lines)
             {
-                /* DENSE restrike: the velocity kept tracking the band and has
+                /* DENSE restrike: the velocity kept tracking the crest and has
                  * moved by rdelta — re-strike so the file carries the envelope.
                  * Off+on share one stamp (one line = simultaneous by
                  * construction). NOT budgeted: a restrike opens no new voice
                  * and retrig_lines bounds its per-band rate. */
-                const uint8_t v  = midi_tap_velocity(cfg, sc, thr_on, span);
+                const uint8_t v  = midi_tap_velocity(cfg, scc, thr_on, span);
                 const int     dv = (int) v - (int) b->vel;
                 if (dv >= rdelta || -dv >= rdelta)
                 {
@@ -723,6 +812,24 @@ void midi_tap_process_line(MidiTapState *state,
                     midi_tap_push(state, now_us, 0x90, (uint8_t) n, v);
                     b->vel = v; b->trig_lines = 0;
                     ++nev;
+                }
+            }
+
+            /* DENSE crest-bend stream (0xE0) for the MPE file sink: same
+             * cadence as the restrikes, emitted once the crest has moved
+             * >= 3 cents. Pushed AFTER any restrike so an off/on pair stays
+             * adjacent in the ring (the MPE sink coalesces on adjacency). */
+            if (dense && b->held && hold_ok
+                && b->bend_lines >= (uint8_t) (state->retrig_lines > 255
+                                               ? 255 : state->retrig_lines))
+            {
+                const int dcb = (int) glue_off[n] - (int) b->bend_cb;
+                if (dcb >= 3 || -dcb >= 3)
+                {
+                    midi_tap_push_ex(state, now_us, 0xE0, (uint8_t) n, 0,
+                                     (uint8_t) glue_off[n]);
+                    b->bend_cb    = glue_off[n];
+                    b->bend_lines = 0;
                 }
             }
         }
@@ -739,10 +846,17 @@ void midi_tap_process_line(MidiTapState *state,
                 }
                 else
                 {
-                    b->vel = midi_tap_velocity(cfg, sc, thr_on, span);
+                    const float ssc = (strike_sc[n] > 0.0f) ? strike_sc[n] : sc;
+                    b->vel = midi_tap_velocity(cfg, ssc, thr_on, span);
 
+                    /* Bend BEFORE the on (proper MIDI order) so the MPE sink
+                     * opens the voice already in tune with the crest. */
+                    if (dense)
+                        midi_tap_push_ex(state, now_us, 0xE0, (uint8_t) n, 0,
+                                         (uint8_t) strike_off[n]);
                     midi_tap_push(state, now_us, 0x90, (uint8_t) n, b->vel);
                     b->held = 1; b->on_lines = 0; b->off_lines = 0; b->trig_lines = 0;
+                    b->bend_cb = strike_off[n]; b->bend_lines = 0;
                     state->budget -= 1.0f;
                     ++nev;
                 }

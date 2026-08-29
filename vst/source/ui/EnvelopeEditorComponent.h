@@ -4,22 +4,28 @@
  *
  * One self-contained widget that replaces the old "graph + slider rows" pair on
  * the PITCH / MASK pages.  It owns BOTH the graphical curve and the compact
- * numeric boxes underneath, so the tab no longer needs duplicate sliders.  All
- * controls bind to APVTS parameters → everything stays host-automatable and
+ * numeric boxes, so the tab no longer needs duplicate sliders.  All controls
+ * bind to APVTS parameters → everything stays host-automatable and
  * MIDI-mappable.
  *
- * ── Alpha lane (always) ─────────────────────────────────────────────────────
+ * Chrome (ModuleEditorChrome.h): each lane is a framed graph with its caption
+ * top-left and its value boxes in a row BELOW the frame (labels above the
+ * boxes).  Every handle is painted by Sp3ctraHandles (lime — Idle / Hover /
+ * Drag, plus the lime drag readout); curve, fill, frames and labels keep the
+ * module colour (`accent`).
+ *
+ * ── Alpha lane (always) — "ENVELOPE" ────────────────────────────────────────
  *   • A / D / S / R node handles set time / sustain (drag).
  *   • A / D / R *bend* handles (segment midpoints) set per-segment curvature
  *     by dragging the segment up/down — exactly the shape the DSP applies
  *     (shared lux_env_shape()).  curve ∈ [-1,1], 0 = linear.
- *   • Compact value boxes (Atck / Dcay / Sus / Rel) below — drag or double-click
- *     to type.  Bound through SliderAttachment to the same parameters.
+ *   • Compact value boxes (Atck / Dcay / Sus / Rel) below the frame — drag or
+ *     double-click to cycle.  Bound through SliderAttachment to the same
+ *     parameters.
  *
- * ── Width lane (MASK only) ──────────────────────────────────────────────────
- *   A second editable lane on the SAME time axis with three draggable nodes —
- *   Width @ Attack → Width → Width @ Release — plus its own value boxes.  This
- *   replaces the old read-only dashed overlay and the separate width sliders.
+ * ── Width lane (MASK only) — "WIDTH" ────────────────────────────────────────
+ *   A second framed lane on the SAME time axis with three draggable nodes —
+ *   Width @ Attack → Width → Width @ Release — plus its own value boxes below.
  *
  * Display mapping: each A/D/R segment's time axis uses a sqrt(ms/maxMs) "log-ish"
  * mapping so short times stay editable; the sustain plateau has a fixed width.
@@ -30,6 +36,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
+#include "ModuleEditorChrome.h"
 #include "Sp3ctraBarSlider.h"
 #include <memory>
 #include <vector>
@@ -37,9 +44,18 @@
 class EnvelopeEditorComponent : public juce::Component
 {
 public:
-    /** Natural strip heights — tab pages reserve preferredHeight() + a small gap. */
-    static constexpr int kPreferredH          = 124; // alpha lane + box row
-    static constexpr int kPreferredHWithWidth = 196; // + width lane + width box row
+    /** Natural strip heights — tab pages reserve preferredHeight() + a small gap.
+     *  Each lane = a ModuleChrome frame + its box row below (kBelowFrameH).
+     *  The frame heights keep the plots at their historical pixel heights
+     *  (69 px alpha; 62 px alpha + 36 px width) — see kLaneTop / kLanePad in
+     *  the .cpp. The width frame is fixed; the alpha frame takes the rest. */
+    static constexpr int kAlphaFrameH          = 104;   ///< alpha lane frame, single lane
+    static constexpr int kAlphaFrameHWithWidth = 97;   ///< alpha lane frame above a width lane
+    static constexpr int kWidthFrameH          = 71;   ///< width lane frame (MASK)
+    static constexpr int kPreferredH          = kAlphaFrameH + ModuleChrome::kBelowFrameH;      // 140
+    static constexpr int kPreferredHWithWidth = kAlphaFrameHWithWidth + ModuleChrome::kBelowFrameH
+                                              + ModuleChrome::kEditorGap
+                                              + kWidthFrameH + ModuleChrome::kBelowFrameH;      // 244
 
     /** decay/sustain IDs are OPTIONAL: pass empty for an AR envelope (rise to
      *  peak then release, no decay/sustain plateau) — used by LuxStral.
@@ -159,8 +175,9 @@ private:
     void initBox(Sp3ctraBarSlider& box, const juce::String& paramId,
                  std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>& att);
 
-    // Lane rectangles (set in resized(), consumed by computeGeometry()/paint()).
-    juce::Rectangle<float> alphaLaneRect_, widthLaneRect_;
+    // Lane frames (set in resized(), consumed by computeGeometry()/paint());
+    // the plots live inside ModuleChrome::graphOf(frame).
+    juce::Rectangle<float> alphaFrame_, widthFrame_;
 
     // ── Interaction state ────────────────────────────────────────────────────
     Handle hovered  { Handle::None };
