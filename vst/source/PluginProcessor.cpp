@@ -5162,6 +5162,8 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
 
 void Sp3ctraAudioProcessor::timerCallback()
 {
+    pollLink();
+
     // ── Deferred parameter changes (audio/loader thread → here) ──────────────
     // A DAW project restore delivers its parameters through this drain (the
     // loader thread defers instead of applying inline). Suppress the noisy
@@ -7552,6 +7554,74 @@ void Sp3ctraAudioProcessor::applySamplerParamsFromState()
         // rotation survive a restart even when the .sp3s session frames are
         // stale (or when no session file was ever saved).
         engine->rebuildImageBoundSlots();
+    }
+}
+
+void Sp3ctraAudioProcessor::pollLink()
+{
+    if (! sharedCore || ! sharedCore->isReady())
+        return;
+    auto* link = sharedCore->getLink();
+    if (link == nullptr)
+        return;
+
+    // Machine policy (preferred device, auto-bind) + the manual HELLO target
+    // (the "Device IP" of the SETUP page — also the HTTP host).
+    juce::String manualHost;
+    {
+        auto b = [this] (const char* id) { return juce::String ((int) apvts.getRawParameterValue (id)->load()); };
+        manualHost = b ("deviceIpByte1") + "." + b ("deviceIpByte2") + "." + b ("deviceIpByte3") + "." + b ("deviceIpByte4");
+    }
+    if (! linkPolicyPushed_)
+    {
+        link->setPreferredUid (MachinePrefs::linkPreferredUid());
+        link->setAutoBind (MachinePrefs::linkAutoBind());
+        linkPolicyPushed_ = true;
+    }
+    if (manualHost != lastLinkManualHost_)
+    {
+        lastLinkManualHost_ = manualHost;
+        link->setManualHosts ({ manualHost });
+    }
+
+    const auto st = link->status();
+    if (st.generation == lastLinkGen_)
+        return;
+    lastLinkGen_ = st.generation;
+
+    if (st.state != Sp3ctraLink::State::Bound)
+        return;
+
+    // 1) The negotiated layout is the truth for the parser + pipeline width.
+    if (st.layout.dpi == 200 || st.layout.dpi == 400)
+    {
+        if (auto* p = apvts.getParameter ("sensorDpi"))
+        {
+            const float norm = p->convertTo0to1 (st.layout.dpi == 200 ? 0.0f : 1.0f);
+            if (std::abs (p->getValue() - norm) > 1.0e-4f)
+            {
+                log_info ("LINK", "device streams at %d DPI - reconciling sensorDpi", st.layout.dpi);
+                p->setValueNotifyingHost (norm);
+                MachinePrefs::saveParam (apvts, "sensorDpi");
+            }
+        }
+    }
+
+    // 2) The HTTP host (config page) follows the bound device.
+    if (st.deviceIp.isNotEmpty())
+    {
+        juce::StringArray parts = juce::StringArray::fromTokens (st.deviceIp, ".", "");
+        if (parts.size() == 4 && st.deviceIp != manualHost)
+        {
+            const char* ids[4] = { "deviceIpByte1", "deviceIpByte2", "deviceIpByte3", "deviceIpByte4" };
+            for (int i = 0; i < 4; ++i)
+                if (auto* p = apvts.getParameter (ids[i]))
+                {
+                    p->setValueNotifyingHost (p->convertTo0to1 ((float) parts[i].getIntValue()));
+                    MachinePrefs::saveParam (apvts, ids[i]);
+                }
+            log_info ("LINK", "device IP set to %s (bound device)", st.deviceIp.toRawUTF8());
+        }
     }
 }
 

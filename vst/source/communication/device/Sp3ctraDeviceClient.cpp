@@ -149,27 +149,9 @@ void Sp3ctraDeviceClient::loadAll (std::function<void (State, DeviceConfig)> onC
         if (get ("getScreensaverTimeout",t)) cfg.screensaverTimeout = t.getIntValue();
         if (get ("getMotionThresholdAcc",t)) cfg.motionThresholdAcc = t.getFloatValue();
         if (get ("getMotionThresholdGyro",t)) cfg.motionThresholdGyro = t.getFloatValue();
-        if (get ("getMdnsEnabled",       t)) cfg.mdnsEnabled       = (t.getIntValue() != 0);
-        if (get ("getRtpMidiMode",       t)) cfg.rtpMidiMode       = t.getIntValue();
         if (get ("getFirmwareVersion",   t)) cfg.firmwareVersion   = t.trim();
 
-        // MIDI button mapping — JSON {"buttons":[{ch,cmd,param},...]}
-        if (get ("getMidiButtonConfig", t))
-        {
-            auto json = juce::JSON::parse (t);
-            if (auto* buttons = json.getProperty ("buttons", juce::var()).getArray())
-            {
-                for (int i = 0; i < juce::jmin (3, buttons->size()); ++i)
-                {
-                    const auto& b = buttons->getReference (i);
-                    cfg.midi[i].channel = (int) b.getProperty ("ch",    0);
-                    cfg.midi[i].command = (int) b.getProperty ("cmd",   0);
-                    cfg.midi[i].param   = (int) b.getProperty ("param", 0);
-                }
-            }
-        }
-
-        // Network configuration — JSON {ip,mask,gw,dest_ip,udp_port,rtpmidi_control_port}
+        // Network configuration — JSON {ip,mask,gw,dest_ip,udp_port,link_port,stream_when_unbound}
         if (get ("getNetworkConfig", t))
         {
             auto json = juce::JSON::parse (t);
@@ -180,8 +162,8 @@ void Sp3ctraDeviceClient::loadAll (std::function<void (State, DeviceConfig)> onC
                 cfg.network.gateway  = json.getProperty ("gw",      cfg.network.gateway).toString();
                 cfg.network.destIp   = json.getProperty ("dest_ip", cfg.network.destIp).toString();
                 cfg.network.udpPort  = (int) json.getProperty ("udp_port", 0);
-                cfg.network.rtpMidiControlPort =
-                    (int) json.getProperty ("rtpmidi_control_port", 0);
+                cfg.network.linkPort = (int) json.getProperty ("link_port", 0);
+                cfg.network.streamWhenUnbound = (int) json.getProperty ("stream_when_unbound", 1) != 0;
             }
         }
 

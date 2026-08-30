@@ -71,6 +71,20 @@ namespace MachinePrefs
     inline bool resumePlaybackOnLoad()
     { return file().getBoolValue(kResumePlaybackKey, false); }
 
+    /** Sp3ctra Link (machine-scoped, never in a session): the device this
+     *  computer prefers to bind, the manual HELLO target used when broadcast
+     *  discovery cannot reach the device, and the auto-bind opt-out. */
+    inline constexpr const char* kLinkPreferredUidKey = "link.preferredUid";
+    inline constexpr const char* kLinkManualIpKey     = "link.manualIp";
+    inline constexpr const char* kLinkAutoBindKey     = "link.autoBind";
+
+    inline juce::String linkPreferredUid()      { return file().getValue(kLinkPreferredUidKey, {}); }
+    inline void setLinkPreferredUid(const juce::String& uid) { file().setValue(kLinkPreferredUidKey, uid); }
+    inline juce::String linkManualIp()          { return file().getValue(kLinkManualIpKey, {}); }
+    inline void setLinkManualIp(const juce::String& ip)      { file().setValue(kLinkManualIpKey, ip); }
+    inline bool linkAutoBind()                  { return file().getBoolValue(kLinkAutoBindKey, true); }
+    inline void setLinkAutoBind(bool on)        { file().setValue(kLinkAutoBindKey, on); }
+
     /** Write the CURRENT denormalised value of @p id into the machine file.
      *  Call from the user edit site right after writing the APVTS. */
     inline void saveParam(juce::AudioProcessorValueTreeState& apvts, const char* id)

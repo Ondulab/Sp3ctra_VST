@@ -38,16 +38,15 @@ public:
 
     enum class State { Idle, Connecting, Connected, Failed };
 
-    struct MidiButton { int channel = 0; int command = 0; int param = 0; };
-
     struct NetworkConfig
     {
         juce::String ip       = "192.168.100.1";
         juce::String mask     = "255.255.255.0";
         juce::String gateway  = "192.168.100.1";
         juce::String destIp   = "192.168.100.2";
-        int udpPort           = 0;
-        int rtpMidiControlPort = 0;
+        int udpPort           = 0;     // stream port while no host session is bound
+        int linkPort          = 0;     // SLP control port
+        bool streamWhenUnbound = true;
     };
 
     /** A full snapshot of every device setting exposed by config.html. */
@@ -67,11 +66,7 @@ public:
         int   screensaverTimeout = 60;   // seconds
         float motionThresholdAcc = 0.1f; // g
         float motionThresholdGyro = 1.0f;// dps
-        // MIDI button mapping (SW1..SW3)
-        MidiButton midi[3];
-        // Network / MIDI transport
-        bool  mdnsEnabled       = false;
-        int   rtpMidiMode       = 0;     // 0 = server, 1 = client
+        // Network
         NetworkConfig network;
         juce::String firmwareVersion;
 

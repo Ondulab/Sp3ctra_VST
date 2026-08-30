@@ -115,6 +115,12 @@ bool Sp3ctraSharedCore::startWithConfig(const Sp3ctraCore::ActiveConfig& config,
     udpThread->startThread();
     log_info("SHARED", "UdpReceiverThread started");
 
+    // ── 2b. Sp3ctra Link control channel (discovery, session, feedback) ────
+    // Announces OUR stream endpoint: the device sends LINE/HID to the port we
+    // listen on, at the address the BIND comes from (or the multicast group).
+    link = std::make_unique<Sp3ctraLink>();
+    link->start(config.udpPort.load(), juce::String(config.udpAddress));
+
     // ── 3. Audio-side globals ────────────────────────────────────────────────
     // Expose sample-rate / buffer-size to the global C config so that
     // LuxStral computes the correct Nyquist-clamped frequency table.
@@ -378,6 +384,13 @@ void Sp3ctraSharedCore::stopThreads()
         log_error("SHARED", "Skipping LuxStral cleanup — leaked synthesis thread may "
                             "still dereference its pool/buffers");
 
+    // ── Sp3ctra Link (sends UNBIND, so the device falls back cleanly) ────────
+    if (link)
+    {
+        link->stop();
+        link.reset();
+    }
+
     // ── UDP receiver thread ───────────────────────────────────────────────────
     if (udpThread)
     {
@@ -460,6 +473,10 @@ bool Sp3ctraSharedCore::restartUdp(int port,
     // Restart receiver thread with the new socket.
     udpThread = std::make_unique<UdpReceiverThread>(core.get());
     udpThread->startThread();
+
+    // Re-announce the stream endpoint to the bound device (re-BIND).
+    if (link)
+        link->setStreamTarget(port, juce::String(address));
 
     log_info("SHARED", "restartUdp() — done (%s:%d)", address.c_str(), port);
     return true;

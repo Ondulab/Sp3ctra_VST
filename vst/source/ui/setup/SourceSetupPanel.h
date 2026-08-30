@@ -27,15 +27,18 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "../../PluginProcessor.h"
 #include "../../communication/device/Sp3ctraDeviceClient.h"
+#include "../../communication/link/Sp3ctraLink.h"
 
-class SourceSetupPanel : public juce::Component
+class SourceSetupPanel : public juce::Component,
+                         private juce::Timer,
+                         private juce::ChangeListener
 {
 public:
     SourceSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour);
     ~SourceSetupPanel() override;
 
     /** Natural content height — hosted in a scrolling viewport (zone-3). */
-    static constexpr int kPreferredH = 1290;
+    static constexpr int kPreferredH = 1300;
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -62,9 +65,15 @@ private:
     void initEditor (juce::TextEditor& e, int maxLen, const juce::String& allowed);
     void initCombo  (juce::ComboBox& c, const juce::StringArray& items);
 
-    // ── LINK (APVTS) ─────────────────────────────────────────────────────────
+    // ── LINK (Sp3ctra Link + APVTS transport params) ─────────────────────────
     void applyLink();                  // write APVTS, restart UDP, re-point client
     juce::String deviceHostFromApvts() const;
+    Sp3ctraLink* link() const;         // process-wide control channel (may be null)
+    void refreshLink();                // device rows + status line from the link
+    void useDevice (const juce::String& uid);
+    void releaseDevice();
+    void timerCallback() override;
+    void changeListenerCallback (juce::ChangeBroadcaster*) override;
 
     // ── DEVICE (HTTP) ─────────────────────────────────────────────────────────
     void reload();                     // GET everything from the device
@@ -74,13 +83,11 @@ private:
     void setDeviceControlsEnabled (bool);
 
     void postDpi();                    // also reconciles APVTS + handles reboot
-    void postMidiButtons();
     void postNetwork();
     void chooseFirmware();
     void uploadFirmware();
     void confirmFactoryReset();
     void reconcileDpiToApvts (int dpi);
-    void updateMidiDataPortDisplay();
 
     Sp3ctraAudioProcessor& audioProcessor;
     juce::AudioProcessorValueTreeState& apvts;
@@ -92,11 +99,24 @@ private:
     bool loading = false;              // guard: dedupe overlapping load bursts
 
     // ── LINK controls ─────────────────────────────────────────────────────────
-    juce::Label    deviceIpLabel;   IpBytes deviceIp;
+    static constexpr int kMaxDeviceRows = 4;
+    struct DeviceRow
+    {
+        juce::Label      text;
+        juce::TextButton button;   // USE / RELEASE
+        juce::String     uid;
+    };
+    juce::Label    devicesLabel;
+    DeviceRow      deviceRows[kMaxDeviceRows];
+    juce::Label    linkStatusLabel;
+    juce::ToggleButton autoBindToggle;
+    juce::Label    deviceIpLabel;   IpBytes deviceIp;      // HELLO unicast target + HTTP host
     juce::Label    udpPortLabel;    juce::TextEditor udpPortEditor;
-    juce::Label    udpAddressLabel; IpBytes udpAddr;
+    juce::Label    udpAddressLabel; IpBytes udpAddr;       // multicast group (blank/unicast = direct)
     juce::TextButton applyLinkButton;
     juce::Label    connStatusLabel; juce::TextButton retryButton;
+    uint32_t       lastLinkGen = 0;
+    bool           linkWasBound = false;
 
     // ── CIS ────────────────────────────────────────────────────────────────────
     juce::Label cisHeader;
@@ -120,13 +140,6 @@ private:
     juce::Label motionAccLabel;   juce::TextEditor motionAccEditor;
     juce::Label motionGyroLabel;  juce::TextEditor motionGyroEditor;
 
-    // ── MIDI button mapping ──────────────────────────────────────────────────────
-    juce::Label midiHeader;
-    juce::Label    swLabel[3];
-    juce::ComboBox chCombo[3];
-    juce::ComboBox cmdCombo[3];
-    juce::TextEditor paramEditor[3];
-    juce::TextButton applyMidiButton;
 
     // ── Device network configuration ─────────────────────────────────────────────
     juce::Label netHeader;
@@ -134,11 +147,9 @@ private:
     juce::Label maskLabel;      IpBytes netMask;
     juce::Label gatewayLabel;   IpBytes netGateway;
     juce::Label destIpLabel;    IpBytes netDestIp;
-    juce::Label cisUdpPortLabel;  juce::TextEditor cisUdpPortEditor;
-    juce::Label mdnsLabel;        juce::ComboBox mdnsCombo;
-    juce::Label rtpModeLabel;     juce::ComboBox rtpModeCombo;
-    juce::Label midiCtrlPortLabel; juce::TextEditor midiCtrlPortEditor;
-    juce::Label midiDataPortLabel; juce::Label midiDataPortValue;
+    juce::Label cisUdpPortLabel;  juce::TextEditor cisUdpPortEditor;   // stream port while unbound
+    juce::Label linkPortLabel;    juce::TextEditor linkPortEditor;     // SLP control port
+    juce::Label streamUnboundLabel; juce::ComboBox streamUnboundCombo; // stream without a host session
     juce::TextButton applyNetworkButton;
 
     // ── Firmware ─────────────────────────────────────────────────────────────────

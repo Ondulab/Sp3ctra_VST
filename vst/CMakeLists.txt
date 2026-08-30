@@ -423,6 +423,10 @@ target_sources(Sp3ctraVST
         # Device HTTP control-plane client (config.html API)
         source/communication/device/Sp3ctraDeviceClient.cpp
 
+        # Sp3ctra Link (SLP v1): discovery / session / feedback + receiver state
+        source/communication/link/Sp3ctraLink.cpp
+        source/communication/link/slp_rx_state.c
+
         # Logging system
         source/utils/logger.c
         source/utils/error.c
@@ -517,6 +521,7 @@ target_include_directories(Sp3ctraVST
         ${CMAKE_CURRENT_SOURCE_DIR}/source/config
         ${CMAKE_CURRENT_SOURCE_DIR}/source/utils
         ${CMAKE_CURRENT_SOURCE_DIR}/source/communication/network
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/communication/link
         ${CMAKE_CURRENT_SOURCE_DIR}/source/audio/buffers
         ${CMAKE_CURRENT_SOURCE_DIR}/source/audio/rtaudio
         ${CMAKE_CURRENT_SOURCE_DIR}/source/threading

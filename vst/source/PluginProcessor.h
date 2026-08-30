@@ -195,6 +195,12 @@ public:
         return sharedCore ? sharedCore->getCore() : nullptr;
     }
 
+    /** Sp3ctra Link control channel (process-wide, owned by the shared core). */
+    Sp3ctraLink* getLink()
+    {
+        return sharedCore ? sharedCore->getLink() : nullptr;
+    }
+
     /**
      * @brief True once the shared pipeline (UDP socket + threads) has been
      *        successfully started by prepareToPlay().
@@ -653,6 +659,13 @@ public:
      *  MIDI-follow) override the restored blob's values — see MachinePrefs.h.
      *  Called at the end of every state restore (session AND DAW blob). */
     void applyMachineParamOverrides();
+
+    /** Sp3ctra Link → APVTS: reconcile the negotiated DPI and the device IP
+     *  (HTTP host) whenever the session changes; push the machine policy. */
+    void pollLink();
+    uint32_t     lastLinkGen_ = 0;
+    bool         linkPolicyPushed_ = false;
+    juce::String lastLinkManualHost_;
 
 private:
 

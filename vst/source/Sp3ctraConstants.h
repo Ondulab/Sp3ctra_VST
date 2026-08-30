@@ -57,8 +57,7 @@ namespace Sp3ctraConstants {
      * UDP packet structure constants
      */
     constexpr int MAX_PACKET_SIZE = 8192;         // Bytes
-    constexpr int IMAGE_DATA_HEADER = 0x12;       // Packet type for CIS data
-    constexpr int IMU_DATA_HEADER = 0x13;         // Packet type for IMU data
+    // (Legacy IMAGE_DATA_HEADER / IMU_DATA_HEADER removed: the wire format is SLP v1.)
     
     /**
      * Default network configuration (can be overridden by user via APVTS).

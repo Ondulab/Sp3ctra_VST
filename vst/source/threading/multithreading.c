@@ -1,6 +1,8 @@
 /* multithreading.c */
 
 #include "multithreading.h"
+#include "sp3ctra_link.h"
+#include "slp_rx_state.h"
 #include "audio_c_api.h"
 #include "config.h"
 #include "config_instrument.h"
@@ -1429,7 +1431,12 @@ void *udpThread(void *arg) {
   struct sockaddr_in *si_other;
   socklen_t slen;
   ssize_t recv_len;
-  struct packet_Image packet;
+  uint8_t rxbuf[2048];                 /* one STREAM datagram (LINE <= 1464 B, HID 72 B) */
+  slp_rx_stats *rxstats;
+  uint32_t lineSeqLast, hidSeqLast;    /* loss detection per flow */
+  int lineSeqValid, hidSeqValid;
+  uint32_t linePixels;                 /* width seen on the line being assembled */
+  int legacy_logged;
   int nb_pixels;
   uint32_t currentLineId;
   int *receivedFragments;
@@ -1459,6 +1466,11 @@ void *udpThread(void *arg) {
   nb_pixels = get_cis_pixels_nb();
   currentLineId = 0;
   fragmentCount = 0;
+  slp_rx_stats_writer(&rxstats);
+  lineSeqLast = hidSeqLast = 0;
+  lineSeqValid = hidSeqValid = 0;
+  linePixels = 0;
+  legacy_logged = 0;
   held_R = NULL;
   held_G = NULL;
   held_B = NULL;
@@ -1488,12 +1500,12 @@ void *udpThread(void *arg) {
   }
 
   log_startup_detail("THREAD", "UDP thread started with dual buffer system");
-  log_info("THREAD", "Listening for packets on socket %d, expecting IMAGE_DATA_HEADER (0x%02X)", s, IMAGE_DATA_HEADER);
+  log_info("THREAD", "Listening for SLP v%u STREAM datagrams on socket %d", (unsigned) SLP_VERSION, s);
 
   int first_packet_logged = 0;  // Log very first packet after restart
 
   while (ctx->running) {
-    recv_len = recvfrom(s, (char *)&packet, sizeof(packet), 0,
+    recv_len = recvfrom(s, (char *)rxbuf, sizeof(rxbuf), 0,
                         (struct sockaddr *)si_other, &slen);
     if (recv_len < 0) {
 #ifdef _WIN32
@@ -1510,144 +1522,139 @@ void *udpThread(void *arg) {
 #endif
       continue;
     }
-
-    // 🔧 CRITICAL FIX: Check ctx->running AFTER each packet reception
-    // If packets arrive continuously (95000+), recvfrom() never times out
-    // and the thread never re-checks the while() condition.
-    // This check ensures the thread can exit promptly when requested.
+    // Check ctx->running AFTER each packet reception: with a continuous stream
+    // recvfrom() never times out and the thread would never re-check the
+    // while() condition.
     if (!ctx->running) {
       log_info("THREAD", "ctx->running=0 detected, exiting main loop");
-      /* (No write_mutex to release: the write bus is only touched — lock,
-       * memcpy, swap, unlock — at line completion now.) */
       break;
     }
 
-    // Log very first packet (to confirm reception restarted)
+    /* ── SLP v1 header ───────────────────────────────────────────────────── */
+    if (recv_len < (ssize_t)sizeof(struct slp_hdr)) {
+      rxstats->bad_datagrams++;
+      continue;
+    }
+    struct slp_hdr hdr;
+    memcpy(&hdr, rxbuf, sizeof(hdr));
+    if (hdr.magic != SLP_MAGIC) {
+      /* Pre-4.0 firmware: type byte 0x11..0x15 at offset 0 (legacy enum). */
+      if (rxbuf[0] >= 0x11 && rxbuf[0] <= 0x15 && rxbuf[1] == 0 && rxbuf[2] == 0 && rxbuf[3] == 0) {
+        rxstats->legacy_datagrams++;
+        if (!legacy_logged) {
+          log_warning("THREAD", "Legacy (pre-4.0) CIS stream detected - update the device firmware to Sp3ctra Link v%u",
+                      (unsigned) SLP_VERSION);
+          legacy_logged = 1;
+        }
+      } else {
+        rxstats->bad_datagrams++;
+      }
+      continue;
+    }
+    if (hdr.version != SLP_VERSION || hdr.length != (uint16_t)recv_len) {
+      rxstats->bad_datagrams++;
+      continue;
+    }
     if (!first_packet_logged) {
-      log_info("THREAD", "🟢 FIRST PACKET after restart! type=0x%02X size=%zd socket=%d",
-               packet.type, recv_len, s);
+      log_info("THREAD", "First SLP datagram after (re)start: type=0x%02X size=%zd socket=%d",
+               (unsigned) hdr.type, recv_len, s);
       first_packet_logged = 1;
     }
 
-#ifdef DEBUG_UDP
-    // Debug: Log every received packet
-    log_debug("UDP", "Received packet: size=%zd bytes, type=0x%02X", recv_len, packet.type);
-#endif
-
-    if (packet.type == IMU_DATA_HEADER) {
-      /* Lightweight IMU packet handling: update filtered X in Context.
-         Keep this code fast and non-blocking. Comments in English as per
-         project conventions. */
-      struct packet_IMU *imu = (struct packet_IMU *)&packet;
-      pthread_mutex_lock(&ctx->imu_mutex);
-      float raw_x = imu->acc[0]; // X axis accelerometer
-      float raw_y = imu->acc[1]; // Y axis accelerometer
-      float raw_z = imu->acc[2]; // Z axis accelerometer
-      
-      /* Store RAW accelerometer values for display effects (reactive, no filtering) */
-      ctx->imu_raw_x = raw_x;
-      ctx->imu_raw_y = raw_y;
-      ctx->imu_raw_z = raw_z;
-      
-      /* Store RAW gyroscope values (rad/s) */
-      ctx->imu_gyro_x = imu->gyro[0];
-      ctx->imu_gyro_y = imu->gyro[1];
-      ctx->imu_gyro_z = imu->gyro[2];
-      
-      /* Store INTEGRATED positions (from sensor's onboard integration) */
-      ctx->imu_position_x = imu->integrated_acc[0];
-      ctx->imu_position_y = imu->integrated_acc[1];
-      ctx->imu_position_z = imu->integrated_acc[2];
-      
-      /* Store INTEGRATED angles (from sensor's onboard integration, radians) */
-      ctx->imu_angle_x = imu->integrated_gyro[0];
-      ctx->imu_angle_y = imu->integrated_gyro[1];
-      ctx->imu_angle_z = imu->integrated_gyro[2];
-      
-      /* Keep filtered X for auto-volume (needs stability) */
-      if (!ctx->imu_has_value) {
-        ctx->imu_x_filtered = raw_x;
-        ctx->imu_has_value = 1;
-#ifdef DEBUG_IMU_PACKETS
-        log_debug("IMU", "First IMU packet received! raw_x=%.6f", raw_x);
-#endif
-      } else {
-        ctx->imu_x_filtered = IMU_FILTER_ALPHA_X * raw_x +
-                              (1.0f - IMU_FILTER_ALPHA_X) * ctx->imu_x_filtered;
+    /* ── HID: buttons + IMU → lock-free snapshot ─────────────────────────── */
+    if (hdr.type == SLP_HID) {
+      if (recv_len < (ssize_t)sizeof(struct slp_hid)) { rxstats->bad_datagrams++; continue; }
+      struct slp_hid h;
+      memcpy(&h, rxbuf, sizeof(h));
+      if (hidSeqValid) {
+        const uint32_t gap = hdr.seq - hidSeqLast;
+        if (gap > 1u && gap < 0x80000000u) rxstats->hid_lost += gap - 1u;
       }
+      hidSeqLast = hdr.seq; hidSeqValid = 1;
+      rxstats->hid_datagrams++;
+      rxstats->last_hid_ms = slp_now_ms();
+
+      slp_hid_sample smp;
+      smp.timestamp_us = h.timestamp_us;
+      smp.valid_mask   = h.valid_mask;
+      smp.button_count = h.button_count;
+      smp.button_state = h.button_state;
+      for (int i = 0; i < (int)SLP_MAX_BUTTONS; i++) smp.button_seq[i] = h.button_seq[i];
+      for (int i = 0; i < 3; i++) { smp.acc[i] = h.acc[i]; smp.gyro[i] = h.gyro[i]; }
+      smp.temp_c = h.temp_c;
+      slp_hid_publish(&smp);
+
+      /* Legacy Context mirror (raw values, g / dps) for any remaining reader. */
+      pthread_mutex_lock(&ctx->imu_mutex);
+      ctx->imu_raw_x = h.acc[0]; ctx->imu_raw_y = h.acc[1]; ctx->imu_raw_z = h.acc[2];
+      ctx->imu_gyro_x = h.gyro[0]; ctx->imu_gyro_y = h.gyro[1]; ctx->imu_gyro_z = h.gyro[2];
+      if (!ctx->imu_has_value) { ctx->imu_x_filtered = h.acc[0]; ctx->imu_has_value = 1; }
+      else ctx->imu_x_filtered = IMU_FILTER_ALPHA_X * h.acc[0] + (1.0f - IMU_FILTER_ALPHA_X) * ctx->imu_x_filtered;
       ctx->last_imu_time = time(NULL);
       pthread_mutex_unlock(&ctx->imu_mutex);
-
-#ifdef DEBUG_IMU_PACKETS
-      log_debug("IMU", "raw_x=%.6f filtered=%.6f threshold=%.6f active=%s", raw_x,
-                ctx->imu_x_filtered, g_luxstral_config.imu_active_threshold_x,
-                (fabsf(ctx->imu_x_filtered) >= g_luxstral_config.imu_active_threshold_x) ? "YES" : "NO");
-#endif
-#ifdef DEBUG_UDP
-      log_debug("UDP", "IMU raw_x=%.6f filtered=%.6f", raw_x, ctx->imu_x_filtered);
-#endif
       continue;
     }
 
-    if (packet.type != IMAGE_DATA_HEADER) {
-#ifdef DEBUG_UDP
-      log_debug("UDP", "Ignoring packet with type 0x%02X (expected 0x%02X)", packet.type, IMAGE_DATA_HEADER);
-#endif
-      continue;
+    if (hdr.type != SLP_LINE) {
+      continue;   /* other STREAM types: ignored (forward compatibility) */
     }
 
-#ifdef DEBUG_UDP
-    log_debug("UDP", "Processing IMAGE_DATA packet: line_id=%u, fragment_id=%u/%u, size=%u",
-              packet.line_id, packet.fragment_id, packet.total_fragments, packet.fragment_size);
-#endif
+    /* ── LINE fragment ───────────────────────────────────────────────────── */
+    if (recv_len < (ssize_t)sizeof(struct slp_line_hdr)) { rxstats->bad_datagrams++; continue; }
+    struct slp_line_hdr lh;
+    memcpy(&lh, rxbuf, sizeof(lh));
+    if (lh.fragment_count == 0 || lh.fragment_count > UDP_MAX_NB_PACKET_PER_LINE ||
+        lh.fragment_index >= lh.fragment_count ||
+        lh.pixel_count == 0 || lh.pixel_count > SLP_LINE_MAX_FRAGMENT_PIXELS ||
+        (size_t)recv_len != SLP_LINE_BYTES(lh.pixel_count) ||
+        (uint32_t)lh.pixel_offset + lh.pixel_count > (uint32_t)CIS_MAX_PIXELS_NB) {
+      rxstats->bad_datagrams++;
+      continue;
+    }
+    if (lineSeqValid) {
+      const uint32_t gap = hdr.seq - lineSeqLast;
+      if (gap > 1u && gap < 0x80000000u) rxstats->line_lost += gap - 1u;
+    }
+    lineSeqLast = hdr.seq; lineSeqValid = 1;
+    rxstats->line_datagrams++;
 
-    if (currentLineId != packet.line_id) {
-      // If we had a previous incomplete line, log it
+    if (currentLineId != lh.line_id) {
       if (currentLineId != 0 && fragmentCount > 0) {
-#ifdef DEBUG_UDP
-        log_debug("UDP", "INCOMPLETE LINE DISCARDED: line_id=%u had %u/%d fragments",
-                  currentLineId, fragmentCount, UDP_MAX_NB_PACKET_PER_LINE);
-#endif
-        /* Incomplete lines are simply never published to the write bus now
-         * (the old scheme had to complete_write a PARTIAL line just to
-         * release the mutex — readers then saw a torn line; they now keep
-         * the last complete one). */
+        rxstats->lines_incomplete++;   /* never published: readers keep the last complete line */
       }
-
-      // New line started - prepare for assembly (db->activeBuffer only; the
-      // audio write bus is filled in one locked shot at line completion).
-      currentLineId = packet.line_id;
+      currentLineId = lh.line_id;
       memset(receivedFragments, 0, UDP_MAX_NB_PACKET_PER_LINE * sizeof(int));
       fragmentCount = 0;
+      linePixels = 0;
     }
 
-    // Validate fragment_id to prevent buffer overflow
-    if (packet.fragment_id >= UDP_MAX_NB_PACKET_PER_LINE) {
-      log_error("THREAD", "fragment_id %u exceeds maximum %u, ignoring packet",
-                packet.fragment_id, UDP_MAX_NB_PACKET_PER_LINE);
-      continue;
-    }
-
-    uint32_t offset = packet.fragment_id * packet.fragment_size;
-    if (!receivedFragments[packet.fragment_id]) {
-      receivedFragments[packet.fragment_id] = 1;
+    if (!receivedFragments[lh.fragment_index]) {
+      receivedFragments[lh.fragment_index] = 1;
       fragmentCount++;
-
-      // Assemble the line in the double buffer (display + single source for
-      // the one-shot audio-bus publish at completion below).
-      memcpy(&db->activeBuffer_R[offset], packet.imageData_R,
-             packet.fragment_size);
-      memcpy(&db->activeBuffer_G[offset], packet.imageData_G,
-             packet.fragment_size);
-      memcpy(&db->activeBuffer_B[offset], packet.imageData_B,
-             packet.fragment_size);
+      /* Planes are contiguous after the header, pixel_count bytes each. The
+       * copy is clipped to the pipeline width (buffers are allocated at
+       * get_cis_pixels_nb(); the negotiated DPI is reconciled by the link). */
+      const uint8_t *plane_r = rxbuf + sizeof(struct slp_line_hdr);
+      const uint8_t *plane_g = plane_r + lh.pixel_count;
+      const uint8_t *plane_b = plane_g + lh.pixel_count;
+      const uint32_t off = lh.pixel_offset;
+      if (off < (uint32_t)nb_pixels) {
+        const uint32_t n = ((off + lh.pixel_count) <= (uint32_t)nb_pixels) ? lh.pixel_count
+                                                                          : (uint32_t)nb_pixels - off;
+        memcpy(&db->activeBuffer_R[off], plane_r, n);
+        memcpy(&db->activeBuffer_G[off], plane_g, n);
+        memcpy(&db->activeBuffer_B[off], plane_b, n);
+      }
+      if (off + lh.pixel_count > linePixels) linePixels = off + lh.pixel_count;
     }
 
-#ifdef DEBUG_UDP
-    log_debug("UDP", "Fragment count: %u/%u for line %u", fragmentCount, packet.total_fragments, packet.line_id);
-#endif
-
-    if (fragmentCount == packet.total_fragments) {
+    if (fragmentCount == lh.fragment_count) {
+      rxstats->lines_complete++;
+      rxstats->line_pixels = linePixels;
+      rxstats->last_line_ms = slp_now_ms();
+      log_info_every_ms(10000, "THREAD", "SLP rx: %u lines (%u incomplete, %u lost datagrams), HID %u (%u lost), %u px/line",
+                        rxstats->lines_complete, rxstats->lines_incomplete, rxstats->line_lost,
+                        rxstats->hid_datagrams, rxstats->hid_lost, rxstats->line_pixels);
       PreprocessedImageData preprocessed_temp;
 
       // 🔧 CRITICAL FIX: Abort heavy processing if stop requested
@@ -1704,7 +1711,7 @@ void *udpThread(void *arg) {
       }
 
 #ifdef DEBUG_UDP
-      log_debug("UDP", "COMPLETE LINE RECEIVED! line_id=%u, %u fragments", packet.line_id, fragmentCount);
+      log_debug("UDP", "COMPLETE LINE RECEIVED! line_id=%u, %u fragments", currentLineId, fragmentCount);
 #endif
       /* Complete line received */
 

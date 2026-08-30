@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include "communication/link/Sp3ctraLink.h"
 #include <mutex>
 #include <atomic>
 
@@ -135,6 +136,7 @@ public:
     // -------------------------------------------------------------------------
 
     Sp3ctraCore*          getCore()         { return core.get(); }
+    Sp3ctraLink*          getLink()         { return link.get(); }
     UdpReceiverThread*    getUdpThread()    { return udpThread.get(); }
     AudioProcessingThread* getAudioThread() { return audioThread.get(); }
 
@@ -174,6 +176,7 @@ private:
     // -------------------------------------------------------------------------
     std::unique_ptr<Sp3ctraCore>              core;
     std::unique_ptr<UdpReceiverThread>        udpThread;
+    std::unique_ptr<Sp3ctraLink>              link;        ///< SLP control channel (discovery / session / feedback)
     std::unique_ptr<AudioProcessingThread>    audioThread;
     std::unique_ptr<LuxSynthProcessingThread> luxSynthThread;
 

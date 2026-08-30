@@ -3,6 +3,7 @@
 #include "../../Sp3ctraConstants.h"
 #include "../../UITheme.h"
 #include "../../session/MachinePrefs.h"
+#include "../../communication/link/slp_rx_state.h"
 #include "../../Sp3ctraDialog.h"
 
 using DC = Sp3ctraDeviceClient;
@@ -130,7 +131,30 @@ void SourceSetupPanel::initCombo (juce::ComboBox& c, const juce::StringArray& it
 SourceSetupPanel::SourceSetupPanel (Sp3ctraAudioProcessor& processor, juce::Colour accentColour)
     : audioProcessor (processor), apvts (processor.getAPVTS()), accent (accentColour)
 {
-    // ── LINK block (APVTS-persisted transport params) ────────────────────────
+    // ── LINK block: Sp3ctra Link devices + APVTS transport params ────────────
+    initLabel (devicesLabel, "Devices:");
+    for (auto& r : deviceRows)
+    {
+        r.text.setFont (juce::FontOptions (Sp3ctraTheme::kFontSettings));
+        r.text.setJustificationType (juce::Justification::centredLeft);
+        addChildComponent (r.text);
+        r.button.setButtonText ("USE");
+        addChildComponent (r.button);
+    }
+    linkStatusLabel.setJustificationType (juce::Justification::centredLeft);
+    linkStatusLabel.setFont (juce::Font (juce::FontOptions (Sp3ctraTheme::kFontTiny)).italicised());
+    linkStatusLabel.setText ("Sp3ctra Link: starting ...", juce::dontSendNotification);
+    addAndMakeVisible (linkStatusLabel);
+
+    autoBindToggle.setButtonText ("Connect automatically (preferred device, or the only one found)");
+    autoBindToggle.setToggleState (MachinePrefs::linkAutoBind(), juce::dontSendNotification);
+    autoBindToggle.onClick = [this]
+    {
+        MachinePrefs::setLinkAutoBind (autoBindToggle.getToggleState());
+        if (auto* l = link()) l->setAutoBind (autoBindToggle.getToggleState());
+    };
+    addAndMakeVisible (autoBindToggle);
+
     initLabel (deviceIpLabel, "Device IP:");
     deviceIp.init (*this);
     deviceIp.set ((int) apvts.getRawParameterValue ("deviceIpByte1")->load(),
@@ -138,11 +162,11 @@ SourceSetupPanel::SourceSetupPanel (Sp3ctraAudioProcessor& processor, juce::Colo
                   (int) apvts.getRawParameterValue ("deviceIpByte3")->load(),
                   (int) apvts.getRawParameterValue ("deviceIpByte4")->load());
 
-    initLabel (udpPortLabel, "UDP Port:");
+    initLabel (udpPortLabel, "Stream Port:");
     initEditor (udpPortEditor, 5, "0123456789");
     udpPortEditor.setText (juce::String ((int) apvts.getRawParameterValue ("udpPort")->load()), false);
 
-    initLabel (udpAddressLabel, "UDP Address:");
+    initLabel (udpAddressLabel, "Multicast:");
     udpAddr.init (*this);
     udpAddr.set ((int) apvts.getRawParameterValue ("udpByte1")->load(),
                  (int) apvts.getRawParameterValue ("udpByte2")->load(),
@@ -265,53 +289,18 @@ SourceSetupPanel::SourceSetupPanel (Sp3ctraAudioProcessor& processor, juce::Colo
     };
     motionGyroEditor.onFocusLost = motionGyroEditor.onReturnKey;
 
-    // ── MIDI button mapping ──────────────────────────────────────────────────────
-    initSection (midiHeader, "MIDI CHANNELS (SW1-SW3)");
-    juce::StringArray channels;
-    for (int ch = 1; ch <= 16; ++ch) channels.add (juce::String (ch));
-    for (int i = 0; i < 3; ++i)
-    {
-        initLabel (swLabel[i], "SW" + juce::String (i + 1) + ":");
-        initCombo (chCombo[i], channels);
-        initCombo (cmdCombo[i], { "CC", "NOTE" });
-        initEditor (paramEditor[i], 3, "0123456789");
-    }
-    applyMidiButton.setButtonText ("Apply MIDI");
-    applyMidiButton.onClick = [this] { postMidiButtons(); };
-    addAndMakeVisible (applyMidiButton);
-
     // ── Device network configuration ─────────────────────────────────────────────
     initSection (netHeader, "NETWORK (DEVICE)");
     initLabel (ipLabel, "IP Addr:");        netIp.init (*this);
     initLabel (maskLabel, "Subnet Mask:");  netMask.init (*this);
     initLabel (gatewayLabel, "Gateway:");   netGateway.init (*this);
     initLabel (destIpLabel, "Dest IP:");    netDestIp.init (*this);
-    initLabel (cisUdpPortLabel, "CIS UDP Port:");
+    initLabel (cisUdpPortLabel, "Stream Port:");
     initEditor (cisUdpPortEditor, 5, "0123456789");
-
-    initLabel (mdnsLabel, "mDNS:");
-    initCombo (mdnsCombo, { "Off", "On" });
-    mdnsCombo.onChange = [this] {
-        if (! applyingRemote)
-            deviceClient.postForm ("setMdnsEnabled", "mdns_enabled=" + juce::String (binVal (mdnsCombo)), {});
-    };
-
-    initLabel (rtpModeLabel, "RTP-MIDI:");
-    initCombo (rtpModeCombo, { "Server", "Client" });
-    rtpModeCombo.onChange = [this] {
-        if (! applyingRemote)
-            deviceClient.postForm ("setRtpMidiMode", "rtpmidi_mode=" + juce::String (binVal (rtpModeCombo)), {});
-    };
-
-    initLabel (midiCtrlPortLabel, "MIDI Ctrl Port:");
-    initEditor (midiCtrlPortEditor, 5, "0123456789");
-    midiCtrlPortEditor.onTextChange = [this] { updateMidiDataPortDisplay(); };
-
-    initLabel (midiDataPortLabel, "MIDI Data Port:");
-    midiDataPortValue.setJustificationType (juce::Justification::centredLeft);
-    midiDataPortValue.setFont (juce::FontOptions (Sp3ctraTheme::kFontSettings));
-    midiDataPortValue.setColour (juce::Label::textColourId, juce::Colour (Sp3ctraTheme::kColTextMuted));
-    addAndMakeVisible (midiDataPortValue);
+    initLabel (linkPortLabel, "Link Port:");
+    initEditor (linkPortEditor, 5, "0123456789");
+    initLabel (streamUnboundLabel, "Stream w/o host:");
+    initCombo (streamUnboundCombo, { "Off", "On" });
 
     applyNetworkButton.setButtonText ("Apply Network");
     applyNetworkButton.onClick = [this] { postNetwork(); };
@@ -342,6 +331,8 @@ SourceSetupPanel::SourceSetupPanel (Sp3ctraAudioProcessor& processor, juce::Colo
 
 SourceSetupPanel::~SourceSetupPanel()
 {
+    stopTimer();
+    if (auto* l = link()) l->removeChangeListener (this);
     deviceClient.cancel();
 }
 
@@ -349,12 +340,130 @@ SourceSetupPanel::~SourceSetupPanel()
 void SourceSetupPanel::visibilityChanged()
 {
     if (isShowing())
+    {
+        if (auto* l = link()) { l->removeChangeListener (this); l->addChangeListener (this); }
+        refreshLink();
+        startTimer (500);
         reload();
+    }
     else
     {
+        stopTimer();
+        if (auto* l = link()) l->removeChangeListener (this);
         deviceClient.cancel();   // HTTP is connectionless — just stop issuing
         loading = false;         // allow the next show to reload
     }
+}
+
+//==============================================================================
+Sp3ctraLink* SourceSetupPanel::link() const
+{
+    return audioProcessor.getLink();
+}
+
+void SourceSetupPanel::timerCallback()                       { refreshLink(); }
+void SourceSetupPanel::changeListenerCallback (juce::ChangeBroadcaster*) { refreshLink(); }
+
+void SourceSetupPanel::refreshLink()
+{
+    auto* l = link();
+    if (l == nullptr)
+    {
+        linkStatusLabel.setText ("Sp3ctra Link: not running (pipeline not started)", juce::dontSendNotification);
+        for (auto& r : deviceRows) { r.text.setVisible (false); r.button.setVisible (false); }
+        return;
+    }
+
+    const auto st  = l->status();
+    const auto dev = l->devices();
+    const juce::String preferred = MachinePrefs::linkPreferredUid();
+
+    // ── device rows ──────────────────────────────────────────────────────────
+    for (int i = 0; i < kMaxDeviceRows; ++i)
+    {
+        auto& r = deviceRows[i];
+        if (i >= (int) dev.size()) { r.text.setVisible (false); r.button.setVisible (false); r.uid.clear(); continue; }
+        const auto& d = dev[(size_t) i];
+        const bool ours = (st.state == Sp3ctraLink::State::Bound || st.state == Sp3ctraLink::State::Binding)
+                          && st.deviceUid == d.uid;
+        juce::String state;
+        juce::Colour col = juce::Colour (Sp3ctraTheme::kColTextMuted);
+        if (! d.supported())            { state = "unsupported fw " + d.fwString() + " (need 4.0+)"; col = juce::Colours::red; }
+        else if (ours)                  { state = st.state == Sp3ctraLink::State::Bound ? "bound" : "binding ..."; col = juce::Colours::green; }
+        else if (d.bound)               { state = "used by " + d.boundPeerIp; col = juce::Colours::orange; }
+        else                            { state = "free"; }
+        if (d.uid == preferred)         state << "  (preferred)";
+
+        r.uid = d.uid;
+        r.text.setText ((ours ? juce::String (juce::CharPointer_UTF8 ("\xe2\x97\x8f ")) : juce::String ("   "))
+                        + d.name + "   " + d.ip + "   fw " + d.fwString() + "   " + state,
+                        juce::dontSendNotification);
+        r.text.setColour (juce::Label::textColourId, col);
+        r.text.setVisible (true);
+        r.button.setButtonText (ours ? "RELEASE" : "USE");
+        r.button.setEnabled (ours || (d.supported() && ! d.bound));
+        r.button.onClick = [this, uid = d.uid, ours] { if (ours) releaseDevice(); else useDevice (uid); };
+        r.button.setVisible (true);
+    }
+
+    // ── status line ──────────────────────────────────────────────────────────
+    juce::String text;
+    juce::Colour col = juce::Colour (Sp3ctraTheme::kColTextMuted);
+    switch (st.state)
+    {
+        case Sp3ctraLink::State::Off:       text = "Sp3ctra Link: off"; break;
+        case Sp3ctraLink::State::Searching: text = "Searching ... " + juce::String ((int) dev.size()) + " device(s) seen"; col = juce::Colours::orange; break;
+        case Sp3ctraLink::State::Binding:   text = "Binding " + st.deviceName + " ..."; col = juce::Colours::orange; break;
+        case Sp3ctraLink::State::Bound:
+        {
+            slp_rx_stats rx {};
+            slp_rx_stats_snapshot (&rx);
+            text << "Bound to " << st.deviceName << " (" << st.deviceIp << ")  " << st.layout.dpi << " DPI  "
+                 << st.lineRateLps << " lps  HID " << st.layout.hidRateHz << " Hz  rtt " << st.rttMs << " ms  "
+                 << juce::String (st.tempC, 1) << " C  lost " << (int) (rx.line_lost + rx.hid_lost);
+            if (rx.legacy_datagrams > 0) text << "  [legacy stream!]";
+            col = juce::Colours::green;
+            break;
+        }
+    }
+    if (st.lastError.isNotEmpty() && st.state != Sp3ctraLink::State::Bound)
+        text << "  -- " << st.lastError;
+    linkStatusLabel.setColour (juce::Label::textColourId, col);
+    linkStatusLabel.setText (text, juce::dontSendNotification);
+
+    // A fresh session: the processor already re-pointed the device IP; refresh
+    // the HTTP page so the device settings follow the bound device.
+    const bool bound = st.state == Sp3ctraLink::State::Bound;
+    if (bound && ! linkWasBound && st.generation != lastLinkGen)
+    {
+        deviceIp.set (st.deviceIp);
+        juce::Component::SafePointer<SourceSetupPanel> safe (this);
+        juce::Timer::callAfterDelay (200, [safe] { if (auto* s = safe.getComponent()) s->reload(); });
+    }
+    linkWasBound = bound;
+    lastLinkGen  = st.generation;
+}
+
+void SourceSetupPanel::useDevice (const juce::String& uid)
+{
+    MachinePrefs::setLinkPreferredUid (uid);
+    if (auto* l = link())
+    {
+        l->setPreferredUid (uid);
+        l->bindTo (uid);
+    }
+    refreshLink();
+}
+
+void SourceSetupPanel::releaseDevice()
+{
+    MachinePrefs::setLinkPreferredUid ({});
+    if (auto* l = link())
+    {
+        l->setPreferredUid ({});
+        l->unbind();
+    }
+    refreshLink();
 }
 
 juce::String SourceSetupPanel::deviceHostFromApvts() const
@@ -428,24 +537,14 @@ void SourceSetupPanel::populate (const DC::DeviceConfig& cfg)
     motionAccEditor.setText (juce::String (cfg.motionThresholdAcc, 2), false);
     motionGyroEditor.setText (juce::String (cfg.motionThresholdGyro, 1), false);
 
-    // MIDI mapping
-    for (int i = 0; i < 3; ++i)
-    {
-        chCombo[i].setSelectedId (juce::jlimit (1, 16, cfg.midi[i].channel + 1), juce::dontSendNotification);
-        cmdCombo[i].setSelectedId (binId (cfg.midi[i].command), juce::dontSendNotification);
-        paramEditor[i].setText (juce::String (cfg.midi[i].param), false);
-    }
-
     // Network
     netIp.set (cfg.network.ip);
     netMask.set (cfg.network.mask);
     netGateway.set (cfg.network.gateway);
     netDestIp.set (cfg.network.destIp);
     cisUdpPortEditor.setText (juce::String (cfg.network.udpPort), false);
-    mdnsCombo.setSelectedId (binId (cfg.mdnsEnabled ? 1 : 0), juce::dontSendNotification);
-    rtpModeCombo.setSelectedId (binId (cfg.rtpMidiMode), juce::dontSendNotification);
-    midiCtrlPortEditor.setText (juce::String (cfg.network.rtpMidiControlPort), false);
-    updateMidiDataPortDisplay();
+    linkPortEditor.setText (juce::String (cfg.network.linkPort), false);
+    streamUnboundCombo.setSelectedId (binId (cfg.network.streamWhenUnbound ? 1 : 0), juce::dontSendNotification);
 
     fwVersionLabel.setText ("Version: " + (cfg.firmwareVersion.isNotEmpty() ? cfg.firmwareVersion
                                                                             : juce::String ("--")),
@@ -474,12 +573,10 @@ void SourceSetupPanel::setDeviceControlsEnabled (bool on)
         &dpiCombo, &ovspCombo, &handCombo, &calibrateCisButton,
         &gyroCombo, &accelCombo, &calibrateImuButton,
         &showImuCombo, &invertCombo, &screensaverEditor, &motionAccEditor, &motionGyroEditor,
-        &applyMidiButton,
-        &cisUdpPortEditor, &mdnsCombo, &rtpModeCombo, &midiCtrlPortEditor, &applyNetworkButton,
+        &cisUdpPortEditor, &linkPortEditor, &streamUnboundCombo, &applyNetworkButton,
         &uploadFwButton, &factoryResetButton
     };
     for (auto* c : ctrls) c->setEnabled (on);
-    for (int i = 0; i < 3; ++i) { chCombo[i].setEnabled (on); cmdCombo[i].setEnabled (on); paramEditor[i].setEnabled (on); }
     for (auto* g : { &netIp, &netMask, &netGateway, &netDestIp })
         for (auto& b : g->box) b.setEnabled (on);
 }
@@ -517,25 +614,6 @@ void SourceSetupPanel::postDpi()
     juce::Timer::callAfterDelay (9000, [safe] { if (auto* s = safe.getComponent()) s->reload(); });
 }
 
-void SourceSetupPanel::postMidiButtons()
-{
-    juce::String body;
-    for (int i = 0; i < 3; ++i)
-    {
-        const int ch  = juce::jmax (0, chCombo[i].getSelectedId() - 1);
-        const int cmd = binVal (cmdCombo[i]);
-        const int prm = paramEditor[i].getText().getIntValue();
-        body << "b" << i << "_ch=" << ch << "&b" << i << "_cmd=" << cmd
-             << "&b" << i << "_param=" << prm;
-        if (i < 2) body << "&";
-    }
-    juce::Component::SafePointer<SourceSetupPanel> safe (this);
-    deviceClient.postForm ("setMidiButtonConfig", body, [safe] (bool ok) {
-        if (auto* s = safe.getComponent())
-            s->setConnState (s->connState, ok ? "MIDI mapping saved" : "MIDI save failed");
-    });
-}
-
 void SourceSetupPanel::postNetwork()
 {
     juce::String body;
@@ -544,7 +622,8 @@ void SourceSetupPanel::postNetwork()
          << "&gateway=" << netGateway.get()
          << "&dest_ip=" << netDestIp.get()
          << "&udp_port=" << cisUdpPortEditor.getText().trim()
-         << "&rtpmidi_control_port=" << midiCtrlPortEditor.getText().trim();
+         << "&link_port=" << linkPortEditor.getText().trim()
+         << "&stream_when_unbound=" << binVal (streamUnboundCombo);
 
     juce::Component::SafePointer<SourceSetupPanel> safe (this);
     deviceClient.postForm ("updateNetworkConfig", body, [safe] (bool ok) {
@@ -552,14 +631,6 @@ void SourceSetupPanel::postNetwork()
             s->setConnState (s->connState, ok ? "Network settings applied (device IP may change)"
                                               : "Network apply failed");
     });
-}
-
-void SourceSetupPanel::updateMidiDataPortDisplay()
-{
-    const int ctrl = midiCtrlPortEditor.getText().getIntValue();
-    midiDataPortValue.setText (ctrl > 0 ? juce::String (juce::jmin (65535, ctrl + 1))
-                                        : juce::String ("--"),
-                               juce::dontSendNotification);
 }
 
 //==============================================================================
@@ -736,7 +807,22 @@ void SourceSetupPanel::resized()
         y += Sp3ctraTheme::kSectionH;
     };
 
-    // LINK
+    // LINK — discovered devices (one row each), status, policy, transport
+    devicesLabel.setBounds (Sp3ctraTheme::kHPad, y + vc, labelW, ctrlH);
+    {
+        const int useW = 80;
+        const int textW = w - ctrlX - Sp3ctraTheme::kHPad - useW - Sp3ctraTheme::kGap;
+        for (auto& r : deviceRows)
+        {
+            r.text.setBounds (ctrlX, y + vc, juce::jmax (100, textW), ctrlH);
+            r.button.setBounds (ctrlX + juce::jmax (100, textW) + Sp3ctraTheme::kGap, y + vc, useW, ctrlH);
+            y += rowH;
+        }
+    }
+    linkStatusLabel.setBounds (Sp3ctraTheme::kHPad, y + vc, w - 2 * Sp3ctraTheme::kHPad, ctrlH);
+    y += rowH;
+    autoBindToggle.setBounds (Sp3ctraTheme::kHPad, y + vc, w - 2 * Sp3ctraTheme::kHPad, ctrlH);
+    y += rowH;
     rowIp (deviceIpLabel, deviceIp);
     row   (udpPortLabel, udpPortEditor);
     rowIp (udpAddressLabel, udpAddr);
@@ -770,22 +856,6 @@ void SourceSetupPanel::resized()
     row (motionAccLabel, motionAccEditor);
     row (motionGyroLabel, motionGyroEditor);
 
-    // MIDI
-    section (midiHeader);
-    for (int i = 0; i < 3; ++i)
-    {
-        swLabel[i].setBounds (Sp3ctraTheme::kHPad, y + vc, labelW, ctrlH);
-        const int chW  = juce::jmin (70, ctrlW / 3);
-        const int cmdW = juce::jmin (80, ctrlW / 3);
-        const int prmW = juce::jmax (44, ctrlW - chW - cmdW - 2 * Sp3ctraTheme::kGap);
-        int x = ctrlX;
-        chCombo[i].setBounds (x, y + vc, chW, ctrlH);   x += chW + Sp3ctraTheme::kGap;
-        cmdCombo[i].setBounds (x, y + vc, cmdW, ctrlH);  x += cmdW + Sp3ctraTheme::kGap;
-        paramEditor[i].setBounds (x, y + vc, prmW, ctrlH);
-        y += rowH;
-    }
-    rowButton (applyMidiButton, 140);
-
     // NETWORK (device)
     section (netHeader);
     rowIp (ipLabel, netIp);
@@ -793,10 +863,8 @@ void SourceSetupPanel::resized()
     rowIp (gatewayLabel, netGateway);
     rowIp (destIpLabel, netDestIp);
     row (cisUdpPortLabel, cisUdpPortEditor);
-    row (mdnsLabel, mdnsCombo);
-    row (rtpModeLabel, rtpModeCombo);
-    row (midiCtrlPortLabel, midiCtrlPortEditor);
-    row (midiDataPortLabel, midiDataPortValue);
+    row (linkPortLabel, linkPortEditor);
+    row (streamUnboundLabel, streamUnboundCombo);
     rowButton (applyNetworkButton, 140);
 
     // FIRMWARE

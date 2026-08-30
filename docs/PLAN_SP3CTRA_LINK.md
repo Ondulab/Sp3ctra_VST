@@ -609,9 +609,23 @@ calibration, X/Y ≈ 0). Quatre bugs trouvés et corrigés grâce au matériel :
 dans un pbuf lwIP (`netbuf_ref` sur un buffer statique n'est pas sûr avec le DMA ETH) ; calibration
 accéléro en unités mixtes (biais ×9,81 → +7,4 g au repos, bug préexistant) ; échantillonnage IMU figé
 après calibration (attente SPI idle, abort avant réinit, auto-réparation dans `TIM_Callback`, tampon DMA
-aligné sur sa ligne de cache). Outil : `--via-broadcast a.b.c.255` (shell sans permission « Réseau
+aligné sur sa ligne de cache) ; **le CM4 ne peut pas lire l'UID du MCU** (bus fault à 0x1FF1E800 →
+HardFault dès la première image de boot : plus d'animation, écran figé, LEDs/OLED muets — le CM7 publie
+désormais `shared_feedback.device_name` avant de libérer le CM4, `sys_identity.c` est CM7-only ; diagnostiqué
+par lecture SWD hotplug des registres de faute du CM4 via `ap=3`). Outil : `--via-broadcast a.b.c.255` (shell sans permission « Réseau
 local »), `--stream-port`, filtrage par adresse source, lps mesuré côté CM7, overlay/lien réveillent
 l'écran de veille. Restent à voir de visu : LED2, bandeau OLED, réveil de veille.
+
+**Écran de boot et veille (2026-08-30, demande utilisateur)** : logo réduit 180×46 centré sur l'animation
+d'ondes + bandeau opaque (nom · version / IP · **étape de boot du CM7** avec points animés :
+STARTING → CONFIG → NETWORK → LINK → IMU → SENSOR → READY, publiée dans `shared_feedback.boot_stage`) ;
+veille = **fond seul, aucun logo ni texte** (toute forme tenue en place brûle l'OLED) : l'animation d'ondes
+**d'origine** est conservée telle quelle (modulation de fréquence/épaisseur par ligne) — une réécriture en
+rubans dérivants a été essayée puis abandonnée (« effet Windows 95 ») ; seule protection ajoutée : un
+**décalage vertical de tout le champ** d'un espacement de ligne toutes les 60 s (0,27 px/s, invisible d'une
+image à l'autre, rebouclé sur l'espacement → image statistiquement identique mais aucune rangée à
+éclairement moyen constant), plus une ligne rendue au-delà de chaque bord et `sin()` → `sinf()` ; puis **extinction du panneau** (`0xAE`) après `DEFAULT_SCREENSAVER_DISPLAY_OFF_SEC` = 600 s, rallumage sur
+mouvement / bouton / overlay / lien. Candidat CFG ultérieur : délai d'extinction configurable.
 
 Ancienne consigne (pour mémoire) : flasher (`scripts/flash.sh all`), puis depuis un Terminal
 `python3 scripts/slp/slp_tool.py discover` → `stat` → `hid` (appuyer sur les boutons) → `lines` → `led` → `overlay` → `cfg get`.
@@ -678,3 +692,29 @@ Principe : l'OLED montre **ce que l'on est en train de toucher, si cela concerne
 - **Contenu** : label = `getName(14)` (8 px) ou `getName(12)` (16 px), valeur = `getCurrentValueAsText()` tronquée à 10 (unités comprises : « -12.5 dB », « 1200 Hz », « Hold »), barre = valeur normalisée (drapeau bipolaire = repère central quand min < 0 < max ; pas de barre pour les booléens), TTL = Hold.
 - **Cadence** : émission coalescée ≤ 20 Hz et seulement si le contenu change ; latence typique geste → OLED < 50 ms (ring → timer 30 ms → UDP). L'automation d'hôte peut faire défiler des dizaines de paramètres : le tri « 3 plus récents » et le coalescing bornent le débit à 20 datagrammes/s de 100 o.
 - Seul le process **lié** émet ; un VST en mode multicast (second process) ne pilote ni l'OLED ni les LEDs.
+
+### 12.5 V2 réalisé (VST, 2026-08-30) — client de lien, parseur v2, SETUP
+- `communication/link/sp3ctra_link.h` = copie du contrat (garde `scripts/check_link_header.sh`, `--sync` pour recopier).
+- `communication/link/Sp3ctraLink.{h,cpp}` : thread du canal de contrôle dans `Sp3ctraSharedCore` — HELLO sur le
+  broadcast dirigé de chaque interface + hôtes manuels (= « Device IP »), registre des devices (expiration 5 s),
+  politique de liaison (UID préféré `MachinePrefs link.preferredUid`, sinon l'unique device libre si
+  `link.autoBind`), BIND avec **notre** port d'écoute (multicast si l'adresse configurée est multicast),
+  PING 500 ms, expiration, re-BIND sur changement de port (restart UDP), file de retour coalescée
+  (`setLed` / `setOverlay` / `clearOverlay` / `requestCalibration`, flushée par le thread),
+  `ChangeBroadcaster` + `Status.generation` pour l'UI. Variable `SP3CTRA_LINK_BROADCAST_CTRL=1` = mode de
+  test qui envoie le contrôle sur le broadcast dirigé (shells sans permission « Réseau local »).
+- `communication/link/slp_rx_state.{h,c}` : instantané HID seqlock (`slp_hid_read` → génération) + statistiques
+  de réception (`slp_rx_stats_snapshot`).
+- `threading/multithreading.c` : parseur SLP v1 (magic/version/longueur), LINE réassemblée par
+  `pixel_offset/pixel_count/fragment_count` (auto-descriptif, clip à la largeur allouée), HID → snapshot +
+  miroir `Context`, comptage des pertes par flux, détection d'un firmware < 4.0, stats loguées toutes les 10 s ;
+  structs `packet_*` supprimées.
+- `PluginProcessor::pollLink()` (timer 30 ms) : pousse la politique machine et l'hôte manuel, puis à chaque
+  changement de session **réconcilie `sensorDpi`** depuis `BIND_ACK` et recopie l'IP du device dans
+  `deviceIpByte1..4` (hôte HTTP) — plus de saisie d'IP nécessaire.
+- SETUP / LINK : liste des devices (nom · IP · fw · libre / lié / utilisé par… / non supporté, bouton USE/RELEASE),
+  ligne d'état (DPI, lps, HID, rtt, température, pertes), case « connexion automatique », Device IP (cible HELLO
+  + HTTP), Stream Port, Multicast ; sections MIDI CHANNELS et mDNS/RTP-MIDI retirées ; NETWORK gagne Link Port +
+  Stream w/o host (`updateNetworkConfig` v4.0). `Sp3ctraDeviceClient` purgé des champs RTP/MIDI.
+- **Validé sur le vrai CIS** : découverte, BIND (400 DPI, 12 × 288, HID 200 Hz), session confirmée côté device
+  (`host 1.4.x`), lignes et HID reçus (stats), pertes 0.
