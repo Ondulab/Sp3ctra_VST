@@ -9,7 +9,7 @@
  *   TTS block (voice + text + Rate/Expression/Silence)
  *   → synthesized WAV (cached in Application Support/Sp3ctra/voice_renders)
  *   → same top waveform strip with page-window picker + source audition
- *   → same Writing Speed / Page / DPI / Multi-res generation controls
+ *   → same Writing Speed / Page / DPI generation controls
  *   → GENERATE (worker thread) → page preview + IMAGE EQ + PNG/JPEG export
  *   → same shared score-player transport (scoreLoop/scoreReverse/scoreSpeed/
  *     scorePlaying params, LuxSampler::loadScoreFramesFromImage + uiPlayScore).
@@ -249,16 +249,6 @@ public:
         // Page format / DPI / PNG-vs-JPEG moved to the SETUP face
         // (VoiceSetupPanel) — it edits this page's settings_ through the
         // public accessors below (VOICE takes are mono → no Stereo option).
-        multiResToggle.setButtonText("Multi-res transients");
-        multiResToggle.setToggleState(settings_.enableMultiRes != 0,
-                                      juce::dontSendNotification);
-        multiResToggle.onClick = [this]
-        {
-            settings_.enableMultiRes = multiResToggle.getToggleState() ? 1 : 0;
-            markDirty();
-        };
-        addAndMakeVisible(multiResToggle);
-
         // ── Waveform region picker (which part of the take to extract) ───────
         waveform.onStartChange = [this](double startSec)
         {
@@ -862,9 +852,6 @@ public:
             y += ch + gap + 4;
         }
         // Page / DPI / image format live on the SETUP face (VoiceSetupPanel).
-        multiResToggle.setBounds(pad, y, colW, ch);
-        y += ch + gap + 4;
-
         generateButton.setBounds(pad, y, colW, ch + 4); y += ch + 8;
         progressBar.setBounds(pad, y, colW, ch);        y += ch + gap;
         exportButton.setBounds(pad, y, colW, ch);
@@ -1986,7 +1973,6 @@ private:
         root->setProperty("ws",    d.settings.writingSpeed);
         root->setProperty("page",  d.settings.pageFormat);
         root->setProperty("dpi",   d.settings.printerDpi);
-        root->setProperty("mres",  d.settings.enableMultiRes);
         root->setProperty("start", d.settings.startTimeSec);
         root->setProperty("sel",   d.settings.selectionSec);
         root->setProperty("png",   d.exportAsPng);
@@ -2061,7 +2047,6 @@ private:
         if (o->hasProperty("ws"))    d.settings.writingSpeed   = (double) o->getProperty("ws");
         if (o->hasProperty("page"))  d.settings.pageFormat     = (int)    o->getProperty("page");
         if (o->hasProperty("dpi"))   d.settings.printerDpi     = (double) o->getProperty("dpi");
-        if (o->hasProperty("mres"))  d.settings.enableMultiRes = (int)    o->getProperty("mres");
         if (o->hasProperty("start")) d.settings.startTimeSec   = (double) o->getProperty("start");
         if (o->hasProperty("sel"))   d.settings.selectionSec   = (double) o->getProperty("sel");
         if (o->hasProperty("png"))   d.exportAsPng             = (bool)   o->getProperty("png");
@@ -2323,8 +2308,6 @@ private:
         exprSlider   .setValue(expr,    juce::dontSendNotification);
         silenceSlider.setValue(silence, juce::dontSendNotification);
         wsSlider     .setValue(settings_.writingSpeed, juce::dontSendNotification);
-        multiResToggle.setToggleState(settings_.enableMultiRes != 0,
-                                      juce::dontSendNotification);
         rebuildVoiceCombo();
 
         // The take is a FILE per instance: re-point the waveform strip at it.
@@ -2445,7 +2428,6 @@ private:
     juce::Label      logLabel;
     juce::Label      wsLabel;
     Sp3ctraBarSlider wsSlider;
-    juce::ToggleButton multiResToggle;
     ScoreSettings    settings_ {};     // VOICE's own page settings (persisted in the blob)
 
     // Playback transport (this instance's own score-player slot).

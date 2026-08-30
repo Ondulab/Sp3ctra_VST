@@ -61,6 +61,9 @@ public:
     {
         viewport_.setMidiMap(&proc.getMidiMap());
         addAndMakeVisible(viewport_);
+        // The box label of the setting being edited takes the control colour
+        // (the pad lights its element and card at the same time).
+        viewport_.onActiveParamChanged = [this] { repaintLabels(); };
 
         // Continuous orientation (degrees, clockwise): 0 = scroll up, 90 = new
         // lines at the left, 180 = scroll down, 270 = at the right.
@@ -119,22 +122,35 @@ public:
         ModuleChrome::drawSectionCaption(g, ModuleChrome::kPageTop + kEditorsH, getWidth(),
                                          accent, "VIDEO SCROLL");
 
-        ModuleChrome::drawBoxLabel(g, rotationSlider_,  accent, "Rotation");
-        ModuleChrome::drawBoxLabel(g, zoomSlider_,      accent, "Zoom");
-        ModuleChrome::drawBoxLabel(g, centerXSlider_,   accent, "Center X");
-        ModuleChrome::drawBoxLabel(g, centerYSlider_,   accent, "Center Y");
-        ModuleChrome::drawBoxLabel(g, linePosSlider_,   accent, "Line Pos");
+        // Labels: module colour, except the setting being edited (from the
+        // pad, its box or MIDI) which takes the control colour — the same
+        // "lit" grammar as the pad's element and card.
+        using P = VideoScrollViewportEditor::Param;
+        const P active = viewport_.activeParam();
+        auto label = [&](const juce::Component& box, P p, const char* text)
+        {
+            const auto bb = box.getBounds();
+            g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
+            g.setColour(active == p ? Sp3ctraHandles::colour() : accent.withAlpha(0.6f));
+            g.drawText(text, bb.getX(), bb.getY() - ModuleChrome::kLabelH, bb.getWidth(),
+                       ModuleChrome::kLabelH, juce::Justification::centred, false);
+        };
+        label(rotationSlider_,  P::Rotation,  "Rotation");
+        label(zoomSlider_,      P::Zoom,      "Zoom");
+        label(centerXSlider_,   P::CenterX,   "Center X");
+        label(centerYSlider_,   P::CenterY,   "Center Y");
+        label(linePosSlider_,   P::LinePos,   "Line Pos");
 
-        ModuleChrome::drawBoxLabel(g, speedSlider_,     accent, "Speed");
-        ModuleChrome::drawBoxLabel(g, thicknessSlider_, accent, "Thickness");
-        ModuleChrome::drawBoxLabel(g, compressSlider_,  accent, "Compression");
-        ModuleChrome::drawBoxLabel(g, fadeSlider_,      accent, "Fade");
-        ModuleChrome::drawBoxLabel(g, blurSlider_,      accent, "Blur");
-        ModuleChrome::drawBoxLabel(g, gammaSlider_,     accent, "Gamma");
+        label(speedSlider_,     P::Speed,     "Speed");
+        label(thicknessSlider_, P::Thickness, "Thickness");
+        label(compressSlider_,  P::Compress,  "Compression");
+        label(fadeSlider_,      P::Fade,      "Fade");
+        label(blurSlider_,      P::Blur,      "Blur");
+        label(gammaSlider_,     P::Gamma,     "Gamma");
 
-        ModuleChrome::drawBoxLabel(g, invertCombo_,     accent, "Invert");
-        ModuleChrome::drawBoxLabel(g, colorButton_,     accent, "Color");
-        ModuleChrome::drawBoxLabel(g, bgSwatch_,        accent, "Background");
+        label(invertCombo_,     P::Paper,     "Invert");
+        label(colorButton_,     P::Paper,     "Color");
+        label(bgSwatch_,        P::Paper,     "Background");
 
         if (slot_ < 0)
         {
@@ -378,6 +394,21 @@ private:
         learn(invertCombo_,     "invertMode");
         learn(colorButton_,     "colorMode");
         repaint();
+    }
+
+    /** Repaint the label strips only (not the pad, not the boxes). */
+    void repaintLabels()
+    {
+        const juce::Component* const boxes[] = { &rotationSlider_, &zoomSlider_, &centerXSlider_,
+                                                 &centerYSlider_, &linePosSlider_, &speedSlider_,
+                                                 &thicknessSlider_, &compressSlider_, &fadeSlider_,
+                                                 &blurSlider_, &gammaSlider_, &invertCombo_,
+                                                 &colorButton_, &bgSwatch_ };
+        for (const juce::Component* c : boxes)
+        {
+            const auto bb = c->getBounds();
+            repaint(bb.getX(), bb.getY() - ModuleChrome::kLabelH, bb.getWidth(), ModuleChrome::kLabelH);
+        }
     }
 
     Sp3ctraAudioProcessor& processor_;

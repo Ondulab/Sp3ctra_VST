@@ -15,16 +15,25 @@
  *   • the birth line inside it (Line Pos);
  *   • the parameters without a handle, made visible ON the axis (see
  *     drawFlowAndAging): the stamped bar (Thickness) as a band centred on
- *     the line; on each side of the line that is still inside the window, a
- *     time ruler whose ticks bunch toward the edge with Compression, go out
- *     with Fade and widen with Blur; and 1–3 flow chevrons for |Speed|,
- *     pointing away from the line (toward it when Speed < 0). The renderer
- *     pushes history away from the line on BOTH sides, so a single outward
- *     arrow was wrong — and vanished when the line sat on an edge;
+ *     the line; on each side of the line still inside the window: a time
+ *     ruler whose ticks bunch toward the edge with Compression, a ribbon
+ *     beside the axis that dies out with Fade (the aging dim law), wedges
+ *     on the band edges that widen with Blur (the smear), and 1–3 flow
+ *     chevrons for |Speed| pointing away from the line (toward it when
+ *     Speed < 0). The renderer pushes history away from the line on BOTH
+ *     sides, so a single outward arrow was wrong — and vanished when the
+ *     line sat on an edge;
  *   • the handles: centre node + outline (move), four corner rings (zoom), a
- *     lever on the frame's leading edge (rotation). Hovering a handle names
- *     it with its value; a key of the drawing sits in the free zone left of
- *     the window when there is room.
+ *     lever on the frame's leading edge (rotation);
+ *   • a column of setting cards (glyph · name · value, one per parameter,
+ *     Gamma and the display law included) in the free zone left of the
+ *     window when there is room (drawCards).
+ *
+ * Edit glow: every parameter is bound (ParameterAttachment), so a change
+ * from ANY source — a handle, a box below, a MIDI controller — lights its
+ * element, its card and (through onActiveParamChanged) its box label in
+ * the control colour for kGlowMs, with a name + value readout at the
+ * element: "what is being edited" is always visible in the picture.
  *
  * Gestures (VideoScrollRenderCore::drawWarp / birthLine01 are the model —
  * the pad reproduces their geometry exactly, so what you grab is what the
@@ -59,6 +68,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <array>
 #include <cmath>
 #include <memory>
 #include "../UITheme.h"
@@ -73,10 +83,34 @@
 class VideoScrollViewportEditor : public juce::Component,
                                   public juce::SettableTooltipClient
 {
-    struct Geo;   // screen geometry — defined below (private), used by member signatures above it
+    struct Geo;     // screen geometry — defined below (private), used by member signatures above it
+    struct Bound;   // a bound parameter — idem
 public:
-    static constexpr int kGraphH     = 240;      // the frame alone (boxes live in the page)
+    // The frame alone (boxes live in the page). 420 (240 until 2026-08-30 —
+    // "the VIEWPORT window must be bigger"): a ~395 px square window at 1×,
+    // the page scrolls in zone 3 and the ALL view stacks one per output.
+    static constexpr int kGraphH     = 420;
     static constexpr int kPreferredH = kGraphH;
+
+    /** Every setting the pad visualises — one element / card each, lit in
+     *  the control colour while it is being edited from any source. Paper =
+     *  the display law group (Invert / Color / Background). */
+    enum class Param { Rotation, Zoom, CenterX, CenterY, LinePos, Speed, Thickness,
+                       Compress, Fade, Blur, Gamma, Paper, Count };
+
+    /** The setting edited most recently (still glowing), else Count. */
+    Param activeParam() const noexcept { return lastActive_; }
+
+    /** Fired when activeParam() changes — the page tints that box's label. */
+    std::function<void()> onActiveParamChanged;
+
+    /** Screen anchors of the axis indicators, filled by drawFlowAndAging
+     *  (the readout of an edited setting sits at its own element). */
+    struct Marks
+    {
+        juce::Point<float> speed, thickness, compress, fade, blur;
+        bool hasSpeed = false, hasCompress = false, hasFade = false, hasBlur = false;
+    };
 
     VideoScrollViewportEditor(juce::AudioProcessorValueTreeState& apvtsIn,
                               juce::Colour accentColour)
@@ -105,13 +139,24 @@ public:
     void setSlot(int slot)
     {
         slot_ = slot;
-        for (auto* b : { &rot_, &zoom_, &cx_, &cy_, &line_ }) b->attach.reset();
+        for (auto* b : allBounds()) { b->attach.reset(); b->live = false; b->editMs = -1.0e12; }
+        lastActive_ = Param::Count;
+        glowing_    = false;
         if (slot_ < 0) { repaint(); return; }
-        bind(rot_,  vsParam(slot_, "rotation"));
-        bind(zoom_, vsParam(slot_, "zoom"));
-        bind(cx_,   vsParam(slot_, "centerX"));
-        bind(cy_,   vsParam(slot_, "centerY"));
-        bind(line_, vsParam(slot_, "linePos"));
+        bind(rot_,   Param::Rotation,  vsParam(slot_, "rotation"));
+        bind(zoom_,  Param::Zoom,      vsParam(slot_, "zoom"));
+        bind(cx_,    Param::CenterX,   vsParam(slot_, "centerX"));
+        bind(cy_,    Param::CenterY,   vsParam(slot_, "centerY"));
+        bind(line_,  Param::LinePos,   vsParam(slot_, "linePos"));
+        bind(speed_, Param::Speed,     vsParam(slot_, "speed"));
+        bind(thick_, Param::Thickness, vsParam(slot_, "thickness"));
+        bind(comp_,  Param::Compress,  vsParam(slot_, "compress"));
+        bind(fade_,  Param::Fade,      vsParam(slot_, "fade"));
+        bind(blur_,  Param::Blur,      vsParam(slot_, "blur"));
+        bind(gamma_, Param::Gamma,     vsParam(slot_, "gamma"));
+        static const char* const paperIds[kPaperN] = { "invertMode", "colorMode", "bgR", "bgG", "bgB" };
+        for (int i = 0; i < kPaperN; ++i)
+            bind(paper_[i], Param::Paper, vsParam(slot_, paperIds[i]));
         repaint();
     }
 
@@ -123,16 +168,39 @@ public:
      *  mixer stops soloing its output. */
     void previewTick()
     {
-        if (slot_ < 0 || source_ == nullptr || ! isShowing()) return;
-        source_->requestOutputPreview(slot_);
-        const uint32_t fc = source_->frameCounter();
-        const auto vs = source_->viewSize();
-        if (fc != lastFrame_ || vs != lastView_)
+        if (slot_ < 0 || ! isShowing()) return;
+        const double now = juce::Time::getMillisecondCounterHiRes();
+        nowMs_ = now;
+
+        // Edit glow: keep repainting while an element is lit; when the last
+        // one goes out, the active setting is cleared (page label follows).
+        bool need = false;
+        if (glowing_)
         {
-            lastFrame_ = fc;
-            lastView_  = vs;
-            repaint();
+            need = true;
+            if (maxHeat() <= 0.0f)
+            {
+                glowing_    = false;
+                lastActive_ = Param::Count;
+                if (onActiveParamChanged) onActiveParamChanged();
+            }
         }
+        if (source_ != nullptr)
+        {
+            source_->requestOutputPreview(slot_);
+            const uint32_t fc = source_->frameCounter();
+            const auto vs = source_->viewSize();
+            if (fc != lastFrame_ || vs != lastView_) need = true;
+        }
+        if (! need) return;
+        // Throttle: the thumbnail is a multi-megapixel blit — every other
+        // editor tick (10 Hz) is plenty for a waterfall and halves the
+        // message-thread cost of an ALL view full of pads. A frame skipped
+        // here is caught on the next tick (lastFrame_ only moves on repaint).
+        if (now - lastRepaintMs_ < kMinRepaintMs) return;
+        lastRepaintMs_ = now;
+        if (source_ != nullptr) { lastFrame_ = source_->frameCounter(); lastView_ = source_->viewSize(); }
+        repaint();
     }
 
     //==========================================================================
@@ -144,6 +212,7 @@ public:
 
     void paint(juce::Graphics& g) override
     {
+        nowMs_ = juce::Time::getMillisecondCounterHiRes();
         ModuleChrome::drawFrame(g, frame_, accent_);
         ModuleChrome::drawCaption(g, frame_, accent_, "VIEWPORT");
 
@@ -159,25 +228,26 @@ public:
         ModuleChrome::drawReadout(g, frame_, accent_, readoutText());
 
         // ── Window: thumbnail (this output alone), veiled outside the band ──
+        // The image is blitted ONCE (it is multi-megapixel); the veil is a
+        // single even-odd fill of "window minus band" on top — not a second
+        // blit clipped to the band (that doubled the pad's cost).
         {
             juce::Graphics::ScopedSaveState ss(g);
             g.reduceClipRegion(geo.win.getSmallestIntegerContainer());
-            const juce::Image img = source_ != nullptr ? source_->outputFrame(slot_) : juce::Image();
-            auto paintWindow = [&]
-            {
-                g.setColour(paperColour());
-                g.fillRect(geo.win);
-                if (img.isValid())
-                {
-                    g.setImageResamplingQuality(juce::Graphics::mediumResamplingQuality);
-                    g.drawImage(img, geo.win, juce::RectanglePlacement::stretchToFit);
-                }
-            };
-            paintWindow();
-            g.setColour(juce::Colours::black.withAlpha(0.5f));   // veil = outside the band
+            g.setColour(paperColour());
             g.fillRect(geo.win);
-            g.reduceClipRegion(bandPath(geo));
-            paintWindow();
+            const juce::Image img = source_ != nullptr ? source_->outputFrame(slot_) : juce::Image();
+            if (img.isValid())
+            {
+                g.setImageResamplingQuality(juce::Graphics::mediumResamplingQuality);
+                g.drawImage(img, geo.win, juce::RectanglePlacement::stretchToFit);
+            }
+            juce::Path veil;
+            veil.addRectangle(geo.win);
+            veil.addPath(bandPath(geo));
+            veil.setUsingNonZeroWinding(false);   // rect XOR band = outside the band
+            g.setColour(juce::Colours::black.withAlpha(0.5f));
+            g.fillPath(veil);
         }
 
         // ── Display layer (module colour): window edge, band edges, axis ────
@@ -185,8 +255,8 @@ public:
             juce::Graphics::ScopedSaveState ss(g);
             g.reduceClipRegion(plot_.getSmallestIntegerContainer());
 
-            g.setColour(accent_.withAlpha(0.55f));
-            g.drawRect(geo.win, 1.0f);
+            // Window edge — lit while the display law (paper) is edited.
+            { juce::Path w; w.addRectangle(geo.win); strokeMark(g, w, Param::Paper, 0.55f, 1.0f); }
 
             const float L = geo.k * std::hypot(geo.W, geo.H);   // covers the window at any angle
             g.setColour(accent_.withAlpha(0.35f));
@@ -200,9 +270,9 @@ public:
             g.setColour(accent_.withAlpha(0.3f));
             g.drawDashedLine({ geo.C - geo.v * L, geo.C + geo.v * L }, dash, 2, 1.0f);
 
-            // Thickness bar, time ruler (compression / fade / blur), flow
-            // chevrons (speed) — inside the window, on the axis.
-            drawFlowAndAging(g, geo);
+            // Thickness bar, compression ruler, fade ribbon, blur wedges, flow
+            // chevrons — inside the window, on the axis; each lit when edited.
+            const Marks marks = drawFlowAndAging(g, geo);
 
             // ── Controls (lime): vignette, birth line, corners, lever, centre ──
             const auto sBody   = stateOf(Handle::Body);
@@ -230,16 +300,20 @@ public:
 
             Sp3ctraHandles::drawNode(g, geo.C, sBody);
 
-            // Name + value of the handle under the pointer (or being dragged).
+            // Readout: the handle under the pointer / being dragged; else the
+            // setting edited most recently (box, MIDI…) at its own element.
             // The dial (anywhere outside the vignette) is not named on hover —
             // it would label the whole pad.
             const Handle named = dragging_ != Handle::None ? dragging_
                                : (hovered_ != Handle::Dial ? hovered_ : Handle::None);
             if (named != Handle::None)
                 Sp3ctraHandles::drawReadout(g, handleReadout(named), anchorOf(named, geo), plot_);
+            else if (lastActive_ != Param::Count)
+                Sp3ctraHandles::drawReadout(g, paramReadout(lastActive_),
+                                            anchorOf(lastActive_, geo, marks), plot_);
         }
 
-        drawKey(g, geo);
+        drawCards(g, geo);
     }
 
     /** The parameters without a handle, made visible on the axis. Mirrors
@@ -249,83 +323,204 @@ public:
      *  edge on each side):
      *   • Thickness — the stamped bar, 1 + t·(z·H − 1) px, as a translucent
      *     band centred on the birth line;
-     *   • per side with room in the window: N ticks at EQUAL history
-     *     intervals — the compression map d + c·d²/S is inverted so they
-     *     bunch toward the edge as Compression rises — dimmed by Fade
-     *     (exp(−10·fade·age)) and widened by Blur;
-     *   • 1–3 flow chevrons for |Speed| next to the line, pointing away from
-     *     it (toward it when Speed < 0), dim when Speed = 0.
-     *  Everything stays INSIDE the window: a line pushed to an edge keeps its
-     *  indicators on the side that is still visible. */
-    void drawFlowAndAging(juce::Graphics& g, const Geo& geo) const
+     *   • per side with room in the window:
+     *     – Compression: N ticks at EQUAL history intervals — the map
+     *       d + c·d²/S is inverted so they bunch toward the edge as it rises;
+     *     – Fade: a ribbon beside the axis whose alpha IS the dim law
+     *       exp(−10·fade·age) — uniform at 0, dying out fast at 1;
+     *     – Blur: wedges on both band edges, widening with age × blur (the
+     *       horizontal smear);
+     *     – Speed: 1–3 flow chevrons next to the line, pointing away from it
+     *       (toward it when Speed < 0), dim when Speed = 0.
+     *  Each element takes the control colour (+ halo) while its parameter is
+     *  being edited. Everything stays INSIDE the window: a line pushed to an
+     *  edge keeps its indicators on the side that is still visible. Returns
+     *  the anchors for the edit readout. */
+    Marks drawFlowAndAging(juce::Graphics& g, const Geo& geo) const
     {
+        Marks m;
         juce::Graphics::ScopedSaveState ss(g);
         g.reduceClipRegion(geo.win.getSmallestIntegerContainer());
 
-        const float speed  = juce::jlimit(-1.f, 1.f, readRaw("speed",     0.33f));
-        const float thick  = juce::jlimit( 0.f, 1.f, readRaw("thickness", 0.f));
-        const float comp01 = juce::jlimit( 0.f, 1.f, (readRaw("compress", 1.f) - 1.0f) / 63.0f);
-        const float fade01 = juce::jlimit( 0.f, 1.f, readRaw("fade",      0.f));
-        const float blur01 = juce::jlimit( 0.f, 1.f, readRaw("blur",      0.f));
+        const float speed  = juce::jlimit(-1.f, 1.f, speed_.value);
+        const float thick  = juce::jlimit( 0.f, 1.f, thick_.value);
+        const float comp01 = juce::jlimit( 0.f, 1.f, (comp_.value - 1.0f) / 63.0f);
+        const float fade01 = juce::jlimit( 0.f, 1.f, fade_.value);
+        const float blur01 = juce::jlimit( 0.f, 1.f, blur_.value);
         constexpr float kCompMax  = 2.5f;    // = VideoScrollRenderCore::buildWarp
         constexpr float kFadeRate = 10.0f;
+        constexpr float kBlurPx   = 14.0f;   // wedge width at the window edge, blur = 1
 
-        // Thickness: the stamped bar, centred on the birth line.
+        // Thickness: the stamped bar, centred on the birth line (a 1.5 px
+        // hint while edited at 0 so the element has a place to light up).
         const float hb = 0.5f * (1.0f + thick * (geo.z * geo.H - 1.0f)) * geo.k;
-        if (hb > 1.5f)
+        if (hb > 1.5f || lit(Param::Thickness))
         {
+            const float hbv = juce::jmax(hb, 1.5f);
             juce::Path bar;
-            bar.startNewSubPath(geo.birth - geo.u * geo.hx - geo.v * hb);
-            bar.lineTo         (geo.birth + geo.u * geo.hx - geo.v * hb);
-            bar.lineTo         (geo.birth + geo.u * geo.hx + geo.v * hb);
-            bar.lineTo         (geo.birth - geo.u * geo.hx + geo.v * hb);
+            bar.startNewSubPath(geo.birth - geo.u * geo.hx - geo.v * hbv);
+            bar.lineTo         (geo.birth + geo.u * geo.hx - geo.v * hbv);
+            bar.lineTo         (geo.birth + geo.u * geo.hx + geo.v * hbv);
+            bar.lineTo         (geo.birth - geo.u * geo.hx + geo.v * hbv);
             bar.closeSubPath();
-            g.setColour(accent_.withAlpha(0.22f));
+            g.setColour(ink(Param::Thickness, 0.22f));
             g.fillPath(bar);
-            g.setColour(accent_.withAlpha(0.5f));
-            g.strokePath(bar, juce::PathStrokeType(1.0f));
+            strokeMark(g, bar, Param::Thickness, 0.5f, 1.0f);
         }
+        m.thickness = geo.birth + geo.u * geo.hx;
 
         for (float sgn : { -1.0f, 1.0f })
         {
             const auto  dir  = geo.v * sgn;
             const float room = rayExit(geo.birth, dir, geo.win);   // = the aging span (screen px)
             if (room < 8.0f) continue;
+            const auto exitP = geo.birth + dir * room;
 
-            // Time ruler: N equal history intervals mapped to the screen
-            // through the compression law (closed-form inverse).
-            constexpr int N = 8;
-            const float c = comp01 * kCompMax;
-            for (int i = 1; i < N; ++i)
+            // Blur: the band edges smear outward with age.
+            if (blur01 > 0.0f || lit(Param::Blur))
             {
-                const float gi = (float) i / (float) N * room * (1.0f + c);
-                const float d  = c > 1.0e-4f
-                    ? (std::sqrt(1.0f + 4.0f * c * gi / room) - 1.0f) * room / (2.0f * c)
-                    : gi;
-                const float age   = d / room;
-                const float alpha = 0.6f * std::exp(-kFadeRate * fade01 * age);
-                if (alpha < 0.03f) break;
-                const float w = 3.0f + 5.0f * blur01 * age;
-                const auto  p = geo.birth + dir * d;
-                g.setColour(accent_.withAlpha(alpha));
-                g.drawLine({ p - geo.u * w, p + geo.u * w }, 1.0f);
+                const float wmax = juce::jmax(2.0f, kBlurPx * blur01);
+                for (float su : { -1.0f, 1.0f })
+                {
+                    juce::Path wedge;
+                    wedge.startNewSubPath(geo.birth + geo.u * (su * geo.hx));
+                    wedge.lineTo(exitP + geo.u * (su * geo.hx));
+                    wedge.lineTo(exitP + geo.u * (su * (geo.hx + wmax)));
+                    wedge.closeSubPath();
+                    g.setColour(ink(Param::Blur, 0.2f));
+                    g.fillPath(wedge);
+                }
+                if (! m.hasBlur) { m.blur = exitP + geo.u * (geo.hx + wmax) - dir * 12.0f; m.hasBlur = true; }
             }
 
-            // Flow chevrons.
+            // Fade: a ribbon beside the axis, alpha = the dim law along the age.
+            {
+                constexpr int   S   = 16;
+                constexpr float off = 8.0f;   // right of the ruler ticks
+                for (int i = 0; i < S; ++i)
+                {
+                    const float a0 = (float) i / (float) S, a1 = (float) (i + 1) / (float) S;
+                    const float alpha = 0.7f * std::exp(-kFadeRate * fade01 * 0.5f * (a0 + a1));
+                    if (alpha < 0.02f) break;
+                    g.setColour(ink(Param::Fade, alpha));
+                    g.drawLine({ geo.birth + dir * (a0 * room) + geo.u * off,
+                                 geo.birth + dir * (a1 * room) + geo.u * off }, 3.0f);
+                }
+                if (! m.hasFade) { m.fade = geo.birth + dir * (room * 0.35f) + geo.u * off; m.hasFade = true; }
+            }
+
+            // Compression: time ruler — N equal history intervals mapped to
+            // the screen through the compression law (closed-form inverse).
+            {
+                constexpr int N = 8;
+                const float c = comp01 * kCompMax;
+                juce::Path ticks;
+                for (int i = 1; i < N; ++i)
+                {
+                    const float gi = (float) i / (float) N * room * (1.0f + c);
+                    const float d  = c > 1.0e-4f
+                        ? (std::sqrt(1.0f + 4.0f * c * gi / room) - 1.0f) * room / (2.0f * c)
+                        : gi;
+                    const auto p = geo.birth + dir * d;
+                    ticks.startNewSubPath(p - geo.u * 4.0f);
+                    ticks.lineTo         (p + geo.u * 4.0f);
+                    if (i == 4 && ! m.hasCompress) { m.compress = p; m.hasCompress = true; }
+                }
+                strokeMark(g, ticks, Param::Compress, 0.6f, 1.0f);
+            }
+
+            // Speed: flow chevrons.
             int n = speed == 0.0f ? 1 : 1 + (int) std::lround(2.0f * std::abs(speed));
             n = juce::jmin(n, (int) ((room - 6.0f) / 6.0f));
             if (n < 1) continue;
             const auto head = speed < 0.0f ? -dir : dir;
-            g.setColour(accent_.withAlpha(speed == 0.0f ? 0.35f : 0.85f));
+            juce::Path ch;
             for (int i = 0; i < n; ++i)
             {
                 const auto tip = geo.birth + dir * (8.0f + 6.0f * (float) i) + head * 2.5f;
-                juce::Path ch;
                 ch.startNewSubPath(tip - head * 5.0f - geo.u * 4.0f);
                 ch.lineTo(tip);
                 ch.lineTo(tip - head * 5.0f + geo.u * 4.0f);
-                g.strokePath(ch, juce::PathStrokeType(1.5f));
             }
+            strokeMark(g, ch, Param::Speed, speed == 0.0f ? 0.35f : 0.85f, 1.5f);
+            if (! m.hasSpeed) { m.speed = geo.birth + dir * (8.0f + 6.0f * (float) (n - 1)); m.hasSpeed = true; }
+        }
+        return m;
+    }
+
+    //── Edit glow ─────────────────────────────────────────────────────────────
+    /** 1 → 0 over kGlowMs after a parameter's last change (0 = idle). */
+    float heat(const Bound& b) const noexcept
+    {
+        return (float) juce::jlimit(0.0, 1.0, 1.0 - (nowMs_ - b.editMs) / kGlowMs);
+    }
+
+    float heatOf(Param p) const noexcept
+    {
+        switch (p)
+        {
+            case Param::Rotation:  return heat(rot_);
+            case Param::Zoom:      return heat(zoom_);
+            case Param::CenterX:   return heat(cx_);
+            case Param::CenterY:   return heat(cy_);
+            case Param::LinePos:   return heat(line_);
+            case Param::Speed:     return heat(speed_);
+            case Param::Thickness: return heat(thick_);
+            case Param::Compress:  return heat(comp_);
+            case Param::Fade:      return heat(fade_);
+            case Param::Blur:      return heat(blur_);
+            case Param::Gamma:     return heat(gamma_);
+            case Param::Paper:
+            {
+                float h = 0.0f;
+                for (const auto& b : paper_) h = juce::jmax(h, heat(b));
+                return h;
+            }
+            case Param::Count: break;
+        }
+        return 0.0f;
+    }
+
+    bool lit(Param p) const noexcept { return heatOf(p) > 0.0f; }
+
+    float maxHeat() const noexcept
+    {
+        float h = 0.0f;
+        for (const auto* b : allBounds()) h = juce::jmax(h, heat(*b));
+        return h;
+    }
+
+    /** Display colour of an element: module colour, pulled toward the control
+     *  colour (and brightened) by its parameter's edit heat. */
+    juce::Colour ink(Param p, float alpha) const
+    {
+        const float h = heatOf(p);
+        return accent_.interpolatedWith(Sp3ctraHandles::colour(), h)
+                      .withAlpha(juce::jmin(1.0f, alpha + 0.35f * h));
+    }
+
+    /** Stroke a display element, with a control-colour halo while edited. */
+    void strokeMark(juce::Graphics& g, const juce::Path& p, Param id, float alpha, float w) const
+    {
+        const float h = heatOf(id);
+        if (h > 0.0f)
+        {
+            g.setColour(Sp3ctraHandles::colour().withAlpha(0.28f * h));
+            g.strokePath(p, juce::PathStrokeType(w + 4.0f));
+        }
+        g.setColour(ink(id, alpha));
+        g.strokePath(p, juce::PathStrokeType(w));
+    }
+
+    void noteEdit(Bound& b)
+    {
+        nowMs_   = juce::Time::getMillisecondCounterHiRes();
+        b.editMs = nowMs_;
+        glowing_ = true;
+        if (lastActive_ != b.id)
+        {
+            lastActive_ = b.id;
+            if (onActiveParamChanged) onActiveParamChanged();
         }
     }
 
@@ -342,37 +537,170 @@ public:
         return juce::jmax(0.0f, t);
     }
 
-    /** Key of the drawing, in the free zone left of the window (only when
-     *  it fits — a narrow page keeps the hover names alone). */
-    void drawKey(juce::Graphics& g, const Geo& geo) const
+    /** Setting cards — glyph · name · value, one row per parameter — in the
+     *  free zone left of the window (only when it fits; a narrow page keeps
+     *  the readouts alone). The edited one is lit in the control colour. */
+    void drawCards(juce::Graphics& g, const Geo& geo) const
     {
-        constexpr int   kLineH = 12;
-        constexpr float kColW  = 58.0f;
-        static const char* const rows[][2] = {
-            { "frame",    "center x / y" },
-            { "corner",   "zoom" },
-            { "lever",    "rotation" },
-            { "line",     "line pos" },
-            { "bar",      "thickness" },
-            { "ticks",    "age: compression / fade / blur" },
-            { "chevrons", "speed" },
+        constexpr int   kRowH   = 17;
+        constexpr float kCardW  = 176.0f;
+        constexpr float kGlyphW = 30.0f;
+        constexpr float kNameW  = 80.0f;
+        struct Row { Param id; const char* name; };
+        static const Row rows[] = {
+            { Param::Rotation,  "Rotation" },   { Param::Zoom,     "Zoom" },
+            { Param::CenterX,   "Center" },     { Param::LinePos,  "Line Pos" },
+            { Param::Speed,     "Speed" },      { Param::Thickness,"Thickness" },
+            { Param::Compress,  "Compression" },{ Param::Fade,     "Fade" },
+            { Param::Blur,      "Blur" },       { Param::Gamma,    "Gamma" },
+            { Param::Paper,     "Display" },
         };
         constexpr int nRows = (int) (sizeof(rows) / sizeof(rows[0]));
         const float zoneW = geo.win.getX() - plot_.getX() - 8.0f;
-        if (zoneW < 210.0f || plot_.getHeight() < (float) (nRows * kLineH + 8)) return;
+        if (zoneW < kCardW || plot_.getHeight() < (float) (nRows * kRowH + 4)) return;
 
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
-        float y = plot_.getCentreY() - 0.5f * (float) (nRows * kLineH);
-        const float x = plot_.getX() + 4.0f;
+        const float x0 = plot_.getX() + 4.0f;
+        float y = plot_.getCentreY() - 0.5f * (float) (nRows * kRowH);
         for (const auto& r : rows)
         {
-            const juce::Rectangle<int> a((int) x, (int) y, (int) kColW, kLineH);
-            const juce::Rectangle<int> b((int) (x + kColW), (int) y, (int) (zoneW - kColW), kLineH);
-            g.setColour(accent_.withAlpha(0.8f));
-            g.drawText(r[0], a, juce::Justification::centredLeft, false);
-            g.setColour(accent_.withAlpha(0.55f));
-            g.drawText(r[1], b, juce::Justification::centredLeft, false);
-            y += (float) kLineH;
+            const float h = r.id == Param::CenterX ? juce::jmax(heatOf(Param::CenterX), heatOf(Param::CenterY))
+                                                   : heatOf(r.id);
+            const juce::Rectangle<float> row(x0, y, kCardW, (float) kRowH);
+            if (h > 0.0f)
+            {
+                g.setColour(Sp3ctraHandles::colour().withAlpha(0.14f * h));
+                g.fillRoundedRectangle(row, 3.0f);
+            }
+            const juce::Colour col = accent_.interpolatedWith(Sp3ctraHandles::colour(), h);
+            drawGlyph(g, r.id, juce::Rectangle<float>(x0 + 3.0f, y + 2.0f, kGlyphW - 6.0f, (float) kRowH - 4.0f),
+                      col.withAlpha(0.65f + 0.35f * h));
+            g.setColour(col.withAlpha(0.8f + 0.2f * h));
+            g.drawText(r.name, juce::Rectangle<int>((int) (x0 + kGlyphW), (int) y, (int) kNameW, kRowH),
+                       juce::Justification::centredLeft, false);
+            g.setColour(col.withAlpha(0.55f + 0.45f * h));
+            g.drawText(cardValue(r.id),
+                       juce::Rectangle<int>((int) (x0 + kGlyphW + kNameW), (int) y,
+                                            (int) (kCardW - kGlyphW - kNameW - 4.0f), kRowH),
+                       juce::Justification::centredRight, false);
+            y += (float) kRowH;
+        }
+    }
+
+    /** One small picture of a setting's current value, in `b`. */
+    void drawGlyph(juce::Graphics& g, Param p, juce::Rectangle<float> b, juce::Colour col) const
+    {
+        g.setColour(col);
+        const auto  c = b.getCentre();
+        const float w = b.getWidth(), h = b.getHeight();
+        juce::Path path;
+        auto plotCurve = [&](auto f)   // f : x∈[0,1] → y∈[0,1], drawn bottom-left origin
+        {
+            for (int i = 0; i <= 10; ++i)
+            {
+                const float x = (float) i / 10.0f;
+                const juce::Point<float> pt(b.getX() + x * w, b.getBottom() - juce::jlimit(0.f, 1.f, f(x)) * (h - 1.0f));
+                if (i == 0) path.startNewSubPath(pt); else path.lineTo(pt);
+            }
+            g.strokePath(path, juce::PathStrokeType(1.2f));
+        };
+        switch (p)
+        {
+            case Param::Rotation:
+            {
+                const float r  = 0.5f * h - 0.5f;
+                const float th = juce::degreesToRadians(wrapDeg(rot_.value));
+                g.drawEllipse(c.x - r, c.y - r, 2.0f * r, 2.0f * r, 1.0f);
+                g.drawLine({ c, c + juce::Point<float>(std::sin(th), -std::cos(th)) * r }, 1.5f);
+                break;
+            }
+            case Param::Zoom:
+            {
+                const float t = std::log(clampZoom(zoom_.value) / VideoScrollLimits::kZoomMin)
+                              / std::log(VideoScrollLimits::kZoomMax / VideoScrollLimits::kZoomMin);
+                const float s = 3.0f + (h - 3.0f) * juce::jlimit(0.f, 1.f, t);
+                g.drawRect(juce::Rectangle<float>(s, s).withCentre(c), 1.0f);
+                break;
+            }
+            case Param::CenterX:
+            case Param::CenterY:
+            {
+                g.drawRect(juce::Rectangle<float>(h, h).withCentre(c), 1.0f);
+                const auto d = c + juce::Point<float>(juce::jlimit(-1.f, 1.f, cx_.value),
+                                                      juce::jlimit(-1.f, 1.f, cy_.value)) * (0.5f * h - 1.5f);
+                g.fillEllipse(d.x - 1.8f, d.y - 1.8f, 3.6f, 3.6f);
+                break;
+            }
+            case Param::LinePos:
+            {
+                const auto r = juce::Rectangle<float>(h, h).withCentre(c);
+                g.drawRect(r, 1.0f);
+                const float yy = c.y + juce::jlimit(-1.f, 1.f, line_.value) * (0.5f * h - 1.5f);
+                g.drawLine({ { r.getX(), yy }, { r.getRight(), yy } }, 1.6f);
+                break;
+            }
+            case Param::Speed:
+            {
+                const float sp  = juce::jlimit(-1.f, 1.f, speed_.value);
+                const int   n   = sp == 0.0f ? 1 : 1 + (int) std::lround(2.0f * std::abs(sp));
+                const float dir = sp < 0.0f ? -1.0f : 1.0f;
+                for (int i = 0; i < n; ++i)
+                {
+                    const float x = c.x + dir * 6.0f * ((float) i - 0.5f * (float) (n - 1));
+                    path.startNewSubPath(x - dir * 2.5f, c.y - 4.0f);
+                    path.lineTo         (x + dir * 2.5f, c.y);
+                    path.lineTo         (x - dir * 2.5f, c.y + 4.0f);
+                }
+                g.setColour(col.withMultipliedAlpha(sp == 0.0f ? 0.45f : 1.0f));
+                g.strokePath(path, juce::PathStrokeType(1.4f));
+                break;
+            }
+            case Param::Thickness:
+            {
+                const float t = juce::jlimit(0.f, 1.f, thick_.value);
+                g.fillRect(juce::Rectangle<float>(h, 1.0f + t * (h - 1.0f)).withCentre(c));
+                break;
+            }
+            case Param::Compress:
+            {
+                const float cc = juce::jlimit(0.f, 1.f, (comp_.value - 1.0f) / 63.0f) * 2.5f;
+                plotCurve([cc](float x) { return (x + cc * x * x) / (1.0f + cc); });
+                break;
+            }
+            case Param::Fade:
+            {
+                const float f = juce::jlimit(0.f, 1.f, fade_.value);
+                plotCurve([f](float x) { return std::exp(-10.0f * f * x); });
+                break;
+            }
+            case Param::Blur:
+            {
+                const float bl = juce::jlimit(0.f, 1.f, blur_.value);
+                const float e  = 0.5f + 0.5f * bl * (h - 1.0f);
+                path.startNewSubPath(b.getX(), c.y - 0.5f);
+                path.lineTo(b.getRight(), c.y - e);
+                path.lineTo(b.getRight(), c.y + e);
+                path.lineTo(b.getX(), c.y + 0.5f);
+                path.closeSubPath();
+                g.fillPath(path);
+                break;
+            }
+            case Param::Gamma:
+            {
+                const float ga = juce::jlimit(0.01f, 10.0f, gamma_.value);
+                plotCurve([ga](float x) { return std::pow(x, 1.0f / ga); });
+                break;
+            }
+            case Param::Paper:
+            {
+                const auto r = juce::Rectangle<float>(w * 0.8f, h).withCentre(c);
+                g.setColour(paperColour());
+                g.fillRect(r);
+                g.setColour(col);
+                g.drawRect(r, 1.0f);
+                break;
+            }
+            case Param::Count: break;
         }
     }
 
@@ -637,10 +965,27 @@ private:
         return Handle::Dial;
     }
 
+    /** Drag > hover > lit (its parameter is being edited from a box / MIDI:
+     *  the handle shows the same hot look as under the pointer) > idle. */
     Sp3ctraHandles::State stateOf(Handle h) const noexcept
     {
+        const bool editing = lit(paramOf(h)) || (h == Handle::Body && lit(Param::CenterY));
         return Sp3ctraHandles::stateOf(dragging_ == h,
-                                       dragging_ == Handle::None && hovered_ == h);
+                                       dragging_ == Handle::None && (hovered_ == h || editing));
+    }
+
+    static Param paramOf(Handle h) noexcept
+    {
+        switch (h)
+        {
+            case Handle::Body:   return Param::CenterX;
+            case Handle::Corner: return Param::Zoom;
+            case Handle::Lever:
+            case Handle::Dial:   return Param::Rotation;
+            case Handle::Birth:  return Param::LinePos;
+            case Handle::None:   break;
+        }
+        return Param::Count;
     }
 
     static juce::MouseCursor cursorFor(Handle h)
@@ -664,10 +1009,13 @@ private:
 
     juce::String readoutText() const
     {
+        // "OFF" = the output is disabled in the mix: the mixer no longer
+        // renders it (its thumbnail is the blank paper) — see renderFrame.
         return juce::String(wrapDeg(rot_.value), 1) + deg() + dot()
              + juce::String(clampZoom(zoom_.value), 2) + times() + dot()
              + "x " + juce::String(cx_.value, 2) + "  y " + juce::String(cy_.value, 2) + dot()
-             + "line " + juce::String(line_.value, 2);
+             + "line " + juce::String(line_.value, 2)
+             + (readRaw("enabled", 1.f) < 0.5f ? dot() + "OFF" : juce::String());
     }
 
     /** Name + value of a handle (hover and drag readout). */
@@ -697,6 +1045,82 @@ private:
             case Handle::None:   break;
         }
         return g.C;
+    }
+
+    /** Where a setting's element lives — the edit readout sits there. */
+    juce::Point<float> anchorOf(Param p, const Geo& g, const Marks& m) const
+    {
+        switch (p)
+        {
+            case Param::Rotation:  return g.lever;
+            case Param::Zoom:      return g.corner[2];
+            case Param::CenterX:
+            case Param::CenterY:   return g.C;
+            case Param::LinePos:   return g.birth;
+            case Param::Speed:     return m.hasSpeed    ? m.speed    : g.birth;
+            case Param::Thickness: return m.thickness;
+            case Param::Compress:  return m.hasCompress ? m.compress : g.birth;
+            case Param::Fade:      return m.hasFade     ? m.fade     : g.birth;
+            case Param::Blur:      return m.hasBlur     ? m.blur     : g.corner[1];
+            case Param::Gamma:     return g.win.getTopLeft()    + juce::Point<float>(10.0f,  10.0f);
+            case Param::Paper:     return g.win.getBottomLeft() + juce::Point<float>(10.0f, -10.0f);
+            case Param::Count: break;
+        }
+        return g.C;
+    }
+
+    static const char* invertName(int mode) noexcept
+    {
+        return mode == 1 ? "Negative" : mode == 2 ? "Luminance" : "Off";
+    }
+
+    juce::String paperHex() const
+    {
+        return "#" + paperColour().toDisplayString(false).toUpperCase();
+    }
+
+    /** Name + value of a setting (edit readout). */
+    juce::String paramReadout(Param p) const
+    {
+        switch (p)
+        {
+            case Param::Rotation:  return "Rotation  " + juce::String(wrapDeg(rot_.value), 1) + deg();
+            case Param::Zoom:      return "Zoom  " + juce::String(clampZoom(zoom_.value), 2) + times();
+            case Param::CenterX:   return "Center X  " + juce::String(cx_.value, 2);
+            case Param::CenterY:   return "Center Y  " + juce::String(cy_.value, 2);
+            case Param::LinePos:   return "Line Pos  " + juce::String(line_.value, 2);
+            case Param::Speed:     return "Speed  " + juce::String(speed_.value, 2);
+            case Param::Thickness: return "Thickness  " + juce::String(thick_.value, 2);
+            case Param::Compress:  return "Compression  " + juce::String((int) std::lround(comp_.value)) + " fr";
+            case Param::Fade:      return "Fade  " + juce::String(fade_.value, 2);
+            case Param::Blur:      return "Blur  " + juce::String(blur_.value, 2);
+            case Param::Gamma:     return "Gamma  " + juce::String(gamma_.value, 2);
+            case Param::Paper:     return "Display  " + paperHex() + dot() + invertName((int) readRaw("invertMode", 0.f));
+            case Param::Count: break;
+        }
+        return {};
+    }
+
+    /** Value column of a card (short form). */
+    juce::String cardValue(Param p) const
+    {
+        switch (p)
+        {
+            case Param::Rotation:  return juce::String(wrapDeg(rot_.value), 1) + deg();
+            case Param::Zoom:      return juce::String(clampZoom(zoom_.value), 2) + times();
+            case Param::CenterX:
+            case Param::CenterY:   return juce::String(cx_.value, 2) + ", " + juce::String(cy_.value, 2);
+            case Param::LinePos:   return juce::String(line_.value, 2);
+            case Param::Speed:     return juce::String(speed_.value, 2);
+            case Param::Thickness: return juce::String(thick_.value, 2);
+            case Param::Compress:  return juce::String((int) std::lround(comp_.value)) + " fr";
+            case Param::Fade:      return juce::String(fade_.value, 2);
+            case Param::Blur:      return juce::String(blur_.value, 2);
+            case Param::Gamma:     return juce::String(gamma_.value, 2);
+            case Param::Paper:     return paperHex();
+            case Param::Count: break;
+        }
+        return {};
     }
 
     //── MIDI learn (right-click) ──────────────────────────────────────────────
@@ -750,9 +1174,12 @@ private:
     //── Parameter binding ─────────────────────────────────────────────────────
     struct Bound
     {
+        Param id { Param::Count };
         juce::RangedAudioParameter* param = nullptr;
         std::unique_ptr<juce::ParameterAttachment> attach;
-        float value = 0.0f;
+        float  value  = 0.0f;
+        double editMs = -1.0e12;   // last change (message thread) → edit glow
+        bool   live   = false;     // false during the initial update
         void begin()             { if (attach) attach->beginGesture(); }
         void end()               { if (attach) attach->endGesture(); }
         void setGesture(float v) { if (attach) attach->setValueAsPartOfGesture(v); }
@@ -764,14 +1191,36 @@ private:
         }
     };
 
-    void bind(Bound& b, const juce::String& id)
+    void bind(Bound& b, Param id, const juce::String& paramId)
     {
-        b.param = apvts_.getParameter(id);
+        b.id    = id;
+        b.live  = false;
+        b.param = apvts_.getParameter(paramId);
         jassert(b.param != nullptr);
         if (b.param == nullptr) return;
+        // Changes from ANY source (handle drag, box, MIDI, preset) land here
+        // on the message thread; only live ones (after the initial update)
+        // light the element.
         b.attach = std::make_unique<juce::ParameterAttachment>(
-            *b.param, [this, &b](float v) { b.value = v; repaint(); });
+            *b.param, [this, &b](float v)
+            {
+                b.value = v;
+                if (b.live) noteEdit(b);
+                repaint();
+            });
         b.attach->sendInitialUpdate();
+        b.live = true;
+    }
+
+    std::array<Bound*, 16> allBounds() noexcept
+    {
+        return { &rot_, &zoom_, &cx_, &cy_, &line_, &speed_, &thick_, &comp_, &fade_, &blur_, &gamma_,
+                 &paper_[0], &paper_[1], &paper_[2], &paper_[3], &paper_[4] };
+    }
+    std::array<const Bound*, 16> allBounds() const noexcept
+    {
+        return { &rot_, &zoom_, &cx_, &cy_, &line_, &speed_, &thick_, &comp_, &fade_, &blur_, &gamma_,
+                 &paper_[0], &paper_[1], &paper_[2], &paper_[3], &paper_[4] };
     }
 
     float readRaw(const char* suffix, float def) const
@@ -816,7 +1265,15 @@ private:
     VideoScrollPreviewSource* source_  { nullptr };
     int slot_ { -1 };
 
-    Bound rot_, zoom_, cx_, cy_, line_;
+    static constexpr int kPaperN = 5;   // invertMode, colorMode, bgR, bgG, bgB
+    Bound rot_, zoom_, cx_, cy_, line_, speed_, thick_, comp_, fade_, blur_, gamma_;
+    Bound paper_[kPaperN];
+
+    // Edit glow
+    Param  lastActive_ { Param::Count };
+    bool   glowing_    { false };
+    double nowMs_      { 0.0 };
+    static constexpr double kGlowMs = 1500.0;
 
     juce::Rectangle<float> frame_, plot_;
     Handle dragging_ { Handle::None };
@@ -830,6 +1287,8 @@ private:
 
     uint32_t         lastFrame_ { 0 };
     juce::Point<int> lastView_;
+    double           lastRepaintMs_ { 0.0 };
+    static constexpr double kMinRepaintMs = 75.0;   // → every other 20 Hz tick
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(VideoScrollViewportEditor)
 };

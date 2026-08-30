@@ -1135,6 +1135,23 @@ void Sp3ctraAudioProcessorEditor::followMidiParam(const juce::String& paramId)
     if (! tgt.valid || chainRack == nullptr)
         return;   // param not tied to a rack module, or the module isn't present
 
+    // VIDEO SCROLL (any output's videoScroll*/videoMix* param): a controller
+    // lands on the ALL view — every output's page at once — rather than on
+    // that output's chain tab (user request 2026-08-29). Already on ALL →
+    // nothing to do (a CC sweep must not reset zone 3 every tick), whichever
+    // output is bound. Otherwise bind the touched instance first (rack
+    // selection + page bank, via onVideoBlockSelected) so leaving ALL later
+    // lands on ITS chain, then flip to ALL.
+    if (tgt.type == ModuleType::VideoScroll)
+    {
+        if (videoAllView_ && selectedBlock == ChainBlockId::VideoScroll && ! setupFace)
+            return;
+        chainRack->selectInstanceById(tgt.instanceId);
+        setupFace = false;
+        showVideoAllView();
+        return;
+    }
+
     // Already showing this exact target? Don't re-select — a CC sweep fires many
     // events and re-selecting would reset the zone-3 scroll position each tick.
     if (chainRack->selectedInstanceId() == tgt.instanceId

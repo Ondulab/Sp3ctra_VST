@@ -406,18 +406,22 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
     if (! target.isValid())
         return false;   // every pool buffer is momentarily referenced — retry next pass
 
-    // Enabled outputs only (a disabled output is dropped from the composite).
+    // Enabled outputs only (a disabled output is dropped from the composite —
+    // and is NOT warped for its pad either: a disabled output costs nothing,
+    // its thumbnail is the blank paper and the pad says "OFF").
     int numEnabled = 0;
     Layer* single = nullptr;
+    auto enabledOf = [&](const Layer& l) { return rawOf(vsParam(l.slot, "enabled"), 1.0f) >= 0.5f; };
     for (auto& l : layers_)
     {
-        if (rawOf(vsParam(l.slot, "enabled"), 1.0f) >= 0.5f)
+        if (enabledOf(l))
         {
             ++numEnabled;
             single = &l;
         }
-        // Solo pool released as soon as the slot is no longer requested.
-        if (! wantsSolo(l.slot))
+        // Solo pool released as soon as the slot is no longer requested (or
+        // no longer rendered).
+        if (! wantsSolo(l.slot) || ! enabledOf(l))
             for (auto& im : l.soloPool) im = juce::Image();
     }
 
@@ -425,6 +429,7 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
     // paper — for the pads that asked. drawAlone() targets the layer's own
     // pool so the image a pad is painting is never written to. Invalid
     // result = pool momentarily busy → that slot keeps its previous solo.
+    // soloBlank = requested but disabled → published as "no image".
     auto drawAlone = [&](Layer& l) -> juce::Image
     {
         juce::Image im = acquireFrom(l.soloPool, 2, W, H);
@@ -432,6 +437,7 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
         return im;
     };
     juce::Image soloNew[ChainModel::kMaxVideoSlots];
+    bool        soloBlank[ChainModel::kMaxVideoSlots] = {};
 
     // Empty master (nothing enabled) = blank paper → WHITE. With layers the
     // compositing base stays black: Add/Screen accumulate light, so their
@@ -445,27 +451,30 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
         // to "just the source" — draw straight into the target, skip the blend.
         { juce::Graphics g(target); single->core->drawWarp(g, W, H); }
         // The composite IS that output alone: its solo shares the image (no
-        // second warp draw). Any other requested output is disabled here.
+        // second warp draw). Every other output is disabled here → blank.
         for (auto& l : layers_)
             if (wantsSolo(l.slot))
-                soloNew[l.slot] = (&l == single) ? target : drawAlone(l);
+            {
+                if (&l == single) soloNew[l.slot]   = target;
+                else              soloBlank[l.slot] = true;
+            }
     }
     else
     {
         for (auto& l : layers_)
         {
-            const bool enabled = rawOf(vsParam(l.slot, "enabled"), 1.0f) >= 0.5f;
-            const bool alone   = wantsSolo(l.slot);
-            if (! enabled && ! alone)
+            const bool alone = wantsSolo(l.slot);
+            if (! enabledOf(l))
+            {
+                if (alone) soloBlank[l.slot] = true;
                 continue;
+            }
             // A soloed layer's solo image doubles as its blend source (no
             // extra warp draw); otherwise (or if its pool was busy) the
             // reusable scratch.
             juce::Image src;
             if (alone)
                 src = soloNew[l.slot] = drawAlone(l);
-            if (! enabled)
-                continue;
             if (! src.isValid())
             {
                 if (! l.scratch.isValid() || l.scratch.getWidth() != W || l.scratch.getHeight() != H)
@@ -484,8 +493,8 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
         front_ = target;
         for (int s = 0; s < ChainModel::kMaxVideoSlots; ++s)
         {
-            if (! wantsSolo(s))            soloFront_[s] = juce::Image();
-            else if (soloNew[s].isValid()) soloFront_[s] = soloNew[s];
+            if (! wantsSolo(s) || soloBlank[s]) soloFront_[s] = juce::Image();
+            else if (soloNew[s].isValid())       soloFront_[s] = soloNew[s];
         }
     }
     haveFrame_ = true;
@@ -646,7 +655,10 @@ void VideoMixerComponent::renderMaster(juce::Graphics& g, juce::Rectangle<int> d
     const juce::Image frame = renderer_->frontImage();
     if (frame.isValid())
     {
-        g.setImageResamplingQuality(juce::Graphics::highResamplingQuality);
+        // Medium, not high: this blit runs at 60 Hz on the message thread
+        // (column preview + detached window) and the warp pass already did
+        // a proper box-average — a waterfall shows no difference.
+        g.setImageResamplingQuality(juce::Graphics::mediumResamplingQuality);
         // Uniform fit (letterbox on white): the published frame's aspect can lag
         // the destination (resize in flight, square column preview vs detached
         // window) — never crop or distort it.
@@ -721,10 +733,15 @@ void VideoMixerComponent::timerCallback()
         return;
     lastPresented_ = fc;
 
-    repaint(masterArea_);
-    if (window_ != nullptr)
+    // One view per frame: the detached window when open (the column shows a
+    // placeholder then), else the column preview.
+    if (isWindowOpen())
+    {
         if (auto* c = window_->getContentComponent())
             c->repaint();
+    }
+    else
+        repaint(masterArea_);
 }
 
 //==============================================================================
@@ -733,15 +750,33 @@ void VideoMixerComponent::paint(juce::Graphics& g)
     g.fillAll(juce::Colour(0xff0c0c10));
 
     // Master display — blit of the render thread's latest published composite.
-    renderMaster(g, masterArea_);
+    // While the detached window is open IT shows the master: the column keeps
+    // a static placeholder instead of a second 60 Hz multi-megapixel blit of
+    // the same frame (the presenter stops repainting this area, see
+    // timerCallback) — user request 2026-08-30.
+    const bool detached = isWindowOpen();
+    if (detached)
+    {
+        g.setColour(juce::Colour(0xff14141c));
+        g.fillRect(masterArea_);
+        g.setColour(moduleColour(ModuleType::VideoScroll).withAlpha(0.6f));
+        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
+        g.drawText("VIDEO MIX is shown in its window",
+                   masterArea_, juce::Justification::centred, true);
+    }
+    else
+        renderMaster(g, masterArea_);
 
     if (voices_.empty())
     {
-        // Dark text: the empty master area is now WHITE (blank paper).
-        g.setColour(juce::Colour(0xff5a6070));
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
-        g.drawText("Patch a VIDEO SCROLL output into a chain",
-                   masterArea_, juce::Justification::centred, true);
+        if (! detached)
+        {
+            // Dark text: the empty master area is WHITE (blank paper).
+            g.setColour(juce::Colour(0xff5a6070));
+            g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
+            g.drawText("Patch a VIDEO SCROLL output into a chain",
+                       masterArea_, juce::Justification::centred, true);
+        }
         return;
     }
 
@@ -876,12 +911,14 @@ void VideoMixerComponent::toggleDetachedWindow()
                 window_.reset();
                 // Explicit close — do NOT reopen on the next launch.
                 MachinePrefs::file().setValue("videoMixWin.open", false);
+                repaint(masterArea_);   // placeholder → live preview again
                 if (onWindowStateChanged) onWindowStateChanged();
             });
         };
     }
     // Explicit open/close (or the ctor reopen, which re-asserts true).
     MachinePrefs::file().setValue("videoMixWin.open", window_ != nullptr);
+    repaint(masterArea_);   // live preview ⇄ placeholder
     if (onWindowStateChanged) onWindowStateChanged();
 }
 

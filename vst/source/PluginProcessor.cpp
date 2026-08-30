@@ -7219,7 +7219,6 @@ juce::ValueTree Sp3ctraAudioProcessor::scoreStateToTree(int slot) const
     t.setProperty("startTimeSec",        s.startTimeSec,        nullptr);
     t.setProperty("selectionSec",        s.selectionSec,        nullptr);
     t.setProperty("enableStereoMode",    s.enableStereoMode,    nullptr);
-    t.setProperty("enableMultiRes",      s.enableMultiRes,      nullptr);
     // minFreq/maxFreq are recomputed at GENERATE time from the musical range —
     // persisting them would only freeze stale values; deliberately omitted.
 
@@ -7265,7 +7264,6 @@ void Sp3ctraAudioProcessor::restoreScoreStateFromTree(int slot,
     s.startTimeSec         = (double) t.getProperty("startTimeSec",        s.startTimeSec);
     s.selectionSec         = (double) t.getProperty("selectionSec",        s.selectionSec);
     s.enableStereoMode     = (int)    t.getProperty("enableStereoMode",    s.enableStereoMode);
-    s.enableMultiRes       = (int)    t.getProperty("enableMultiRes",      s.enableMultiRes);
     if (! s.spectroHeightManual)
         s.spectroHeightMM = SCORE_CIS_HEIGHT_MM;   // keep the lock invariant
 

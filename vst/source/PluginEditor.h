@@ -484,7 +484,8 @@ private:
 
     // ── Behaviour ─────────────────────────────────────────────────────────────
     /** MIDI-follow — polls the mapping engine (~20 Hz) and, when enabled, jumps
-     *  to the module a MIDI controller just moved. */
+     *  to the module a MIDI controller just moved (a VIDEO SCROLL parameter
+     *  lands on the ALL view, not on the output's chain tab). */
     void timerCallback() override;
     bool midiFollowEnabled() const;
     void followMidiParam(const juce::String& paramId);

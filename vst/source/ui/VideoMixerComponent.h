@@ -65,7 +65,9 @@ public:
     void setAllPaused(bool paused);   // sets videoScroll{slot}_paused for all
     void stopAll();                   // pause + clear every waterfall
 
-    /** Detached master window (the right-band "window management"). */
+    /** Detached master window (the right-band "window management"). While it
+     *  is open it is the ONLY live view: the column's master area shows a
+     *  static placeholder (no duplicate 60 Hz blit). */
     void toggleDetachedWindow();
     void requestFullscreenWindow();
     bool isWindowOpen() const noexcept;

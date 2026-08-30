@@ -159,20 +159,6 @@ public:
         };
         addAndMakeVisible(stereoToggle);
 
-        // ── Multi-resolution analysis: shorter FFT windows for the upper ────
-        // octaves (sharper transients in the highs, full harmonic resolution
-        // kept in the lows). Encoder-only — playback is unchanged. Takes
-        // effect on the next GENERATE.
-        multiResToggle.setButtonText("Multi-res transients");
-        multiResToggle.setToggleState(processor.getScoreSettings().enableMultiRes != 0,
-                                      juce::dontSendNotification);
-        multiResToggle.onClick = [this]
-        {
-            processor.getScoreSettings().enableMultiRes =
-                multiResToggle.getToggleState() ? 1 : 0;
-        };
-        addAndMakeVisible(multiResToggle);
-
         // ── Waveform region picker (which part of the WAV to extract) ───────
         waveform.onStartChange = [this](double startSec)
         { processor.getScoreSettings().startTimeSec = startSec; };
@@ -745,12 +731,8 @@ public:
         }
 
         // Page / DPI / image format moved to the SETUP face (ScoreSetupPanel).
-        {
-            const int half = (colW - gap) / 2;
-            stereoToggle.setBounds(pad, y, half, ch);
-            multiResToggle.setBounds(pad + half + gap, y, half, ch);
-            y += ch + gap + 4;
-        }
+        stereoToggle.setBounds(pad, y, colW, ch);
+        y += ch + gap + 4;
 
         generateButton.setBounds(pad, y, colW, ch + 4); y += ch + 8;
         progressBar.setBounds(pad, y, colW, ch);        y += ch + gap;
@@ -1747,7 +1729,6 @@ private:
         auto& sset = processor.getScoreSettings();
         wsSlider.setValue(sset.writingSpeed, juce::dontSendNotification);
         stereoToggle  .setToggleState(sset.enableStereoMode != 0, juce::dontSendNotification);
-        multiResToggle.setToggleState(sset.enableMultiRes  != 0, juce::dontSendNotification);
         shownPageFormat_ = sset.pageFormat;
         if (loadedWav.existsAsFile())
             setLoadedFile(loadedWav, /*restoreRegion*/ true);
@@ -1876,7 +1857,6 @@ private:
     // Generation toggles + image EQ + waveform region picker (page format,
     // DPI and image format live on the SETUP face).
     juce::ToggleButton stereoToggle;          // generate L/R spectrograms (red=L, blue=R)
-    juce::ToggleButton multiResToggle;        // multi-resolution STFT (encoder-only)
     ShapeEqComponent eqEditor { juce::Colour(kAccentARGB) };
     WaveformSelectorComponent waveform { juce::Colour(kAccentARGB) };
     juce::TextButton previewButton;          // audition the selected source region

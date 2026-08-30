@@ -345,8 +345,23 @@ vignette ».
   DEUX côtés de la ligne (`scrollStep`), et la flèche pointait hors de la
   fenêtre dès que la ligne était bornée sur un bord (« quand on déplace le
   centre on perd la flèche »). Le survol d'une poignée affiche son nom et sa
-  valeur (`handleReadout`) ; une **légende** (`drawKey`) occupe la zone
-  libre à gauche de la fenêtre quand elle a ≥ 210 px. Même géométrie que
+  valeur (`handleReadout`).
+  **2026-08-30 — « une couleur de ce qui est en train d'être édité, des
+  visuels pour tous les paramètres »** : tous les paramètres sont liés
+  (`ParameterAttachment`, y compris Fade / Blur / Gamma et le groupe
+  d'affichage invertMode / colorMode / bgRGB) ; un changement de n'importe
+  quelle source (poignée, boîte, MIDI, preset) allume pendant 1,5 s
+  (`kGlowMs`, `heatOf`) **l'élément** du pad (couleur contrôle + halo,
+  poignée en état « chaud »), **sa carte** et **le libellé de sa boîte**
+  (`onActiveParamChanged` → `VideoScrollPage::repaintLabels`), avec un
+  readout nom + valeur à l'élément (`paramReadout` / `anchorOf(Param)`).
+  Nouveaux indicateurs : **ruban Fade** le long de l'axe (alpha =
+  `exp(−10·fade·âge)`), **biseaux Blur** sur les bords de bande (largeur ∝
+  blur × âge), la règle ne montre plus que Compression. **Cartes**
+  (`drawCards`, zone libre à gauche ≥ 176 px) : glyphe · nom · valeur pour
+  Rotation, Zoom, Center, Line Pos, Speed, Thickness, Compression, Fade,
+  Blur, Gamma, Display (pastille papier) — la carte éditée s'allume.
+  Le pad repeint à 10 Hz tant qu'un élément est allumé. Même géométrie que
   `drawWarp` / `birthLine01` (spans visibles,
   offset de centre, clamp de la ligne à la fenêtre) : ce qu'on saisit est ce
   que la sortie fait.
@@ -363,12 +378,30 @@ vignette ».
   (affichage) ; cadre, ligne, coins, levier, nœud central = lime
   (`Sp3ctraHandles`). Aucune boîte dans le cadre.
 - **Page** (`video/VideoScrollPage.h`) réécrite dans le **squelette standard**
-  `ModuleChrome` : cadre VIEWPORT (240 px) → rangée géométrie (Rotation ·
+  `ModuleChrome` : cadre VIEWPORT (420 px depuis le 2026-08-30 — « la
+  fenêtre de visualisation doit être plus grande » ; 240 avant) → rangée
+  géométrie (Rotation ·
   Zoom · Center X · Center Y · Line Pos) → rangée rendu (Speed · Thickness ·
   Compression · Fade · Blur · Gamma) → caption `--- VIDEO SCROLL ---` →
   rangée loi d'affichage (Invert · Color · Background). Les barres et le pad
   sont liés aux mêmes paramètres (l'un pilote l'autre). `kPreferredH` =
   `pageHeight(kEditorsH, 1)` = 382 px (448 avant).
+- **Suivi MIDI (2026-08-30)** : quand un contrôleur MIDI touche un paramètre
+  `videoScroll{n}_*` / `videoMix{n}_*` (suivi MIDI activé, `followMidiParam`),
+  l'éditeur affiche la vue **ALL** (toutes les sorties) au lieu de l'onglet
+  CHAIN n de la sortie touchée ; l'instance touchée reste liée (sélection du
+  rack + banque de la page) pour que quitter ALL retombe sur sa chaîne ; déjà
+  sur ALL → aucune re-sélection (un balayage de CC ne remet pas la zone 3 à
+  zéro).
+- **Coût (2026-08-30, « je suis plus gourmand »)** : le pad blitte l'image
+  UNE fois et pose le voile par un chemin pair-impair « fenêtre moins bande »
+  (avant : deux blits multi-mégapixels par repaint) ; repaint du pad limité à
+  un tick sur deux (10 Hz, `kMinRepaintMs`) ; une sortie **désactivée** n'est
+  plus warpée pour son pad (papier + « OFF » dans le readout, `soloBlank`) ;
+  blit de l'aperçu maître à 60 Hz en qualité *medium* ; **fenêtre détachée
+  ouverte (ou plein écran) → l'aperçu de la colonne s'arrête** (placeholder
+  « VIDEO MIX is shown in its window », le presenter ne repeint que la
+  fenêtre). Rien de tout cela ne touche le thread audio.
 - **Plomberie** : `video/VideoScrollPreviewSource.h` (interface :
   `requestOutputPreview(slot)` + `outputFrame(slot)` — image de la sortie
   seule —, compteur de trames, taille de vue) implémentée par

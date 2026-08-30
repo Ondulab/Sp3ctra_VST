@@ -55,7 +55,6 @@ void score_settings_defaults(ScoreSettings *s)
     s->startTimeSec        = 0.0;
     s->selectionSec        = 0.0;   /* Selection mode: 0 = to the end of file */
     s->enableStereoMode    = 0;
-    s->enableMultiRes      = 0;
 }
 
 /*---------------------------------------------------------------------------
@@ -273,6 +272,151 @@ int score_compute_spectrogram_ex(const double *signal, int total_samples,
     out->index_max   = index_max;
     out->global_max  = global_max;
     return 0;
+}
+
+/* Relative improvement a LONGER candidate must show before it displaces a
+ * shorter one. See the tie-break note in score_choose_base_window_seconds. */
+#define SCORE_WINDOW_WIN_MARGIN 0.02
+
+/*---------------------------------------------------------------------------
+ * Adaptive base-window choice - see score_engine.h for the reasoning.
+ *-------------------------------------------------------------------------*/
+double score_choose_base_window_seconds(const double *signal, int total_samples,
+                                        int sample_rate,
+                                        double min_freq, double band_top_freq,
+                                        const double *candidates_sec,
+                                        int num_candidates, double *out_scores)
+{
+    if (signal == NULL || candidates_sec == NULL || num_candidates <= 0) return 0.0;
+    if (total_samples <= 0 || sample_rate <= 0) return 0.0;
+    if (min_freq <= 0.0 || band_top_freq <= min_freq) return 0.0;
+
+    for (int c = 0; c < num_candidates; c++)
+        if (out_scores) out_scores[c] = -1.0;
+
+    /* Decimate by a power of two, keeping the probe's Nyquist well above the
+     * band we care about. */
+    int decim = 1;
+    while (decim < 256 &&
+           (double)sample_rate / (double)(decim * 2) > 4.0 * band_top_freq)
+        decim *= 2;
+
+    const int probe_rate = sample_rate / decim;
+    const int probe_len  = total_samples / decim;
+    if (probe_rate <= 0 || probe_len < 128) return 0.0;
+
+    /* Longest candidate that actually fits in the signal. */
+    int max_win = 0;
+    for (int c = 0; c < num_candidates; c++)
+    {
+        int w = (int)(candidates_sec[c] * probe_rate);
+        if (w >= 16 && w < probe_len && w > max_win) max_win = w;
+    }
+    if (max_win < 16) return 0.0;
+
+    int pad = 16;
+    while (pad < max_win) pad *= 2;
+
+    int hop = probe_rate / 100;                       /* ~10 ms */
+    if (hop < 1) hop = 1;
+    const int frames = (probe_len - max_win) / hop + 1;
+    if (frames < 4) return 0.0;
+
+    const int num_bins = pad / 2 + 1;
+    const double freq_res = (double)probe_rate / (double)pad;
+    int b_lo = (int)ceil(min_freq / freq_res);
+    int b_hi = (int)floor(band_top_freq / freq_res);
+    if (b_lo < 1) b_lo = 1;                           /* skip DC */
+    if (b_hi > num_bins - 1) b_hi = num_bins - 1;
+    if (b_lo > b_hi) return 0.0;
+
+    double *probe = (double *)malloc((size_t)probe_len * sizeof(double));
+    if (probe == NULL) return 0.0;
+
+    /* Box average over the decimation span: a crude but adequate anti-alias
+     * for a statistic that only ever reads the bottom octaves. */
+    for (int i = 0; i < probe_len; i++)
+    {
+        double acc = 0.0;
+        for (int j = 0; j < decim; j++)
+            acc += signal[(size_t)i * (size_t)decim + (size_t)j];
+        probe[i] = acc / (double)decim;
+    }
+
+    kiss_fftr_cfg    cfg  = kiss_fftr_alloc(pad, 0, NULL, NULL);
+    kiss_fft_scalar *in   = (kiss_fft_scalar *)calloc((size_t)pad, sizeof(kiss_fft_scalar));
+    kiss_fft_cpx    *fout = (kiss_fft_cpx *)malloc((size_t)num_bins * sizeof(kiss_fft_cpx));
+    double          *wtab = (double *)malloc((size_t)max_win * sizeof(double));
+
+    if (cfg == NULL || in == NULL || fout == NULL || wtab == NULL)
+    {
+        free(probe); free(in); free(fout); free(wtab);
+        if (cfg) kiss_fftr_free(cfg);
+        return 0.0;
+    }
+
+    double best_score = 0.0;
+    double best_sec   = 0.0;
+
+    for (int c = 0; c < num_candidates; c++)
+    {
+        const int w = (int)(candidates_sec[c] * probe_rate);
+        if (w < 16 || w > max_win) continue;           /* longer than the signal */
+
+        for (int i = 0; i < w; i++) wtab[i] = 1.0;
+        score_apply_blackman_harris_window(wtab, w);
+
+        double l1 = 0.0, l2 = 0.0;
+        long   n  = 0;
+
+        for (int f = 0; f < frames; f++)
+        {
+            const size_t start = (size_t)f * (size_t)hop;
+            for (int i = 0; i < w; i++)
+                in[i] = (kiss_fft_scalar)(probe[start + (size_t)i] * wtab[i]);
+            for (int i = w; i < pad; i++)
+                in[i] = (kiss_fft_scalar)0;
+
+            kiss_fftr(cfg, in, fout);
+
+            for (int b = b_lo; b <= b_hi; b++)
+            {
+                const double re = (double)fout[b].r;
+                const double im = (double)fout[b].i;
+                const double mag = sqrt(re * re + im * im);
+                l1 += mag;
+                l2 += mag * mag;
+                n++;
+            }
+        }
+
+        /* Normalised l1/l2: 1/sqrt(N) = one coefficient holds everything,
+         * 1 = energy spread evenly. Lower is more compact. */
+        double score = 1.0;
+        if (n > 0 && l2 > 0.0)
+            score = l1 / (sqrt((double)n) * sqrt(l2));
+
+        if (out_scores) out_scores[c] = score;
+
+        /* Candidates are ordered shortest first, and a longer window only wins
+         * if it is compact by a clear MARGIN. Without that, material with no
+         * preferred window (noise, where every candidate scores within a
+         * fraction of a percent) would drift to the longest one and buy a
+         * quarter-second of time smear for nothing. Ties go to the short
+         * window: it is the safe one, since it never destroys an attack. */
+        if (best_sec <= 0.0 || score < best_score * (1.0 - SCORE_WINDOW_WIN_MARGIN))
+        {
+            best_score = score;
+            best_sec   = candidates_sec[c];
+        }
+    }
+
+    free(probe);
+    free(in);
+    free(fout);
+    free(wtab);
+    kiss_fftr_free(cfg);
+    return best_sec;
 }
 
 /* Legacy single-layer entry — exact historical behaviour. */

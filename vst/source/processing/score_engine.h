@@ -108,11 +108,6 @@ typedef struct ScoreSettings
     double selectionSec;        /* pageFormat 2: selected region length (s);
                                  * 0 ⇒ to the end of the file                */
     int    enableStereoMode;    /* 0/1 — generate L/R spectrograms (red=L, blue=R) */
-    int    enableMultiRes;      /* 0/1 — multi-resolution STFT: shorter analysis
-                                 * windows for the upper octaves (sharper
-                                 * transients in the highs, full harmonic
-                                 * resolution kept in the lows). Encoder-only:
-                                 * playback through the instrument is unchanged. */
 } ScoreSettings;
 
 /* Fills *s with the legacy defaults. */
@@ -173,6 +168,40 @@ int score_compute_spectrogram_ex(const double *signal, int total_samples,
                                  int normalize_gain, double bins_per_second,
                                  double min_freq, double max_freq,
                                  ScoreSpectrogramData *out);
+
+/*-----------------------------------------------------------------------------
+ * Adaptive base-window choice.
+ *
+ * Long windows resolve pitch, short windows resolve time. Which one a piece of
+ * material wants is a property of the MATERIAL, not a setting: a held chord
+ * collapses into a few sharp lines under a long window and smears into blobs
+ * under a short one, while a drum hit does exactly the opposite. So instead of
+ * asking the user, measure which candidate represents the low band most
+ * compactly and take the winner.
+ *
+ * Compactness is the normalised l1/l2 ratio of the magnitudes,
+ *     sparsity = sum|x| / ( sqrt(N) * sqrt(sum x^2) )
+ * which tends to 1/sqrt(N) when the energy collapses onto one coefficient and
+ * to 1 when it spreads evenly. LOWER IS BETTER. It is scale-invariant, so the
+ * candidates need no level matching, and every candidate is measured on the
+ * same grid (same pad, same hop, same bins) so the counts cancel exactly.
+ *
+ * The probe runs on a decimated copy of the signal, because only the bottom
+ * few octaves are at stake: the whole scan costs a few milliseconds.
+ *
+ *   candidates_sec : window lengths to try, in seconds
+ *   out_scores     : optional, num_candidates sparsity values (-1 = not tried,
+ *                    e.g. a candidate longer than the signal)
+ *
+ * Returns the winning length in seconds, or 0.0 if the probe could not run
+ * (signal too short, allocation failure) - the caller should then fall back to
+ * a fixed choice.
+ *---------------------------------------------------------------------------*/
+double score_choose_base_window_seconds(const double *signal, int total_samples,
+                                        int sample_rate,
+                                        double min_freq, double band_top_freq,
+                                        const double *candidates_sec,
+                                        int num_candidates, double *out_scores);
 
 /* Maps magnitude → inverted greyscale intensity in [0,1] (white = silence).
  * Operates in place on data->data over [index_min,index_max]. */
