@@ -117,6 +117,7 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
 
     // Image pipeline pages (reused as-is from the former tab layout)
     sourcesPage     = std::make_unique<SourcesTabComponent>(audioProcessor);
+    controlsPage    = std::make_unique<Sp3ctraControlsPage>(audioProcessor);
     pitchPage       = std::make_unique<LuxPitchTabComponent>(audioProcessor);
     maskPage        = std::make_unique<LuxMaskTabComponent>(audioProcessor);
     imgLuxStralPage = std::make_unique<LuxStralTabComponent>(audioProcessor);
@@ -131,6 +132,7 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     imgLuxSynthPage = std::make_unique<LuxSynthTabComponent>(audioProcessor);
 
     zone3Content.addChildComponent(sourcesPage.get());
+    zone3Content.addChildComponent(controlsPage.get());
     zone3Content.addChildComponent(pitchPage.get());
     zone3Content.addChildComponent(maskPage.get());
     zone3Content.addChildComponent(imgLuxStralPage.get());
@@ -284,6 +286,17 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     // patched output in rack order (same list as refreshVideoTabs()).
     faceSwitch.onSegmentSelected = [this](int idx)
     {
+        // SP3CTRA source block: PLAY | CONTROLS | SETUP
+        if (selectedBlock == ChainBlockId::Chain1Source || selectedBlock == ChainBlockId::Chain2Source)
+        {
+            sourceFace_ = juce::jlimit(0, 2, idx);
+            setupFace   = (sourceFace_ == 2);
+            applyZone3Visibility();
+            layoutZone3();
+            zone3Viewport.setViewPosition(0, 0);
+            persistLayoutProps();
+            return;
+        }
         if (idx == 0) { showVideoAllView(); return; }
         const auto slots = audioProcessor.activeVideoSlots();
         if (idx - 1 < (int) slots.size() && chainRack)
@@ -497,6 +510,7 @@ Sp3ctraAudioProcessorEditor::Sp3ctraAudioProcessorEditor(Sp3ctraAudioProcessor& 
     // Pre-seed selectedBlock so selectBlock() keeps the restored face (it
     // resets to PLAY on a block CHANGE); blockHasSetup is re-checked inside.
     setupFace     = (bool) state.getProperty("selSetupFace", false);
+    sourceFace_   = juce::jlimit(0, 2, (int) state.getProperty("selSourceFace", 0));
     engineView_   = (bool) state.getProperty("selEngineView", false);
     selectedBlock = sel;
     selectBlock(sel);
@@ -1044,9 +1058,10 @@ void Sp3ctraAudioProcessorEditor::applyZone3Visibility()
     const bool play = !setupFace;
 
     // ── PLAY face: the page (or stacked pages) for this block ────────────────
-    const bool showSources = play && (id == ChainBlockId::Chain1Source
-                                   || id == ChainBlockId::Chain2Source);
+    const bool isSource    = (id == ChainBlockId::Chain1Source || id == ChainBlockId::Chain2Source);
+    const bool showSources = play && isSource && sourceFace_ != 1;
     if (sourcesPage)     sourcesPage    ->setVisible(showSources);
+    if (controlsPage)    controlsPage   ->setVisible(play && isSource && sourceFace_ == 1);
     if (pitchPage)       pitchPage      ->setVisible(play && id == ChainBlockId::Pitch);
     if (maskPage)        maskPage       ->setVisible(play && id == ChainBlockId::Mask);
     if (samplerPage)     samplerPage    ->setVisible(play && id == ChainBlockId::Sampler);
@@ -1115,8 +1130,15 @@ void Sp3ctraAudioProcessorEditor::timerCallback()
     // Always drain the touch flag so turning the setting on later never replays
     // a stale move; only navigate while the setting is enabled.
     const bool touched = audioProcessor.getMidiMap().takeLastTouchedParam(paramId);
-    if (touched && midiFollowEnabled())
-        followMidiParam(paramId);
+    if (touched)
+    {
+        // Light whatever control that parameter belongs to — "being edited"
+        // is the same state whether the mouse or a CC is moving it
+        // (ui/Sp3ctraControls.h; the sinks are the MidiLearnAttachments).
+        Sp3ctraControls::MidiTouch::note(paramId);
+        if (midiFollowEnabled())
+            followMidiParam(paramId);
+    }
 
     // Session bar dot (saved / autosave-pending) — repaint only on change.
     if (auto* s = audioProcessor.sessions();
@@ -1155,7 +1177,8 @@ void Sp3ctraAudioProcessorEditor::followMidiParam(const juce::String& paramId)
     // Already showing this exact target? Don't re-select — a CC sweep fires many
     // events and re-selecting would reset the zone-3 scroll position each tick.
     if (chainRack->selectedInstanceId() == tgt.instanceId
-        && ! setupFace && engineView_ == tgt.engineView)
+        && ! setupFace && engineView_ == tgt.engineView
+        && (! tgt.controlsFace || sourceFace_ == 1))
         return;
 
     // Drive the rack like a user click: it rebinds the per-instance page/setup
@@ -1169,6 +1192,10 @@ void Sp3ctraAudioProcessorEditor::followMidiParam(const juce::String& paramId)
     // a synth ENGINE param that needs the engine page rather than the OUT page).
     bool reselect = false;
     if (setupFace)                     { setupFace = false;               reselect = true; }
+    if (tgt.controlsFace && sourceFace_ != 1) { sourceFace_ = 1;         reselect = true; }
+    else if (! tgt.controlsFace && sourceFace_ == 1
+             && (selectedBlock == ChainBlockId::Chain1Source || selectedBlock == ChainBlockId::Chain2Source))
+                                       { sourceFace_ = 0;                 reselect = true; }
     if (engineView_ != tgt.engineView) { engineView_ = tgt.engineView;    reselect = true; }
     if (reselect)
         selectBlock(selectedBlock);
@@ -1563,6 +1590,13 @@ void Sp3ctraAudioProcessorEditor::selectBlock(ChainBlockId id)
     // of PLAY | SETUP — refreshed here so a rack click / MIDI-follow / restore
     // always shows the tab of the bound instance.
     if (id == ChainBlockId::VideoScroll) refreshVideoTabs();
+    else if (id == ChainBlockId::Chain1Source || id == ChainBlockId::Chain2Source)
+    {
+        // Three faces: the SETUP flag stays the truth for the third one.
+        if (setupFace)                sourceFace_ = 2;
+        else if (sourceFace_ == 2)    sourceFace_ = 0;
+        faceSwitch.setCustomSegments({ "PLAY", "CONTROLS", "SETUP" }, sourceFace_);
+    }
     else                                 faceSwitch.setCustomSegments({}, 0);
 
     // Module power toggle (right of the face row) — rebind to this block's enable
@@ -2092,7 +2126,9 @@ void Sp3ctraAudioProcessorEditor::layoutZone3()
         {
             case ChainBlockId::Chain1Source:
             case ChainBlockId::Chain2Source:
-                top = sourcesPage.get();     topMinH = 260; break;  // +acquisition-speed group
+                if (sourceFace_ == 1) { top = controlsPage.get(); topMinH = Sp3ctraControlsPage::kPreferredH; }
+                else                  { top = sourcesPage.get();  topMinH = 260; }   // +acquisition-speed group
+                break;
             case ChainBlockId::Pitch:
                 top = pitchPage.get();       topMinH = LuxPitchTabComponent::kPreferredH; break;
             case ChainBlockId::Mask:
@@ -2212,6 +2248,7 @@ void Sp3ctraAudioProcessorEditor::persistLayoutProps()
     // face and the engine/instance bindings behind it. Restored in the ctor.
     state.setProperty("selBlock",          (int) selectedBlock,  nullptr);
     state.setProperty("selSetupFace",      setupFace,            nullptr);
+    state.setProperty("selSourceFace",     sourceFace_,          nullptr);
     state.setProperty("selEngineView",     engineView_,          nullptr);
     state.setProperty("selLuxStralSend", luxStralSendSlot_, nullptr);
     state.setProperty("selSamplerEngine",  samplerEngineIndex_,  nullptr);

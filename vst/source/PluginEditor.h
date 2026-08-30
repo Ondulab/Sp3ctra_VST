@@ -7,6 +7,7 @@
 #include "AboutDialog.h"
 #include "CisVisualizerComponent.h"
 #include "image/SourcesTabComponent.h"
+#include "image/Sp3ctraControlsPage.h"
 #include "image/LuxPitchTabComponent.h"
 #include "image/LuxMaskTabComponent.h"
 #include "image/LuxReverbTabComponent.h"
@@ -554,6 +555,7 @@ private:
     // VIDEO SCROLL zone-3 view: false = the page of videoSlotIndex_ (its chain
     // tab), true = the ALL tab (every output stacked). Persisted (selVideoAll).
     bool videoAllView_        { false };
+    int  sourceFace_          { 0 };   // SP3CTRA block: 0 PLAY, 1 CONTROLS, 2 SETUP (custom segments)
     int  midiTapSlotIndex_    { 0 };   // selected MIDI TAP instance slot (0..7)
     // zone2Width/zone4Width hold the USER INTENT (persisted in the session);
     // zone2Eff_/zone4Eff_ are what layoutZones() actually displayed after
@@ -602,6 +604,7 @@ private:
 
     // Hosted PLAY pages — children of zone3Content, one (or one stack) visible
     std::unique_ptr<SourcesTabComponent>  sourcesPage;
+    std::unique_ptr<Sp3ctraControlsPage> controlsPage;   // SP3CTRA CONTROLS face
     std::unique_ptr<LuxPitchTabComponent> pitchPage;
     std::unique_ptr<LuxMaskTabComponent>  maskPage;
     std::unique_ptr<LuxStralTabComponent> imgLuxStralPage;

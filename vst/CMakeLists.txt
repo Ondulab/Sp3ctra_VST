@@ -222,6 +222,8 @@ target_sources(Sp3ctraVST
 
         # MIDI mapping (CC/Note → any play parameter, MIDI learn)
         source/midi/MidiMappingEngine.cpp
+        source/midi/HidMidiMapper.cpp
+        source/midi/HidMidiMapper.h
         source/midi/MidiMappingEngine.h
         source/midi/MidiLearnAttachment.h
         source/midi/MidiTapPage.h
@@ -324,6 +326,8 @@ target_sources(Sp3ctraVST
         # TIMBRE — parametric instrument-spectrum generator (6 sounds / A4)
         source/image/TimbreGenTabComponent.h
         source/image/TimbreGenRenderer.h
+        source/image/TimbreParamsPanel.h
+        source/image/ScoreTransportBar.h
         source/image/TimbreGenRenderer.cpp
 
         # MIDI SCORE — MIDI-file → printable score generator (per-voice timbres)

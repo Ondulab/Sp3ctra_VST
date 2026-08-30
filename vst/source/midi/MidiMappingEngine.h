@@ -182,6 +182,19 @@ public:
 
     /** Human label for a mapped parameter ("CC 21 · ch 1"), empty if unmapped. */
     juce::String mappingDescription(const juce::String& paramId) const;
+    /** Reverse lookup: the parameter mapped to (type, channel, number), or an
+     *  empty string. Message thread (paramId mirror) — used by the CIS
+     *  CONTROLS page to show what each button / axis drives. */
+    juce::String paramForEvent(int type, int channel, int number) const
+    {
+        for (const auto& s : slots_)
+            if (s.paramId.isNotEmpty()
+                && s.type   .load(std::memory_order_relaxed) == type
+                && s.channel.load(std::memory_order_relaxed) == channel
+                && s.number .load(std::memory_order_relaxed) == number)
+                return s.paramId;
+        return {};
+    }
 
     //==========================================================================
     // Message thread — MIDI learn

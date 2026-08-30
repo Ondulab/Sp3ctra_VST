@@ -718,3 +718,23 @@ Principe : l'OLED montre **ce que l'on est en train de toucher, si cela concerne
   Stream w/o host (`updateNetworkConfig` v4.0). `Sp3ctraDeviceClient` purgé des champs RTP/MIDI.
 - **Validé sur le vrai CIS** : découverte, BIND (400 DPI, 12 × 288, HID 200 Hz), session confirmée côté device
   (`host 1.4.x`), lignes et HID reçus (stats), pertes 0.
+
+### 12.6 V3 réalisé (VST, 2026-08-30) — le CIS comme contrôleur MIDI, face CONTROLS
+- `midi/HidMidiMapper.{h,cpp}` : 11 contrôles (SW1-3, ACC X/Y/Z, GYRO X/Y/Z, TILT P/R dérivés de l'accéléro,
+  ±90°), paramètres `sp3ctraHid<Ctrl>{Type,Chan,Num}` (+ `{Min,Max,Bipolar}` pour les continus), globaux
+  `sp3ctraHidDeadzone` (%) et `sp3ctraHidSmoothMs`. Boutons : Off / CC (127-0) / Note (on-off) / Toggle ;
+  continus : Off / CC / CC 14 bits (MSB n, LSB n+32). Fronts reconstruits depuis les compteurs `button_seq`
+  (pertes tolérées), hystérésis ½ pas, lissage 1 pôle calé sur l'horodatage HID. Défauts : SW1-3 → CC 20/21/22
+  canal 1, IMU Off.
+- `processBlock` : `hidMidi_` (MidiBuffer privé, pré-dimensionné) rempli par le mapper puis consommé par
+  `midiMap_.processMidi()` juste après le MIDI hôte — MIDI-learn natif, aucune fuite vers les synthés ni le bus
+  MIDI de sortie. `MidiMappingEngine::paramForEvent()` = recherche inverse pour les pastilles de la page.
+- `image/Sp3ctraControlsPage.h` : squelette `ModuleChrome`, une ligne par contrôle (vumètre live 30 Hz avec
+  rémanence, Type, Ch, Num, Min, Max, ±), rangée Deadzone / Smoothing, section FEEDBACK (LED1-3 mode
+  Off/Press/Follow/Manual + niveau Manual automatisable et MIDI-learnable, OLED Off/Chain/All + Hold) ; pastille
+  « ● » + infobulle « Drives: <param> » quand la ligne est apprise quelque part.
+- Bloc SP3CTRA en **PLAY | CONTROLS | SETUP** (`sourceFace_`, persisté `selSourceFace`) ; MIDI-follow d'un param
+  `sp3ctraHid*/Led*/Oled*` → face CONTROLS (`ParamNavTarget::controlsFace`).
+- Paramètres de retour créés (`sp3ctraLed{1,2,3}Mode/Level`, `sp3ctraOledMode`, `sp3ctraOledHoldMs`) ; la
+  logique de retour (LED_SET / OLED_OVERLAY) est le jalon V4.
+- Build vert, app stable ; validation interactive (appuis, inclinaison, learn) à faire par l'utilisateur.

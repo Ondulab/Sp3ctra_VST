@@ -1708,6 +1708,28 @@ juce::AudioProcessorValueTreeState::ParameterLayout Sp3ctraAudioProcessor::creat
         juce::ParameterID{"acqGateMultDiv", 1}, "Acquisition Mult/Div",
         juce::StringArray{"/32", "/16", "/8", "/4", "/2", "x1", "x2", "x4"}, 5));
 
+    // ── SP3CTRA CONTROLS — the CIS as a MIDI controller + device feedback ──
+    // docs/PLAN_SP3CTRA_LINK.md D7 / D9 / D10. Mapping params are hidden from
+    // automation (configuration); the LED "Manual" levels are performance
+    // parameters (automatable, MIDI-learnable).
+    HidMidiMapper::addParameters(params);
+    for (int i = 1; i <= 3; ++i)
+    {
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID{"sp3ctraLed" + juce::String(i) + "Mode", 1}, "CIS LED " + juce::String(i) + " Mode",
+            juce::StringArray{"Off", "Press", "Follow", "Manual"}, 1, kHiddenChoice));
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{"sp3ctraLed" + juce::String(i) + "Level", 1}, "CIS LED " + juce::String(i) + " Level",
+            juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+    }
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"sp3ctraOledMode", 1}, "CIS OLED Overlay",
+        juce::StringArray{"Off", "Chain", "All"}, 1, kHiddenChoice));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"sp3ctraOledHoldMs", 1}, "CIS OLED Hold",
+        juce::NormalisableRange<float>(300.0f, 5000.0f, 10.0f, 0.5f), 1500.0f,
+        juce::AudioParameterFloatAttributes{}.withAutomatable(false).withLabel("ms")));
+
     // ── MIDI MIX master — the TIMEBASE and the destinations, shared by every
     // MIDI TAP probe. Everything here is global on purpose: N probes must write
     // files that align on ONE timeline, so per-probe tempi are not a thing.
@@ -1992,6 +2014,7 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     udpByte3Param = apvts.getRawParameterValue(PARAM_UDP_BYTE3);
     udpByte4Param = apvts.getRawParameterValue(PARAM_UDP_BYTE4);
     sensorDpiParam = apvts.getRawParameterValue(PARAM_SENSOR_DPI);
+    hidMapper_.attach(apvts);
     logLevelParam = apvts.getRawParameterValue(PARAM_LOG_LEVEL);
     deviceEnabledParam  = apvts.getRawParameterValue(PARAM_DEVICE_ENABLED);
     visualizerModeParam = apvts.getRawParameterValue(PARAM_VISUALIZER_MODE);
@@ -2958,6 +2981,7 @@ void Sp3ctraAudioProcessor::setVisualizerSuspendedSafely (bool suspend)
 
 void Sp3ctraAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
+    hidMidi_.ensureSize(4096);   // CIS → MIDI events, RT-safe from here on
     // 🛡️ PROTECTION: Suspend visualizer to prevent Metal/CoreGraphics race
     setVisualizerSuspendedSafely(true);
 
@@ -3265,6 +3289,15 @@ void Sp3ctraAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // sampler targets (play params + REC/PLAY/SAVE action pulses) route through
     // this processor's IVirtualMidiSink implementation.
     midiMap_.processMidi(midiMessages);
+
+    // ── The CIS as a MIDI controller (Sp3ctra Link HID → MIDI, D7) ─────────
+    // Buttons / IMU become CC / notes in a PRIVATE buffer: they can be
+    // MIDI-learnt like any controller, but never reach the synths below as
+    // played notes nor the plugin MIDI output.
+    hidMidi_.clear();
+    hidMapper_.process(hidMidi_);
+    if (! hidMidi_.isEmpty())
+        midiMap_.processMidi(hidMidi_);
 
 
     // ── All Notes Off (panic): release every held/stuck note across engines ───
@@ -6156,6 +6189,17 @@ Sp3ctraAudioProcessor::navTargetForParam(const juce::String& id) const
         outSlot = num.getIntValue();
         return true;
     };
+
+    // SP3CTRA source block: CIS controller mapping + device feedback params
+    // live on its CONTROLS face (docs/PLAN_SP3CTRA_LINK.md §12.3).
+    if (id.startsWith("sp3ctraHid") || id.startsWith("sp3ctraLed") || id.startsWith("sp3ctraOled"))
+    {
+        t.type         = ModuleType::Sp3ctra;
+        t.instanceId   = chainInstance(ModuleType::Sp3ctra, -1);
+        t.controlsFace = true;
+        t.valid        = ! t.instanceId.isNull();
+        return t;
+    }
 
     int slot = -1;
     // Order matters: the banked "...Out"/"luxSamplerB" families must be tested

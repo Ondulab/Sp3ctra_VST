@@ -8,7 +8,8 @@
 #include "framesequencer/FrameSequencer.h"
 #include "processing/AcquisitionGate.h" // "Vitesse d'acquisition" — frame-advance brake clock
 #include "ui/ChainModel.h"      // M6 Phase 2 — editable chain topology (owned here)
-#include "midi/MidiMappingEngine.h" // MIDI CC/Note → any play param (MIDI learn)
+#include "midi/MidiMappingEngine.h"
+#include "midi/HidMidiMapper.h" // MIDI CC/Note → any play param (MIDI learn)
 #include "session/SessionManager.h" // working-session persistence (sessions())
 #include "session/Sp3ctraPaths.h"   // PathKeys:: + last-dir chooser memory
 #include <map>                  // chainPoolSlots_ (stable chain → pool-slot binding)
@@ -200,6 +201,9 @@ public:
     {
         return sharedCore ? sharedCore->getLink() : nullptr;
     }
+
+    /** The CIS as a MIDI controller (Sp3ctra Link HID → MIDI, per instance). */
+    HidMidiMapper& getHidMapper() noexcept { return hidMapper_; }
 
     /**
      * @brief True once the shared pipeline (UDP socket + threads) has been
@@ -584,6 +588,7 @@ public:
         juce::Uuid instanceId;                    ///< instance to select in the rack
         ModuleType type { ModuleType::Sp3ctra };
         bool       engineView { false };          ///< synth engine page vs OUT page
+        bool       controlsFace { false };        ///< SP3CTRA block: land on the CONTROLS face
     };
     ParamNavTarget navTargetForParam(const juce::String& paramId) const;
 
@@ -921,6 +926,8 @@ private:
     // MIDI CC/Note → parameter mappings. Constructed after apvts (declaration
     // order below the apvts member matters — it holds a reference to it).
     MidiMappingEngine midiMap_ { apvts };
+    HidMidiMapper     hidMapper_;          // CIS buttons / IMU → MIDI (private buffer below)
+    juce::MidiBuffer  hidMidi_;            // consumed by midiMap_ only — never by the synths or the MIDI out
 
     // M6 Phase 2 — authoritative editable topology + last-known presence set
     // (used to diff the enable-param bridge). Message-thread owned.
