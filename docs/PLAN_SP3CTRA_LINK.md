@@ -738,3 +738,26 @@ Principe : l'OLED montre **ce que l'on est en train de toucher, si cela concerne
 - Paramètres de retour créés (`sp3ctraLed{1,2,3}Mode/Level`, `sp3ctraOledMode`, `sp3ctraOledHoldMs`) ; la
   logique de retour (LED_SET / OLED_OVERLAY) est le jalon V4.
 - Build vert, app stable ; validation interactive (appuis, inclinaison, learn) à faire par l'utilisateur.
+
+### 12.7 V4 réalisé (2026-08-30) — retour LEDs + overlay OLED
+- `feedback/DeviceFeedback.{h,cpp}` (timer 30 ms du processeur) :
+  - **OLED** — chaque `audioProcessorParameterChanged` (souris, MIDI appris **y compris depuis le CIS**,
+    automation hôte) horodate le paramètre ; le tick garde les **3 derniers distincts** dans la fenêtre Hold,
+    filtre (**Chain** = module SP3CTRA + transport `image*`/`acqGate*`/`rawFreeze*` + tout module d'une chaîne
+    hébergeant un IN SP3CTRA via `navTargetForParam` + `instanceChainHostsSp3ctra`, cache 1 s ; **All** = tout
+    sauf la plomberie session/UI), compose label `getName(12|14)` · `getCurrentValueAsText()` · barre normalisée
+    (bipolaire si la plage traverse 0, pas de barre pour un booléen) et envoie `OLED_OVERLAY` coalescé
+    (≤ 20 Hz, réémission 250 ms pour tenir le TTL, `OLED_CLEAR` quand plus rien n'est frais). Les rafales de
+    restauration sont ignorées (3 s de mutisme au démarrage + `isBulkParamApplyActive()`).
+  - **LEDs** — Off (éteinte + appui local inhibé), Press (comportement local, rien envoyé), **Follow**
+    (recherche inverse `paramForEvent` sur le MIDI que produit ce bouton → valeur du paramètre : 2 états →
+    on/off, continu → luminosité), Manual (`sp3ctraLedNLevel`, automatisable). Envoi sur changement + toutes
+    les 2 s (UDP sans accusé).
+  - **Salut au bind** : clignotement ×2 des 3 LEDs + overlay « SP3CTRA LINK v<version> » 1,5 s (maintenu
+    contre la coalescence de la file, sinon l'état normal l'écrasait 30 ms plus tard).
+- Firmware : `LED_SET`/`OLED_OVERLAY` tracés sur l'UART ; **fin de session = nettoyage** (overlay effacé,
+  inhibition d'appui local relâchée, LEDs éteintes) — un hôte qui plante ne laisse plus l'instrument avec des
+  rétroéclairages morts.
+- **Validé sur le CIS** : salut reçu intact, état LED normal 1,5 s après, session fermée par timeout après un
+  `kill -9`. Reste à valider de visu par l'utilisateur : overlay d'un paramètre en cours d'édition (mode Chain),
+  LED en mode Follow/Manual, boutons/inclinaison appris sur des paramètres.

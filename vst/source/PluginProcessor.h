@@ -9,7 +9,8 @@
 #include "processing/AcquisitionGate.h" // "Vitesse d'acquisition" — frame-advance brake clock
 #include "ui/ChainModel.h"      // M6 Phase 2 — editable chain topology (owned here)
 #include "midi/MidiMappingEngine.h"
-#include "midi/HidMidiMapper.h" // MIDI CC/Note → any play param (MIDI learn)
+#include "midi/HidMidiMapper.h"
+#include "feedback/DeviceFeedback.h" // MIDI CC/Note → any play param (MIDI learn)
 #include "session/SessionManager.h" // working-session persistence (sessions())
 #include "session/Sp3ctraPaths.h"   // PathKeys:: + last-dir chooser memory
 #include <map>                  // chainPoolSlots_ (stable chain → pool-slot binding)
@@ -52,6 +53,7 @@ extern "C" {
  * - VST parameters (APVTS with UDP config, sensor DPI, log level)
  */
 class Sp3ctraAudioProcessor  : public juce::AudioProcessor,
+                              public juce::AudioProcessorListener,
                                 public juce::AudioProcessorValueTreeState::Listener,
                                 public IVirtualMidiSink,
                                 private juce::Timer
@@ -204,6 +206,33 @@ public:
 
     /** The CIS as a MIDI controller (Sp3ctra Link HID → MIDI, per instance). */
     HidMidiMapper& getHidMapper() noexcept { return hidMapper_; }
+
+    /** True while the deferred-restore drain applies a batch of parameters
+     *  (a parameter storm the device feedback must not mistake for editing). */
+    bool isBulkParamApplyActive() const noexcept { return bulkParamApply_; }
+
+    /** Message thread: does the chain hosting @p instanceId also host an IN
+     *  SP3CTRA module? (OLED overlay "Chain" filter.) */
+    bool instanceChainHostsSp3ctra (const juce::Uuid& instanceId) const noexcept
+    {
+        for (const auto& ch : chainModel_.chains)
+        {
+            bool hasInstance = false, hasSource = false;
+            for (const auto& m : ch.modules)
+            {
+                if (m.id == instanceId)              hasInstance = true;
+                if (m.type == ModuleType::Sp3ctra)   hasSource = true;
+            }
+            if (hasInstance) return hasSource;
+        }
+        return false;
+    }
+
+    // juce::AudioProcessorListener — every parameter change (UI, learnt MIDI,
+    // host automation) stamps the device feedback's "touched" table.
+    void audioProcessorParameterChanged (juce::AudioProcessor*, int parameterIndex, float) override
+    { feedback_.noteParamTouched (parameterIndex); }
+    void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails&) override {}
 
     /**
      * @brief True once the shared pipeline (UDP socket + threads) has been
@@ -928,6 +957,7 @@ private:
     MidiMappingEngine midiMap_ { apvts };
     HidMidiMapper     hidMapper_;          // CIS buttons / IMU → MIDI (private buffer below)
     juce::MidiBuffer  hidMidi_;            // consumed by midiMap_ only — never by the synths or the MIDI out
+    DeviceFeedback    feedback_ { *this };   // LEDs + OLED overlay sent back to the CIS
 
     // M6 Phase 2 — authoritative editable topology + last-known presence set
     // (used to diff the enable-param bridge). Message-thread owned.

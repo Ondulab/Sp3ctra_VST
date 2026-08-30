@@ -2015,6 +2015,8 @@ Sp3ctraAudioProcessor::Sp3ctraAudioProcessor()
     udpByte4Param = apvts.getRawParameterValue(PARAM_UDP_BYTE4);
     sensorDpiParam = apvts.getRawParameterValue(PARAM_SENSOR_DPI);
     hidMapper_.attach(apvts);
+    feedback_.prepare();
+    addListener(this);   // parameter touches → device feedback (OLED overlay)
     logLevelParam = apvts.getRawParameterValue(PARAM_LOG_LEVEL);
     deviceEnabledParam  = apvts.getRawParameterValue(PARAM_DEVICE_ENABLED);
     visualizerModeParam = apvts.getRawParameterValue(PARAM_VISUALIZER_MODE);
@@ -2479,6 +2481,7 @@ void Sp3ctraAudioProcessor::getScoreFrequencyRange(double& lowHz, double& highHz
 
 Sp3ctraAudioProcessor::~Sp3ctraAudioProcessor()
 {
+    removeListener(this);
     log_info("VST", "=============================================================");
     log_info("VST", "Sp3ctraAudioProcessor: Destructor - Shutting down");
     log_info("VST", "=============================================================");
@@ -5196,6 +5199,7 @@ void Sp3ctraAudioProcessor::parameterChanged(const juce::String& parameterID, fl
 void Sp3ctraAudioProcessor::timerCallback()
 {
     pollLink();
+    feedback_.tick();
 
     // ── Deferred parameter changes (audio/loader thread → here) ──────────────
     // A DAW project restore delivers its parameters through this drain (the

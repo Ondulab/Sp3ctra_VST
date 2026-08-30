@@ -224,6 +224,8 @@ target_sources(Sp3ctraVST
         source/midi/MidiMappingEngine.cpp
         source/midi/HidMidiMapper.cpp
         source/midi/HidMidiMapper.h
+        source/feedback/DeviceFeedback.cpp
+        source/feedback/DeviceFeedback.h
         source/midi/MidiMappingEngine.h
         source/midi/MidiLearnAttachment.h
         source/midi/MidiTapPage.h
