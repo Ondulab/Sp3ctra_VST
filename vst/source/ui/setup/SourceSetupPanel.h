@@ -25,8 +25,10 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_processors/juce_audio_processors.h>
+#include "SetupHeader.h"
 #include "../../PluginProcessor.h"
 #include "../../communication/device/Sp3ctraDeviceClient.h"
+#include "../../communication/device/Sp3ctraNetFlash.h"
 #include "../../communication/link/Sp3ctraLink.h"
 
 class SourceSetupPanel : public juce::Component,
@@ -37,12 +39,30 @@ public:
     SourceSetupPanel(Sp3ctraAudioProcessor& processor, juce::Colour accentColour);
     ~SourceSetupPanel() override;
 
-    /** Natural content height — hosted in a scrolling viewport (zone-3). */
-    static constexpr int kPreferredH = 1300;
+    /** Max Sp3ctra units listed in the DEVICES section. */
+    static constexpr int kMaxDeviceRows = 4;
+
+    /** Natural content height — hosted in a scrolling viewport (zone-3).
+        Derived from the row/section tokens so it always matches resized();
+        sized for the worst case (every device row shown — the page collapses
+        the unused ones at runtime). */
+    static constexpr int kRowH = Sp3ctraTheme::kRowStep;
+    static constexpr int kSecH = 3 * Sp3ctraTheme::kSectionGap + Sp3ctraTheme::kSectionH;
+    static constexpr int kPreferredH =
+          SetupUI::kHeaderH + Sp3ctraTheme::kSectionGap
+        + kSecH + (kMaxDeviceRows + 2) * kRowH   // DEVICES  — list + status + auto-connect
+        + kSecH + 5 * kRowH                      // LINK     — ip / port / multicast / apply / status
+        + kSecH + 5 * kRowH                      // CIS
+        + kSecH + 3 * kRowH                      // IMU
+        + kSecH + 5 * kRowH                      // GUI & screensaver
+        + kSecH + 8 * kRowH                      // NETWORK (device)
+        + kSecH + 5 * kRowH                      // FIRMWARE
+        + Sp3ctraTheme::kHPad;
 
     void paint(juce::Graphics&) override;
     void resized() override;
-    void visibilityChanged() override;   // load on show / cancel on hide
+    void visibilityChanged() override;       // load on show / cancel on hide
+    void parentHierarchyChanged() override;  // same, for a restored-at-startup page
 
 private:
     //==========================================================================
@@ -76,9 +96,9 @@ private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
 
     // ── DEVICE (HTTP) ─────────────────────────────────────────────────────────
-    void reload();                     // GET everything from the device
-    void onLoaded (Sp3ctraDeviceClient::State, Sp3ctraDeviceClient::DeviceConfig);
-    void populate (const Sp3ctraDeviceClient::DeviceConfig&);
+    void reload();                     // CFG_GET everything over the bound link
+    void populateFromCfg();            // fill the fields from the link's CFG cache
+    void cfgSet (uint16_t id, uint8_t type, uint32_t value);   // one CFG_SET
     void setConnState (Sp3ctraDeviceClient::State, const juce::String& detail = {});
     void setDeviceControlsEnabled (bool);
 
@@ -86,6 +106,7 @@ private:
     void postNetwork();
     void chooseFirmware();
     void uploadFirmware();
+    void netFlashFirmware();   // through the bootloader's network flasher
     void confirmFactoryReset();
     void reconcileDpiToApvts (int dpi);
 
@@ -95,21 +116,22 @@ private:
 
     Sp3ctraDeviceClient deviceClient;
     Sp3ctraDeviceClient::State connState = Sp3ctraDeviceClient::State::Idle;
-    bool applyingRemote = false;       // guard: suppress POST while populating
-    bool loading = false;              // guard: dedupe overlapping load bursts
+    bool applyingRemote = false;       // guard: suppress CFG_SET while populating
+    double cfgAskedMs = 0;             // last CFG_GET burst — drives the timeout
 
     // ── LINK controls ─────────────────────────────────────────────────────────
-    static constexpr int kMaxDeviceRows = 4;
     struct DeviceRow
     {
         juce::Label      text;
         juce::TextButton button;   // USE / RELEASE
         juce::String     uid;
     };
-    juce::Label    devicesLabel;
+    juce::Label    devicesHeader;
     DeviceRow      deviceRows[kMaxDeviceRows];
+    juce::Label    noDeviceLabel;      // placeholder while the list is empty
     juce::Label    linkStatusLabel;
     juce::ToggleButton autoBindToggle;
+    juce::Label    linkHeader;
     juce::Label    deviceIpLabel;   IpBytes deviceIp;      // HELLO unicast target + HTTP host
     juce::Label    udpPortLabel;    juce::TextEditor udpPortEditor;
     juce::Label    udpAddressLabel; IpBytes udpAddr;       // multicast group (blank/unicast = direct)
@@ -117,6 +139,8 @@ private:
     juce::Label    connStatusLabel; juce::TextButton retryButton;
     uint32_t       lastLinkGen = 0;
     bool           linkWasBound = false;
+    int            shownDevices = -1;  // visible device rows — a change re-lays out
+    int            contentRight = 0;   // right edge of the content column (paint)
 
     // ── CIS ────────────────────────────────────────────────────────────────────
     juce::Label cisHeader;
@@ -154,10 +178,12 @@ private:
 
     // ── Firmware ─────────────────────────────────────────────────────────────────
     juce::Label fwHeader;
-    juce::Label fwVersionLabel;
+    juce::Label fwVersionCaption;  juce::Label fwVersionLabel;
     juce::TextButton chooseFwButton;
     juce::Label      fwFileLabel;
     juce::TextButton uploadFwButton;
+    juce::TextButton netFlashButton;
+    Sp3ctraNetFlash  netFlash;
     double           uploadProgress = 0.0;
     juce::ProgressBar uploadProgressBar { uploadProgress };
     juce::TextButton factoryResetButton;

@@ -97,6 +97,9 @@ else()
 endif()
 
 # Define the plugin with sources directly
+option(SP3CTRA_COPY_PLUGIN_AFTER_BUILD "Install plugin formats after building" ${SP3CTRA_COPY_PLUGIN})
+option(SP3CTRA_INCREMENT_VERSION "Increment patch version on build" ON)
+
 juce_add_plugin(Sp3ctraVST
     COMPANY_NAME "Ondulab"
     IS_SYNTH TRUE
@@ -108,7 +111,7 @@ juce_add_plugin(Sp3ctraVST
     NEEDS_MIDI_OUTPUT TRUE
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
-    COPY_PLUGIN_AFTER_BUILD ${SP3CTRA_COPY_PLUGIN}
+    COPY_PLUGIN_AFTER_BUILD ${SP3CTRA_COPY_PLUGIN_AFTER_BUILD}
     PLUGIN_MANUFACTURER_CODE "Ondu"
     PLUGIN_CODE "Sp3c"
     FORMATS ${SP3CTRA_PLUGIN_FORMATS}
@@ -170,6 +173,10 @@ target_sources(Sp3ctraVST
 
         # M6 — editable chain model + drag-and-drop module catalogue
         source/ui/ModuleCatalog.h
+        source/ui/ChainIdentity.h
+        source/ui/ParamIdentity.h
+        source/ui/MidiMapGlyphs.h
+        source/ui/MidiCurveEditor.h
         source/ui/ChainModel.cpp
         source/ui/ChainModel.h
         source/ui/ModuleCatalogComponent.h
@@ -227,6 +234,10 @@ target_sources(Sp3ctraVST
         source/feedback/DeviceFeedback.cpp
         source/feedback/DeviceFeedback.h
         source/midi/MidiMappingEngine.h
+        source/midi/MidiCcNames.h
+        source/midi/LfoBank.h
+        source/midi/MidiMappingCurve.h
+        source/midi/MidiMappingEnvelope.h
         source/midi/MidiLearnAttachment.h
         source/midi/MidiTapPage.h
         source/midi/MidiTapSink.cpp
@@ -258,6 +269,8 @@ target_sources(Sp3ctraVST
 
         # 🎵 PHASE 3: LuxStral Synthesis Engine (VST-adapted)
         source/synthesis/luxstral/vst_adapters.cpp
+        source/synthesis/luxstral/vst_callback_sync.c
+        source/synthesis/luxstral/synth_work_dispatch.c
         source/synthesis/luxstral/vst_adapters.h
         source/synthesis/luxstral/luxstral_engine.h
         source/synthesis/luxstral/synth_luxstral.c
@@ -339,12 +352,16 @@ target_sources(Sp3ctraVST
 
         # Video scroll system
         source/video/VideoScrollMode.h
-        source/video/VideoScrollPage.h
-        source/video/VideoScrollAllPage.h
+        source/video/VideoMixFocus.h
+        source/video/VideoScrollGridPage.h
         source/video/VideoScrollViewportEditor.h
         source/video/VideoScrollPreviewSource.h
         source/video/VideoScrollRenderCore.cpp
         source/video/VideoScrollRenderCore.h
+        source/video/VideoParallel.h
+        source/video/VideoBlit.h
+        source/video/VideoBlit.cpp
+        source/ui/VideoMixRadar.h
         source/ui/VideoMixerComponent.cpp
         source/ui/VideoMixerComponent.h
         source/ui/VideoMixerColumn.cpp
@@ -361,6 +378,7 @@ if(APPLE)
         source/sources/VideoFileReader.mm
         # VIDEO MIX + master-audio recorder (AVAssetWriter → HEVC .mov).
         source/recorder/VideoRecorder.mm
+        source/video/NativeVideoView.mm
     )
 elseif(WIN32)
     # VIDEO file source via Media Foundation (mirrors the AVFoundation reader).
@@ -428,6 +446,8 @@ target_sources(Sp3ctraVST
 
         # Device HTTP control-plane client (config.html API)
         source/communication/device/Sp3ctraDeviceClient.cpp
+        # Network flasher client (bootloader UDP 55152, replaces the ST-Link)
+        source/communication/device/Sp3ctraNetFlash.cpp
 
         # Sp3ctra Link (SLP v1): discovery / session / feedback + receiver state
         source/communication/link/Sp3ctraLink.cpp
@@ -437,6 +457,8 @@ target_sources(Sp3ctraVST
         source/utils/logger.c
         source/utils/error.c
         source/utils/rt_profiler.c
+        source/utils/pipeline_metrics.c
+        source/utils/rt_block_metrics.c
         
         # Threading (for udpThread and buffer initialization)
         source/threading/multithreading.c
@@ -474,6 +496,8 @@ target_sources(Sp3ctraVST
         source/processing/lux_dcblock.h
         source/processing/lux_gain.c
         source/processing/lux_gain.h
+        source/processing/lux_diff.c
+        source/processing/lux_diff.h
         source/processing/video_scroll.c
         source/processing/video_scroll.h
         source/processing/midi_tap.c
@@ -512,7 +536,7 @@ add_custom_target(Sp3ctraVersionHeader
     COMMAND ${CMAKE_COMMAND}
         -DVERSION_FILE=${CMAKE_CURRENT_SOURCE_DIR}/VERSION
         -DOUTPUT_HEADER=${SP3CTRA_VERSION_HEADER_DIR}/Sp3ctraVersion.h
-        -DINCREMENT=ON
+        -DINCREMENT=${SP3CTRA_INCREMENT_VERSION}
         -P ${SP3CTRA_VERSION_SCRIPT}
     COMMENT "Bumping Sp3ctra patch version"
     VERBATIM)
@@ -724,6 +748,21 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     endif()
 endif()
 
+# ===== VIDEO RENDER PASSES: -O3 =====
+# The waterfall passes are tight per-pixel integer loops whose speed IS the
+# video budget; -O3 lets clang unroll and vectorise them (NEON on Apple silicon).
+# Scoped to these translation units ON PURPOSE: the project-wide -O2 / no
+# -ffast-math policy above exists for the RT audio path and stays untouched.
+# They contain no DSP and no atomics ordering that -O3 could disturb.
+if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT MSVC)
+    set_source_files_properties(
+        source/video/VideoScrollRenderCore.cpp
+        source/video/VideoBlit.cpp
+        source/ui/VideoMixerComponent.cpp
+        PROPERTIES COMPILE_OPTIONS "-O3"
+    )
+endif()
+
 # ===== PROFIL DEBUG =====
 # ASan/UBSan are opt-in via -DUSE_ASAN=ON because VST3 CFBundle link does not
 # automatically pull in the sanitizer runtime (JUCE multi-target CMake layout).
@@ -774,4 +813,41 @@ if(NOT MSVC)
             )
         endif()
     endforeach()
+endif()
+
+option(SP3CTRA_BUILD_PERFORMANCE_TESTS "Build focused performance regression tests and worker benchmark" OFF)
+if(SP3CTRA_BUILD_PERFORMANCE_TESTS)
+    add_executable(Sp3ctraPerformanceStorageTest tests/performance/frame_slot.cpp)
+    target_compile_features(Sp3ctraPerformanceStorageTest PRIVATE cxx_std_17)
+    target_link_libraries(Sp3ctraPerformanceStorageTest PRIVATE Sp3ctraVST)
+    target_include_directories(Sp3ctraPerformanceStorageTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/source" "${juce_SOURCE_DIR}/modules")
+    target_compile_definitions(Sp3ctraPerformanceStorageTest PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(Sp3ctraPerformanceStorageTest PRIVATE -fsanitize=address,undefined)
+        target_link_options(Sp3ctraPerformanceStorageTest PRIVATE -fsanitize=address,undefined)
+    endif()
+    add_executable(Sp3ctraWorkerPoolTest tests/performance/worker_pool.c)
+    set_target_properties(Sp3ctraWorkerPoolTest PROPERTIES LINKER_LANGUAGE CXX)
+    target_link_libraries(Sp3ctraWorkerPoolTest PRIVATE Sp3ctraVST)
+    target_include_directories(Sp3ctraWorkerPoolTest PRIVATE
+        $<TARGET_PROPERTY:Sp3ctraVST,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(Sp3ctraWorkerPoolTest PRIVATE VST_MODE=1 NO_SFML=1)
+
+    add_executable(Sp3ctraWorkerBenchmark tests/performance/worker_benchmark.c)
+    set_target_properties(Sp3ctraWorkerBenchmark PROPERTIES LINKER_LANGUAGE CXX)
+    target_link_libraries(Sp3ctraWorkerBenchmark PRIVATE Sp3ctraVST)
+    target_include_directories(Sp3ctraWorkerBenchmark PRIVATE
+        $<TARGET_PROPERTY:Sp3ctraVST,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(Sp3ctraWorkerBenchmark PRIVATE VST_MODE=1 NO_SFML=1)
+endif()
+
+if(SP3CTRA_BUILD_PERFORMANCE_TESTS AND APPLE)
+    add_executable(Sp3ctraMacSchedulingTest tests/performance/macos_team_scheduling.c)
+    set_target_properties(Sp3ctraMacSchedulingTest PROPERTIES LINKER_LANGUAGE CXX)
+    target_link_libraries(Sp3ctraMacSchedulingTest PRIVATE Sp3ctraVST)
+    target_include_directories(Sp3ctraMacSchedulingTest PRIVATE
+        $<TARGET_PROPERTY:Sp3ctraVST,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(Sp3ctraMacSchedulingTest PRIVATE VST_MODE=1 NO_SFML=1)
 endif()
