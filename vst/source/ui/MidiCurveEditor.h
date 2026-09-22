@@ -854,9 +854,9 @@ private:
     //── Hit testing ───────────────────────────────────────────────────────────
     Hit hitAt(juce::Point<float> p) const
     {
-        auto near = [&](juce::Rectangle<float> r) { return r.expanded(4.0f).contains(p); };
-        if (near(outLoThumb())) return { Target::OutLo, -1 };
-        if (near(outHiThumb())) return { Target::OutHi, -1 };
+        auto nearThumb = [&](juce::Rectangle<float> r) { return r.expanded(4.0f).contains(p); };
+        if (nearThumb(outLoThumb())) return { Target::OutLo, -1 };
+        if (nearThumb(outHiThumb())) return { Target::OutHi, -1 };
 
         constexpr float grab = 9.0f;
         if (envView())
@@ -877,8 +877,8 @@ private:
                 return { Target::EnvKnee, seg };
             return {};
         }
-        if (near(inLoThumb ())) return { Target::InLo,  -1 };
-        if (near(inHiThumb ())) return { Target::InHi,  -1 };
+        if (nearThumb(inLoThumb ())) return { Target::InLo,  -1 };
+        if (nearThumb(inHiThumb ())) return { Target::InHi,  -1 };
 
         if (curve_.mode == MidiMappingCurve::Mode::Expo
             && shapeNode().getDistanceFrom(p) < grab)
