@@ -238,6 +238,18 @@ private:
      *  forever. 60 s is well past any musically useful tail. */
     static constexpr int kRunoutMaxTicks = 60000;
 
+    /** Player period (µs): the CIS scans ≈ 1000 lines/s, the score plays
+     *  one frame per period at speed 1×. */
+    static constexpr uint64_t kTickUs = 1000;
+    /** Bounded catch-up (2026-09-08): a wake-up late by N periods runs up to
+     *  this many ticks back-to-back so the head keeps real time — the line
+     *  count equals the elapsed milliseconds on average, so the FX
+     *  line-clocks and the downstream recorders stay coherent. A stall
+     *  longer than this is written off (a burst that long would itself
+     *  starve the synth): 32 ms covers every late wake-up seen in practice
+     *  and leaves only the rare 30-130 ms outliers as a one-off hiccup. */
+    static constexpr int kMaxCatchUpTicks = 32;
+
     /** P8 hold predicate: the slot wants a live session even with the
      *  transport stopped (VOICE parity with a loaded IMAGE). */
     bool slotWantsHold(int slot) const noexcept
@@ -265,6 +277,11 @@ private:
      *  polyphonic Path-B commit, visual mix bus (display owner only). */
     void inject(int slot, int nb, bool displayOwner) noexcept;
     void writeWhiteMixBus() noexcept;
+    /** One 1 ms period of the player: display-owner arbitration, then every
+     *  feeding slot advanced + injected (session begin/runout/end included).
+     *  run() calls it once per due period — several back-to-back after a
+     *  late wake-up (see kMaxCatchUpTicks). */
+    void tick() noexcept;
 
     ScoreSlot   slots_[kMaxSlots];
     Session     sessions_[kMaxSlots];

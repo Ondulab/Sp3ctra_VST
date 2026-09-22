@@ -11,11 +11,12 @@
 #include "logger.h"
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 
-/* Helper function to calculate time difference in microseconds */
-static inline uint64_t timeval_diff_us(struct timeval *start, struct timeval *end) {
-    return (end->tv_sec - start->tv_sec) * 1000000ULL +
-           (end->tv_usec - start->tv_usec);
+uint64_t rt_profiler_now_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000ULL + (uint64_t)t.tv_nsec;
 }
 
 /* Display names for the per-family engine timers (indexed by rt_engine_id). */
@@ -36,6 +37,26 @@ void rt_profiler_engine_report(RTProfiler *profiler, rt_engine_id id, uint64_t e
            !atomic_compare_exchange_weak(&e->max_us, &cur, elapsed_us)) {
         /* cur reloaded by CAS */
     }
+}
+
+/* The shared producer can remain alive across prepareToPlay(). Its ring must
+ * not be memset by callback-profiler reinitialization while it is publishing.
+ * It is zero-initialized once; only the message thread resets report windows. */
+static RTBlockMetrics producer_blocks;
+static RTBlockMetrics producer_launch, producer_own, producer_join;
+
+void rt_profiler_report_luxstral_schedule(RTProfiler *profiler, uint64_t launch_ns,
+                                        uint64_t own_ns, uint64_t join_ns, uint64_t budget_ns) {
+    if (!atomic_load_explicit(&profiler->enabled, memory_order_relaxed)) return;
+    rt_block_record(&producer_launch, launch_ns, budget_ns);
+    rt_block_record(&producer_own, own_ns, budget_ns);
+    rt_block_record(&producer_join, join_ns, budget_ns);
+}
+
+void rt_profiler_report_producer_block(RTProfiler *profiler, uint64_t elapsed_ns,
+                                      uint64_t budget_ns) {
+    if (atomic_load_explicit(&profiler->enabled, memory_order_relaxed))
+        rt_block_record(&producer_blocks, elapsed_ns, budget_ns);
 }
 
 void rt_profiler_init(RTProfiler *profiler, int sample_rate, int buffer_size) {
@@ -68,20 +89,24 @@ void rt_profiler_set_enabled(RTProfiler *profiler, int enabled) {
     }
 }
 
-void rt_profiler_callback_start(RTProfiler *profiler) {
+void rt_profiler_callback_start_frames(RTProfiler *profiler, int frames) {
     if (!profiler->enabled) return;
-    
-    gettimeofday(&profiler->callback_start_time, NULL);
+    profiler->callback_start_ns = rt_profiler_now_ns();
+    profiler->actual_callback_budget_ns = (frames > 0 && profiler->sample_rate > 0)
+        ? (uint64_t)frames * 1000000000ULL / (uint64_t)profiler->sample_rate : 0;
+}
+
+void rt_profiler_callback_start(RTProfiler *profiler) {
+    rt_profiler_callback_start_frames(profiler, profiler->buffer_size);
 }
 
 void rt_profiler_callback_end(RTProfiler *profiler) {
     if (!profiler->enabled) return;
-    
-    struct timeval end_time;
-    gettimeofday(&end_time, NULL);
-    
-    uint64_t elapsed_us = timeval_diff_us(&profiler->callback_start_time, &end_time);
-    
+    const uint64_t elapsed_ns = rt_profiler_now_ns() - profiler->callback_start_ns;
+    const uint64_t elapsed_us = elapsed_ns / 1000;
+    if (profiler->actual_callback_budget_ns > 0)
+        rt_block_record(&profiler->blocks, elapsed_ns, profiler->actual_callback_budget_ns);
+
     profiler->callback_count++;
     profiler->total_callback_time_us += elapsed_us;
     
@@ -100,7 +125,8 @@ void rt_profiler_callback_end(RTProfiler *profiler) {
 
     /* Track critical latency — coalesced into ONE line at the next flush
      * (logging every offending callback amplified the very latency reported) */
-    float percent = (elapsed_us * 100.0f) / profiler->callback_budget_us;
+    float percent = profiler->actual_callback_budget_ns > 0
+        ? (elapsed_ns * 100.0f) / profiler->actual_callback_budget_ns : 0.0f;
     if (percent > RT_PROFILER_CRITICAL_LATENCY_PERCENT) {
         atomic_fetch_add(&profiler->critical_latency_events, 1);
         if (elapsed_us > profiler->critical_latency_worst_us) {
@@ -227,7 +253,7 @@ static int rt_profiler_perf_state(RTProfiler *profiler, char *reason, size_t rle
     }
     if (stale_rate > 1.0f) {
         if (reason) snprintf(reason, rlen,
-                             "producer slower than consumer: %.1f%% stale re-output", stale_rate);
+                             "producer slower than consumer: %.1f%% starved blocks", stale_rate);
         return 2;
     }
     if (contention_rate > 5.0f) {
@@ -286,9 +312,9 @@ static void rt_profiler_report_health_edges(RTProfiler *profiler) {
  * A family is over budget when its OWN per-iteration time approaches the audio
  * block budget — that isolates which synthesis is the offender. */
 static void rt_profiler_report_engines(RTProfiler *profiler) {
-    const float budget = (float)profiler->callback_budget_us;
-
     for (int i = 0; i < RT_ENGINE_COUNT; i++) {
+        const float budget = (i == RT_ENGINE_SAMPLER || i == RT_ENGINE_SCORE)
+            ? 1000.0f : (float)profiler->callback_budget_us;
         RTEngineTimer *e = &profiler->engines[i];
         uint64_t iters = atomic_load(&e->iters);
 
@@ -386,7 +412,7 @@ void rt_profiler_print_stats(RTProfiler *profiler) {
     log_info("RT_PROFILER",
         "[%d Hz / %d frm | budget %llu µs] "
         "synth avg %llu µs (%.0f%%) max %llu µs (%.0f%%) | "
-        "cb %.0f%% | miss %.2f%% | stale(re-out) %.2f%% | underruns %llu",
+        "cb %.0f%% | miss %.2f%% | starved %.2f%% | underruns %llu",
         profiler->sample_rate, profiler->buffer_size,
         profiler->callback_budget_us,
         audio_avg,  audio_ratio,
@@ -435,20 +461,40 @@ void rt_profiler_print_stats(RTProfiler *profiler) {
     }
 }
 
+static void rt_profiler_log_block_window(const char *tag, RTBlockMetrics *m) {
+    if (m->count) {
+        log_info(tag, "n=%llu avg=%.2fus max=%.2fus P95=%lluus P99=%lluus P99.9=%lluus minHeadroom=%.2fus deadlines=%llu dropped=%llu histogramOverflow=%llu",
+            m->count, (double)m->total_ns / (1000.0 * m->count), m->max_ns / 1000.0,
+            rt_block_percentile_us(m, 950), rt_block_percentile_us(m, 990), rt_block_percentile_us(m, 999),
+            m->min_headroom_ns / 1000.0, m->deadlines,
+            (uint64_t)atomic_exchange(&m->dropped, 0), m->overflows);
+        rt_block_reset_window(m);
+    }
+}
+
 void rt_profiler_flush_logs(RTProfiler *profiler) {
+    rt_block_drain(&profiler->blocks);
+    rt_block_drain(&producer_blocks);
+    rt_block_drain(&producer_launch);
+    rt_block_drain(&producer_own);
+    rt_block_drain(&producer_join);
     /* Message-thread only. RT threads never log — they raise the flags and
      * counters drained here. Slightly stale readings are fine (diagnostic). */
 
     /* Periodic stats report requested by the audio callback */
     if (atomic_exchange(&profiler->report_due, 0)) {
+        rt_profiler_log_block_window("RT_BLOCK", &profiler->blocks);
+        rt_profiler_log_block_window("RT_PRODUCER", &producer_blocks);
+        rt_profiler_log_block_window("RT_LS_LAUNCH", &producer_launch);
+        rt_profiler_log_block_window("RT_LS_OWN", &producer_own);
+        rt_profiler_log_block_window("RT_LS_JOIN", &producer_join);
         rt_profiler_print_stats(profiler);
     }
 
     /* Coalesced critical-latency events (one line per flush, not per callback) */
     uint64_t crit_latency = atomic_exchange(&profiler->critical_latency_events, 0);
     if (crit_latency > 0) {
-        uint64_t worst_us = profiler->critical_latency_worst_us;
-        profiler->critical_latency_worst_us = 0;
+        uint64_t worst_us = atomic_exchange(&profiler->critical_latency_worst_us, 0);
         log_warning("RT_PROFILER",
                     "CRITICAL latency: %llu callback(s) > %.0f%% of budget since last flush (worst %llu µs)",
                     crit_latency, RT_PROFILER_CRITICAL_LATENCY_PERCENT, worst_us);

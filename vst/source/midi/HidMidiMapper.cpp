@@ -17,23 +17,44 @@ namespace
         { "Sw1",   "SW1",    "",    0, 0,       0, 0,     20 },
         { "Sw2",   "SW2",    "",    0, 0,       0, 0,     21 },
         { "Sw3",   "SW3",    "",    0, 0,       0, 0,     22 },
-        { "AccX",  "ACC X",  "g",   -4.0f,   4.0f,   -1.0f,   1.0f,   30 },
-        { "AccY",  "ACC Y",  "g",   -4.0f,   4.0f,   -1.0f,   1.0f,   31 },
-        { "AccZ",  "ACC Z",  "g",   -4.0f,   4.0f,   -1.0f,   1.0f,   32 },
         { "GyrX",  "GYRO X", "dps", -2000.f, 2000.f, -250.f,  250.f,  33 },
         { "GyrY",  "GYRO Y", "dps", -2000.f, 2000.f, -250.f,  250.f,  34 },
         { "GyrZ",  "GYRO Z", "dps", -2000.f, 2000.f, -250.f,  250.f,  35 },
         { "TiltP", "TILT P", "deg", -90.f,   90.f,   -45.f,   45.f,   40 },
         { "TiltR", "TILT R", "deg", -90.f,   90.f,   -45.f,   45.f,   41 },
+        // device-side gestures: the HIT family behaves like buttons (one pulse
+        // per event), FACE is a selector of the resting face — mapped by the
+        // per-face value table, so its lo/hi/defMin/defMax are unused. HIT
+        // fires on every shock; the four others only on the face that took
+        // it. Their default CC numbers keep FACE on 53 so mappings learnt
+        // before the per-face rows existed survive.
+        { "Hit",      "HIT",       "",    0, 0,       0, 0,     50 },
+        { "HitPaper", "HIT PAPER", "",    0, 0,       0, 0,     51 },
+        { "HitBack",  "HIT BACK",  "",    0, 0,       0, 0,     52 },
+        { "HitLeft",  "HIT LEFT",  "",    0, 0,       0, 0,     54 },
+        { "HitRight", "HIT RIGHT", "",    0, 0,       0, 0,     55 },
+        { "Face",     "FACE",      "",    0.f, 4.f,   0.f, 4.f, 53 },
     };
 
+    // enum slp_face order. Table defaults spread the faces evenly over the
+    // course, i.e. exactly the linear law the table replaced.
+    const char* kFaceNames[HidMidiMapper::kNumFaces] =
+        { "Moving", "Paper", "Back", "Left", "Right" };
+
     constexpr float kHidPeriodMs = 5.0f;      // 200 Hz default rate
+    constexpr float kPulseMs     = 60.0f;     // trigger press -> release delay
+    constexpr float kVelPulseMs  = 15.0f;     // Velocity: hug the impulse, no more
+    constexpr float kMeterHoldMs = 60.0f;     // ... but stay visible on the page
+    constexpr float kRestGateDps = 3.0f;      // gyro magnitude below = still
+    constexpr float kRestGateMs  = 400.0f;    // still this long -> gate closes
 }
 
 const char* HidMidiMapper::controlKey  (int c) noexcept { return kDefs[c].key; }
 const char* HidMidiMapper::controlName (int c) noexcept { return kDefs[c].name; }
 const char* HidMidiMapper::controlUnit (int c) noexcept { return kDefs[c].unit; }
 juce::String HidMidiMapper::paramId (int c, const char* suffix) { return juce::String (kPrefix) + kDefs[c].key + suffix; }
+const char* HidMidiMapper::faceName (int f) noexcept { return kFaceNames[f]; }
+juce::String HidMidiMapper::faceParamId (int f) { return juce::String (kPrefix) + "FaceVal" + juce::String (f); }
 
 //==============================================================================
 void HidMidiMapper::addParameters (std::vector<std::unique_ptr<juce::RangedAudioParameter>>& params)
@@ -47,7 +68,13 @@ void HidMidiMapper::addParameters (std::vector<std::unique_ptr<juce::RangedAudio
     {
         const auto& d = kDefs[c];
         const juce::String name = juce::String ("CIS ") + d.name;
-        if (isButton (c))
+        if (isEvent (c))
+            // Velocity by default: a percussion trigger whose CC ignored how
+            // hard you hit was the whole complaint.
+            params.push_back (std::make_unique<juce::AudioParameterChoice> (
+                juce::ParameterID { paramId (c, "Type"), 1 }, name + " Type",
+                juce::StringArray { "Off", "CC", "Note", "Toggle", "Velocity" }, BtVelocity, hiddenChoice));
+        else if (isButton (c))
             params.push_back (std::make_unique<juce::AudioParameterChoice> (
                 juce::ParameterID { paramId (c, "Type"), 1 }, name + " Type",
                 juce::StringArray { "Off", "CC", "Note", "Toggle" }, BtCC, hiddenChoice));
@@ -61,7 +88,20 @@ void HidMidiMapper::addParameters (std::vector<std::unique_ptr<juce::RangedAudio
         params.push_back (std::make_unique<juce::AudioParameterInt> (
             juce::ParameterID { paramId (c, "Num"), 1 }, name + " Number", 0, 127, d.defNum, hiddenInt));
 
-        if (! isButton (c))
+        if (c == Face)
+        {
+            // FACE value table: what each resting face emits, in % of the MIDI
+            // course. The 0.01 % step matters: in CC 14-bit it keeps ~10000 of
+            // the 16384 reachable values, where CC units would cap at 128.
+            for (int f = 0; f < kNumFaces; ++f)
+                params.push_back (std::make_unique<juce::AudioParameterFloat> (
+                    juce::ParameterID { faceParamId (f), 1 },
+                    name + " " + kFaceNames[f],
+                    juce::NormalisableRange<float> (0.0f, 100.0f, 0.01f),
+                    (float) f * (100.0f / (float) (kNumFaces - 1)),
+                    juce::AudioParameterFloatAttributes{}.withAutomatable (false).withLabel ("%")));
+        }
+        else if (! isButton (c))
         {
             const float step = (d.hi - d.lo) > 100.0f ? 1.0f : 0.01f;
             params.push_back (std::make_unique<juce::AudioParameterFloat> (
@@ -73,7 +113,8 @@ void HidMidiMapper::addParameters (std::vector<std::unique_ptr<juce::RangedAudio
                 juce::NormalisableRange<float> (d.lo, d.hi, step), d.defMax,
                 juce::AudioParameterFloatAttributes{}.withAutomatable (false).withLabel (d.unit)));
             params.push_back (std::make_unique<juce::AudioParameterBool> (
-                juce::ParameterID { paramId (c, "Bipolar"), 1 }, name + " Bipolar", true, hiddenBool));
+                juce::ParameterID { paramId (c, "Bipolar"), 1 }, name + " Bipolar",
+                true, hiddenBool));
         }
     }
     params.push_back (std::make_unique<juce::AudioParameterFloat> (
@@ -95,7 +136,7 @@ void HidMidiMapper::attach (juce::AudioProcessorValueTreeState& apvts)
         r.type = apvts.getRawParameterValue (paramId (c, "Type"));
         r.chan = apvts.getRawParameterValue (paramId (c, "Chan"));
         r.num  = apvts.getRawParameterValue (paramId (c, "Num"));
-        if (! isButton (c))
+        if (! isButton (c) && c != Face)
         {
             r.min     = apvts.getRawParameterValue (paramId (c, "Min"));
             r.max     = apvts.getRawParameterValue (paramId (c, "Max"));
@@ -104,6 +145,8 @@ void HidMidiMapper::attach (juce::AudioProcessorValueTreeState& apvts)
         lastSent_[(size_t) c] = -1;
         smoothed_[(size_t) c] = 0.5f;
     }
+    for (int f = 0; f < kNumFaces; ++f)
+        faceVal_[(size_t) f] = apvts.getRawParameterValue (faceParamId (f));
     deadzone_ = apvts.getRawParameterValue (juce::String (kPrefix) + "Deadzone");
     smoothMs_ = apvts.getRawParameterValue (juce::String (kPrefix) + "SmoothMs");
 }
@@ -153,13 +196,103 @@ void HidMidiMapper::emitButton (int c, bool pressed, juce::MidiBuffer& out) noex
     }
 }
 
-void HidMidiMapper::process (juce::MidiBuffer& out) noexcept
+void HidMidiMapper::emitEventPulse (int c, int velocity, juce::MidiBuffer& out) noexcept
 {
+    const auto& r = raw_[(size_t) c];
+    if (r.type == nullptr) return;
+    const int t = (int) r.type->load (std::memory_order_relaxed);
+    if (t == BtOff) return;
+    const int ch = juce::jlimit (1, 16, (int) r.chan->load (std::memory_order_relaxed));
+    const int n  = juce::jlimit (0, 127, (int) r.num->load (std::memory_order_relaxed));
+
+    // Retrigger: a hit landing while the previous pulse is still held closes
+    // it first. Without this, tapping faster than the pulse leaves a note on
+    // for ever and the second strike is simply lost.
+    if (auto& rel = release_[(size_t) c]; rel.ms > 0.0f)
+    {
+        if (rel.type == BtCC)        out.addEvent (juce::MidiMessage::controllerEvent (rel.chan, rel.num, 0), 0);
+        else if (rel.type == BtNote) out.addEvent (juce::MidiMessage::noteOff (rel.chan, rel.num), 0);
+        rel.ms = 0.0f;
+    }
+
+    switch (t)
+    {
+        case BtVelocity:
+            // The strike strength, then straight back to 0: the control follows
+            // the impulse and nothing more. Holding the value instead made a
+            // percussive gesture behave like a knob left where you last hit it.
+            out.addEvent (juce::MidiMessage::controllerEvent (ch, n, juce::jlimit (1, 127, velocity)), 0);
+            release_[(size_t) c] = { kVelPulseMs, BtCC, ch, n };
+            break;
+
+        case BtCC:
+            out.addEvent (juce::MidiMessage::controllerEvent (ch, n, 127), 0);
+            release_[(size_t) c] = { kPulseMs, BtCC, ch, n };
+            break;
+        case BtNote:
+            out.addEvent (juce::MidiMessage::noteOn (ch, n, (juce::uint8) juce::jlimit (1, 127, velocity)), 0);
+            release_[(size_t) c] = { kPulseMs, BtNote, ch, n };
+            break;
+        case BtToggle:
+        {
+            auto& tg = toggle_[(size_t) c];
+            tg = ! tg;
+            out.addEvent (juce::MidiMessage::controllerEvent (ch, n, tg ? 127 : 0), 0);
+            release_[(size_t) c] = { kPulseMs, BtOff, ch, n };   // meter blink only
+            break;
+        }
+        default: break;
+    }
+    // The meter shows the FORCE of the blow, whatever the type: the page is
+    // the only place you can see a light tap register at all.
+    live_[(size_t) c].store ((float) juce::jlimit (0, 127, velocity) / 127.0f,
+                             std::memory_order_relaxed);
+    meterMs_[(size_t) c] = kMeterHoldMs;
+}
+
+void HidMidiMapper::process (juce::MidiBuffer& out, float blockMs) noexcept
+{
+    // Pending gesture releases tick on EVERY call, by the REAL block duration:
+    // a stalled HID stream must never hold a note or a CC at 127.
+    const float dtMsBlock = (blockMs > 0.0f && blockMs < 200.0f) ? blockMs : 3.0f;
+    for (int c = Hit; c <= HitRight; ++c)
+    {
+        auto& rel = release_[(size_t) c];
+        if (rel.ms > 0.0f && (rel.ms -= dtMsBlock) <= 0.0f)
+        {
+            if (rel.type == BtCC)        out.addEvent (juce::MidiMessage::controllerEvent (rel.chan, rel.num, 0), 0);
+            else if (rel.type == BtNote) out.addEvent (juce::MidiMessage::noteOff (rel.chan, rel.num), 0);
+            rel.ms = 0.0f;
+        }
+        auto& mm = meterMs_[(size_t) c];
+        if (mm > 0.0f && (mm -= dtMsBlock) <= 0.0f)
+        {
+            live_[(size_t) c].store (0.0f, std::memory_order_relaxed);
+            mm = 0.0f;
+        }
+    }
+
     slp_hid_sample s;
     const uint32_t gen = slp_hid_read (&s);
     if (gen == 0 || gen == lastGen_)
         return;
     lastGen_ = gen;
+
+    // ── gesture events: u8 wrapping counter, immune to lost datagrams ────────
+    if (! haveGestSeq_)
+    {
+        lastHitSeq_ = s.hit_seq;
+        haveGestSeq_ = true;
+    }
+    else if (s.hit_seq != lastHitSeq_)
+    {
+        lastHitSeq_ = s.hit_seq;
+        // One shock, two rows: HIT always, plus the row of the face it landed
+        // on. A shock along the bar (SLP_FACE_MOVING) has no face row.
+        emitEventPulse (Hit, s.hit_velocity, out);
+        if (const int row = hitRowForFace (s.hit_face); row >= 0)
+            emitEventPulse (row, s.hit_velocity, out);
+    }
 
     // ── buttons: edge counters survive lost datagrams ────────────────────────
     for (int i = 0; i < kNumButtons; ++i)
@@ -190,7 +323,8 @@ void HidMidiMapper::process (juce::MidiBuffer& out) noexcept
     const float ax = s.acc[0], ay = s.acc[1], az = s.acc[2];
     const float pitch = std::atan2 (ax, std::sqrt (ay * ay + az * az)) * (180.0f / juce::MathConstants<float>::pi);
     const float roll  = std::atan2 (ay, std::fabs (az) + 1.0e-6f)      * (180.0f / juce::MathConstants<float>::pi);
-    const float values[NumControls] = { 0, 0, 0, ax, ay, az, s.gyro[0], s.gyro[1], s.gyro[2], pitch, roll };
+    const float values[NumControls] = { 0, 0, 0, s.gyro[0], s.gyro[1], s.gyro[2], pitch, roll,
+                                        0, 0, 0, 0, 0, (float) s.gesture_face };
 
     // Smoothing coefficient from the real HID period (timestamps), default 5 ms.
     float dtMs = kHidPeriodMs;
@@ -201,30 +335,56 @@ void HidMidiMapper::process (juce::MidiBuffer& out) noexcept
     const float alpha = tau <= 0.5f ? 1.0f : (1.0f - std::exp (-dtMs / tau));
     const float dz    = deadzone_ ? deadzone_->load (std::memory_order_relaxed) * 0.01f : 0.0f;
 
+    // Rest gate: while the device lies still (gyro quiet for a while), the
+    // gyro/tilt rows stop emitting - sensor noise crossing a CC step no longer
+    // chatters, and MIDI learn stops being stolen at rest. A deliberate move
+    // reopens the gate instantly.
+    const float gyrMag = std::fabs (s.gyro[0]) + std::fabs (s.gyro[1]) + std::fabs (s.gyro[2]);
+    if (gyrMag > kRestGateDps) restQuietMs_ = 0.0f;
+    else if (restQuietMs_ < 1.0e6f) restQuietMs_ += dtMs;
+    const bool resting = restQuietMs_ >= kRestGateMs;
+
     for (int c = kNumButtons; c < NumControls; ++c)
     {
+        if (isButton (c)) continue;      // gesture events: handled above
         const auto& r = raw_[(size_t) c];
         if (r.type == nullptr) continue;
-        const float mn = r.min->load (std::memory_order_relaxed);
-        const float mx = r.max->load (std::memory_order_relaxed);
-        const float span = (mx - mn);
-        float norm = std::fabs (span) < 1.0e-6f ? 0.5f : (values[c] - mn) / span;
-        norm = juce::jlimit (0.0f, 1.0f, norm);
-        if (r.bipolar->load (std::memory_order_relaxed) > 0.5f && dz > 0.0f)
+        float norm;
+        if (c == Face)
         {
-            // dead band around the centre, then re-stretch so the full range stays reachable
-            const float d = norm - 0.5f;
-            const float half = dz * 0.5f;
-            if (std::fabs (d) <= half) norm = 0.5f;
-            else norm = 0.5f + (d - (d > 0 ? half : -half)) / (0.5f - half) * 0.5f;
+            // table lookup: the face picks its entry, % of the MIDI course
+            const int f = juce::jlimit (0, kNumFaces - 1, (int) values[c]);
+            auto* v = faceVal_[(size_t) f];
+            norm = juce::jlimit (0.0f, 1.0f,
+                                 (v ? v->load (std::memory_order_relaxed)
+                                    : (float) f * (100.0f / (float) (kNumFaces - 1))) * 0.01f);
+        }
+        else
+        {
+            const float mn = r.min->load (std::memory_order_relaxed);
+            const float mx = r.max->load (std::memory_order_relaxed);
+            const float span = (mx - mn);
+            norm = std::fabs (span) < 1.0e-6f ? 0.5f : (values[c] - mn) / span;
+            norm = juce::jlimit (0.0f, 1.0f, norm);
+            if (r.bipolar->load (std::memory_order_relaxed) > 0.5f && dz > 0.0f)
+            {
+                // dead band around the centre, then re-stretch so the full range stays reachable
+                const float d = norm - 0.5f;
+                const float half = dz * 0.5f;
+                if (std::fabs (d) <= half) norm = 0.5f;
+                else norm = 0.5f + (d - (d > 0 ? half : -half)) / (0.5f - half) * 0.5f;
+            }
         }
         float& sm = smoothed_[(size_t) c];
-        sm += alpha * (norm - sm);
+        // FACE is a discrete selector: it snaps (smoothing would walk the CC
+        // through every intermediate state).
+        sm += (c == Face ? 1.0f : alpha) * (norm - sm);
         live_[(size_t) c].store (sm, std::memory_order_relaxed);
 
         const int t = (int) r.type->load (std::memory_order_relaxed);
         int& last = lastSent_[(size_t) c];
         if (t == CtOff) { last = -1; continue; }
+        if (resting && c != Face) continue;   // rest gate (FACE has its own hysteresis)
 
         const int ch = juce::jlimit (1, 16, (int) r.chan->load (std::memory_order_relaxed));
         const int n  = juce::jlimit (0, 127, (int) r.num->load (std::memory_order_relaxed));

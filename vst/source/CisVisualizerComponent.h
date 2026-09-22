@@ -143,7 +143,7 @@ private:
      * The KissFFT config is cached in fftCfg_ and only reallocated when
      * cisPixelsCount changes.
      *
-     * Called at most once per timer tick (30 fps) from paintFftColorMode()
+     * Called at most once per timer tick (30 fps) for visible FFT panels
      * — always on the UI/message thread.
      */
     void computeFftMagnitudes();
@@ -259,6 +259,7 @@ private:
      *  Set from the lxFftBins APVTS parameter.  Used by both paint helpers. */
     int                fftNumHarmonics_ { 128 };
     /** cisPixelsCount value used for the last kiss_fftr_alloc call. */
+    std::vector<float> fftWindow_;
     int                fftSize_ { 0 };
     /** Opaque pointer to a kiss_fftr_cfg.
      *  Cast to kiss_fftr_cfg inside CisVisualizerComponent.cpp only. */

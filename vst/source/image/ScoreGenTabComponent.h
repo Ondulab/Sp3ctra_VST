@@ -1020,6 +1020,7 @@ private:
         s.setColour(juce::Slider::textBoxTextColourId,       juce::Colour(0xffa0c4e8));
         s.setRange(lo, hi, step);
         s.setValue(val, juce::dontSendNotification);
+        s.setDoubleClickReturnValue(true, val);   // long-press reset target
         if (suffix != nullptr) s.setTextValueSuffix(suffix);
         addAndMakeVisible(s);
     }
@@ -1833,7 +1834,7 @@ private:
     TransportPlayButton playStopButton;
     ScoreIconToggle     loopBtn    { ScoreIconToggle::Glyph::Loop };
     ScoreIconToggle     reverseBtn { ScoreIconToggle::Glyph::Inverse };
-    juce::Slider        speedSlider;
+    Sp3ctraGestureSlider speedSlider;
     juce::Label         speedLabel, playHint;
     int                 scrubHead { -1 }; // armed/displayed score head when stopped (-1 = none)
     bool                scrubbing { false };

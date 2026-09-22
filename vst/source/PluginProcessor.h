@@ -6,8 +6,8 @@
 #include "luxsampler/LuxSampler.h"
 #include "luxsampler/ScorePlayerService.h"
 #include "framesequencer/FrameSequencer.h"
-#include "processing/AcquisitionGate.h" // "Vitesse d'acquisition" — frame-advance brake clock
 #include "ui/ChainModel.h"      // M6 Phase 2 — editable chain topology (owned here)
+#include "midi/LfoBank.h"
 #include "midi/MidiMappingEngine.h"
 #include "midi/HidMidiMapper.h"
 #include "feedback/DeviceFeedback.h" // MIDI CC/Note → any play param (MIDI learn)
@@ -59,6 +59,8 @@ class Sp3ctraAudioProcessor  : public juce::AudioProcessor,
                                 private juce::Timer
 {
 public:
+    uint64_t monitorAudioBlocks() const noexcept { return monitorAudioBlocks_.load(std::memory_order_relaxed); }
+    uint64_t monitorLinkChanges() const noexcept { return monitorLinkChanges_.load(std::memory_order_relaxed); }
     //==============================================================================
     Sp3ctraAudioProcessor();
     ~Sp3ctraAudioProcessor() override;
@@ -228,11 +230,28 @@ public:
         return false;
     }
 
+    /** Message thread: 0-based rack index of the chain hosting @p instanceId,
+     *  or -1 when the instance sits in no chain (OLED "C{n}" naming). */
+    int chainIndexForInstance (const juce::Uuid& instanceId) const noexcept
+    {
+        for (int c = 0; c < (int) chainModel_.chains.size(); ++c)
+            for (const auto& m : chainModel_.chains[(size_t) c].modules)
+                if (m.id == instanceId)
+                    return c;
+        return -1;
+    }
+
     // juce::AudioProcessorListener — every parameter change (UI, learnt MIDI,
     // host automation) stamps the device feedback's "touched" table.
     void audioProcessorParameterChanged (juce::AudioProcessor*, int parameterIndex, float) override
     { feedback_.noteParamTouched (parameterIndex); }
     void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails&) override {}
+
+    /** Any thread: a VIRTUAL (non-APVTS) sampler target changed — feeds the CIS
+     *  OLED overlay. Stamped by virtualApply (MIDI) and by the sampler UI
+     *  handlers, which write the LuxSampler engine directly
+     *  (targetId = SamplerMidiTargets::encode). */
+    void noteVirtualTouched (int targetId) noexcept { feedback_.noteVirtualTouched (targetId); }
 
     /**
      * @brief True once the shared pipeline (UDP socket + threads) has been
@@ -477,9 +496,30 @@ public:
 
     //==========================================================================
     // IVirtualMidiSink — NON-APVTS mapping targets: the sampler play params /
-    // action buttons (SamplerMidiTargets) and the "selected EQ handle" trio
-    // (EqHandleMidiTargets). Implemented in PluginProcessor.cpp.
+    // action buttons (SamplerMidiTargets), the "selected EQ handle" trio
+    // (EqHandleMidiTargets) and the SP3CTRA FREEZE toggle (below).
+    // Implemented in PluginProcessor.cpp.
     //==========================================================================
+    // SP3CTRA source FREEZE — a 2-state virtual target over imageFreezeMode.
+    // The raw param is the 3-step transport (0=play / 1=hold / 2=stop) that
+    // ALSO serves as the module's power switch, so a CC learnt directly on it
+    // sweeps play↔stop (absolute CC on a discrete param) — i.e. it toggles the
+    // module enable instead of freezing. The FREEZE button learns this id
+    // instead: on = hold (mode 1), off = play (mode 0), inert while stopped —
+    // exactly the UI button's semantics. Target bit 29 is disjoint from
+    // SamplerMidiTargets (< bit 28) and EqHandleMidiTargets (bit 28).
+    static constexpr const char* kImgFreezeMidiId = "img:freeze";
+    static constexpr int         kImgFreezeTarget = 0x20000000;
+    // DIFF CAPTURE / CLEAR — one-shot action targets per pool slot. Their
+    // ids share the bank prefix (luxdiff{slot}_Capture / _Clear) so
+    // navigation, identity and the MIDI MAP panel treat them like the
+    // bank's params; they are NOT APVTS params (resolved here). Bit 30 is
+    // disjoint from every other family (Sampler < bit 28, EqHandle bit 28,
+    // Freeze bit 29): low bits = slot << 1 | (clear ? 1 : 0).
+    static constexpr int kDiffTargetBase = 0x40000000;
+    static juce::String diffCaptureMidiId(int slot);
+    static juce::String diffClearMidiId  (int slot);
+
     int   virtualResolve(const juce::String& paramId) const override;
     int   virtualSteps  (int targetId) const noexcept override;
     float virtualRead   (int targetId) const noexcept override;
@@ -526,11 +566,23 @@ public:
      *  per-chain routing applies headless and is reachable by the RT thread.
      *  The ChainRackComponent edits this model directly and calls
      *  onChainModelEdited() afterwards. */
-    ChainModel& getChainModel() noexcept { return chainModel_; }
+    ChainModel&       getChainModel()       noexcept { return chainModel_; }
+    const ChainModel& getChainModel() const noexcept { return chainModel_; }
 
     /** MIDI CC/Note → parameter mapping engine (right-click MIDI Learn on any
      *  play control; per-instance via the banked param ids). */
     MidiMappingEngine& getMidiMap() noexcept { return midiMap_; }
+
+    /** The modulation bank (midi/LfoBank.h) — eight shapes that drive mapped
+     *  parameters as a source of the very same engine. */
+    LfoBank&       getLfoBank()       noexcept { return lfoBank_; }
+    const LfoBank& getLfoBank() const noexcept { return lfoBank_; }
+
+    /** DIFF — capture / clear the reference of pool slot @p slot. Message
+     *  thread from the page buttons, audio thread from a mapped MIDI event:
+     *  int stores only, the image thread does the learning. */
+    void requestDiffCapture(int slot) noexcept;
+    void requestDiffClear  (int slot) noexcept;
 
     /** UI VU meters (AUDIO MIX panel) — per-engine post-volume block peaks,
      *  folded with an RT-side release in processBlock. [0..1+], relaxed reads. */
@@ -539,6 +591,42 @@ public:
     float meterLuxWave()  const noexcept { return meterLuxWave_ .load(std::memory_order_relaxed); }
     float meterLuxGrain() const noexcept { return meterLuxGrain_.load(std::memory_order_relaxed); }
     float meterMaster()   const noexcept { return meterMaster_  .load(std::memory_order_relaxed); }
+
+    /** AUDIO MIX per-send LIGHT meter: RMS of the line the send last staged
+     *  (synth_staging_send_level) × its effective mix weight (bank intensity
+     *  × per-send power), 0 while the engine is not fed (off / starved).
+     *  engine 0..3 = LuxStral / LuxSynth / LuxWave / LuxGrain, chainIdx =
+     *  the model chain hosting the send, bankSlot = its …Out{N} bank.
+     *  Relaxed reads of producer-written floats — UI rate only. */
+    float sendMeter(int engine, int chainIdx, int bankSlot) const noexcept;
+
+    /** VIDEO MIX audio-follow source, per chain index:
+     *   `setOut`   the chain's level in the audio MIX SETTINGS, 0…1 (send
+     *              level × power/solo × engine volume — a fader position),
+     *              or VideoMixFollow::kExempt when the chain feeds NO engine
+     *              ("takes no part in the audio conversation": the follow law
+     *              never masks it);
+     *   `meterOut` what its sends actually staged (sendMeter), 0 when silent
+     *              — the LIVE flavour's weight, meaningless on its own.
+     *  Message thread (it walks the chain model); the law that turns these
+     *  into a mask lives in video/VideoMixFollow.h. */
+    void chainAudioLevels(float setOut[ChainModel::kMaxChains],
+                          float meterOut[ChainModel::kMaxChains]) const;
+
+    /** VIDEO MIX → AUDIO: the weight the toile's PROJECTOR puts on each
+     *  chain's audio sends — a crossfade (VideoMixFocus::audioWeight): ½ at
+     *  the centre, 1 on the chain's own spoke, 0 on the others. 1 = untouched,
+     *  what every chain keeps while the link is disarmed or points the other
+     *  way, and what a chain with no spoke on the toile always keeps.
+     *  Calculated after the LFO on the audio block clock, even with the editor
+     *  closed. Staging combines its atomic snapshot with the base send gain. */
+
+    /** That same weight, for the AUDIO MIX panel's marker. Any thread. */
+    float chainVideoWeight(int chainIdx) const noexcept
+    {
+        return (chainIdx >= 0 && chainIdx < ChainModel::kMaxChains)
+                 ? ((videoAudioWeights_.load(std::memory_order_relaxed) >> (8 * chainIdx)) & 255u) / 255.0f : 1.0f;
+    }
 
     //==========================================================================
     // VIDEO MIX recording (macOS). The editor's VideoMixerComponent renders a
@@ -652,6 +740,45 @@ public:
                    : kChainBgWhite;
     }
 
+    /** Chain-owned user label (rack header, next to the number — the number
+     *  stays the identity). Empty clears back to the default "CHAIN" caption.
+     *  Persist-only: no routing/plan impact. Message thread (rack header UI). */
+    void setChainName(int chainIdx, const juce::String& name);
+    juce::String chainName(int chainIdx) const noexcept
+    {
+        return (chainIdx >= 0 && chainIdx < chainModel_.numChains())
+                   ? chainModel_.chains[(size_t) chainIdx].name
+                   : juce::String();
+    }
+
+    /** Chain-owned rack fold state (card collapsed to its header). Pure UI,
+     *  persist-only. Message thread (rack header UI). */
+    void setChainCollapsed(int chainIdx, bool collapsed);
+    bool chainCollapsed(int chainIdx) const noexcept
+    {
+        return chainIdx >= 0 && chainIdx < chainModel_.numChains()
+               && chainModel_.chains[(size_t) chainIdx].collapsed;
+    }
+
+    /** Outward chain label — the ONE rule for every surface that names a
+     *  chain to the user (VIDEO/MIDI MIX rows, zone-3 chain tabs, zone-1
+     *  badges, MIDI TAP ports/takes): the user name when set, else "CHAIN n". */
+    juce::String chainDisplayName(int chainIdx) const
+    {
+        const juce::String n = chainName(chainIdx);
+        return n.isNotEmpty() ? n : "CHAIN " + juce::String(chainIdx + 1);
+    }
+
+    /** Per-chain user labels indexed by chain ("" = unnamed) — the form the
+     *  shared videoScrollOutputLabels() helper consumes. */
+    juce::StringArray chainNames() const
+    {
+        juce::StringArray out;
+        for (const auto& ch : chainModel_.chains)
+            out.add(ch.name);
+        return out;
+    }
+
     /** J4 — write chain `chainIdx` (fresh VALUES + type memory) as a
      *  .sp3chain preset. Atomic write; returns false on any I/O error. */
     bool saveChainPreset(int chainIdx, const juce::File& file);
@@ -723,6 +850,8 @@ private:
     // and allows re-outputting old audio instead of silence when producer is mid-write.
     // -1 = no buffer consumed yet (startup)
     int lastConsumedReadIdx = -1;
+    int luxstralReadOffset_ = 0, luxstralGapSamples_ = 0;
+    float luxstralLastSample_[2] {}, luxstralRecoverGain_ = 1.0f;
     int lastConsumedReadIdxLuxSynth = -1;
     // pixels_per_note used during the last synth_IfftInit() call.
     // If it changes on SR switch (e.g. 96kHz→48kHz: ppn 4→2), the waves[]
@@ -793,12 +922,6 @@ private:
     /** MEDIA_SOURCES state blob child tree (paths + camera device). */
     juce::ValueTree mediaSourcesStateToTree() const;
     void restoreMediaSourcesFromTree(const juce::ValueTree& t);
-
-    // "Vitesse d'acquisition" — brakes the live frame-advance rate (sample-and-
-    // hold) of the SP3CTRA source.  Clock only (audio thread); the buffer module
-    // enforces the hold.  Driven each block from processBlock by the acqGate*
-    // APVTS params.
-    AcquisitionGate acqGate_;
 
     // SCORE generation settings — one block PER INSTANCE (P7), shared between
     // the PLAY page and the SETUP panel of the instance the UI views.
@@ -894,6 +1017,8 @@ private:
     std::atomic<float>* luxpitchOctaveOffsetParam[ChainModel::kMaxChains] = {};
     std::atomic<float>* luxmaskMidiChannelParam  [ChainModel::kMaxChains] = {};
     std::atomic<float>* luxmaskOctaveOffsetParam [ChainModel::kMaxChains] = {};
+    void syncLuxSynthConfigFromParameters(int blockSize) noexcept;
+    std::array<std::atomic<float>*, 19> luxsynthConfigParams_ {};
     std::atomic<float>* luxsynthEnabledParam        = nullptr;
     std::atomic<float>* luxsynthMidiChannelParam    = nullptr;
     std::atomic<float>* luxsynthOctaveOffsetParam   = nullptr;
@@ -932,11 +1057,11 @@ private:
     std::atomic<float>* luxwaveLfoDepthParam        = nullptr;
     std::atomic<float>* luxwaveScanModeParam        = nullptr;
     std::atomic<float>* luxwaveAmplitudeParam       = nullptr;
-    std::atomic<float>* acqGateModeParam            = nullptr;
-    std::atomic<float>* acqGateRateMsParam          = nullptr;
-    std::atomic<float>* acqGateSyncDivParam         = nullptr;
-    std::atomic<float>* acqGateMultDivParam         = nullptr;
     std::atomic<float>* luxstralVolumeParam         = nullptr;
+    // AUDIO MIX pan/mute/solo per engine, indexed LuxStral/LuxSynth/LuxWave/
+    // LuxGrain (same order as engineGate_ & co) — applied at each mix site.
+    std::atomic<float>* enginePanParam [4]          = {};
+    std::atomic<float>* engineSoloParam[4]          = {};
 
     // CC1 mod-wheel targets driven from processBlock (setValueNotifyingHost):
     // cached to avoid the juce::String built by apvts.getParameter("literal").
@@ -951,6 +1076,11 @@ private:
     // All Notes Off (panic): set by the UI (message thread), consumed and
     // cleared by processBlock (audio thread) to release every held/stuck note.
     std::atomic<bool> panicRequested{false};
+
+    // The modulation bank — declared BEFORE midiMap_ on purpose: the engine
+    // holds a pointer to it (setLfoSource) and members die in reverse order,
+    // so the reader must be destroyed first.
+    LfoBank lfoBank_;
 
     // MIDI CC/Note → parameter mappings. Constructed after apvts (declaration
     // order below the apvts member matters — it holds a reference to it).
@@ -1011,7 +1141,7 @@ private:
     juce::Uuid vizTapModuleId_;
     // Per-type masks of pool slots whose binding changed in the LAST rebind
     // (released or freshly assigned) — their pool state is stale.
-    struct PoolStale { uint32_t pitch = 0, mask = 0, reverb = 0, echo = 0, eq = 0, harmo = 0, centro = 0, drive = 0, dcblock = 0, gain = 0; };
+    struct PoolStale { uint32_t pitch = 0, mask = 0, reverb = 0, echo = 0, eq = 0, harmo = 0, centro = 0, drive = 0, dcblock = 0, gain = 0, diff = 0; };
     // Pool slots owning a Pitch/Mask/Reverb/Echo/EQ/Harmo/Centro instance after
     // the LAST derive — diffed to reset instances whose module (or whole chain)
     // was just removed.
@@ -1025,6 +1155,7 @@ private:
     uint32_t prevDriveSlots_  { 0 };
     uint32_t prevDcBlockSlots_ { 0 };
     uint32_t prevGainSlots_   { 0 };
+    uint32_t prevDiffSlots_   { 0 };
     // Bit i set ⇒ the chain bound to pool slot i has a Pitch/Mask instance →
     // fan MIDI to pool slot i. Default bit 0 = legacy single-instance behaviour.
     std::atomic<uint32_t> chainPitchMask_ { 1 };
@@ -1038,6 +1169,7 @@ private:
     std::atomic<uint32_t> chainDriveMask_  { 0 };
     std::atomic<uint32_t> chainDcBlockMask_ { 0 };
     std::atomic<uint32_t> chainGainMask_   { 0 };
+    std::atomic<uint32_t> chainDiffMask_   { 0 };
     // MIDI TAP presence, indexed by ModuleInstance.slot (its own pool) — the
     // pooled masks above are indexed by poolSlotForInstance instead.
     std::atomic<uint32_t> chainMidiTapMask_ { 0 };
@@ -1092,7 +1224,8 @@ private:
     // the feed debounce also counts one tick per block.
     static constexpr int kEngineDrainBlocks = 64;
     int  engineDrainBlocks_[4] { 0, 0, 0, 0 };
-    bool engineFed_[4]  { false, false, false, false };   // this block
+    // Atomic: read at UI rate by sendMeter() (a send meter is 0 when unfed).
+    std::atomic<bool> engineFed_[4] { false, false, false, false };   // this block
     bool engineGate_[4] { false, false, false, false };   // fed OR draining
     // Per-engine enable fade (audio thread only): current gain of the
     // per-sample ramp toward fed ? 1 : 0, applied at each engine's buffer
@@ -1101,6 +1234,11 @@ private:
     // window even at tiny host buffers, slow enough to kill the step.
     static constexpr float kEngineFadeTauSec = 0.008f;
     float engineFadeGain_[4] { 0.0f, 0.0f, 0.0f, 0.0f };
+    // AUDIO MIX pan/mute/solo per-channel gain (audio thread only): last
+    // block's end value, ramped to the new target over one block so a mute or
+    // solo punch or pan jump never steps the output. [engine][channel L/R],
+    // starts unity.
+    float mixPanSoloGain_[4][2] { {1,1}, {1,1}, {1,1}, {1,1} };
     // Per-engine sampler presence in the model (message thread, set in
     // deriveChainRouting) — combined with EACH engine's own enable param
     // (fsEngineParam(e,"Enabled")) to drive that engine's setEnabled().
@@ -1180,6 +1318,10 @@ private:
         eqHandleParam_[kEqFamilies][kEqPoolSlots][kEqHandles][3] {};
     void buildEqHandleParamCache();
 
+    // imageFreezeMode, cached alongside the EQ handle params (same lifetime
+    // rules) for the "img:freeze" virtual target's audio-thread accesses.
+    juce::RangedAudioParameter* imgFreezeParam_ = nullptr;
+
 
     /** LEGACY — full path of the last .sp3s written by the retired sampler
      *  session feature. Only read once at restore time to migrate the old
@@ -1241,6 +1383,13 @@ private:
      *  DAW, takes/ sidecars in Standalone) and rebuild each in-use slot's
      *  frames off-thread. End of applyRestoredStateOnMessageThread. */
     void restoreScoreTakes();
+    /** DIFF references (captured per-pixel "dark frames") → a DIFF_REFS
+     *  tree: one planar RGB blob per armed pool slot placed in a chain
+     *  (orphan references never persist). Message thread. */
+    juce::ValueTree diffRefsToTree();
+    /** Re-arm the DIFF references from the restored state (DIFF_REFS child);
+     *  slots absent from the tree are cleared. End of the restore. */
+    void restoreDiffRefs();
     /** Frame-rebuild completion (message thread): hot-swap the frames in and
      *  consume the slot's armed resume-play bit. */
     void finishScoreTakeRestore(int slot, juce::uint32 gen,
@@ -1276,6 +1425,16 @@ private:
     // (timer tick / end of restore). bulkParamApply_ silences the per-parameter
     // logs while a restore or a deferred-automation batch is being applied.
     bool bulkParamApply_    = false;  // suppress per-param + hot-reload logs in bulk
+    std::atomic<uint64_t> videoAudioTopology_ { 0 }, videoAudioWeights_ { UINT64_MAX };
+    std::atomic<float>* videoFocusXParam_ = nullptr;
+    std::atomic<float>* videoFocusYParam_ = nullptr;
+    std::atomic<float>* videoFollowArmParam_ = nullptr;
+    std::atomic<float>* videoFollowDirParam_ = nullptr;
+    uint64_t lastVideoTopology_ = UINT64_MAX; // audio thread only below
+    float lastVideoX_ = 0.0f, lastVideoY_ = 0.0f;
+    bool lastVideoArmed_ = false;
+    void updateVideoAudioFollow() noexcept;
+    std::atomic<uint64_t> monitorAudioBlocks_{0}, monitorLinkChanges_{0};
     bool configResyncPending_ = false;
     bool freqReinitPending_   = false;
     bool coeffUpdatePending_  = false;
@@ -1283,6 +1442,7 @@ private:
     // Apply any pending g_sp3ctra_config resync / wavetable reinit / envelope
     // coefficient rebuild, once, on the message thread. Idempotent.
     void drainPendingConfig();
+    void syncAudioSendMix(); // message thread; no global resync
 
     // R6 — pool resets deferred past the in-flight frame: chain_plan_publish()
     // makes the NEXT frame stop pulling a removed Pitch/Mask/VideoScroll pool
@@ -1299,6 +1459,14 @@ private:
     uint32_t pendingDriveResets_      { 0 };
     uint32_t pendingDcBlockResets_    { 0 };
     uint32_t pendingGainResets_       { 0 };
+    uint32_t pendingDiffResets_       { 0 };
+    // DIFF slots whose module LEFT the rack: their captured reference is
+    // dropped with the same defer window (the next occupant must not
+    // inherit a stranger's scene). A plain reset keeps the reference.
+    uint32_t pendingDiffClears_       { 0 };
+    // Last DIFF reference generation seen per slot (timerCallback): a
+    // capture/clear on the image thread marks the session dirty.
+    uint32_t diffRefGenSeen_[8] {};
     uint32_t pendingVideoScrollInits_ { 0 };
     // MIDI TAP teardown is two-stage: panic (push the note-offs, so the sinks
     // still see them) then, one defer window later, init (wipe the ring +

@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "synth_common.h"
+#include "../../utils/spsc_snapshot.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -134,23 +135,22 @@ typedef struct {
     /* Global LFO */
     LfoState global_lfo;
 
-    /* Configuration (copied atomically from UI) */
+    /* Configuration (audio thread, or initialization before audio starts) */
     LuxSynthConfig config;
 
     /* Spectral data — RENDER copy, owned by the audio thread. Writers never
-     * touch it: they stage into `spectral_pending` under the seqlock below,
+     * touch it: they stage into `spectral_pending` through the owned mailbox below,
      * and luxsynth_engine_process latches it at BLOCK START, ramping the
      * magnitudes across the block (a push must never step the waveform
      * mid-block — the unsynchronised memcpy did, audible as crackle at the
      * feed's ~250 Hz push rate with a moving image). */
     LuxSynthSpectralData spectral;
 
-    /* Writer-side staging (luxsynth_feed_tick, synth thread). seqlock:
-     * odd = writer inside; the render latch retries next block on a torn
-     * read (spec_applied_seq tracks the last even seq actually applied). */
+    /* Producer-owned canonical data preserves optional fields between pushes. */
     LuxSynthSpectralData spectral_pending;
-    volatile uint32_t    spec_pending_seq;
-    uint32_t             spec_applied_seq;
+    LuxSynthSpectralData spectral_slots[3];
+    Sp3ctraSpscSnapshot spectral_mailbox;
+    uint32_t spec_applied_seq; /* audio-owned latch counter for diagnostics */
 
     /* Sample rate cache */
     float sample_rate;

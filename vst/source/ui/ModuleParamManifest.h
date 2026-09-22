@@ -21,7 +21,7 @@
  * NOT in the manifest (documented, out of the chain-owned scope):
  *   • the global ENGINE params (luxstral*, luxsynth*, luxwave*, sf*,
  *     spctr* …) — the engines live in the AUDIO MIX zone, not in a chain;
- *   • the source modules (SP3CTRA/IMAGE/VIDEO/CAMERA + acqGate*) — engine
+ *   • the source modules (SP3CTRA/IMAGE/VIDEO/CAMERA) — engine
  *     singletons with global params (V1 decision C);
  *   • the SEQUENCER state (non-APVTS trees) and the shared sampler prefs
  *     (enable LED, export options);
@@ -91,6 +91,13 @@ inline juce::String dcbParam(int slot, const char* suffix)
 
 inline juce::String gnParam(int slot, const char* suffix)
 { return "luxgain" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
+
+// DIFF bank. Besides the APVTS params (Enabled/Amount/Mode) the same prefix
+// names the two VIRTUAL action targets luxdiff{N}_Capture / luxdiff{N}_Clear
+// (Sp3ctraAudioProcessor::diffCaptureMidiId) — not params, resolved by the
+// processor's virtual MIDI sink.
+inline juce::String dfParam(int slot, const char* suffix)
+{ return "luxdiff" + juce::String(juce::jlimit(0, 7, slot)) + "_" + suffix; }
 
 // Media source banks (P5-M3) — slot 0 keeps the LEGACY global ids
 // ("imgSrcPos"…) so existing sessions and automation lanes load unchanged;
@@ -224,6 +231,7 @@ inline juce::String insertBankParam(ModuleType t, int slot, const char* suffix)
         case ModuleType::Drive:     return dvParam(slot, suffix);
         case ModuleType::DcBlock:   return dcbParam(slot, suffix);
         case ModuleType::Gain:      return gnParam(slot, suffix);
+        case ModuleType::Diff:      return dfParam(slot, suffix);
         default:                    return {};
     }
 }
@@ -267,6 +275,7 @@ namespace module_param_manifest_detail
     };
     inline const char* const kReverb[] = {
         "Enabled", "Decay", "Diffusion", "Mix",
+        "Damping", "DampType",   // treble fade strength + law (2026-09-08)
     };
     inline const char* const kEcho[] = {
         "Enabled", "Delay", "Feedback", "Mix",
@@ -310,11 +319,17 @@ namespace module_param_manifest_detail
     inline const char* const kGain[] = {
         "Enabled", "Gain",
     };
+    inline const char* const kDiff[] = {
+        "Enabled", "Amount", "Mode", "Follow", "Time",
+    };
     inline const char* const kVideoScroll[] = {
         "rotation", "speed", "linePos", "thickness", "zoom", "centerX", "centerY",
         // ("mode" — the 4-way orientation — migrated to "rotation" 2026-08-28)
-        "fade", "blur", "gamma",
-        "compress", "invert",   // "invert" = legacy bool, migrated to "invertMode"
+        "fade", "fadeMidX", "fadeMidY", "fadeMidFree",   // the attenuation law
+        "blur", "gamma",
+        // "compress" = legacy one-way (1..64), migrated to the bipolar "pack"
+        "pack", "compress",
+        "invert",   // "invert" = legacy bool, migrated to "invertMode"
         "invertMode", "colorMode", "bgR", "bgG", "bgB", "paused", "enabled",
         "MixLevel", "MixBlend",   // → videoMix{N}_level / _blend
     };
@@ -342,11 +357,15 @@ namespace module_param_manifest_detail
     // modules (LEVELS, DC), the decode window on the SETUP face (luxstralRangeDb).
     // 2026-08-13: contrastMin followed — the variance dimming is the LEVELS
     // module's CONTRAST knob now (visual domain, the sound follows the picture).
+    // Per-send mix strip (engine PLAY pages): volume = staging mix weight,
+    // solo = engine-scoped solo. In the manifest ⇒ chain-owned (J2 snapshot,
+    // J3 memory, reset-on-claim); "enabled" is the send's power = the strip's
+    // MUTE shown inverted (excluded from memory like every enable).
     inline const char* const kLsOut[] = {
-        "enabled",
+        "enabled", "volume", "solo",
     };
     inline const char* const kLxLwOut[] = {
-        "enabled",
+        "enabled", "volume", "solo",
     };
     inline const char* const kImage[] = {
         "Pos", "Duration", "Loop", "Play", "Enabled", "ScanStart", "ScanEnd",
@@ -386,6 +405,7 @@ namespace module_param_manifest_detail
     inline juce::String dvId(int s, const char* x) { return dvParam(s, x); }
     inline juce::String dcbId(int s, const char* x) { return dcbParam(s, x); }
     inline juce::String gnId(int s, const char* x) { return gnParam(s, x); }
+    inline juce::String dfId(int s, const char* x) { return dfParam(s, x); }
     inline juce::String lsId(int s, const char* x) { return lsOutParam(s, x); }
     inline juce::String lxId(int s, const char* x) { return lxOutParam(s, x); }
     inline juce::String lwId(int s, const char* x) { return lwOutParam(s, x); }
@@ -448,6 +468,10 @@ inline const ModuleParamManifest kModuleParamManifest[] = {
       module_param_manifest_detail::kGain,
       (int) std::size(module_param_manifest_detail::kGain),
       &module_param_manifest_detail::gnId },
+    { ModuleType::Diff,        "luxdiff",     8,
+      module_param_manifest_detail::kDiff,
+      (int) std::size(module_param_manifest_detail::kDiff),
+      &module_param_manifest_detail::dfId },
     { ModuleType::VideoScroll, "videoScroll", 8,
       module_param_manifest_detail::kVideoScroll,
       (int) std::size(module_param_manifest_detail::kVideoScroll),

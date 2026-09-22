@@ -1,7 +1,13 @@
 #include "VideoMixerComponent.h"
+#include "../video/VideoDisplaySettings.h"
 #include "ModuleCatalog.h"
 #include "../session/MachinePrefs.h"   // detached-window state is machine-scoped
-#include "../video/VideoScrollMode.h"  // videoScrollOutputLabels() (shared row labels)
+#include "../video/VideoScrollMode.h"  // videoScrollOutputLabels() (shared spoke labels)
+#include "../video/VideoMixFocus.h"    // projector law (shared with the toile)
+#include "../video/VideoMixFollow.h"   // audio-follow law (shared with the toile)
+#include "../video/VideoParallel.h"    // parallelChunks — the per-row fan-out
+#include "../video/VideoBlit.h"        // scaleARGB — the preview downsample
+#include <array>
 #include <cmath>
 
 //==============================================================================
@@ -16,13 +22,37 @@ public:
         // so the detached/fullscreen view is fully opaque — this prevents the
         // window content from flickering under the presenter-driven repaints.
         setOpaque(true);
+#if JUCE_MAC
+        if (NativeVideoView::enabled())
+        {
+            native_ = std::make_unique<NativeVideoView>();
+            addAndMakeVisible(*native_);
+        }
+#endif
     }
 
-    // Driven by the mixer's presenter clock (owner repaints us whenever the
-    // render thread publishes a new frame). paint() is a cheap image blit.
+    // The native child receives frames directly; paint is the fallback presenter.
     void paint(juce::Graphics& g) override
     {
+#if JUCE_MAC
+        if (native_) { g.fillAll(juce::Colours::white); return; }
+#endif
         owner_.renderMaster(g, getLocalBounds());
+    }
+
+    void resized() override
+    {
+#if JUCE_MAC
+        if (native_) native_->setBounds(getLocalBounds());
+#endif
+    }
+
+    std::shared_ptr<VideoPresentationTarget> target() const
+    {
+#if JUCE_MAC
+        if (native_) return native_->target();
+#endif
+        return {};
     }
 
     void mouseDoubleClick(const juce::MouseEvent&) override
@@ -34,6 +64,9 @@ public:
 
 private:
     VideoMixerComponent& owner_;
+#if JUCE_MAC
+    std::unique_ptr<NativeVideoView> native_;
+#endif
 };
 
 class VideoMixerComponent::MasterWindow : public juce::DocumentWindow
@@ -110,7 +143,10 @@ namespace
         juce::Image::BitmapData db(dst, juce::Image::BitmapData::readWrite);
         juce::Image::BitmapData sb(src, juce::Image::BitmapData::readOnly);
 
-        for (int y = 0; y < h; ++y)
+        // Rows are independent — fan them out like every other per-pixel pass.
+        videoparallel::parallelChunks(0, h, 24, [&](int, int yA, int yB)
+        {
+        for (int y = yA; y < yB; ++y)
         {
             auto* dp = (juce::PixelARGB*) db.getLinePointer(y);
             auto* sp = (juce::PixelARGB*) sb.getLinePointer(y);
@@ -144,6 +180,7 @@ namespace
                                    (juce::uint8) juce::jmin(255, mb));
             }
         }
+        });
     }
 }
 
@@ -153,6 +190,9 @@ namespace
 VideoMixerComponent::Renderer::Renderer(Sp3ctraAudioProcessor& p)
     : juce::Thread("VideoMixRender"), processor_(p)
 {
+    for (auto& f : follow_)   // no follow until the presenter says otherwise
+        f.store(1.0f, std::memory_order_relaxed);
+    VideoDisplaySettings::restore();
     startThread();
 }
 
@@ -203,6 +243,27 @@ juce::Image VideoMixerComponent::Renderer::frontImage() const
     return front_;
 }
 
+juce::Image VideoMixerComponent::Renderer::presentImage() const
+{
+    const juce::ScopedLock fl(frontLock_);
+    return previewFront_.isValid() ? previewFront_ : front_;
+}
+
+bool VideoMixerComponent::Renderer::flowOf(int slot, float& now, float& peak,
+                                           float& power) const noexcept
+{
+    for (const auto& l : layers_)
+        if (l.slot == slot && l.core != nullptr)
+        {
+            now   = l.core->flowNow();
+            peak  = l.core->flowPeak();
+            power = l.core->flowPower();
+            return true;
+        }
+    now = peak = power = 0.0f;
+    return false;
+}
+
 juce::Image VideoMixerComponent::Renderer::soloImage(int slot) const
 {
     if (slot < 0 || slot >= ChainModel::kMaxVideoSlots) return {};
@@ -219,6 +280,12 @@ void VideoMixerComponent::Renderer::setRecordTarget(int w, int h, bool on) noexc
 
 void VideoMixerComponent::Renderer::run()
 {
+    const bool measure = videotiming::enabled();
+    videotiming::Window timing;
+    videotiming::Window nativeTiming;
+    VideoPresentationRoute route;
+    VideoFramePacer presentPacer;
+    bool pendingPresent = false;
     double last = juce::Time::getMillisecondCounterHiRes();
     while (! threadShouldExit())
     {
@@ -226,14 +293,49 @@ void VideoMixerComponent::Renderer::run()
         const double dt = start - last;
         last = start;
 
-        renderFrame(start, dt);
+        bool changedTarget = false;
+        if (targetChanged_.exchange(false, std::memory_order_acq_rel))
+        {
+            std::shared_ptr<VideoPresentationTarget> next;
+            { const juce::ScopedLock lock(frontLock_); next = presentationTarget_; }
+            changedTarget = route.select(std::move(next));
+        }
+        const bool published = renderFrame(start, dt);
+        pendingPresent |= published || changedTarget;
+        if (pendingPresent)
+        {
+            if (route && (changedTarget || presentPacer.due(start,VideoDisplaySettings::fps())))
+            {
+                const double before = measure ? juce::Time::getMillisecondCounterHiRes() : 0.0;
+                route.present(frontImage());
+                pendingPresent = false;
+                if (measure)
+                {
+                    const double after = juce::Time::getMillisecondCounterHiRes();
+                    if (nativeTiming.add(after, after - before, true))
+                        nativeTiming.report("native-submit", after);
+                }
+            }
+        }
 
         // Pace to ~60 fps: sleep whatever remains of the frame slot (min 1 ms so
         // an overloaded pass still yields; wait() returns early on stopThread).
         constexpr double kFrameMs = 1000.0 / 60.0;
         const double elapsed = juce::Time::getMillisecondCounterHiRes() - start;
+        if (measure && timing.add(start + elapsed, elapsed, published))
+            timing.report("render", start + elapsed);
         wait((int) juce::jlimit(1.0, kFrameMs, kFrameMs - elapsed));
     }
+    route.select({});
+}
+
+void VideoMixerComponent::Renderer::setPresentationTarget(
+    std::shared_ptr<VideoPresentationTarget> target)
+{
+    const juce::ScopedLock lock(frontLock_);
+    if (presentationTarget_ == target) return;
+    presentationTarget_ = std::move(target);
+    targetChanged_.store(true, std::memory_order_release);
 }
 
 // Pick a pool image that nothing else references, (re)sized to w×h. Invalid
@@ -280,8 +382,17 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
         if (recOn_.load(std::memory_order_acquire))
         {
             if (! lastRecOn_) { lastRecOn_ = true; recStartMs_ = nowMs; lastRecPushMs_ = -1.0e12; }
-            const int rW = recW_.load(std::memory_order_acquire);
-            const int rH = recH_.load(std::memory_order_acquire);
+            // Budgeted like every other composite — the recorder upsamples it.
+            int rW = recW_.load(std::memory_order_acquire);
+            int rH = recH_.load(std::memory_order_acquire);
+            {
+                const double diag = std::hypot((double) rW, (double) rH);
+                if (diag > (double) kMaxRenderDim)
+                {
+                    rW = juce::jmax(1, (int) std::lround((double) rW * kMaxRenderDim / diag));
+                    rH = juce::jmax(1, (int) std::lround((double) rH * kMaxRenderDim / diag));
+                }
+            }
             if (rW > 0 && rH > 0
                 && (lastRecPushMs_ < 0.0 || (nowMs - lastRecPushMs_) > 500.0))
             {
@@ -289,7 +400,8 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
                 if (target.isValid())
                 {
                     target.clear(target.getBounds(), juce::Colours::white);
-                    { const juce::ScopedLock fl(frontLock_); front_ = target; }
+                    { const juce::ScopedLock fl(frontLock_); front_ = target;
+                      previewFront_ = juce::Image(); }
                     haveFrame_ = true;
                     frameCounter_.fetch_add(1, std::memory_order_release);
                     processor_.pushRecordVideoFrame(target, (nowMs - recStartMs_) / 1000.0);
@@ -303,7 +415,8 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
 
         if (haveFrame_)
         {
-            { const juce::ScopedLock fl(frontLock_); front_ = juce::Image(); }
+            { const juce::ScopedLock fl(frontLock_); front_ = juce::Image();
+              previewFront_ = juce::Image(); }
             haveFrame_ = false;
             frameCounter_.fetch_add(1, std::memory_order_release);
             return true;
@@ -314,6 +427,10 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
     const uint64_t vs = viewState_.load(std::memory_order_acquire);
     int W = (int) ((vs >> 25) & 0xffffff);
     int H = (int) ((vs >> 1)  & 0xffffff);
+    // The size the composite will actually be SHOWN at, kept before recording
+    // overrides W/H with the record aspect (see the preview publish below).
+    const int viewWpx = W;
+    const int viewHpx = H;
 
     // Outputs to publish ALONE (the VIEWPORT pads' thumbnails). A pad showing
     // is a view too: it keeps the warp/composite pass alive even when no
@@ -325,9 +442,9 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
     };
     bool visible = (vs & 1u) != 0 || solo != 0;
 
-    // Recording overrides the view: render ONE fixed hi-res composite (no √N
-    // budget) and force it visible so frames flow even when the preview is
-    // hidden/collapsed. The preview downsamples the same front image.
+    // Recording overrides the view: render ONE composite at the RECORD ASPECT
+    // (still budgeted — see below) and force it visible so frames flow even when
+    // the preview is hidden or collapsed. The preview shows that same image.
     const bool rec = recOn_.load(std::memory_order_acquire);
     if (rec && ! lastRecOn_) { lastRecOn_ = true; recStartMs_ = nowMs; lastRecPushMs_ = -1.0e12; }
     else if (! rec && lastRecOn_) lastRecOn_ = false;
@@ -337,9 +454,15 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
     if (W <= 0 || H <= 0)
         return false;
 
-    if (! rec)
     {
-        // Per-output render budget (see kMaxRenderDim above).
+        // Per-output render budget (see kMaxRenderDim above). It applies while
+        // RECORDING too, which is the whole point of the pass: the composite is
+        // rendered at the cost of a preview and the RECORDER upsamples it to the
+        // chosen encode resolution on its way into the pixel buffer. Recording
+        // used to lift the cap entirely, so a 2160p session asked this CPU warp
+        // for 4406² canvases PER OUTPUT — that, not the encoder, is what froze
+        // the interface. A waterfall loses nothing visible to the upsample: the
+        // warp pass already box-averaged it down out of the history.
         const int n = (int) layers_.size();
         int cap = kMaxRenderDim;
         if (n > 1)
@@ -358,12 +481,17 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
         changed |= l.core->tick(nowMs, dtMs);
     }
 
+    pendingFrameChange_ |= changed;
     if (! visible)
         return false;
 
-    // Heavy warp ONCE per output per frame (cached while frozen).
-    for (auto& l : layers_)
-        changed |= l.core->buildWarp();
+    // Collect lines/history at the existing tick rate; throttle only expensive
+    // warp/rotation/compositing. Recording retains its existing render cadence,
+    // while the native/software screen presenters still obey the display cap.
+    if (! renderPacer_.due(nowMs,rec ? kFps : VideoDisplaySettings::fps()))
+        return false;
+    changed = pendingFrameChange_;
+    pendingFrameChange_ = false;
 
     // Signature of everything the composite depends on OUTSIDE the warps: render
     // size, per-output mix controls, and the drawWarp-time params (zoom/mode are
@@ -376,23 +504,60 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
         auto* p = apvts.getRawParameterValue(id);
         return p ? p->load() : def;
     };
+    const float fx = rawOf(VideoMixFocus::kXId, 0.0f);   // the projector
+    const float fy = rawOf(VideoMixFocus::kYId, 0.0f);
+    // Sample mix controls ONCE, before choosing which expensive warps to build.
+    // A block-rate LFO may change again during rendering: culling and blending
+    // must use the same snapshot or a newly visible layer could show a stale warp.
+    struct MixState
+    {
+        bool enabled = false;
+        float level = 0.0f;
+        int blend = 0;
+    };
+    std::array<MixState, ChainModel::kMaxVideoSlots> mix;
+    constexpr float kInvisibleLevel = 0.002f; // existing composite cutoff
     std::vector<float> sig;
-    sig.reserve(3 + layers_.size() * 8);
+    sig.reserve(5 + layers_.size() * 9);
     sig.push_back((float) W);
     sig.push_back((float) H);
     sig.push_back((float) solo);   // a pad appearing/leaving → (re)publish once
-    for (auto& l : layers_)
+    sig.push_back(fx);
+    sig.push_back(fy);
+    for (size_t li = 0; li < layers_.size(); ++li)
     {
+        auto& l = layers_[li];
+        auto& m = mix[li];
+        const float follow = follow_[l.slot].load(std::memory_order_relaxed);
+        const float level = rawOf(vsMixParam(l.slot, "level"), 1.0f);
+        m.enabled = rawOf(vsParam(l.slot, "enabled"), 1.0f) >= 0.5f;
+        m.blend = (int) rawOf(vsMixParam(l.slot, "blend"), 0.0f);
+        m.level = juce::jlimit(0.0f, 1.0f, level)
+                * VideoMixFocus::weight((int) li, (int) layers_.size(), fx, fy)
+                * follow;
         sig.push_back((float) l.slot);
-        sig.push_back(rawOf(vsMixParam(l.slot, "level"), 1.0f));
-        sig.push_back(rawOf(vsMixParam(l.slot, "blend"), 0.0f));
-        sig.push_back(rawOf(vsParam(l.slot, "enabled"),  1.0f));
+        // QUANTIZED: the follow mask moves at every frame while it is armed,
+        // and a raw value here would defeat the whole point of the signature
+        // (a frozen output would republish 60 times a second).
+        sig.push_back(VideoMixFollow::quantized(follow));
+        sig.push_back(level);
+        sig.push_back((float) m.blend);
+        sig.push_back(m.enabled ? 1.0f : 0.0f);
         sig.push_back(rawOf(vsParam(l.slot, "zoom"),     1.0f));
         sig.push_back(rawOf(vsParam(l.slot, "rotation"), 0.0f));
         sig.push_back(rawOf(vsParam(l.slot, "centerX"),  0.0f));
         sig.push_back(rawOf(vsParam(l.slot, "centerY"),  0.0f));
     }
     if (sig != lastSig_) { lastSig_ = std::move(sig); changed = true; }
+
+    // Hidden outputs keep ticking above (their live history must survive a
+    // fast switch), but need no warp until they contribute or a pad requests
+    // them. tick() leaves the warp dirty, so revealing one rebuilds from the
+    // CURRENT history in this same frame, including after a pause.
+    for (size_t li = 0; li < layers_.size(); ++li)
+        if (mix[li].enabled
+            && (mix[li].level > kInvisibleLevel || wantsSolo(layers_[li].slot)))
+            changed |= layers_[li].core->buildWarp();
 
     // Recording heartbeat: guarantee the first frame and ≥~2 fps so the video
     // track's duration tracks the (continuous) audio even while frozen.
@@ -402,26 +567,45 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
     if (! changed && haveFrame_)
         return false;
 
+    // Release expired previews before acquiring, including aliases of master
+    // pool images. Waiting until publication can prevent that publication.
+    {
+        const juce::ScopedLock lock(frontLock_);
+        for (int slot = 0; slot < ChainModel::kMaxVideoSlots; ++slot)
+            if (! wantsSolo(slot)) soloFront_[slot] = {};
+    }
     juce::Image target = acquireTarget(W, H);
     if (! target.isValid())
-        return false;   // every pool buffer is momentarily referenced — retry next pass
+    {
+        // The warps/signature were already updated. Keep this frame dirty so
+        // a frozen source retries when a presenter releases its buffer.
+        lastSig_.clear();
+        return false;
+    }
 
     // Enabled outputs only (a disabled output is dropped from the composite —
     // and is NOT warped for its pad either: a disabled output costs nothing,
     // its thumbnail is the blank paper and the pad says "OFF").
     int numEnabled = 0;
+    int numVisible = 0;
     Layer* single = nullptr;
-    auto enabledOf = [&](const Layer& l) { return rawOf(vsParam(l.slot, "enabled"), 1.0f) >= 0.5f; };
-    for (auto& l : layers_)
+    size_t singleIdx = 0;
+    for (size_t li = 0; li < layers_.size(); ++li)
     {
-        if (enabledOf(l))
+        auto& l = layers_[li];
+        if (mix[li].enabled)
         {
             ++numEnabled;
-            single = &l;
+            if (mix[li].level > kInvisibleLevel)
+            {
+                ++numVisible;
+                single    = &l;
+                singleIdx = li;
+            }
         }
         // Solo pool released as soon as the slot is no longer requested (or
         // no longer rendered).
-        if (! wantsSolo(l.slot) || ! enabledOf(l))
+        if (! wantsSolo(l.slot) || ! mix[li].enabled)
             for (auto& im : l.soloPool) im = juce::Image();
     }
 
@@ -433,7 +617,7 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
     auto drawAlone = [&](Layer& l) -> juce::Image
     {
         juce::Image im = acquireFrom(l.soloPool, 2, W, H);
-        if (im.isValid()) { juce::Graphics gs(im); l.core->drawWarp(gs, W, H); }
+        if (im.isValid()) l.core->drawWarp(im);
         return im;
     };
     juce::Image soloNew[ChainModel::kMaxVideoSlots];
@@ -442,33 +626,51 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
     // Empty master (nothing enabled) = blank paper → WHITE. With layers the
     // compositing base stays black: Add/Screen accumulate light, so their
     // neutral element is black (a white base would saturate them).
-    target.clear(target.getBounds(),
-                 numEnabled == 0 ? juce::Colours::white : juce::Colours::black);
+    // The single-output fast path below writes EVERY pixel itself (drawWarp
+    // paints its own border since 2026-09-04), so it needs no base at all —
+    // skipping the clear there saves a full-surface pass per frame.
+    // Full level must be exact: the integer blend scales 0.999 to 255/256.
+    const bool soleFullLevel = (numVisible == 1 && mix[singleIdx].level >= 1.0f);
+    if (! soleFullLevel)
+        target.clear(target.getBounds(),
+                     numEnabled == 0 ? juce::Colours::white : juce::Colours::black);
 
-    if (numEnabled == 1 && rawOf(vsMixParam(single->slot, "level"), 1.0f) >= 0.999f)
+    if (soleFullLevel)
     {
-        // One output at full level: over a black base Mix/Add/Screen all reduce
+        // One VISIBLE output at full level: over a black base Mix/Add/Screen all reduce
         // to "just the source" — draw straight into the target, skip the blend.
-        { juce::Graphics g(target); single->core->drawWarp(g, W, H); }
+        single->core->drawWarp(target);
         // The composite IS that output alone: its solo shares the image (no
-        // second warp draw). Every other output is disabled here → blank.
-        for (auto& l : layers_)
+        // second warp draw). Masked but enabled outputs still serve their pads.
+        for (size_t li = 0; li < layers_.size(); ++li)
+        {
+            auto& l = layers_[li];
             if (wantsSolo(l.slot))
             {
                 if (&l == single) soloNew[l.slot]   = target;
-                else              soloBlank[l.slot] = true;
+                else if (mix[li].enabled) soloNew[l.slot] = drawAlone(l);
+                else                     soloBlank[l.slot] = true;
             }
+        }
     }
     else
     {
-        for (auto& l : layers_)
+        for (size_t li = 0; li < layers_.size(); ++li)
         {
+            auto& l = layers_[li];
             const bool alone = wantsSolo(l.slot);
-            if (! enabledOf(l))
+            if (! mix[li].enabled)
             {
                 if (alone) soloBlank[l.slot] = true;
                 continue;
             }
+            // Fully masked (projector and/or audio-follow): it adds nothing to
+            // the composite, so it is not rasterized either — a mask that
+            // hides an output SAVES its blit. Its VIEWPORT pad still gets its
+            // own full-level image below (a thumbnail never lies about what
+            // the output is producing).
+            if (mix[li].level <= kInvisibleLevel && ! alone)
+                continue;
             // A soloed layer's solo image doubles as its blend source (no
             // extra warp draw); otherwise (or if its pool was busy) the
             // reusable scratch.
@@ -479,18 +681,47 @@ bool VideoMixerComponent::Renderer::renderFrame(double nowMs, double dtMs)
             {
                 if (! l.scratch.isValid() || l.scratch.getWidth() != W || l.scratch.getHeight() != H)
                     l.scratch = juce::Image(juce::Image::ARGB, W, H, true, juce::SoftwareImageType());
-                { juce::Graphics gs(l.scratch); l.core->drawWarp(gs, W, H); }
+                l.core->drawWarp(l.scratch);
                 src = l.scratch;
             }
-            blendLayer(target, src,
-                       rawOf(vsMixParam(l.slot, "level"), 1.0f),
-                       (int) rawOf(vsMixParam(l.slot, "blend"), 0.0f));
+            if (mix[li].level > kInvisibleLevel)   // a masked solo still gets its pad image
+                blendLayer(target, src, mix[li].level, mix[li].blend);
+        }
+    }
+
+    // ── Preview publish ──────────────────────────────────────────────────────
+    // When the composite is much larger than the view that will show it — the
+    // normal case while recording, where the render follows the record aspect
+    // rather than the window — the message thread would rescale several
+    // megapixels on EVERY paint, inside the same CoreGraphics call that already
+    // owns the UI. Do that downsample once here instead, in parallel, and hand
+    // the presenter something already the right size. Above the threshold the
+    // presenter keeps blitting the composite directly (no extra pass, no loss).
+    juce::Image previewNew;
+    bool softwarePreview;
+    { const juce::ScopedLock fl(frontLock_); softwarePreview = presentationTarget_ == nullptr; }
+    // Core Animation scales the composite itself; avoid a redundant CPU pass.
+    if (softwarePreview && viewWpx > 0 && viewHpx > 0)
+    {
+        const double viewDiag = std::hypot((double) viewWpx, (double) viewHpx);
+        const double compDiag = std::hypot((double) W, (double) H);
+        if (viewDiag > 8.0 && compDiag > viewDiag * 1.4)
+        {
+            // Keep the composite's aspect: the presenter letterboxes, and a
+            // preview that lied about it would crop the master.
+            const double k  = viewDiag / compDiag;
+            const int    pw = juce::jmax(2, (int) std::lround((double) W * k));
+            const int    ph = juce::jmax(2, (int) std::lround((double) H * k));
+            juce::Image dst = acquireFrom(previewPool_, 2, pw, ph);
+            if (dst.isValid() && videoblit::scaleARGB(dst, target))
+                previewNew = dst;
         }
     }
 
     {
         const juce::ScopedLock fl(frontLock_);
-        front_ = target;
+        front_       = target;
+        previewFront_ = previewNew;   // invalid → the presenter uses the composite
         for (int s = 0; s < ChainModel::kMaxVideoSlots; ++s)
         {
             if (! wantsSolo(s) || soloBlank[s]) soloFront_[s] = juce::Image();
@@ -518,6 +749,16 @@ VideoMixerComponent::VideoMixerComponent(Sp3ctraAudioProcessor& proc)
     // flicker source. The original VideoDisplayComponent did the same.
     setOpaque(true);
     renderer_ = std::make_unique<Renderer>(proc);
+    radar_ = std::make_unique<VideoMixRadar>(proc);
+    radar_->onOutputClicked = [this](int slot) { if (onOutputClicked) onOutputClicked(slot); };
+    addAndMakeVisible(*radar_);
+#if JUCE_MAC
+    if (NativeVideoView::enabled())
+    {
+        nativePreview_ = std::make_unique<NativeVideoView>();
+        addAndMakeVisible(*nativePreview_);
+    }
+#endif
     refreshActiveSlots();
     startTimerHz(kFps);
 
@@ -545,9 +786,30 @@ VideoMixerComponent::~VideoMixerComponent()
 void VideoMixerComponent::refreshActiveSlots()
 {
     auto slots = processor_.activeVideoSlots();
+    const auto labels = videoScrollOutputLabels(slots, processor_.chainNames());
     if (slots == activeSlots_)
-        return;                 // unchanged — keep existing cores/attachments
+    {
+        // Same topology, but a chain RENAME can change the spoke labels —
+        // the toile relabels in place (same slots → bindings kept).
+        if (labels != labels_)
+        {
+            labels_ = labels;
+            rebuildStrip();
+        }
+        return;                 // unchanged — keep existing cores/bindings
+    }
     activeSlots_ = slots;
+    labels_      = labels;
+    // The follow envelope is indexed by LAYER: a topology change invalidates
+    // it. Release every mask to neutral and re-seed on the next tick, so a
+    // slot that moved chains never inherits the mask of the one before it.
+    for (int s2 = 0; s2 < ChainModel::kMaxVideoSlots; ++s2)
+    {
+        renderer_->setFollow(s2, 1.0f);
+        followLvl_[s2] = 0.0f;
+        followExempt_[s2] = false;
+    }
+    followArmed_ = false;
     std::vector<int> slotList;
     slotList.reserve(activeSlots_.size());
     for (const auto& [slot, chain] : activeSlots_)
@@ -558,40 +820,21 @@ void VideoMixerComponent::refreshActiveSlots()
 
 void VideoMixerComponent::rebuildStrip()
 {
-    voices_.clear();
-    auto& apvts = processor_.getAPVTS();
-
-    // Row labels ("CHAIN n", suffixed a/b when a chain hosts SEVERAL probes)
-    // come from the shared helper, so the zone-3 chain tabs and the ALL view
-    // name every output exactly like this strip.
-    const auto labels = videoScrollOutputLabels(activeSlots_);
+    // Spoke labels ("CHAIN n" or the user chain name, suffixed a/b when a
+    // chain hosts SEVERAL probes) come from the shared helper — computed by
+    // refreshActiveSlots() into labels_ — so the zone-3 chain tabs and the
+    // ALL view name every output exactly like the toile.
+    std::vector<VideoMixRadar::Output> outs;
+    outs.reserve(activeSlots_.size());
     for (int i = 0; i < (int) activeSlots_.size(); ++i)
     {
-        const int slot = activeSlots_[(size_t) i].first;
-        auto v = std::make_unique<Voice>();
-        v->slot  = slot;
-        v->label = labels[i];
-
-        v->level.setTextBoxStyle(juce::Slider::NoTextBox, true, 0, 0);
-        v->level.setRange(0.0, 1.0, 0.01);
-        addAndMakeVisible(v->level);
-
-        v->blend.addItem("Mix",    1);
-        v->blend.addItem("Add",    2);
-        v->blend.addItem("Screen", 3);
-        addAndMakeVisible(v->blend);
-
-        v->levelAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-            apvts, vsMixParam(slot, "level"), v->level);
-        v->blendAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-            apvts, vsMixParam(slot, "blend"), v->blend);
-        v->levelLearn = std::make_unique<MidiLearnAttachment>(
-            processor_.getMidiMap(), v->level, vsMixParam(slot, "level"));
-        v->blendLearn = std::make_unique<MidiLearnAttachment>(
-            processor_.getMidiMap(), v->blend, vsMixParam(slot, "blend"));
-
-        voices_.push_back(std::move(v));
+        VideoMixRadar::Output o;
+        o.slot     = activeSlots_[(size_t) i].first;
+        o.chainIdx = activeSlots_[(size_t) i].second;
+        o.label    = i < labels_.size() ? labels_[i] : juce::String();
+        outs.push_back(std::move(o));
     }
+    radar_->setOutputs(outs);   // same slots → relabel only
 
     layoutStrip();
     repaint();
@@ -603,10 +846,15 @@ void VideoMixerComponent::resized()
     layoutStrip();
 }
 
+int VideoMixerComponent::radarBandFor(int height) noexcept
+{
+    return juce::jlimit(kRadarMinH, kRadarMaxH,
+                        (int) std::lround((float) height * kRadarShare)) + 2 * kStripPad;
+}
+
 int VideoMixerComponent::stripHeight() const noexcept
 {
-    const int n = (int) voices_.size();
-    return (n > 0) ? (kStripPad + n * (kRowH + kRowGap)) : 0;
+    return activeSlots_.empty() ? 0 : radarBandFor(getHeight());
 }
 
 int VideoMixerComponent::maxUsefulWidth(int height) const noexcept
@@ -614,35 +862,29 @@ int VideoMixerComponent::maxUsefulWidth(int height) const noexcept
     // layoutStrip(): avail = (bounds − strip).reduced(2), side = min(availW,
     // availH). Width only helps while availW <= availH, i.e. up to
     // height − stripHeight() (the ±4 of reduced(2) cancels on both axes).
-    return juce::jmax(0, height - stripHeight());
+    // The radar band depends on the height only, never on the width.
+    return juce::jmax(0, height - (activeSlots_.empty() ? 0 : radarBandFor(height)));
 }
 
 void VideoMixerComponent::layoutStrip()
 {
     auto r = getLocalBounds();
 
-    stripArea_  = r.removeFromTop(stripHeight());
-    // Fader rows follow the strip area, which stops stretching with a very
-    // wide zone (paint() walks the same rect, so labels stay aligned).
+    stripArea_ = r.removeFromTop(stripHeight());
+    // The toile follows the strip area, which stops stretching with a very
+    // wide zone (its side labels need width, its rim needs height).
     stripArea_.setWidth(juce::jmin(stripArea_.getWidth(), Sp3ctraTheme::kMaxContentW));
+    stripArea_.setX((getWidth() - stripArea_.getWidth()) / 2);   // centred like the preview
+    radar_->setBounds(stripArea_.reduced(kStripPad));
 
     // The preview is kept square so it reads correctly whatever the scroll
     // direction is. Fit the largest centred square inside the remaining area.
     auto avail = r.reduced(2);
     const int side = juce::jmin(avail.getWidth(), avail.getHeight());
     masterArea_ = juce::Rectangle<int>(0, 0, side, side).withCentre(avail.getCentre());
-
-    // Lay out each fader row: [label kLabelW][level slider …][blend 72]
-    auto strip = stripArea_.reduced(kStripPad, kStripPad / 2);
-    for (auto& v : voices_)
-    {
-        auto row = strip.removeFromTop(kRowH);
-        strip.removeFromTop(kRowGap);
-        row.removeFromLeft(kLabelW);                 // label drawn in paint()
-        v->blend.setBounds(row.removeFromRight(72).reduced(0, 1));
-        row.removeFromRight(6);
-        v->level.setBounds(row.reduced(0, 2));
-    }
+#if JUCE_MAC
+    if (nativePreview_) nativePreview_->setBounds(masterArea_);
+#endif
 }
 
 //==============================================================================
@@ -652,7 +894,12 @@ void VideoMixerComponent::renderMaster(juce::Graphics& g, juce::Rectangle<int> d
     g.setColour(juce::Colours::white);   // no frame yet → blank paper, not black
     g.fillRect(dest);
 
-    const juce::Image frame = renderer_->frontImage();
+    const double t0 = juce::Time::getMillisecondCounterHiRes();
+    // Read before taking the image: a concurrent publish can undercount one
+    // frame, but repeated paints of the same frame never masquerade as 60 fps.
+    const bool measure = videotiming::enabled();
+    const uint32_t timingFrame = measure ? renderer_->frameCounter() : 0;
+    const juce::Image frame = renderer_->presentImage();
     if (frame.isValid())
     {
         // Medium, not high: this blit runs at 60 Hz on the message thread
@@ -663,6 +910,20 @@ void VideoMixerComponent::renderMaster(juce::Graphics& g, juce::Rectangle<int> d
         // the destination (resize in flight, square column preview vs detached
         // window) — never crop or distort it.
         g.drawImage(frame, dest.toFloat(), juce::RectanglePlacement::centred);
+    }
+
+    // What this blit actually costs on THIS machine, at this window size, in
+    // this theme — smoothed. The presenter uses it to stop queueing frames the
+    // message thread cannot absorb (see timerCallback); a fixed rate cap would
+    // either throttle a machine with headroom or fail to save a loaded one.
+    const double dt = juce::Time::getMillisecondCounterHiRes() - t0;
+    lastPaintMs_ = lastPaintMs_ * 0.8 + dt * 0.2;
+    if (measure)
+    {
+        const bool fresh = frame.isValid() && timingFrame != timingPresentedFrame_;
+        timingPresentedFrame_ = timingFrame;
+        if (paintTiming_.add(t0 + dt, dt, fresh))
+            paintTiming_.report("present", t0 + dt);
     }
 }
 
@@ -705,6 +966,135 @@ juce::Point<int> VideoMixerComponent::viewSize() const
     return { w, h };
 }
 
+//==============================================================================
+// AUDIO FOLLOW — "mettre en avant ce que l'on entend".
+//
+// The presenter is the ONE place this is computed: it owns the chain model
+// (message thread), it already ticks at the render cadence, and it feeds both
+// consumers — the compositor (Renderer::setFollow, read per frame) and the
+// toile (VideoMixRadar::setFollow, drawn on the polygon). One smoother, so
+// the picture and the mix can never disagree by a frame.
+//
+// Disarmed it costs one atomic parameter read: the mask stays at 1 and no
+// chain is walked. Arming SEEDS the envelope with the current levels (no
+// fade-in from zero, the mix answers the button immediately).
+void VideoMixerComponent::updateFollow(double nowMs)
+{
+    auto& apvts = processor_.getAPVTS();
+    auto raw = [&apvts](const juce::String& id, float def)
+    {
+        auto* p = apvts.getRawParameterValue(id);
+        return p != nullptr ? p->load() : def;
+    };
+    const bool armed = raw(VideoMixFollow::kArmId, 0.0f) >= 0.5f;
+    const bool toAudio = raw(VideoMixFollow::kDirId, 1.0f) >= 0.5f;
+    const int  n     = juce::jmin((int) activeSlots_.size(),
+                                  (int) ChainModel::kMaxVideoSlots);
+
+    const float dtMs = (float) juce::jlimit(1.0, 250.0, nowMs - lastFollowMs_);
+    lastFollowMs_ = nowMs;
+
+    // Release the video mask when disarmed or following VIDEO -> AUDIO.
+    auto releaseVideo = [&]
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            renderer_->setFollow(activeSlots_[(size_t) i].first, 1.0f);
+            radar_->setFollow(i, 1.0f, false);
+        }
+    };
+
+
+    if (! armed)
+    {
+        if (followArmed_)   // falling edge: release the UI-owned video mask
+        {
+            followArmed_ = false;
+            releaseVideo();
+        }
+        return;
+    }
+
+    const float depth = raw(VideoMixFollow::kDepthId, 1.0f);
+    const bool  seed  = ! followArmed_;
+    followArmed_ = true;
+
+    // ── VIDEO MIX → AUDIO ────────────────────────────────────────────────────
+    // The PROJECTOR is the audio mix of the chains on the toile — a
+    // crossfade, not a mask (VideoMixFocus::audioWeight): at the centre every
+    // chain sits at 50 % of its send faders, pulled onto a spoke that chain
+    // alone is heard and the others are silent, anywhere else the blend.
+    // The handles (the PICTURE's levels), an output switched off and the
+    // Amount say nothing here: one hand, one law. The video side is left
+    // alone (a mask each way would be a loop).
+    if (toAudio)
+    {
+        releaseVideo();
+
+        // The processor drives the linked audio at block rate. This UI
+        // timer owns only the opposite (audio -> video) envelope below.
+        return;
+    }
+
+    // AUDIO MIX -> VIDEO
+    float setLvl[ChainModel::kMaxChains], meter[ChainModel::kMaxChains];
+    processor_.chainAudioLevels(setLvl, meter);
+    const bool live = raw(VideoMixFollow::kModeId, 0.0f) >= 0.5f;
+
+    // LIVE weighs each chain by what it is really staging, against the
+    // loudest of the outputs ON THE TOILE — the peak is taken over the same
+    // set the mask is applied to, never over chains one cannot see.
+    float peakMeter = 0.0f;
+    if (live)
+        for (int i = 0; i < n; ++i)
+        {
+            const int c = activeSlots_[(size_t) i].second;
+            if (c >= 0 && c < ChainModel::kMaxChains && setLvl[c] >= 0.0f)
+                peakMeter = juce::jmax(peakMeter, meter[c]);
+        }
+
+    for (int i = 0; i < n; ++i)
+    {
+        const int c = activeSlots_[(size_t) i].second;
+        const bool ok = c >= 0 && c < ChainModel::kMaxChains;
+        const float target = ! ok ? VideoMixFollow::kExempt
+                           : live ? VideoMixFollow::liveLevel(setLvl[c], meter[c], peakMeter)
+                                  : setLvl[c];
+        followExempt_[i] = target < 0.0f;
+        followLvl_[i] = followExempt_[i]
+                          ? 0.0f
+                          : (seed ? target
+                                  : VideoMixFollow::smooth(followLvl_[i], target, dtMs));
+    }
+
+    for (int i = 0; i < n; ++i)
+    {
+        const float w = followExempt_[i] ? 1.0f
+                                         : VideoMixFollow::weight(followLvl_[i], depth);
+        renderer_->setFollow(activeSlots_[(size_t) i].first, w);
+        radar_->setFollow(i, w, ! followExempt_[i]);
+    }
+}
+
+//==============================================================================
+bool VideoMixerComponent::updatePresentationTarget()
+{
+    std::shared_ptr<VideoPresentationTarget> target;
+#if JUCE_MAC
+    const bool detached = isWindowOpen();
+    if (nativePreview_)
+    {
+        nativePreview_->setVisible(! detached);
+        if (! detached && isShowing()) target = nativePreview_->target();
+    }
+    if (detached)
+        if (auto* view = dynamic_cast<MasterView*>(window_->getContentComponent()))
+            target = view->target();
+#endif
+    renderer_->setPresentationTarget(target);
+    return target != nullptr;
+}
+
 void VideoMixerComponent::timerCallback()
 {
     // Presenter only: tell the renderer what to render (view size in LOGICAL px,
@@ -716,6 +1106,7 @@ void VideoMixerComponent::timerCallback()
     bool visible = false;
     currentView(w, h, visible);
     renderer_->setViewState(w, h, visible);
+    const bool nativePresentation = updatePresentationTarget();
 
     // Solo requests still alive → the outputs the renderer must also publish
     // alone (a pad that hid or died simply stops requesting).
@@ -728,9 +1119,38 @@ void VideoMixerComponent::timerCallback()
         renderer_->setSoloMask(mask);
     }
 
+    // AUDIO FOLLOW — read the AUDIO MIX, smooth, publish the mask (both the
+    // compositor and the toile read the SAME numbers, see updateFollow).
+    updateFollow(juce::Time::getMillisecondCounterHiRes());
+
+    // Flow pulses → the toile's handles (30 Hz is plenty for an LED; the
+    // toile only repaints a handle whose reading actually moved).
+    if ((++flowTick_ & 1) == 0)
+        for (int i = 0; i < (int) activeSlots_.size(); ++i)
+        {
+            float fn = 0.0f, fp = 0.0f, pw = 0.0f;
+            renderer_->flowOf(activeSlots_[(size_t) i].first, fn, fp, pw);
+            radar_->setFlow(i, fn, fp, pw);
+        }
+
+    // Native presentation is submitted directly from the renderer. This timer
+    // only maintains layout, pad requests and meters; no paint hop per frame.
+    if (nativePresentation) return;
     const uint32_t fc = renderer_->frameCounter();
     if (fc == lastPresented_)
         return;
+
+    // Adaptive presentation: when a single blit costs more than a frame slot
+    // (a fullscreen master on a Retina display), invalidating on every published
+    // frame just queues paints the message thread will never catch up with, and
+    // the whole UI goes with it. Present as fast as the paint actually allows —
+    // the RECORDING is unaffected, its frames come off the render thread.
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    if (! softwarePresentPacer_.due(nowMs,VideoDisplaySettings::fps())) return;
+    constexpr double kSlotMs = 1000.0 / (double) kFps;
+    if (lastPaintMs_ > kSlotMs && (nowMs - lastPresentMs_) < lastPaintMs_)
+        return;
+    lastPresentMs_ = nowMs;
     lastPresented_ = fc;
 
     // One view per frame: the detached window when open (the column shows a
@@ -765,9 +1185,15 @@ void VideoMixerComponent::paint(juce::Graphics& g)
                    masterArea_, juce::Justification::centred, true);
     }
     else
-        renderMaster(g, masterArea_);
+    {
+#if JUCE_MAC
+        if (nativePreview_) g.fillAll(juce::Colour(0xff0c0c10));
+        else
+#endif
+            renderMaster(g, masterArea_);
+    }
 
-    if (voices_.empty())
+    if (activeSlots_.empty())
     {
         if (! detached)
         {
@@ -780,63 +1206,9 @@ void VideoMixerComponent::paint(juce::Graphics& g)
         return;
     }
 
-    // Strip background + per-row labels (aligned with the controls in layoutStrip).
+    // Strip band background — the toile (radar_) paints its own frame on it.
     g.setColour(juce::Colour(0xff14141c));
     g.fillRect(stripArea_);
-
-    // Labels are links to the output's chain tab (onOutputClicked): the
-    // hovered one brightens + underlines.
-    auto strip = stripArea_.reduced(kStripPad, kStripPad / 2);
-    g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
-    const auto accent = moduleColour(ModuleType::VideoScroll);
-    for (int i = 0; i < (int) voices_.size(); ++i)
-    {
-        auto& v  = voices_[(size_t) i];
-        auto row = strip.removeFromTop(kRowH);
-        strip.removeFromTop(kRowGap);
-        const bool hov = (i == hoverRow_);
-        const auto lab = row.removeFromLeft(kLabelW).reduced(2, 0);
-        g.setColour(hov ? accent.brighter(0.5f) : accent);
-        g.drawText(v->label, lab, juce::Justification::centredLeft, false);
-        if (hov)
-        {
-            const int tw = (int) std::ceil(juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), v->label));
-            g.fillRect(lab.getX(), lab.getBottom() - 5, juce::jmin(tw, lab.getWidth()), 1);
-        }
-    }
-}
-
-int VideoMixerComponent::rowLabelAt(juce::Point<int> p) const noexcept
-{
-    auto strip = stripArea_.reduced(kStripPad, kStripPad / 2);
-    for (int i = 0; i < (int) voices_.size(); ++i)
-    {
-        auto row = strip.removeFromTop(kRowH);
-        strip.removeFromTop(kRowGap);
-        if (row.removeFromLeft(kLabelW).contains(p))
-            return i;
-    }
-    return -1;
-}
-
-void VideoMixerComponent::mouseMove(const juce::MouseEvent& e)
-{
-    const int r = rowLabelAt(e.getPosition());
-    setMouseCursor(r >= 0 ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
-    if (r != hoverRow_) { hoverRow_ = r; repaint(stripArea_); }
-}
-
-void VideoMixerComponent::mouseExit(const juce::MouseEvent&)
-{
-    if (hoverRow_ != -1) { hoverRow_ = -1; repaint(stripArea_); }
-}
-
-void VideoMixerComponent::mouseUp(const juce::MouseEvent& e)
-{
-    if (! e.mouseWasClicked() || e.mods.isPopupMenu()) return;
-    const int r = rowLabelAt(e.getPosition());
-    if (r >= 0 && onOutputClicked)
-        onOutputClicked(voices_[(size_t) r]->slot);
 }
 
 //==============================================================================
@@ -844,8 +1216,8 @@ void VideoMixerComponent::setAllPaused(bool paused)
 {
     auto& apvts = processor_.getAPVTS();
     const float v = paused ? 1.0f : 0.0f;
-    for (auto& voice : voices_)
-        if (auto* p = apvts.getParameter(vsParam(voice->slot, "paused")))
+    for (const auto& [slot, chain] : activeSlots_)
+        if (auto* p = apvts.getParameter(vsParam(slot, "paused")))
         {
             p->beginChangeGesture();
             p->setValueNotifyingHost(v);

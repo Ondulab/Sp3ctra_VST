@@ -4,7 +4,7 @@
  * M6 Phase 2 — RT-safe per-synth chain descriptor.
  *
  * The processor derives a ChainPlan from the editable ChainModel (message
- * thread) and publishes it via a lock-free double buffer. The synthesis thread
+ * thread) and publishes it via three reader-pinned snapshots. The synthesis thread
  * reads a consistent snapshot once per frame and processes each synth engine's
  * input through ONLY the modules on that synth's chain, in that chain's order.
  *
@@ -33,14 +33,15 @@ extern "C" {
  * score family emit one marker PER TYPE):
  *
  *   Pitch + Mask + Reverb + Echo + EQ + Harmo
- *          + Centro + Drive + DcBlock + Gain   10   1 each (per-chain dup rule)
+ *          + Centro + Drive + DcBlock + Gain
+ *          + Diff                            11   1 each (per-chain dup rule)
  *   VideoScroll probes                          8   dup rule relaxed, pool of 8
  *   Sampler position markers                    8   dup rule relaxed, 8 engines
  *   Score-family markers                        4   1 per type per chain
  *   OUT send markers                            4   LuxStral/Synth/Wave/Grain
  *   MidiTap probes                              8   dup rule relaxed, pool of 8
  *                                             ---
- *                                              42
+ *                                              43
  *
  * The `num_inserts < CHAIN_PLAN_MAX_INSERTS` gate in deriveAndPublishChainPlan
  * is a defensive cap: at 44 it stays unreachable for any legal model (an
@@ -142,7 +143,7 @@ typedef struct {
 void chain_send_transport(const SynthChainPlan *sp,
                           int *freeze_out, int *fade_ms_out);
 
-/* Message thread: publish a new plan (lock-free double buffer + atomic flip). */
+/* Message thread: publish into an unpinned slot; only the publisher may wait. */
 void chain_plan_publish(const ChainPlan* plan);
 
 /* Synth thread: copy the current published plan into `out` (consistent snapshot,

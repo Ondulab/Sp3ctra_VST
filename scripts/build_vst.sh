@@ -180,6 +180,20 @@ else
     echo -e "${YELLOW}⚠ Standalone not found${NC}"
 fi
 
+# Re-sign the standalone with a STABLE identity. CMake leaves an ad-hoc
+# (linker) signature whose hash changes at every build, so macOS treats each
+# rebuild as a brand-new app and silently drops the "Local Network"
+# permission — the Sp3ctra Link discovery then dies until the permission is
+# re-granted. A stable certificate keeps the TCC grant across rebuilds.
+SIGN_ID="${SP3CTRA_SIGN_ID:-Sp3ctra Dev}"
+if [ -d "$STANDALONE_PATH" ] && security find-identity -v -p codesigning | grep -q "\"$SIGN_ID\""; then
+    if codesign --force --deep -s "$SIGN_ID" "$STANDALONE_PATH" 2>/dev/null; then
+        echo -e "${GREEN}✓ Signed with '$SIGN_ID' (stable Local Network permission)${NC}"
+    else
+        echo -e "${YELLOW}⚠ codesign with '$SIGN_ID' failed — ad-hoc signature kept${NC}"
+    fi
+fi
+
 # Create ZIP archives for Git distribution (solves symlink issues).
 # Skipped in fast mode: zipping 3x200MB bundles dominates iteration time.
 if [ "$BUILD_CONFIG" = "Release" ] && [ $FAST_BUILD -eq 0 ]; then

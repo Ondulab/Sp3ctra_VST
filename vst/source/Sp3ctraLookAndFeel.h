@@ -2,6 +2,9 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "UITheme.h"
+#include "ui/Sp3ctraControls.h"
+
+#include <cmath>
 
 /**
  * @file Sp3ctraLookAndFeel.h
@@ -10,6 +13,21 @@
  * Inherits from juce::LookAndFeel_V4.
  * Overrides drawButtonText so that ALL TextButton labels use the unified
  * Sp3ctraTheme::kFontBtn token instead of JUCE's default scaling.
+ *
+ * Every widget branch below reads the SAME interaction ladder as the
+ * graphic-editor handles — ui/Sp3ctraControls.h:
+ *
+ *   Idle      the accent DESATURATED (Sp3ctraControls::restOf): a panel at
+ *             rest is calm, nothing shouts for attention;
+ *   Hover     full accent — "you can grab this";
+ *   Edit      full accent + WHITE cursor / ring — being changed right now,
+ *             by the mouse OR by a MIDI CC / automation, which keeps the
+ *             control lit for Sp3ctraTheme::kCtlGlowMs (the remote heat,
+ *             stamped by Sp3ctraBarSlider and MidiLearnAttachment).
+ *
+ * No branch here restates an alpha or a width: it resolves
+ * Sp3ctraControls::inkOf() / fillAlpha() and paints. Restyle every control
+ * of the interface from those tokens, not from this file.
  *
  * Usage — instantiate once in Sp3ctraAudioProcessorEditor and call:
  *   juce::LookAndFeel::setDefaultLookAndFeel(&laf);
@@ -26,6 +44,47 @@ public:
         // page, never the module colour (drawToggleButton reads tickColourId
         // with parent inheritance — a host may still override it locally).
         setColour(juce::ToggleButton::tickColourId, juce::Colour(Sp3ctraTheme::kColHandle));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // The ladder, read for a widget — the ONLY place a branch below asks
+    // "what state is this control in?". Sliders publish an accent through
+    // their colour ids; the ladder owns every alpha, so a colour id set with
+    // a baked-in alpha (legacy call sites) reads exactly the same.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /** Live reading of a slider: mouse state + remote-edit heat (MIDI CC,
+     *  automation — stamped by Sp3ctraBarSlider / MidiLearnAttachment). */
+    static Sp3ctraControls::Look lookOfSlider(juce::Slider& s)
+    {
+        const bool en   = s.isEnabled();
+        const bool drag = en && s.isMouseButtonDown(true);
+        const bool over = en && ! drag && s.isMouseOverOrDragging(true);
+        return Sp3ctraControls::stateOf(drag, over, false, Sp3ctraControls::heatOf(s));
+    }
+
+    /** The chrome hue of a slider (outline / cursor / thumb ring). */
+    static juce::Colour accentOf(juce::Slider& s)
+    {
+        const auto c = s.findColour(juce::Slider::textBoxOutlineColourId);
+        return c.isTransparent() ? Sp3ctraControls::active() : c.withAlpha(1.0f);
+    }
+
+    /** The "how much" surface of a bar / fader, on the ladder. */
+    static juce::Colour fillOf(juce::Slider& s, Sp3ctraControls::Look lk, bool enabled)
+    {
+        const auto c = s.findColour(juce::Slider::trackColourId);
+        const auto base = c.isTransparent() ? Sp3ctraControls::active() : c.withAlpha(1.0f);
+        const bool resting = (lk.state == Sp3ctraControls::State::Idle && lk.heat <= 0.0f);
+        return (resting ? Sp3ctraControls::restOf(base) : base)
+                   .withAlpha(Sp3ctraControls::fillAlpha(lk, enabled));
+    }
+
+    /** Live reading of a button / combo box. */
+    static Sp3ctraControls::Look lookOfWidget(const juce::Component& c, bool down,
+                                              bool over, bool selected = false)
+    {
+        return Sp3ctraControls::lookOf(c, down, over, selected);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -76,14 +135,25 @@ public:
             return;
         }
 
-        // Standard buttons — default V4 rendering
+        // Standard buttons — the panel's own background, and a border on the
+        // interaction ladder: plain chrome at rest (a button is not a value),
+        // the control colour under the pointer, white while it is pressed or
+        // while a MIDI CC is firing it (Sp3ctraControls::heatOf).
         const auto bounds = button.getLocalBounds().toFloat().reduced(0.5f);
         const auto baseColour = backgroundColour
             .withMultipliedBrightness(isButtonDown ? 0.7f : isMouseOverButton ? 1.1f : 1.0f);
         g.setColour(baseColour);
         g.fillRoundedRectangle(bounds, 3.0f);
-        g.setColour(juce::Colour(Sp3ctraTheme::kColBorder));
-        g.drawRoundedRectangle(bounds, 3.0f, 1.0f);
+
+        const auto look = lookOfWidget(button, isButtonDown, isMouseOverButton);
+        const auto ink  = Sp3ctraControls::inkOf(look, Sp3ctraControls::active(),
+                                                 Sp3ctraControls::kRoleOutline, button.isEnabled());
+        const float lit = juce::jmax(look.edit(),
+                                     look.state == Sp3ctraControls::State::Hover ? 1.0f : 0.0f);
+        g.setColour(juce::Colour(Sp3ctraTheme::kColBorder)
+                        .interpolatedWith(ink.line.withAlpha(1.0f), lit)
+                        .withAlpha(button.isEnabled() ? 1.0f : 0.5f));
+        g.drawRoundedRectangle(bounds, 3.0f, lit > 0.0f ? ink.lineW : 1.0f);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -127,48 +197,69 @@ public:
     // ancestor's ToggleButton::tickColourId — the handle colour by default
     // (a toggle is a control), so toggles tint like the bar sliders.
     // ─────────────────────────────────────────────────────────────────────────
+    /** Track geometry of the sliding switch below — shared with the pages so a
+     *  toggle column is never laid out narrower than its own knob. */
+    static constexpr float kSwitchH     = 20.0f;   ///< track height cap
+    static constexpr float kSwitchRatio = 1.9f;    ///< track width = height x this
+
+    /** Width drawToggleButton() needs at this height: lay a bare toggle out at
+     *  least this wide, or the ON knob (right end of the track) is clipped. */
+    static int toggleSwitchWidth(int height) noexcept
+    {
+        return (int) std::ceil(juce::jmin(kSwitchH, (float) height) * kSwitchRatio);
+    }
+
     void drawToggleButton(juce::Graphics& g,
                           juce::ToggleButton& button,
                           bool shouldDrawButtonAsHighlighted,
-                          bool /*shouldDrawButtonAsDown*/) override
+                          bool shouldDrawButtonAsDown) override
     {
         const bool on      = button.getToggleState();
         const bool enabled = button.isEnabled();
 
-        auto accent = button.findColour(juce::ToggleButton::tickColourId, true);
-        if (! enabled) accent = accent.withMultipliedAlpha(0.5f);
+        const auto accent = button.findColour(juce::ToggleButton::tickColourId, true)
+                                  .withAlpha(1.0f);
+        // The rung: hovered / pressed / remotely edited (a CC that flipped it
+        // keeps it lit for kCtlGlowMs, exactly like a handle).
+        const auto look = lookOfWidget(button, shouldDrawButtonAsDown,
+                                       shouldDrawButtonAsHighlighted);
+        const auto ink  = Sp3ctraControls::inkOf(look, accent,
+                                                 Sp3ctraControls::kRoleOutline, enabled);
 
         // Switch geometry — vertically centred, left-aligned within the bounds.
-        const float h = juce::jmin(20.0f, (float)button.getHeight());
-        const float w = h * 1.9f;
+        const float h = juce::jmin(kSwitchH, (float)button.getHeight());
+        const float w = h * kSwitchRatio;
         const float y = ((float)button.getHeight() - h) * 0.5f;
         const auto  track = juce::Rectangle<float>(0.0f, y, w, h);
         constexpr float r = 2.0f;   // same corner family as the bars
 
-        // Track — dark interior; accent fill when ON (the bar's "value" look)
+        // Track — dark interior; accent fill when ON (the bar's "value" look,
+        // on the same ladder: calm at rest, brighter under the pointer).
         g.setColour(juce::Colour(Sp3ctraTheme::kColBarBg));
         g.fillRoundedRectangle(track, r);
         if (on)
         {
-            g.setColour(accent.withAlpha(0.25f));
+            g.setColour(Sp3ctraControls::valueInk(look, accent, enabled)
+                            .withAlpha(Sp3ctraControls::fillAlpha(look, enabled)));
             g.fillRoundedRectangle(track, r);
         }
-        g.setColour(accent.withAlpha(on ? 0.55f : 0.3f));
+        g.setColour(ink.line.withMultipliedAlpha(on ? 1.0f : 0.75f));
         g.drawRoundedRectangle(track.reduced(0.5f), r, 1.0f);
-
-        if (shouldDrawButtonAsHighlighted)
+        if (ink.hasHalo())
         {
-            g.setColour(juce::Colours::white.withAlpha(0.06f));
-            g.fillRoundedRectangle(track, r);
+            g.setColour(ink.halo.withMultipliedAlpha(0.5f));
+            g.fillRoundedRectangle(track.expanded(2.0f), r + 1.0f);
         }
 
-        // Sliding knob — solid accent when ON, muted grey when OFF
+        // Sliding knob — the grabbable object: the value ink when ON, a muted
+        // grey when OFF; both follow the ladder.
         constexpr float pad = 2.5f;
         const float knobS = h - 2.0f * pad;
         const float knobX = on ? (track.getRight() - pad - knobS)
                                : (track.getX() + pad);
-        g.setColour(on ? accent
-                       : juce::Colour(0xff4a4e58).withMultipliedAlpha(enabled ? 1.0f : 0.5f));
+        g.setColour(on ? Sp3ctraControls::valueInk(look, accent, enabled)
+                       : juce::Colour(0xff4a4e58).withMultipliedAlpha(
+                             enabled ? (look.hot() ? 1.0f : 0.8f) : 0.5f));
         g.fillRoundedRectangle(knobX, y + pad, knobS, knobS, r);
 
         // Label
@@ -202,66 +293,116 @@ public:
     {
         if (style == juce::Slider::LinearVertical)
         {
-            constexpr float kBarW = 12.0f;   // thinner than the horizontal bars
+            // 12 px by default (thinner than the horizontal bars); a strip may
+            // narrow it further through the "faderBarW" property (AUDIO MIX
+            // send columns). The bar stays centred in the slider width.
+            const auto& props = slider.getProperties();
+            const float kBarW = props.contains("faderBarW")
+                              ? (float) (double) props["faderBarW"] : 12.0f;
             const float barW = juce::jmin(kBarW, (float) width);
             const juce::Rectangle<float> bar((float) x + ((float) width - barW) * 0.5f,
                                              (float) y, barW, (float) height);
+            const auto look = lookOfSlider(slider);
+            const bool en   = slider.isEnabled();
+            const auto ink  = Sp3ctraControls::inkOf(look, accentOf(slider),
+                                                     Sp3ctraControls::kRoleOutline, en);
 
             g.setColour(slider.findColour(juce::Slider::backgroundColourId));
             g.fillRect(bar);
 
             // Fill bottom → value (sliderPos is the value's y; top = max).
             const float top = juce::jlimit((float) y, (float) (y + height), sliderPos);
-            const auto fill = slider.findColour(juce::Slider::trackColourId);
-            g.setColour(slider.isEnabled() ? fill : fill.withMultipliedAlpha(0.5f));
+            g.setColour(fillOf(slider, look, en));
             g.fillRect(juce::Rectangle<float>(bar.getX() + 0.5f, top,
                                               barW - 1.0f, bar.getBottom() - top));
 
-            g.setColour(slider.findColour(juce::Slider::textBoxOutlineColourId));
+            // Value edge — the crisp cursor of what is moving (mouse or MIDI).
+            // A small mark, so it takes the full handle weight, not the
+            // outline one.
+            if (en && look.hot())
+            {
+                g.setColour(Sp3ctraControls::inkOf(look, accentOf(slider),
+                                                   Sp3ctraControls::kRoleHandle, en).line);
+                g.fillRect(juce::Rectangle<float>(bar.getX() + 0.5f,
+                                                  juce::jlimit(bar.getY(), bar.getBottom() - 2.0f, top),
+                                                  barW - 1.0f, 2.0f));
+            }
+
+            g.setColour(ink.line);
             g.drawRect(bar, 1.0f);
+
+            // Graduations (AUDIO MIX faders set the "faderTicks" property):
+            // a tick every 10% of the range beside the bar, longer/brighter
+            // at 0 / 50 / 100 — the majors also print their value (through
+            // the slider's own text conversion, so a percent fader reads
+            // "50", not "0.5"). getPositionOfValue keeps them aligned with
+            // the exact value↔pixel law the slider itself uses.
+            if (slider.getProperties().contains("faderTicks"))
+            {
+                for (int t = 0; t <= 10; ++t)
+                {
+                    const double val = slider.proportionOfLengthToValue(t / 10.0);
+                    const float  ty  = slider.getPositionOfValue(val);
+                    const bool major = (t == 0 || t == 5 || t == 10);
+                    const float len  = major ? 5.0f : 3.0f;
+                    g.setColour(ink.line.withAlpha(major ? 0.6f : 0.3f));
+                    g.fillRect(juce::Rectangle<float>(bar.getX() - len - 1.0f,
+                                                      ty - 0.5f, len, 1.0f));
+                    if (major)
+                    {
+                        // Right-justified against the tick, whatever room the
+                        // strip width leaves left of the bar.
+                        const int tx = juce::jmax(0, x - 2);
+                        const int tw = (int) (bar.getX() - len - 3.0f) - tx;
+                        g.setFont(juce::FontOptions(8.0f));
+                        g.setColour(ink.line.withAlpha(0.55f));
+                        g.drawText(slider.getTextFromValue(val),
+                                   juce::Rectangle<int>(tx,
+                                                        juce::jlimit(y, y + height - 9,
+                                                                     (int) (ty - 4.5f)),
+                                                        tw, 9),
+                                   juce::Justification::centredRight, false);
+                    }
+                }
+            }
             return;
         }
 
         if (style == juce::Slider::LinearBar)
         {
-            // Sp3ctraBarSlider's DC-block bar, with the control's three
-            // states painted here and nowhere else:
-            //   idle   dark interior, translucent handle-colour fill, 35 % outline
-            //   hover  brighter fill, 70 % outline, solid value edge
-            //   drag   brightest fill, solid outline, WHITE value edge
-            // Colours come from the slider's colour ids (Sp3ctraBarSlider::
-            // setAccent — the handle colour by default, an engine tint on the
-            // mixer strips), so the recipe is shared by every bar.
+            // Sp3ctraBarSlider's DC-block bar. The bar owns NO state recipe of
+            // its own: it publishes an accent (the handle colour by default,
+            // an engine tint on the mixer strips) and the ladder decides the
+            // rest — desaturated at rest, full accent under the pointer,
+            // white value cursor while it is being moved by the mouse or by a
+            // MIDI controller (Sp3ctraControls::heatOf, stamped by the bar's
+            // MidiLearnAttachment).
             const juce::Rectangle<float> r((float) x, (float) y, (float) width, (float) height);
             const bool en   = slider.isEnabled();
-            const bool drag = en && slider.isMouseButtonDown(true);
-            const bool over = en && ! drag && slider.isMouseOverOrDragging(true);
+            const auto look = lookOfSlider(slider);
+            const auto ink  = Sp3ctraControls::inkOf(look, accentOf(slider),
+                                                     Sp3ctraControls::kRoleOutline, en);
 
             g.setColour(slider.findColour(juce::Slider::backgroundColourId));
             g.fillRect(r);
 
             const float pos = juce::jlimit(r.getX(), r.getRight(), sliderPos);
-            auto fill = slider.findColour(juce::Slider::trackColourId);
-            if (drag)      fill = fill.withMultipliedAlpha(1.8f);
-            else if (over) fill = fill.withMultipliedAlpha(1.35f);
-            g.setColour(fill);
+            g.setColour(fillOf(slider, look, en));
             g.fillRect(juce::Rectangle<float>(r.getX() + 1.0f, r.getY() + 1.0f,
                                               juce::jmax(0.0f, pos - r.getX() - 1.0f),
                                               r.getHeight() - 2.0f));
 
-            auto outline = slider.findColour(juce::Slider::textBoxOutlineColourId);
-            if (over || drag)
+            // Value edge — a crisp cursor at the end of the fill: the thing
+            // that is moving. White while it is actually being edited, and at
+            // full handle weight (a small mark, not a long outline).
+            if (en && look.hot())
             {
-                // Value edge — a crisp cursor at the end of the fill: the
-                // thing you are moving.
-                g.setColour(drag ? juce::Colour(Sp3ctraTheme::kColHandleHot)
-                                 : outline.withAlpha(1.0f));
+                g.setColour(Sp3ctraControls::inkOf(look, accentOf(slider),
+                                                   Sp3ctraControls::kRoleHandle, en).line);
                 g.fillRect(juce::Rectangle<float>(juce::jlimit(r.getX(), r.getRight() - 2.0f, pos - 1.0f),
                                                   r.getY() + 1.0f, 2.0f, r.getHeight() - 2.0f));
             }
-            if (drag)      outline = outline.withAlpha(1.0f);
-            else if (over) outline = outline.withMultipliedAlpha(2.0f);
-            g.setColour(outline);
+            g.setColour(ink.line);
             g.drawRect(r, 1.0f);
             return;
         }
@@ -279,39 +420,45 @@ public:
         const float trackW  = (float)width;
         const float thumbX  = sliderPos;
         const bool  en      = slider.isEnabled();
+        const auto  look    = lookOfSlider(slider);
+        const auto  ink     = Sp3ctraControls::inkOf(look, Sp3ctraControls::active(),
+                                                  Sp3ctraControls::kRoleOutline, en);
 
         // Unfilled portion (right of thumb) — very dark
         g.setColour(juce::Colour(0xff1a1f2a));
         g.fillRoundedRectangle(trackX, trackY - trackH * 0.5f, trackW, trackH, trackH * 0.5f);
 
-        // Filled portion (left of thumb) — handle colour (muted when disabled)
+        // Filled portion (left of thumb) — the control colour on the ladder
         const float filledW = thumbX - trackX;
         if (filledW > 0.f)
         {
-            g.setColour(en ? juce::Colour(Sp3ctraTheme::kColHandle).withAlpha(0.7f)
-                           : juce::Colour(0xff363f4d));
+            g.setColour(Sp3ctraControls::valueInk(look, Sp3ctraControls::active(), en)
+                            .withMultipliedAlpha(0.85f));
             g.fillRoundedRectangle(trackX, trackY - trackH * 0.5f, filledW, trackH, trackH * 0.5f);
         }
 
-        // Thumb — circle in the handle colour (muted when disabled)
+        // Thumb — the grabbable object: same ink as a canvas node.
         constexpr float thumbR = 7.0f;
-        g.setColour(en ? juce::Colour(Sp3ctraTheme::kColHandle) : juce::Colour(0xff555a62));
-        g.fillEllipse(thumbX - thumbR, trackY - thumbR, thumbR * 2.f, thumbR * 2.f);
-
-        if (slider.isMouseOverOrDragging())
+        if (ink.hasHalo())
         {
-            g.setColour(juce::Colours::white.withAlpha(0.15f));
-            g.fillEllipse(thumbX - thumbR - 2.f, trackY - thumbR - 2.f,
-                          (thumbR + 2.f) * 2.f, (thumbR + 2.f) * 2.f);
+            g.setColour(ink.halo);
+            g.fillEllipse(thumbX - thumbR - 3.f, trackY - thumbR - 3.f,
+                          (thumbR + 3.f) * 2.f, (thumbR + 3.f) * 2.f);
         }
+        g.setColour(Sp3ctraControls::valueInk(look, Sp3ctraControls::active(), en));
+        g.fillEllipse(thumbX - thumbR, trackY - thumbR, thumbR * 2.f, thumbR * 2.f);
+        g.setColour(ink.line);
+        g.drawEllipse(thumbX - thumbR, trackY - thumbR, thumbR * 2.f, thumbR * 2.f, ink.lineW);
     }
 
     /** The vertical bar faders have no round thumb, so they don't need the V4
-        thumb clearance — keep a hair of breathing room above/below the bar.
-        Horizontal sliders keep the indent their circular thumb requires. */
+        thumb clearance — keep a hair of breathing room above/below the bar
+        (Sp3ctraTheme::kVFaderInset, which the mixer's VU / overlay layout
+        shares so they hug the bar's real extent). Horizontal sliders keep the
+        indent their circular thumb requires. */
     int getSliderThumbRadius(juce::Slider& slider) override
     {
-        return slider.isVertical() ? 2
+        return slider.isVertical() ? Sp3ctraTheme::kVFaderInset
                                    : LookAndFeel_V4::getSliderThumbRadius(slider);
     }
 
@@ -332,6 +479,10 @@ public:
         const float cy = bounds.getCentreY();
         const float angle = rotaryStartAngle + sliderPos * (rotaryEndAngle - rotaryStartAngle);
         constexpr float arcW = 3.5f;
+        const bool  en   = slider.isEnabled();
+        const auto  look = lookOfSlider(slider);
+        const auto  ink  = Sp3ctraControls::inkOf(look, Sp3ctraControls::active(),
+                                                  Sp3ctraControls::kRoleOutline, en);
 
         const juce::PathStrokeType arcStroke(
             arcW, juce::PathStrokeType::curved, juce::PathStrokeType::rounded);
@@ -343,36 +494,42 @@ public:
         g.setColour(juce::Colour(0xff1a1f2a));
         g.strokePath(bgArc, arcStroke);
 
-        // Filled arc (start → value) — handle colour
-        if (slider.isEnabled() && angle > rotaryStartAngle)
+        // Filled arc (start → value) — the control colour on the ladder.
+        // Centred parameters (pan) set "rotaryFromCentre": their arc grows
+        // from 12 o'clock towards the value instead of sweeping from the min.
+        const float arcFrom = slider.getProperties().contains("rotaryFromCentre")
+                            ? (rotaryStartAngle + rotaryEndAngle) * 0.5f
+                            : rotaryStartAngle;
+        if (en && std::abs(angle - arcFrom) > 0.008f)
         {
             juce::Path valArc;
             valArc.addCentredArc(cx, cy, radius, radius, 0.0f,
-                                 rotaryStartAngle, angle, true);
-            g.setColour(juce::Colour(Sp3ctraTheme::kColHandle).withAlpha(0.75f));
+                                 juce::jmin(arcFrom, angle),
+                                 juce::jmax(arcFrom, angle), true);
+            g.setColour(Sp3ctraControls::valueInk(look, Sp3ctraControls::active(), en)
+                            .withMultipliedAlpha(0.85f));
             g.strokePath(valArc, arcStroke);
         }
 
         // Knob body
         const float knobR = radius - 5.0f;
+        if (ink.hasHalo())
+        {
+            g.setColour(ink.halo.withMultipliedAlpha(0.6f));
+            g.fillEllipse(cx - knobR - 3.f, cy - knobR - 3.f,
+                          (knobR + 3.f) * 2.f, (knobR + 3.f) * 2.f);
+        }
         g.setColour(juce::Colour(0xff22272f));
         g.fillEllipse(cx - knobR, cy - knobR, knobR * 2.f, knobR * 2.f);
-        g.setColour(juce::Colour(0xff33373f));
+        g.setColour(look.hot() ? ink.line.withMultipliedAlpha(0.7f)
+                               : juce::Colour(0xff33373f));
         g.drawEllipse(cx - knobR, cy - knobR, knobR * 2.f, knobR * 2.f, 1.0f);
-
-        // Hover halo
-        if (slider.isMouseOverOrDragging())
-        {
-            g.setColour(juce::Colours::white.withAlpha(0.06f));
-            g.fillEllipse(cx - knobR, cy - knobR, knobR * 2.f, knobR * 2.f);
-        }
 
         // Pointer line — from inner radius outward, rotated to the value angle
         juce::Path pointer;
         pointer.startNewSubPath(0.0f, -knobR * 0.35f);
         pointer.lineTo(0.0f, -knobR * 0.92f);
-        g.setColour(slider.isEnabled() ? juce::Colour(Sp3ctraTheme::kColHandle)
-                                       : juce::Colour(0xff555a62));
+        g.setColour(Sp3ctraControls::valueInk(look, Sp3ctraControls::active(), en));
         g.strokePath(pointer,
                      juce::PathStrokeType(2.5f, juce::PathStrokeType::curved,
                                           juce::PathStrokeType::rounded),
@@ -405,17 +562,19 @@ public:
     {
         const juce::Rectangle<float> boxR(0.f, 0.f, (float)width, (float)height);
         constexpr float radius = 3.0f;
-        const bool en  = box.isEnabled();
-        const bool hot = en && (isButtonDown || box.isMouseOver(true));
-        const auto handle = juce::Colour(Sp3ctraTheme::kColHandle);
+        const bool en   = box.isEnabled();
+        const auto look = lookOfWidget(box, isButtonDown, en && box.isMouseOver(true));
+        const auto ink  = Sp3ctraControls::inkOf(look, Sp3ctraControls::active(),
+                                                 Sp3ctraControls::kRoleOutline, en);
 
         // Background — the bar interior
         g.setColour(juce::Colour(en ? Sp3ctraTheme::kColBarBg : Sp3ctraTheme::kColBarBgOff)
                         .brighter(isButtonDown ? 0.12f : 0.0f));
         g.fillRoundedRectangle(boxR, radius);
 
-        // Border — handle colour like a bar's outline
-        g.setColour(handle.withAlpha(! en ? 0.10f : hot ? 0.7f : 0.35f));
+        // Border — a bar's outline, on the ladder (desaturated at rest, full
+        // accent under the pointer, white while a CC is changing the choice)
+        g.setColour(ink.line);
         g.drawRoundedRectangle(boxR.reduced(0.5f), radius, 1.0f);
 
         // Small filled downward triangle, centred in the arrow-button zone
@@ -430,9 +589,20 @@ public:
             tri.addTriangle(ax,          ay,
                             ax + aw,     ay,
                             ax + aw * 0.5f, ay + ah);
-            g.setColour(handle.withAlpha(hot ? 1.0f : 0.85f));
+            g.setColour(Sp3ctraControls::valueInk(look, Sp3ctraControls::active(), en));
             g.fillPath(tri);
         }
+    }
+
+    /** V4's default reserves 30 px of label width for its wide chevron; the
+     *  compact triangle above only needs ~16, and on narrow combos those dead
+     *  pixels ellipsized short labels ("Ch 16" → "Ch …" on the MIDI MIX
+     *  channel). The arrow zone follows automatically: ComboBox::paint hands
+     *  drawComboBox everything right of the label as the button area. */
+    void positionComboBoxText(juce::ComboBox& box, juce::Label& label) override
+    {
+        label.setBounds(1, 1, box.getWidth() - 18, box.getHeight() - 2);
+        label.setFont(getComboBoxFont(box));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

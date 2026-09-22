@@ -27,7 +27,7 @@
  * latch — same feed sequence + same seed = bit-identical output.
  *
  * RT-safety: Pure C, allocation-free, bounded O(bands + active grains).
- *            Line pushes and config updates are staged under seqlocks and
+ *            Line pushes use an owned SPSC mailbox and are
  *            latched at BLOCK START only (house pattern — a push must never
  *            step the output mid-block). No JUCE deps, no mutex, no logging.
  *
@@ -39,6 +39,7 @@
 #define SYNTH_LUXGRAIN_ENGINE_H
 
 #include <stdint.h>
+#include "../../utils/spsc_snapshot.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -151,23 +152,18 @@ typedef struct {
  * Engine state (preallocated, single global instance owned by the adapter).
  * ========================================================================== */
 typedef struct {
-    /* Config — RENDER copy (audio thread) + staged copy (UI thread). */
-    LuxGrainConfig    config;
-    LuxGrainConfig    config_pending;
-    volatile uint32_t cfg_pending_seq;   /* seqlock: odd = writer inside */
-    uint32_t          cfg_applied_seq;
+    LuxGrainBandCell cells[LUXGRAIN_MAX_BANDS];
+    int bands, clear, pixels;
+    uint32_t frame_seq;
+} LuxGrainLineSnapshot;
 
-    /* Line staging — producer folds the conditioned line into band cells
-     * under the seqlock; process() latches at block start into the ring.
-     * (Two pushes inside one block keep only the last — harmless for a
-     * stochastic cloud, the ring advances once per latch.) */
-    LuxGrainBandCell  pending_cells[LUXGRAIN_MAX_BANDS];
-    int               pending_bands;
-    int               pending_clear;        /* 1 = no-signal: wipe the ring  */
-    int               axis_pixels_pending;  /* line width of the staged fold */
-    uint32_t          pending_frame_seq;
-    volatile uint32_t line_pending_seq;
-    uint32_t          line_applied_seq;
+typedef struct {
+    /* Config belongs to the audio thread. Only band count crosses to the feed. */
+    LuxGrainConfig config;
+    atomic_int feed_bands;
+    LuxGrainLineSnapshot line_slots[3];
+    Sp3ctraSpscSnapshot line_mailbox;
+    uint32_t line_applied_seq;
 
     /* History ring of latched lines (audio thread only). */
     LuxGrainBandCell  ring[LUXGRAIN_MAX_SPREAD][LUXGRAIN_MAX_BANDS];
@@ -213,7 +209,7 @@ void luxgrain_engine_reset(LuxGrainEngine *engine);
 
 LuxGrainConfig luxgrain_config_default(void);
 
-/* UI/message thread: stage a new config (latched at next block start). */
+/* Config updates: audio thread, or initialization before audio starts. */
 /* Re-derive sample-rate-dependent state after a host sample-rate change
  * (grain pitch, durations, sample playback ratio). Call from prepareToPlay. */
 void luxgrain_engine_set_sample_rate(LuxGrainEngine *engine, float sample_rate);

@@ -16,8 +16,8 @@
  * three masses as CENTROID/LEVELS/DC BLOCK) keeps the editor readable.
  *
  * The stream view is DISPLAY-ONLY: Gain is set from the numeric box in its
- * own row below the frame (Sp3ctraBarSlider — double-click cycles
- * min/centre/max, centre = 0 dB = unity).
+ * own row below the frame (Sp3ctraBarSlider — hold resets to 0 dB = unity,
+ * double-click types the value).
  *
  * Skeleton (frame, caption, box row + label) = ModuleChrome; the box takes
  * the shared handle colour.
@@ -31,6 +31,7 @@
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
 #include "ModuleEditorChrome.h"
+#include "Sp3ctraControls.h"
 #include "Sp3ctraBarSlider.h"
 #include "../processing/lux_gain.h"   // self-manages extern "C" linkage
 
@@ -227,21 +228,15 @@ private:
     }
 
     //==========================================================================
-    struct Bound
-    {
-        juce::RangedAudioParameter* param = nullptr;
-        std::unique_ptr<juce::ParameterAttachment> attach;
-        float value = 0.0f;   // read for drawing only — edits go through the box
-    };
+    /** The shared parameter binding — ui/Sp3ctraControls.h. Besides the
+     *  attachment and the mirrored value it carries the EDIT HEAT: any
+     *  change, from this editor's drag, from the box below, from a MIDI CC
+     *  or from automation, lights the handle that owns it. */
+    using Bound = Sp3ctraControls::Bound;
 
     void bind(Bound& bnd, const juce::String& id)
     {
-        bnd.param = apvts.getParameter(id);
-        jassert(bnd.param != nullptr);
-        if (bnd.param == nullptr) return;
-        bnd.attach = std::make_unique<juce::ParameterAttachment>(
-            *bnd.param, [this, &bnd](float v) { bnd.value = v; repaint(); });
-        bnd.attach->sendInitialUpdate();
+        bnd.bind(apvts, id, [this](float) { repaint(); });
     }
 
     void initBox(Sp3ctraBarSlider& box, const juce::String& id,

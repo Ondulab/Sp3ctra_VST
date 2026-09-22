@@ -63,6 +63,16 @@ struct Chain
      *  per-module BackgroundMode params are gone; applyConfigurationToCore
      *  projects this value onto every member module's config. */
     int backgroundMode { 1 };   // White — paper is the typical Sp3ctra stream
+
+    /** User label shown in the rack header NEXT TO the chain number (the
+     *  number stays the identity — colours, delete confirms, zone-3 tabs).
+     *  Empty = the default "CHAIN" caption. */
+    juce::String name;
+
+    /** Rack fold state: true = the chain card is collapsed to its header
+     *  (blocks hidden, no drop target). Pure UI — routing, the RT plan and
+     *  the enable bridge ignore it; persisted so the rack reopens as left. */
+    bool collapsed { false };
 };
 
 /** Chain::backgroundMode poles (C-side LUX_*_BG_* convention). */
@@ -242,6 +252,9 @@ public:
     static const juce::Identifier kValuesTag;   // "VALUES" (J2 — chain-owned settings)
     static const juce::Identifier kMemoryTag;   // "MEMORY" (J3 — chain type memory)
     static const juce::Identifier kBackgroundProp; // "background" (schema 4 — chain-owned pole)
+    // Additive CHAIN attributes (no schema bump — absent = default):
+    static const juce::Identifier kNameProp;       // "name" (user chain label)
+    static const juce::Identifier kCollapsedProp;  // "collapsed" (rack fold state)
 
     /** CHAINS schema version written by toValueTree(). Migrations gate on the
      *  version read back from a loaded tree:

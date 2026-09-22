@@ -286,7 +286,10 @@ double panAt(const std::vector<PanPoint>& points, double posFrac)
 }
 
 //==============================================================================
-// Shared drawing core
+// Shared drawing core — every note goes through timbregen::NotePainter, the
+// painter TIMBRE uses for its strips, so a timbre sounds the same under a
+// piece as on its own page. What stays here is what is MIDI SCORE's: the
+// voices, the per-voice pan automation and EQ, the piece-wide ink scale.
 //==============================================================================
 namespace
 {
@@ -305,55 +308,16 @@ namespace
                 return true;
         return false;
     }
-    /** Per-voice partial set, precomputed once per render: the partial RATIOS
-     *  (and relative dBs / decay multipliers) are note-independent, so they are
-     *  computed at a reference fundamental and rescaled per note. */
-    struct VoicePartials
-    {
-        bool   enabled  = false;
-        double refHz    = 440.0;
-        double maxAmpDb = -1.0e9;
-        double attackSec = 0.004;
-        double decaySec  = 0.0;
-        double levelDb   = 0.0;
-        double vibCents  = 0.0;    // vibrato (see drawNoteVibrato)
-        double vibRateHz = 5.5;
-        double vibOnsetSec = 0.4;
-        double vibLife   = 0.5;
-        std::vector<timbregen::Partial> rel;
-    };
 
-    std::array<VoicePartials, kMaxVoices> buildVoicePartials(
+    using VoiceModels = std::array<timbregen::VoiceModel, kMaxVoices>;
+
+    VoiceModels buildVoiceModels(
         const std::array<timbregen::TimbreSlotParams, kMaxVoices>& voices)
     {
-        std::array<VoicePartials, kMaxVoices> out;
+        VoiceModels out;
         for (int v = 0; v < kMaxVoices; ++v)
-        {
-            const auto& p = voices[(size_t) v];
-            auto& vp = out[(size_t) v];
-            vp.enabled = p.enabled;
-            if (! p.enabled)
-                continue;
-            timbregen::TimbreSlotParams ref = p;
-            ref.midiNote = 69;                       // A4 reference — ratios only
-            vp.rel   = timbregen::computePartials(ref);
-            vp.refHz = timbregen::midiNoteHz(69);
-            for (const auto& pt : vp.rel)
-                vp.maxAmpDb = juce::jmax(vp.maxAmpDb, pt.ampDb);
-            vp.attackSec = juce::jmax(1.0e-4, p.attackMs / 1000.0);
-            vp.decaySec  = p.decaySec;
-            vp.levelDb   = p.levelDb;
-            vp.vibCents    = juce::jmax(0.0, p.vibCents);
-            vp.vibRateHz   = juce::jlimit(0.1, 20.0, p.vibRateHz);
-            vp.vibOnsetSec = juce::jmax(0.0, p.vibOnsetSec);
-            vp.vibLife     = juce::jlimit(0.0, 1.0, p.vibLife);
-        }
+            out[(size_t) v] = timbregen::buildVoiceModel(voices[(size_t) v]);
         return out;
-    }
-
-    inline double velocityDb(int vel, double rangeDb)
-    {
-        return -rangeDb * (1.0 - (double) juce::jlimit(1, 127, vel) / 127.0);
     }
 
     /** Loudest printable cell across the WHOLE piece (velocity + strongest
@@ -363,232 +327,54 @@ namespace
      *  absolute ink/level gain (clipped at full black), instead of being
      *  cancelled by the normalisation whenever only one voice plays.
      *  Returns -1e9 when no enabled voice has notes. */
-    double globalMaxDb(const MidiScoreData& data,
-                       const std::array<VoicePartials, kMaxVoices>& vps,
+    double globalMaxDb(const MidiScoreData& data, const VoiceModels& vms,
                        const MidiScoreSettings& s)
     {
         double mx = -1.0e9;
         for (const auto& n : data.notes)
         {
-            const auto& vp = vps[(size_t) n.voice];
-            if (! vp.enabled || vp.rel.empty())
+            const auto& vm = vms[(size_t) n.voice];
+            if (! vm.hasInk())
                 continue;
-            mx = juce::jmax(mx, vp.maxAmpDb
-                                + velocityDb(n.velocity, s.velocityRangeDb));
+            mx = juce::jmax(mx, vm.maxAmpDb
+                                + timbregen::velocityDb(n.velocity, s.velocityRangeDb));
         }
         return mx;
     }
 
-    /** Geometry of the band inside the target image + the time window. */
-    struct BandGeom
-    {
-        double x0Px     = 0.0;   ///< px column of t0 (may be fractional)
-        int    xMin = 0, xMax = 0;
-        double yBottom  = 0.0;   ///< px row of minFreq (band bottom)
-        double heightPx = 0.0;
-        int    yTop = 0, yBot = 0;
-        double pxPerSec = 1.0;
-        double t0 = 0.0, t1 = 0.0;
-    };
-
-    /** Living vibrato of ONE note, sampled per pixel column.
-     *
-     *  The whole partial stack is frequency-modulated by the same ±cents wave;
-     *  on the LOG axis that is a single vertical offset shared by every
-     *  partial, so it is precomputed once per note into two per-column arrays
-     *  (pitch offset in px, coupled amplitude dip in dB ≤ 0).
-     *
-     *  "Living" ingredients — all deterministic in tau (a note crossing a page
-     *  boundary keeps its wave phase, and playback matches the print):
-     *   - onset: nothing at the attack, then the depth develops smoothly over
-     *     vibOnsetSec (delay + smoothstep rise), and eases out at the tail;
-     *   - waving depth: a slow undulation makes the vibrato come and go
-     *     instead of holding a constant amplitude;
-     *   - drifting rate: the rate wobbles a few percent (integrated
-     *     analytically so the phase stays a pure function of tau);
-     *   - per-note defects: each note draws its own start phase, rate and
-     *     depth deviation from a hash of its index — two equal notes never
-     *     vibrate identically.
-     *  vibLife scales every irregularity: 0 = metronomic sine, 1 = loose. */
-    void computeNoteVibrato(const VoicePartials& vp, const NoteEvent& n,
-                            size_t noteIndex, const BandGeom& g,
-                            int x0, int x1, double pxPerCent,
-                            std::vector<double>& yOffPx,
-                            std::vector<double>& amDb)
-    {
-        const double life = vp.vibLife;
-
-        // Deterministic per-note randoms (no global RNG — pure re-render).
-        juce::uint32 h = (juce::uint32) (noteIndex + 1) * 2654435761u
-                       ^ (juce::uint32) (n.note * 40503 + 977);
-        auto rnd = [&h]() {
-            h = h * 1664525u + 1013904223u;
-            return (double) (h >> 8) * (1.0 / 16777216.0);
-        };
-        const double phase0   = rnd() * juce::MathConstants<double>::twoPi * life;
-        const double rateMul  = 1.0 + (rnd() - 0.5) * 0.16 * life;   // ±8 %
-        const double depthMul = 1.0 + (rnd() - 0.5) * 0.50 * life;   // ±25 %
-        const double driftPh  = rnd() * juce::MathConstants<double>::twoPi;
-        const double undPh    = rnd() * juce::MathConstants<double>::twoPi;
-        const double undHz    = 0.8 * (0.6 + 0.8 * rnd());           // 0.48..1.12 Hz
-
-        const double dur     = n.endSec - n.startSec;
-        const double delay   = vp.vibOnsetSec * 0.4;
-        const double rise    = juce::jmax(0.08, vp.vibOnsetSec * 0.6);
-        const double easeSec = juce::jmin(0.25, dur * 0.25);         // tail ease-out
-        const double rate    = vp.vibRateHz * rateMul;
-        const double driftHz = 0.9;                                  // rate-wobble speed
-        const double driftW  = juce::MathConstants<double>::twoPi * driftHz;
-        const double driftA  = 0.10 * life;                          // ±10 % rate wobble
-        const double twoPi   = juce::MathConstants<double>::twoPi;
-
-        const size_t nCols = (size_t) juce::jmax(0, x1 - x0);
-        yOffPx.assign(nCols, 0.0);
-        amDb.assign(nCols, 0.0);
-
-        for (size_t i = 0; i < nCols; ++i)
-        {
-            const double tau = (((double) (x0 + (int) i) + 0.5) - g.x0Px) / g.pxPerSec
-                             + g.t0 - n.startSec;
-            if (tau < 0.0 || tau > dur)
-                continue;
-
-            double env = 0.0;                                        // onset smoothstep
-            if (tau > delay)
-            {
-                const double s = juce::jlimit(0.0, 1.0, (tau - delay) / rise);
-                env = s * s * (3.0 - 2.0 * s);
-            }
-            if (easeSec > 0.0)
-            {
-                const double e = juce::jlimit(0.0, 1.0, (dur - tau) / easeSec);
-                env *= e * e * (3.0 - 2.0 * e);
-            }
-            if (env <= 0.0)
-                continue;
-
-            // Depth undulation: comes and goes between 100 % and (1 − 0.35·life).
-            const double und = 1.0 - 0.35 * life
-                             * (0.5 + 0.5 * std::sin(twoPi * undHz * tau + undPh));
-
-            // Phase with drifting rate, integrated analytically:
-            // rate(t) = R(1 + a·sin(wt+p))  →  ∫ = R·tau − (R·a/w)(cos(wtau+p) − cos p)
-            const double phase = twoPi * rate * tau
-                               + (twoPi * rate * driftA / driftW)
-                                 * (std::cos(driftPh) - std::cos(driftW * tau + driftPh))
-                               + phase0;
-
-            const double amp = vp.vibCents * depthMul * env * und;   // cents, now
-            yOffPx[i] = amp * std::sin(phase) * pxPerCent;
-
-            // Subtle coupled AM (never above the note's own level): a breath
-            // of ~0.6 dB per 30 cents, in quadrature with the pitch wave.
-            const double amDepth = 0.018 * amp;
-            amDb[i] = amDepth * 0.5 * (std::sin(phase - juce::MathConstants<double>::halfPi) - 1.0);
-        }
-    }
-
-    /** Captured curves of ONE note (Sp3ctra MPE takes), folded into the same
-     *  per-column arrays as the synthetic vibrato: bendPts waves the whole
-     *  partial stack along the note's REAL pitch trajectory, levelPts turns
-     *  the ink into the captured level envelope (its dB replaces the note-on
-     *  velocity's). Piecewise-constant walk — breakpoints are sorted and tau
-     *  grows with the column. */
-    void computeNoteCurves(const NoteEvent& n, const BandGeom& g,
-                           int x0, int x1, double pxPerCent, double velRangeDb,
-                           bool addToExisting,
-                           std::vector<double>& yOffPx, std::vector<double>& amDb)
-    {
-        const size_t nCols = (size_t) juce::jmax(0, x1 - x0);
-        if (! addToExisting)
-        {
-            yOffPx.assign(nCols, 0.0);
-            amDb.assign(nCols, 0.0);
-        }
-        const double baseDb = velocityDb(n.velocity, velRangeDb);
-        size_t ib = 0, il = 0;
-        for (size_t i = 0; i < nCols; ++i)
-        {
-            const double tau = (((double) (x0 + (int) i) + 0.5) - g.x0Px) / g.pxPerSec
-                             + g.t0 - n.startSec;
-            if (tau < 0.0)
-                continue;
-            if (! n.bendPts.empty())
-            {
-                while (ib + 1 < n.bendPts.size() && n.bendPts[ib + 1].first <= tau)
-                    ++ib;
-                yOffPx[i] += (double) n.bendPts[ib].second * pxPerCent;
-            }
-            if (! n.levelPts.empty())
-            {
-                while (il + 1 < n.levelPts.size() && n.levelPts[il + 1].first <= tau)
-                    ++il;
-                amDb[i] += velocityDb((int) n.levelPts[il].second, velRangeDb)
-                         - baseDb;
-            }
-        }
-    }
-
-    /** Draws every note overlapping [t0..t1] into the band: one soft-edged
-     *  horizontal line per partial, attack/decay envelope along the note,
-     *  end fade for anti-click / bar separation, per-voice living vibrato
-     *  waving the whole partial stack. Same greyscale-vs-dB and
-     *  Gaussian cross-profile conventions as TimbreGenRenderer. */
-    void drawNotes(juce::Image& img, const BandGeom& g,
+    /** Draws every note overlapping [t0..t1] into the band through the
+     *  shared painter: partial stack, envelope, vibrato/drift, captured
+     *  curves, textures — plus this page's per-voice pan tint and EQ. */
+    void drawNotes(juce::Image& img, const timbregen::BandGeom& g,
                    const MidiScoreData& data,
-                   const std::array<VoicePartials, kMaxVoices>& vps,
+                   const VoiceModels& vms,
                    const MidiScoreSettings& s,
                    double maxDb, double dpiY,
                    const std::function<void(double)>* progress = nullptr)
     {
-        const double range     = juce::jmax(1.0, s.dynamicRangeDB);
-        const double logRatio  = std::log(s.maxFreq / s.minFreq);
-        const double halfWidth = juce::jmax(0.5, mmToPx(s.lineWidthMM, dpiY) * 0.5);
-        const int    dyMax     = (int) std::ceil(halfWidth * 2.0);   // Gaussian skirt
-
-        // On the LOG axis a pitch offset in cents is the same px offset at any
-        // frequency — one conversion serves the whole vibrato render.
-        const double pxPerCent = (std::log(2.0) / 1200.0) / logRatio * g.heightPx;
-        std::vector<double> vibYOff, vibAmDb;   // per-column, reused across notes
-
-        const int imageW = img.getWidth();
-        juce::Image::BitmapData bmp(img, juce::Image::BitmapData::readWrite);
-        auto darken = [&](int x, int y, double intensity)   // 0 = black … 1 = white
-        {
-            if (x < 0 || x >= imageW || y < g.yTop || y >= g.yBot) return;
-            const auto v = (juce::uint8) juce::jlimit(0, 255,
-                                (int) (intensity * 255.0 + 0.5));
-            juce::uint8* p = bmp.getLinePointer(y) + x * bmp.pixelStride;
-            if (v < p[0]) p[0] = p[1] = p[2] = v;            // darker (louder) wins
-        };
-
-        // Panned ink, SCORE stereo convention: R byte = RIGHT brightness,
-        // B byte = LEFT brightness, G = the darker of the two — left-only ink
-        // is red, right-only blue, centre grey (byte-identical to mono).
-        // Darker-wins per CHANNEL so overlapping notes with different pans
-        // composite exactly like ScoreGen's stereo cells.
-        auto darkenLR = [&](int x, int y, double intL, double intR)
-        {
-            if (x < 0 || x >= imageW || y < g.yTop || y >= g.yBot) return;
-            const auto vL = (juce::uint8) juce::jlimit(0, 255,
-                                (int) (intL * 255.0 + 0.5));
-            const auto vR = (juce::uint8) juce::jlimit(0, 255,
-                                (int) (intR * 255.0 + 0.5));
-            auto* p = reinterpret_cast<juce::PixelRGB*>(
-                bmp.getLinePointer(y) + x * bmp.pixelStride);
-            p->setARGB(255,
-                       juce::jmin(p->getRed(),   vR),
-                       juce::jmin(p->getGreen(), juce::jmin(vL, vR)),
-                       juce::jmin(p->getBlue(),  vL));
-        };
+        timbregen::InkSettings ink;
+        ink.minFreq        = s.minFreq;
+        ink.maxFreq        = s.maxFreq;
+        ink.dynamicRangeDB = s.dynamicRangeDB;
+        ink.lineWidthMM    = s.lineWidthMM;
+        ink.dpiY           = dpiY;
+        ink.maxDb          = maxDb;
+        timbregen::NotePainter painter(img, g, ink);
 
         // Per-voice EQ: the curve is a tone control of the VOICE, so its gain
         // is read at each PARTIAL's frequency (not at an image row) — hoisted
-        // here so the inner loops only pay for voices that actually shape.
+        // here so only voices that actually shape pay for it.
+        std::array<std::function<double(double)>, kMaxVoices> eqFn;
         std::array<bool, kMaxVoices> eqOn {};
         for (int v = 0; v < kMaxVoices; ++v)
-            eqOn[(size_t) v] = vps[(size_t) v].enabled
-                            && s.voiceEq[(size_t) v].active();
+        {
+            eqOn[(size_t) v] = vms[(size_t) v].enabled && s.voiceEq[(size_t) v].active();
+            if (eqOn[(size_t) v])
+            {
+                const auto* eq = &s.voiceEq[(size_t) v];
+                eqFn[(size_t) v] = [eq](double hz) { return (double) eq->gainDbAt(hz); };
+            }
+        }
 
         // ── Pan automation → per-VOICE, per-column L/R attenuations (dB ≤ 0).
         // Linear balance: centre = 0 dB both sides (grey ink, historical
@@ -602,7 +388,7 @@ namespace
             const size_t nCols = (size_t) juce::jmax(0, g.xMax - g.xMin);
             for (int v = 0; v < kMaxVoices; ++v)
             {
-                if (! vps[(size_t) v].enabled
+                if (! vms[(size_t) v].enabled
                     || ! panActive(s.panPoints[(size_t) v]))
                     continue;
                 auto& dbL = panDbL[(size_t) v];
@@ -635,134 +421,29 @@ namespace
                 (*progress)((double) ni / (double) data.notes.size());
 
             const auto& n  = data.notes[ni];
-            const auto& vp = vps[(size_t) n.voice];
-            if (! vp.enabled || vp.rel.empty())
-                continue;
-            if (n.endSec <= g.t0 || n.startSec >= g.t1)
-                continue;   // outside this window
-
-            const double f0      = timbregen::midiNoteHz(n.note);
-            const double baseAll = velocityDb(n.velocity, s.velocityRangeDb)
-                                 + vp.levelDb - maxDb;                 // ≤ 0
-            if (baseAll <= -range)
+            const auto& vm = vms[(size_t) n.voice];
+            if (! vm.hasInk())
                 continue;
 
-            const double dur     = n.endSec - n.startSec;
-            const double fadeSec = juce::jmin(0.04, dur * 0.2);   // anti-click tail
-
-            const double tA = juce::jmax(n.startSec, g.t0);
-            const double tB = juce::jmin(n.endSec,   g.t1);
-            const int x0 = juce::jmax(g.xMin, (int) std::floor(g.x0Px + (tA - g.t0) * g.pxPerSec));
-            const int x1 = juce::jmin(g.xMax, (int) std::ceil (g.x0Px + (tB - g.t0) * g.pxPerSec));
-
-            // Vibrato wave of this note — one array for the whole partial stack.
-            const bool hasVib = vp.vibCents > 0.05 && pxPerCent > 0.0 && x1 > x0;
-            int vibMarginPx = 0;
-            if (hasVib)
+            timbregen::NoteInk ink1;
+            ink1.f0Hz      = timbregen::midiNoteHz(n.note);
+            ink1.startSec  = n.startSec;
+            ink1.endSec    = n.endSec;
+            ink1.levelDb   = timbregen::velocityDb(n.velocity, s.velocityRangeDb) + vm.levelDb;
+            ink1.noteIndex = ni;
+            ink1.bendPts   = n.bendPts.empty()  ? nullptr : &n.bendPts;
+            ink1.levelPts  = n.levelPts.empty() ? nullptr : &n.levelPts;
+            ink1.velocity  = n.velocity;
+            ink1.velocityRangeDb = s.velocityRangeDb;
+            if (! panDbL[(size_t) n.voice].empty())
             {
-                computeNoteVibrato(vp, n, ni, g, x0, x1, pxPerCent, vibYOff, vibAmDb);
-                vibMarginPx = (int) std::ceil(vp.vibCents * 1.25 * pxPerCent);
+                ink1.panDbL = panDbL[(size_t) n.voice].data();
+                ink1.panDbR = panDbR[(size_t) n.voice].data();
             }
+            if (eqOn[(size_t) n.voice])
+                ink1.gainDbAt = &eqFn[(size_t) n.voice];
 
-            // Captured curves (MPE takes): the note's REAL pitch trajectory
-            // and level envelope, folded into the same arrays.
-            const bool hasCurves = (! n.bendPts.empty() || ! n.levelPts.empty())
-                                 && pxPerCent > 0.0 && x1 > x0;
-            if (hasCurves)
-            {
-                computeNoteCurves(n, g, x0, x1, pxPerCent, s.velocityRangeDb,
-                                  hasVib, vibYOff, vibAmDb);
-                double mxCents = 0.0;
-                for (const auto& bp : n.bendPts)
-                    mxCents = juce::jmax(mxCents, std::abs((double) bp.second));
-                vibMarginPx += (int) std::ceil(mxCents * pxPerCent) + 1;
-            }
-            const bool hasWave = hasVib || hasCurves;
-
-            // This VOICE's pan attenuations (nullptr = centred voice).
-            const double* vPanL = panDbL[(size_t) n.voice].empty()
-                                      ? nullptr : panDbL[(size_t) n.voice].data();
-            const double* vPanR = panDbR[(size_t) n.voice].empty()
-                                      ? nullptr : panDbR[(size_t) n.voice].data();
-
-            const midiscoregen::MidiScoreSettings::VoiceEq* vEq =
-                eqOn[(size_t) n.voice] ? &s.voiceEq[(size_t) n.voice] : nullptr;
-
-            for (const auto& pt : vp.rel)
-            {
-                const double f = f0 * (pt.freqHz / vp.refHz);
-                if (f < s.minFreq || f > s.maxFreq)
-                    continue;   // partial outside the instrument's span
-                // This VOICE's EQ at THIS partial — an absolute gain (like
-                // levelDb), never folded into the normalisation.
-                const double eqDb   = vEq ? (double) vEq->gainDbAt(f) : 0.0;
-                const double baseDb = baseAll + pt.ampDb + eqDb;
-                if (baseDb <= -range)
-                    continue;
-
-                // LOG frequency axis: same mapping as SCORE / TIMBRE / the reader.
-                const double pos = std::log(f / s.minFreq) / logRatio;
-                const double yC  = g.yBottom - pos * g.heightPx;
-                const int    yCi = (int) std::round(yC);
-                if (yCi + dyMax + vibMarginPx < g.yTop
-                    || yCi - dyMax - vibMarginPx >= g.yBot)
-                    continue;
-
-                for (int x = x0; x < x1; ++x)
-                {
-                    // Column time relative to the NOTE start (absolute — so a
-                    // note crossing a page boundary keeps its envelope phase).
-                    const double tau = ((x + 0.5) - g.x0Px) / g.pxPerSec
-                                     + g.t0 - n.startSec;
-                    if (tau < 0.0 || tau > dur)
-                        continue;
-
-                    double envDb = 0.0;
-                    if (tau < vp.attackSec)                          // attack ramp
-                        envDb += 20.0 * std::log10(juce::jmax(tau / vp.attackSec, 1.0e-4));
-                    if (vp.decaySec > 0.0 && tau > vp.attackSec)     // −60 dB decay
-                        envDb += -60.0 * (tau - vp.attackSec) / vp.decaySec * pt.decayMul;
-                    const double tail = dur - tau;
-                    if (tail < fadeSec)
-                        envDb += 20.0 * std::log10(juce::jmax(tail / fadeSec, 1.0e-4));
-
-                    double yCol = yC;
-                    if (hasWave)
-                    {
-                        yCol -= vibYOff[(size_t) (x - x0)];          // +cents = higher = up
-                        envDb += vibAmDb[(size_t) (x - x0)];
-                    }
-
-                    const double dB = baseDb + envDb;
-                    if (dB <= -range)
-                        continue;
-
-                    const double pdL = vPanL ? vPanL[x - g.xMin] : 0.0;
-                    const double pdR = vPanR ? vPanR[x - g.xMin] : 0.0;
-
-                    const int yCiCol = (int) std::round(yCol);
-                    for (int dy = -dyMax; dy <= dyMax; ++dy)
-                    {
-                        const double dd  = ((yCiCol + dy) - yCol) / halfWidth;
-                        const double off = -12.0 * dd * dd;          // Gaussian in dB
-                        if (! hasPan)
-                        {
-                            const double v = juce::jlimit(0.0, 1.0, -(dB + off) / range);
-                            if (v < 1.0)
-                                darken(x, yCiCol + dy, v);
-                        }
-                        else
-                        {
-                            const double vL = juce::jlimit(0.0, 1.0,
-                                                  -(dB + off + pdL) / range);
-                            const double vR = juce::jlimit(0.0, 1.0,
-                                                  -(dB + off + pdR) / range);
-                            if (vL < 1.0 || vR < 1.0)
-                                darkenLR(x, yCiCol + dy, vL, vR);
-                        }
-                    }
-                }
-            }
+            painter.paint(vm, ink1);
         }
     }
 }
@@ -792,7 +473,7 @@ scoregen::RenderResult renderStrip(
     if (t1Sec <= t0Sec || pxPerSec <= 0.0 || dpiY < 8.0)
         return fail("Degenerate strip geometry");
 
-    const auto vps   = buildVoicePartials(voices);
+    const auto vps   = buildVoiceModels(voices);
     const double mx  = globalMaxDb(data, vps, settings);
     if (mx < -1.0e8)
         return fail("No voice enabled (activate at least one voice)");
@@ -809,7 +490,7 @@ scoregen::RenderResult renderStrip(
         g.fillAll(juce::Colours::white);
     }
 
-    BandGeom geom;
+    timbregen::BandGeom geom;
     geom.x0Px = 0.0;  geom.xMin = 0;  geom.xMax = w;
     geom.yBottom = (double) h;  geom.heightPx = (double) h;
     geom.yTop = 0;  geom.yBot = h;
@@ -857,7 +538,7 @@ scoregen::RenderResult renderSheet(
     const double dpi = (settings.printerDpi >= 72.0) ? settings.printerDpi
                                                      : SCORE_DEFAULT_PRINTER_DPI;
 
-    const auto vps  = buildVoicePartials(voices);
+    const auto vps  = buildVoiceModels(voices);
     const double mx = globalMaxDb(data, vps, settings);
     if (mx < -1.0e8)
         return fail("No voice enabled (activate at least one voice)");
@@ -914,7 +595,7 @@ scoregen::RenderResult renderSheet(
     const int yTop = juce::jmax(0,      (int) std::floor(spectroTop));
     const int yBot = juce::jmin(imageH, (int) std::ceil (spectroBottom));
 
-    BandGeom geom;
+    timbregen::BandGeom geom;
     geom.x0Px = spectroLeft;
     geom.xMin = (int) std::floor(spectroLeft);
     geom.xMax = juce::jmin(imageW, (int) std::ceil(spectroLeft + spectroWidth));

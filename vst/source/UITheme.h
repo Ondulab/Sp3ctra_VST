@@ -38,6 +38,15 @@ namespace Sp3ctraTheme
     /// Tab navigation button height (slightly shorter than standard controls).
     constexpr int kTabBtnH     = 22;
 
+    /// Vertical bar faders (AUDIO MIX): the breathing room the LookAndFeel
+    /// keeps above and below the bar inside the slider bounds — its "thumb
+    /// radius", though the bar has no round thumb. JUCE shrinks the slider's
+    /// bar/region by it, so anything laid out AGAINST the bar (the glued VU,
+    /// the VIDEO ceiling overlay) derives its rectangle from this constant;
+    /// a rect taken from the slider bounds instead overhangs the bar by this
+    /// much and paints over its outline.
+    constexpr int kVFaderInset = 2;
+
     // ──────────────────────────────────────────────────────────────────────────
     // ROW / STEP METRICS
     // ──────────────────────────────────────────────────────────────────────────
@@ -183,14 +192,71 @@ namespace Sp3ctraTheme
     // Painting recipes live in ui/Sp3ctraHandles.h — never restate these
     // literals in an editor.
 
-    /// THE handle / control colour (acid lime).
+    /// THE handle / control colour (acid lime) — a control that is HOT:
+    /// hovered, selected, or being edited (mouse, MIDI, automation).
     constexpr uint32_t kColHandle     = 0xffdcff3c;
 
-    /// Ring of a handle while it is being DRAGGED (and the bar's drag edge).
+    /// Neutral a resting control is pulled toward (kCtlRestMix of the way):
+    /// at rest a page must read CALM, so an untouched handle / bar / combo
+    /// wears a desaturated version of its accent instead of the full hue.
+    /// Any accent (mixer identity tints included) desaturates the same way —
+    /// see Sp3ctraControls::restOf().
+    constexpr uint32_t kColCtlNeutral = 0xff7c8698;
+
+    /// How far a resting control travels toward kColCtlNeutral (0 = full
+    /// accent, 1 = plain grey). 0.42 keeps the family readable.
+    constexpr float    kCtlRestMix    = 0.42f;
+
+    /// Ring of a handle while it is being EDITED — from the mouse OR from a
+    /// MIDI controller / automation (and the bar's drag edge).
     constexpr uint32_t kColHandleHot  = 0xffffffff;
+
+    // — Interaction ladder: ONE alpha per rung, for handles AND widgets.
+    //   Idle (rest colour) < Selected < Hover < Edit. Sp3ctraControls resolves
+    //   them; no component restates an alpha.
+
+    /// Resting control — not hovered, not selected, not being edited.
+    constexpr float kCtlAlphaIdle  = 0.72f;
+
+    /// Persistent selection (the EQ handle the boxes / CCs talk to).
+    constexpr float kCtlAlphaSel   = 0.95f;
+
+    /// Hovered / being edited — full accent.
+    constexpr float kCtlAlphaHot   = 1.00f;
+
+    /// Disabled control — present, clearly inert.
+    constexpr float kCtlAlphaOff   = 0.26f;
+
+    /// Halo alpha under a hovered / edited control.
+    constexpr float kCtlHaloHover  = 0.22f;
+    constexpr float kCtlHaloEdit   = 0.34f;
+
+    /// Outline / ring widths along the ladder.
+    constexpr float kCtlLineIdle   = 1.2f;
+    constexpr float kCtlLineSel    = 1.4f;
+    constexpr float kCtlLineHot    = 1.6f;
+    constexpr float kCtlLineEdit   = 1.9f;
+
+    /// Value-fill alphas of a bar / toggle track along the same ladder.
+    constexpr float kCtlFillIdle   = 0.20f;
+    constexpr float kCtlFillHot    = 0.34f;
+    constexpr float kCtlFillEdit   = 0.44f;
+
+    /// How long a control keeps glowing after a change it did NOT get from
+    /// its own mouse drag (MIDI CC, automation, preset) — "what is being
+    /// edited" stays visible for a moment after the move.
+    constexpr double kCtlGlowMs    = 1500.0;
 
     /// Dark core of an IDLE handle — the lime ring reads on top of it. Same
     /// value as the graphic-frame fill so an idle node looks punched out.
+    /// MODULATION — the identity of the LFO bank (midi/LfoBank.h): its
+    /// pastilles, the "LFO 3" source token of a MIDI MAP row, the window a
+    /// modulated control shows. Chosen OUTSIDE the five category hues (cyan
+    /// SRC / magenta MIDI / violet FX / amber UTILS / green OUT) and outside
+    /// the lime of controls: a modulated destination must not read as a
+    /// module, and a source that moves on its own is not something you touch.
+    constexpr uint32_t kColMod        = 0xff6f8cff;
+
     constexpr uint32_t kColHandleCore = 0xff20202a;
 
     /// Graphic-editor frame fill (the window every module editor draws its

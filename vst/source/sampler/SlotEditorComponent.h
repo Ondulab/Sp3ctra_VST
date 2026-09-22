@@ -9,6 +9,7 @@
 #include "../ui/ShapeEqComponent.h"
 #include "../midi/MidiLearnAttachment.h"   // right-click MIDI-Learn on play controls
 #include "SamplerValueBox.h"               // crop / fade param chips under the image
+#include "SamplerMidiTargets.h"            // Kind for the CIS OLED overlay stamps
 #include "../ui/Sp3ctraBarSlider.h"
 
 class Sp3ctraAudioProcessor;
@@ -324,6 +325,16 @@ private:
     SlotSpectralEditorComponent spectralEditor;
     ShapeEqComponent            eqEditor { moduleColour(ModuleType::Sampler) };
     bool                        suppressEqPush_ = false; // guard during refresh
+
+    // ── CIS OLED overlay — which EQ dimension a drag actually moves ──────────
+    // The eqEditor's onChange carries no delta, so remember the selected
+    // handle's freq/gain/width and stamp only the dimensions that changed
+    // (stamping FREQ blindly showed a frozen value during a pure gain drag).
+    float eqOvlLast_[3] { -1.0f, -1.0f, -1.0f };
+    int   eqOvlKey_ = -1;   // (engine<<16)|(slot<<8)|handle — resets the cache
+
+    /** CIS OLED overlay stamp for a virtual sampler target of this engine. */
+    void stampOverlay(int slot, SamplerMidiTargets::Kind k);
 
     /** Reload the EQ curve into eqEditor from the current slot (silent). */
     void refreshFreqCurve();

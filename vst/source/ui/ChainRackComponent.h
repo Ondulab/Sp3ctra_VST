@@ -61,10 +61,11 @@ enum class ChainBlockId
     Drive,                             // FX — LEVELS gain/saturation/floor insert (appended: ordinals persist)
     DcBlock,                           // FX — DC BLOCK per-line mean removal insert (appended: ordinals persist)
     Gain,                              // FX — GAIN per-line energy gain insert (appended: ordinals persist)
+    Diff,                              // FX — DIFF per-pixel reference subtraction insert (appended: ordinals persist)
     None                               // empty rack — no module selected
     // NOTE: appending shifts None's ordinal. A session that persisted the OLD
-    // None decodes as Gain, but such a session has an empty rack so
-    // hasBlock(Gain) is false and the editor falls back to firstBlockId().
+    // None decodes as Diff, but such a session has an empty rack so
+    // hasBlock(Diff) is false and the editor falls back to firstBlockId().
 };
 
 /** Maps a selection key to its module type (sources → Sp3ctra). */
@@ -104,6 +105,10 @@ public:
 
     /** Identity colour of a block — shared with the zone-3 switcher + headers. */
     static juce::Colour blockColour(ChainBlockId id) noexcept;
+
+    /** Header colour of chain `chainIdx` (cycles every 3) — shared with the
+     *  zone-3 face-bar chain badge so both name a chain the same way. */
+    static juce::Colour chainColour(int chainIdx) noexcept;
 
     /** APVTS enable/device-on parameter that powers a block on/off ("" = none). */
     static juce::String enableParamId(ChainBlockId id) noexcept;
@@ -247,9 +252,11 @@ private:
     //── Layout bookkeeping (built in resized, used for paint + hit-testing) ───
     struct Slot  { int chainIdx; int moduleIdx; juce::Rectangle<int> bounds; };
     /** One chain card. headerY = envelope top; topY/bottomY = the block
-     *  column (or the drop zone when empty); envBottomY = envelope bottom. */
+     *  column (or the drop zone when empty); envBottomY = envelope bottom.
+     *  collapsed = the card is folded to its header (blocks hidden, topY ==
+     *  bottomY == envBottomY == header bottom, never a drop target). */
     struct Band  { int chainIdx; int headerY; int topY; int bottomY; bool empty;
-                   int envBottomY; };
+                   int envBottomY; bool collapsed; };
     struct DropTarget { int chainIdx; int index; bool valid; bool newChain; };
 
     //==========================================================================
@@ -257,6 +264,14 @@ private:
 
     void rebuild();                       // (re)create block components from model
     void mutateAndRefresh(bool notifySelection); // after a model change: processor bridge + rebuild + relayout
+
+    /** Fold/unfold chain `chainIdx` (header click). Persists via the
+     *  processor, then re-runs the layout (preferred height changed). */
+    void toggleChainFold(int chainIdx);
+
+    /** Rename dialog (header double-click / context menu): edits the chain's
+     *  user label — the NUMBER stays. Empty restores the "CHAIN" default. */
+    void renameChainFlow(int chainIdx);
 
     // J4 — .sp3chain preset flows (async FileChooser, then processor API)
     void savePresetFlow(int chainIdx);

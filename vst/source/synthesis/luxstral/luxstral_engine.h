@@ -27,6 +27,7 @@
 #include <stdint.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include "synth_work_dispatch.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,10 +40,9 @@ struct wave;   /* per-oscillator state (defined in wave_generation.h) */
 typedef struct LuxStralEngine {
 
   /* ===== DSP buffers (persistent, owned by the engine) ===================== */
-  /* Final combination buffers, sized to audio_buffer_size (synth_IfftMode)   */
+  /* Final combination buffers, reserved for 4096 samples before rendering   */
   float *additiveBuffer;
   float *sumVolumeBuffer;
-  float *maxVolumeBuffer;
   float *tmp_audioData;
   /* Stereo temp accumulation buffers (persistently allocated)                */
   float *stereoBuffer_L;
@@ -63,8 +63,8 @@ typedef struct LuxStralEngine {
   /* Slow-decaying max of per-note target volumes — the reference the onset
    * gate adapts to, so the user never tunes an absolute threshold against
    * invisible internal volume scales. Updated by the producer in the drain
-   * block AFTER the end barrier; workers read phase_gate_abs the NEXT frame,
-   * strictly ordered by the barriers (no race).                              */
+   * block AFTER completion; workers read phase_gate_abs the NEXT frame,
+   * ordered by the work dispatcher.                              */
   float phase_onset_ref;   /* rolling max note volume (decay ~10 s)          */
   float phase_onset_floor; /* rolling min note volume = the decode law's
                               resting bed (empty pixels decode to
@@ -77,7 +77,10 @@ typedef struct LuxStralEngine {
   /* ===== Worker pool ======================================================== */
   synth_thread_worker_t *thread_pool;  /* Dynamically allocated (num_workers)  */
   pthread_t *worker_threads;           /* Dynamically allocated (num_workers)  */
-  int num_workers;                     /* Actual number of workers from config */
+  SynthWorkDispatch *work_dispatch;
+  int started_auxiliaries;
+  int scheduling_sample_rate, scheduling_block_size; /* producer-owned policy cache */
+  int num_workers;                     /* Partitions: producer + auxiliaries   */
   _Atomic int pool_initialized;        /* RT-SAFE: C11 atomic                  */
   _Atomic int pool_shutdown;           /* RT-SAFE: C11 atomic                  */
   /* Signal to unblock workers during prepareToPlay() buffer size changes     */
@@ -86,7 +89,7 @@ typedef struct LuxStralEngine {
    * at the next pass boundary and lazily re-inits with the new config count  */
   _Atomic int pool_restart_requested;  /* RT-SAFE: C11 atomic                  */
 
-  /* ===== Barriers (deterministic worker execution) ========================= */
+  /* Legacy barrier reference, retained for the scheduler A/B benchmark. */
 #ifdef __linux__
   pthread_barrier_t worker_start_barrier;
   pthread_barrier_t worker_end_barrier;

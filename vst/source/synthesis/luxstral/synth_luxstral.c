@@ -19,6 +19,7 @@
 
 // Engine instance state (M3 phase A de-globalization)
 #include "luxstral_engine.h"
+#include "utils/rt_profiler.h"
 
 // Include all the specialized modules
 #include "synth_luxstral_algorithms.h"
@@ -102,11 +103,13 @@ static inline float rms_ceiling_gain(float energy_sum, float chain_gain) {
 static void synth_luxstral_cleanup_impl(LuxStralEngine *eng) {
   if (eng->additiveBuffer)  { free(eng->additiveBuffer);  eng->additiveBuffer = NULL; }
   if (eng->sumVolumeBuffer) { free(eng->sumVolumeBuffer); eng->sumVolumeBuffer = NULL; }
-  if (eng->maxVolumeBuffer) { free(eng->maxVolumeBuffer); eng->maxVolumeBuffer = NULL; }
   if (eng->tmp_audioData)   { free(eng->tmp_audioData);   eng->tmp_audioData = NULL; }
   if (eng->stereoBuffer_L)  { free(eng->stereoBuffer_L);  eng->stereoBuffer_L = NULL; }
   if (eng->stereoBuffer_R)  { free(eng->stereoBuffer_R);  eng->stereoBuffer_R = NULL; }
   if (eng->imageRef)        { free(eng->imageRef);        eng->imageRef = NULL; }
+  free(eng->grayScale_live); eng->grayScale_live = NULL;
+  free(eng->processed_grayScale); eng->processed_grayScale = NULL;
+  eng->audio_buffer_size = 0;
 }
 
 // Public wrapper (registered via atexit; called by Sp3ctraSharedCore)
@@ -218,6 +221,36 @@ int32_t synth_IfftInit(void) {
   return synth_IfftInit_impl(&g_luxstral_engine);
 }
 
+/* Called with the producer stopped. Reserve the supported maximum so buffer
+ * size and mono/stereo changes do not allocate during synthesis. Allocate all
+ * replacements before committing, including both grayscale staging arrays. */
+int synth_prepare_runtime(void) {
+  LuxStralEngine *eng = &g_luxstral_engine;
+  const int bs = g_sp3ctra_config.audio_buffer_size;
+  if (bs <= 0 || bs > 4096) return -1;
+  float **slots[] = { &eng->additiveBuffer, &eng->sumVolumeBuffer,
+                     &eng->tmp_audioData, &eng->stereoBuffer_L,
+                     &eng->stereoBuffer_R, &eng->grayScale_live,
+                     &eng->processed_grayScale };
+  float *pending[7] = {0};
+  for (int i = 0; i < 7; ++i) {
+    if (*slots[i]) continue;
+    pending[i] = (float *)calloc(i < 5 ? 4096 : CIS_MAX_PIXELS_NB, sizeof(float));
+    if (!pending[i]) {
+      for (int j = 0; j < 7; ++j) free(pending[j]);
+      return -1;
+    }
+  }
+  for (int i = 0; i < 7; ++i)
+    if (pending[i]) *slots[i] = pending[i];
+  eng->audio_buffer_size = bs;
+  if (!eng->pool_initialized) {
+    if (synth_init_thread_pool(eng) != 0) return -1;
+    if (synth_start_worker_threads(eng) != 0) return -1;
+  }
+  return 0;
+}
+
 /**
  * @brief  Optimized version of the LuxStral synthesis with a persistent thread pool
  * @param  eng Engine instance
@@ -238,9 +271,9 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
   // Persistent dynamically-sized buffers live in the engine struct
 
   // Hot-apply of the "Worker threads" setting (gear menu): tear the pool down
-  // at a pass boundary — workers are idle at the start barrier here — then
+  // at a pass boundary — auxiliaries are parked on their start signals — then
   // fall through to the lazy re-init below, which re-reads the fresh
-  // g_sp3ctra_config.num_workers. Costs one blocked pass (~60 ms hold).
+  // g_sp3ctra_config.num_workers. Thread creation can still delay that pass.
   if (atomic_exchange(&eng->pool_restart_requested, 0) &&
       eng->pool_initialized &&
       eng->num_workers != g_sp3ctra_config.num_workers) {
@@ -249,58 +282,12 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
     synth_shutdown_thread_pool();
   }
 
-  // Initialize thread pool and RT-safe buffers if not initialized
-  // This handles both first start AND restart after buffer size change
-  if (!eng->pool_initialized) {
-    log_startup_detail("SYNTH", "Initializing synthesis system (pool_init=%d, shutdown=%d)",
-             eng->pool_initialized, eng->pool_shutdown);
-
-    // (init_rt_safe_buffers removed: the "RT-safe double buffering" subsystem
-    // had no consumer — it only calloc'd + mlock'd 96 KB per engine on every
-    // pool init and never freed them.)
-    if (synth_init_thread_pool(eng) == 0) {
-      if (synth_start_worker_threads(eng) == 0) {
-        log_info("SYNTH", "RT-safe synthesis pool ready — %d workers, RT priority",
-                 eng->num_workers);
-      } else {
-        log_error("SYNTH", "Failed to start worker threads, synthesis will fail");
-        eng->pool_initialized = 0;
-      }
-    } else {
-      log_error("SYNTH", "Failed to initialize thread pool, synthesis will fail");
-      eng->pool_initialized = 0;
-    }
-  }
-
-  // Reallocate persistent buffers if buffer size changed
-  int bs = g_sp3ctra_config.audio_buffer_size;
-  if (bs <= 0) {
-    log_error("SYNTH", "Invalid audio buffer size");
+  // A worker-count change still rebuilds the pool at a pass boundary.
+  // Ordinary startup and buffer preparation happen before the producer starts.
+  if (!eng->pool_initialized && synth_prepare_runtime() != 0) return;
+  const int bs = g_sp3ctra_config.audio_buffer_size;
+  if (bs <= 0 || bs > 4096 || !eng->additiveBuffer || !eng->stereoBuffer_L)
     return;
-  }
-
-  if (eng->audio_buffer_size != bs) {
-    // Free old buffers if size changed
-    free(eng->additiveBuffer);  eng->additiveBuffer = NULL;
-    free(eng->sumVolumeBuffer); eng->sumVolumeBuffer = NULL;
-    free(eng->maxVolumeBuffer); eng->maxVolumeBuffer = NULL;
-    free(eng->tmp_audioData);   eng->tmp_audioData = NULL;
-    free(eng->stereoBuffer_L);  eng->stereoBuffer_L = NULL;
-    free(eng->stereoBuffer_R);  eng->stereoBuffer_R = NULL;
-
-    eng->audio_buffer_size = bs;
-  }
-
-  if (!eng->additiveBuffer) {
-    eng->additiveBuffer   = (float*)calloc(bs, sizeof(float));
-    eng->sumVolumeBuffer  = (float*)calloc(bs, sizeof(float));
-    eng->maxVolumeBuffer  = (float*)calloc(bs, sizeof(float));
-    eng->tmp_audioData    = (float*)calloc(bs, sizeof(float));
-    if (!eng->additiveBuffer || !eng->sumVolumeBuffer || !eng->maxVolumeBuffer || !eng->tmp_audioData) {
-      log_error("SYNTH", "Failed to allocate additive persistent buffers");
-      return;
-    }
-  }
 
   // Debug marker: start of new image (yellow line)
   image_debug_mark_new_image_boundary();
@@ -311,36 +298,45 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
   // Reset final buffers
   fill_float(0, eng->additiveBuffer, g_sp3ctra_config.audio_buffer_size);
   fill_float(0, eng->sumVolumeBuffer, g_sp3ctra_config.audio_buffer_size);
-  fill_float(0, eng->maxVolumeBuffer, g_sp3ctra_config.audio_buffer_size);
 
 
   if (eng->pool_initialized && !eng->pool_shutdown) {
     // === OPTIMIZED VERSION WITH THREAD POOL ===
 
+    // The producer now computes partition zero. It must share the auxiliaries'
+    // scheduling class; refresh the whole team's period after format changes.
+    synth_update_realtime_team_policy(eng);
+
     // HOT-RELOAD CHECK: Process pending frequency reinit BEFORE workers start
-    // This is safe because workers are waiting on start_barrier
+    // This is safe because auxiliaries are waiting on their start signals
     // (check_and_process_frequency_reinit() mutates the GLOBAL waves[]).
     check_and_process_frequency_reinit();
 
     // Phase 1: Pre-compute data in single-thread (avoids contention)
     synth_precompute_wave_data(eng, imageData, db);
 
-    // Phase 2: Start workers in parallel
-    // Deterministic execution with barriers
-    // Signal all workers to start via barrier
-    synth_barrier_wait(eng, &eng->worker_start_barrier);
-
-    // Wait for all workers to complete via barrier
-    synth_barrier_wait(eng, &eng->worker_end_barrier);
+    // Launch auxiliaries, compute partition zero here, then collect completion.
+    // Partition boundaries, RNG streams and reduction order are unchanged.
+    const uint64_t launch_start = rt_profiler_now_ns();
+    synth_work_dispatch_begin(eng->work_dispatch);
+    const uint64_t own_start = rt_profiler_now_ns();
+    synth_process_worker_range(&eng->thread_pool[0]);
+    const uint64_t join_start = rt_profiler_now_ns();
+    synth_work_dispatch_finish(eng->work_dispatch);
+    const uint64_t join_end = rt_profiler_now_ns();
+    if (g_sp3ctra_config.sampling_frequency > 0)
+      rt_profiler_report_luxstral_schedule(&g_vst_rt_profiler,
+          own_start - launch_start, join_start - own_start, join_end - join_start,
+          (uint64_t)bs * 1000000000ULL / g_sp3ctra_config.sampling_frequency);
 
     /* ── Phase management: auto-gate + diagnostics ────────────────────────
      * Drain the per-worker counters every buffer (producer thread, after
-     * the end barrier — never in the RT workers).
+     * completion — never in the auxiliary workers).
      *  1. phase_onset_ref  = slow-decaying max of note volumes (~10 s), the
      *     self-calibrating reference: the user never tunes an absolute
      *     threshold against invisible internal volume scales.
      *  2. phase_gate_abs   = sensitivity_fraction × ref (floored) — read by
-     *     the workers NEXT frame (barrier-ordered, no race).
+     *     the workers NEXT frame (ordered by the dispatcher).
      *  3. onset totals feed the UI activity LED (atomic, polled by the
      *     LUXSTRAL page timer) and a ~5 s log line.                        */
     if (g_sp3ctra_config.luxstral_phase_mode != LUXSTRAL_PHASE_MODE_FREE) {
@@ -461,16 +457,7 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
                   eng->sumVolumeBuffer, g_sp3ctra_config.audio_buffer_size);
       }
 
-      // For maxVolumeBuffer, take the maximum
-      if (w->thread_maxVolumeBuffer) {
-        for (buff_idx = 0; buff_idx < g_sp3ctra_config.audio_buffer_size; buff_idx++) {
-          if (w->thread_maxVolumeBuffer[buff_idx] >
-              eng->maxVolumeBuffer[buff_idx]) {
-            eng->maxVolumeBuffer[buff_idx] =
-                w->thread_maxVolumeBuffer[buff_idx];
-          }
-        }
-      }
+
     }
 
     // SATURATION PREVENTION: Apply pre-scaling to keep headroom before normalization
@@ -485,11 +472,9 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
     // Pi/Linux: Divide by 3 (BossDAC/ALSA amplifies naturally)
     //scale_float(additiveBuffer, 1.0f / 3.0f, g_sp3ctra_config.audio_buffer_size);
     //scale_float(sumVolumeBuffer, 1.0f / 3.0f, g_sp3ctra_config.audio_buffer_size);
-    //scale_float(maxVolumeBuffer, 1.0f / 3.0f, g_sp3ctra_config.audio_buffer_size);
 #else
     //scale_float(additiveBuffer, 1.0f / 3.0f, g_sp3ctra_config.audio_buffer_size);
     //scale_float(sumVolumeBuffer, 1.0f / 3.0f, g_sp3ctra_config.audio_buffer_size);
-    //scale_float(maxVolumeBuffer, 1.0f / 3.0f, g_sp3ctra_config.audio_buffer_size);
 #endif
 
   } else {
@@ -553,14 +538,6 @@ static void synth_IfftMode_impl(LuxStralEngine *eng, float *imageData, float *au
     // STEREO MODE: Use actual stereo buffers from threads
     // Combine stereo buffers from all threads (held in the engine struct)
 
-    // Initialize stereo buffers (allocate once)
-    if (!eng->stereoBuffer_L) {
-      eng->stereoBuffer_L = (float*)calloc(g_sp3ctra_config.audio_buffer_size, sizeof(float));
-      eng->stereoBuffer_R = (float*)calloc(g_sp3ctra_config.audio_buffer_size, sizeof(float));
-      if (!eng->stereoBuffer_L || !eng->stereoBuffer_R) {
-        log_error("SYNTH", "Failed to allocate stereo buffers");
-      }
-    }
     fill_float(0, eng->stereoBuffer_L, g_sp3ctra_config.audio_buffer_size);
     fill_float(0, eng->stereoBuffer_R, g_sp3ctra_config.audio_buffer_size);
 
@@ -723,17 +700,8 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
   volatile int     *obIdx = eng->out_index;
   int index = __atomic_load_n(obIdx, __ATOMIC_RELAXED);
   int nb_pixels = get_cis_pixels_nb();
-  // Grayscale staging buffers live in the engine struct (allocated on first call)
-
-  // Allocate buffers on first call
-  if (!eng->grayScale_live) {
-    eng->grayScale_live = (float *)malloc(nb_pixels * sizeof(float));
-    eng->processed_grayScale = (float *)malloc(nb_pixels * sizeof(float));
-    if (!eng->grayScale_live || !eng->processed_grayScale) {
-      log_error("SYNTH", "Failed to allocate grayscale buffers");
-      return;
-    }
-  }
+  // Prepared before starting the producer; never allocate in this path.
+  if (!eng->grayScale_live || !eng->processed_grayScale) return;
 
   // LOCK-FREE DOUBLE BUFFERING with proper alternation:
   // Use the OTHER buffer if current one is still being read by processBlock.
@@ -760,47 +728,13 @@ static void synth_AudioProcess_impl(LuxStralEngine *eng, uint8_t *buffer_R, uint
   // (no-signal contract), so an empty buffer simply means silence.
   int has_preprocessed = 0;
 
-  int      _diag_print = 0;
-  float    _diag_gray_sum = 0.0f, _diag_notes_sum = 0.0f;
-  uint64_t _diag_ts = 0;
-
   pthread_mutex_lock(&db->mutex);
   has_preprocessed = (db->dataReady != 0) && (db->preprocessed_data.timestamp_us != 0);
-  /* Diagnostic snapshot every ~500 synth calls (~0.5 s) — captured under
-   * db->mutex, logged after unlock (logging under a mutex shared with the
-   * producers caused periodic crackle). */
-  _diag_print = ((eng->diag_ctr++ % 500) == 0);
-  if (_diag_print && has_preprocessed) {
-    for (int _d = 0; _d < nb_pixels && _d < 3456; _d++)
-      _diag_gray_sum += db->preprocessed_data.additive.grayscale[_d];
-    for (int _d = 0; _d < 3456; _d++)
-      _diag_notes_sum += db->preprocessed_data.additive.notes[_d];
-    _diag_ts = db->preprocessed_data.timestamp_us;
-  }
   if (has_preprocessed) {
     memcpy(eng->grayScale_live, db->preprocessed_data.additive.grayscale,
            nb_pixels * sizeof(float));
   }
   pthread_mutex_unlock(&db->mutex);
-
-  if (_diag_print) {
-    /* Edge-triggered: INFO when the source state changes (stream appearing or
-     * disappearing, content starting/stopping), slow heartbeat otherwise — the
-     * unconditional every-2s line flooded the session log (~1800 lines/h). */
-    const int _sig = (has_preprocessed ? 2 : 0)
-                   | ((_diag_gray_sum > 0.0f || _diag_notes_sum > 0.0f) ? 1 : 0);
-    if (_sig != eng->diag_last_sig) {
-      eng->diag_last_sig = _sig;
-      log_info("SRC-GATE", "has_pre=%d gray_sum=%.2f notes_sum=%.2f ts=%llu",
-               has_preprocessed,
-               _diag_gray_sum, _diag_notes_sum, (unsigned long long)_diag_ts);
-    } else {
-      log_info_every_ms(60000, "SRC-GATE",
-               "has_pre=%d gray_sum=%.2f notes_sum=%.2f ts=%llu (heartbeat)",
-               has_preprocessed,
-               _diag_gray_sum, _diag_notes_sum, (unsigned long long)_diag_ts);
-    }
-  }
 
   if (!has_preprocessed) {
     /* Nothing committed yet (startup) → silence (zeroed grayscale). */

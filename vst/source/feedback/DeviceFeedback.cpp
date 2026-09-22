@@ -6,6 +6,9 @@
 #include "../PluginProcessor.h"
 #include "../communication/link/Sp3ctraLink.h"
 #include "../midi/HidMidiMapper.h"
+#include "../ui/ParamIdentity.h"                 // ParamNaming (shared with the UI)
+#include "../sampler/SamplerMidiTargets.h"
+#include "../luxsampler/LuxSampler.h"
 #if __has_include("Sp3ctraVersion.h")
  #include "Sp3ctraVersion.h"
 #endif
@@ -30,6 +33,48 @@ namespace
         };
         for (auto* p : prefixes) if (id.startsWith (p)) return true;
         return false;
+    }
+
+    // (Module codes + bank-prefix stripping: ModuleCatalog::moduleAbbrev and
+    // ParamNaming in ui/ParamIdentity.h — the same naming the interface
+    // shows, so the OLED and the MIDI MAP agree on what a parameter is called.)
+
+    /** Drop "(...)" groups — secondary info the 14-char label can't afford. */
+    juce::String stripParens (juce::String s)
+    {
+        for (;;)
+        {
+            const int a = s.indexOfChar ('(');
+            const int b = s.indexOfChar (')');
+            if (a < 0 || b <= a) break;
+            s = (s.substring (0, a) + " " + s.substring (b + 1)).trim();
+        }
+        return s;
+    }
+
+    /** Word abbreviations, applied ONLY when the composed label overflows the
+     *  protocol's 14 chars — common short names stay untouched. */
+    juce::String shortenWord (const juce::String& u)
+    {
+        static const std::pair<const char*, const char*> kMap[] = {
+            { "POSITION", "POS" },     { "THICKNESS", "THICK" },
+            { "COMPRESSION", "COMPR" },{ "SENSITIVITY", "SENS" },
+            { "HARMONICS", "HARM" },   { "HARMONIC", "HARM" },
+            { "ENVELOPE", "ENV" },     { "DENSITY", "DENS" },
+            { "MATERIAL", "MAT" },     { "OCTAVE", "OCT" },
+            { "CHANNEL", "CH" },       { "DURATION", "DUR" },
+            { "TRANSPORT", "XPORT" },  { "SELECTION", "SEL" },
+            { "LATENCY", "LAT" },      { "VISUALIZER", "VIZ" },
+            { "ADAPTIVE", "ADAPT" },   { "CONTRAST", "CONTR" },
+            { "COHERENCE", "COHER" },  { "RELEASE", "REL" },
+            { "SUSTAIN", "SUS" },      { "OSCILLATORS", "OSC" },
+            { "BALANCE", "BAL" },      { "OPACITY", "OPAC" },
+            { "WINDOW", "WIN" },       { "INVERTED", "INV" },
+            { "EQUAL-LOUDNESS", "EQ-LOUD" }, { "ACQUISITION", "ACQ" },
+        };
+        for (const auto& [w, sh] : kMap)
+            if (u == w) return sh;
+        return u;
     }
 }
 
@@ -60,6 +105,13 @@ void DeviceFeedback::noteParamTouched (int paramIndex) noexcept
     touchFlag_.store (1, std::memory_order_release);
 }
 
+void DeviceFeedback::noteVirtualTouched (int targetId) noexcept
+{
+    const uint32_t w = vRingW_.fetch_add (1, std::memory_order_acq_rel) % (uint32_t) kVirtualRing;
+    vRing_[w].store (((uint64_t) nowMs() << 32) | (uint32_t) targetId, std::memory_order_release);
+    touchFlag_.store (1, std::memory_order_release);
+}
+
 //==============================================================================
 bool DeviceFeedback::eligible (int index, int mode)
 {
@@ -76,7 +128,7 @@ bool DeviceFeedback::eligible (int index, int mode)
     if (it != eligCache_.end() && (now - it->second.second) < kEligCacheMs)
         return it->second.first;
 
-    bool ok = id.startsWith ("image") || id.startsWith ("acqGate") || id.startsWith ("rawFreeze");
+    bool ok = id.startsWith ("image") || id.startsWith ("rawFreeze");
     if (! ok)
     {
         const auto t = proc_.navTargetForParam (id);
@@ -85,6 +137,141 @@ bool DeviceFeedback::eligible (int index, int mode)
     }
     eligCache_[index] = { ok, now };
     return ok;
+}
+
+bool DeviceFeedback::virtualEligible (int targetId, int mode)
+{
+    if (mode == 2)                         // All
+        return true;
+
+    const uint32_t now = nowMs();
+    auto it = vEligCache_.find (targetId);
+    if (it != vEligCache_.end() && (now - it->second.second) < kEligCacheMs)
+        return it->second.first;
+
+    // Chain: the sampler module instance hosting this engine sits in a chain
+    // with an IN SP3CTRA (same resolution as APVTS ids, via the synthetic id).
+    const auto id = SamplerMidiTargets::makeId (SamplerMidiTargets::tEngine (targetId),
+                                               SamplerMidiTargets::tSlot (targetId),
+                                               SamplerMidiTargets::tKind (targetId));
+    const auto t = proc_.navTargetForParam (id);
+    const bool ok = t.valid && proc_.instanceChainHostsSp3ctra (t.instanceId);
+    vEligCache_[targetId] = { ok, now };
+    return ok;
+}
+
+bool DeviceFeedback::composeVirtualItem (int targetId, Sp3ctraLink::OverlayItem& it)
+{
+    using namespace SamplerMidiTargets;
+    const Kind k = tKind (targetId);
+    const int  e = tEngine (targetId);
+    const int  s = tSlot (targetId);
+    auto* fs = proc_.getSampler (e);
+    if (fs == nullptr)
+        return false;
+
+    const char* name = nullptr;
+    switch (k)
+    {
+        case Kind::Speed:       name = "SPEED";     break;
+        case Kind::LoopMode:    name = "LOOP";      break;
+        case Kind::LoopFwd:     name = "LOOP FWD";  break;   // relabelled below from live state
+        case Kind::LoopBwd:     name = "LOOP BWD";  break;
+        case Kind::LoopRepeat:  name = "LOOP RPT";  break;
+        case Kind::Img:         name = "LEVEL";     break;
+        case Kind::Floor:       name = "FLOOR";     break;
+        case Kind::Resume:      name = "RESUME";    break;
+        case Kind::FadeInType:  name = "FIN CURVE"; break;
+        case Kind::FadeInPow:   name = "FIN POW";   break;
+        case Kind::FadeOutType: name = "FOUT CURVE";break;
+        case Kind::FadeOutPow:  name = "FOUT POW";  break;
+        case Kind::Overdub:     name = "OVERDUB";   break;
+        case Kind::SelEqFreq:   name = "EQ FREQ";   break;
+        case Kind::SelEqGain:   name = "EQ GAIN";   break;
+        case Kind::SelEqWidth:  name = "EQ WIDTH";  break;
+        case Kind::MixMode:     name = "MIX";       break;
+        case Kind::CropStart:   name = "CROP IN";   break;
+        case Kind::CropEnd:     name = "CROP OUT";  break;
+        case Kind::FadeInLen:   name = "FADE IN";   break;
+        case Kind::FadeOutLen:  name = "FADE OUT";  break;
+        case Kind::Rec:         name = "REC";       break;   // actions: show the
+        case Kind::Play:        name = "PLAY";      break;   // resulting state
+        case Kind::Save:        name = "SAVE";      break;
+        case Kind::Clear:       name = "CLEAR";     break;
+        default:                return false;
+    }
+
+    // In a chain: "5 S4 SPEED" — inverted chain number + boxed module token
+    // (the chain identifies the engine). Otherwise: "SA4 SPEED" — engine
+    // letter + 1-based bank. Engine-wide kinds skip the bank ("5 SMP OVERDUB").
+    const auto nav   = proc_.navTargetForParam (makeId (e, s, k));
+    const int  chain = nav.valid ? proc_.chainIndexForInstance (nav.instanceId) : -1;
+    juce::String label;
+    if (chain >= 0)
+    {
+        label = juce::String (chain + 1) + " ";
+        if (isEngineWide (k)) label << "SMP";
+        else                  label << "S" << juce::String (s + 1);
+        it.tagInvert = true;
+    }
+    else
+    {
+        label = "S";
+        label << juce::String::charToString ((juce::juce_wchar) ('A' + juce::jlimit (0, 7, e)));
+        if (! isEngineWide (k))
+            label << juce::String (s + 1);
+    }
+    label << " " << name;
+
+    const auto pct = [] (float v) { return juce::String (juce::roundToInt (v * 100.0f)) + " %"; };
+    const auto onOff = [] (bool b) { return juce::String (b ? "ON" : "OFF"); };
+    static const char* const fadeNames[] = { "LIN", "EXP", "LOG", "S" };
+    static const char* const loopNames[] = { "NONE", "FWD", "BWD", "PP", "1x BWD", "1x RT" };
+    static const char* const mixNames[]  = { "MIX", "ADD", "DARK" };
+
+    float norm = read (*fs, s, k);
+    juce::String value;
+    bool bar = true;
+    bool f = false, b = false, r = false;
+
+    switch (k)
+    {
+        case Kind::Speed:       value = juce::String (fs->getSlotSpeed (s), 2) + "x";          break;
+        case Kind::Img:         value = pct (norm);                                            break;
+        case Kind::Floor:       value = pct (norm);                                            break;
+        case Kind::FadeInPow:   value = juce::String (fs->getSlotAttackCurvePower (s), 2);     break;
+        case Kind::FadeOutPow:  value = juce::String (fs->getSlotDecayCurvePower (s), 2);      break;
+        case Kind::FadeInType:  value = fadeNames[juce::jlimit (0, 3, (int) fs->getSlotAttackCurveType (s))]; bar = false; break;
+        case Kind::FadeOutType: value = fadeNames[juce::jlimit (0, 3, (int) fs->getSlotDecayCurveType (s))];  bar = false; break;
+        case Kind::LoopMode:    value = loopNames[juce::jlimit (0, 5, (int) fs->getSlotLoopMode (s))];        bar = false; break;
+        case Kind::LoopFwd: case Kind::LoopBwd: case Kind::LoopRepeat:
+            decomposeLoopMode (fs->getSlotLoopMode (s), f, b, r);
+            value = onOff (k == Kind::LoopFwd ? f : k == Kind::LoopBwd ? b : r);
+            bar = false;
+            break;
+        case Kind::Resume:      value = onOff (fs->getSlotResumeMode (s)); bar = false;        break;
+        case Kind::Overdub:     value = onOff (fs->getOverdubMode());      bar = false;        break;
+        case Kind::MixMode:     value = mixNames[juce::jlimit (0, 2, (int) fs->getSlotMixMode (s))]; bar = false; break;
+        case Kind::SelEqFreq: case Kind::SelEqGain: case Kind::SelEqWidth:
+        {
+            const int which = (k == Kind::SelEqFreq) ? 0 : (k == Kind::SelEqGain) ? 1 : 2;
+            norm  = fs->getSlotEqHandleParam (s, fs->getSlotEqSelHandle (s), which);
+            value = pct (norm);
+            break;
+        }
+        case Kind::Rec:         value = onOff (fs->getSlotState (s) == SlotState::RECORDING); bar = false; break;
+        case Kind::Play:        value = (fs->getSlotState (s) == SlotState::PLAYING) ? "PLAY" : "STOP";
+                                bar = false; break;
+        case Kind::Save:        value = "SAVED";   bar = false; break;
+        case Kind::Clear:       value = "CLEARED"; bar = false; break;
+        default:                value = pct (norm);                                            break;
+    }
+
+    it.label = label;
+    it.value = value;
+    it.norm  = bar ? juce::jlimit (0.0f, 1.0f, norm) : -1.0f;
+    it.bipolar = false;
+    return true;
 }
 
 void DeviceFeedback::tick()
@@ -153,7 +340,7 @@ void DeviceFeedback::tickOverlay (Sp3ctraLink& link, uint32_t now)
     const int mode = (int) apvts.getRawParameterValue ("sp3ctraOledMode")->load();   // 0 Off, 1 Chain, 2 All
     const uint32_t holdMs = (uint32_t) juce::jmax (100.0f, apvts.getRawParameterValue ("sp3ctraOledHoldMs")->load());
 
-    if (mode != lastOverlayMode_) { eligCache_.clear(); lastOverlayMode_ = mode; }
+    if (mode != lastOverlayMode_) { eligCache_.clear(); vEligCache_.clear(); lastOverlayMode_ = mode; }
 
     // ── collect fresh touches ────────────────────────────────────────────────
     if (touchFlag_.exchange (0, std::memory_order_acq_rel) != 0 && now >= suppressUntilMs_ && mode != 0
@@ -166,7 +353,21 @@ void DeviceFeedback::tickOverlay (Sp3ctraLink& link, uint32_t now)
             bool known = false;
             for (auto& r : recent_) if (r.index == i) { r.touchedMs = juce::jmax (r.touchedMs, t); known = true; }
             if (! known && eligible (i, mode))
-                recent_.push_back ({ i, t });
+                recent_.push_back ({ i, -1, t });
+        }
+
+        // Virtual (non-APVTS) sampler targets, stamped into the small ring.
+        for (auto& slot : vRing_)
+        {
+            const uint64_t packed = slot.exchange (0, std::memory_order_acq_rel);
+            if (packed == 0) continue;
+            const int      vt = (int) (uint32_t) packed;
+            const uint32_t t  = (uint32_t) (packed >> 32);
+            if ((now - t) > holdMs) continue;
+            bool known = false;
+            for (auto& r : recent_) if (r.vt == vt && r.index < 0) { r.touchedMs = juce::jmax (r.touchedMs, t); known = true; }
+            if (! known && virtualEligible (vt, mode))
+                recent_.push_back ({ -1, vt, t });
         }
     }
 
@@ -194,21 +395,113 @@ void DeviceFeedback::tickOverlay (Sp3ctraLink& link, uint32_t now)
     const auto& params = proc_.getParameters();
     for (size_t k = 0; k < recent_.size(); ++k)
     {
-        auto* p = params[recent_[k].index];
-        if (p == nullptr) continue;
         Sp3ctraLink::OverlayItem it;
-        it.label = p->getName (recent_.size() == 1 ? 12 : 14);
-        it.value = p->getCurrentValueAsText().substring (0, 10);
-        it.highlight = (k == 0);
-        if (dynamic_cast<juce::AudioParameterBool*> (p) != nullptr)
-            it.norm = -1.0f;                                  // no bar for switches
-        else
-            it.norm = p->getValue();
-        if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
+        if (recent_[k].index < 0)
         {
-            const auto& r = rp->getNormalisableRange();
-            it.bipolar = r.start < 0.0f && r.end > 0.0f;
+            if (! composeVirtualItem (recent_[k].vt, it))
+                continue;
         }
+        else
+        {
+            auto* p = params[recent_[k].index];
+            if (p == nullptr) continue;
+
+            // OLED naming: params of a module that sits in a chain show as
+            // "3 DC AMOUNT" — chain number inverted, module code boxed
+            // (SLP_OVL_TAG_INVERT). Words repeating the module identity and
+            // the redundant slot number are dropped; a module-enable param
+            // (…Enabled / …Active / …On) shows ENABLED/DISABLED as its value.
+            const juce::String full = p->getName (64);
+            const juce::String& pid = ids_[(size_t) recent_[k].index];
+            const bool isBool = dynamic_cast<juce::AudioParameterBool*> (p) != nullptr;
+            const auto nav    = proc_.navTargetForParam (pid);
+            const int  chain  = nav.valid ? proc_.chainIndexForInstance (nav.instanceId) : -1;
+            const char* ab    = chain >= 0 ? moduleAbbrev (nav.type) : nullptr;
+
+            // The SP3CTRA transport (imageFreezeMode 0=play/1=hold/2=stop) IS
+            // the module's power + freeze: show it like every other enable.
+            if (pid == "imageFreezeMode" && ab != nullptr)
+            {
+                const int m = juce::roundToInt (p->getValue() * 2.0f);   // 0..2 int param, normalised
+                it.label = juce::String (chain + 1) + " " + ab;
+                it.tagInvert = true;
+                it.value = m == 0 ? "ENABLED" : m == 1 ? "FROZEN" : "DISABLED";
+                it.norm  = -1.0f;
+                it.highlight = (k == 0);
+                sig << it.label << '|' << it.value << "|-1.000|" << (it.highlight ? 'H' : '-') << ';';
+                items.push_back (it);
+                continue;
+            }
+
+            // Shared naming (ui/ParamIdentity.h): the bank tag, the words
+            // repeating the module and the slot number go — the chain tag +
+            // module code already say all that, as the identity label does
+            // on screen.
+            juce::StringArray tok = juce::StringArray::fromTokens (
+                stripParens (ParamNaming::bareName (full, ab != nullptr ? &nav.type : nullptr)),
+                " ", "");
+            bool enableLike = false;
+            if (isBool)
+            {
+                while (tok.size() > 0 && tok[tok.size() - 1].containsOnly ("0123456789"))
+                    tok.remove (tok.size() - 1);
+                const juce::String last = tok.size() > 0 ? tok[tok.size() - 1].toUpperCase() : juce::String();
+                if (last == "ON" || last == "ENABLED" || last == "ENABLE" || last == "ACTIVE")
+                {
+                    enableLike = true;
+                    tok.remove (tok.size() - 1);
+                }
+            }
+
+            if (ab != nullptr)
+            {
+                juce::String rest = tok.joinIntoString (" ").toUpperCase();
+                const juce::String head = juce::String (chain + 1) + " " + ab;
+                if (head.length() + 1 + rest.length() > 14)
+                {
+                    // Overflow: abbreviate the long words (POSITION → POS…).
+                    juce::StringArray sh;
+                    for (const auto& t : tok)
+                        sh.add (shortenWord (t.toUpperCase()));
+                    rest = sh.joinIntoString (" ");
+                }
+                it.label = head + (rest.isEmpty() ? juce::String() : " " + rest);
+                it.tagInvert = true;
+            }
+            else
+                it.label = full.substring (0, 14);
+
+            if (enableLike)
+                it.value = p->getValue() >= 0.5f ? "ENABLED" : "DISABLED";
+            else
+            {
+                // Value field is 10 chars: prefer a parenthesised short form
+                // ("Foo (BAR)" → "BAR") over blunt truncation.
+                juce::String v = p->getCurrentValueAsText();
+                if      (v == "Fundamental")       v = "Fund.";
+                else if (v == "Inverted Waveform") v = "Inv.Wave";
+                else if (v == "LuxSynth/LuxWave")  v = "LX/LW";
+                if (v.length() > 10)
+                {
+                    const juce::String inner =
+                        v.fromFirstOccurrenceOf ("(", false, false)
+                         .upToFirstOccurrenceOf (")", false, false).trim();
+                    if (inner.isNotEmpty() && inner.length() <= 10)
+                        v = inner;
+                }
+                it.value = v.substring (0, 10);
+            }
+            if (isBool)
+                it.norm = -1.0f;                              // no bar for switches
+            else
+                it.norm = p->getValue();
+            if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
+            {
+                const auto& r = rp->getNormalisableRange();
+                it.bipolar = r.start < 0.0f && r.end > 0.0f;
+            }
+        }
+        it.highlight = (k == 0);
         sig << it.label << '|' << it.value << '|' << juce::String (it.norm, 3) << '|' << (it.highlight ? 'H' : '-') << ';';
         items.push_back (it);
     }

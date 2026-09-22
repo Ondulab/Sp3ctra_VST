@@ -48,7 +48,8 @@ enum class ModuleType
     Drive,                         // FX — LEVELS gain/saturation/floor (appended to keep table indices
                                    // stable; renamed DRIVE → LEVELS, enum/persist id stay "Drive")
     DcBlock,                       // FX — DC BLOCK per-line mean removal (appended to keep table indices stable)
-    Gain                           // FX — GAIN per-line energy gain (appended to keep table indices stable)
+    Gain,                          // FX — GAIN per-line energy gain (appended to keep table indices stable)
+    Diff                           // FX — DIFF per-pixel reference subtraction (appended to keep table indices stable)
 };
 
 /** SCORE / TIMBRE / MIDI SCORE / VOICE all audition through the
@@ -87,56 +88,63 @@ struct ModuleDesc
     const char*  displayName;     ///< UTF-8 ("SP3CTRA", "\xE2\x99\xAA LUXSTRAL"…)
     const char*  enableParamId;   ///< APVTS enable param, "" when none
     const char*  id;              ///< stable string id for persistence
+    /** 1–3 capital letters naming the module where space is scarce: THE tag
+     *  of its per-instance APVTS bank names ("DC2 Amount" — see
+     *  ParamNaming::bareName, which strips it back off for the UI) and the
+     *  module code of the CIS OLED overlay ("4 DC AMOUNT"). No digit inside
+     *  (a digit reads as the slot). */
+    const char*  abbrev;
 };
 
 //==============================================================================
 /** The whole catalogue. Table order MUST match the enum order (descFor indexes
  *  by ordinal); the catalogue panel buckets rows by category for display. */
-inline const std::array<ModuleDesc, 25>& moduleTable()
+inline const std::array<ModuleDesc, 26>& moduleTable()
 {
-    static const std::array<ModuleDesc, 25> table = {{
-        // type                  category          role                  name                       enableParam          id
-        { ModuleType::Sp3ctra,     ModuleCat::SRC,   ModuleRole::Source,   "SP3CTRA",                 "",                  "Sp3ctra"  },
+    static const std::array<ModuleDesc, 26> table = {{
+        // type                  category          role                  name                       enableParam          id          abbrev
+        { ModuleType::Sp3ctra,     ModuleCat::SRC,   ModuleRole::Source,   "SP3CTRA",                 "",                  "Sp3ctra",  "SPT" },
         // Media sources: the type-level id is slot 0's LEGACY global param
         // (P5-M3 pooling) — the rack LED and the face-bar power switch resolve
         // the SELECTED instance's per-slot bank instead (imgSrc{N}_Enabled…).
-        { ModuleType::Image,       ModuleCat::SRC,   ModuleRole::Source,   "IMAGE",                   "imgSrcEnabled",     "Image"    },
-        { ModuleType::Video,       ModuleCat::SRC,   ModuleRole::Source,   "VIDEO",                   "vidSrcEnabled",     "Video"    },
+        { ModuleType::Image,       ModuleCat::SRC,   ModuleRole::Source,   "IMAGE",                   "imgSrcEnabled",     "Image",    "IMG" },
+        { ModuleType::Video,       ModuleCat::SRC,   ModuleRole::Source,   "VIDEO",                   "vidSrcEnabled",     "Video",    "VID" },
         // Pitch/Mask/Reverb/Echo/EQ enable lives in the PER-INSTANCE bank
         // (luxpitch{slot}_Enabled…): the rack block and the zone-3 power switch
         // resolve it from the selected instance's pool slot, not from here.
-        { ModuleType::Pitch,       ModuleCat::MIDI,  ModuleRole::Processor,"PITCH",                   "",                  "Pitch"    },
-        { ModuleType::Mask,        ModuleCat::MIDI,  ModuleRole::Processor,"MASK",                    "",                  "Mask"     },
-        { ModuleType::Sampler,     ModuleCat::UTILS, ModuleRole::Util,     "SAMPLER",                 "luxSamplerEnabled", "Sampler"  },
-        { ModuleType::Score,       ModuleCat::UTILS, ModuleRole::Util,     "SCORE",                   "",                  "Score"    },
+        { ModuleType::Pitch,       ModuleCat::MIDI,  ModuleRole::Processor,"PITCH",                   "",                  "Pitch",    "P"   },
+        { ModuleType::Mask,        ModuleCat::MIDI,  ModuleRole::Processor,"MASK",                    "",                  "Mask",     "M"   },
+        { ModuleType::Sampler,     ModuleCat::UTILS, ModuleRole::Util,     "SAMPLER",                 "luxSamplerEnabled", "Sampler",  "SMP" },
+        { ModuleType::Score,       ModuleCat::UTILS, ModuleRole::Util,     "SCORE",                   "",                  "Score",    "SCR" },
         // Synth-split P2 — the three synths are OUT/send modules in the rack
         // (the flux leaves the chain toward the global engine, which lives in
         // the ZONE-5 dock): OUT category, arrow-prefixed names.
-        { ModuleType::LuxStral,    ModuleCat::Out,   ModuleRole::Synth,    "\xE2\x86\x92 LUXSTRAL",   "deviceEnabled",     "LuxStral" },
-        { ModuleType::LuxSynth,    ModuleCat::Out,   ModuleRole::Synth,    "\xE2\x86\x92 LUXSYNTH",   "luxsynthEnabled",   "LuxSynth" },
-        { ModuleType::LuxWave,     ModuleCat::Out,   ModuleRole::Synth,    "\xE2\x86\x92 LUXWAVE",    "luxwaveEnabled",    "LuxWave"  },
-        { ModuleType::VideoScroll, ModuleCat::Out,   ModuleRole::Processor,"\xE2\x86\x92 VIDEO SCROLL", "",                  "VideoScroll" },
-        { ModuleType::Camera,      ModuleCat::SRC,   ModuleRole::Source,   "CAMERA",                  "camSrcEnabled",     "Camera"   },
-        { ModuleType::Reverb,      ModuleCat::FX,    ModuleRole::Processor,"REVERB",                  "",                  "Reverb"   },
-        { ModuleType::Echo,        ModuleCat::FX,    ModuleRole::Processor,"ECHO",                    "",                  "Echo"     },
-        { ModuleType::Timbre,      ModuleCat::UTILS, ModuleRole::Util,     "TIMBRE",                  "",                  "Timbre"   },
-        { ModuleType::Equalizer,   ModuleCat::FX,    ModuleRole::Processor,"EQ",                      "",                  "Equalizer" },
-        { ModuleType::MidiScore,   ModuleCat::UTILS, ModuleRole::Util,     "MIDI SCORE",              "",                  "MidiScore" },
-        { ModuleType::Voice,       ModuleCat::UTILS, ModuleRole::Util,     "VOICE",                   "",                  "Voice"    },
-        { ModuleType::Harmonize,   ModuleCat::FX,    ModuleRole::Processor,"SCALE",                   "",                  "Harmonize" },
-        { ModuleType::LuxGrain,    ModuleCat::Out,   ModuleRole::Synth,    "\xE2\x86\x92 LUXGRAIN",   "luxgrainEnabled",   "LuxGrain" },
+        { ModuleType::LuxStral,    ModuleCat::Out,   ModuleRole::Synth,    "\xE2\x86\x92 LUXSTRAL",   "deviceEnabled",     "LuxStral", "LS"  },
+        { ModuleType::LuxSynth,    ModuleCat::Out,   ModuleRole::Synth,    "\xE2\x86\x92 LUXSYNTH",   "luxsynthEnabled",   "LuxSynth", "LX"  },
+        { ModuleType::LuxWave,     ModuleCat::Out,   ModuleRole::Synth,    "\xE2\x86\x92 LUXWAVE",    "luxwaveEnabled",    "LuxWave",  "LW"  },
+        { ModuleType::VideoScroll, ModuleCat::Out,   ModuleRole::Processor,"\xE2\x86\x92 VIDEO SCROLL", "",                  "VideoScroll", "VS" },
+        { ModuleType::Camera,      ModuleCat::SRC,   ModuleRole::Source,   "CAMERA",                  "camSrcEnabled",     "Camera",   "CAM" },
+        { ModuleType::Reverb,      ModuleCat::FX,    ModuleRole::Processor,"REVERB",                  "",                  "Reverb",   "RV"  },
+        { ModuleType::Echo,        ModuleCat::FX,    ModuleRole::Processor,"ECHO",                    "",                  "Echo",     "EC"  },
+        { ModuleType::Timbre,      ModuleCat::UTILS, ModuleRole::Util,     "TIMBRE",                  "",                  "Timbre",   "TMB" },
+        { ModuleType::Equalizer,   ModuleCat::FX,    ModuleRole::Processor,"EQ",                      "",                  "Equalizer", "EQ" },
+        { ModuleType::MidiScore,   ModuleCat::UTILS, ModuleRole::Util,     "MIDI SCORE",              "",                  "MidiScore", "MSC" },
+        { ModuleType::Voice,       ModuleCat::UTILS, ModuleRole::Util,     "VOICE",                   "",                  "Voice",    "VC"  },
+        { ModuleType::Harmonize,   ModuleCat::FX,    ModuleRole::Processor,"SCALE",                   "",                  "Harmonize", "SC" },
+        { ModuleType::LuxGrain,    ModuleCat::Out,   ModuleRole::Synth,    "\xE2\x86\x92 LUXGRAIN",   "luxgrainEnabled",   "LuxGrain", "LG"  },
         // MIDI TAP is a PROBE (Processor role, exactly like VIDEO SCROLL): the
         // flux leaves the chain toward a MIDI port rather than an audio ENGINE,
         // hence the same "→" OUT prefix as the sends. Its enable lives in the
         // PER-INSTANCE bank (midiTap{slot}_enabled), so enableParamId stays
         // empty here.
-        { ModuleType::MidiTap,     ModuleCat::Out,   ModuleRole::Processor,"\xE2\x86\x92 MIDI TAP",     "",                  "MidiTap"  },
-        { ModuleType::Centroid,    ModuleCat::FX,    ModuleRole::Processor,"CENTROID",                "",                  "Centroid" },
+        { ModuleType::MidiTap,     ModuleCat::Out,   ModuleRole::Processor,"\xE2\x86\x92 MIDI TAP",     "",                  "MidiTap",  "MT"  },
+        { ModuleType::Centroid,    ModuleCat::FX,    ModuleRole::Processor,"CENTROID",                "",                  "Centroid", "CT"  },
         // Display name LEVELS (was DRIVE) — the persist id keeps "Drive" so
         // sessions saved under the old name load unchanged.
-        { ModuleType::Drive,       ModuleCat::FX,    ModuleRole::Processor,"LEVELS",                  "",                  "Drive"    },
-        { ModuleType::DcBlock,     ModuleCat::FX,    ModuleRole::Processor,"DC BLOCK",                "",                  "DcBlock"  },
-        { ModuleType::Gain,        ModuleCat::FX,    ModuleRole::Processor,"GAIN",                    "",                  "Gain"     },
+        { ModuleType::Drive,       ModuleCat::FX,    ModuleRole::Processor,"LEVELS",                  "",                  "Drive",    "LV"  },
+        { ModuleType::DcBlock,     ModuleCat::FX,    ModuleRole::Processor,"DC BLOCK",                "",                  "DcBlock",  "DC"  },
+        { ModuleType::Gain,        ModuleCat::FX,    ModuleRole::Processor,"GAIN",                    "",                  "Gain",     "GN"  },
+        { ModuleType::Diff,        ModuleCat::FX,    ModuleRole::Processor,"DIFF",                    "",                  "Diff",     "DF"  },
     }};
     return table;
 }
@@ -172,6 +180,8 @@ inline juce::Colour moduleCatColour(ModuleCat c)
 inline juce::Colour moduleColour(ModuleType t)       { return moduleCatColour(descFor(t).category); }
 inline juce::String moduleEnableParam(ModuleType t)  { return juce::String(descFor(t).enableParamId); }
 inline juce::String moduleDisplayName(ModuleType t)  { return juce::String::fromUTF8(descFor(t).displayName); }
+/** Short code — APVTS bank-name tag + OLED module code (ModuleDesc::abbrev). */
+inline const char*  moduleAbbrev(ModuleType t)       { return descFor(t).abbrev; }
 inline ModuleRole   moduleRole(ModuleType t)         { return descFor(t).role; }
 inline ModuleCat    moduleCategory(ModuleType t)     { return descFor(t).category; }
 

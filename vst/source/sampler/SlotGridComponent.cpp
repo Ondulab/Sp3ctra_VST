@@ -30,6 +30,8 @@ SlotGridComponent::SlotGridComponent(Sp3ctraAudioProcessor& proc)
                     1.0f - static_cast<float>(levelSlider[i].getValue()));
                 // Engine-held param (not APVTS) — mark the session dirty.
                 processor.sessions()->markStateDirty();
+                processor.noteVirtualTouched(SamplerMidiTargets::encode(
+                    samplerIndex_, i, SamplerMidiTargets::Kind::Img));
             }
         };
         addAndMakeVisible(sl);
@@ -52,6 +54,8 @@ SlotGridComponent::SlotGridComponent(Sp3ctraAudioProcessor& proc)
                 {
                     fs->setSlotMixMode(i, static_cast<SlotMixMode>(id - 1));
                     processor.sessions()->markStateDirty();
+                    processor.noteVirtualTouched(SamplerMidiTargets::encode(
+                        samplerIndex_, i, SamplerMidiTargets::Kind::MixMode));
                 }
         };
         addAndMakeVisible(box);
@@ -341,6 +345,9 @@ void SlotGridComponent::mouseDown(const juce::MouseEvent& e)
                                     eng->uiClearSlot(idx);
                                     s2->repaint();
                                     s2->processor.sessions()->markBanksDirty();
+                                    s2->processor.noteVirtualTouched(
+                                        SamplerMidiTargets::encode(s2->samplerIndex_, idx,
+                                                                   SamplerMidiTargets::Kind::Clear));
                                 }
                             });
                         break;

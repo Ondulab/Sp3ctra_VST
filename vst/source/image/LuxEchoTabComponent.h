@@ -3,8 +3,8 @@
  * @brief Tab — ECHO: echo on the image-line stream (regenerated repeats).
  *
  * The interactive graphic editor fills the page (EchoEditorComponent — the
- * repeat train with Delay / Mix / Feedback handles + numeric boxes below the
- * frame). The background pole is chain-owned (rack header selector), not a
+ * repeat train over its whole time window, with a ruler in seconds, Delay /
+ * Mix / Feedback handles + numeric boxes below the frame). The background pole is chain-owned (rack header selector), not a
  * module setting. Page skeleton (padding, "--- ECHO ---" caption, height) =
  * ModuleChrome.
  *
@@ -38,6 +38,9 @@ public:
     {
         // ── Interactive repeat-train editor (Delay / Feedback / Mix) ───
         editor.setMidiMap(&p.getMidiMap());   // right-click MIDI Learn
+        // The time ruler reads the measured line rate (the LFO bank's SCAN
+        // clock — 0 while no stream runs, the ruler then counts lines).
+        editor.setLineRateProvider([&p] { return p.getLfoBank().lineRate(); });
         addAndMakeVisible(editor);
 
         // ── Enable toggle ── rack LED + zone-3 header power switch

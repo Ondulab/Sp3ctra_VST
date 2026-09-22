@@ -533,6 +533,9 @@ public:
     static constexpr int kPreferredH =
         kTopPad + (kLeftColH > kRightColH ? kLeftColH : kRightColH) + kSecPadB;
 
+    /** Content height — fixed: the page has no growing section. */
+    int preferredHeight() const { return kPreferredH; }
+
 private:
     // ── Resolved layout (single source for paint + resized) ─────────────────
     struct Geom
@@ -805,13 +808,13 @@ private:
 
     // OSCILLATORS (left)
     std::unique_ptr<EnvelopeEditorComponent> arEnv;
-    juce::Slider       noiseGateSlider;
-    juce::Slider       phaseSensSlider;    // onset sensitivity (relative) — SHARED A+B
+    Sp3ctraGestureSlider noiseGateSlider;
+    Sp3ctraGestureSlider phaseSensSlider;  // onset sensitivity (relative) — SHARED A+B
     juce::ComboBox     phaseModeCombo;      // physical onset mode — SHARED A+B
     uint32_t           lastOnsetTotal_ = 0; // last polled onset counter (LED)
     bool               onsetLedOn_ = false; // LED lit state (repaint on change)
-    juce::Slider       phasePositionSlider; // strike/pluck position, BELL impact — SHARED A+B
-    juce::Slider       phaseDriftSlider;   // per-onset micro-detune — SHARED A+B
+    Sp3ctraGestureSlider phasePositionSlider; // strike/pluck position, BELL impact — SHARED A+B
+    Sp3ctraGestureSlider phaseDriftSlider; // per-onset micro-detune — SHARED A+B
 
     // TIMBRE (left) — sample wavetable + scan transport
     juce::TextButton   timbreLoadButton, timbreClearButton;
@@ -819,20 +822,20 @@ private:
     juce::Label        timbreInfoLabel;
     std::unique_ptr<TimbreWaveformStrip> timbreStrip;
     juce::ToggleButton timbreEnableToggle;   // badge toggle = timbre mode ON/OFF
-    juce::Slider       timbreRateKnob, timbreFormantKnob, timbreMixKnob;
+    Sp3ctraGestureSlider timbreRateKnob, timbreFormantKnob, timbreMixKnob;
     std::unique_ptr<juce::FileChooser> timbreFileChooser;
     bool               lastScanPlaying_ = false;  // PLAY button lit state
 
     // STEREO (right)
     juce::ToggleButton stereoEnableToggle;
-    juce::Slider       stereoTempSlider;
+    Sp3ctraGestureSlider stereoTempSlider;
 
     // STROKEFORGE — blob detection (right)
     juce::Label  blobThreshLabel, blobMinWidthLabel, blobMergeGapLabel, blobColorSplitLabel;
     Sp3ctraBarSlider blobThreshSlider, blobMinWidthSlider, blobMergeGapSlider, blobColorSplitSlider;
     // STROKEFORGE — morphing (right)
     juce::ToggleButton sfEnabledToggle, sfFocusOnlyToggle;
-    juce::Slider       sfMorphWidthSlider, sfFocusSigmaSlider, sfSpectralThreshSlider;
+    Sp3ctraGestureSlider sfMorphWidthSlider, sfFocusSigmaSlider, sfSpectralThreshSlider;
 
     // ── Attachments ───────────────────────────────────────────────────────
     using SldAttach = juce::AudioProcessorValueTreeState::SliderAttachment;

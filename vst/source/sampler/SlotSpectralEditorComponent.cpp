@@ -1,6 +1,7 @@
 #include "SlotSpectralEditorComponent.h"
 #include "../ui/ModuleCatalog.h"
 #include "../PluginProcessor.h"
+#include "SamplerMidiTargets.h"   // CIS OLED overlay stamps (noteVirtualTouched)
 #include "../UITheme.h"
 #include "../ui/Sp3ctraHandles.h"
 #include <algorithm>
@@ -94,8 +95,11 @@ void SlotSpectralEditorComponent::rebuildImage()
     auto* fs = processor.getSampler(samplerIndex_);
     if (fs == nullptr) { image_ = {}; return; }
 
+    // Caps bound the per-pixel preview work (EQ/fade/floor bake), not the
+    // widget: the paint stretches the image to the frame. 600 keeps the view
+    // sharp now that the page hands its spare window height to this editor.
     const int capW = juce::jmin(1100, builtW_);
-    const int capH = juce::jmin(420,  builtH_);
+    const int capH = juce::jmin(600,  builtH_);
     juce::Image raw = fs->renderSlotImage(selectedSlot_, capW, capH, /*timeHorizontal=*/true);
     if (!raw.isValid()) { image_ = {}; return; }
 
@@ -390,6 +394,10 @@ void SlotSpectralEditorComponent::showFadeTypeMenu(bool in)
             const auto t = static_cast<FadeCurveType>(result - 1);
             if (in) fs2->setSlotAttackCurveType(safe->selectedSlot_, t);
             else    fs2->setSlotDecayCurveType (safe->selectedSlot_, t);
+            safe->processor.noteVirtualTouched(SamplerMidiTargets::encode(
+                safe->samplerIndex_, safe->selectedSlot_,
+                in ? SamplerMidiTargets::Kind::FadeInType
+                   : SamplerMidiTargets::Kind::FadeOutType));
             safe->processor.sessions()->markStateDirty();
             safe->markDirty();
             if (safe->onFadeChanged) safe->onFadeChanged();
@@ -503,44 +511,114 @@ void SlotSpectralEditorComponent::mouseDown(const juce::MouseEvent& e)
         return;
     }
 
-    // Double-click the MID handle → back to a straight (LIN) fade.
-    if ((midIn || midOut) && e.getNumberOfClicks() >= 2)
-    {
-        if (midIn)
-        {
-            fs->setSlotAttackCurveType (selectedSlot_, FadeCurveType::LINEAR);
-            fs->setSlotAttackCurvePower(selectedSlot_, 1.0f);
-        }
-        else
-        {
-            fs->setSlotDecayCurveType (selectedSlot_, FadeCurveType::LINEAR);
-            fs->setSlotDecayCurvePower(selectedSlot_, 1.0f);
-        }
-        mode_ = Mode::None;
-        processor.sessions()->markStateDirty();
-        markDirty();
-        if (onFadeChanged) onFadeChanged();
-        return;
-    }
-
-    if      (endIn)  mode_ = Mode::Attack;
-    else if (endOut) mode_ = Mode::Decay;
-    else if (midIn)  mode_ = Mode::AttackShape;
-    else if (midOut) mode_ = Mode::DecayShape;
+    Mode target = Mode::None;
+    if      (endIn)  target = Mode::Attack;
+    else if (endOut) target = Mode::Decay;
+    else if (midIn)  target = Mode::AttackShape;
+    else if (midOut) target = Mode::DecayShape;
     else
     {
         const float sf = fs->getSlotStartFrac(selectedSlot_);
         const float ef = fs->getSlotEndFrac(selectedSlot_);
         const float sx = fracToX(sf), ex = fracToX(ef);
-        if (std::abs(e.position.x - sx) <= kSnap)      mode_ = Mode::Start;
-        else if (std::abs(e.position.x - ex) <= kSnap) mode_ = Mode::End;
-        else mode_ = (xToFrac(e.position.x) <= (sf + ef) * 0.5f) ? Mode::Start : Mode::End;
+        if (std::abs(e.position.x - sx) <= kSnap)      target = Mode::Start;
+        else if (std::abs(e.position.x - ex) <= kSnap) target = Mode::End;
+        else if (e.getNumberOfClicks() == 1)   // a free press drags the nearer bar
+            target = (xToFrac(e.position.x) <= (sf + ef) * 0.5f) ? Mode::Start : Mode::End;
     }
+
+    // The UI-wide gesture pair (ui/Sp3ctraGestures.h): double-click = the
+    // handle back to its default, long press = type it.
+    if (e.getNumberOfClicks() >= 2)
+    {
+        mode_ = Mode::None;
+        resetHandle(target);
+        return;
+    }
+    mode_ = target;
     mouseDrag(e);
+    if (mode_ != Mode::None)
+        hold_.arm(e, [this] { holdToType(); });
+}
+
+void SlotSpectralEditorComponent::resetHandle(Mode m)
+{
+    auto* fs = processor.getSampler(samplerIndex_);
+    if (fs == nullptr) return;
+    using K = SamplerMidiTargets::Kind;
+    switch (m)
+    {
+        case Mode::Start:  SamplerMidiTargets::apply(*fs, selectedSlot_, K::CropStart,  0.0f); break;
+        case Mode::End:    SamplerMidiTargets::apply(*fs, selectedSlot_, K::CropEnd,    1.0f); break;
+        case Mode::Attack: SamplerMidiTargets::apply(*fs, selectedSlot_, K::FadeInLen,  0.0f); break;
+        case Mode::Decay:  SamplerMidiTargets::apply(*fs, selectedSlot_, K::FadeOutLen, 0.0f); break;
+        case Mode::AttackShape:   // back to a straight (LIN) fade
+            fs->setSlotAttackCurveType (selectedSlot_, FadeCurveType::LINEAR);
+            fs->setSlotAttackCurvePower(selectedSlot_, 1.0f);
+            break;
+        case Mode::DecayShape:
+            fs->setSlotDecayCurveType (selectedSlot_, FadeCurveType::LINEAR);
+            fs->setSlotDecayCurvePower(selectedSlot_, 1.0f);
+            break;
+        default: return;
+    }
+    processor.sessions()->markStateDirty();
+    markDirty();
+    if (onFadeChanged) onFadeChanged();
+}
+
+void SlotSpectralEditorComponent::holdToType()
+{
+    const Mode m = mode_;
+    mode_ = Mode::None;
+    repaint();
+
+    using K = SamplerMidiTargets::Kind;
+    K kind = K::KindCount;
+    const char* label = "";
+    bool power = false;
+    switch (m)
+    {
+        case Mode::Start:       kind = K::CropStart;  label = "Start";     break;
+        case Mode::End:         kind = K::CropEnd;    label = "End";       break;
+        case Mode::Attack:      kind = K::FadeInLen;  label = "Fade in";   break;
+        case Mode::Decay:       kind = K::FadeOutLen; label = "Fade out";  break;
+        case Mode::AttackShape: kind = K::FadeInPow;  label = "In power";  power = true; break;
+        case Mode::DecayShape:  kind = K::FadeOutPow; label = "Out power"; power = true; break;
+        default: return;
+    }
+    auto* fs = processor.getSampler(samplerIndex_);
+    if (fs == nullptr) return;
+
+    // Same words as the chips under the image: "37%" / "1.50".
+    const float n = SamplerMidiTargets::read(*fs, selectedSlot_, kind);
+    const juce::String text = power
+        ? juce::String(SamplerMidiTargets::powerRange().convertFrom0to1(n), 2)
+        : juce::String(juce::roundToInt(n * 100.0f)) + "%";
+
+    juce::Component::SafePointer<SlotSpectralEditorComponent> safe(this);
+    Sp3ctraGestures::openEntry(*this, hold_.anchor(*this),
+        { Sp3ctraGestures::fieldOf(label, text, [safe, kind, power](const juce::String& t)
+          {
+              if (safe == nullptr) return;
+              auto* fs2 = safe->processor.getSampler(safe->samplerIndex_);
+              if (fs2 == nullptr) return;
+              const float v = power
+                  ? SamplerMidiTargets::powerRange().convertTo0to1(t.getFloatValue())
+                  : t.getFloatValue() / 100.0f;
+              SamplerMidiTargets::apply(*fs2, safe->selectedSlot_, kind, v);
+              safe->processor.noteVirtualTouched(
+                  SamplerMidiTargets::encode(safe->samplerIndex_, safe->selectedSlot_, kind));
+              safe->processor.sessions()->markStateDirty();
+              safe->markDirty();
+              if (safe->onFadeChanged) safe->onFadeChanged();
+          }) });
 }
 
 void SlotSpectralEditorComponent::mouseDrag(const juce::MouseEvent& e)
 {
+    if (hold_.fired()) return;            // the entry bubble owns the rest
+    hold_.moved(e);
     auto* fs = processor.getSampler(samplerIndex_);
     if (fs == nullptr || mode_ == Mode::None) return;
 
@@ -606,6 +684,24 @@ void SlotSpectralEditorComponent::mouseDrag(const juce::MouseEvent& e)
         }
         default: break;
     }
+    {
+        // Feed the CIS OLED overlay with the dragged handle's target.
+        using K = SamplerMidiTargets::Kind;
+        K kind = K::CropStart;
+        switch (mode_)
+        {
+            case Mode::Start:       kind = K::CropStart;  break;
+            case Mode::End:         kind = K::CropEnd;    break;
+            case Mode::Attack:      kind = K::FadeInLen;  break;
+            case Mode::Decay:       kind = K::FadeOutLen; break;
+            case Mode::AttackShape: kind = K::FadeInPow;  break;
+            case Mode::DecayShape:  kind = K::FadeOutPow; break;
+            default:                kind = K::KindCount;  break;
+        }
+        if (kind != K::KindCount)
+            processor.noteVirtualTouched(
+                SamplerMidiTargets::encode(samplerIndex_, selectedSlot_, kind));
+    }
     // Engine-held slot params (not APVTS) — mark the session dirty.
     processor.sessions()->markStateDirty();
     markDirty();   // rebuild the preview with the new edit
@@ -618,6 +714,7 @@ void SlotSpectralEditorComponent::mouseDrag(const juce::MouseEvent& e)
 
 void SlotSpectralEditorComponent::mouseUp(const juce::MouseEvent& e)
 {
+    hold_.release();
     mode_ = Mode::None;
     mouseMove(e);
     repaint();   // Drag → Hover/Idle look even when the cursor stays on the handle

@@ -29,6 +29,12 @@ typedef struct
     float    acc[3];                       /* g */
     float    gyro[3];                      /* dps */
     float    temp_c;
+    /* Device-side gestures (SLP_HID_GESTURES): the u8 counter wraps, react to
+     * changes only. */
+    uint8_t  gesture_face;                 /* enum slp_face: face it RESTS on */
+    uint8_t  hit_seq;
+    uint8_t  hit_velocity;                 /* 1..127 */
+    uint8_t  hit_face;                     /* enum slp_face: face STRUCK */
 } slp_hid_sample;
 
 /** Writer (udpThread): publish a new sample. Never blocks. */

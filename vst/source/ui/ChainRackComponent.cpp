@@ -1,4 +1,5 @@
 #include "ChainRackComponent.h"
+#include "ChainIdentity.h"
 #include "../Sp3ctraCore.h"
 #include "../sources/MediaSourceEngines.h"   // M9 — media source LEDs
 #include "ChainPresetIO.h"                   // J4 — .sp3chain presets
@@ -17,30 +18,21 @@ extern "C" {
     #include "processing/lux_drive.h"
     #include "processing/lux_dcblock.h"
     #include "processing/lux_gain.h"
+    #include "processing/lux_diff.h"
     #include "processing/midi_tap.h"
     #include "audio/buffers/audio_image_buffers.h"    // lines_received counter
 }
 
 namespace
 {
-    // Chain group header colours (cycled per chain index)
-    const juce::Colour kColChain1Hdr { 0xffe0b84a }; // amber
-    const juce::Colour kColChain2Hdr { 0xff4ae0a0 }; // green
-    const juce::Colour kColChain3Hdr { 0xffc0c4cc }; // grey
+    // (Chain header colours + numbered pastille: ui/ChainIdentity.h — shared
+    // with the PLAY/SETUP bar badge and the MIDI parameter labels.)
     const juce::Colour kColConnector { 0xff3a4250 };
     const juce::Colour kColGutter    { 0xff121218 }; // rack ground between chain cards
     const juce::Colour kColCard      { 0xff181820 }; // chain card body (the former rack bg)
     const juce::Colour kColMarkerTxt { 0xff6b7280 }; // IN / END captions
 
-    juce::Colour chainHeaderColour(int idx)
-    {
-        switch (idx % 3)
-        {
-            case 0:  return kColChain1Hdr;
-            case 1:  return kColChain2Hdr;
-            default: return kColChain3Hdr;
-        }
-    }
+    juce::Colour chainHeaderColour(int idx) { return ChainIdentity::colour(idx); }
 }
 
 //==============================================================================
@@ -60,6 +52,7 @@ ModuleType chainBlockToModuleType(ChainBlockId id) noexcept
         case ChainBlockId::Drive:    return ModuleType::Drive;
         case ChainBlockId::DcBlock:  return ModuleType::DcBlock;
         case ChainBlockId::Gain:     return ModuleType::Gain;
+        case ChainBlockId::Diff:     return ModuleType::Diff;
         case ChainBlockId::Sampler:  return ModuleType::Sampler;
         case ChainBlockId::Score:    return ModuleType::Score;
         case ChainBlockId::Timbre:   return ModuleType::Timbre;
@@ -85,6 +78,11 @@ juce::Colour ChainRackComponent::blockColour(ChainBlockId id) noexcept
     if (id == ChainBlockId::None)
         return juce::Colours::grey;
     return moduleColour(chainBlockToModuleType(id));
+}
+
+juce::Colour ChainRackComponent::chainColour(int chainIdx) noexcept
+{
+    return chainHeaderColour(chainIdx);
 }
 
 juce::String ChainRackComponent::enableParamId(ChainBlockId id) noexcept
@@ -342,7 +340,8 @@ void ChainRackComponent::rebuild()
                 || m.type == ModuleType::Reverb || m.type == ModuleType::Echo
                 || m.type == ModuleType::Equalizer || m.type == ModuleType::Harmonize
                 || m.type == ModuleType::Centroid || m.type == ModuleType::Drive
-                || m.type == ModuleType::DcBlock || m.type == ModuleType::Gain)
+                || m.type == ModuleType::DcBlock || m.type == ModuleType::Gain
+                || m.type == ModuleType::Diff)
                 bp->setEnableParamOverride(insertBankParam(
                     m.type, processor.poolSlotForInstance(m.id), "Enabled"));
             // Score family (SCORE/TIMBRE/MIDI SCORE/VOICE): the LED is the
@@ -489,6 +488,7 @@ ChainBlockId ChainRackComponent::instanceToBlockId(ModuleType type, int chainIdx
         case ModuleType::Drive:    return ChainBlockId::Drive;
         case ModuleType::DcBlock:  return ChainBlockId::DcBlock;
         case ModuleType::Gain:     return ChainBlockId::Gain;
+        case ModuleType::Diff:     return ChainBlockId::Diff;
         case ModuleType::Sampler:  return ChainBlockId::Sampler;
         case ModuleType::Score:    return ChainBlockId::Score;
         case ModuleType::Timbre:   return ChainBlockId::Timbre;
@@ -655,6 +655,11 @@ ChainRackComponent::computeDrop(juce::Point<int> localPos, ModuleType type,
     const auto& band = bands[(size_t) chosen];
     const int   c    = band.chainIdx;
 
+    // A folded chain shows no insertion geometry — never a drop target
+    // (unfold it first).
+    if (band.collapsed)
+        return { c, 0, false, false };
+
     int index = 0;
     if (! band.empty)
         for (const auto& s : slots)
@@ -808,11 +813,14 @@ int ChainRackComponent::preferredHeight() const noexcept
     for (const auto& ch : model.chains)
     {
         h += kHeaderH;
-        const int n = (int) ch.modules.size();
-        if (n == 0)
-            h += kEmptyPad + kEmptyH + kEmptyPad;
-        else
-            h += kInH + n * kBlockH + (n - 1) * kBlockGap + kEndH;
+        if (! ch.collapsed)   // folded card = header only
+        {
+            const int n = (int) ch.modules.size();
+            if (n == 0)
+                h += kEmptyPad + kEmptyH + kEmptyPad;
+            else
+                h += kInH + n * kBlockH + (n - 1) * kBlockGap + kEndH;
+        }
         h += kChainGap;
     }
     h += kAddRowH + kBottomPad;
@@ -832,16 +840,26 @@ void ChainRackComponent::resized()
 
     for (int c = 0; c < model.numChains(); ++c)
     {
-        const auto& mods = model.chains[(size_t) c].modules;
+        const auto& chain = model.chains[(size_t) c];
+        const auto& mods  = chain.modules;
 
         const int headerY = y;
         y += kHeaderH;
 
-        if (mods.empty())
+        if (chain.collapsed)
+        {
+            // Folded card: header only — blocks hidden, no slots (so the
+            // connector / exit-arrow / drop passes all skip this chain).
+            for (int i = 0; i < (int) mods.size(); ++i, ++bi)
+                if (bi < (int) blocks.size())
+                    blocks[(size_t) bi]->setVisible(false);
+            bands.push_back({ c, headerY, y, y, mods.empty(), y, true });
+        }
+        else if (mods.empty())
         {
             const int topY = y + kEmptyPad;
             bands.push_back({ c, headerY, topY, topY + kEmptyH, true,
-                              topY + kEmptyH + kEmptyPad });
+                              topY + kEmptyH + kEmptyPad, false });
             y = topY + kEmptyH + kEmptyPad;
         }
         else
@@ -851,7 +869,10 @@ void ChainRackComponent::resized()
             for (int i = 0; i < (int) mods.size(); ++i)
             {
                 if (bi < (int) blocks.size())
+                {
+                    blocks[(size_t) bi]->setVisible(true);   // may return from a fold
                     blocks[(size_t) bi]->setBounds(bx, y, bw, kBlockH);
+                }
                 slots.push_back({ c, i, { bx, y, bw, kBlockH } });
                 y += kBlockH;
                 ++bi;
@@ -860,7 +881,7 @@ void ChainRackComponent::resized()
             }
             const int bottomY = y;
             y += kEndH;                      // END terminator strip
-            bands.push_back({ c, headerY, topY, bottomY, false, y });
+            bands.push_back({ c, headerY, topY, bottomY, false, y, false });
         }
 
         y += kChainGap;
@@ -898,7 +919,8 @@ void ChainRackComponent::paint(juce::Graphics& g)
                                          (float) (band.envBottomY - band.headerY));
 
         // Envelope body (+ a faint chain tint), header strip on the top
-        // corners, 1 px rule under it, chain-colour rail, border.
+        // corners (the WHOLE card when folded), 1 px rule under it,
+        // chain-colour rail, border. A folded card is its header alone.
         g.setColour(kColCard);
         g.fillRoundedRectangle(env, kR);
         g.setColour(chainCol.withAlpha(0.05f));
@@ -907,38 +929,52 @@ void ChainRackComponent::paint(juce::Graphics& g)
             juce::Path hdr;
             hdr.addRoundedRectangle(env.getX(), env.getY(), env.getWidth(),
                                     (float) kHeaderH, kR, kR,
-                                    true, true, false, false);
+                                    true, true, band.collapsed, band.collapsed);
             g.setColour(chainCol.withAlpha(0.14f));
             g.fillPath(hdr);
         }
-        g.setColour(chainCol.withAlpha(0.30f));
-        g.fillRect(env.getX(), env.getY() + (float) kHeaderH - 1.f,
-                   env.getWidth(), 1.f);
-        g.setColour(chainCol.withAlpha(0.70f));   // rail stops short of the rounded corners
-        g.fillRect(env.getX() + 1.f, env.getY() + (float) kHeaderH,
-                   (float) kRailW, env.getHeight() - (float) kHeaderH - kR);
+        if (! band.collapsed)
+        {
+            g.setColour(chainCol.withAlpha(0.30f));
+            g.fillRect(env.getX(), env.getY() + (float) kHeaderH - 1.f,
+                       env.getWidth(), 1.f);
+            g.setColour(chainCol.withAlpha(0.70f));   // rail stops short of the rounded corners
+            g.fillRect(env.getX() + 1.f, env.getY() + (float) kHeaderH,
+                       (float) kRailW, env.getHeight() - (float) kHeaderH - kR);
+        }
         g.setColour(chainCol.withAlpha(0.40f));
         g.drawRoundedRectangle(env, kR, 1.f);
 
-        // Header: numbered pastille + "CHAIN" — the NUMBER carries the
-        // identity (the header colour cycles every 3 chains).
+        // Header: numbered pastille, fold chevron, then the chain label —
+        // the NUMBER carries the identity (the header colour cycles every 3
+        // chains); the LABEL is the user name, defaulting to "CHAIN".
         {
-            const float d = 16.f;
+            const float d = (float) ChainIdentity::kPastilleD;
             const juce::Rectangle<float> dot((float) kPadX + 2.f,
                                              (float) band.headerY
                                                  + ((float) kHeaderH - d) * 0.5f,
                                              d, d);
-            g.setColour(chainCol);
-            g.fillEllipse(dot);
-            g.setColour(kColGutter);
-            g.setFont(juce::Font(juce::FontOptions(11.0f)).boldened());
-            g.drawText(juce::String(band.chainIdx + 1), dot.toNearestInt(),
-                       juce::Justification::centred, false);
+            ChainIdentity::drawPastille(g, dot, band.chainIdx + 1, chainCol);
 
-            const int labelX = (int) dot.getRight() + 6;
+            // Fold chevron — the header band is the click target:
+            // ▼ deployed / ▶ folded.
+            const float cvx = dot.getRight() + 7.f;
+            const float cvy = (float) band.headerY + (float) kHeaderH * 0.5f;
+            juce::Path chev;
+            if (band.collapsed)
+                chev.addTriangle(cvx, cvy - 4.f, cvx, cvy + 4.f, cvx + 6.f, cvy);
+            else
+                chev.addTriangle(cvx, cvy - 3.f, cvx + 7.f, cvy - 3.f,
+                                 cvx + 3.5f, cvy + 4.f);
+            g.setColour(chainCol.withAlpha(0.85f));
+            g.fillPath(chev);
+
+            const auto& chainName = model.chains[(size_t) band.chainIdx].name;
+            const int labelX = (int) cvx + 13;
             g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
             g.setColour(chainCol);
-            g.drawText("CHAIN", labelX, band.headerY,
+            g.drawText(ChainIdentity::label(chainName),
+                       labelX, band.headerY,
                        juce::jmax(10, bgBadgeRect(band).getX() - 4 - labelX), kHeaderH,
                        juce::Justification::centredLeft, true);
         }
@@ -992,6 +1028,9 @@ void ChainRackComponent::paint(juce::Graphics& g)
             g.drawLine(x.getX() + pad, x.getY() + pad, x.getRight() - pad, x.getBottom() - pad, 1.3f);
             g.drawLine(x.getRight() - pad, x.getY() + pad, x.getX() + pad, x.getBottom() - pad, 1.3f);
         }
+
+        if (band.collapsed)
+            continue;   // folded: no drop zone, no IN/END markers
 
         if (band.empty)
         {
@@ -1202,6 +1241,7 @@ void ChainRackComponent::mouseUp(const juce::MouseEvent& e)
             if (! header.contains(e.getPosition()))
                 continue;
             juce::PopupMenu menu;
+            menu.addItem(5, "Rename chain...");
             menu.addItem(1, "Duplicate chain",
                          model.canAddChain());
             menu.addSeparator();
@@ -1237,6 +1277,7 @@ void ChainRackComponent::mouseUp(const juce::MouseEvent& e)
                         case 2: savePresetFlow(chainIdx);  break;
                         case 3: loadPresetFlow(chainIdx);  break;
                         case 4: loadPresetFlow(-1);        break;
+                        case 5: renameChainFlow(chainIdx); break;
                         default: break;
                     }
                 });
@@ -1264,8 +1305,10 @@ void ChainRackComponent::mouseUp(const juce::MouseEvent& e)
                 const int nModules = (chainIdx >= 0
                                       && chainIdx < (int) model.chains.size())
                     ? (int) model.chains[(size_t) chainIdx].modules.size() : 0;
+                const juce::String label = processor.chainName(chainIdx);
                 const juce::String msg =
                     "Delete CHAIN " + juce::String(chainIdx + 1)
+                    + (label.isNotEmpty() ? " \"" + label + "\"" : juce::String())
                     + (nModules > 0
                         ? (" and its " + juce::String(nModules) + " module(s)?")
                         : juce::String("?"));
@@ -1285,6 +1328,60 @@ void ChainRackComponent::mouseUp(const juce::MouseEvent& e)
             }
         }
     }
+
+    // Fold/unfold — a left-click anywhere else on the header band toggles the
+    // chain card between full and header-only. Allowed while locked (showing/
+    // hiding a chain is a performance action, like the background badge).
+    // A DOUBLE-click renames instead: the first click already toggled the
+    // fold, so undo it before prompting.
+    if (! e.mods.isPopupMenu())
+    {
+        for (const auto& band : bands)
+        {
+            const juce::Rectangle<int> header(0, band.headerY,
+                                              getWidth(), kHeaderH);
+            if (! header.contains(e.getPosition()))
+                continue;
+            toggleChainFold(band.chainIdx);
+            if (e.getNumberOfClicks() >= 2)
+                renameChainFlow(band.chainIdx);
+            return;
+        }
+    }
+}
+
+//==============================================================================
+// Fold + rename (chain header)
+//==============================================================================
+void ChainRackComponent::toggleChainFold(int chainIdx)
+{
+    processor.setChainCollapsed(chainIdx, ! processor.chainCollapsed(chainIdx));
+    resized();                  // rebuild bands/slots + hide/show the blocks
+    if (onModelChanged)
+        onModelChanged();       // editor re-runs layoutZones (height changed)
+    repaint();
+}
+
+void ChainRackComponent::renameChainFlow(int chainIdx)
+{
+    Sp3ctraDialog::showInput(
+        this, "Rename chain",
+        "Name for CHAIN " + juce::String(chainIdx + 1)
+            + " (leave empty for the default):",
+        processor.chainName(chainIdx), "Rename", "Cancel",
+        [safe = juce::Component::SafePointer<ChainRackComponent>(this),
+         chainIdx](const juce::String& text)
+        {
+            if (auto* self = safe.getComponent())
+            {
+                self->processor.setChainName(chainIdx, text);
+                // The label ripples beyond the rack (VIDEO/MIDI MIX rows,
+                // chain tabs, zone-1 badges) — let the editor refresh them.
+                if (self->onModelChanged)
+                    self->onModelChanged();
+                self->repaint();
+            }
+        });
 }
 
 //==============================================================================
@@ -1303,7 +1400,10 @@ void ChainRackComponent::savePresetFlow(int chainIdx)
     dir.createDirectory();
     presetChooser_ = std::make_unique<juce::FileChooser>(
         "Save chain preset",
-        dir.getChildFile("Chain " + juce::String(chainIdx + 1) + ".sp3chain"),
+        dir.getChildFile(juce::File::createLegalFileName(
+            processor.chainName(chainIdx).isNotEmpty()
+                ? processor.chainName(chainIdx)
+                : "Chain " + juce::String(chainIdx + 1)) + ".sp3chain"),
         "*.sp3chain");
     presetChooser_->launchAsync(
         juce::FileBrowserComponent::saveMode
@@ -1334,9 +1434,12 @@ void ChainRackComponent::loadPresetFlow(int targetChainIdx)
     if (targetChainIdx >= 0 && targetChainIdx < (int) model.chains.size()
         && ! model.chains[(size_t) targetChainIdx].modules.empty())
     {
+        const juce::String tgtName = processor.chainName(targetChainIdx);
         const juce::String msg =
             "Loading a preset replaces the current modules of CHAIN "
-            + juce::String(targetChainIdx + 1) + ".";
+            + juce::String(targetChainIdx + 1)
+            + (tgtName.isNotEmpty() ? " \"" + tgtName + "\"" : juce::String())
+            + ".";
         Sp3ctraDialog::showConfirm(
             this, "Load chain preset", msg, "Continue", "Cancel",
             [safe = juce::Component::SafePointer<ChainRackComponent>(this),
@@ -1513,6 +1616,11 @@ ChainRackComponent::LedState ChainRackComponent::ledFor(BlockComponent& blk, int
         case ModuleType::Gain:
         {
             const LuxGainState* st = lux_gain_instance(processor.poolSlotForInstance(uid));
+            return fxLed(st->config.enabled, st->active_ticks);
+        }
+        case ModuleType::Diff:
+        {
+            const LuxDiffState* st = lux_diff_instance(processor.poolSlotForInstance(uid));
             return fxLed(st->config.enabled, st->active_ticks);
         }
 

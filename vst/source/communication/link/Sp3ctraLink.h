@@ -20,8 +20,13 @@
  *  - The STREAM target sent in BIND is the plugin's own listen port; the
  *    device streams to the address the BIND came from (or to the multicast
  *    group when the configured listen address is multicast).
- *  - Feedback (LED_SET / OLED_OVERLAY / OLED_CLEAR / CAL_START) is queued by
- *    the message thread and flushed by the link thread, coalesced.
+ *  - Feedback (LED_SET / OLED_OVERLAY / OLED_CLEAR / CAL_START / CFG_GET /
+ *    CFG_SET) is queued by the message thread and flushed by the link thread,
+ *    coalesced. Device SETTINGS travel here, not over the web server: an HTTP
+ *    POST needs the admin password (random, generated on the device's first
+ *    boot and shown once on its screen), while the bound session is already
+ *    the proof of ownership. CFG_REPLY values land in a small cache the pages
+ *    read back (a change message is broadcast on every reply).
  *
  * Thread-safety: every public method is callable from any thread; readers get
  * copies under a lock; listeners are notified through ChangeBroadcaster
@@ -32,6 +37,9 @@
 #include <juce_core/juce_core.h>
 #include <juce_events/juce_events.h>
 #include <array>
+#include <deque>
+#include <functional>
+#include <map>
 #include <vector>
 #include "sp3ctra_link.h"
 
@@ -91,6 +99,7 @@ public:
         juce::String label, value;
         float norm = -1.0f;                // < 0 = no bar
         bool  bipolar = false, highlight = false;
+        bool  tagInvert = false;           // label starts with "Cn " drawn inverted
     };
 
     Sp3ctraLink();
@@ -116,6 +125,22 @@ public:
     void clearOverlay();
     void requestCalibration (int slpCalKind);
 
+    //── device configuration over the session (SLP_CFG_*) ────────────────────
+    /** One value the device holds, as its last CFG_REPLY reported it. */
+    struct CfgValue { uint32_t value = 0; uint8_t type = 0, flags = 0; };
+
+    /** Ask the device for these ids (enum slp_cfg_id). The answers land in the
+        cache and a change message follows. */
+    void requestConfig (const std::vector<uint16_t>& ids);
+
+    /** Write these items (id + type + value). The device answers with the
+        STORED value and its flags (REBOOT / READONLY / REJECTED), so the cache
+        always ends up holding what the device really has. */
+    void writeConfig (const std::vector<slp_cfg_item>& items);
+
+    /** Last value the device reported for `id`; false if it never answered. */
+    bool configValue (uint16_t id, CfgValue& out) const;
+
     //── queries (copies) ─────────────────────────────────────────────────────
     Status status() const;
     std::vector<DeviceInfo> devices() const;
@@ -140,6 +165,7 @@ private:
     void handleBindAck  (const uint8_t* data, const juce::String& fromIp);
     void handlePong     (const uint8_t* data);
     void handleError    (const uint8_t* data, const juce::String& fromIp);
+    void handleCfgReply (const uint8_t* data);
     void sendTo (const juce::String& ip, int port, const void* msg, size_t len);
     void fillHdr (slp_hdr& h, uint8_t type, uint16_t len);
     void enterSearching (const juce::String& why);
@@ -174,11 +200,17 @@ private:
     slp_oled_overlay pendingOverlay_ {};
     bool         overlayPending_ = false, overlayClearPending_ = false;
     int          calRequest_ = -1;
+    std::vector<uint16_t>     pendingCfgGet_;
+    std::vector<slp_cfg_item> pendingCfgSet_;
+    std::map<uint16_t, CfgValue> cfg_;      // last CFG_REPLY per id
 
     // ── link-thread private state ────────────────────────────────────────────
     std::unique_ptr<juce::DatagramSocket> socket_;
     juce::StringArray broadcastTargets_;
     bool         ctrlViaBroadcast_ = false;   // SP3CTRA_LINK_BROADCAST_CTRL=1: unicast-less test mode (sandboxed shells)
+    bool         socketOk_ = false;           // bindToPort succeeded on the current socket
+    int          sendFails_ = 0;              // consecutive unicast send failures (socket sickness)
+    double       lastSocketRetryMs_ = 0;
     uint32_t     txSeq_ = 0;
     uint32_t     session_ = 0;
     juce::String boundIp_;

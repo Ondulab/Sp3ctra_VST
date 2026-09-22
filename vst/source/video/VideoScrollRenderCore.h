@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_graphics/juce_graphics.h>
+#include <atomic>
 #include <vector>
 #include <cstdint>
 
@@ -65,6 +66,21 @@ public:
     // image is untouched and the caller may skip repainting its views this tick.
     bool tick(double nowMs, double dtMs);
 
+    // ── Live-stream envelopes — the VIDEO MIX toile's flow pulse ──────────────
+    // "Is this output receiving INK right now?" Fresh CIS lines drained this
+    // tick, weighted by their darkness (white = the silent pole of the Sp3ctra
+    // stream: the unfed white-line sweep and blank paper read as silence) and
+    // by how much of the nominal ~1000 lps arrived, so a trickle BLINKS and a
+    // full stream holds. now = fast release (the LED), peak = slow release
+    // (its rémanence — the ui_in_now / ui_in_peak pair of the chain modules),
+    // power = the same drive under a SYMMETRIC smoothing: the honest reading
+    // to print beside the output ("how hard is this tap being driven"), which
+    // a peak-hold envelope would overstate.
+    // Written by tick() on the render thread, readable from any thread.
+    float flowNow()   const noexcept { return flowNow_.load  (std::memory_order_relaxed); }
+    float flowPeak()  const noexcept { return flowPeak_.load (std::memory_order_relaxed); }
+    float flowPower() const noexcept { return flowPower_.load(std::memory_order_relaxed); }
+
     // ── Split render (perf): compute the expensive warp ONCE per tick, then blit
     // it cheaply into any number of views.
     //   buildWarp() : warp + age the linear history into warpBuf_ (bufW_×compH_).
@@ -73,6 +89,12 @@ public:
     //   drawWarp()  : zoom/rotate/scale warpBuf_ into the destination Graphics.
     bool buildWarp();
     void drawWarp(juce::Graphics& g, int destW, int destH);
+    /** Fast path — the SAME picture straight into a 4-byte ARGB image (the
+     *  mixer's render targets). Replaces juce::Graphics' generic software
+     *  rasteriser with a parallel fixed-point affine blit that paints its own
+     *  border, so the separate full-surface fill disappears too. Falls back to
+     *  the Graphics path if `dest` is not ARGB. */
+    void drawWarp(juce::Image& dest);
 
     // Blank the history buffer (transport Stop). May be called by the mixer's
     // render thread only (same single-consumer discipline as tick()).
@@ -98,6 +120,21 @@ private:
 
     // ── Helpers (the original allocateScrollBuffer / clearHistory) ────────────
     void allocateScrollBuffer(int w, int h);
+
+    // ── History ring addressing ───────────────────────────────────────────────
+    // Logical history row (0 = far past above the birth line, bufH_ = far past
+    // below it) → the physical row of history_ that currently holds it.
+    int  histRow(int y) const noexcept;
+    // Roll the rings back to identity (offsets 0, physical order == logical
+    // order). Needed whenever the split moves — the birth line is a parameter,
+    // so this runs on a user gesture, not every frame — and before any resize.
+    void linearizeHistory();
+    // Make scratch_ hold `chunks` entries sized for the current bufW_.
+    void ensureScratch(int chunks);
+
+    // The zoom / centre / rotation transform shared by both drawWarp paths:
+    // warpBuf_ pixel space → destination pixel space.
+    juce::AffineTransform warpTransform(int destW, int destH) const;
 
     // APVTS convenience: load a slot-scoped raw param with a null-guarded default.
     float param(const char* suffix, float defaultValue) const;
@@ -173,19 +210,41 @@ private:
     int    heldPx_   { 0 };
     double heldAtMs_ { -1.0e12 };
 
-    // ── History buffer (single, scrolled IN PLACE — legacy birth-line model) ──
-    // The original kept two ping-pong images and re-blitted the whole W×4H
-    // history through juce::Graphics every tick (plus a full black fill). The
-    // in-place row-move version does the same shift with row memcpys on one
-    // buffer: ~3-4× less memory traffic per tick and half the resident memory.
+    // ── Flow envelopes (see flowNow / flowPeak) ──────────────────────────────
+    void noteFlow(int freshLines, double dtMs);
+    static constexpr float kNominalLps = 1000.0f;   // full-fidelity CIS rate
+    static constexpr float kInkFloor   = 0.03f;     // below: blank paper / noise
+    static constexpr float kInkFull    = 0.12f;     // ink (above the floor) lighting the LED fully
+    static constexpr float kFlowNowMs  = 90.0f;     // LED release
+    static constexpr float kFlowPeakMs = 700.0f;    // rémanence release
+    static constexpr float kFlowPwrMs  = 250.0f;    // printed value, both ways
+    std::atomic<float> flowNow_   { 0.0f };
+    std::atomic<float> flowPeak_  { 0.0f };
+    std::atomic<float> flowPower_ { 0.0f };
+
+    // ── History buffer (TWO RINGS, split at the birth line) ──────────────────
+    // The waterfall pushes content AWAY from the birth line in both directions,
+    // so the history is two back-to-back waterfalls: physical rows [0, birth)
+    // hold the upper zone, [birth, bufH_) the lower one. Each is addressed
+    // through its own rotating offset (histRow), so a scroll of s px costs s
+    // rows of writes instead of shifting the whole 4×canvas buffer every tick —
+    // at record resolutions that shift alone moved ~100 MB per frame per
+    // output. The ring layout is rebuilt (linearizeHistory) only when the birth
+    // line itself moves, which is a user gesture, not a per-frame event.
     juce::Image history_;
+    int  upOff_     { 0 };    // rotation of the upper ring, in [0, ringBirth_)
+    int  loOff_     { 0 };    // rotation of the lower ring, in [0, bufH_-ringBirth_)
+    int  ringBirth_ { -1 };   // the split the current rotations are expressed in
     // Offscreen scratch: linear history warped (time-squish) + aged (fade),
     // before the zoom/orientation transform. Sized bufW_ × compH_.
     juce::Image warpBuf_;
-    // Reused scratch (avoid per-frame allocation).
+    // Reused scratch (avoid per-frame allocation). The row accumulators and the
+    // blur prefix sums are PER PARALLEL CHUNK: buildWarp fans its row range out
+    // over videoparallel::parallelChunks, and two worker threads must never
+    // share a row buffer.
     std::vector<int> warpEdge_;
-    std::vector<int> accR_, accG_, accB_;
-    std::vector<int> psR_, psG_, psB_;
+    struct RowScratch { std::vector<int> accR, accG, accB, psR, psG, psB; };
+    std::vector<RowScratch> scratch_;
 
     // View dims (budgeted logical px) the canvas was sized for. The canvas is
     // a SQUARE on their diagonal (compW_ = compH_ = ceil(hypot(viewW_, viewH_)))
@@ -214,8 +273,11 @@ private:
     float wsRot_       { 1e9f };   // rotation → visible span (aging distances)
     int   wsViewW_     { -1 };
     int   wsViewH_     { -1 };
-    float wsCompress_  { 1e9f };
+    float wsCompress_  { 1e9f };   // bipolar "pack"
     float wsFade_      { 1e9f };
+    float wsMidX_      { 1e9f };   // the attenuation curve's free middle point
+    float wsMidY_      { 1e9f };
+    float wsMidFree_   { 1e9f };
     float wsBlur_      { 1e9f };
     float wsGamma_     { 1e9f };
     int   wsBufW_      { -1 };

@@ -36,6 +36,7 @@
 #include "AudioPanelWidgets.h"
 #include "Sp3ctraBarSlider.h"
 #include "ModuleCatalog.h"
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -114,6 +115,9 @@ public:
     static constexpr int kPreferredH =
         kTopPad + kHeaderH + kSecGapV + kCloudSecH + kSecGapV + kGrainSecH
         + kSecGapV + kMatSecH + AudioPanelLayout::kBottomPad;
+
+    /** Content height — fixed: the page has no growing section. */
+    int preferredHeight() const { return kPreferredH; }
 
     void paint(juce::Graphics& g) override
     {
@@ -236,10 +240,10 @@ private:
 
     juce::Label    volumeLabel;
     Sp3ctraBarSlider volumeSlider;
-    juce::Slider   densitySlider, shapeSlider, spreadSlider, edgeSlider;
-    juce::Slider   sizeMinSlider, sizeMaxSlider, textureSlider, jitterSlider,
+    Sp3ctraGestureSlider   densitySlider, shapeSlider, spreadSlider, edgeSlider;
+    Sp3ctraGestureSlider   sizeMinSlider, sizeMaxSlider, textureSlider, jitterSlider,
                    widthSlider, colorPanSlider, followSlider;
-    juce::Slider   scrubSlider;
+    Sp3ctraGestureSlider   scrubSlider;
     juce::ComboBox envCombo, matCombo;
 
     using SldAttach = juce::AudioProcessorValueTreeState::SliderAttachment;

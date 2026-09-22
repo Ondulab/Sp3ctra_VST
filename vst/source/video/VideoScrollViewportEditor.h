@@ -1,58 +1,42 @@
 /**
  * @file VideoScrollViewportEditor.h
- * @brief The VIEWPORT pad of the VIDEO SCROLL page — the output window drawn
- *        as a live thumbnail, with the generation frame (the "vignette")
- *        laid on it as a grabbable object.
+ * @brief The VIEWPORT pad of the VIDEO SCROLL grid — the output window drawn
+ *        as a live thumbnail, with the generation frame laid on it.
+ *
+ * TWO POSITIONS, and nothing else (2026-09-04). The pad used to carry every
+ * setting at once: corner rings for Zoom, a lever for Rotation, and on the
+ * axis a thickness bar, a compression ruler, an aging ribbon, blur wedges,
+ * flow chevrons, plus a column of value cards. Together they buried the one
+ * thing only this view can show — where the generation sits IN the picture —
+ * under a dozen marks nobody could tell apart. Each of those settings now
+ * owns a cell in the grid below, which draws it properly and to scale.
  *
  * What is drawn (window space, the output's real aspect):
- *   • the window rect, filled with the latest VIDEO MIX composite (or the
- *     frame colour through the Invert / Color law while nothing is rendered);
- *   • the sweep band — the strip the waterfall actually covers (Zoom wide,
- *     running edge to edge along the scroll axis) — bright, the rest veiled;
- *   • the vignette — the zoom frame (Zoom × the view itself, W × H, turned
- *                    by Rotation — rotation-invariant like a camera viewfinder,
- *     centred by Center X / Y, turned by Rotation) hosting the birth line;
- *   • the birth line inside it (Line Pos);
- *   • the parameters without a handle, made visible ON the axis (see
- *     drawFlowAndAging): the stamped bar (Thickness) as a band centred on
- *     the line; on each side of the line still inside the window: a time
- *     ruler whose ticks bunch toward the edge with Compression, a ribbon
- *     beside the axis that dies out with Fade (the aging dim law), wedges
- *     on the band edges that widen with Blur (the smear), and 1–3 flow
- *     chevrons for |Speed| pointing away from the line (toward it when
- *     Speed < 0). The renderer pushes history away from the line on BOTH
- *     sides, so a single outward arrow was wrong — and vanished when the
- *     line sat on an edge;
- *   • the handles: centre node + outline (move), four corner rings (zoom), a
- *     lever on the frame's leading edge (rotation);
- *   • a column of setting cards (glyph · name · value, one per parameter,
- *     Gamma and the display law included) in the free zone left of the
- *     window when there is room (drawCards).
+ *   • the window rect, filled with the latest solo render of THIS output (or
+ *     the frame colour through the Invert / Color law before the first frame);
+ *   • the sweep band it covers, bright, the rest veiled;
+ *   • the generation window — Zoom × the view, turned by Rotation, centred by
+ *     Center X / Y — as a plain outline: its POSITION, not its size or angle;
+ *   • the birth line inside it (Line Pos).
  *
- * Edit glow: every parameter is bound (ParameterAttachment), so a change
- * from ANY source — a handle, a box below, a MIDI controller — lights its
- * element, its card and (through onActiveParamChanged) its box label in
- * the control colour for kGlowMs, with a name + value readout at the
- * element: "what is being edited" is always visible in the picture.
+ * Edit glow: every parameter is bound (ParameterAttachment), so a change from
+ * ANY source — a handle here, a grid cell, a MIDI controller, automation —
+ * lights its element for kGlowMs with a name + value readout, and
+ * onActiveParamChanged tells the page which setting is live.
  *
- * Gestures (VideoScrollRenderCore::drawWarp / birthLine01 are the model —
- * the pad reproduces their geometry exactly, so what you grab is what the
- * output does):
- *   • drag the vignette          Center X / Center Y (±1 = centre on the edge)
- *   • drag a corner ring         Zoom (uniform, about the vignette centre)
- *   • drag the lever, or drag    Rotation (degrees clockwise, wraps at 360)
- *     anywhere outside the vignette (dial around its centre)
- *   • drag the birth line        Line Pos (along the scroll axis, inside the
- *                                zoom frame; clamped to the window like the
- *                                renderer)
+ * Gestures (VideoScrollRenderCore::drawWarp / birthLine01 are the model — the
+ * pad reproduces their geometry exactly, so what you grab is what the output
+ * does). The window has NO centre node: you push the frame itself rather than
+ * aim at a dot sitting in the middle of the picture.
+ *   • drag the frame             Center X / Center Y (±1 = centre on the edge)
+ *   • drag the birth line        Line Pos — seized anywhere along its length,
+ *                                then it follows the pointer along the scroll
+ *                                axis, clamped to the window like the renderer
  *   • pinch (trackpad) / ⌘ or Ctrl + wheel   Zoom — a plain wheel keeps
  *                                scrolling the page (editor rule)
- *   • double-click               reset what is under the pointer: vignette →
- *                                centre 0/0, corner → 1.0×, lever/outside →
- *                                0°, birth line → its default
- *   • right-click                MIDI Learn of the parameter(s) under the
- *                                pointer (both centres on the vignette; all
- *                                five outside)
+ *   • double-click               reset what is under the pointer
+ *   • right-click                MIDI Learn — the parameter(s) under the
+ *                                pointer, or all of them off the handles
  *
  * Colour split (charter): the window, band, axis, arrow and captions are
  * DISPLAY (module colour); everything grabbable is lime (Sp3ctraHandles).
@@ -78,6 +62,7 @@
 #include "../ui/ModuleParamManifest.h"   // vsParam()
 #include "VideoScrollMode.h"             // VideoScrollLimits
 #include "VideoScrollPreviewSource.h"
+#include "../ui/Sp3ctraGestures.h"
 #include "VideoScrollRenderCore.h"       // applyDisplayColour (frame colour law)
 
 class VideoScrollViewportEditor : public juce::Component,
@@ -86,10 +71,10 @@ class VideoScrollViewportEditor : public juce::Component,
     struct Geo;     // screen geometry — defined below (private), used by member signatures above it
     struct Bound;   // a bound parameter — idem
 public:
-    // The frame alone (boxes live in the page). 420 (240 until 2026-08-30 —
-    // "the VIEWPORT window must be bigger"): a ~395 px square window at 1×,
+    // The frame alone (boxes live in the page). 240 → 420 → 640 px
+    // (2026-08-30, "bigger, and let me grab the handles that are off frame"):
     // the page scrolls in zone 3 and the ALL view stacks one per output.
-    static constexpr int kGraphH     = 420;
+    static constexpr int kGraphH     = 640;
     static constexpr int kPreferredH = kGraphH;
 
     /** Every setting the pad visualises — one element / card each, lit in
@@ -104,23 +89,15 @@ public:
     /** Fired when activeParam() changes — the page tints that box's label. */
     std::function<void()> onActiveParamChanged;
 
-    /** Screen anchors of the axis indicators, filled by drawFlowAndAging
-     *  (the readout of an edited setting sits at its own element). */
-    struct Marks
-    {
-        juce::Point<float> speed, thickness, compress, fade, blur;
-        bool hasSpeed = false, hasCompress = false, hasFade = false, hasBlur = false;
-    };
-
     VideoScrollViewportEditor(juce::AudioProcessorValueTreeState& apvtsIn,
                               juce::Colour accentColour)
         : apvts_(apvtsIn), accent_(accentColour)
     {
         setRepaintsOnMouseActivity(true);
         setTooltip(juce::String::fromUTF8(
-            "VIEWPORT \xE2\x80\x94 the output window\n"
-            "Drag the frame: Center X / Y \xC2\xB7 corner: Zoom \xC2\xB7 lever or outside: Rotation\n"
-            "Birth line: Line Pos \xC2\xB7 pinch or \xE2\x8C\x98+wheel: Zoom \xC2\xB7 double-click: reset"));
+            "VIEWPORT \xE2\x80\x94 where the generation sits in the output\n"
+            "Drag the frame: Center X / Y \xC2\xB7 drag the line: Line Pos\n"
+            "pinch or \xE2\x8C\x98+wheel: Zoom \xC2\xB7 double-click: reset \xC2\xB7 hold: type"));
     }
 
     /** Optional MIDI-learn wiring — right-click menus on the handles. */
@@ -139,7 +116,7 @@ public:
     void setSlot(int slot)
     {
         slot_ = slot;
-        for (auto* b : allBounds()) { b->attach.reset(); b->live = false; b->editMs = -1.0e12; }
+        for (auto* b : allBounds()) b->reset();
         lastActive_ = Param::Count;
         glowing_    = false;
         if (slot_ < 0) { repaint(); return; }
@@ -150,10 +127,13 @@ public:
         bind(line_,  Param::LinePos,   vsParam(slot_, "linePos"));
         bind(speed_, Param::Speed,     vsParam(slot_, "speed"));
         bind(thick_, Param::Thickness, vsParam(slot_, "thickness"));
-        bind(comp_,  Param::Compress,  vsParam(slot_, "compress"));
+        bind(comp_,  Param::Compress,  vsParam(slot_, "pack"));
         bind(fade_,  Param::Fade,      vsParam(slot_, "fade"));
         bind(blur_,  Param::Blur,      vsParam(slot_, "blur"));
         bind(gamma_, Param::Gamma,     vsParam(slot_, "gamma"));
+        bind(fadeMidX_,    Param::Fade, vsParam(slot_, "fadeMidX"));
+        bind(fadeMidY_,    Param::Fade, vsParam(slot_, "fadeMidY"));
+        bind(fadeMidFree_, Param::Fade, vsParam(slot_, "fadeMidFree"));
         static const char* const paperIds[kPaperN] = { "invertMode", "colorMode", "bgR", "bgG", "bgB" };
         for (int i = 0; i < kPaperN; ++i)
             bind(paper_[i], Param::Paper, vsParam(slot_, paperIds[i]));
@@ -258,27 +238,15 @@ public:
             // Window edge — lit while the display law (paper) is edited.
             { juce::Path w; w.addRectangle(geo.win); strokeMark(g, w, Param::Paper, 0.55f, 1.0f); }
 
-            const float L = geo.k * std::hypot(geo.W, geo.H);   // covers the window at any angle
-            g.setColour(accent_.withAlpha(0.35f));
-            for (float sgn : { -1.0f, 1.0f })
-            {
-                const auto a = geo.C + geo.u * (sgn * geo.hx) - geo.v * L;
-                const auto b = geo.C + geo.u * (sgn * geo.hx) + geo.v * L;
-                g.drawLine({ a, b }, 1.0f);
-            }
-            const float dash[2] = { 4.0f, 4.0f };
-            g.setColour(accent_.withAlpha(0.3f));
-            g.drawDashedLine({ geo.C - geo.v * L, geo.C + geo.v * L }, dash, 2, 1.0f);
-
-            // Thickness bar, compression ruler, fade ribbon, blur wedges, flow
-            // chevrons — inside the window, on the axis; each lit when edited.
-            const Marks marks = drawFlowAndAging(g, geo);
-
-            // ── Controls (lime): vignette, birth line, corners, lever, centre ──
-            const auto sBody   = stateOf(Handle::Body);
-            const auto sLine   = stateOf(Handle::Birth);
-            const auto sLever  = stateOf(Handle::Lever);
-            const auto sCorner = stateOf(Handle::Corner);
+            // ── Controls (lime): the generation window, and the birth line ──
+            // TWO positions, and nothing else (2026-09-04). Rotation, zoom,
+            // speed, thickness, compression, attenuation and blur all have a
+            // cell of their own in the grid below, which draws each of them
+            // far better than a mark crowded onto this axis could. What the
+            // pad is FOR is the pair you can only judge against the picture:
+            // where the generation window sits, and where the line is born.
+            const auto sBody = stateOf(Handle::Body);
+            const auto sLine = stateOf(Handle::Birth);
 
             juce::Path outline = vignettePath(geo);
             if (Sp3ctraHandles::isHot(sBody))
@@ -290,170 +258,21 @@ public:
                             .withMultipliedAlpha(Sp3ctraHandles::isHot(sBody) ? 1.0f : 0.85f));
             g.strokePath(outline, juce::PathStrokeType(Sp3ctraHandles::isHot(sBody) ? 2.0f : 1.2f));
 
+            // No centre node: the window IS its own handle — you push the
+            // frame, you do not aim at a dot in the middle of the picture.
             Sp3ctraHandles::drawGrabLine(g, { geo.birth - geo.u * geo.hx, geo.birth + geo.u * geo.hx }, sLine);
 
-            Sp3ctraHandles::drawLink(g, geo.C - geo.v * geo.hy, geo.lever, sLever);
-            Sp3ctraHandles::drawNode(g, geo.lever, sLever, 4.0f);
-
-            for (const auto& c : geo.corner)
-                Sp3ctraHandles::drawRing(g, c, sCorner);
-
-            Sp3ctraHandles::drawNode(g, geo.C, sBody);
-
-            // Readout: the handle under the pointer / being dragged; else the
-            // setting edited most recently (box, MIDI…) at its own element.
-            // The dial (anywhere outside the vignette) is not named on hover —
-            // it would label the whole pad.
-            const Handle named = dragging_ != Handle::None ? dragging_
-                               : (hovered_ != Handle::Dial ? hovered_ : Handle::None);
+            // Readout: whichever of the two is under the hand or being dragged.
+            const Handle named = dragging_ != Handle::None ? dragging_ : hovered_;
             if (named != Handle::None)
                 Sp3ctraHandles::drawReadout(g, handleReadout(named), anchorOf(named, geo), plot_);
-            else if (lastActive_ != Param::Count)
-                Sp3ctraHandles::drawReadout(g, paramReadout(lastActive_),
-                                            anchorOf(lastActive_, geo, marks), plot_);
         }
-
-        drawCards(g, geo);
-    }
-
-    /** The parameters without a handle, made visible on the axis. Mirrors
-     *  VideoScrollRenderCore (scrollStep: the stamp is centred on the birth
-     *  line and both zones move AWAY from it, toward it in reverse; buildWarp:
-     *  kCompMax / kFadeRate, aging 0 at the line → 1 at the nearest window
-     *  edge on each side):
-     *   • Thickness — the stamped bar, 1 + t·(z·H − 1) px, as a translucent
-     *     band centred on the birth line;
-     *   • per side with room in the window:
-     *     – Compression: N ticks at EQUAL history intervals — the map
-     *       d + c·d²/S is inverted so they bunch toward the edge as it rises;
-     *     – Fade: a ribbon beside the axis whose alpha IS the dim law
-     *       exp(−10·fade·age) — uniform at 0, dying out fast at 1;
-     *     – Blur: wedges on both band edges, widening with age × blur (the
-     *       horizontal smear);
-     *     – Speed: 1–3 flow chevrons next to the line, pointing away from it
-     *       (toward it when Speed < 0), dim when Speed = 0.
-     *  Each element takes the control colour (+ halo) while its parameter is
-     *  being edited. Everything stays INSIDE the window: a line pushed to an
-     *  edge keeps its indicators on the side that is still visible. Returns
-     *  the anchors for the edit readout. */
-    Marks drawFlowAndAging(juce::Graphics& g, const Geo& geo) const
-    {
-        Marks m;
-        juce::Graphics::ScopedSaveState ss(g);
-        g.reduceClipRegion(geo.win.getSmallestIntegerContainer());
-
-        const float speed  = juce::jlimit(-1.f, 1.f, speed_.value);
-        const float thick  = juce::jlimit( 0.f, 1.f, thick_.value);
-        const float comp01 = juce::jlimit( 0.f, 1.f, (comp_.value - 1.0f) / 63.0f);
-        const float fade01 = juce::jlimit( 0.f, 1.f, fade_.value);
-        const float blur01 = juce::jlimit( 0.f, 1.f, blur_.value);
-        constexpr float kCompMax  = 2.5f;    // = VideoScrollRenderCore::buildWarp
-        constexpr float kFadeRate = 10.0f;
-        constexpr float kBlurPx   = 14.0f;   // wedge width at the window edge, blur = 1
-
-        // Thickness: the stamped bar, centred on the birth line (a 1.5 px
-        // hint while edited at 0 so the element has a place to light up).
-        const float hb = 0.5f * (1.0f + thick * (geo.z * geo.H - 1.0f)) * geo.k;
-        if (hb > 1.5f || lit(Param::Thickness))
-        {
-            const float hbv = juce::jmax(hb, 1.5f);
-            juce::Path bar;
-            bar.startNewSubPath(geo.birth - geo.u * geo.hx - geo.v * hbv);
-            bar.lineTo         (geo.birth + geo.u * geo.hx - geo.v * hbv);
-            bar.lineTo         (geo.birth + geo.u * geo.hx + geo.v * hbv);
-            bar.lineTo         (geo.birth - geo.u * geo.hx + geo.v * hbv);
-            bar.closeSubPath();
-            g.setColour(ink(Param::Thickness, 0.22f));
-            g.fillPath(bar);
-            strokeMark(g, bar, Param::Thickness, 0.5f, 1.0f);
-        }
-        m.thickness = geo.birth + geo.u * geo.hx;
-
-        for (float sgn : { -1.0f, 1.0f })
-        {
-            const auto  dir  = geo.v * sgn;
-            const float room = rayExit(geo.birth, dir, geo.win);   // = the aging span (screen px)
-            if (room < 8.0f) continue;
-            const auto exitP = geo.birth + dir * room;
-
-            // Blur: the band edges smear outward with age.
-            if (blur01 > 0.0f || lit(Param::Blur))
-            {
-                const float wmax = juce::jmax(2.0f, kBlurPx * blur01);
-                for (float su : { -1.0f, 1.0f })
-                {
-                    juce::Path wedge;
-                    wedge.startNewSubPath(geo.birth + geo.u * (su * geo.hx));
-                    wedge.lineTo(exitP + geo.u * (su * geo.hx));
-                    wedge.lineTo(exitP + geo.u * (su * (geo.hx + wmax)));
-                    wedge.closeSubPath();
-                    g.setColour(ink(Param::Blur, 0.2f));
-                    g.fillPath(wedge);
-                }
-                if (! m.hasBlur) { m.blur = exitP + geo.u * (geo.hx + wmax) - dir * 12.0f; m.hasBlur = true; }
-            }
-
-            // Fade: a ribbon beside the axis, alpha = the dim law along the age.
-            {
-                constexpr int   S   = 16;
-                constexpr float off = 8.0f;   // right of the ruler ticks
-                for (int i = 0; i < S; ++i)
-                {
-                    const float a0 = (float) i / (float) S, a1 = (float) (i + 1) / (float) S;
-                    const float alpha = 0.7f * std::exp(-kFadeRate * fade01 * 0.5f * (a0 + a1));
-                    if (alpha < 0.02f) break;
-                    g.setColour(ink(Param::Fade, alpha));
-                    g.drawLine({ geo.birth + dir * (a0 * room) + geo.u * off,
-                                 geo.birth + dir * (a1 * room) + geo.u * off }, 3.0f);
-                }
-                if (! m.hasFade) { m.fade = geo.birth + dir * (room * 0.35f) + geo.u * off; m.hasFade = true; }
-            }
-
-            // Compression: time ruler — N equal history intervals mapped to
-            // the screen through the compression law (closed-form inverse).
-            {
-                constexpr int N = 8;
-                const float c = comp01 * kCompMax;
-                juce::Path ticks;
-                for (int i = 1; i < N; ++i)
-                {
-                    const float gi = (float) i / (float) N * room * (1.0f + c);
-                    const float d  = c > 1.0e-4f
-                        ? (std::sqrt(1.0f + 4.0f * c * gi / room) - 1.0f) * room / (2.0f * c)
-                        : gi;
-                    const auto p = geo.birth + dir * d;
-                    ticks.startNewSubPath(p - geo.u * 4.0f);
-                    ticks.lineTo         (p + geo.u * 4.0f);
-                    if (i == 4 && ! m.hasCompress) { m.compress = p; m.hasCompress = true; }
-                }
-                strokeMark(g, ticks, Param::Compress, 0.6f, 1.0f);
-            }
-
-            // Speed: flow chevrons.
-            int n = speed == 0.0f ? 1 : 1 + (int) std::lround(2.0f * std::abs(speed));
-            n = juce::jmin(n, (int) ((room - 6.0f) / 6.0f));
-            if (n < 1) continue;
-            const auto head = speed < 0.0f ? -dir : dir;
-            juce::Path ch;
-            for (int i = 0; i < n; ++i)
-            {
-                const auto tip = geo.birth + dir * (8.0f + 6.0f * (float) i) + head * 2.5f;
-                ch.startNewSubPath(tip - head * 5.0f - geo.u * 4.0f);
-                ch.lineTo(tip);
-                ch.lineTo(tip - head * 5.0f + geo.u * 4.0f);
-            }
-            strokeMark(g, ch, Param::Speed, speed == 0.0f ? 0.35f : 0.85f, 1.5f);
-            if (! m.hasSpeed) { m.speed = geo.birth + dir * (8.0f + 6.0f * (float) (n - 1)); m.hasSpeed = true; }
-        }
-        return m;
     }
 
     //── Edit glow ─────────────────────────────────────────────────────────────
-    /** 1 → 0 over kGlowMs after a parameter's last change (0 = idle). */
-    float heat(const Bound& b) const noexcept
-    {
-        return (float) juce::jlimit(0.0, 1.0, 1.0 - (nowMs_ - b.editMs) / kGlowMs);
-    }
+    /** 1 → 0 over Sp3ctraTheme::kCtlGlowMs after a parameter's last change
+     *  (0 = idle) — the shared heat, read at the pad's own clock. */
+    float heat(const Bound& b) const noexcept { return b.heat(nowMs_); }
 
     float heatOf(Param p) const noexcept
     {
@@ -514,193 +333,14 @@ public:
 
     void noteEdit(Bound& b)
     {
+        // The stamp itself lives in the binding; the pad only tracks WHICH
+        // setting is lit (its readout, its card, the page's box label).
         nowMs_   = juce::Time::getMillisecondCounterHiRes();
-        b.editMs = nowMs_;
         glowing_ = true;
         if (lastActive_ != b.id)
         {
             lastActive_ = b.id;
             if (onActiveParamChanged) onActiveParamChanged();
-        }
-    }
-
-    /** Distance from `o` along the unit vector `d` to where the ray leaves
-     *  the axis-aligned `r` (0 when `o` is outside or on the facing edge). */
-    static float rayExit(juce::Point<float> o, juce::Point<float> d, juce::Rectangle<float> r)
-    {
-        if (! r.expanded(1.0f).contains(o)) return 0.0f;
-        float t = 1.0e9f;
-        if (d.x >  1.0e-6f) t = juce::jmin(t, (r.getRight()  - o.x) / d.x);
-        if (d.x < -1.0e-6f) t = juce::jmin(t, (r.getX()      - o.x) / d.x);
-        if (d.y >  1.0e-6f) t = juce::jmin(t, (r.getBottom() - o.y) / d.y);
-        if (d.y < -1.0e-6f) t = juce::jmin(t, (r.getY()      - o.y) / d.y);
-        return juce::jmax(0.0f, t);
-    }
-
-    /** Setting cards — glyph · name · value, one row per parameter — in the
-     *  free zone left of the window (only when it fits; a narrow page keeps
-     *  the readouts alone). The edited one is lit in the control colour. */
-    void drawCards(juce::Graphics& g, const Geo& geo) const
-    {
-        constexpr int   kRowH   = 17;
-        constexpr float kCardW  = 176.0f;
-        constexpr float kGlyphW = 30.0f;
-        constexpr float kNameW  = 80.0f;
-        struct Row { Param id; const char* name; };
-        static const Row rows[] = {
-            { Param::Rotation,  "Rotation" },   { Param::Zoom,     "Zoom" },
-            { Param::CenterX,   "Center" },     { Param::LinePos,  "Line Pos" },
-            { Param::Speed,     "Speed" },      { Param::Thickness,"Thickness" },
-            { Param::Compress,  "Compression" },{ Param::Fade,     "Fade" },
-            { Param::Blur,      "Blur" },       { Param::Gamma,    "Gamma" },
-            { Param::Paper,     "Display" },
-        };
-        constexpr int nRows = (int) (sizeof(rows) / sizeof(rows[0]));
-        const float zoneW = geo.win.getX() - plot_.getX() - 8.0f;
-        if (zoneW < kCardW || plot_.getHeight() < (float) (nRows * kRowH + 4)) return;
-
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
-        const float x0 = plot_.getX() + 4.0f;
-        float y = plot_.getCentreY() - 0.5f * (float) (nRows * kRowH);
-        for (const auto& r : rows)
-        {
-            const float h = r.id == Param::CenterX ? juce::jmax(heatOf(Param::CenterX), heatOf(Param::CenterY))
-                                                   : heatOf(r.id);
-            const juce::Rectangle<float> row(x0, y, kCardW, (float) kRowH);
-            if (h > 0.0f)
-            {
-                g.setColour(Sp3ctraHandles::colour().withAlpha(0.14f * h));
-                g.fillRoundedRectangle(row, 3.0f);
-            }
-            const juce::Colour col = accent_.interpolatedWith(Sp3ctraHandles::colour(), h);
-            drawGlyph(g, r.id, juce::Rectangle<float>(x0 + 3.0f, y + 2.0f, kGlyphW - 6.0f, (float) kRowH - 4.0f),
-                      col.withAlpha(0.65f + 0.35f * h));
-            g.setColour(col.withAlpha(0.8f + 0.2f * h));
-            g.drawText(r.name, juce::Rectangle<int>((int) (x0 + kGlyphW), (int) y, (int) kNameW, kRowH),
-                       juce::Justification::centredLeft, false);
-            g.setColour(col.withAlpha(0.55f + 0.45f * h));
-            g.drawText(cardValue(r.id),
-                       juce::Rectangle<int>((int) (x0 + kGlyphW + kNameW), (int) y,
-                                            (int) (kCardW - kGlyphW - kNameW - 4.0f), kRowH),
-                       juce::Justification::centredRight, false);
-            y += (float) kRowH;
-        }
-    }
-
-    /** One small picture of a setting's current value, in `b`. */
-    void drawGlyph(juce::Graphics& g, Param p, juce::Rectangle<float> b, juce::Colour col) const
-    {
-        g.setColour(col);
-        const auto  c = b.getCentre();
-        const float w = b.getWidth(), h = b.getHeight();
-        juce::Path path;
-        auto plotCurve = [&](auto f)   // f : x∈[0,1] → y∈[0,1], drawn bottom-left origin
-        {
-            for (int i = 0; i <= 10; ++i)
-            {
-                const float x = (float) i / 10.0f;
-                const juce::Point<float> pt(b.getX() + x * w, b.getBottom() - juce::jlimit(0.f, 1.f, f(x)) * (h - 1.0f));
-                if (i == 0) path.startNewSubPath(pt); else path.lineTo(pt);
-            }
-            g.strokePath(path, juce::PathStrokeType(1.2f));
-        };
-        switch (p)
-        {
-            case Param::Rotation:
-            {
-                const float r  = 0.5f * h - 0.5f;
-                const float th = juce::degreesToRadians(wrapDeg(rot_.value));
-                g.drawEllipse(c.x - r, c.y - r, 2.0f * r, 2.0f * r, 1.0f);
-                g.drawLine({ c, c + juce::Point<float>(std::sin(th), -std::cos(th)) * r }, 1.5f);
-                break;
-            }
-            case Param::Zoom:
-            {
-                const float t = std::log(clampZoom(zoom_.value) / VideoScrollLimits::kZoomMin)
-                              / std::log(VideoScrollLimits::kZoomMax / VideoScrollLimits::kZoomMin);
-                const float s = 3.0f + (h - 3.0f) * juce::jlimit(0.f, 1.f, t);
-                g.drawRect(juce::Rectangle<float>(s, s).withCentre(c), 1.0f);
-                break;
-            }
-            case Param::CenterX:
-            case Param::CenterY:
-            {
-                g.drawRect(juce::Rectangle<float>(h, h).withCentre(c), 1.0f);
-                const auto d = c + juce::Point<float>(juce::jlimit(-1.f, 1.f, cx_.value),
-                                                      juce::jlimit(-1.f, 1.f, cy_.value)) * (0.5f * h - 1.5f);
-                g.fillEllipse(d.x - 1.8f, d.y - 1.8f, 3.6f, 3.6f);
-                break;
-            }
-            case Param::LinePos:
-            {
-                const auto r = juce::Rectangle<float>(h, h).withCentre(c);
-                g.drawRect(r, 1.0f);
-                const float yy = c.y + juce::jlimit(-1.f, 1.f, line_.value) * (0.5f * h - 1.5f);
-                g.drawLine({ { r.getX(), yy }, { r.getRight(), yy } }, 1.6f);
-                break;
-            }
-            case Param::Speed:
-            {
-                const float sp  = juce::jlimit(-1.f, 1.f, speed_.value);
-                const int   n   = sp == 0.0f ? 1 : 1 + (int) std::lround(2.0f * std::abs(sp));
-                const float dir = sp < 0.0f ? -1.0f : 1.0f;
-                for (int i = 0; i < n; ++i)
-                {
-                    const float x = c.x + dir * 6.0f * ((float) i - 0.5f * (float) (n - 1));
-                    path.startNewSubPath(x - dir * 2.5f, c.y - 4.0f);
-                    path.lineTo         (x + dir * 2.5f, c.y);
-                    path.lineTo         (x - dir * 2.5f, c.y + 4.0f);
-                }
-                g.setColour(col.withMultipliedAlpha(sp == 0.0f ? 0.45f : 1.0f));
-                g.strokePath(path, juce::PathStrokeType(1.4f));
-                break;
-            }
-            case Param::Thickness:
-            {
-                const float t = juce::jlimit(0.f, 1.f, thick_.value);
-                g.fillRect(juce::Rectangle<float>(h, 1.0f + t * (h - 1.0f)).withCentre(c));
-                break;
-            }
-            case Param::Compress:
-            {
-                const float cc = juce::jlimit(0.f, 1.f, (comp_.value - 1.0f) / 63.0f) * 2.5f;
-                plotCurve([cc](float x) { return (x + cc * x * x) / (1.0f + cc); });
-                break;
-            }
-            case Param::Fade:
-            {
-                const float f = juce::jlimit(0.f, 1.f, fade_.value);
-                plotCurve([f](float x) { return std::exp(-10.0f * f * x); });
-                break;
-            }
-            case Param::Blur:
-            {
-                const float bl = juce::jlimit(0.f, 1.f, blur_.value);
-                const float e  = 0.5f + 0.5f * bl * (h - 1.0f);
-                path.startNewSubPath(b.getX(), c.y - 0.5f);
-                path.lineTo(b.getRight(), c.y - e);
-                path.lineTo(b.getRight(), c.y + e);
-                path.lineTo(b.getX(), c.y + 0.5f);
-                path.closeSubPath();
-                g.fillPath(path);
-                break;
-            }
-            case Param::Gamma:
-            {
-                const float ga = juce::jlimit(0.01f, 10.0f, gamma_.value);
-                plotCurve([ga](float x) { return std::pow(x, 1.0f / ga); });
-                break;
-            }
-            case Param::Paper:
-            {
-                const auto r = juce::Rectangle<float>(w * 0.8f, h).withCentre(c);
-                g.setColour(paperColour());
-                g.fillRect(r);
-                g.setColour(col);
-                g.drawRect(r, 1.0f);
-                break;
-            }
-            case Param::Count: break;
         }
     }
 
@@ -734,27 +374,28 @@ public:
 
         dragging_ = h;
         hovered_  = h;
+        if (h != Handle::None)
+            setMouseCursor(Sp3ctraCursors::closedHand());   // now you hold it
         start_    = { geo.C, e.position, rot_.value, zoom_.value, cx_.value, cy_.value, line_.value };
         switch (h)
         {
             case Handle::Body:   cx_.begin(); cy_.begin(); break;
-            case Handle::Corner: zoom_.begin();            break;
-            case Handle::Lever:
-            case Handle::Dial:   rot_.begin();             break;
             case Handle::Birth:  line_.begin();            break;
             case Handle::None:   break;
         }
+        if (h != Handle::None)
+            hold_.arm(e, [this] { holdToType(); });   // long press = type
         repaint();
     }
 
     void mouseDrag(const juce::MouseEvent& e) override
     {
+        if (hold_.fired()) return;            // the entry bubble owns the rest
+        hold_.moved(e);
         if (dragging_ == Handle::None || e.mods.isPopupMenu()) return;
         const Geo geo = computeGeometry();
         if (! geo.valid) return;
-        const auto p  = e.position;
-        const auto d0 = start_.mouse - start_.centre;
-        const auto d  = p - start_.centre;
+        const auto p = e.position;
 
         switch (dragging_)
         {
@@ -765,24 +406,6 @@ public:
                 const float dy = (p.y - start_.mouse.y) / juce::jmax(1.0f, geo.k * geo.H * 0.5f);
                 cx_.setGesture(juce::jlimit(-1.0f, 1.0f, start_.cx + dx));
                 cy_.setGesture(juce::jlimit(-1.0f, 1.0f, start_.cy + dy));
-                break;
-            }
-            case Handle::Corner:
-            {
-                // Uniform zoom about the vignette centre: the corner follows
-                // the pointer's distance from it.
-                const float r0 = juce::jmax(4.0f, d0.getDistanceFromOrigin());
-                const float r  = d.getDistanceFromOrigin();
-                zoom_.setGesture(clampZoom(start_.zoom * r / r0));
-                break;
-            }
-            case Handle::Lever:
-            case Handle::Dial:
-            {
-                // Dial: the angle swept around the vignette centre.
-                if (d.getDistanceFromOrigin() < 2.0f) break;
-                const float a0 = std::atan2(d0.y, d0.x), a1 = std::atan2(d.y, d.x);
-                rot_.setGesture(wrapDeg(start_.rot + juce::radiansToDegrees(a1 - a0)));
                 break;
             }
             case Handle::Birth:
@@ -801,17 +424,16 @@ public:
 
     void mouseUp(const juce::MouseEvent& e) override
     {
+        hold_.release();
         switch (dragging_)
         {
             case Handle::Body:   cx_.end(); cy_.end(); break;
-            case Handle::Corner: zoom_.end();          break;
-            case Handle::Lever:
-            case Handle::Dial:   rot_.end();           break;
             case Handle::Birth:  line_.end();          break;
             case Handle::None:   break;
         }
         dragging_ = Handle::None;
         hovered_  = handleAt(e.position);
+        setMouseCursor(cursorFor(hovered_));                // and it opens again
         repaint();
     }
 
@@ -820,11 +442,8 @@ public:
         if (slot_ < 0 || e.mods.isPopupMenu()) return;
         switch (handleAt(e.position))
         {
-            case Handle::Body:   cx_.reset(); cy_.reset(); break;
-            case Handle::Corner: zoom_.reset();            break;
-            case Handle::Lever:
-            case Handle::Dial:   rot_.reset();             break;
-            case Handle::Birth:  line_.reset();            break;
+            case Handle::Body:   cx_.toDefault(); cy_.toDefault(); break;
+            case Handle::Birth:  line_.toDefault();               break;
             case Handle::None:   break;
         }
     }
@@ -850,7 +469,33 @@ public:
 
 private:
     //==========================================================================
-    enum class Handle { None, Body, Corner, Lever, Dial, Birth };
+    // 2026-09-04 — the pad answers for TWO positions and nothing else: the
+    // generation window (Body) and the birth line. Rotation, zoom and the
+    // flow settings each own a cell in the grid, which draws them properly;
+    // crowding them back onto this axis is what made the view unreadable.
+    enum class Handle { None, Body, Birth };
+
+    //── The UI-wide gesture pair (ui/Sp3ctraGestures.h) ─────────────────────
+    // Double-click resets what is under the pointer (mouseDoubleClick above);
+    // the long press types it.
+    void holdToType()
+    {
+        const Handle h = dragging_;
+        switch (h)
+        {
+            case Handle::Body:   cx_.end(); cy_.end(); break;
+            case Handle::Birth:  line_.end();          break;
+            case Handle::None:   break;
+        }
+        dragging_ = Handle::None;
+        setMouseCursor(cursorFor(hovered_));
+        repaint();
+        Sp3ctraGestures::BoundList l;
+        if (h == Handle::Body)  l = { { "Center X", &cx_ }, { "Center Y", &cy_ } };
+        if (h == Handle::Birth) l = { { "Line", &line_ } };
+        Sp3ctraGestures::openEntry(*this, hold_.anchor(*this), l);
+    }
+    Sp3ctraGestures::Hold hold_;
 
     /** Everything in SCREEN px, derived from the params + the view aspect,
      *  with the same maths as VideoScrollRenderCore (visibleSpans /
@@ -869,7 +514,6 @@ private:
         float hx = 0, hy = 0;                  // vignette half sizes (screen px)
         juce::Point<float> corner[4];
         juce::Point<float> birth;              // birth line centre
-        juce::Point<float> lever;              // rotation handle
     };
 
     Geo computeGeometry() const
@@ -883,7 +527,15 @@ private:
         g.W = (float) (vs.x > 0 && vs.y > 0 ? vs.x : 1);
         g.H = (float) (vs.x > 0 && vs.y > 0 ? vs.y : 1);
 
-        g.k   = juce::jmin(plot_.getWidth() / g.W, plot_.getHeight() / g.H);
+        // The window does NOT fill the plot: kFitMargin leaves a border of
+        // ~24 % of the window on every side, because the vignette's corners,
+        // its lever and the sweep band live OUTSIDE the window as soon as it
+        // is rotated (at 45°, zoom 1, a corner sits 0.207·side beyond the
+        // edge) — without that border they fell outside plot_, which both
+        // clips the drawing and makes handleAt() refuse them. Enlarging the
+        // pad alone never helped: the window is fitted to the plot, so
+        // everything scaled together and the handles stayed just as far out.
+        g.k   = kFitMargin * juce::jmin(plot_.getWidth() / g.W, plot_.getHeight() / g.H);
         g.win = juce::Rectangle<float>(g.W * g.k, g.H * g.k).withCentre(plot_.getCentre());
         g.O   = g.win.getCentre();
 
@@ -917,7 +569,6 @@ private:
                                       oy + (posNorm - 0.5f) * g.z * g.H);
         g.birth = g.C + g.v * ((tb - oy) * g.k);
 
-        g.lever = g.C - g.v * (g.hy + kLeverLen);
         g.valid = true;
         return g;
     }
@@ -950,9 +601,8 @@ private:
         const Geo g = computeGeometry();
         if (! g.valid || ! plot_.contains(p)) return Handle::None;
 
-        if (p.getDistanceFrom(g.lever) <= kHitR) return Handle::Lever;
-        for (const auto& c : g.corner)
-            if (p.getDistanceFrom(c) <= kHitR) return Handle::Corner;
+        // Two positions, one priority: the birth line is seized along its whole
+        // length, then the window by its body. Nothing else answers.
         juce::Point<float> onLine;
         if (juce::Line<float>(g.birth - g.u * g.hx, g.birth + g.u * g.hx)
                 .getDistanceFromPoint(p, onLine) <= kLineHitR)
@@ -962,16 +612,19 @@ private:
         const float a   = rel.x * g.u.x + rel.y * g.u.y;
         const float b   = rel.x * g.v.x + rel.y * g.v.y;
         if (std::abs(a) <= g.hx && std::abs(b) <= g.hy) return Handle::Body;
-        return Handle::Dial;
+        return Handle::None;
     }
 
-    /** Drag > hover > lit (its parameter is being edited from a box / MIDI:
-     *  the handle shows the same hot look as under the pointer) > idle. */
-    Sp3ctraHandles::State stateOf(Handle h) const noexcept
+    /** Drag > hover > edit heat (its parameter is being changed from a box,
+     *  a MIDI CC or automation: the handle fades back down over
+     *  Sp3ctraTheme::kCtlGlowMs like every other control) > idle. */
+    Sp3ctraHandles::Look stateOf(Handle h) const noexcept
     {
-        const bool editing = lit(paramOf(h)) || (h == Handle::Body && lit(Param::CenterY));
+        const float editing = juce::jmax(heatOf(paramOf(h)),
+                                         h == Handle::Body ? heatOf(Param::CenterY) : 0.0f);
         return Sp3ctraHandles::stateOf(dragging_ == h,
-                                       dragging_ == Handle::None && (hovered_ == h || editing));
+                                       dragging_ == Handle::None && hovered_ == h,
+                                       false, editing);
     }
 
     static Param paramOf(Handle h) noexcept
@@ -979,9 +632,6 @@ private:
         switch (h)
         {
             case Handle::Body:   return Param::CenterX;
-            case Handle::Corner: return Param::Zoom;
-            case Handle::Lever:
-            case Handle::Dial:   return Param::Rotation;
             case Handle::Birth:  return Param::LinePos;
             case Handle::None:   break;
         }
@@ -992,11 +642,10 @@ private:
     {
         switch (h)
         {
-            case Handle::Body:   return juce::MouseCursor::DraggingHandCursor;
-            case Handle::Corner: return juce::MouseCursor::CrosshairCursor;
-            case Handle::Lever:  return juce::MouseCursor::PointingHandCursor;
-            case Handle::Birth:  return juce::MouseCursor::CrosshairCursor;
-            case Handle::Dial:
+            // At rest the hand is OPEN over both of them (the charter's
+            // grammar, ui/Sp3ctraControls.h); it closes on the press below.
+            case Handle::Body:
+            case Handle::Birth:  return Sp3ctraCursors::openHand();
             case Handle::None:   break;
         }
         return juce::MouseCursor::NormalCursor;
@@ -1024,9 +673,6 @@ private:
         switch (h)
         {
             case Handle::Body:   return "Center  x " + juce::String(cx_.value, 2) + "  y " + juce::String(cy_.value, 2);
-            case Handle::Corner: return "Zoom  " + juce::String(clampZoom(zoom_.value), 2) + times();
-            case Handle::Lever:
-            case Handle::Dial:   return "Rotation  " + juce::String(wrapDeg(rot_.value), 1) + deg();
             case Handle::Birth:  return "Line Pos  " + juce::String(line_.value, 2);
             case Handle::None:   break;
         }
@@ -1038,33 +684,8 @@ private:
         switch (h)
         {
             case Handle::Body:   return g.C;
-            case Handle::Corner: return g.corner[2];
-            case Handle::Lever:
-            case Handle::Dial:   return g.lever;
             case Handle::Birth:  return g.birth;
             case Handle::None:   break;
-        }
-        return g.C;
-    }
-
-    /** Where a setting's element lives — the edit readout sits there. */
-    juce::Point<float> anchorOf(Param p, const Geo& g, const Marks& m) const
-    {
-        switch (p)
-        {
-            case Param::Rotation:  return g.lever;
-            case Param::Zoom:      return g.corner[2];
-            case Param::CenterX:
-            case Param::CenterY:   return g.C;
-            case Param::LinePos:   return g.birth;
-            case Param::Speed:     return m.hasSpeed    ? m.speed    : g.birth;
-            case Param::Thickness: return m.thickness;
-            case Param::Compress:  return m.hasCompress ? m.compress : g.birth;
-            case Param::Fade:      return m.hasFade     ? m.fade     : g.birth;
-            case Param::Blur:      return m.hasBlur     ? m.blur     : g.corner[1];
-            case Param::Gamma:     return g.win.getTopLeft()    + juce::Point<float>(10.0f,  10.0f);
-            case Param::Paper:     return g.win.getBottomLeft() + juce::Point<float>(10.0f, -10.0f);
-            case Param::Count: break;
         }
         return g.C;
     }
@@ -1079,28 +700,6 @@ private:
         return "#" + paperColour().toDisplayString(false).toUpperCase();
     }
 
-    /** Name + value of a setting (edit readout). */
-    juce::String paramReadout(Param p) const
-    {
-        switch (p)
-        {
-            case Param::Rotation:  return "Rotation  " + juce::String(wrapDeg(rot_.value), 1) + deg();
-            case Param::Zoom:      return "Zoom  " + juce::String(clampZoom(zoom_.value), 2) + times();
-            case Param::CenterX:   return "Center X  " + juce::String(cx_.value, 2);
-            case Param::CenterY:   return "Center Y  " + juce::String(cy_.value, 2);
-            case Param::LinePos:   return "Line Pos  " + juce::String(line_.value, 2);
-            case Param::Speed:     return "Speed  " + juce::String(speed_.value, 2);
-            case Param::Thickness: return "Thickness  " + juce::String(thick_.value, 2);
-            case Param::Compress:  return "Compression  " + juce::String((int) std::lround(comp_.value)) + " fr";
-            case Param::Fade:      return "Fade  " + juce::String(fade_.value, 2);
-            case Param::Blur:      return "Blur  " + juce::String(blur_.value, 2);
-            case Param::Gamma:     return "Gamma  " + juce::String(gamma_.value, 2);
-            case Param::Paper:     return "Display  " + paperHex() + dot() + invertName((int) readRaw("invertMode", 0.f));
-            case Param::Count: break;
-        }
-        return {};
-    }
-
     /** Value column of a card (short form). */
     juce::String cardValue(Param p) const
     {
@@ -1113,7 +712,7 @@ private:
             case Param::LinePos:   return juce::String(line_.value, 2);
             case Param::Speed:     return juce::String(speed_.value, 2);
             case Param::Thickness: return juce::String(thick_.value, 2);
-            case Param::Compress:  return juce::String((int) std::lround(comp_.value)) + " fr";
+            case Param::Compress:  return packText();
             case Param::Fade:      return juce::String(fade_.value, 2);
             case Param::Blur:      return juce::String(blur_.value, 2);
             case Param::Gamma:     return juce::String(gamma_.value, 2);
@@ -1138,10 +737,9 @@ private:
         switch (h)
         {
             case Handle::Body:   list = body; n = 2;   break;
-            case Handle::Corner: single = "zoom";      break;
-            case Handle::Lever:  single = "rotation";  break;
             case Handle::Birth:  single = "linePos";   break;
-            case Handle::Dial:
+            // Off the two handles: every setting of the output, one sub-menu
+            // each — the pad stays the place to learn them in one gesture.
             case Handle::None:   break;
         }
         if (single != nullptr)
@@ -1157,7 +755,7 @@ private:
         {
             ids.add(vsParam(slot_, list[i].suffix));
             juce::PopupMenu sub;
-            MidiLearnPopup::addItems(sub, *midiMap_, ids[i], (i + 1) * MidiLearnPopup::kItemCount);
+            MidiLearnPopup::addItems(sub, *midiMap_, ids[i], MidiLearnPopup::subMenuBase(i));
             menu.addSubMenu(list[i].label, sub);
         }
         MidiMappingEngine& engine = *midiMap_;
@@ -1166,61 +764,57 @@ private:
                            {
                                for (int i = 0; i < ids.size(); ++i)
                                    if (MidiLearnPopup::handle(engine, ids[i], choice,
-                                                              (i + 1) * MidiLearnPopup::kItemCount))
+                                                              MidiLearnPopup::subMenuBase(i)))
                                        return;
                            });
     }
 
     //── Parameter binding ─────────────────────────────────────────────────────
-    struct Bound
+    /** The shared binding (ui/Sp3ctraControls.h: attachment, mirrored value
+     *  and the edit heat stamped by ANY source — handle drag, box, MIDI CC,
+     *  automation, preset) plus which pad element it lights. */
+    struct Bound : Sp3ctraControls::Bound
     {
         Param id { Param::Count };
-        juce::RangedAudioParameter* param = nullptr;
-        std::unique_ptr<juce::ParameterAttachment> attach;
-        float  value  = 0.0f;
-        double editMs = -1.0e12;   // last change (message thread) → edit glow
-        bool   live   = false;     // false during the initial update
-        void begin()             { if (attach) attach->beginGesture(); }
-        void end()               { if (attach) attach->endGesture(); }
-        void setGesture(float v) { if (attach) attach->setValueAsPartOfGesture(v); }
-        void set(float v)        { if (attach) attach->setValueAsCompleteGesture(v); }
-        void reset()
-        {
-            if (attach && param)
-                attach->setValueAsCompleteGesture(param->convertFrom0to1(param->getDefaultValue()));
-        }
+        void set(float v)        { setComplete(v); }
     };
 
     void bind(Bound& b, Param id, const juce::String& paramId)
     {
-        b.id    = id;
-        b.live  = false;
-        b.param = apvts_.getParameter(paramId);
-        jassert(b.param != nullptr);
-        if (b.param == nullptr) return;
-        // Changes from ANY source (handle drag, box, MIDI, preset) land here
-        // on the message thread; only live ones (after the initial update)
-        // light the element.
-        b.attach = std::make_unique<juce::ParameterAttachment>(
-            *b.param, [this, &b](float v)
-            {
-                b.value = v;
-                if (b.live) noteEdit(b);
-                repaint();
-            });
-        b.attach->sendInitialUpdate();
-        b.live = true;
+        b.id = id;
+        // Changes from ANY source land here on the message thread; the
+        // initial update never counts as an edit (Sp3ctraControls::Bound).
+        b.bind(apvts_, paramId, [this, &b](float) { noteEdit(b); repaint(); });
     }
 
-    std::array<Bound*, 16> allBounds() noexcept
+    std::array<Bound*, 19> allBounds() noexcept
     {
         return { &rot_, &zoom_, &cx_, &cy_, &line_, &speed_, &thick_, &comp_, &fade_, &blur_, &gamma_,
+                 &fadeMidX_, &fadeMidY_, &fadeMidFree_,
                  &paper_[0], &paper_[1], &paper_[2], &paper_[3], &paper_[4] };
     }
-    std::array<const Bound*, 16> allBounds() const noexcept
+    std::array<const Bound*, 19> allBounds() const noexcept
     {
         return { &rot_, &zoom_, &cx_, &cy_, &line_, &speed_, &thick_, &comp_, &fade_, &blur_, &gamma_,
+                 &fadeMidX_, &fadeMidY_, &fadeMidFree_,
                  &paper_[0], &paper_[1], &paper_[2], &paper_[3], &paper_[4] };
+    }
+
+    /** The bipolar packing, spoken the way the grid's cell speaks it. */
+    juce::String packText() const
+    {
+        const float v = juce::jlimit(-1.0f, 1.0f, comp_.value);
+        if (std::abs(v) < 0.02f) return "1 : 1";
+        const float k = std::pow(2.0f, std::abs(v) * 2.0f);
+        return (v > 0.0f ? "x" : "/") + juce::String(k, 2);
+    }
+
+    /** The attenuation level at normalised distance `a` — the SAME law the
+     *  renderer dims with (VideoScrollMode.h). */
+    float attenAt(float a) const noexcept
+    {
+        return videoScrollAttenLevel(a, fade_.value, fadeMidX_.value, fadeMidY_.value,
+                                     fadeMidFree_.value > 0.5f);
     }
 
     float readRaw(const char* suffix, float def) const
@@ -1255,9 +849,11 @@ private:
     }
 
     //==========================================================================
+    static constexpr float kFitMargin = 0.68f;   // window / plot — the handle border
     static constexpr float kHitR      = 9.0f;
     static constexpr float kLineHitR  = 6.0f;
-    static constexpr float kLeverLen  = 22.0f;
+    /** How much a ⇧-drag slows the hand down — the grid uses the same. */
+    static constexpr float kFineFactor = 0.12f;
 
     juce::AudioProcessorValueTreeState& apvts_;
     juce::Colour accent_;
@@ -1267,13 +863,17 @@ private:
 
     static constexpr int kPaperN = 5;   // invertMode, colorMode, bgR, bgG, bgB
     Bound rot_, zoom_, cx_, cy_, line_, speed_, thick_, comp_, fade_, blur_, gamma_;
+    // The attenuation law's SHAPE (the grid cell's free middle handle). The
+    // pad reproduces the renderer's geometry exactly — including this curve —
+    // so the aging ribbon cannot drift from what the picture does.
+    Bound fadeMidX_, fadeMidY_, fadeMidFree_;
     Bound paper_[kPaperN];
 
     // Edit glow
     Param  lastActive_ { Param::Count };
     bool   glowing_    { false };
     double nowMs_      { 0.0 };
-    static constexpr double kGlowMs = 1500.0;
+    static constexpr double kGlowMs = Sp3ctraTheme::kCtlGlowMs;
 
     juce::Rectangle<float> frame_, plot_;
     Handle dragging_ { Handle::None };

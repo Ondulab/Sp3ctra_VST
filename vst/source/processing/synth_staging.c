@@ -1,3 +1,4 @@
+#include "utils/pipeline_metrics.h"
 /*
  * synth_staging.c — see synth_staging.h for the contract.
  */
@@ -5,6 +6,7 @@
 #include "image_chain.h"         /* IMAGE_CHAIN_INSERT_OUT_LUXSYNTH */
 #include "config/config_loader.h"
 #include "config_instrument.h"   /* CIS_MAX_PIXELS_NB (LuxSynth line staging) */
+#include <math.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -16,10 +18,55 @@
  * of mixing. RT threads only bump the counter; the message thread drains it
  * (PluginProcessor timer). */
 static volatile uint64_t s_contention_holds = 0;
+static volatile uint64_t s_video_weights = UINT64_MAX;
+
+void synth_staging_set_video_weights(uint64_t packed)
+{
+    __atomic_store_n(&s_video_weights, packed, __ATOMIC_RELEASE);
+}
+
+uint64_t synth_staging_video_weights(void)
+{
+    return __atomic_load_n(&s_video_weights, __ATOMIC_ACQUIRE);
+}
+
+/* A mix change must invalidate cached FFT/spectral output even while the
+ * staged image itself is frozen. Preserve the old generation at unity. */
+static uint32_t video_weight_generation(uint64_t packed, int chain)
+{
+    const uint64_t x = (packed ^ UINT64_MAX) & (UINT64_C(255) << (chain * 8));
+    return (uint32_t)x * 0x9e3779b9u + (uint32_t)(x >> 32) * 0x85ebca77u;
+}
 
 uint64_t synth_staging_contention_holds(void)
 {
     return __atomic_load_n(&s_contention_holds, __ATOMIC_RELAXED);
+}
+
+/* AUDIO MIX per-send meters — see synth_staging_send_level() in the header.
+ * Plain aligned float stores/loads (atomic on every target), no seqlock. */
+static volatile float s_send_level[4][CHAIN_MAX_CHAINS];
+
+float synth_staging_send_level(int engine, int chain_idx)
+{
+    if (engine < 0 || engine > 3 || chain_idx < 0 || chain_idx >= CHAIN_MAX_CHAINS)
+        return 0.0f;
+    return s_send_level[engine][chain_idx];
+}
+
+/* RMS of (v − centre)·scale over n samples — the engine-native energy of a
+ * staged line (LuxWave is bipolar around 0.5, the others unipolar 0..1). */
+static float line_rms(const float* v, int n, float centre, float scale)
+{
+    if (v == NULL || n <= 0)
+        return 0.0f;
+    float acc = 0.0f;
+    for (int i = 0; i < n; ++i)
+    {
+        const float d = (v[i] - centre) * scale;
+        acc += d * d;
+    }
+    return sqrtf(acc / (float) n);
 }
 
 typedef struct {
@@ -90,6 +137,9 @@ void synth_staging_stage_luxstral(int chain_idx, int bank_slot,
     }
     s->active = 1;
     __atomic_fetch_add(&s->seq, 1, __ATOMIC_RELEASE);          /* → even */
+    s_send_level[SYNTH_STAGING_ENGINE_LUXSTRAL][chain_idx] =
+        line_rms(pp->additive.notes, num_notes, 0.0f, 1.0f);
+    pipeline_metric_hit(PIPE_SEND + 0 * 8 + (unsigned)chain_idx);
 }
 
 void synth_staging_set_inactive(int chain_idx)
@@ -100,6 +150,7 @@ void synth_staging_set_inactive(int chain_idx)
     __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
     s->active = 0;
     __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
+    s_send_level[SYNTH_STAGING_ENGINE_LUXSTRAL][chain_idx] = 0.0f;
 }
 
 /* Consistent snapshot of one slot (bounded retries; ~40 KB memcpy).
@@ -134,6 +185,7 @@ int synth_staging_mix_luxstral(const ChainPlan* plan,
                                int max_pixels, int* nb_pixels_out,
                                uint32_t* generation_out)
 {
+    const uint64_t video_weights = synth_staging_video_weights();
     if (plan == NULL || notes_out == NULL || max_notes <= 0)
         return 0;
 
@@ -184,7 +236,8 @@ int synth_staging_mix_luxstral(const ChainPlan* plan,
             &g_sp3ctra_config.luxstral_out[s_mix_snap.bank_slot];
         if (! bank->enabled)
             continue;
-        float w = bank->intensity;
+        gen += video_weight_generation(video_weights, snd->chain_idx);
+        float w = bank->intensity * synth_staging_video_weight(video_weights, snd->chain_idx);
         if (w <= 0.0f)
             continue;
 
@@ -382,6 +435,9 @@ void synth_staging_stage_luxsynth(int chain_idx, int bank_slot,
     memcpy(s->rgb[2], b,    (size_t) nb_pixels);
     s->active = 1;
     __atomic_fetch_add(&s->seq, 1, __ATOMIC_RELEASE);          /* → even */
+    s_send_level[SYNTH_STAGING_ENGINE_LUXSYNTH][chain_idx] =
+        line_rms(line, nb_pixels, 0.0f, 1.0f);
+    pipeline_metric_hit(PIPE_SEND + 1 * 8 + (unsigned)chain_idx);
 }
 
 void synth_staging_luxsynth_set_inactive(int chain_idx)
@@ -392,6 +448,7 @@ void synth_staging_luxsynth_set_inactive(int chain_idx)
     __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
     s->active = 0;
     __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
+    s_send_level[SYNTH_STAGING_ENGINE_LUXSYNTH][chain_idx] = 0.0f;
 }
 
 static int lx_staging_snapshot(const LxSendStaging* s, LxSendStaging* out)
@@ -417,6 +474,7 @@ int synth_staging_mix_luxsynth(const ChainPlan* plan,
                                int max_pixels, int* nb_pixels_out,
                                uint32_t* generation_out)
 {
+    const uint64_t video_weights = synth_staging_video_weights();
     if (plan == NULL || line_out == NULL || max_pixels <= 0)
         return 0;
 
@@ -455,7 +513,8 @@ int synth_staging_mix_luxsynth(const ChainPlan* plan,
         const lux_out_params_t* bank =
             &g_sp3ctra_config.luxsynth_out[s_lx_snap.bank_slot];
         if (! bank->enabled) continue;
-        float w = bank->intensity;
+        gen += video_weight_generation(video_weights, c);
+        float w = bank->intensity * synth_staging_video_weight(video_weights, c);
         if (w <= 0.0f) continue;
 
         const int n = s_lx_snap.nb_pixels < max_pixels ? s_lx_snap.nb_pixels
@@ -544,6 +603,10 @@ void synth_staging_stage_luxwave(int chain_idx, int bank_slot,
     memcpy(s->line, line, (size_t) nb_pixels * sizeof(float));
     s->active = 1;
     __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
+    /* Bipolar around the wavetable midpoint: 0.5 = silence. */
+    s_send_level[SYNTH_STAGING_ENGINE_LUXWAVE][chain_idx] =
+        line_rms(line, nb_pixels, 0.5f, 2.0f);
+    pipeline_metric_hit(PIPE_SEND + 2 * 8 + (unsigned)chain_idx);
 }
 
 void synth_staging_luxwave_set_inactive(int chain_idx)
@@ -554,6 +617,7 @@ void synth_staging_luxwave_set_inactive(int chain_idx)
     __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
     s->active = 0;
     __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
+    s_send_level[SYNTH_STAGING_ENGINE_LUXWAVE][chain_idx] = 0.0f;
 }
 
 /* Tri-state like staging_snapshot: 1 = data, 0 = inactive, -1 = torn (hold). */
@@ -578,6 +642,7 @@ int synth_staging_mix_luxwave(const ChainPlan* plan,
                               float* line_out, int max_pixels,
                               int* nb_pixels_out)
 {
+    const uint64_t video_weights = synth_staging_video_weights();
     if (plan == NULL || line_out == NULL || max_pixels <= 0)
         return 0;
 
@@ -607,7 +672,7 @@ int synth_staging_mix_luxwave(const ChainPlan* plan,
         const lux_out_params_t* bank =
             &g_sp3ctra_config.luxwave_out[s_lw_snap.bank_slot];
         if (! bank->enabled) continue;
-        float w = bank->intensity;
+        float w = bank->intensity * synth_staging_video_weight(video_weights, c);
         if (w < 0.0f) w = 0.0f;
         if (w <= 0.0f) { ++mixed; continue; }   /* silent send still counts */
 
@@ -686,6 +751,9 @@ void synth_staging_stage_luxgrain(int chain_idx, int bank_slot,
     }
     s->active = 1;
     __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
+    s_send_level[SYNTH_STAGING_ENGINE_LUXGRAIN][chain_idx] =
+        line_rms(line, nb_pixels, 0.0f, 1.0f);
+    pipeline_metric_hit(PIPE_SEND + 3 * 8 + (unsigned)chain_idx);
 }
 
 void synth_staging_luxgrain_set_inactive(int chain_idx)
@@ -696,6 +764,7 @@ void synth_staging_luxgrain_set_inactive(int chain_idx)
     __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
     s->active = 0;
     __atomic_fetch_add(&s->seq, 1, __ATOMIC_ACQ_REL);
+    s_send_level[SYNTH_STAGING_ENGINE_LUXGRAIN][chain_idx] = 0.0f;
 }
 
 static int lg_staging_snapshot(const LgSendStaging* s, LgSendStaging* out)
@@ -721,6 +790,7 @@ int synth_staging_mix_luxgrain(const ChainPlan* plan,
                                int max_pixels, int* nb_pixels_out,
                                uint32_t* generation_out)
 {
+    const uint64_t video_weights = synth_staging_video_weights();
     if (plan == NULL || line_out == NULL || max_pixels <= 0)
         return 0;
 
@@ -758,7 +828,8 @@ int synth_staging_mix_luxgrain(const ChainPlan* plan,
         const lux_out_params_t* bank =
             &g_sp3ctra_config.luxgrain_out[s_lg_snap.bank_slot];
         if (! bank->enabled) continue;
-        float w = bank->intensity;
+        gen += video_weight_generation(video_weights, c);
+        float w = bank->intensity * synth_staging_video_weight(video_weights, c);
         if (w <= 0.0f) { ++mixed; continue; }   /* silent send still counts */
 
         const int n = s_lg_snap.nb_pixels < max_pixels ? s_lg_snap.nb_pixels

@@ -1,3 +1,4 @@
+#include "utils/pipeline_metrics.h"
 /*
  * luxsynth_feed.c — see luxsynth_feed.h for the contract.
  */
@@ -19,6 +20,7 @@ static float           s_line[CIS_MAX_PIXELS_NB];
 static uint8_t         s_r[CIS_MAX_PIXELS_NB];
 static uint8_t         s_g[CIS_MAX_PIXELS_NB];
 static uint8_t         s_b[CIS_MAX_PIXELS_NB];
+static float s_window[CIS_MAX_PIXELS_NB];
 static kiss_fft_scalar s_in[CIS_MAX_PIXELS_NB];
 static kiss_fft_cpx    s_out[LX_FEED_MAX_BINS];
 static float           s_mags[LX_FEED_MAX_BINS];
@@ -134,6 +136,8 @@ void luxsynth_feed_tick(const ChainPlan* plan)
         if (s_cfg) kiss_fft_free(s_cfg);
         s_cfg   = kiss_fftr_alloc(N, 0, NULL, NULL);
         s_cfg_n = N;
+        const float step = 2.0f * (float) M_PI / (float) (N > 1 ? N - 1 : 1);
+        for (int i = 0; i < N; ++i) s_window[i] = 0.5f * (1.0f - cosf(step * (float)i));
         memset(s_smoothed, 0, sizeof(s_smoothed));
         for (int k = 0; k < LX_FEED_MAX_BINS; ++k) s_harm[k] = 0.5f;
     }
@@ -141,10 +145,9 @@ void luxsynth_feed_tick(const ChainPlan* plan)
         return;
 
     /* Hann window over the mixed conditioned line. */
-    const float k2pi = 2.0f * (float) M_PI / (float) (N > 1 ? N - 1 : 1);
     for (int i = 0; i < N; ++i)
     {
-        const float hann = 0.5f * (1.0f - cosf(k2pi * (float) i));
+        const float hann = s_window[i];
         s_in[i] = s_line[i] * hann;
     }
     kiss_fftr(s_cfg, s_in, s_out);
@@ -238,4 +241,5 @@ void luxsynth_feed_tick(const ChainPlan* plan)
                                       s_harm + 1,
                                       NULL, NULL,
                                       nDisplay);
+    pipeline_metric_hit(PIPE_FEED + 1);
 }

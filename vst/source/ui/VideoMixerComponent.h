@@ -4,11 +4,13 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
-#include "../midi/MidiLearnAttachment.h"
-#include "Sp3ctraBarSlider.h"
 #include "ChainModel.h"                       // kMaxVideoSlots (solo preview slots)
+#include "VideoMixRadar.h"                    // the toile (spokes + projector)
 #include "../video/VideoScrollRenderCore.h"
 #include "../video/VideoScrollPreviewSource.h"
+#include "../video/VideoTiming.h"
+#include "../video/NativeVideoView.h"
+#include "../video/VideoFramePacer.h"
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -19,24 +21,25 @@
  *
  * For each VideoScroll output instance currently in a chain (processor.
  * activeVideoSlots()) the mixer owns a VideoScrollRenderCore that drains that
- * slot's capture ring and renders its waterfall. A dynamic fader strip (one row
- * per output: level + blend Mix/Add/Screen, bound to videoMix{slot}_*) sits at
- * the top and controls how each is composited into the master image below it.
- * Rows follow the RACK order and are labelled by host chain ("CHAIN n"), not by
- * pool slot — the slot stays a hidden implementation detail of the param bank.
+ * slot's capture ring and renders its waterfall. The RADAR toile (ui/
+ * VideoMixRadar.h) sits at the top: one spoke per output carrying its level
+ * + blend Mix/Add/Screen (videoMix{slot}_*), and the PROJECTOR at the centre
+ * (videoMixFocusX/Y) — the one-hand sweep that dims what it points away
+ * from. The compositor applies the same law (video/VideoMixFocus.h): each
+ * layer is blended at level × weight(spoke, focus). Spokes follow the RACK
+ * order and are labelled by host chain ("CHAIN n"), not by pool slot — the
+ * slot stays a hidden implementation detail of the param bank.
  *
  * Rendering architecture (perf):
  * ─────────────────────────────────────────────────────────────────────────────
  * All heavy work — ring drain, scroll, per-pixel warp, per-layer blend — runs on
  * a dedicated BACKGROUND render thread (Renderer), paced at ~60 fps with a real
  * dt. It publishes each finished composite into a small triple-buffered image
- * pool. The message thread only runs a light presenter timer: it pushes the
- * current view size/visibility to the renderer and, when a NEW frame counter is
- * seen, invalidates the views. paint() just blits the front image — the message
- * thread can therefore never be saturated by the video path, and only COMPLETE
- * frames ever reach the screen (the historical half-painted flicker is gone by
- * construction). Cost also stays bounded as outputs are added: the per-output
- * render resolution is budgeted by 1/sqrt(numOutputs).
+ * pool. On macOS, the render thread submits that image to a hosted Core
+ * Animation layer; the message timer only maintains layout and meters. Other
+ * platforms (or SP3CTRA_VIDEO_NATIVE=0) use the JUCE timer/paint presenter.
+ * Published images stay immutable until all presenters release them. The
+ * per-output render resolution is budgeted by 1/sqrt(numOutputs).
  * ─────────────────────────────────────────────────────────────────────────────
  */
 class VideoMixerComponent : public juce::Component,
@@ -73,9 +76,9 @@ public:
     bool isWindowOpen() const noexcept;
     std::function<void()> onWindowStateChanged;
 
-    int numActiveOutputs() const noexcept { return (int) voices_.size(); }
+    int numActiveOutputs() const noexcept { return (int) activeSlots_.size(); }
 
-    /** A click on a strip row's "CHAIN n" label — the column forwards it to
+    /** A click on a spoke's "CHAIN n" label — the column forwards it to
      *  the editor, which opens that output's chain tab. */
     std::function<void(int slot)> onOutputClicked;
 
@@ -94,9 +97,6 @@ public:
 
     void paint(juce::Graphics& g) override;
     void resized() override;
-    void mouseMove(const juce::MouseEvent& e) override;
-    void mouseExit(const juce::MouseEvent& e) override;
-    void mouseUp(const juce::MouseEvent& e) override;
 
 private:
     //==========================================================================
@@ -127,6 +127,7 @@ private:
          *  whether any view is actually visible. Invisible → the renderer keeps
          *  draining/scrolling (history stays truthful) but skips warp/composite. */
         void setViewState(int w, int h, bool visible) noexcept;
+        void setPresentationTarget(std::shared_ptr<VideoPresentationTarget>);
 
         /** Any thread: blank every waterfall on the next render pass. */
         void requestClear() noexcept { clearGen_.fetch_add(1, std::memory_order_release); }
@@ -140,6 +141,13 @@ private:
         /** Message thread: latest published composite (ref-copy under lock). */
         juce::Image frontImage() const;
 
+        /** Message thread: what the PRESENTER should blit — a view-sized
+         *  downsample of the composite when the two differ enough to matter
+         *  (recording renders to the record aspect, not the window), else the
+         *  composite itself. Doing that rescale here, once and in parallel,
+         *  keeps multi-megapixel resampling out of every paint. */
+        juce::Image presentImage() const;
+
         /** Message thread: which outputs (bit = slot) must ALSO be published
          *  alone — the VIEWPORT pads' thumbnails. 0 = none (no extra work). */
         void setSoloMask(uint32_t mask) noexcept { soloMask_.store(mask, std::memory_order_release); }
@@ -149,6 +157,23 @@ private:
         juce::Image soloImage(int slot) const;
 
         uint32_t frameCounter() const noexcept { return frameCounter_.load(std::memory_order_acquire); }
+
+        /** Message thread: the live-stream envelopes of `slot` (0…1, see
+         *  VideoScrollRenderCore::flowNow/flowPeak/flowPower) — the toile's
+         *  blinker and its printed power. layers_ is only ever reshaped by
+         *  setSlots() on this same thread, so the walk needs no lock; the
+         *  values are atomics. false = the slot is not rendered. */
+        bool flowOf(int slot, float& now, float& peak, float& power) const noexcept;
+
+        /** Message thread: the AUDIO-FOLLOW mask of `slot` (0…1, 1 = not
+         *  masked) — the third factor of the composite's effective level,
+         *  computed and smoothed once by the presenter so the toile and the
+         *  compositor can never disagree (video/VideoMixFollow.h). */
+        void setFollow(int slot, float w) noexcept
+        {
+            if (slot >= 0 && slot < ChainModel::kMaxVideoSlots)
+                follow_[slot].store(juce::jlimit(0.0f, 1.0f, w), std::memory_order_relaxed);
+        }
 
         void run() override;
 
@@ -163,7 +188,8 @@ private:
             juce::Image soloPool[2];
         };
 
-        // One 60 fps pass: tick + warp every layer, composite, publish.
+        // One history tick (~60 Hz); warp/composite at the selected display FPS
+        // or the existing recording cadence. Hidden layers keep live history.
         // Returns true when a new frame was published.
         bool renderFrame(double nowMs, double dtMs);
         // Pick an image of `pool` that nothing else references (a published
@@ -176,6 +202,9 @@ private:
         juce::CriticalSection coreLock_;
         std::vector<Layer> layers_;
 
+        // Audio-follow mask per slot, written by the presenter, read by the
+        // render thread (relaxed: a frame of lag on a visual mask is nothing).
+        std::atomic<float>    follow_[ChainModel::kMaxVideoSlots];
         std::atomic<uint64_t> viewState_ { 0 };   // packed w:24 | h:24 | visible:1
         std::atomic<uint32_t> soloMask_  { 0 };   // bit = slot to publish alone
         std::atomic<int>      clearGen_  { 0 };
@@ -183,11 +212,17 @@ private:
         std::vector<float>    lastSig_;           // mix/draw param signature (change detection)
 
         mutable juce::CriticalSection frontLock_;
+        std::shared_ptr<VideoPresentationTarget> presentationTarget_;
+        std::atomic<bool> targetChanged_ { false };
         juce::Image           front_;
+        juce::Image           previewFront_;      // under frontLock_; invalid = use front_
+        juce::Image           previewPool_[2];    // render thread only
         juce::Image           soloFront_[ChainModel::kMaxVideoSlots];   // under frontLock_
         juce::Image           pool_[3];
         std::atomic<uint32_t> frameCounter_ { 0 };
         bool                  haveFrame_ { false };
+        bool                  pendingFrameChange_ { false };
+        VideoFramePacer       renderPacer_;
 
         // ── Recording (fixed hi-res composite streamed to the recorder) ──────
         std::atomic<bool> recOn_ { false };
@@ -203,57 +238,73 @@ private:
     };
 
     //==========================================================================
+    VideoFramePacer softwarePresentPacer_;
     void timerCallback() override;    // presenter: push view state, repaint on new frames
+    bool updatePresentationTarget(); // message thread; native surface if available
+#if JUCE_MAC
+    std::unique_ptr<NativeVideoView> nativePreview_;
+#endif
     // The view the renderer targets (logical px): the detached window content
     // when open, else the column master area; `visible` = anything on screen.
     void currentView(int& w, int& h, bool& visible) const;
-    void rebuildStrip();
+    void rebuildStrip();                 // push the outputs to the toile
+    // Presenter: read the AUDIO MIX, smooth it, hand the resulting mask to
+    // BOTH the renderer and the toile. One smoother, one truth.
+    void updateFollow(double nowMs);
     void layoutStrip();
-    int  stripHeight() const noexcept;   // fader rows band (0 when no output)
+    int  stripHeight() const noexcept;   // radar band (0 when no output)
+    static int radarBandFor(int height) noexcept;   // its height at this mixer height
     // Draw the latest published composite into `dest` (shared by the column
     // preview and the detached window).
     void renderMaster(juce::Graphics& g, juce::Rectangle<int> dest);
 
-    /** UI-only fader row (the render core lives in Renderer::Layer). */
-    struct Voice
-    {
-        int slot { -1 };
-        juce::String label;   ///< "CHAIN n" (+ a/b… when the chain hosts several)
-        Sp3ctraBarSlider level;
-        juce::ComboBox blend;
-        std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   levelAtt;
-        std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> blendAtt;
-        std::unique_ptr<MidiLearnAttachment> levelLearn, blendLearn;
-    };
+    videotiming::Window paintTiming_;
+    uint32_t timingPresentedFrame_ { 0 };
 
     class MasterView;     // detached-window content (paints the front image)
     class MasterWindow;
 
     Sp3ctraAudioProcessor& processor_;
-    std::vector<std::unique_ptr<Voice>> voices_;
+    std::unique_ptr<VideoMixRadar> radar_;          // the toile (strip band)
     std::vector<std::pair<int, int>> activeSlots_;   // {slot, chainIdx} mirror of
                                                      // the current voices, in chain
                                                      // order (drives change detection
                                                      // incl. cross-chain moves)
+    juce::StringArray labels_;                       // row labels (chain rename can
+                                                     // change them with slots intact)
 
     std::unique_ptr<Renderer> renderer_;
     uint32_t lastPresented_ { 0 };
+    // Measured cost of one master blit (ms, smoothed) and when the last one was
+    // handed out — the presenter's adaptive throttle, see timerCallback.
+    double   lastPaintMs_   { 0.0 };
+    double   lastPresentMs_ { 0.0 };
     // Last requestOutputPreview() time per slot (message thread); the
     // presenter folds the recent ones into the renderer's solo mask.
     double   soloReqMs_[ChainModel::kMaxVideoSlots] { };
 
     juce::Rectangle<int> masterArea_;
     juce::Rectangle<int> stripArea_;
-    int  hoverRow_ { -1 };                              // strip row whose label is hovered
-    int  rowLabelAt(juce::Point<int> p) const noexcept; // label hit-test (−1 = none)
 
     std::unique_ptr<MasterWindow> window_;
 
-    static constexpr int kRowH     = 24;
-    static constexpr int kStripPad = 6;
-    static constexpr int kRowGap   = 4;
-    static constexpr int kLabelW   = 58;   // fits "CHAIN 8b" at kFontBadge bold
-    static constexpr int kFps      = 60;   // presenter poll rate (renderer self-paces)
+    // The radar band takes kRadarShare of the mixer height, clamped: below
+    // kRadarMinH the labels crowd the rim, above kRadarMaxH the master
+    // preview (the point of the column) gives up too much.
+    static constexpr int   kStripPad  = 4;
+    static constexpr int   kRadarMinH = 176;
+    static constexpr int   kRadarMaxH = 240;
+    static constexpr float kRadarShare = 0.32f;
+    static constexpr int   kFps       = 60;   // presenter poll rate (renderer self-paces)
+    int flowTick_ { 0 };                      // flow push at kFps / 2
+
+    // ── Audio-follow state (presenter/message thread only) ──────────────────
+    // Smoothed per-LAYER audio level (index = activeSlots_ order), the arm
+    // edge and the clock the envelope is advanced on.
+    float  followLvl_[ChainModel::kMaxVideoSlots] { };
+    bool   followExempt_[ChainModel::kMaxVideoSlots] { };
+    bool   followArmed_  { false };
+    double lastFollowMs_ { 0.0 };
     static constexpr double kSoloHoldMs = 300.0;   // request lifetime (pads tick at 20 Hz)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(VideoMixerComponent)

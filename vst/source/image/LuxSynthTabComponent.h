@@ -28,6 +28,8 @@
 #include "../ui/ModuleCatalog.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <functional>
+#include <memory>
 #include "../PluginProcessor.h"
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
@@ -269,6 +271,9 @@ public:
     static constexpr int kPreferredH =
         kTopPad + (kLeftColH > kRightColH ? kLeftColH : kRightColH) + kSecPadB;
 
+    /** Content height — fixed: the page has no growing section. */
+    int preferredHeight() const { return kPreferredH; }
+
 private:
     // ── Resolved layout (single source for paint + resized) ─────────────────
     struct Geom
@@ -393,7 +398,7 @@ private:
 
     // OSCILLATORS (left)
     std::unique_ptr<EnvelopeEditorComponent> volEnv;
-    juce::Slider       numOscSlider;
+    Sp3ctraGestureSlider numOscSlider;
 
     // ANALYSIS — blob detection + FFT (right)
     juce::Label    blobThreshLabel, blobMinWidthLabel, blobMergeGapLabel, blobColorSplitLabel;
@@ -404,7 +409,7 @@ private:
 
     // FILTER & LFO (right)
     std::unique_ptr<EnvelopeEditorComponent> fltEnv;
-    juce::Slider       fltCutoffSlider, fltDepthSlider, lfoRateSlider, lfoDepthSlider;
+    Sp3ctraGestureSlider fltCutoffSlider, fltDepthSlider, lfoRateSlider, lfoDepthSlider;
 
     // ── Attachments ───────────────────────────────────────────────────────
     using SldAttach = juce::AudioProcessorValueTreeState::SliderAttachment;

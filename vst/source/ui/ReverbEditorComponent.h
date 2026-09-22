@@ -1,16 +1,21 @@
 /**
  * @file ReverbEditorComponent.h
- * @brief Interactive editor for the LuxReverb tail (Decay / Diffusion / Mix).
+ * @brief Interactive editor for the LuxReverb tail (Decay / Diffusion / Mix
+ *        / Damping + law).
  *
- * Standard module editor (ModuleChrome skeleton): a graphic frame holding the
+ * Standard module editor (ModuleChrome skeleton): a TAIL frame holding the
  * tail response and its draggable handles (Sp3ctraHandles — lime, hover and
- * drag distinct), plus compact numeric boxes in their own row BELOW the
- * frame, all bound to APVTS params (host-automatable, MIDI-mappable).  The
- * x-axis is time (skewed like the Decay param), y is the tail level; the dry
- * impulse sits at t = 0.
+ * drag distinct), a DAMPING frame below it (ReverbDampingEditorComponent —
+ * the tail length along the frequency axis, treble handle + LIN/AIR law
+ * chips), plus compact numeric boxes in their own row BELOW the frames, all
+ * bound to APVTS params (host-automatable, MIDI-mappable).  The TAIL x-axis
+ * is time (skewed like the Decay param), y is the tail level; the dry
+ * impulse sits at t = 0 and the tail fades in a straight line to the pole
+ * at t = Decay (linear in energy = exponential in audio through the synth's
+ * dB law — lux_reverb.h).
  *
  *   • Mix node (left, filled)    → drag vertically → wet level of the tail.
- *   • Decay node (bottom, filled)→ drag horizontally → -60 dB point.
+ *   • Decay node (bottom, filled)→ drag horizontally → where the tail ends.
  *   • Diffusion glow around the curve is set from its numeric box.
  *
  * A faint animated fill shows the LIVE tail energy (read from the slot-0 pool
@@ -25,24 +30,31 @@
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
 #include "ModuleEditorChrome.h"
+#include "Sp3ctraControls.h"
+#include "Sp3ctraGestures.h"
 #include "Sp3ctraHandles.h"
 #include "Sp3ctraBarSlider.h"
+#include "ReverbDampingEditorComponent.h"
 #include "../processing/lux_reverb.h"   // self-manages extern "C" linkage
 
 class ReverbEditorComponent : public juce::Component,
                               private juce::Timer
 {
 public:
-    static constexpr int kGraphH     = 82;   // the graphic frame alone (plot 56 px)
-    // frame + gap + label + box row
-    static constexpr int kPreferredH = kGraphH + ModuleChrome::kBelowFrameH;
+    static constexpr int kGraphH     = 82;   // the TAIL frame alone (plot 56 px)
+    static constexpr int kViewGap    = ModuleChrome::kEditorGap;   // TAIL → DAMPING
+    // TAIL frame + gap + DAMPING frame + gap + label + box row
+    static constexpr int kPreferredH = kGraphH + kViewGap
+                                     + ReverbDampingEditorComponent::kPreferredH
+                                     + ModuleChrome::kBelowFrameH;
 
     ReverbEditorComponent(juce::AudioProcessorValueTreeState& apvtsIn,
                           juce::Colour accentColour)
-        : apvts(apvtsIn), accent(accentColour)
+        : apvts(apvtsIn), accent(accentColour), damping_(apvtsIn, accentColour)
     {
         // Unbound until the owning tab calls setInstance() with the selected
         // instance's bank ids (luxreverb{slot}_*).
+        addAndMakeVisible(damping_);
         setRepaintsOnMouseActivity(true);
         startTimerHz(30);
     }
@@ -51,31 +63,36 @@ public:
 
     /** Optional MIDI-learn wiring — set once (before the first setInstance);
      *  the right-click popups then follow every rebind. */
-    void setMidiMap(MidiMappingEngine* m) noexcept { midiMap_ = m; }
+    void setMidiMap(MidiMappingEngine* m) noexcept { midiMap_ = m; damping_.setMidiMap(m); }
 
     /** (Re)bind the handles/boxes to one instance's bank and point the live
      *  tail overlay at that instance's pool slot. */
     void setInstance(int slot,
                      const juce::String& decayId,
                      const juce::String& diffusionId,
-                     const juce::String& mixId)
+                     const juce::String& mixId,
+                     const juce::String& dampingId,
+                     const juce::String& dampTypeId)
     {
         slot_ = juce::jlimit(0, 7, slot);
         dcy.attach.reset(); dif.attach.reset(); mix.attach.reset();
-        boxDAtt.reset(); boxFAtt.reset(); boxMAtt.reset();
+        boxDAtt.reset(); boxFAtt.reset(); boxMAtt.reset(); boxAAtt.reset();
         bind(dcy, decayId);
         bind(dif, diffusionId);
         bind(mix, mixId);
         initBox(boxD, decayId,     boxDAtt);
         initBox(boxF, diffusionId, boxFAtt);
         initBox(boxM, mixId,       boxMAtt);
-        learnD_.reset(); learnF_.reset(); learnM_.reset();
+        initBox(boxA, dampingId,   boxAAtt);
+        learnD_.reset(); learnF_.reset(); learnM_.reset(); learnA_.reset();
         if (midiMap_ != nullptr)
         {
             learnD_ = std::make_unique<MidiLearnAttachment>(*midiMap_, boxD, decayId);
             learnF_ = std::make_unique<MidiLearnAttachment>(*midiMap_, boxF, diffusionId);
             learnM_ = std::make_unique<MidiLearnAttachment>(*midiMap_, boxM, mixId);
+            learnA_ = std::make_unique<MidiLearnAttachment>(*midiMap_, boxA, dampingId);
         }
+        damping_.setInstance(slot_, decayId, dampingId, dampTypeId);
         repaint();
     }
 
@@ -85,12 +102,14 @@ public:
     void resized() override
     {
         auto area = getLocalBounds();
-        // Controls OUT of the graphic frame — box row below it.
+        // Controls OUT of the graphic frames — box row below them.
         auto row = area.removeFromBottom(ModuleChrome::kBoxRowH);
         area.removeFromBottom(ModuleChrome::kRowGap);
+        damping_.setBounds(area.removeFromBottom(ReverbDampingEditorComponent::kPreferredH));
+        area.removeFromBottom(kViewGap);
         frameRect_ = area.toFloat();
         graphRect_ = ModuleChrome::graphOf(frameRect_);
-        ModuleChrome::layoutBoxRow(row, { &boxD, &boxF, &boxM });
+        ModuleChrome::layoutBoxRow(row, { &boxD, &boxF, &boxM, &boxA });
     }
 
     void paint(juce::Graphics& g) override
@@ -104,7 +123,7 @@ public:
             g.setColour(juce::Colours::white.withAlpha(0.35f));
             g.fillRect(juce::Rectangle<float>(geo.x0 - 1.0f, geo.topY, 2.0f, geo.botY - geo.topY));
 
-            // -60 dB time marker.
+            // End-of-tail marker (t = Decay).
             g.setColour(accent.withAlpha(0.28f));
             const float xd = xForTime(geo, geo.decayS);
             for (float y = geo.topY; y < geo.botY; y += 6.0f)
@@ -152,6 +171,7 @@ public:
         ModuleChrome::drawBoxLabel(g, boxD, accent, "Decay");
         ModuleChrome::drawBoxLabel(g, boxF, accent, "Diffusion");
         ModuleChrome::drawBoxLabel(g, boxM, accent, "Mix");
+        ModuleChrome::drawBoxLabel(g, boxA, accent, "Damping");
     }
 
     //==========================================================================
@@ -172,15 +192,22 @@ public:
 
     void mouseDown(const juce::MouseEvent& e) override
     {
+        if (e.mods.isPopupMenu() || e.getNumberOfClicks() != 1) return;   // 2nd click → mouseDoubleClick
         dragging = handleAt(e.position, computeGeometry());
         hovered  = dragging;
         if (dragging == Handle::Mix)   mix.begin();
         if (dragging == Handle::Decay) dcy.begin();
-        if (dragging != Handle::None) repaint();
+        if (dragging != Handle::None)
+        {
+            hold_.arm(e, [this] { holdToType(); });   // long press = type
+            repaint();
+        }
     }
 
     void mouseDrag(const juce::MouseEvent& e) override
     {
+        if (hold_.fired()) return;            // the entry bubble owns the rest
+        hold_.moved(e);
         const Geometry geo = computeGeometry();
         if (!geo.valid) return;
         if (dragging == Handle::Mix)
@@ -196,15 +223,53 @@ public:
 
     void mouseUp(const juce::MouseEvent& e) override
     {
-        if (dragging == Handle::Mix)   mix.end();
-        if (dragging == Handle::Decay) dcy.end();
+        hold_.release();
+        endGesture(dragging);
         dragging = Handle::None;
         hovered  = handleAt(e.position, computeGeometry());
         repaint();
     }
 
+    /** Double-click = the handle's parameters back to their defaults. */
+    void mouseDoubleClick(const juce::MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu()) return;
+        Sp3ctraGestures::toDefault(boundsOf(handleAt(e.position, computeGeometry())));
+    }
+
 private:
     enum class Handle { None, Mix, Decay };
+
+    //── The UI-wide gesture pair (ui/Sp3ctraGestures.h) ─────────────────────
+    /** What a handle drives: the double-click resets it, the long press
+     *  types it. */
+    Sp3ctraGestures::BoundList boundsOf(Handle h)
+    {
+        switch (h)
+        {
+            case Handle::Mix:   return { { "Mix",   &mix } };
+            case Handle::Decay: return { { "Decay", &dcy } };
+            default:            return {};
+        }
+    }
+
+    void endGesture(Handle h)
+    {
+        if (h == Handle::Mix)   mix.end();
+        if (h == Handle::Decay) dcy.end();
+    }
+
+    /** Long press on a handle: the drag gesture closes, the bubble opens. */
+    void holdToType()
+    {
+        const Handle h = dragging;
+        endGesture(h);
+        dragging = Handle::None;
+        repaint();
+        Sp3ctraGestures::openEntry(*this, hold_.anchor(*this), boundsOf(h));
+    }
+
+    Sp3ctraGestures::Hold hold_;
 
     struct Geometry
     {
@@ -245,7 +310,8 @@ private:
         return kMaxT * std::pow(n, 1.0f / kSkew);
     }
 
-    /* level(t) = mix * 10^(-3t / decay) — the tail response. */
+    /* level(t) = mix · max(0, 1 - t / decay) — the tail response of the
+     * bass edge (the DAMPING view shows how the treble shortens it). */
     juce::Path buildCurve(const Geometry& geo) const
     {
         const int W = juce::jmax(2, (int) (geo.plot.getRight() - geo.x0));
@@ -255,7 +321,7 @@ private:
         {
             const float x = geo.x0 + (float) px;
             const float t = timeForX(geo, x);
-            const float lvl = geo.mixN * std::pow(10.0f, -3.0f * t / geo.decayS);
+            const float lvl = geo.mixN * juce::jmax(0.0f, 1.0f - t / geo.decayS);
             p.lineTo(x, geo.botY - lvl * (geo.botY - geo.topY));
         }
         return p;
@@ -295,7 +361,8 @@ private:
     void drawNode(juce::Graphics& g, juce::Point<float> pt, Handle h) const
     {
         Sp3ctraHandles::drawNode(g, pt,
-            Sp3ctraHandles::stateOf(h == dragging, dragging == Handle::None && h == hovered));
+            Sp3ctraHandles::stateOf(h == dragging, dragging == Handle::None && h == hovered,
+                                    false, handleHeat(h)));
     }
 
     //==========================================================================
@@ -318,24 +385,28 @@ private:
     }
 
     //==========================================================================
-    struct Bound
+    /** Remote-edit heat of the parameter(s) a handle drives — a change from
+     *  the box below, a MIDI CC or automation lights the handle exactly like
+     *  a drag (ui/Sp3ctraControls.h). */
+    float handleHeat(Handle h) const noexcept
     {
-        juce::RangedAudioParameter* param = nullptr;
-        std::unique_ptr<juce::ParameterAttachment> attach;
-        float value = 0.0f;
-        void begin()            { if (attach) attach->beginGesture(); }
-        void end()              { if (attach) attach->endGesture(); }
-        void setGesture(float v){ if (attach) attach->setValueAsPartOfGesture(v); }
-    };
+        switch (h)
+        {
+            case Handle::Mix:   return mix.heat();
+            case Handle::Decay: return dcy.heat();
+            default:            return 0.0f;
+        }
+    }
+
+    /** The shared parameter binding — ui/Sp3ctraControls.h. Besides the
+     *  attachment and the mirrored value it carries the EDIT HEAT: any
+     *  change, from this editor's drag, from the box below, from a MIDI CC
+     *  or from automation, lights the handle that owns it. */
+    using Bound = Sp3ctraControls::Bound;
 
     void bind(Bound& bnd, const juce::String& id)
     {
-        bnd.param = apvts.getParameter(id);
-        jassert(bnd.param != nullptr);
-        if (bnd.param == nullptr) return;
-        bnd.attach = std::make_unique<juce::ParameterAttachment>(
-            *bnd.param, [this, &bnd](float v) { bnd.value = v; repaint(); });
-        bnd.attach->sendInitialUpdate();
+        bnd.bind(apvts, id, [this](float) { repaint(); });
     }
 
     void initBox(Sp3ctraBarSlider& box, const juce::String& id,
@@ -353,10 +424,11 @@ private:
     int slot_ { 0 };   // pool slot of the bound instance (live overlay)
 
     Bound dcy, dif, mix;
-    Sp3ctraBarSlider boxD, boxF, boxM;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> boxDAtt, boxFAtt, boxMAtt;
+    Sp3ctraBarSlider boxD, boxF, boxM, boxA;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> boxDAtt, boxFAtt, boxMAtt, boxAAtt;
     MidiMappingEngine* midiMap_ = nullptr;
-    std::unique_ptr<MidiLearnAttachment> learnD_, learnF_, learnM_;
+    std::unique_ptr<MidiLearnAttachment> learnD_, learnF_, learnM_, learnA_;
+    ReverbDampingEditorComponent damping_;   // DAMPING — Damping + law
 
     juce::Rectangle<float> frameRect_;   // the graphic window (frame only)
     juce::Rectangle<float> graphRect_;   // graph area inside the frame (ModuleChrome::graphOf)

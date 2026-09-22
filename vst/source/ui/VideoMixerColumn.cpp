@@ -1,4 +1,5 @@
 #include "VideoMixerColumn.h"
+#include "Sp3ctraControls.h"
 #include "ModuleCatalog.h"
 #include "../licensing/ActivationDialog.h"
 #include "../Sp3ctraDialog.h"
@@ -19,9 +20,11 @@ void VideoMixerColumn::MiniButton::paintButton(juce::Graphics& g,
               :                bg);
     g.fillRoundedRectangle(b, 3.f);
 
-    const juce::Colour fg = isMouseOver ? juce::Colour(0xffe8eef8)
-                                        : juce::Colour(0xff9aa6ba);
-    g.setColour(fg);
+    // Glyph on the shared control ladder (ui/Sp3ctraControls.h): quiet grey
+    // at rest, THE control colour as soon as the pointer is on it.
+    const auto look = Sp3ctraControls::stateOf(isButtonDown, isMouseOver);
+    g.setColour(look.hot() ? Sp3ctraControls::valueInk(look)
+                           : juce::Colour(0xff9aa6ba));
 
     const auto inner = b.reduced(4.5f);
 

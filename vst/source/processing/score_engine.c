@@ -165,6 +165,7 @@ void score_apply_highpass(double *signal, int num_samples, int sample_rate,
  * normalization. See score_engine.h.
  *-------------------------------------------------------------------------*/
 int score_compute_spectrogram_ex(const double *signal, int total_samples,
+                                 int lead_samples, int region_samples,
                                  int sample_rate, int fft_size,
                                  int fft_pad_size, int align_fft_size,
                                  int normalize_gain, double bins_per_second,
@@ -176,6 +177,10 @@ int score_compute_spectrogram_ex(const double *signal, int total_samples,
     if (fft_pad_size & 1) fft_pad_size++;            /* kiss_fftr needs even */
     if (align_fft_size < fft_size) align_fft_size = fft_size;
     if (bins_per_second < 1.0) bins_per_second = 1.0;
+    if (lead_samples < 0) lead_samples = 0;
+    if (lead_samples >= total_samples) return 2;
+    if (region_samples <= 0 || lead_samples + region_samples > total_samples)
+        region_samples = total_samples - lead_samples;
 
     const int fft_effective_size = fft_pad_size;
     const int num_bins = fft_effective_size / 2 + 1;
@@ -183,11 +188,17 @@ int score_compute_spectrogram_ex(const double *signal, int total_samples,
     int step = (int)((double)sample_rate / bins_per_second);
     if (step < 1) step = 1;
 
-    /* Frames are positioned so their CENTERS coincide with those of the
-     * reference (longest-window) layer: start = w·step + (align − size)/2. */
-    const int center_offset = (align_fft_size - fft_size) / 2;
-    int num_windows = (total_samples - align_fft_size) / step + 1;
-    if (num_windows <= 0) return 2;   /* signal too short for the FFT window */
+    /* Column w is CENTERED on region-relative time w·step: start = lead +
+     * w·step − size/2 once the (align − size)/2 layer alignment is folded in.
+     * A sound therefore prints at the x position where it sits in the audio;
+     * the window tails read the surrounding context, or 0 past the buffer
+     * (file edges). Columns cover the WHOLE region — the old layout drew each
+     * window at its left edge (everything printed half a window early, the
+     * opening note faded under the taper) and stopped a full window short of
+     * the end. */
+    const int center_offset = (align_fft_size - fft_size) / 2 - align_fft_size / 2;
+    int num_windows = (region_samples + step - 1) / step;
+    if (num_windows <= 0) return 2;   /* empty region */
 
     double freq_resolution = (double)sample_rate / (double)fft_effective_size;
 
@@ -234,11 +245,14 @@ int score_compute_spectrogram_ex(const double *signal, int total_samples,
 
     for (int w = 0; w < num_windows; w++)
     {
-        int start = w * step + center_offset;
+        int start = lead_samples + w * step + center_offset;
 
         /* Copy frame (double), then window in double for precision. */
         for (int i = 0; i < fft_size; i++)
-            win[i] = (start + i < total_samples) ? signal[start + i] : 0.0;
+        {
+            int idx = start + i;
+            win[i] = (idx >= 0 && idx < total_samples) ? signal[idx] : 0.0;
+        }
 
         score_apply_blackman_harris_window(win, fft_size);
 
@@ -419,14 +433,15 @@ double score_choose_base_window_seconds(const double *signal, int total_samples,
     return best_sec;
 }
 
-/* Legacy single-layer entry — exact historical behaviour. */
+/* Legacy single-layer entry — whole buffer, no context. */
 int score_compute_spectrogram(const double *signal, int total_samples,
                               int sample_rate, int fft_size, double bins_per_second,
                               double min_freq, double max_freq,
                               ScoreSpectrogramData *out)
 {
-    return score_compute_spectrogram_ex(signal, total_samples, sample_rate,
-                                        fft_size, SCORE_FFT_EFFECTIVE_SIZE,
+    return score_compute_spectrogram_ex(signal, total_samples, 0, total_samples,
+                                        sample_rate, fft_size,
+                                        SCORE_FFT_EFFECTIVE_SIZE,
                                         fft_size, 0, bins_per_second,
                                         min_freq, max_freq, out);
 }

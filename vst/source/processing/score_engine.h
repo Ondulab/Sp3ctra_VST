@@ -147,22 +147,33 @@ int score_compute_spectrogram(const double *signal, int total_samples,
 /*-----------------------------------------------------------------------------
  * Extended STFT for multi-resolution layers.
  *
+ *   lead_samples    : samples of CONTEXT present in `signal` BEFORE the region
+ *                     being printed (0 = the buffer starts at the region).
+ *   region_samples  : the printed span; time columns cover exactly it
+ *                     (num_windows = ceil(region / step)). Column w is
+ *                     CENTERED on region-relative time w·step, so a sound
+ *                     prints at the x position where it sits in the audio and
+ *                     the first/last notes keep their full window weight. The
+ *                     window tails read the surrounding context, or 0 past
+ *                     the buffer (file edges). ≤ 0 ⇒ everything after lead.
  *   fft_pad_size    : zero-padded FFT length (even, ≥ fft_size). Bin spacing =
  *                     sample_rate / fft_pad_size. The legacy path uses
  *                     SCORE_FFT_EFFECTIVE_SIZE; shorter layers can use a
  *                     smaller pad to keep memory bounded.
  *   align_fft_size  : window CENTERS are aligned to those of a reference layer
- *                     with this window size (≥ fft_size): each frame starts at
- *                     w·step + (align − fft_size)/2 and num_windows is computed
- *                     from align. Pass align == fft_size for the legacy layout.
+ *                     with this window size (≥ fft_size), so every layer's
+ *                     column w describes the same instant. Pass align ==
+ *                     fft_size for a single layer.
  *   normalize_gain  : 1 → divide magnitudes by the window's coherent gain
  *                     (Σ window[i]) so sinusoid levels are directly comparable
  *                     ACROSS layers with different window sizes. 0 → raw
  *                     magnitudes (legacy single-layer behaviour).
  *
- * score_compute_spectrogram() ≡ _ex(..., SCORE_FFT_EFFECTIVE_SIZE, fft_size, 0).
+ * score_compute_spectrogram() ≡ _ex(..., 0, total, ..., SCORE_FFT_EFFECTIVE_SIZE,
+ * fft_size, 0, ...).
  *---------------------------------------------------------------------------*/
 int score_compute_spectrogram_ex(const double *signal, int total_samples,
+                                 int lead_samples, int region_samples,
                                  int sample_rate, int fft_size,
                                  int fft_pad_size, int align_fft_size,
                                  int normalize_gain, double bins_per_second,

@@ -8,7 +8,7 @@
  *
  * RT safety contract (enforced throughout):
  *   - processMidi() runs on the audio thread → atomics ONLY, no alloc, no lock, no I/O
- *   - the producer hooks run on udpThread (Non-RT) → alloc allowed on first use
+ *   - record storage is prepared before REC publication, outside producer hooks
  *   - FramePlayerThread runs Non-RT → alloc/lock/I/O allowed
  *
  */
@@ -212,17 +212,29 @@ struct FrameSlot
 
     bool isAllocated() const noexcept { return frames != nullptr; }
 
-    /** Lazy allocation — Non-RT only. Called at first NoteOn REC. */
-    void allocate()
+    /** Non-RT. Preserve an existing take when preparing space for overdub. */
+    void reserve(int requiredCapacity, std::unique_ptr<CapturedFrame[]> replacement = {})
     {
-        if (!frames)
-        {
-            frames   = std::make_unique<CapturedFrame[]>(
-                           LuxSamplerConstants::MAX_FRAMES_PER_SLOT);
-            capacity = LuxSamplerConstants::MAX_FRAMES_PER_SLOT;
+        requiredCapacity = juce::jlimit(1, LuxSamplerConstants::MAX_FRAMES_PER_SLOT, requiredCapacity);
+        if (capacity >= requiredCapacity) return;
+        if (!replacement) replacement = std::make_unique<CapturedFrame[]>(requiredCapacity);
+        if (frames && frame_count > 0)
+            std::copy_n(frames.get(), frame_count, replacement.get());
+        frames = std::move(replacement);
+        capacity = requiredCapacity;
+    }
+
+    /** Non-RT replacement: imported takes use their actual frame count. */
+    void allocate(int requiredCapacity)
+    {
+        requiredCapacity = juce::jlimit(1, LuxSamplerConstants::MAX_FRAMES_PER_SLOT, requiredCapacity);
+        if (capacity != requiredCapacity) {
+            auto replacement = std::make_unique<CapturedFrame[]>(requiredCapacity);
+            frames = std::move(replacement);
+            capacity = requiredCapacity;
         }
         frame_count = 0;
-        play_head   = 0;
+        play_head = 0;
         duration_us = 0;
         has_content = false;
     }

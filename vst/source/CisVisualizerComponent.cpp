@@ -494,7 +494,7 @@ void CisVisualizerComponent::paintSourceLabel(
      || source == VisualizerMode::SPCTR_COLOR
      || source == VisualizerMode::SPCTR_BLOB)
         label += spctrViewChain_ >= 0
-                 ? " - CHAIN " + juce::String(spctrViewChain_ + 1)
+                 ? " - " + processor.chainDisplayName(spctrViewChain_)
                  : " - MIX";
 
     // Semi-transparent pill badge — top-left corner
@@ -547,13 +547,14 @@ void CisVisualizerComponent::resized() {}
 //==============================================================================
 void CisVisualizerComponent::timerCallback()
 {
+    if (!isShowing()) return;
     updateCisData();
-
-    // Always run FFT + feed spectral data to the LuxSynth engine, regardless
-    // of which visualizer tab is active.  Without this, the engine only receives
-    // spectral data when the user is on the FFT Color view, causing silence on
-    // all other tabs.
-    computeFftMagnitudes();
+    // Engine feeds are independent of this view; only visible FFT panels need it.
+    for (const auto& panel : panels_)
+        if (panel.mode == VisualizerMode::SYNTH_FFT_COLOR) {
+            computeFftMagnitudes();
+            break;
+        }
 
     repaint();
 }
@@ -2081,6 +2082,10 @@ void CisVisualizerComponent::computeFftMagnitudes()
         }
         fftCfg_  = static_cast<void*>(kiss_fftr_alloc(N, 0, nullptr, nullptr));
         fftSize_ = N;
+        fftWindow_.resize(static_cast<size_t>(N));
+        const float step = 2.0f * static_cast<float>(M_PI) / static_cast<float>(juce::jmax(1, N - 1));
+        for (int i = 0; i < N; ++i)
+            fftWindow_[static_cast<size_t>(i)] = 0.5f * (1.0f - std::cos(step * static_cast<float>(i)));
         fftMagnitudes_.assign(static_cast<size_t>(nBins), 0.0f);
         fftMagnitudesSmoothed_.assign(static_cast<size_t>(nBins), 0.0f);
         fftHarmonicity_.assign(static_cast<size_t>(nBins), 0.5f);
@@ -2132,11 +2137,9 @@ void CisVisualizerComponent::computeFftMagnitudes()
     if (kChain2Freeze == 0)   // PLAY
     {
     // ── Hann window ───────────────────────────────────────────────────────────
-    const float kTwoPiOverN =
-        2.0f * static_cast<float>(M_PI) / static_cast<float>(juce::jmax(1, N - 1));
     for (int i = 0; i < N; ++i)
     {
-        const float hann = 0.5f * (1.0f - std::cos(kTwoPiOverN * static_cast<float>(i)));
+        const float hann = fftWindow_[static_cast<size_t>(i)];
         inBuf[static_cast<size_t>(i)] =
             (static_cast<float>(lxFftGray_[static_cast<size_t>(i)]) / 255.0f) * hann;
     }
@@ -2227,46 +2230,7 @@ void CisVisualizerComponent::computeFftMagnitudes()
     // HOLD (1): leave fftMagnitudesSmoothed_ / fftHarmonicity_ at their last
     // PLAY values so the frozen timbre keeps sounding while MIDI notes play.
 
-    // ========================================================================
-    // M4/D2 — the spectral ENGINE feed now lives in the core
-    // (processing/luxsynth_feed.c, audio thread): it mixes the staged
-    // "→ LUXSYNTH" sends and pushes the FFT even with the editor closed.
-    // The FFT computed above is DISPLAY-ONLY (this view). Only the engine
-    // CONFIG sync remains here (UI → engine, non-RT, ~30 fps).
-    // ========================================================================
-    if (luxsynth_are_buffers_ready() && nDisplay > 0)
-    {
-        // ── Sync engine config from APVTS (non-RT, ~30 fps) ──────────────────
-        auto& apvts = processor.getAPVTS();
-        LuxSynthConfig cfg;
-        cfg.attack_ms            = apvts.getRawParameterValue("luxsynthAttackMs")->load();
-        cfg.decay_ms             = apvts.getRawParameterValue("luxsynthDecayMs")->load();
-        cfg.sustain_level        = apvts.getRawParameterValue("luxsynthSustainLevel")->load();
-        cfg.release_ms           = apvts.getRawParameterValue("luxsynthReleaseMs")->load();
-        cfg.attack_curve         = apvts.getRawParameterValue("luxsynthAttackCurve")->load();
-        cfg.decay_curve          = apvts.getRawParameterValue("luxsynthDecayCurve")->load();
-        cfg.release_curve        = apvts.getRawParameterValue("luxsynthReleaseCurve")->load();
-        cfg.filter_attack_ms     = apvts.getRawParameterValue("luxsynthFilterAttackMs")->load();
-        cfg.filter_decay_ms      = apvts.getRawParameterValue("luxsynthFilterDecayMs")->load();
-        cfg.filter_sustain       = apvts.getRawParameterValue("luxsynthFilterSustain")->load();
-        cfg.filter_release_ms    = apvts.getRawParameterValue("luxsynthFilterReleaseMs")->load();
-        cfg.filter_attack_curve  = apvts.getRawParameterValue("luxsynthFilterAttackCurve")->load();
-        cfg.filter_decay_curve   = apvts.getRawParameterValue("luxsynthFilterDecayCurve")->load();
-        cfg.filter_release_curve = apvts.getRawParameterValue("luxsynthFilterReleaseCurve")->load();
-        cfg.filter_cutoff        = apvts.getRawParameterValue("luxsynthFilterCutoff")->load();
-        cfg.filter_env_depth     = apvts.getRawParameterValue("luxsynthFilterEnvDepth")->load();
-        cfg.lfo_rate_hz          = apvts.getRawParameterValue("luxsynthLfoRate")->load();
-        cfg.lfo_depth_semitones  = apvts.getRawParameterValue("luxsynthLfoDepth")->load();
-        cfg.num_oscillators      = static_cast<int>(
-            apvts.getRawParameterValue("luxsynthNumOscillators")->load());
-        cfg.master_volume        = 0.20f; // legacy default — attenuate additive sum before hard clip
-        cfg.sample_rate          = g_luxsynth_engine.sample_rate;
-        cfg.buffer_size          = static_cast<int>(
-            g_luxsynth_engine.sample_rate > 0 ? g_luxsynth_engine.sample_rate / 30.0f : 512);
-        cfg.enabled              = apvts.getRawParameterValue("luxsynthEnabled")->load() > 0.5f;
 
-        luxsynth_engine_set_config(&g_luxsynth_engine, &cfg);
-    }
 }
 
 //==============================================================================
@@ -2286,7 +2250,7 @@ void CisVisualizerComponent::paintFftColorMode(juce::Graphics& g, int W, int H)
     g.fillAll(juce::Colour(0xff080808));
     if (cisPixelsCount == 0 || localDataGray.empty()) return;
 
-    computeFftMagnitudes();
+    // The timer owns FFT computation; repaint reuses its cached spectrum.
 
     const int nBins = static_cast<int>(fftMagnitudesSmoothed_.size());
     if (nBins < 2 || fftNumHarmonics_ < 1) return;

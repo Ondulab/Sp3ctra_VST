@@ -127,11 +127,12 @@ void MediaSourcePage::PreviewComponent::dragTo(const juce::MouseEvent& e,
     repaint();
 }
 
-void MediaSourcePage::PreviewComponent::mouseDown(const juce::MouseEvent& e)
+MediaSourcePage::PreviewComponent::DragTarget
+MediaSourcePage::PreviewComponent::targetAt(const juce::MouseEvent& e) const
 {
-    // A click near a scan bound grabs THAT bound; the LINE cursor keeps
+    // A press near a scan bound grabs THAT bound; the LINE cursor keeps
     // priority when it sits closer (it is the primary control).
-    drag_ = DragTarget::Line;
+    DragTarget t = DragTarget::Line;
     const auto area = imageArea();
     if (scanStartFrac >= 0.0f && scanEndFrac >= 0.0f && area.getHeight() > 0.0f)
     {
@@ -140,15 +141,71 @@ void MediaSourcePage::PreviewComponent::mouseDown(const juce::MouseEvent& e)
         const float dS = std::abs(e.position.y - (area.getY() + scanStartFrac * area.getHeight()));
         const float dE = std::abs(e.position.y - (area.getY() + scanEndFrac   * area.getHeight()));
         if (dS <= grab && dS <= dE && dS < dL)
-            drag_ = DragTarget::ScanStart;
+            t = DragTarget::ScanStart;
         else if (dE <= grab && dE < dL)
-            drag_ = DragTarget::ScanEnd;
+            t = DragTarget::ScanEnd;
     }
-    dragTo(e, true, false);
+    return t;
 }
 
-void MediaSourcePage::PreviewComponent::mouseDrag(const juce::MouseEvent& e) { dragTo(e, false, false); }
-void MediaSourcePage::PreviewComponent::mouseUp  (const juce::MouseEvent& e) { dragTo(e, false, true);  }
+juce::RangedAudioParameter* MediaSourcePage::PreviewComponent::paramFor(DragTarget t) const
+{
+    auto& apvts = owner.processor.getAPVTS();
+    switch (t)
+    {
+        case DragTarget::Line:      return apvts.getParameter(owner.lineParamId());
+        case DragTarget::ScanStart: return owner.kind == Kind::Image
+                                         ? apvts.getParameter(imgSrcParam(owner.slot_, "ScanStart")) : nullptr;
+        case DragTarget::ScanEnd:   return owner.kind == Kind::Image
+                                         ? apvts.getParameter(imgSrcParam(owner.slot_, "ScanEnd")) : nullptr;
+    }
+    return nullptr;
+}
+
+void MediaSourcePage::PreviewComponent::mouseDown(const juce::MouseEvent& e)
+{
+    if (e.mods.isPopupMenu() || e.getNumberOfClicks() != 1) return;   // 2nd click → mouseDoubleClick
+    drag_ = targetAt(e);
+    dragTo(e, true, false);
+    hold_.arm(e, [this] { holdToType(); });   // long press = type
+}
+
+void MediaSourcePage::PreviewComponent::mouseDrag(const juce::MouseEvent& e)
+{
+    if (hold_.fired()) return;            // the entry bubble owns the rest
+    hold_.moved(e);
+    dragTo(e, false, false);
+}
+
+void MediaSourcePage::PreviewComponent::mouseUp(const juce::MouseEvent& e)
+{
+    if (hold_.release()) return;          // the gesture already closed when the hold fired
+    dragTo(e, false, true);
+}
+
+// Double-click = the bound under the pointer back to its declared default.
+void MediaSourcePage::PreviewComponent::mouseDoubleClick(const juce::MouseEvent& e)
+{
+    if (e.mods.isPopupMenu()) return;
+    if (auto* p = paramFor(targetAt(e)))
+    {
+        p->beginChangeGesture();
+        p->setValueNotifyingHost(p->getDefaultValue());
+        p->endChangeGesture();
+    }
+}
+
+// Long press = type the value of the bound being held.
+void MediaSourcePage::PreviewComponent::holdToType()
+{
+    auto* p = paramFor(drag_);
+    if (p == nullptr) return;
+    p->endChangeGesture();                // closes the drag opened on the press
+    const char* label = drag_ == DragTarget::Line      ? "Line"
+                      : drag_ == DragTarget::ScanStart ? "Scan start" : "Scan end";
+    Sp3ctraGestures::openEntry(*this, hold_.anchor(*this),
+                               { Sp3ctraGestures::fieldOf(label, *p) });
+}
 
 //==============================================================================
 // MediaSourcePage
@@ -251,7 +308,7 @@ MediaSourcePage::MediaSourcePage(Sp3ctraAudioProcessor& p, Kind k)
 
         positionSlider.setRange(0.0, 1.0, 0.0001);
         positionSlider.setTextBoxStyle(juce::Slider::NoTextBox, true, 0, 0);
-        positionSlider.setCycleEnabled(false);   // scrubber: double-click jumps nowhere
+        positionSlider.setEditGesturesEnabled(false);   // scrubber: no reset/editor, click & drag = seek
         positionSlider.onDragStart = [this] { scrubbing_ = true; };
         positionSlider.onDragEnd   = [this] { scrubbing_ = false; };
         positionSlider.onValueChange = [this]

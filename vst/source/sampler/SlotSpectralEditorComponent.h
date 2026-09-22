@@ -3,6 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_graphics/juce_graphics.h>
 #include "../luxsampler/LuxSampler.h"
+#include "../ui/Sp3ctraGestures.h"
 
 class Sp3ctraAudioProcessor;
 
@@ -94,6 +95,13 @@ private:
     juce::Point<float> fadeEndPoint(bool in) const;
     juce::Point<float> fadeMidPoint(bool in) const;
     void showFadeTypeMenu(bool in);
+
+    // The UI-wide gesture pair (ui/Sp3ctraGestures.h): double-click = the
+    // handle back to its default, long press = type it (crop bars, fade
+    // lengths, fade curve power).
+    void resetHandle(Mode m);
+    void holdToType();
+    Sp3ctraGestures::Hold hold_;
 
     // Rotation arrows (top-centre of the fade strip) — visible only when the
     // bank was loaded from an image (visibility driven by the timer).

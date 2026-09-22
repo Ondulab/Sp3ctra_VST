@@ -14,6 +14,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../UITheme.h"
+#include "Sp3ctraControls.h"
 #include "ModuleCatalog.h"
 #include <algorithm>
 #include <vector>
@@ -117,13 +118,19 @@ private:
         void paint(juce::Graphics& g) override
         {
             auto b = getLocalBounds().toFloat().reduced(1.5f);
-            g.setColour(isMouseOver() ? colour.withAlpha(0.26f) : colour.withAlpha(0.15f));
+            // A chip is grabbable: the interaction ladder (ui/Sp3ctraControls.h)
+            // decides how loud it is, its own MODULE colour decides which hue —
+            // calm at rest, full colour + outline under the pointer.
+            const auto look = Sp3ctraControls::stateOf(isMouseButtonDown(), isMouseOver());
+            const auto ink  = Sp3ctraControls::inkOf(look, colour);
+            const float lit = Sp3ctraControls::inkAlpha(look);
+            g.setColour(colour.withAlpha(Sp3ctraControls::fillAlpha(look) * 0.75f));
             g.fillRoundedRectangle(b, 4.f);
-            g.setColour(colour.withAlpha(isMouseOver() ? 1.0f : 0.75f));
-            g.drawRoundedRectangle(b, 4.f, 1.f);
+            g.setColour(ink.line);
+            g.drawRoundedRectangle(b, 4.f, ink.lineW);
 
             // grip dots (drag affordance)
-            g.setColour(colour.withAlpha(0.55f));
+            g.setColour(colour.withAlpha(0.55f * lit));
             const float gx = b.getRight() - 9.f;
             for (int i = 0; i < 3; ++i)
             {
@@ -140,7 +147,7 @@ private:
                 const float icoW = 12.f, icoH = 11.f;
                 const juce::Rectangle<float> iconR(b.getX() + 5.f, b.getCentreY() - icoH * 0.5f,
                                                    icoW, icoH);
-                ModuleIcons::drawMidiKeyboard(g, iconR, colour.withAlpha(isMouseOver() ? 0.90f : 0.62f));
+                ModuleIcons::drawMidiKeyboard(g, iconR, colour.withAlpha(0.62f * lit + 0.28f * look.edit()));
                 textArea = textArea.withLeft(iconR.getRight() + 5.f);
             }
             else if (moduleIsFx(type))
@@ -148,7 +155,7 @@ private:
                 const float icoW = 14.f, icoH = 12.f;
                 const juce::Rectangle<float> iconR(b.getX() + 5.f, b.getCentreY() - icoH * 0.5f,
                                                    icoW, icoH);
-                ModuleIcons::drawFxBadge(g, iconR, colour.withAlpha(isMouseOver() ? 0.90f : 0.62f));
+                ModuleIcons::drawFxBadge(g, iconR, colour.withAlpha(0.62f * lit + 0.28f * look.edit()));
                 textArea = textArea.withLeft(iconR.getRight() + 5.f);
             }
 

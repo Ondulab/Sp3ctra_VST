@@ -12,6 +12,7 @@
 #define RT_PROFILER_H
 
 #include <stdint.h>
+#include "rt_block_metrics.h"
 #include <stdatomic.h>
 #include <pthread.h>
 #include <sys/time.h>
@@ -65,9 +66,9 @@ typedef struct {
  */
 typedef struct {
     /* Audio callback metrics */
-    uint64_t callback_count;
-    uint64_t total_callback_time_us;
-    uint64_t max_callback_time_us;
+    atomic_uint_fast64_t callback_count;
+    atomic_uint_fast64_t total_callback_time_us;
+    atomic_uint_fast64_t max_callback_time_us;
     uint64_t callback_budget_us;  /* Maximum allowed time per callback */
     
     /* Underrun tracking (atomic for thread safety) */
@@ -77,23 +78,25 @@ typedef struct {
     atomic_uint_fast64_t buffer_miss_luxstral;      /* ready=0, silence output */
     atomic_uint_fast64_t buffer_miss_luxsynth;
     atomic_uint_fast64_t buffer_miss_luxwave;
-    /* Stale-buffer re-output: producer is mid-write, consumer re-outputs last frame */
-    atomic_uint_fast64_t buffer_stale_luxstral;     /* "SAME DATA" re-output count */
+    /* Producer starvation: no new block; consumer conceals the missing samples */
+    atomic_uint_fast64_t buffer_stale_luxstral;     /* starved callback count */
     
     /* Mutex contention tracking */
-    uint64_t mutex_lock_attempts;
-    uint64_t mutex_contentions;      /* Times trylock failed */
-    uint64_t mutex_total_wait_us;
-    uint64_t mutex_max_wait_us;
+    atomic_uint_fast64_t mutex_lock_attempts;
+    atomic_uint_fast64_t mutex_contentions;      /* Times trylock failed */
+    atomic_uint_fast64_t mutex_total_wait_us;
+    atomic_uint_fast64_t mutex_max_wait_us;
     
     /* Configuration */
     int sample_rate;
     int buffer_size;
-    int enabled;  /* 0 = disabled, 1 = enabled */
+    atomic_int enabled;  /* 0 = disabled, 1 = enabled */
     uint64_t report_interval_callbacks;  /* summary cadence, ~10 s of callbacks */
     
     /* Timing helper */
-    struct timeval callback_start_time;
+    uint64_t callback_start_ns;
+    uint64_t actual_callback_budget_ns; /* audio writer only */
+    RTBlockMetrics blocks;
     
     /* Thread performance tracking */
     atomic_uint_fast64_t audio_thread_total_time_us;
@@ -111,7 +114,7 @@ typedef struct {
      * latency being reported. */
     atomic_int           report_due;                  /* periodic stats report pending */
     atomic_uint_fast64_t critical_latency_events;     /* callbacks > critical budget since last flush */
-    uint64_t             critical_latency_worst_us;   /* worst offender since last flush (approx) */
+    atomic_uint_fast64_t critical_latency_worst_us;   /* worst offender since last flush (approx) */
     atomic_uint_fast64_t underrun_events;             /* underruns since last flush */
     atomic_uint_fast64_t mutex_critical_wait_events;  /* critical mutex waits since last flush */
     atomic_uint_fast64_t mutex_warn_wait_events;      /* long mutex waits since last flush */
@@ -159,6 +162,12 @@ void rt_profiler_set_enabled(RTProfiler *profiler, int enabled);
  * @param profiler Profiler instance
  */
 void rt_profiler_callback_start(RTProfiler *profiler);
+void rt_profiler_callback_start_frames(RTProfiler *profiler, int frames);
+uint64_t rt_profiler_now_ns(void);
+/* One process-wide LuxStral producer; ring lifetime is independent of host prepare. */
+void rt_profiler_report_producer_block(RTProfiler *, uint64_t elapsed_ns, uint64_t budget_ns);
+void rt_profiler_report_luxstral_schedule(RTProfiler *, uint64_t launch_ns,
+                                        uint64_t own_ns, uint64_t join_ns, uint64_t budget_ns);
 
 /**
  * @brief Mark the end of an audio callback

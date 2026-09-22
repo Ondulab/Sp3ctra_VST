@@ -1,4 +1,5 @@
 #pragma once
+#include "ui/PipelineMetricsBar.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -18,6 +19,7 @@
 #include "image/LuxDriveTabComponent.h"
 #include "image/LuxDcBlockTabComponent.h"
 #include "image/LuxGainTabComponent.h"
+#include "image/LuxDiffTabComponent.h"
 #include "image/LuxStralTabComponent.h"
 #include "image/LuxSynthTabComponent.h"
 #include "image/ScoreGenTabComponent.h"
@@ -25,18 +27,20 @@
 #include "image/MidiScoreGenTabComponent.h"
 #include "image/VoiceGenTabComponent.h"
 #include "image/VisualizerMode.h"
-#include "video/VideoScrollPage.h"
-#include "video/VideoScrollAllPage.h"
+#include "video/VideoScrollGridPage.h"
 #include "midi/MidiTapPage.h"
 #include "midi/MidiLearnAttachment.h"
 #include "sampler/SamplerPageComponent.h"
 #include "ui/ChainRackComponent.h"
+#include "ui/ChainIdentity.h"
 #include "ui/KeyboardRulerComponent.h"
 #include "ui/EngineAudioPanels.h"
 #include "ui/LuxGrainPanel.h"
 #include "ui/SynthOutPageComponent.h"
 #include "ui/AudioMixPanel.h"
 #include "ui/MidiMixPanel.h"
+#include "ui/LfoPanel.h"
+#include "ui/MidiMapPanel.h"
 #include "ui/VideoMixerColumn.h"
 #include "ui/ModuleCatalogComponent.h"
 #include "ui/SplitterBar.h"
@@ -175,55 +179,7 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RailToggleButton)
 };
 
-// ============================================================================
-// ModulePowerButton — power switch for the selected module, sitting at the
-// right end of the zone-3 PLAY|SETUP header row. A real toggle Button (so an
-// APVTS ButtonAttachment keeps it in sync with the rack LED + host automation).
-// Draws the universal power glyph, lit in the block's accent colour when on.
-// ============================================================================
-class ModulePowerButton : public juce::Button
-{
-public:
-    ModulePowerButton() : juce::Button("modulePower")
-    {
-        setClickingTogglesState(true);
-        setTooltip("Enable / disable this module");
-    }
-
-    void setAccent(juce::Colour c) { if (accent != c) { accent = c; repaint(); } }
-
-    void paintButton(juce::Graphics& g, bool isMouseOver, bool isButtonDown) override
-    {
-        const auto b   = getLocalBounds().toFloat().reduced(2.f);
-        const bool on  = getToggleState();
-
-        const juce::Colour bg(0xff222836);
-        g.setColour(isButtonDown ? bg.brighter(0.30f)
-                  : isMouseOver  ? bg.brighter(0.12f)
-                  :                bg);
-        g.fillRoundedRectangle(b, 3.f);
-        g.setColour(on ? accent.withAlpha(0.90f) : juce::Colour(0xff3a4250));
-        g.drawRoundedRectangle(b, 3.f, on ? 1.4f : 1.f);
-
-        // Power glyph: open ring (gap at top) + vertical stem through the gap.
-        const float cx = b.getCentreX();
-        const float cy = b.getCentreY() + 0.5f;
-        const float r  = juce::jmin(b.getWidth(), b.getHeight()) * 0.26f;
-        g.setColour(on ? accent.brighter(0.20f) : juce::Colour(0xff6b7280));
-
-        juce::Path ring;
-        ring.addCentredArc(cx, cy, r, r, 0.f,
-                           juce::MathConstants<float>::pi * 0.30f,
-                           juce::MathConstants<float>::pi * 1.70f, true);
-        g.strokePath(ring, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved,
-                                                      juce::PathStrokeType::rounded));
-        g.drawLine(cx, cy - r - 1.5f, cx, cy - 0.5f, 1.6f);
-    }
-
-private:
-    juce::Colour accent { juce::Colour(0xff4fa3e0) };
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ModulePowerButton)
-};
+#include "ui/ModulePowerButton.h"
 
 // ============================================================================
 // FaceSwitchBar — slim PLAY | SETUP switcher above the zone-3 block editor.
@@ -280,6 +236,20 @@ public:
         if (accent != c) { accent = c; repaint(); }
     }
 
+    /** Chain identity badge centred in the bar — the rack header's numbered
+     *  pastille + the chain's user name, so every module edit page names the
+     *  chain it edits. `number` is 1-based; <= 0 hides the badge (engine
+     *  views / the VIDEO SCROLL ALL view are chain-independent). */
+    void setChainIdentity(int number, const juce::String& name, juce::Colour colour)
+    {
+        if (chainNo_ == number && chainName_ == name && chainCol_ == colour)
+            return;
+        chainNo_   = number;
+        chainName_ = name;
+        chainCol_  = colour;
+        repaint();
+    }
+
     void paint(juce::Graphics& g) override
     {
         // Bar background + bottom separator
@@ -292,11 +262,14 @@ public:
         {
             for (int i = 0; i < customLabels.size(); ++i)
                 drawSegment(g, customSegmentBounds(i), customLabels[i], i == customSel, mouse);
-            return;
         }
-        drawSegment(g, segmentBounds(false), "PLAY",  !setupFace, mouse);
-        if (!playOnly)
-            drawSegment(g, segmentBounds(true), "SETUP", setupFace, mouse);
+        else
+        {
+            drawSegment(g, segmentBounds(false), "PLAY",  !setupFace, mouse);
+            if (!playOnly)
+                drawSegment(g, segmentBounds(true), "SETUP", setupFace, mouse);
+        }
+        drawChainIdentity(g);
     }
 
     void mouseUp(const juce::MouseEvent& e) override
@@ -379,11 +352,56 @@ private:
         g.drawText(text, r, juce::Justification::centred, false);
     }
 
+    /** Right edge of the last drawn segment — the chain badge stays clear. */
+    int segmentsRightEdge() const
+    {
+        if (hasCustomSegments())
+            return customSegmentBounds(customLabels.size() - 1).getRight();
+        return segmentBounds(!playOnly).getRight();
+    }
+
+    /** The chain badge: numbered pastille + chain name, centred in the CONTENT
+     *  width (the pages below are capped at kMaxPageW, like the power switch),
+     *  pushed right of the segments and stopping short of the power switch. */
+    void drawChainIdentity(juce::Graphics& g) const
+    {
+        if (chainNo_ <= 0)
+            return;
+
+        const juce::Font f(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontTab)).boldened());
+        const int   textW = (int) std::ceil(
+            juce::GlyphArrangement::getStringWidth(f, chainName_));
+        const int   d     = ChainIdentity::kPastilleD;   // the rack header's pastille
+        const int   gap   = 6;
+        const int   total = d + gap + textW;
+
+        const int contentW = juce::jmin(getWidth(), Sp3ctraTheme::kMaxPageW);
+        const int minX     = segmentsRightEdge() + 14;
+        const int maxX     = contentW - 52;   // power switch (36 + 8 pad) + 8 gap
+        int x = juce::jmax((contentW - total) / 2, minX);
+        if (maxX - x < d + gap + 20)          // no legible room — skip the badge
+            return;
+
+        const int   barH = getHeight() - 1;   // above the bottom separator
+        const float py   = (float) (barH - d) * 0.5f;
+        ChainIdentity::drawPastille(g, { (float) x, py, (float) d, (float) d },
+                                    chainNo_, chainCol_);
+
+        g.setColour(chainCol_);
+        g.setFont(f);
+        g.drawText(chainName_, x + d + gap, 0,
+                   juce::jmin(textW, maxX - x - d - gap), barH,
+                   juce::Justification::centredLeft, true);
+    }
+
     bool setupFace { false };
     bool playOnly  { false };
     juce::StringArray customLabels;   // non-empty → custom mode
     int  customSel { 0 };
     juce::Colour accent { juce::Colour(0xff4fa3e0) };
+    int          chainNo_ { 0 };      // 1-based; 0 = no chain badge
+    juce::String chainName_;
+    juce::Colour chainCol_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FaceSwitchBar)
 };
@@ -420,6 +438,8 @@ private:
  *   "zone2W"/"zone4W"    — splitter positions
  *   "scrollCollapsed"    — zone 4 collapse state
  */
+class MidiCurveWindow;   // ui/MidiCurveEditor.h — included by the .cpp only
+
 class Sp3ctraAudioProcessorEditor : public juce::AudioProcessorEditor,
                                     public juce::DragAndDropContainer,
                                     private juce::Timer,
@@ -490,6 +510,10 @@ private:
     void timerCallback() override;
     bool midiFollowEnabled() const;
     void followMidiParam(const juce::String& paramId);
+    /** MIDI CURVE window (ui/MidiCurveEditor.h) — one window, retargeted on
+     *  every open: a MIDI MAP row's ⚙, or "Edit MIDI mapping…" in a control's
+     *  right-click menu. Closing (or the mapping vanishing) deletes it. */
+    void openMidiCurveEditor(const juce::String& paramId);
 
     /** Single selection model — drives zones 1 + 2 + 3. */
     void selectBlock(ChainBlockId id);
@@ -500,6 +524,9 @@ private:
      *  patched outputs and highlights the bound instance's tab. */
     void showVideoAllView();
     void refreshVideoTabs();
+    /** Chain badge in the face bar (number + name of the edited module's
+     *  chain, centred) — re-run on selection and on model edits (rename). */
+    void refreshChainBadge();
     /** Contextual top-bandeau panels for LUXSTRAL: GRAY always, COLOR only when
      *  Stereo is on, BLOB only when StrokeForge is on. */
     std::vector<VisualizerMode> luxStralVisualizerSources() const;
@@ -540,6 +567,7 @@ private:
     }
 
     Sp3ctraAudioProcessor& audioProcessor;
+    PipelineMetricsBar pipelineMetricsBar_;
 
     // ── Selection / splitter state ────────────────────────────────────────────
     ChainBlockId selectedBlock { ChainBlockId::Chain1Source };
@@ -599,6 +627,13 @@ private:
     ModulePowerButton modulePowerButton; // power switch at the right of the face row
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> modulePowerAttachment;
     std::unique_ptr<MidiLearnAttachment> modulePowerLearn; // right-click MIDI learn on the enable
+    bool sp3HeaderPower_ = false; // header power hand-wired to imageFreezeMode (3-state, no bool)
+    // Engine PLAY pages: the header switch is the ENGINE MUTE — the engine's
+    // enable param shown INVERTED (lit = off), the same truth as the AUDIO MIX
+    // strip's M; the per-send on/off lives in the page's chain strips.
+    juce::TextButton moduleMuteButton { "MUTE" };
+    std::unique_ptr<juce::ParameterAttachment> moduleMuteAttachment;   // inverted view
+    std::unique_ptr<MidiLearnAttachment> moduleMuteLearn;
     juce::Viewport  zone3Viewport;
     juce::Component zone3Content;
 
@@ -622,8 +657,11 @@ private:
     std::unique_ptr<LuxDriveTabComponent> drivePage;         // FX > LEVELS
     std::unique_ptr<LuxDcBlockTabComponent> dcBlockPage;     // FX > DC BLOCK
     std::unique_ptr<LuxGainTabComponent>  gainPage;          // FX > GAIN
-    std::unique_ptr<VideoScrollPage>      videoScrollPage;   // OUT > VIDEO SCROLL (per-instance)
-    std::unique_ptr<VideoScrollAllPage>   videoScrollAllPage; // OUT > VIDEO SCROLL — ALL tab
+    std::unique_ptr<LuxDiffTabComponent>  diffPage;          // FX > DIFF
+    // OUT > VIDEO SCROLL — ONE page for every output (2026-09-04): the grid
+    // always shows them all, the ALL / CHAIN n tab only picks the output its
+    // VIEWPORT pad edits (videoSlotIndex_).
+    std::unique_ptr<VideoScrollGridPage>  videoScrollGridPage;
     std::unique_ptr<MidiTapPage>          midiTapPage;       // OUT > MIDI TAP (per-instance)
     std::unique_ptr<AudioWavePanel>       audioWavePanel;
     std::unique_ptr<LuxGrainPanel>        luxGrainPanel;    // LUXGRAIN engine page (M4)
@@ -656,6 +694,9 @@ private:
     // it shrinks to a bare vertical MASTER fader (mini mode).
     std::unique_ptr<AudioMixPanel> audioMixPanel;
     std::unique_ptr<MidiMixPanel>  midiMixPanel;   // shown only when a probe is patched
+    std::unique_ptr<LfoPanel>      lfoPanel;      // ZONE 4 — the modulation bank
+    std::unique_ptr<MidiMapPanel>  midiMapPanel;   // MIDI mapping list (MIN/MAX editor)
+    std::unique_ptr<MidiCurveWindow> midiCurveWindow_;   // detached transfer-law editor
 
     // ── LookAndFeel (declared before all JUCE components that use it) ─────────
     Sp3ctraLookAndFeel sp3ctraLaf;

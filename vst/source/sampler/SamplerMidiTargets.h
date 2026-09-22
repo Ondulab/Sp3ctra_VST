@@ -82,6 +82,41 @@ namespace SamplerMidiTargets
         }
     }
 
+    /** Human name of a kind for the interface (MIDI MAP rows, tooltips) —
+     *  the OLED overlay keeps its own 14-char spellings (DeviceFeedback). */
+    inline const char* displayName(Kind k) noexcept
+    {
+        switch (k)
+        {
+            case Kind::Speed:       return "Speed";
+            case Kind::LoopMode:    return "Loop";
+            case Kind::Img:         return "Level";
+            case Kind::Floor:       return "Floor";
+            case Kind::Resume:      return "Resume";
+            case Kind::FadeInType:  return "Fade-In Curve";
+            case Kind::FadeInPow:   return "Fade-In Power";
+            case Kind::FadeOutType: return "Fade-Out Curve";
+            case Kind::FadeOutPow:  return "Fade-Out Power";
+            case Kind::Overdub:     return "Overdub";
+            case Kind::Rec:         return "Rec";
+            case Kind::Play:        return "Play";
+            case Kind::Save:        return "Save";
+            case Kind::Clear:       return "Clear";
+            case Kind::SelEqFreq:   return "EQ Freq";
+            case Kind::SelEqGain:   return "EQ Gain";
+            case Kind::SelEqWidth:  return "EQ Width";
+            case Kind::MixMode:     return "Mix";
+            case Kind::CropStart:   return "Crop In";
+            case Kind::CropEnd:     return "Crop Out";
+            case Kind::FadeInLen:   return "Fade In";
+            case Kind::FadeOutLen:  return "Fade Out";
+            case Kind::LoopFwd:     return "Loop Fwd";
+            case Kind::LoopBwd:     return "Loop Bwd";
+            case Kind::LoopRepeat:  return "Loop Repeat";
+            default:                return "";
+        }
+    }
+
     inline bool isEngineWide(Kind k) noexcept { return k == Kind::Overdub; }
     inline bool isAction    (Kind k) noexcept
     { return k == Kind::Rec || k == Kind::Play || k == Kind::Save || k == Kind::Clear; }

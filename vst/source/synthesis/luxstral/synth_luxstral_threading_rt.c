@@ -166,7 +166,8 @@ void synth_cleanup_barriers(LuxStralEngine *eng) {
  * @param  priority Priority level (1-99, higher = more priority)
  * @retval 0 on success, -1 on error
  */
-int synth_set_rt_priority(pthread_t thread, int priority) {
+static int synth_set_rt_priority_for_format(pthread_t thread, int priority,
+                                            int requested_rate, int requested_size) {
 #ifdef __linux__
   struct sched_param param;
   param.sched_priority = priority;
@@ -187,7 +188,6 @@ int synth_set_rt_priority(pthread_t thread, int priority) {
   // This ensures synthesis workers run before all external processes
   (void)priority; // Unused on macOS - uses Mach policies instead
   
-  int success_count = 0;
   
   // Get the Mach thread from pthread
   mach_port_t mach_thread = pthread_mach_thread_np(thread);
@@ -214,7 +214,6 @@ int synth_set_rt_priority(pthread_t thread, int priority) {
       THREAD_PRECEDENCE_POLICY_COUNT
   );
   if (prec_result == KERN_SUCCESS) {
-    success_count++;
     log_startup_detail("SYNTH_RT", "Precedence policy set to maximum (63)");
   }
   
@@ -224,11 +223,8 @@ int synth_set_rt_priority(pthread_t thread, int priority) {
   // ========================================================================
   // Calculate time constraints dynamically based on actual buffer size
   // Use g_sp3ctra_config if available, otherwise use safe defaults
-  extern sp3ctra_config_t g_sp3ctra_config;
-  int sample_rate = g_sp3ctra_config.sampling_frequency > 0 ? 
-                    g_sp3ctra_config.sampling_frequency : 48000;
-  int buffer_size = g_sp3ctra_config.audio_buffer_size > 0 ? 
-                    g_sp3ctra_config.audio_buffer_size : 128;
+  const int sample_rate = requested_rate > 0 ? requested_rate : 48000;
+  const int buffer_size = requested_size > 0 ? requested_size : 128;
   
   // Calculate period in nanoseconds: (buffer_size / sample_rate) * 1e9
   uint64_t audio_period_ns = (uint64_t)buffer_size * 1000000000ULL / (uint64_t)sample_rate;
@@ -241,14 +237,14 @@ int synth_set_rt_priority(pthread_t thread, int priority) {
   uint32_t period_mach = (uint32_t)((audio_period_ns * timebase.denom) / timebase.numer);
   
   // 🔧 AGGRESSIVE RT SETTINGS for synthesis workers:
-  // - computation: 50% of period (conservative to leave margin)
+  // - computation: 75% of period (observed dense rendering is >50%)
   // - constraint: 95% of period (tight deadline for RT behavior)
-  // - preemptible: FALSE (do not interrupt once running!)
+  // - preemptible: TRUE (modern XNU ignores this legacy field)
   thread_time_constraint_policy_data_t policy;
   policy.period      = period_mach;
-  policy.computation = (uint32_t)(period_mach * 0.5);   // 50% max computation
+  policy.computation = (uint32_t)(period_mach * 0.75);  // reserve 75% of the real period
   policy.constraint  = (uint32_t)(period_mach * 0.95);  // 95% hard deadline
-  policy.preemptible = FALSE;  // 🔧 Do NOT preempt synthesis workers!
+  policy.preemptible = TRUE;   // permit preemption on kernels that honor this field
   
   kern_return_t result = thread_policy_set(
       mach_thread,
@@ -258,18 +254,18 @@ int synth_set_rt_priority(pthread_t thread, int priority) {
   );
   
   if (result == KERN_SUCCESS) {
-    success_count++;
-    log_startup_detail("SYNTH_RT", "Time-constraint policy: period=%.2fms, computation=%.2fms, constraint=%.2fms, preemptible=NO",
+    log_startup_detail("SYNTH_RT", "Time-constraint policy: period=%.2fms, computation=%.2fms, constraint=%.2fms, preemptible=YES",
              audio_period_ns / 1000000.0,
-             (audio_period_ns * 0.5) / 1000000.0,
+             (audio_period_ns * 0.75) / 1000000.0,
              (audio_period_ns * 0.95) / 1000000.0);
   } else {
     log_warning("SYNTH_RT", "Failed to set time-constraint policy (error %d)", result);
     log_info("SYNTH_RT", "Note: Full RT requires elevated privileges on macOS");
   }
   
-  // Return success if at least QoS was set (basic priority boost)
-  if (success_count >= 1) {
+  // Precedence alone is NOT real-time scheduling. The caller needs to know
+  // whether the time-constraint policy actually succeeded.
+  if (result == KERN_SUCCESS) {
     return 0;
   }
 
@@ -310,5 +306,56 @@ int synth_barrier_wait(LuxStralEngine *eng, void *barrier) {
   return pthread_barrier_wait((pthread_barrier_t*)barrier);
 #else
   return barrier_wait(eng, (barrier_t*)barrier);
+#endif
+}
+
+int synth_set_rt_priority(pthread_t thread, int priority) {
+  return synth_set_rt_priority_for_format(thread, priority,
+      g_sp3ctra_config.sampling_frequency, g_sp3ctra_config.audio_buffer_size);
+}
+
+#ifdef __APPLE__
+static void synth_restore_timesharing(pthread_t thread) {
+  mach_port_t port = pthread_mach_thread_np(thread);
+  thread_extended_policy_data_t extended = { .timeshare = TRUE };
+  thread_precedence_policy_data_t precedence = { .importance = 0 };
+  thread_policy_set(port, THREAD_EXTENDED_POLICY, (thread_policy_t)&extended,
+                    THREAD_EXTENDED_POLICY_COUNT);
+  thread_policy_set(port, THREAD_PRECEDENCE_POLICY, (thread_policy_t)&precedence,
+                    THREAD_PRECEDENCE_POLICY_COUNT);
+}
+#endif
+
+void synth_update_realtime_team_policy(LuxStralEngine *eng) {
+#ifdef __APPLE__
+  static _Thread_local const LuxStralEngine *configured_engine;
+  const int sr = g_sp3ctra_config.sampling_frequency;
+  const int bs = g_sp3ctra_config.audio_buffer_size;
+  // A replacement producer needs its own policy even when the format is unchanged.
+  if (configured_engine == eng && eng->scheduling_sample_rate == sr &&
+      eng->scheduling_block_size == bs)
+    return;
+  // Called on the producer while every auxiliary is parked, before begin().
+  // Equal priority lets partition zero overlap the auxiliaries. With a QoS
+  // producer and RT auxiliaries, waking them can suspend the producer until
+  // their computation finishes, serializing two otherwise parallel phases.
+  int ok = synth_set_rt_priority_for_format(pthread_self(), 80, sr, bs) == 0;
+  for (int i = 1; i <= eng->started_auxiliaries; ++i)
+    if (synth_set_rt_priority_for_format(eng->worker_threads[i], 80, sr, bs) != 0) ok = 0;
+  if (!ok) {
+    // A partial success would recreate the priority mismatch. Keep the team
+    // in the same ordinary scheduling class if RT cannot be established.
+    synth_restore_timesharing(pthread_self());
+    for (int i = 1; i <= eng->started_auxiliaries; ++i)
+      synth_restore_timesharing(eng->worker_threads[i]);
+  }
+  configured_engine = eng;
+  eng->scheduling_sample_rate = sr;
+  eng->scheduling_block_size = bs;
+  log_info("SYNTH_SCHED", "producer + %d auxiliaries: %s, %d Hz / %d samples, period %.3f ms",
+           eng->started_auxiliaries, ok ? "matched RT policy" : "timesharing fallback",
+           sr, bs, sr > 0 ? bs * 1000.0 / sr : 0.0);
+#else
+  (void)eng;
 #endif
 }

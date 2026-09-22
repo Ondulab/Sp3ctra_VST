@@ -238,9 +238,9 @@ int luxwave_engine_init(LuxWaveEngine *engine, float sample_rate, int buffer_siz
     engine->config.enabled           = false;
 
     /* Double-buffer init: both buffers empty, RT reads from 0 */
-    atomic_store(&engine->wt_write_idx, 1);
+    engine->wt_write_idx = 2;
     engine->wt_read_idx    = 0;
-    atomic_store(&engine->wt_new_ready, 0);
+    atomic_store(&engine->wt_middle, 1);
     engine->xfade_remaining = 0;
     engine->xfade_old_idx   = 0;
     engine->wt_pixel_count[0] = 0;
@@ -306,12 +306,13 @@ void luxwave_engine_set_image_line(LuxWaveEngine *engine,
         pixel_count = LUXWAVE_MAX_PIXELS;
 
     /* Write to the buffer the RT thread is NOT currently reading from */
-    int wr = atomic_load(&engine->wt_write_idx);
+    int wr = engine->wt_write_idx;
     memcpy(engine->wt_buf[wr], image_line, (size_t)pixel_count * sizeof(float));
     engine->wt_pixel_count[wr] = pixel_count;
 
     /* Signal: new data available (RT thread will pick it up and crossfade) */
-    atomic_store(&engine->wt_new_ready, 1);
+    engine->wt_write_idx = atomic_exchange_explicit(
+        &engine->wt_middle, wr | 4, memory_order_acq_rel) & 3;
 }
 
 /* ============================================================================
@@ -410,26 +411,25 @@ void luxwave_engine_all_notes_off(LuxWaveEngine *engine)
 void luxwave_engine_process(LuxWaveEngine *engine, int num_samples,
                              float *out_left, float *out_right)
 {
-    if (!engine || !engine->initialized || !out_left || !out_right)
+    if (!engine || !engine->initialized || !out_left || !out_right || num_samples <= 0)
         return;
 
+    if (num_samples > LUXWAVE_MAX_BUFFER_SIZE) num_samples = LUXWAVE_MAX_BUFFER_SIZE;
     memset(out_left,  0, (size_t)num_samples * sizeof(float));
     memset(out_right, 0, (size_t)num_samples * sizeof(float));
 
-    /* Check if new wavetable data is ready (atomic, lock-free) */
-    if (atomic_load(&engine->wt_new_ready))
+    // Accept at most one complete table per block, after the preceding fade.
+    if (engine->xfade_remaining == 0 &&
+        (atomic_load_explicit(&engine->wt_middle, memory_order_acquire) & 4))
     {
-        /* Swap: the write buffer becomes the new read buffer */
-        int old_read = engine->wt_read_idx;
-        int new_read = atomic_load(&engine->wt_write_idx);
-
-        engine->xfade_old_idx   = old_read;
-        engine->wt_read_idx     = new_read;
+        const int old = engine->wt_read_idx;
+        const int count = engine->wt_pixel_count[old];
+        memcpy(engine->wt_buf[3], engine->wt_buf[old], (size_t)count * sizeof(float));
+        engine->wt_pixel_count[3] = count;
+        engine->wt_read_idx = atomic_exchange_explicit(
+            &engine->wt_middle, old, memory_order_acq_rel) & 3;
+        engine->xfade_old_idx = 3;
         engine->xfade_remaining = LUXWAVE_CROSSFADE_SAMPLES;
-
-        /* Toggle write index so next set_image_line writes to the old buffer */
-        atomic_store(&engine->wt_write_idx, old_read);
-        atomic_store(&engine->wt_new_ready, 0);
     }
 
     /* Bail out if no wavetable data yet */

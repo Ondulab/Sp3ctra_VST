@@ -4,6 +4,7 @@
  */
 #include "Sp3ctraLink.h"
 #include "slp_rx_state.h"
+#include <algorithm>
 #include <cstring>
 
 extern "C" {
@@ -22,6 +23,8 @@ namespace
     constexpr double kIfaceScanMs      = 10000.0;
     constexpr int    kBindMaxAttempts  = 10;
     constexpr int    kRxBufBytes       = 512;
+    constexpr double kSocketRetryMs    = 3000.0;  // re-open a sick control socket at most this often
+    constexpr int    kSendFailReopen   = 3;       // consecutive unicast send failures before re-opening
 
     double nowMs() { return juce::Time::getMillisecondCounterHiRes(); }
 
@@ -137,8 +140,11 @@ void Sp3ctraLink::setOverlay (const std::vector<OverlayItem>& items, int ttlMs)
         const auto value = it.value.toStdString();
         std::strncpy (d.label, label.c_str(), SLP_OVERLAY_LABEL_LEN);
         std::strncpy (d.value, value.c_str(), SLP_OVERLAY_VALUE_LEN);
-        d.norm  = it.norm < 0.0f ? 0xFFFF : (uint16_t) juce::roundToInt (juce::jlimit (0.0f, 1.0f, it.norm) * 65535.0f);
-        d.flags = (uint8_t) ((it.bipolar ? SLP_OVL_BIPOLAR : 0) | (it.highlight ? SLP_OVL_HIGHLIGHT : 0));
+        // 0xFFFF is the protocol's "no bar" sentinel — a parameter at exactly
+        // 100 % must not reach it, or its bar vanishes on the device.
+        d.norm  = it.norm < 0.0f ? 0xFFFF : (uint16_t) juce::jmin (65534, juce::roundToInt (juce::jlimit (0.0f, 1.0f, it.norm) * 65535.0f));
+        d.flags = (uint8_t) ((it.bipolar ? SLP_OVL_BIPOLAR : 0) | (it.highlight ? SLP_OVL_HIGHLIGHT : 0)
+                             | (it.tagInvert ? SLP_OVL_TAG_INVERT : 0));
     }
     const juce::ScopedLock sl (lock_);
     pendingOverlay_ = o;
@@ -157,6 +163,36 @@ void Sp3ctraLink::requestCalibration (int slpCalKind)
 {
     const juce::ScopedLock sl (lock_);
     calRequest_ = slpCalKind;
+}
+
+void Sp3ctraLink::requestConfig (const std::vector<uint16_t>& ids)
+{
+    const juce::ScopedLock sl (lock_);
+    for (auto id : ids)
+        if (std::find (pendingCfgGet_.begin(), pendingCfgGet_.end(), id) == pendingCfgGet_.end())
+            pendingCfgGet_.push_back (id);
+}
+
+void Sp3ctraLink::writeConfig (const std::vector<slp_cfg_item>& items)
+{
+    const juce::ScopedLock sl (lock_);
+    for (const auto& it : items)
+    {
+        // Coalesce: only the last value written to an id is worth sending.
+        auto same = std::find_if (pendingCfgSet_.begin(), pendingCfgSet_.end(),
+                                  [&it] (const slp_cfg_item& p) { return p.id == it.id; });
+        if (same != pendingCfgSet_.end()) *same = it;
+        else                              pendingCfgSet_.push_back (it);
+    }
+}
+
+bool Sp3ctraLink::configValue (uint16_t id, CfgValue& out) const
+{
+    const juce::ScopedLock sl (lock_);
+    const auto it = cfg_.find (id);
+    if (it == cfg_.end()) return false;
+    out = it->second;
+    return true;
 }
 
 //==============================================================================
@@ -186,8 +222,10 @@ void Sp3ctraLink::bumpGeneration()
 void Sp3ctraLink::openSocket()
 {
     socket_ = std::make_unique<juce::DatagramSocket> (true /* broadcast */);
-    if (! socket_->bindToPort (0))
-        log_error ("LINK", "cannot bind the control socket");
+    socketOk_ = socket_->bindToPort (0);
+    sendFails_ = 0;
+    if (! socketOk_)
+        log_error ("LINK", "cannot bind the control socket (will retry)");
 }
 
 void Sp3ctraLink::refreshBroadcastTargets()
@@ -230,7 +268,19 @@ void Sp3ctraLink::sendTo (const juce::String& ipIn, int port, const void* msg, s
         if (broadcastTargets_.contains (ip))
             broadcastTargets_.removeString (ip);
         else
+        {
+            // Unicast failures signal a sick socket (bound before the
+            // interface came up, route change...): count them so the link
+            // thread re-opens it instead of failing silently forever - seen
+            // live 2026-09-02, the app showed the fallback stream for 11 min
+            // while every HELLO failed and the device stayed unbound.
+            sendFails_++;
             log_warning_every_ms (5000, "LINK", "send to %s:%d failed", ip.toRawUTF8(), port);
+        }
+    }
+    else
+    {
+        sendFails_ = 0;
     }
 }
 
@@ -305,12 +355,16 @@ void Sp3ctraLink::flushFeedback()
     uint8_t ledMask = 0; std::array<slp_led_cmd, SLP_MAX_LEDS> leds {};
     bool overlay = false, clear = false; slp_oled_overlay ovl {};
     int cal = -1;
+    std::vector<uint16_t>     cfgGet;
+    std::vector<slp_cfg_item> cfgSet;
     {
         const juce::ScopedLock sl (lock_);
         ledMask = pendingLedMask_; leds = pendingLed_; pendingLedMask_ = 0;
         overlay = overlayPending_; ovl = pendingOverlay_; overlayPending_ = false;
         clear = overlayClearPending_; overlayClearPending_ = false;
         cal = calRequest_; calRequest_ = -1;
+        cfgGet.swap (pendingCfgGet_);
+        cfgSet.swap (pendingCfgSet_);
     }
     if (ledMask)
     {
@@ -337,6 +391,28 @@ void Sp3ctraLink::flushFeedback()
         fillHdr (m.hdr, SLP_CAL_START, sizeof (m));
         m.kind = (uint8_t) cal;
         sendTo (boundIp_, SLP_CTRL_PORT, &m, sizeof (m));
+    }
+    // CFG travels in datagrams of at most SLP_CFG_MAX_ITEMS items; the device
+    // answers each one with a CFG_REPLY carrying the STORED values.
+    auto sendCfg = [this] (uint8_t type, const slp_cfg_item* items, int n)
+    {
+        slp_cfg_msg m {};
+        fillHdr (m.hdr, type, sizeof (m));
+        m.count = (uint8_t) n;
+        for (int i = 0; i < n; ++i) m.item[i] = items[i];
+        sendTo (boundIp_, SLP_CTRL_PORT, &m, sizeof (m));
+    };
+    for (size_t i = 0; i < cfgGet.size(); i += SLP_CFG_MAX_ITEMS)
+    {
+        std::array<slp_cfg_item, SLP_CFG_MAX_ITEMS> items {};
+        const int n = (int) juce::jmin ((size_t) SLP_CFG_MAX_ITEMS, cfgGet.size() - i);
+        for (int k = 0; k < n; ++k) items[(size_t) k].id = cfgGet[i + (size_t) k];
+        sendCfg (SLP_CFG_GET, items.data(), n);
+    }
+    for (size_t i = 0; i < cfgSet.size(); i += SLP_CFG_MAX_ITEMS)
+    {
+        const int n = (int) juce::jmin ((size_t) SLP_CFG_MAX_ITEMS, cfgSet.size() - i);
+        sendCfg (SLP_CFG_SET, cfgSet.data() + i, n);
     }
 }
 
@@ -367,6 +443,7 @@ void Sp3ctraLink::handleDatagram (const uint8_t* data, int len, const juce::Stri
         case SLP_BIND_ACK: if (len >= (int) sizeof (slp_bind_ack)) handleBindAck (data, fromIp);  break;
         case SLP_PONG:     if (len >= (int) sizeof (slp_pong))     handlePong (data);             break;
         case SLP_ERROR:    if (len >= (int) sizeof (slp_error))    handleError (data, fromIp);    break;
+        case SLP_CFG_REPLY: if (len >= (int) sizeof (slp_cfg_msg))  handleCfgReply (data);         break;
         default: break;   // CFG_REPLY etc.: V5
     }
 }
@@ -488,6 +565,22 @@ void Sp3ctraLink::handleError (const uint8_t* data, const juce::String& fromIp)
         enterSearching ("session lost (NOT_BOUND)");
 }
 
+void Sp3ctraLink::handleCfgReply (const uint8_t* data)
+{
+    slp_cfg_msg m; readStruct (m, data);
+    const int n = juce::jlimit (0, (int) SLP_CFG_MAX_ITEMS, (int) m.count);
+    {
+        const juce::ScopedLock sl (lock_);
+        for (int i = 0; i < n; ++i)
+        {
+            const auto& it = m.item[(size_t) i];
+            if (it.flags & SLP_CFG_F_UNKNOWN) continue;   // this device has no such id
+            cfg_[it.id] = CfgValue { it.value, it.type, it.flags };
+        }
+    }
+    sendChangeMessage();
+}
+
 //==============================================================================
 void Sp3ctraLink::enterSearching (const juce::String& why)
 {
@@ -537,7 +630,10 @@ void Sp3ctraLink::pickCandidate()
         {
             for (auto* d : free) if (d->uid == preferredUid_) { pick = *d; found = true; break; }
         }
-        else if (autoBind_ && free.size() == 1)
+        // Documented policy (see file header): the preferred UID when it is
+        // seen, OTHERWISE the only free device when auto-bind is on. A stale
+        // preferred UID must not leave the app searching forever.
+        if (! found && autoBind_ && free.size() == 1)
         {
             pick = *free[0]; found = true;
         }
@@ -625,6 +721,21 @@ void Sp3ctraLink::run()
 
         // ── periodic ─────────────────────────────────────────────────────────
         if (now - lastIfaceScanMs_ >= kIfaceScanMs) { refreshBroadcastTargets(); lastIfaceScanMs_ = now; }
+
+        // Control-socket recovery: a failed initial bind or persistent unicast
+        // send failures never heal on their own - re-open (new ephemeral port;
+        // harmless, every HELLO advertises the current one).
+        if ((! socketOk_ || sendFails_ >= kSendFailReopen) && (now - lastSocketRetryMs_) >= kSocketRetryMs)
+        {
+            lastSocketRetryMs_ = now;
+            // NB: re-opening cannot cure a missing macOS "Local Network"
+            // permission (unicast denied at TCC level) - that one needs the
+            // signing identity / privacy setting, see build_vst.sh.
+            log_warning_every_ms (30000, "LINK", "re-opening the control socket (%s)",
+                                  socketOk_ ? "persistent send failures" : "bind failed");
+            openSocket();
+            refreshBroadcastTargets();
+        }
         expireDevices();
 
         const double helloPeriod = (st == State::Bound) ? kHelloBoundMs : (double) SLP_HELLO_PERIOD_MS;

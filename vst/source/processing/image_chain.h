@@ -75,7 +75,10 @@ extern "C" {
                                             * (per-chain pool) */
 #define IMAGE_CHAIN_INSERT_LUXGAIN     17  /* FX — GAIN: per-line energy gain
                                             * (per-chain pool) */
-#define IMAGE_CHAIN_NUM_INSERTS        18
+#define IMAGE_CHAIN_INSERT_LUXDIFF     18  /* FX — DIFF: per-pixel reference
+                                        * subtraction, captured on demand
+                                        * (per-chain pool) */
+#define IMAGE_CHAIN_NUM_INSERTS        19
 
 /*
  * M6 Phase 2 — generalised executor driven by an explicit ordered insert list

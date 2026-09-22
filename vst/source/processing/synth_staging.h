@@ -150,6 +150,31 @@ int synth_staging_mix_luxgrain(const ChainPlan* plan,
                                int max_pixels, int* nb_pixels_out,
                                uint32_t* generation_out);
 
+/* ── AUDIO MIX per-send meters ────────────────────────────────────────────
+ * RMS of the line a send LAST STAGED, on its engine's native axis (LuxStral
+ * note amplitudes, LuxSynth/LuxGrain unipolar line, LuxWave excursion around
+ * the wavetable midpoint), WITHOUT the bank weight — the reader applies
+ * intensity × power itself (PluginProcessor::sendMeter). 0 while the slot is
+ * inactive (no-signal contract). One aligned float store by the producer at
+ * stage time (outside the seqlock), relaxed UI-rate reads — a meter may lag
+ * a frame, never tear. engine: 0 LuxStral, 1 LuxSynth, 2 LuxWave, 3 LuxGrain. */
+#define SYNTH_STAGING_ENGINE_LUXSTRAL 0
+#define SYNTH_STAGING_ENGINE_LUXSYNTH 1
+#define SYNTH_STAGING_ENGINE_LUXWAVE  2
+#define SYNTH_STAGING_ENGINE_LUXGRAIN 3
+float synth_staging_send_level(int engine, int chain_idx);
+
+/* VIDEO MIX -> AUDIO: one atomic snapshot, one byte per chain (0..255).
+ * Separate from the base send intensity so UI config changes never overwrite
+ * block-clock automation. Publisher: audio callback; consumers: staging mixers. */
+void synth_staging_set_video_weights(uint64_t packed);
+uint64_t synth_staging_video_weights(void);
+static inline float synth_staging_video_weight(uint64_t packed, int chain)
+{
+    return chain >= 0 && chain < CHAIN_MAX_CHAINS
+        ? (float)((packed >> (chain * 8)) & 255u) * (1.0f / 255.0f) : 1.0f;
+}
+
 /* Diagnostic: total mixer ticks that HELD on a torn slot (all three mixers).
  * Monotonic, process-lifetime. Message-thread drain (PluginProcessor timer)
  * — a steadily climbing value under device streaming confirms staging

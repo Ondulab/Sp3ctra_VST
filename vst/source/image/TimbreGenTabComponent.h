@@ -33,6 +33,8 @@
 #include "../IconPaths.h"
 #include "../licensing/ActivationDialog.h"
 #include "TimbreGenRenderer.h"
+#include "TimbreParamsPanel.h"
+#include "ScoreTransportBar.h"
 
 class TimbreGenTabComponent : public juce::Component,
                               private juce::Timer,
@@ -46,12 +48,12 @@ public:
         : processor(p)
     {
         // ── Default page: six classic timbres, ready to print ───────────────
-        static const int kDefaultPresets[timbregen::kNumSlots] = { 1, 2, 3, 9, 6, 7 };
+        static const int kDefaultPresets[timbregen::kNumSlots] = { 12, 25, 37, 15, 11, 19 };
         for (int i = 0; i < timbregen::kNumSlots; ++i)
         {
             timbregen::applyPreset(slots[(size_t) i], kDefaultPresets[i]);
             slots[(size_t) i].enabled  = true;
-            slots[(size_t) i].midiNote = 57;   // A3
+            slots[(size_t) i].midiNote = timbregen::presetSuggestedNote(kDefaultPresets[i]);
         }
         // P7 — every instance starts from this default page, then the
         // persisted per-instance docs overwrite whichever were saved.
@@ -79,21 +81,14 @@ public:
             slotTabs[(size_t) i] = std::move(tab);
         }
 
-        // ── Per-slot parameters ──────────────────────────────────────────────
-        initLabel(presetLabel, "Preset");
-        for (int i = 0; i < timbregen::numPresets(); ++i)
-            presetCombo.addItem(timbregen::presetName(i), i + 1);
-        presetCombo.addItem("Custom", timbregen::numPresets() + 1);
-        presetCombo.onChange = [this]
-        {
-            const int id = presetCombo.getSelectedId();
-            if (id <= 0 || id > timbregen::numPresets())
-                return;   // "Custom" is a display state, not a template
-            timbregen::applyPreset(cur(), id - 1);
-            refreshSlotControls();
-            markDirty();
-        };
-        addAndMakeVisible(presetCombo);
+        // ── Per-slot parameters: the shared timbre editor ────────────────────
+        params_.target = [this]() -> timbregen::TimbreSlotParams& { return cur(); };
+        params_.onPresetChange  = [this]
+        { slotTabs[(size_t) selectedSlot]->repaint(); markDirty(); };
+        params_.onTimbralChange = [this]
+        { slotTabs[(size_t) selectedSlot]->repaint(); markDirty(); };
+        params_.onLevelChange   = [this] { markDirty(); };
+        addAndMakeVisible(params_);
 
         activeToggle.setButtonText("Active");
         activeToggle.onClick = [this]
@@ -114,65 +109,6 @@ public:
             cur().midiNote = (int) noteSlider.getValue();
             slotTabs[(size_t) selectedSlot]->repaint();
             markDirty();   // note is not a timbral field — preset stays
-        };
-
-        auto timbral = [this](juce::Slider& s, auto setter)
-        {
-            s.onValueChange = [this, &s, setter]
-            {
-                setter(cur(), s.getValue());
-                becomeCustom();
-                markDirty();
-            };
-        };
-
-        initLabel(partialsLabel, "Partials");
-        initSlider(partialsSlider, 1, 128, 1, 24);
-        timbral(partialsSlider, [](timbregen::TimbreSlotParams& q, double v) { q.numPartials = (int) v; });
-
-        initLabel(slopeLabel, "Slope (dB/oct)");
-        initSlider(slopeSlider, -36.0, 12.0, 0.1, -6.0);
-        timbral(slopeSlider, [](timbregen::TimbreSlotParams& q, double v) { q.slopeDbPerOct = v; });
-
-        initLabel(oddLabel, "Odd bias");
-        initSlider(oddSlider, 0.0, 1.0, 0.01, 0.0);
-        timbral(oddSlider, [](timbregen::TimbreSlotParams& q, double v) { q.oddBias = v; });
-
-        initLabel(inharmLabel, "Inharmonicity");
-        initSlider(inharmSlider, 0.0, 0.1, 0.0001, 0.0);
-        inharmSlider.setSkewFactor(0.3);
-        timbral(inharmSlider, [](timbregen::TimbreSlotParams& q, double v) { q.inharmonicity = v; });
-
-        initLabel(combLabel, "Pluck comb");
-        initSlider(combSlider, 0.0, 1.0, 0.01, 0.0);
-        timbral(combSlider, [](timbregen::TimbreSlotParams& q, double v) { q.combDepth = v; });
-
-        initLabel(combPosLabel, "Pluck position");
-        initSlider(combPosSlider, 0.02, 0.5, 0.005, 0.28);
-        timbral(combPosSlider, [](timbregen::TimbreSlotParams& q, double v) { q.combPos = v; });
-
-        initLabel(attackLabel, "Attack (ms)");
-        initSlider(attackSlider, 0.0, 1000.0, 1.0, 4.0);
-        attackSlider.setSkewFactor(0.4);
-        timbral(attackSlider, [](timbregen::TimbreSlotParams& q, double v) { q.attackMs = v; });
-
-        initLabel(decayLabel, "Decay (s)");
-        initSlider(decaySlider, 0.0, 20.0, 0.05, 0.0);
-        decaySlider.setSkewFactor(0.5);
-        decaySlider.textFromValueFunction = [](double v)
-        { return v <= 0.0 ? juce::String("sustain") : juce::String(v, 2); };
-        timbral(decaySlider, [](timbregen::TimbreSlotParams& q, double v) { q.decaySec = v; });
-
-        initLabel(hfDampLabel, "HF damping");
-        initSlider(hfDampSlider, 0.0, 1.0, 0.01, 0.5);
-        timbral(hfDampSlider, [](timbregen::TimbreSlotParams& q, double v) { q.hfDamp = v; });
-
-        initLabel(levelLabel, "Level (dB)");
-        initSlider(levelSlider, -36.0, 12.0, 0.1, 0.0);
-        levelSlider.onValueChange = [this]
-        {
-            cur().levelDb = levelSlider.getValue();   // gain — preset stays
-            markDirty();
         };
 
         // ── Page-level settings ──────────────────────────────────────────────
@@ -221,26 +157,13 @@ public:
         }
 
         // ── Audition transport (this instance's own score-player slot) ──────
-        playStopButton.setTooltip("Play / stop the timbre page through the score player");
-        playStopButton.onClick = [this] { togglePlay(); };
-        addAndMakeVisible(playStopButton);
-
-        loopBtn.setTooltip("Loop playback");
-        addAndMakeVisible(loopBtn);
-
-        reverseBtn.setTooltip("Reverse (play the timbre page backward)");
-        addAndMakeVisible(reverseBtn);
-
-        initLabel(speedLabel, "Speed");
-        speedSlider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-        speedSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 52, 22);
-        speedSlider.setColour(juce::Slider::textBoxOutlineColourId,    juce::Colours::transparentBlack);
-        speedSlider.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
-        speedSlider.setColour(juce::Slider::textBoxTextColourId,       juce::Colour(0xffa0c4e8));
-        speedSlider.setRange(0.1, 6.0, 0.01);
-        speedSlider.setTextValueSuffix("x");
-        speedSlider.setSkewFactorFromMidPoint(1.0);
-        addAndMakeVisible(speedSlider);
+        xportBar_.setTooltips("Play / stop the timbre page through the score player",
+                              "Freeze the current column: the timbre under the "
+                              "head keeps sounding (a drone); click/drag the "
+                              "preview to move it. Works while playing or from stop.");
+        xportBar_.onPlay  = [this] { togglePlay();  };
+        xportBar_.onPause = [this] { togglePause(); };
+        addAndMakeVisible(xportBar_);
 
         // P7 — transport attachments + MIDI-Learn follow the SELECTED
         // instance: bindTransport() re-points them on every setScoreSlot().
@@ -324,15 +247,16 @@ public:
             if (fs != nullptr && framesAreOurs)
             {
                 const bool playing = fs->isScorePlaying();
+                const bool paused  = pauseMode != PauseMode::none;
                 int headFrame = -1;
-                if (playing)             headFrame = fs->getScorePlayHead();
+                if (playing || paused)   headFrame = fs->getScorePlayHead();
                 else if (scrubHead >= 0) headFrame = scrubHead;
                 if (headFrame >= 0)
                 {
                     const int n = juce::jmax(1, fs->getScoreFrameCount());
                     const float frac = juce::jlimit(0.f, 1.f, (float) headFrame / (float) n);
                     const float lx = imgArea.getX() + frac * imgArea.getWidth();
-                    g.setColour(accent.withAlpha(playing ? 0.9f : 0.6f));
+                    g.setColour(accent.withAlpha(playing || paused ? 0.9f : 0.6f));
                     g.fillRect(lx - 0.75f, imgArea.getY(), 1.5f, imgArea.getHeight());
                 }
             }
@@ -698,9 +622,13 @@ public:
                  && previewArea.contains(e.getPosition());
         if (! scrubbing) return;
         scrubTo(e);
-        if (auto* fs = boundChannel())
-            if (! fs->isScorePlaying())
-                scrubAuditioning = fs->uiBeginScoreScrub();
+        // Pause mode already sustains a session (held or frozen transport):
+        // the seek above moved its column — no transient audition to start,
+        // and mouseUp must NOT end the held session.
+        if (pauseMode == PauseMode::none)
+            if (auto* fs = boundChannel())
+                if (! fs->isScorePlaying())
+                    scrubAuditioning = fs->uiBeginScoreScrub();
     }
     void mouseDrag(const juce::MouseEvent& e) override { if (scrubbing) scrubTo(e); }
     void mouseUp  (const juce::MouseEvent&)   override
@@ -761,25 +689,17 @@ public:
             y += ch + 3;
         };
 
+        // Note + Active on one row, then the shared timbre editor.
         // Switch (~38 px) + 8 px gap + "Active" at 11 px needs ~84 px to render untruncated.
         const int togW = 84;
-        presetLabel.setBounds(pad, y, 60, ch);
-        presetCombo.setBounds(pad + 60 + gap, y, colW - 60 - gap - togW - gap, ch);
+        noteLabel.setBounds(pad, y, lblW, ch);
+        noteSlider.setBounds(pad + lblW + gap, y, colW - lblW - gap - togW - gap, ch);
         activeToggle.setBounds(pad + colW - togW, y, togW, ch);
         y += ch + gap;
 
-        row(noteLabel,     noteSlider);
-        row(partialsLabel, partialsSlider);
-        row(slopeLabel,    slopeSlider);
-        row(oddLabel,      oddSlider);
-        row(inharmLabel,   inharmSlider);
-        row(combLabel,     combSlider);
-        row(combPosLabel,  combPosSlider);
-        row(attackLabel,   attackSlider);
-        row(decayLabel,    decaySlider);
-        row(hfDampLabel,   hfDampSlider);
-        row(levelLabel,    levelSlider);
-        y += 6;
+        params_.setRowMetrics(lblW, ch, gap);
+        params_.setBounds(pad, y, colW, params_.preferredHeight());
+        y += params_.preferredHeight() + 6;
 
         row(wsLabel,   wsSlider);
         row(lineLabel, lineSlider);
@@ -791,24 +711,9 @@ public:
         exportButton.setBounds(pad, y, colW, ch);
         y += ch + gap + 4;
 
-        // ── Transport bar ────────────────────────────────────────────────────
-        {
-            const int knobW = 56, knobDrwH = 42, knobValH = 14;
-            const int blockH = knobDrwH + knobValH;
-            const int btn = 40;
-            const int icon = 34;   // loop / inverse pictograms (matches SCORE)
-
-            int x = pad;
-            playStopButton.setBounds(x, y + (blockH - btn)  / 2, btn,  btn);  x += btn + gap;
-            loopBtn.setBounds      (x, y + (blockH - icon) / 2, icon, icon);  x += icon + 4;
-            reverseBtn.setBounds   (x, y + (blockH - icon) / 2, icon, icon);  x += icon + gap;
-
-            const int knobX = pad + colW - knobW;
-            speedSlider.setBounds(knobX, y, knobW, blockH);
-            speedLabel.setBounds(x, y + (knobDrwH - ch) / 2,
-                                 juce::jmax(0, knobX - gap - x), ch);
-            y += blockH + gap;
-        }
+        // ── Transport bar (the shared widget) ────────────────────────────────
+        xportBar_.setBounds(pad, y, colW, ScoreTransportBar::kHeight);
+        y += ScoreTransportBar::kHeight + gap;
         playHint.setBounds(pad, y, colW, ch); y += ch + 2;
 
         // Log fills whatever is left under the column.
@@ -880,143 +785,6 @@ private:
     };
 
     //==========================================================================
-    /** Square play/stop transport button (same visual language as SCORE's). */
-    class TimbrePlayButton : public juce::Button
-    {
-    public:
-        TimbrePlayButton() : juce::Button("timbrePlayStop") {}
-
-        void setPlaying(bool p)
-        {
-            if (p == playing) return;
-            playing = p;
-            repaint();
-        }
-
-        void paintButton(juce::Graphics& g, bool over, bool down) override
-        {
-            const auto b = getLocalBounds().toFloat().reduced(1.f);
-            const juce::Colour bg(0xff222230);
-            g.setColour(down ? bg.brighter(0.30f) : over ? bg.brighter(0.12f) : bg);
-            g.fillRoundedRectangle(b, 3.f);
-            g.setColour(juce::Colour(0xff33373f));
-            g.drawRoundedRectangle(b, 3.f, 1.f);
-
-            const auto inner = b.reduced(b.getHeight() * 0.30f);
-            if (! isEnabled())
-                Icons::fillPath(g, Icons::play(), inner, juce::Colour(0xff555a62));
-            else if (playing)
-                Icons::fillPath(g, Icons::stop(), inner, juce::Colour(kAccentARGB));
-            else
-                Icons::fillPath(g, Icons::play(), inner, juce::Colour(0xff66cc88));
-        }
-
-    private:
-        bool playing = false;
-        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TimbrePlayButton)
-    };
-
-    /** Compact pictogram toggle for the loop controls — same visual language as
-     *  the SCORE page (ScoreIconToggle) and the SAMPLER loop-mode pictograms
-     *  (LoopModeButton), so the transport reads identically across pages; only
-     *  the accent differs (terracotta = TIMBRE identity).
-     *   • Loop    → a "racetrack" loop with a left-pointing arrow (repeat).
-     *   • Inverse → the same loop, mirrored (right-pointing arrow) = play backward.
-     *  JUCE toggle — APVTS-bound (scoreLoop / scoreReverse), shared with SCORE. */
-    class TimbreIconToggle : public juce::Button
-    {
-    public:
-        enum class Glyph { Loop, Inverse };
-
-        explicit TimbreIconToggle(Glyph g) : juce::Button("timbreLoopToggle"), glyph(g)
-        {
-            setClickingTogglesState(true);
-        }
-
-        void paintButton(juce::Graphics& g, bool over, bool down) override
-        {
-            const auto b = getLocalBounds().toFloat().reduced(1.f);
-            const bool on = getToggleState() && isEnabled();
-            const juce::Colour accent(kAccentARGB); // terracotta (TIMBRE identity)
-
-            const juce::Colour bg = on ? accent.withAlpha(0.22f) : juce::Colour(0xff222230);
-            g.setColour(down ? bg.brighter(0.30f) : over ? bg.brighter(0.12f) : bg);
-            g.fillRoundedRectangle(b, 3.f);
-            g.setColour(on ? accent.withAlpha(0.9f) : juce::Colour(0xff33373f));
-            g.drawRoundedRectangle(b, 3.f, 1.f);
-
-            const auto inner = b.reduced(b.getHeight() * 0.22f);
-            const juce::Colour fg = on ? accent
-                                       : juce::Colour(isEnabled() ? 0xff9aa6ba : 0xff555a62);
-            drawLoopGlyph(g, inner, fg, glyph == Glyph::Inverse);
-        }
-
-    private:
-        /** Stadium (racetrack) loop, open at the top, with an arrow capping the
-         *  gap — reads as "repeat". The RING is centred (the arrow head overshoots
-         *  its top, so it is EXCLUDED from the centring measurement). @p reversed
-         *  mirrors it horizontally (arrow points right) = play backward.
-         *  Shared shape with ScoreIconToggle / LoopModeButton. */
-        static void drawLoopGlyph(juce::Graphics& g, juce::Rectangle<float> r,
-                                  juce::Colour col, bool reversed)
-        {
-            const float h  = r.getHeight();
-            const float th = juce::jmax(2.0f, h * 0.12f);   // stroke thickness
-
-            // Ring built symmetric about r's centre → centred by construction.
-            const float ringH  = h * 0.64f;
-            const float L = r.getX() + th * 0.6f;
-            const float R = r.getRight() - th * 0.6f;
-            const float T = r.getCentreY() - ringH * 0.5f;
-            const float B = r.getCentreY() + ringH * 0.5f;
-            const float radius = (B - T) * 0.5f;
-            const float midY   = (T + B) * 0.5f;
-            const float topLx  = L + radius;                // top straight: left end
-            const float topRx  = R - radius;                // top straight: right end
-            const float gx0    = juce::jmap(0.34f, topLx, topRx); // gap (arrow) start
-            const float gx1    = juce::jmap(0.66f, topLx, topRx); // gap (arrow) end
-
-            juce::Path loop;
-            loop.startNewSubPath(gx1, T);
-            loop.lineTo(topRx, T);
-            loop.addCentredArc(topRx, midY, radius, radius, 0.0f,
-                               0.0f, juce::MathConstants<float>::pi, false);
-            loop.lineTo(topLx, B);
-            loop.addCentredArc(topLx, midY, radius, radius, 0.0f,
-                               juce::MathConstants<float>::pi,
-                               juce::MathConstants<float>::twoPi, false);
-            loop.lineTo(gx0, T);
-
-            const float aH     = radius * 0.85f;
-            const float aTipX  = gx0 - th * 0.25f;
-            const float aBackX = gx1 + th * 0.25f;
-            juce::Path arrow;
-            arrow.addTriangle(aTipX, T, aBackX, T - aH, aBackX, T + aH);
-
-            const auto ringBounds = loop.getBounds().expanded(th * 0.5f);
-            const auto offset = r.getCentre() - ringBounds.getCentre();
-            const auto move = juce::AffineTransform::translation(offset.x, offset.y);
-            loop.applyTransform(move);
-            arrow.applyTransform(move);
-
-            if (reversed)
-            {
-                const auto flip = juce::AffineTransform::scale(-1.0f, 1.0f)
-                                      .translated(r.getCentreX() * 2.0f, 0.0f);
-                loop.applyTransform(flip);
-                arrow.applyTransform(flip);
-            }
-
-            g.setColour(col);
-            g.strokePath(loop, juce::PathStrokeType(th, juce::PathStrokeType::curved,
-                                                        juce::PathStrokeType::rounded));
-            g.fillPath(arrow);
-        }
-
-        Glyph glyph;
-        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TimbreIconToggle)
-    };
-
     /** Top tab for one sound slot: index + preset + note, dimmed when the slot
      *  is disabled, accent frame when selected. */
     class SlotTab : public juce::Button
@@ -1085,42 +853,9 @@ private:
     void refreshSlotControls()
     {
         const auto& q = cur();
-        presetCombo.setSelectedId(q.preset >= 0 ? q.preset + 1
-                                                : timbregen::numPresets() + 1,
-                                  juce::dontSendNotification);
-        activeToggle .setToggleState(q.enabled, juce::dontSendNotification);
-        noteSlider   .setValue(q.midiNote,      juce::dontSendNotification);
-        partialsSlider.setValue(q.numPartials,  juce::dontSendNotification);
-        slopeSlider  .setValue(q.slopeDbPerOct, juce::dontSendNotification);
-        oddSlider    .setValue(q.oddBias,       juce::dontSendNotification);
-        inharmSlider .setValue(q.inharmonicity, juce::dontSendNotification);
-        combSlider   .setValue(q.combDepth,     juce::dontSendNotification);
-        combPosSlider.setValue(q.combPos,       juce::dontSendNotification);
-        attackSlider .setValue(q.attackMs,      juce::dontSendNotification);
-        decaySlider  .setValue(q.decaySec,      juce::dontSendNotification);
-        hfDampSlider .setValue(q.hfDamp,        juce::dontSendNotification);
-        levelSlider  .setValue(q.levelDb,       juce::dontSendNotification);
-
-        // Bell presets fix their partial set — grey the harmonic-series fields.
-        const bool harmonic = ! q.bellMode;
-        partialsSlider.setEnabled(harmonic);
-        slopeSlider.setEnabled(harmonic);
-        oddSlider.setEnabled(harmonic);
-        inharmSlider.setEnabled(harmonic);
-        combSlider.setEnabled(harmonic);
-        combPosSlider.setEnabled(harmonic);
-    }
-
-    /** A timbral tweak turns the slot into a hand-tuned "Custom" patch. */
-    void becomeCustom()
-    {
-        if (cur().preset != timbregen::kPresetCustom)
-        {
-            cur().preset = timbregen::kPresetCustom;
-            presetCombo.setSelectedId(timbregen::numPresets() + 1,
-                                      juce::dontSendNotification);
-            slotTabs[(size_t) selectedSlot]->repaint();
-        }
+        activeToggle.setToggleState(q.enabled, juce::dontSendNotification);
+        noteSlider  .setValue(q.midiNote, juce::dontSendNotification);
+        params_.refresh();
     }
 
     void markDirty()
@@ -1266,24 +1001,83 @@ private:
     }
 
     //==========================================================================
+    /** (Re)loads OUR page into the shared score player — replaces whatever
+     *  SCORE / MIDI SCORE generated last; regenerating there reclaims the
+     *  channel. */
+    bool reloadPlayFrames()
+    {
+        auto* fs = boundChannel();
+        if (fs == nullptr || ! ensureFullImage())
+            return false;
+        fs->loadScoreFramesFromImage(fullImage, fullBand, fullMinFreq, fullMaxFreq, false);
+        framesAreOurs    = true;
+        loadedFrameCount = fs->getScoreFrameCount();
+        scrubHead        = -1;
+        return true;
+    }
+
+    /** PAUSE = keep delivering the same image instant: a drone of the timbre
+     *  under the head. Two flavours sharing one button: freezing a RUNNING
+     *  transport rides the player's scrub-hold (session alive, held column
+     *  re-injected every tick); from STOP it is a sticky scrub session (the
+     *  drag-audition without holding the mouse). In both, clicking/dragging
+     *  the preview moves the held column live. Same contract as MIDI SCORE
+     *  and VOICE. */
+    enum class PauseMode { none, playing, held };
+
+    void togglePause()
+    {
+        auto* fs = boundChannel();
+        if (fs == nullptr) return;
+
+        if (pauseMode != PauseMode::none)   // release
+        {
+            if (pauseMode == PauseMode::playing) fs->uiSetScorePaused(false);
+            else                                 fs->uiEndScoreScrub();
+            pauseMode = PauseMode::none;
+            xportBar_.setPaused(false);
+            repaint(previewArea);
+            return;
+        }
+
+        if (fs->isScorePlaying() && framesAreOurs)
+        {
+            fs->uiSetScorePaused(true);
+            pauseMode = PauseMode::playing;
+        }
+        else
+        {
+            if ((! framesAreOurs || fullDirty) && ! reloadPlayFrames())
+                return;
+            if (! fs->uiBeginScoreScrub())
+                return;
+            pauseMode = PauseMode::held;   // holds wherever the head sits
+        }
+        xportBar_.setPaused(true);
+        repaint(previewArea);
+    }
+
+    void releasePauseState()
+    {
+        pauseMode = PauseMode::none;
+        xportBar_.setPaused(false);
+    }
+
     void togglePlay()
     {
         auto* fs = boundChannel();
         if (fs == nullptr) return;
 
+        // PLAY and STOP both leave pause mode (play() / stop() clear the
+        // player-side hold themselves; the held session just becomes ours).
+        releasePauseState();
+
         const bool play = ! (fs->isScorePlaying() && framesAreOurs);
 
         if (play)
         {
-            if (! ensureFullImage())
+            if (! reloadPlayFrames())
                 return;
-            // (Re)load OUR page into the shared score player — replaces whatever
-            // SCORE generated last; regenerating there reclaims the channel.
-            fs->loadScoreFramesFromImage(fullImage, fullBand,
-                                         fullMinFreq, fullMaxFreq, false);
-            framesAreOurs    = true;
-            loadedFrameCount = fs->getScoreFrameCount();
-            scrubHead        = -1;
         }
         else
             scrubHead = -1;
@@ -1346,17 +1140,18 @@ private:
             {
                 framesAreOurs = false;
                 scrubHead     = -1;
+                releasePauseState();   // whoever reclaimed the slot ended it
                 repaint(previewArea);
             }
             else
             {
-                playStopButton.setPlaying(fs->isScorePlaying());
+                xportBar_.setPlaying(fs->isScorePlaying());
                 if (fs->isScorePlaying())
                     repaint(previewArea);
             }
         }
         else
-            playStopButton.setPlaying(false);
+            xportBar_.setPlaying(false);
 
         // Mirror TIMBRE's play param on the real engine state (DAW lane truthful
         // when a one-shot ends / an internal reload stops playback).
@@ -1412,21 +1207,9 @@ private:
         for (const auto& q : d.slots)
         {
             auto* o = new juce::DynamicObject();
-            o->setProperty("en",    q.enabled);
-            o->setProperty("preset",q.preset);
-            o->setProperty("note",  q.midiNote);
-            o->setProperty("part",  q.numPartials);
-            o->setProperty("slope", q.slopeDbPerOct);
-            o->setProperty("odd",   q.oddBias);
-            o->setProperty("inh",   q.inharmonicity);
-            o->setProperty("comb",  q.combDepth);
-            o->setProperty("cpos",  q.combPos);
-            o->setProperty("atk",   q.attackMs);
-            o->setProperty("dec",   q.decaySec);
-            o->setProperty("hf",    q.hfDamp);
-            o->setProperty("lvl",   q.levelDb);
-            o->setProperty("bell",  q.bellMode);
-            o->setProperty("bellT", q.bellTable);
+            o->setProperty("en",   q.enabled);
+            o->setProperty("note", q.midiNote);
+            timbregen::encodeParams(*o, q);
             arr.add(juce::var(o));
         }
         auto* root = new juce::DynamicObject();
@@ -1477,23 +1260,10 @@ private:
             auto* so = (*arr)[i].getDynamicObject();
             if (so == nullptr) continue;
             auto& q = slots[(size_t) i];
-            auto get = [&](const char* k, double d)
-            { return so->hasProperty(k) ? (double) so->getProperty(k) : d; };
-            q.enabled       = (bool) so->getProperty("en");
-            q.preset        = (int) get("preset", q.preset);
-            q.midiNote      = juce::jlimit(0, 127, (int) get("note", q.midiNote));
-            q.numPartials   = juce::jlimit(1, 128, (int) get("part", q.numPartials));
-            q.slopeDbPerOct = get("slope", q.slopeDbPerOct);
-            q.oddBias       = get("odd",   q.oddBias);
-            q.inharmonicity = get("inh",   q.inharmonicity);
-            q.combDepth     = get("comb",  q.combDepth);
-            q.combPos       = get("cpos",  q.combPos);
-            q.attackMs      = get("atk",   q.attackMs);
-            q.decaySec      = get("dec",   q.decaySec);
-            q.hfDamp        = get("hf",    q.hfDamp);
-            q.levelDb       = get("lvl",   q.levelDb);
-            q.bellMode      = (bool) so->getProperty("bell");
-            q.bellTable     = (int) get("bellT", q.bellTable);
+            q.enabled = (bool) so->getProperty("en");
+            if (so->hasProperty("note"))
+                q.midiNote = juce::jlimit(0, 127, (int) so->getProperty("note"));
+            timbregen::decodeParams(*so, q);
         }
         d.previewDirty = true;
         d.fullDirty    = true;
@@ -1518,9 +1288,15 @@ public:
     {
         if (slot == boundScoreSlot_)
             return;
-        if (scrubAuditioning)
-            if (auto* fs = boundChannel())
+        if (auto* fs = boundChannel())
+        {
+            if (scrubAuditioning)
                 fs->uiEndScoreScrub();
+            // Don't leave the OLD instance frozen with no UI bound to it.
+            if (pauseMode == PauseMode::playing) fs->uiSetScorePaused(false);
+            if (pauseMode == PauseMode::held)    fs->uiEndScoreScrub();
+        }
+        releasePauseState();
         scrubAuditioning = false;
         framesAreOurs    = false;
         loadedFrameCount = 0;
@@ -1678,7 +1454,8 @@ private:
     {
         xport_.rebind(processor.getAPVTS(), processor.getMidiMap(),
                       ModuleType::Timbre, transportSlot(),
-                      playStopButton, loopBtn, reverseBtn, speedSlider);
+                      xportBar_.playButton(), xportBar_.loopButton(),
+                      xportBar_.reverseButton(), xportBar_.speedSlider());
     }
     int boundScoreSlot_ = -1;
 
@@ -1690,22 +1467,15 @@ private:
 
     std::array<std::unique_ptr<SlotTab>, timbregen::kNumSlots> slotTabs;
 
-    juce::Label    presetLabel, noteLabel, partialsLabel, slopeLabel, oddLabel,
-                   inharmLabel, combLabel, combPosLabel, attackLabel, decayLabel,
-                   hfDampLabel, levelLabel, wsLabel, lineLabel,
-                   speedLabel, playHint, logLabel;
-    juce::ComboBox presetCombo;
+    juce::Label    noteLabel, wsLabel, lineLabel, playHint, logLabel;
     juce::ToggleButton activeToggle, labelsToggle;
-    TimbreIconToggle   loopBtn    { TimbreIconToggle::Glyph::Loop };
-    TimbreIconToggle   reverseBtn { TimbreIconToggle::Glyph::Inverse };
-    Sp3ctraBarSlider noteSlider, partialsSlider, slopeSlider, oddSlider, inharmSlider,
-                     combSlider, combPosSlider, attackSlider, decaySlider, hfDampSlider,
-                     levelSlider, wsSlider, lineSlider;
-    juce::Slider   speedSlider;   // rotary transport knob — NOT a bar
+    Sp3ctraBarSlider noteSlider, wsSlider, lineSlider;
+    TimbreParamsPanel params_;           // the shared timbre editor (preset + bars)
+    ScoreTransportBar xportBar_ { juce::Colour(kAccentARGB), /*withPause*/ true };
+    PauseMode pauseMode = PauseMode::none;
     TimbreExportButton exportButton;
     bool exportAsPng_ = true;            // SETUP face: PNG (true) / JPEG
     bool exportBusy_  = false;           // one export at a time
-    TimbrePlayButton playStopButton;
 
     juce::Rectangle<int>   previewArea;
     juce::Rectangle<float> previewImgArea;

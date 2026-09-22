@@ -149,14 +149,16 @@ int synth_init_thread_pool(LuxStralEngine *eng) {
     return -1;
   }
 
-  // Initialize barrier synchronization (Phase 2: Deterministic execution)
-  if (eng->use_barriers) {
-    // num_workers + 1 for main thread
-    if (synth_init_barriers(eng, eng->num_workers + 1) != 0) {
-      log_warning("SYNTH", "Failed to initialize barriers, falling back to condition variables");
-      eng->use_barriers = 0;
-    }
+  eng->work_dispatch = synth_work_dispatch_create(eng->num_workers - 1);
+  if (!eng->work_dispatch) {
+    free(eng->thread_pool); eng->thread_pool = NULL;
+    free(eng->worker_threads); eng->worker_threads = NULL;
+    return -1;
   }
+  eng->started_auxiliaries = 0;
+  eng->scheduling_sample_rate = eng->scheduling_block_size = 0;
+  // Cleanup can now safely handle partial buffer initialization.
+  eng->pool_initialized = 1;
 
   int current_notes = get_current_number_of_notes();
   int notes_per_thread = current_notes / eng->num_workers;
@@ -180,15 +182,14 @@ int synth_init_thread_pool(LuxStralEngine *eng) {
 
     // ✅ STATIC ALLOCATION: Use MAX_BUFFER_SIZE for all per-sample buffers
     // Industry standard: allocate once for maximum buffer size (4096)
-    // Memory cost: ~114 MB for 8 workers (negligible on modern systems)
     // Benefit: No reallocation needed when DAW changes buffer size
     {
       int notes_this = worker->end_note - worker->start_note;
+      if (notes_this < 1) notes_this = 1; // valid allocation for an empty partition
       
       // Allocate per-sample buffers with MAX_BUFFER_SIZE (static allocation)
       worker->thread_luxstralBuffer = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
       worker->thread_sumVolumeBuffer = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
-      worker->thread_maxVolumeBuffer = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
       worker->thread_luxstralBuffer_L = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
       worker->thread_luxstralBuffer_R = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
       worker->waveBuffer = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
@@ -198,11 +199,10 @@ int synth_init_thread_pool(LuxStralEngine *eng) {
       worker->imageBuffer_q31 = (int32_t*)calloc(notes_this, sizeof(int32_t));
       worker->imageBuffer_f32 = (float*)calloc(notes_this, sizeof(float));
       
-      // Precomputed arrays: per note × MAX_BUFFER_SIZE (static allocation)
-      size_t total_max = (size_t)notes_this * MAX_BUFFER_SIZE;
+      // One scratch block per worker: each note is consumed before the next.
       // precomputed_new_idx removed: phase continuity is now tracked via float
       // phase_acc/phase_inc and committed in synth_precompute_wave_data().
-      worker->precomputed_wave_data = (float*)calloc(total_max, sizeof(float));
+      worker->precomputed_wave_data = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
       
       // Precomputed volume and pan data (per note, independent of buffer size)
       worker->precomputed_volume = (float*)calloc(notes_this, sizeof(float));
@@ -223,7 +223,7 @@ int synth_init_thread_pool(LuxStralEngine *eng) {
       worker->temp_waveBuffer_R = (float*)calloc(MAX_BUFFER_SIZE, sizeof(float));
       
       // Check all allocations
-      if (!worker->thread_luxstralBuffer || !worker->thread_sumVolumeBuffer || !worker->thread_maxVolumeBuffer ||
+      if (!worker->thread_luxstralBuffer || !worker->thread_sumVolumeBuffer ||
           !worker->thread_luxstralBuffer_L || !worker->thread_luxstralBuffer_R || !worker->waveBuffer || !worker->volumeBuffer ||
           !worker->imageBuffer_q31 || !worker->imageBuffer_f32 ||
           !worker->precomputed_wave_data || !worker->precomputed_volume ||
@@ -231,6 +231,7 @@ int synth_init_thread_pool(LuxStralEngine *eng) {
           !worker->last_left_gain || !worker->last_right_gain ||
           !worker->temp_waveBuffer_L || !worker->temp_waveBuffer_R) {
         log_error("SYNTH", "Error allocating worker buffers for thread %d", i);
+        synth_shutdown_thread_pool_impl(eng);
         return -1;
       }
       
@@ -242,16 +243,6 @@ int synth_init_thread_pool(LuxStralEngine *eng) {
         worker->precomputed_left_gain[idx] = 0.707f;
         worker->precomputed_right_gain[idx] = 0.707f;
       }
-    }
-
-    // Initialize synchronization
-    if (pthread_mutex_init(&worker->work_mutex, NULL) != 0) {
-      log_error("SYNTH", "Error initializing mutex for thread %d", i);
-      return -1;
-    }
-    if (pthread_cond_init(&worker->work_cond, NULL) != 0) {
-      log_error("SYNTH", "Error initializing condition for thread %d", i);
-      return -1;
     }
   }
 
@@ -288,31 +279,9 @@ void *synth_persistent_worker_thread(void *arg) {
   }
 #endif
 
-  while (!eng->pool_shutdown && !eng->workers_must_exit) {
-    // Deterministic execution with barriers
-    // Wait at start barrier for all workers + main thread
-    synth_barrier_wait(eng, &eng->worker_start_barrier);
-
-    // 🔧 CRITICAL: Check exit flags immediately after barrier wakeup
-    if (eng->pool_shutdown || eng->workers_must_exit) {
-      // Rejoin the end barrier before exiting: the shutdown thread joins BOTH
-      // barriers (synth_shutdown_thread_pool_impl). On Linux
-      // pthread_barrier_wait has no exit-flag escape, so exiting without this
-      // join left the shutdown thread blocked forever on the end barrier.
-      // On macOS the custom barrier returns immediately (flags checked).
-      synth_barrier_wait(eng, &eng->worker_end_barrier);
-      break;
-    }
-
-    // Perform the work (Float32 path)
+  while (synth_work_dispatch_wait(eng->work_dispatch, worker->thread_id - 1)) {
     synth_process_worker_range(worker);
-
-    // Wait at end barrier for all workers to complete
-    synth_barrier_wait(eng, &eng->worker_end_barrier);
-
-    // 🔧 CRITICAL: Check exit flags after end barrier too
-    if (eng->pool_shutdown || eng->workers_must_exit)
-      break;
+    synth_work_dispatch_complete(eng->work_dispatch);
   }
 
   return NULL;
@@ -324,13 +293,7 @@ void *synth_persistent_worker_thread(void *arg) {
  * @retval None
  */
 void synth_process_worker_range(synth_thread_worker_t *worker) {
-  int32_t buff_idx, note, local_note_idx;
-
-  // Thread-safe one-time log using atomic compare-exchange (per-engine flag)
-  int expected = 0;
-  if (atomic_compare_exchange_strong(&worker->engine->f32_path_logged, &expected, 1)) {
-    log_startup_detail("SYNTH", "Float32 path active in worker threads");
-  }
+  int32_t note, local_note_idx;
 
   // Release capture buffers if capture was disabled since last buffer
   synth_release_capture_buffers_if_disabled(worker);
@@ -338,7 +301,6 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
   // Initialize output buffers to zero
   fill_float(0, worker->thread_luxstralBuffer, g_sp3ctra_config.audio_buffer_size);
   fill_float(0, worker->thread_sumVolumeBuffer, g_sp3ctra_config.audio_buffer_size);
-  fill_float(0, worker->thread_maxVolumeBuffer, g_sp3ctra_config.audio_buffer_size);
 
   // Initialize stereo buffers - CRITICAL FIX: must zero these buffers! (always present)
   fill_float(0, worker->thread_luxstralBuffer_L, g_sp3ctra_config.audio_buffer_size);
@@ -359,7 +321,7 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
   // Phase management (mode + auto-calibrated gate) — see config_loader.h.
   // The absolute gate is computed by the producer (drain block, after the
   // end barrier) from the rolling max note volume × sensitivity: workers
-  // read last frame's value, strictly ordered by the barriers.
+  // read last frame's value, ordered by dispatch publication/completion.
   const int   phase_mode         = g_sp3ctra_config.luxstral_phase_mode;
   const float gate_raw           = worker->engine->phase_gate_abs;
   const float phase_reset_thresh = (gate_raw > 0.003f) ? gate_raw : 0.003f;
@@ -494,13 +456,34 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
       }
     }
 
+    // Exact silence only: retain the existing floating-point phase recurrence
+    // and all onset bookkeeping, but avoid table gathers and envelope/mix passes.
+    // No threshold: the decode law's nonzero background remains audible as before.
+    if (!capture_enabled && worker->precomputed_volume[local_note_idx] == 0.0f &&
+        worker->engine->waves[note].current_volume == 0.0f) {
+      float phase = worker->engine->waves[note].phase_acc;
+      const float inc = worker->engine->waves[note].phase_inc *
+                        (1.0f + worker->engine->waves[note].detune_offset);
+      for (int s = 0; s < audio_buffer_size; ++s) {
+        phase += inc;
+        if (phase >= (float)SINE_TABLE_SIZE) phase -= (float)SINE_TABLE_SIZE;
+      }
+      worker->engine->waves[note].phase_acc = phase;
+      worker->engine->waves[note].target_volume = 0.0f;
+      if (stereo_enabled) {
+        worker->last_left_gain[local_note_idx] = worker->precomputed_left_gain[local_note_idx];
+        worker->last_right_gain[local_note_idx] = worker->precomputed_right_gain[local_note_idx];
+      }
+      if (phase_active && worker->min_target_volume > 0.0f) worker->min_target_volume = 0.0f;
+      continue;
+    }
+
     /* Per-engine morph snapshot (M8) — copied from THIS engine's db in
      * synth_precompute_wave_data(); the global g_waveform_morph holds the last
      * pipeline call's frame and would cross-talk between engines A and B. */
     const float morph = worker->engine->sf_morph;
     {
-      float*      pre_wave_w = worker->precomputed_wave_data +
-                               (size_t)local_note_idx * audio_buffer_size;
+      float*      pre_wave_w = worker->precomputed_wave_data;
       float       phase = worker->engine->waves[note].phase_acc;
       /* Phase drift applied here — hoisted per note/buffer, zero per-sample
        * cost. detune_offset = 0 → bit-exact legacy increment.               */
@@ -581,7 +564,6 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
     // ✅ OPTIMIZATION: Prefetch next iteration data (improves cache hit rate)
     if (note + 1 < worker->end_note) {
       __builtin_prefetch(&worker->precomputed_volume[local_note_idx + 1], 0, 3);
-      __builtin_prefetch(&worker->precomputed_wave_data[(size_t)(local_note_idx + 1) * audio_buffer_size], 0, 3);
     }
     
     // Use preprocessed volume data (already has: RGB → Grayscale → Inversion → Gamma → Averaging)
@@ -608,7 +590,7 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
     }
 
     // ✅ OPTIMIZATION: Compute pointers once (avoid repeated address calculations)
-    const float* pre_wave = worker->precomputed_wave_data + (size_t)local_note_idx * audio_buffer_size;
+    const float* pre_wave = worker->precomputed_wave_data;
     float* wave_buf = worker->waveBuffer;
     float* vol_buf = worker->volumeBuffer;
 
@@ -632,13 +614,6 @@ void synth_process_worker_range(synth_thread_worker_t *worker) {
     // normalization pass was an identity copy — multiply straight from the
     // precomputed data instead (one full buffer pass per note saved).
     mult_float(pre_wave, vol_buf, wave_buf, audio_buffer_size);
-
-    // ✅ OPTIMIZATION: Update max volume buffer inline (better cache locality)
-    for (buff_idx = audio_buffer_size; --buff_idx >= 0;) {
-      if (vol_buf[buff_idx] > worker->thread_maxVolumeBuffer[buff_idx]) {
-        worker->thread_maxVolumeBuffer[buff_idx] = vol_buf[buff_idx];
-      }
-    }
 
     // ✅ OPTIMIZATION: Conditional stereo/mono processing (hoisted check)
     if (stereo_enabled) {
@@ -816,12 +791,15 @@ void synth_precompute_wave_data(LuxStralEngine *eng, float *imageData, DoubleBuf
 int synth_start_worker_threads(LuxStralEngine *eng) {
   int rt_success_count = 0;  // Track how many workers got RT priority
 
-  for (int i = 0; i < eng->num_workers; i++) {
+  for (int i = 1; i < eng->num_workers; i++) {
     if (pthread_create(&eng->worker_threads[i], NULL, synth_persistent_worker_thread,
                        &eng->thread_pool[i]) != 0) {
       log_error("SYNTH", "Error creating worker thread %d", i);
+      synth_shutdown_thread_pool_impl(eng);
       return -1;
     }
+
+    ++eng->started_auxiliaries;
 
     // ✅ PHASE 1: Set RT priority for deterministic execution
 #if defined(__linux__) || defined(__APPLE__)
@@ -852,10 +830,10 @@ int synth_start_worker_threads(LuxStralEngine *eng) {
 
   // Condensed summary log (always shown in NORMAL mode)
 #if defined(__linux__) || defined(__APPLE__)
-  if (rt_success_count == eng->num_workers) {
-    log_startup_detail("SYNTH", "RT priority enabled for all %d worker threads", eng->num_workers);
+  if (rt_success_count == eng->num_workers - 1) {
+    log_startup_detail("SYNTH", "RT priority enabled for %d auxiliary threads; partition 0 runs on producer", eng->started_auxiliaries);
   } else if (rt_success_count > 0) {
-    log_info("SYNTH", "RT priority enabled for %d/%d worker threads", rt_success_count, eng->num_workers);
+    log_info("SYNTH", "RT priority enabled for %d/%d worker threads", rt_success_count, eng->started_auxiliaries);
   } else {
     log_info("SYNTH", "RT priority not available (continuing without RT for %d workers)", eng->num_workers);
   }
@@ -879,68 +857,21 @@ static void synth_shutdown_thread_pool_impl(LuxStralEngine *eng) {
   eng->pool_shutdown = 1;
   eng->workers_must_exit = 1;
 
-  // 🔧 ULTRA-CRITICAL FIX: If workers are blocked on barriers, we need to JOIN them
-  // to unblock them. This simulates the main thread rejoining the barriers one last time.
-  if (eng->use_barriers) {
-    log_info("SYNTH", "Performing final barrier sync to unblock workers...");
-
-    // Join the start barrier: workers parked there wake up, see the exit flags
-    // and rejoin the END barrier before exiting (see synth_worker_thread) —
-    // so ALWAYS join the end barrier too, regardless of the start result.
-    // On Linux pthread_barrier_wait returns PTHREAD_BARRIER_SERIAL_THREAD for
-    // one arbitrary thread; the old `== 0 || == -1` guard skipped the end join
-    // in that case, leaving every worker (and this thread on the next call)
-    // blocked forever — frozen DAW on unload.
-    int start_result = synth_barrier_wait(eng, &eng->worker_start_barrier);
-    (void)start_result;
-    log_info("SYNTH", "Joined start barrier, workers can proceed to exit check");
-    int end_result = synth_barrier_wait(eng, &eng->worker_end_barrier);
-    (void)end_result;
-    log_info("SYNTH", "Joined end barrier, workers should exit now");
-
-    // Additional broadcast to catch any edge cases
-#ifndef __linux__
-    // macOS: Broadcast on barrier condition variables
-    pthread_mutex_lock(&eng->worker_start_barrier.mutex);
-    eng->worker_start_barrier.generation++;
-    eng->worker_start_barrier.waiting = 0;
-    pthread_cond_broadcast(&eng->worker_start_barrier.cond);
-    pthread_mutex_unlock(&eng->worker_start_barrier.mutex);
-
-    pthread_mutex_lock(&eng->worker_end_barrier.mutex);
-    eng->worker_end_barrier.generation++;
-    eng->worker_end_barrier.waiting = 0;
-    pthread_cond_broadcast(&eng->worker_end_barrier.cond);
-    pthread_mutex_unlock(&eng->worker_end_barrier.mutex);
-#else
-    // Linux: Destroy and recreate with count=1
-    pthread_barrier_destroy(&eng->worker_start_barrier);
-    pthread_barrier_destroy(&eng->worker_end_barrier);
-    pthread_barrier_init(&eng->worker_start_barrier, NULL, 1);
-    pthread_barrier_init(&eng->worker_end_barrier, NULL, 1);
-#endif
-  }
-
-  // Wake up all threads via condition variables (legacy/fallback)
-  for (int i = 0; i < eng->num_workers; i++) {
-    pthread_mutex_lock(&eng->thread_pool[i].work_mutex);
-    pthread_cond_signal(&eng->thread_pool[i].work_cond);
-    pthread_mutex_unlock(&eng->thread_pool[i].work_mutex);
-  }
-
-  // 🔧 CRITICAL: Give workers a moment to process the exit signal
-  usleep(50000);  // 50ms grace period for clean exit
+  // The producer is quiescent: no batch remains in flight. Wake only parked
+  // auxiliaries and join them; no artificial 50 ms grace period is needed.
+  synth_work_dispatch_stop(eng->work_dispatch);
 
   // Wait for all threads to terminate
   log_info("SYNTH", "Waiting for worker threads to terminate...");
-  for (int i = 0; i < eng->num_workers; i++) {
+  for (int i = 1; i <= eng->started_auxiliaries; i++) {
     pthread_join(eng->worker_threads[i], NULL);
     log_info("SYNTH", "Worker thread %d terminated", i);
+  }
 
-    // Free dynamically allocated worker buffers
+  for (int i = 0; i < eng->num_workers; ++i) {
+    // Free all partitions, including producer and any not-yet-started worker.
     free(eng->thread_pool[i].thread_luxstralBuffer);    eng->thread_pool[i].thread_luxstralBuffer = NULL;
     free(eng->thread_pool[i].thread_sumVolumeBuffer);   eng->thread_pool[i].thread_sumVolumeBuffer = NULL;
-    free(eng->thread_pool[i].thread_maxVolumeBuffer);   eng->thread_pool[i].thread_maxVolumeBuffer = NULL;
     free(eng->thread_pool[i].thread_luxstralBuffer_L);  eng->thread_pool[i].thread_luxstralBuffer_L = NULL;
     free(eng->thread_pool[i].thread_luxstralBuffer_R);  eng->thread_pool[i].thread_luxstralBuffer_R = NULL;
     free(eng->thread_pool[i].waveBuffer);               eng->thread_pool[i].waveBuffer = NULL;
@@ -958,8 +889,7 @@ static void synth_shutdown_thread_pool_impl(LuxStralEngine *eng) {
     free(eng->thread_pool[i].temp_waveBuffer_L);        eng->thread_pool[i].temp_waveBuffer_L = NULL;
     free(eng->thread_pool[i].temp_waveBuffer_R);        eng->thread_pool[i].temp_waveBuffer_R = NULL;
 
-    pthread_mutex_destroy(&eng->thread_pool[i].work_mutex);
-    pthread_cond_destroy(&eng->thread_pool[i].work_cond);
+
   }
 
   // Free the dynamically allocated arrays
@@ -973,11 +903,9 @@ static void synth_shutdown_thread_pool_impl(LuxStralEngine *eng) {
   }
   eng->num_workers = 0;
 
-  // Cleanup barrier synchronization
-  if (eng->use_barriers) {
-    synth_cleanup_barriers(eng);
-    log_info("SYNTH", "Barrier synchronization cleaned up");
-  }
+  synth_work_dispatch_destroy(eng->work_dispatch);
+  eng->work_dispatch = NULL;
+  eng->started_auxiliaries = 0;
 
   eng->pool_initialized = 0;
   log_info("SYNTH", "Thread pool shutdown complete");
@@ -995,7 +923,7 @@ void synth_shutdown_thread_pool(void) {
 /**
  * @brief  Request a hot rebuild of the worker pool (num_workers changed)
  * @note   Only raises a flag — the producer thread consumes it at the next
- *         pass boundary (workers idle at the start barrier), tears the pool
+ *         pass boundary (auxiliaries parked on start signals), tears the pool
  *         down and falls through to the lazy re-init, which re-reads
  *         g_sp3ctra_config.num_workers. Safe from any thread.
  * @retval None

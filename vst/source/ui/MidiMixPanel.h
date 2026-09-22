@@ -65,6 +65,11 @@ public:
 
     explicit MidiMixPanel(Sp3ctraAudioProcessor& p) : processor_(p)
     {
+        chevron_.collapsed = &collapsed_;
+        chevron_.onClick = [this] { setCollapsed(! collapsed_, true); };
+        chevron_.setTooltip("Collapse / expand MIDI MIX");
+        addAndMakeVisible(chevron_);
+
         addAndMakeVisible(recBtn_);
         recBtn_.onClick = [this] { toggleRecording(); };
         recBtn_.setColour(juce::TextButton::buttonOnColourId,
@@ -101,7 +106,23 @@ public:
     void refreshActiveSlots()
     {
         auto slots = processor_.activeMidiTapSlotChains();
-        if (slots == activeSlots_) return;
+        if (slots == activeSlots_)
+        {
+            // Same topology, but a chain RENAME can change the row labels —
+            // refresh them (and the sinks' outward identity) in place.
+            bool changed = false;
+            for (auto& v : voices_)
+            {
+                auto label = processor_.midiTapLabel(v->slot);
+                if (label != v->label) { v->label = std::move(label); changed = true; }
+            }
+            if (changed)
+            {
+                processor_.refreshMidiTapDisplayNames();
+                repaint();
+            }
+            return;
+        }
         activeSlots_ = slots;
         rebuildStrip();
     }
@@ -124,7 +145,32 @@ public:
         g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontBadge)).boldened());
         g.drawText("MIDI MIX", 8, 0, getWidth() - 16, kHeaderH,
                    juce::Justification::centredLeft, false);
-        if (collapsed_) return;
+        if (collapsed_)
+        {
+            // Folded band keeps a live readout: the running take while
+            // recording, else the probe(s) whose notes are flowing right now
+            // (sampled + held by timerCallback so a dense stream won't
+            // flicker at the timer rate).
+            g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
+            if (processor_.isMidiCapturing())
+            {
+                const double s = processor_.midiCaptureElapsed();
+                g.setColour(juce::Colour(0xffff3b30));
+                g.drawText(juce::String::formatted("%02d:%04.1f", (int) (s / 60.0),
+                                                   s - 60.0 * (double) (int) (s / 60.0))
+                               + juce::String::fromUTF8(" \xC2\xB7 ")
+                               + juce::String(processor_.midiCaptureNoteCount()),
+                           readoutArea_, juce::Justification::centredRight, false);
+            }
+            else if (hotLabel_.isNotEmpty()
+                     && juce::Time::getMillisecondCounterHiRes() - hotMs_ < kHotHoldMs)
+            {
+                g.setColour(kAccent.withAlpha(0.85f));
+                g.drawText(hotLabel_, readoutArea_,
+                           juce::Justification::centredRight, false);
+            }
+            return;
+        }
 
         // Master rows: painted labels + the take readout.
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontBadge));
@@ -185,11 +231,15 @@ public:
     void resized() override
     {
         auto r = getLocalBounds();
+        // Chevron at the panel's TRUE right edge — aligned with the VIDEO MIX
+        // header buttons and the MIDI MAP chevron whatever the zone width.
+        const int cbtn = kHeaderH - 6;
+        chevron_.setBounds(getWidth() - cbtn - 6, (kHeaderH - cbtn) / 2, cbtn, cbtn);
+
         // Rows stop stretching with a very wide zone — every stored rect
         // (master rows, readout, strip) derives from this capped width.
         r.setWidth(juce::jmin(r.getWidth(), Sp3ctraTheme::kMaxContentW));
-        auto header = r.removeFromTop(kHeaderH);
-        juce::ignoreUnused(header);
+        r.removeFromTop(kHeaderH);
 
         const bool showFull = ! collapsed_;
         recBtn_     .setVisible(true);   // transport stays reachable when folded
@@ -205,8 +255,12 @@ public:
 
         if (collapsed_)
         {
-            recBtn_.setBounds(4, 2, 44, 20);
-            stripArea_ = readoutArea_ = destLabelArea_ = {};
+            // REC docks beside the chevron — it must not cover the "MIDI MIX"
+            // title on the left; the space between them is the live readout.
+            recBtn_.setBounds(chevron_.getX() - 4 - 44, 2, 44, 20);
+            readoutArea_ = { 70, 0,
+                             juce::jmax(0, recBtn_.getX() - 6 - 70), kHeaderH };
+            stripArea_ = destLabelArea_ = {};
             return;
         }
 
@@ -261,6 +315,26 @@ public:
 
 private:
     static const juce::Colour kAccent;
+
+    //── Header chevron — ▾ expanded / ▸ collapsed (mirrors MidiMapPanel) ─────
+    struct Chevron : juce::Button
+    {
+        Chevron() : juce::Button("collapse") {}
+        bool* collapsed = nullptr;
+        void paintButton(juce::Graphics& g, bool over, bool) override
+        {
+            const auto b = getLocalBounds().toFloat().reduced(4.0f);
+            g.setColour(kAccent.withAlpha(over ? 0.95f : 0.6f));
+            juce::Path p;
+            if (collapsed != nullptr && *collapsed)
+                p.addTriangle(b.getX(), b.getY(), b.getX(), b.getBottom(),
+                              b.getRight(), b.getCentreY());          // ▸
+            else
+                p.addTriangle(b.getX(), b.getY(), b.getRight(), b.getY(),
+                              b.getCentreX(), b.getBottom());         // ▾
+            g.fillPath(p);
+        }
+    };
 
     struct Voice
     {
@@ -445,6 +519,28 @@ private:
     void timerCallback() override
     {
         if (! collapsed_) repaint(stripArea_.getUnion(readoutArea_));
+        else
+        {
+            // Folded-band readout: sample the probes' activity HERE (paint
+            // stays pure) and hold the label kHotHoldMs past the last event
+            // so a dense stream doesn't flicker at the timer rate.
+            juce::String hot;
+            for (auto& v : voices_)
+            {
+                auto* st = midi_tap_instance(v->slot);
+                if (st != nullptr && st->config.enabled != 0
+                    && v->tickMoved(midi_tap_active_ticks(st)))
+                    hot += (hot.isEmpty() ? juce::String()
+                                          : juce::String::fromUTF8(" \xC2\xB7 "))
+                         + v->label;
+            }
+            const double now = juce::Time::getMillisecondCounterHiRes();
+            if (hot.isNotEmpty()) { hotLabel_ = hot; hotMs_ = now; }
+            const bool lit = processor_.isMidiCapturing()
+                          || (hotLabel_.isNotEmpty() && now - hotMs_ < kHotHoldMs);
+            if (lit || wasLit_) repaint(readoutArea_);
+            wasLit_ = lit;
+        }
         recBtn_.setToggleState(processor_.isMidiCapturing(), juce::dontSendNotification);
         // Channel only addresses the classic notes stream (and BUS): while
         // MPE streams, channels are allocated per note — grey it out.
@@ -470,6 +566,7 @@ private:
         return n;
     }
 
+    Chevron          chevron_;
     juce::TextButton recBtn_ { "REC" };
     juce::ComboBox   destCombo_;
     juce::TextButton busBtn_;
@@ -477,6 +574,12 @@ private:
 
     juce::Rectangle<int> stripArea_, readoutArea_, destLabelArea_;
     bool collapsed_ { false };
+
+    // Folded-band activity readout (see timerCallback).
+    static constexpr double kHotHoldMs = 1200.0;
+    juce::String hotLabel_;
+    double       hotMs_  { -1.0e12 };
+    bool         wasLit_ { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MidiMixPanel)
 };

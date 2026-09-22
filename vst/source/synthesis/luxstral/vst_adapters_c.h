@@ -119,7 +119,7 @@ void luxstral_cleanup_audio_buffers(void);
 void luxstral_init_callback_sync(void);
 void luxstral_cleanup_callback_sync(void);
 void luxstral_signal_buffer_consumed(void);  // Called by processBlock()
-void luxstral_wait_for_buffer_consumed(void); // Called by audioProcessingThread()
+int luxstral_wait_for_buffer_consumed(void); // Called by audioProcessingThread()
 
 #ifdef __cplusplus
 }

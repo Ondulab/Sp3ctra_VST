@@ -1160,6 +1160,7 @@ private:
         s.setColour(juce::Slider::textBoxTextColourId,       juce::Colour(0xffa0c4e8));
         s.setRange(lo, hi, step);
         s.setValue(val, juce::dontSendNotification);
+        s.setDoubleClickReturnValue(true, val);   // long-press reset target
         if (suffix != nullptr) s.setTextValueSuffix(suffix);
         addAndMakeVisible(s);
     }
@@ -2410,7 +2411,7 @@ private:
     juce::TextButton rescanButton, folderButton;
     juce::TextEditor textEditor;
     juce::Label      rateLabel, exprLabel, silenceLabel, synthStatus;
-    juce::Slider     rateSlider, exprSlider, silenceSlider;
+    Sp3ctraGestureSlider rateSlider, exprSlider, silenceSlider;
     juce::String     text;
     bool             autoMode = true;
     juce::String     selectedVoiceId;
@@ -2436,7 +2437,7 @@ private:
     PauseMode            pauseMode = PauseMode::none;
     VoiceIconToggle      loopBtn    { VoiceIconToggle::Glyph::Loop };
     VoiceIconToggle      reverseBtn { VoiceIconToggle::Glyph::Inverse };
-    juce::Slider        speedSlider;
+    Sp3ctraGestureSlider speedSlider;
     juce::Label         speedLabel, playHint;
     int  scrubHead { -1 };
     bool scrubbing { false };

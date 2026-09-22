@@ -49,6 +49,8 @@ typedef struct {
  * @return 0 on success, -1 on failure
  */
 int32_t synth_IfftInit(void);
+/* Prepare buffers and persistent workers with the producer stopped. */
+int synth_prepare_runtime(void);
 
 /**
  * @brief Process audio buffers for RGB channels

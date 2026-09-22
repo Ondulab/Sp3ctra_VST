@@ -108,7 +108,8 @@ int luxgrain_engine_init(LuxGrainEngine *e, float sample_rate) {
   lg_build_lut();
   memset(e, 0, sizeof(*e));
   e->config = luxgrain_config_default();
-  e->config_pending = e->config;
+  atomic_store(&e->feed_bands, e->config.num_bands);
+  sp3ctra_snapshot_init(&e->line_mailbox);
   e->sample_rate = sample_rate;
   e->inv_sample_rate = 1.0f / sample_rate;
   e->rng = e->config.seed;
@@ -131,9 +132,11 @@ void luxgrain_engine_reset(LuxGrainEngine *e) {
 void luxgrain_engine_set_config(LuxGrainEngine *e, const LuxGrainConfig *c) {
   if (!e || !c)
     return;
-  e->cfg_pending_seq++; /* odd: writer inside */
-  e->config_pending = *c;
-  e->cfg_pending_seq++; /* even: consistent */
+  /* Called by processBlock (or before starting audio), never by the UI. */
+  if (c->num_bands != e->config.num_bands || c->num_octaves != e->config.num_octaves ||
+      c->axis_low_hz != e->config.axis_low_hz) e->axis_pixels = -1;
+  e->config = *c;
+  atomic_store_explicit(&e->feed_bands, c->num_bands, memory_order_release);
 }
 
 void luxgrain_engine_set_sample_rate(LuxGrainEngine *e, float sample_rate) {
@@ -245,32 +248,24 @@ void luxgrain_engine_stage_line(LuxGrainEngine *e, const float *line,
     return;
   if (nb_pixels > LUXGRAIN_MAX_PIXELS)
     nb_pixels = LUXGRAIN_MAX_PIXELS;
-  int nb = e->config_pending.num_bands; /* UI-thread copy is fine here: the
-                                         * band count only changes on SETUP
-                                         * edits, and the latch re-checks. */
+  int nb = atomic_load_explicit(&e->feed_bands, memory_order_acquire);
   if (nb < 16)
     nb = 16;
   else if (nb > LUXGRAIN_MAX_BANDS)
     nb = LUXGRAIN_MAX_BANDS;
 
-  e->line_pending_seq++; /* odd: writer inside */
-  lg_fold_line(line, r, g, b, nb_pixels, nb, e->pending_cells);
-  e->pending_bands = nb;
-  e->pending_clear = 0;
-  e->pending_frame_seq = frame_seq;
-  /* The axis cache needs the true line width; it travels with the staged
-   * fold and triggers a rebuild at latch time when it changes. */
-  e->axis_pixels_pending = nb_pixels;
-  e->line_pending_seq++; /* even: consistent */
+  LuxGrainLineSnapshot* p = &e->line_slots[e->line_mailbox.back];
+  lg_fold_line(line, r, g, b, nb_pixels, nb, p->cells);
+  p->bands = nb; p->clear = 0; p->frame_seq = frame_seq; p->pixels = nb_pixels;
+  sp3ctra_snapshot_publish(&e->line_mailbox);
 }
 
 void luxgrain_engine_stage_silence(LuxGrainEngine *e) {
   if (!e || !e->initialized)
     return;
-  e->line_pending_seq++;
-  e->pending_clear = 1;
-  e->pending_bands = 0;
-  e->line_pending_seq++;
+  LuxGrainLineSnapshot* p = &e->line_slots[e->line_mailbox.back];
+  p->clear = 1; p->bands = 0; p->pixels = 0; p->frame_seq = 0;
+  sp3ctra_snapshot_publish(&e->line_mailbox);
 }
 
 /* ============================================================================
@@ -499,67 +494,29 @@ static inline float lg_env(LuxGrainVoice *g) {
  * Latch + process
  * ========================================================================== */
 static void lg_latch_pending(LuxGrainEngine *e) {
-  /* Config (retry-free: writer is quick, torn read waits for next block). */
-  uint32_t seq = e->cfg_pending_seq;
-  if (seq != e->cfg_applied_seq && (seq & 1u) == 0u) {
-    LuxGrainConfig snap = e->config_pending;
-    if (e->cfg_pending_seq == seq) {
-      int geometry_changed = snap.num_bands != e->config.num_bands ||
-                             snap.num_octaves != e->config.num_octaves ||
-                             snap.axis_low_hz != e->config.axis_low_hz;
-      e->config = snap;
-      e->cfg_applied_seq = seq;
-      if (geometry_changed)
-        e->axis_pixels = -1; /* rebuild on next line latch */
+  if (!sp3ctra_snapshot_acquire(&e->line_mailbox)) return;
+  const LuxGrainLineSnapshot* p = &e->line_slots[e->line_mailbox.front];
+  ++e->line_applied_seq;
+  if (p->clear) { e->ring_count = 0; e->ring_write = 0; return; }
+  const int nb = p->bands;
+  if (nb <= 0 || nb > LUXGRAIN_MAX_BANDS) return;
+  LuxGrainBandCell snap[LUXGRAIN_MAX_BANDS];
+  memcpy(snap, p->cells, (size_t)nb * sizeof(*snap));
+  if (e->ring_count > 0) {
+    int prev = e->ring_write - 1;
+    if (prev < 0) prev += LUXGRAIN_MAX_SPREAD;
+    const LuxGrainBandCell* pc = e->ring[prev];
+    for (int b = 0; b < nb; ++b) {
+      float d = snap[b].value - pc[b].value;
+      snap[b].edge = d > 0.0f ? (d > 1.0f ? 1.0f : d) : 0.0f;
     }
   }
-
-  /* Line → ring. */
-  seq = e->line_pending_seq;
-  if (seq != e->line_applied_seq && (seq & 1u) == 0u) {
-    LuxGrainBandCell snap[LUXGRAIN_MAX_BANDS];
-    int nb = e->pending_bands;
-    int clear = e->pending_clear;
-    int npx = e->axis_pixels_pending;
-    uint32_t fseq = e->pending_frame_seq;
-    if (clear) {
-      if (e->line_pending_seq == seq) { /* not torn — wipe the history */
-        e->ring_count = 0;
-        e->ring_write = 0;
-        e->line_applied_seq = seq;
-      }
-    } else if (nb > 0 && nb <= LUXGRAIN_MAX_BANDS) {
-      memcpy(snap, e->pending_cells, (size_t)nb * sizeof(LuxGrainBandCell));
-      if (e->line_pending_seq == seq) { /* not torn — commit */
-        /* Edge = per-band luminance RISE vs the previously latched line
-         * (consumer-side: only the ring owner sees the history). */
-        if (e->ring_count > 0) {
-          int prev = e->ring_write - 1;
-          if (prev < 0)
-            prev += LUXGRAIN_MAX_SPREAD;
-          const LuxGrainBandCell *pc = e->ring[prev];
-          for (int b2 = 0; b2 < nb; b2++) {
-            float d = snap[b2].value - pc[b2].value;
-            snap[b2].edge = d > 0.0f ? (d > 1.0f ? 1.0f : d) : 0.0f;
-          }
-        }
-        memcpy(e->ring[e->ring_write], snap,
-               (size_t)nb * sizeof(LuxGrainBandCell));
-        e->ring_write = (e->ring_write + 1) % LUXGRAIN_MAX_SPREAD;
-        if (e->ring_count < LUXGRAIN_MAX_SPREAD)
-          e->ring_count++;
-        e->line_applied_seq = seq;
-        if (npx > 0 && npx != e->axis_pixels)
-          lg_rebuild_axis(e, npx);
-        /* Mix the frame sequence into the RNG: same feed = same cloud. */
-        e->rng ^= fseq * 0x9e3779b9u;
-        if (!e->rng)
-          e->rng = e->config.seed;
-      }
-    } else {
-      e->line_applied_seq = seq; /* malformed push — drop it */
-    }
-  }
+  memcpy(e->ring[e->ring_write], snap, (size_t)nb * sizeof(*snap));
+  e->ring_write = (e->ring_write + 1) % LUXGRAIN_MAX_SPREAD;
+  if (e->ring_count < LUXGRAIN_MAX_SPREAD) ++e->ring_count;
+  if (p->pixels > 0 && p->pixels != e->axis_pixels) lg_rebuild_axis(e, p->pixels);
+  e->rng ^= p->frame_seq * 0x9e3779b9u;
+  if (!e->rng) e->rng = e->config.seed;
 }
 
 void luxgrain_engine_process(LuxGrainEngine *e, float *out_l, float *out_r,

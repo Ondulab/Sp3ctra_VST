@@ -25,6 +25,7 @@
 #include "EnvelopeEditorComponent.h"
 #include "AudioPanelWidgets.h"   // AudioPanelLayout + AudioPanelUI (shared visual language)
 #include "Sp3ctraBarSlider.h"
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -92,6 +93,9 @@ public:
     static constexpr int kPreferredH =
         kTopPad + (kLeftColH > kRightColH ? kLeftColH : kRightColH) + kSecPadB;
 
+    /** Content height — fixed: the page has no growing section. */
+    int preferredHeight() const { return kPreferredH; }
+
 private:
     // ── Resolved layout (single source for paint + resized) ─────────────────
     struct Geom
@@ -113,9 +117,9 @@ private:
 
     juce::Label  volumeLabel;
     Sp3ctraBarSlider luxwaveVolumeSlider;
-    juce::Slider lwAmplitudeSlider;
-    juce::Slider lwFltCutoffSlider, lwFltDepthSlider;
-    juce::Slider lwLfoRateSlider, lwLfoDepthSlider;
+    Sp3ctraGestureSlider lwAmplitudeSlider;
+    Sp3ctraGestureSlider lwFltCutoffSlider, lwFltDepthSlider;
+    Sp3ctraGestureSlider lwLfoRateSlider, lwLfoDepthSlider;
     juce::ComboBox lwScanModeCombo;
 
     // Wavetable amplitude ADSR rendered as a draggable envelope editor.

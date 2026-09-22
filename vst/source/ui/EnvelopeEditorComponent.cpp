@@ -137,8 +137,7 @@ EnvelopeEditorComponent::~EnvelopeEditorComponent() = default;
 void EnvelopeEditorComponent::bind(Bound& b, const juce::String& id, bool readRange)
 {
     if (id.isEmpty()) return;   // optional parameter (e.g. curve on audio ADSRs)
-    b.param = apvts.getParameter(id);
-    jassert(b.param != nullptr);
+    b.bind(apvts, id, [this](float) { repaint(); });   // sets b.param, asserts if absent
     if (b.param == nullptr) return;
 
     if (readRange)
@@ -147,9 +146,26 @@ void EnvelopeEditorComponent::bind(Bound& b, const juce::String& id, bool readRa
         b.min = rg.start;
         b.max = rg.end;
     }
-    b.attach = std::make_unique<juce::ParameterAttachment>(
-        *b.param, [this, &b](float v) { b.value = v; repaint(); });
-    b.attach->sendInitialUpdate();
+}
+
+//==============================================================================
+float EnvelopeEditorComponent::handleHeat(Handle h) const noexcept
+{
+    switch (h)
+    {
+        case Handle::Attack:   return a.heat();
+        case Handle::Decay:    return d.heat();
+        case Handle::Sustain:  return s.heat();
+        case Handle::Release:  return r.heat();
+        case Handle::BendA:    return aCurve.heat();
+        case Handle::BendD:    return dCurve.heat();
+        case Handle::BendR:    return rCurve.heat();
+        case Handle::WAttack:  return wAtk.heat();
+        case Handle::WBase:    return wBase.heat();
+        case Handle::WRelease: return wRel.heat();
+        case Handle::None:     break;
+    }
+    return 0.0f;
 }
 
 void EnvelopeEditorComponent::initBox(
@@ -458,16 +474,23 @@ void EnvelopeEditorComponent::mouseExit(const juce::MouseEvent&)
 
 void EnvelopeEditorComponent::mouseDown(const juce::MouseEvent& e)
 {
+    if (e.mods.isPopupMenu() || e.getNumberOfClicks() != 1) return;   // 2nd click → mouseDoubleClick
     const Handle h = handleAt(e.position, computeGeometry());
     dragging = h;
     hovered  = h;
     updateCursor(h);
     beginHandleGesture(h);
-    if (h != Handle::None) repaint();
+    if (h != Handle::None)
+    {
+        hold_.arm(e, [this] { holdToType(); });   // long press = type
+        repaint();
+    }
 }
 
 void EnvelopeEditorComponent::mouseDrag(const juce::MouseEvent& e)
 {
+    if (hold_.fired()) return;            // the entry bubble owns the rest
+    hold_.moved(e);
     if (dragging == Handle::None) return;
     const Geometry geo = computeGeometry();
     if (!geo.valid) return;
@@ -476,11 +499,45 @@ void EnvelopeEditorComponent::mouseDrag(const juce::MouseEvent& e)
 
 void EnvelopeEditorComponent::mouseUp(const juce::MouseEvent& e)
 {
+    hold_.release();
     endHandleGesture(dragging);
     dragging = Handle::None;
     hovered  = handleAt(e.position, computeGeometry());
     updateCursor(hovered);
     repaint();
+}
+
+void EnvelopeEditorComponent::mouseDoubleClick(const juce::MouseEvent& e)
+{
+    if (e.mods.isPopupMenu()) return;
+    Sp3ctraGestures::toDefault(boundsOf(handleAt(e.position, computeGeometry())));
+}
+
+Sp3ctraGestures::BoundList EnvelopeEditorComponent::boundsOf(Handle h)
+{
+    switch (h)
+    {
+        case Handle::Attack:   return { { "Attack",        &a } };
+        case Handle::Decay:    return { { "Decay",         &d } };
+        case Handle::Sustain:  return { { "Sustain",       &s } };
+        case Handle::Release:  return { { "Release",       &r } };
+        case Handle::BendA:    return { { "Attack curve",  &aCurve } };
+        case Handle::BendD:    return { { "Decay curve",   &dCurve } };
+        case Handle::BendR:    return { { "Release curve", &rCurve } };
+        case Handle::WAttack:  return { { "Width attack",  &wAtk } };
+        case Handle::WBase:    return { { "Width",         &wBase } };
+        case Handle::WRelease: return { { "Width release", &wRel } };
+        case Handle::None: default: return {};
+    }
+}
+
+void EnvelopeEditorComponent::holdToType()
+{
+    const Handle h = dragging;
+    endHandleGesture(h);
+    dragging = Handle::None;
+    repaint();
+    Sp3ctraGestures::openEntry(*this, hold_.anchor(*this), boundsOf(h));
 }
 
 //==============================================================================
@@ -528,7 +585,8 @@ void EnvelopeEditorComponent::paint(juce::Graphics& g)
     auto handleState = [this](Handle h)
     {
         return Sp3ctraHandles::stateOf(h == dragging,
-                                       dragging == Handle::None && h == hovered);
+                                       dragging == Handle::None && h == hovered,
+                                       false, handleHeat(h));
     };
 
     // ── Alpha lane ───────────────────────────────────────────────────────────

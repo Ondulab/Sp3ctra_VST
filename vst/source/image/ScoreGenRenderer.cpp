@@ -305,10 +305,27 @@ RenderResult renderScore(const juce::File& wav,
         (juce::int64) 0, reader->lengthInSamples,
         (juce::int64) (s.startTimeSec * sampleRate));
 
-    juce::int64 framesToLoad = reader->lengthInSamples - startSample;
+    juce::int64 regionFrames = reader->lengthInSamples - startSample;
     if (duration > 0.0)
-        framesToLoad = juce::jmin(framesToLoad,
+        regionFrames = juce::jmin(regionFrames,
                                   (juce::int64) (duration * sampleRate));
+
+    // Analysis context AROUND the region: the STFT columns are centered on the
+    // region timeline (a sound prints exactly where it sits in the audio), so
+    // the first and last windows reach half a window outside the region. Feed
+    // those tails the file's real samples wherever it has any — loading only
+    // the region would fade the opening note under the window taper and leave
+    // the last half-window blank. Half the longest candidate base window
+    // bounds every layer's reach; past the file edges the engine reads 0.
+    const int maxAlign = juce::jmin(SCORE_FFT_EFFECTIVE_SIZE,
+        (int) std::lround(kBaseWindowCandidates[kNumBaseWindowCandidates - 1]
+                          * sampleRate));
+    const juce::int64 ctxPre  = juce::jmin(startSample,
+                                           (juce::int64) (maxAlign / 2 + 1));
+    const juce::int64 ctxPost = juce::jmin(
+        reader->lengthInSamples - (startSample + regionFrames),
+        (juce::int64) (maxAlign / 2 + 1));
+    juce::int64 framesToLoad = regionFrames + ctxPre + ctxPost;
 
     // ── Load signal(s) ───────────────────────────────────────────────────────
     // Stereo SCORE builds TWO spectrograms (left → red, right → blue) so the
@@ -335,17 +352,21 @@ RenderResult renderScore(const juce::File& wav,
     std::vector<double> signal, signalR;
     if (stereo)
     {
-        if (! loadStereo(*reader, startSample, framesToLoad, signal, signalR,
+        if (! loadStereo(*reader, startSample - ctxPre, framesToLoad, signal, signalR,
                          s.enableNormalization != 0))
             return fail("Failed to decode audio samples");
     }
     else
     {
-        if (! loadMono(*reader, startSample, framesToLoad, signal, s.enableNormalization != 0))
+        if (! loadMono(*reader, startSample - ctxPre, framesToLoad, signal,
+                       s.enableNormalization != 0))
             return fail("Failed to decode audio samples");
     }
 
-    const int totalSamples = (int) signal.size();
+    const int totalSamples  = (int) signal.size();          // region + context
+    const int leadSamples   = (int) ctxPre;
+    const int regionSamples = juce::jmax(1, totalSamples - leadSamples
+                                            - (int) ctxPost);
     if (totalSamples < kMinWindow)
         return fail("Audio too short to analyse (" + juce::String(totalSamples)
                     + " samples)");
@@ -380,9 +401,12 @@ RenderResult renderScore(const juce::File& wav,
     std::vector<double> windowScores((size_t) kNumBaseWindowCandidates, -1.0);
     {
         // Score over the span the base layer will own: the bottom four octaves.
+        // Probe the REGION only — the surrounding context feeds window tails
+        // but is not part of the printed material.
         const double probeTop = juce::jmin(s.maxFreq, s.minFreq * 16.0);
         const double chosen = score_choose_base_window_seconds(
-            signal.data(), totalSamples, sampleRate, s.minFreq, probeTop,
+            signal.data() + leadSamples, regionSamples, sampleRate, s.minFreq,
+            probeTop,
             kBaseWindowCandidates, kNumBaseWindowCandidates, windowScores.data());
         if (chosen > 0.0)
             baseWindowSec = chosen;
@@ -394,7 +418,7 @@ RenderResult renderScore(const juce::File& wav,
     // image by orders of magnitude — seen live at 68 GB.
     auto planBytes = [&](const std::vector<LayerSpec>& plan)
     {
-        const double windows = (double) totalSamples
+        const double windows = (double) regionSamples
                                    / juce::jmax(1.0, (double) sampleRate / binsPerSecond)
                              + 2.0;
         double b = 0.0;
@@ -429,10 +453,8 @@ RenderResult renderScore(const juce::File& wav,
     }
 
     // Frame centres are aligned to the LONGEST window (the plan is built
-    // descending, so that is the first layer). It must not be shorter than any
-    // layer: score_compute_spectrogram_ex offsets each frame by
-    // (align - size)/2, which would run off the front of the signal if a layer
-    // were longer than the reference.
+    // descending, so that is the first layer): every layer's column w describes
+    // the same region instant, and window tails past the loaded buffer read 0.
     const int alignWin = layerPlan.front().winSize;
     if (totalSamples < alignWin)
         return fail("Audio too short for FFT window (" + juce::String(totalSamples)
@@ -487,12 +509,14 @@ RenderResult renderScore(const juce::File& wav,
         L.freqRes = (double) sampleRate / (double) L.padSize;
         L.fCross  = layerPlan[li].fCross;
 
-        int rc = score_compute_spectrogram_ex(signal.data(), totalSamples, sampleRate,
+        int rc = score_compute_spectrogram_ex(signal.data(), totalSamples,
+                                              leadSamples, regionSamples, sampleRate,
                                               L.winSize, L.padSize, alignWin,
                                               1, binsPerSecond,
                                               s.minFreq, s.maxFreq, &L.data);
         if (rc == 0 && stereo)
-            rc = score_compute_spectrogram_ex(signalR.data(), totalSamples, sampleRate,
+            rc = score_compute_spectrogram_ex(signalR.data(), totalSamples,
+                                              leadSamples, regionSamples, sampleRate,
                                               L.winSize, L.padSize, alignWin,
                                               1, binsPerSecond,
                                               s.minFreq, s.maxFreq, &L.dataR);
@@ -589,7 +613,7 @@ RenderResult renderScore(const juce::File& wav,
     const double pageH = pageHeightPx(s.pageFormat, dpi);
     if (s.pageFormat == 2 && s.writingSpeed > 0.0)
     {
-        const double realDur = (double) totalSamples / (double) sampleRate;
+        const double realDur = (double) regionSamples / (double) sampleRate;
         pageW = labelMargin + realDur * s.writingSpeed * (dpi / 2.54);
     }
     const int imageW = (int) pageW;
@@ -616,7 +640,7 @@ RenderResult renderScore(const juce::File& wav,
     int visibleWindows = spec.num_windows;
     if (s.writingSpeed > 0.0)
     {
-        const double realDur = (double) totalSamples / (double) sampleRate;
+        const double realDur = (double) regionSamples / (double) sampleRate;
         const double fftDur  = (duration > 0.0) ? duration : realDur;
         const double spectroWidthCm = spectroWidth / (dpi / 2.54);
         const double requiredCm     = fftDur * s.writingSpeed;

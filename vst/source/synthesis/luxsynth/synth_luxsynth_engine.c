@@ -249,6 +249,7 @@ int luxsynth_engine_init(LuxSynthEngine *engine, float sample_rate, int buffer_s
 
     sine_lut_init();
 
+    sp3ctra_snapshot_init(&engine->spectral_mailbox);
     engine->sample_rate = sample_rate;
     engine->inv_sample_rate = 1.0f / sample_rate;
     engine->num_voices = LUXSYNTH_MAX_VOICES;
@@ -322,8 +323,7 @@ void luxsynth_engine_set_config(LuxSynthEngine *engine, const LuxSynthConfig *co
 {
     if (!engine || !config) return;
 
-    /* Copy config — this is atomic enough for float fields on aligned structs.
-     * Full memory barrier ensures visibility to audio thread. */
+    /* Audio-thread-owned config; callers update before rendering the block. */
     engine->config = *config;
 
     /* Update LFO parameters */
@@ -397,16 +397,9 @@ void luxsynth_engine_set_spectral_data(LuxSynthEngine *engine,
 {
     if (!engine || !magnitudes) return;
 
-    int n = (num_bins > LUXSYNTH_MAX_OSCILLATORS) ? LUXSYNTH_MAX_OSCILLATORS : num_bins;
+    int n = num_bins < 0 ? 0 : ((num_bins > LUXSYNTH_MAX_OSCILLATORS) ? LUXSYNTH_MAX_OSCILLATORS : num_bins);
 
-    /* Stage into the PENDING copy under the seqlock — never into the render
-     * copy: the audio thread was reading it per sample, so a push landed as
-     * an amplitude step anywhere inside the block (audible crackle while the
-     * image moves). The render latch in luxsynth_engine_process applies this
-     * at block start and ramps to it. */
     LuxSynthSpectralData *p = &engine->spectral_pending;
-    __atomic_store_n(&engine->spec_pending_seq,
-                     engine->spec_pending_seq + 1, __ATOMIC_RELEASE); /* odd */
     p->num_bins = n;
     memcpy(p->magnitudes, magnitudes, (size_t)n * sizeof(float));
     if (pan_positions)
@@ -417,8 +410,8 @@ void luxsynth_engine_set_spectral_data(LuxSynthEngine *engine,
         memcpy(p->left_gains, left_gains, (size_t)n * sizeof(float));
     if (right_gains)
         memcpy(p->right_gains, right_gains, (size_t)n * sizeof(float));
-    __atomic_store_n(&engine->spec_pending_seq,
-                     engine->spec_pending_seq + 1, __ATOMIC_RELEASE); /* even */
+    engine->spectral_slots[engine->spectral_mailbox.back] = *p;
+    sp3ctra_snapshot_publish(&engine->spectral_mailbox);
 }
 
 /* ============================================================================
@@ -600,6 +593,8 @@ void luxsynth_engine_all_notes_off(LuxSynthEngine *engine)
 void luxsynth_engine_process(LuxSynthEngine *engine, int num_samples,
                               float *out_left, float *out_right)
 {
+    if (num_samples <= 0 || !out_left || !out_right) return;
+    if (num_samples > LUXSYNTH_MAX_BUFFER_SIZE) num_samples = LUXSYNTH_MAX_BUFFER_SIZE;
     if (!engine || !engine->initialized || !engine->config.enabled)
     {
         if (out_left)  memset(out_left,  0, (size_t)num_samples * sizeof(float));
@@ -614,36 +609,17 @@ void luxsynth_engine_process(LuxSynthEngine *engine, int num_samples,
     memset(out_left,  0, (size_t)num_samples * sizeof(float));
     memset(out_right, 0, (size_t)num_samples * sizeof(float));
 
-    /* ── Latch a pending spectral push (block start ONLY) ────────────────────
-     * Snapshot spectral_pending under its seqlock, keep the outgoing
-     * magnitudes, and ramp old→new across THIS block: a push (image moved,
-     * or feed silence) reaches the output as a 1-block linear fade instead
-     * of an instantaneous step at a random sample (that step was audible as
-     * crackle at the feed's push rate). A torn read (writer mid-staging)
-     * simply retries next block — seq stays != applied. */
-    static LuxSynthSpectralData s_spec_snap;        /* audio thread only */
+    /* Latch a complete, exclusively owned spectrum and retain the old
+     * magnitudes for the existing one-block ramp. */
     float mag_from[LUXSYNTH_MAX_OSCILLATORS];
-    int   ramping = 0;
-    {
-        const uint32_t ps =
-            __atomic_load_n(&engine->spec_pending_seq, __ATOMIC_ACQUIRE);
-        if (!(ps & 1u) && ps != engine->spec_applied_seq)
-        {
-            memcpy(&s_spec_snap, (const void *)&engine->spectral_pending,
-                   sizeof(s_spec_snap));
-            const uint32_t ps2 =
-                __atomic_load_n(&engine->spec_pending_seq, __ATOMIC_ACQUIRE);
-            if (ps2 == ps)
-            {
-                const int old_bins = engine->spectral.num_bins;
-                memcpy(mag_from, engine->spectral.magnitudes, sizeof(mag_from));
-                for (int k = old_bins; k < LUXSYNTH_MAX_OSCILLATORS; ++k)
-                    mag_from[k] = 0.0f;   /* freshly exposed bins fade in */
-                engine->spectral = s_spec_snap;
-                engine->spec_applied_seq = ps;
-                ramping = 1;
-            }
-        }
+    int ramping = 0;
+    if (sp3ctra_snapshot_acquire(&engine->spectral_mailbox)) {
+        const int old_bins = engine->spectral.num_bins;
+        memcpy(mag_from, engine->spectral.magnitudes, sizeof(mag_from));
+        for (int k = old_bins; k < LUXSYNTH_MAX_OSCILLATORS; ++k) mag_from[k] = 0.0f;
+        engine->spectral = engine->spectral_slots[engine->spectral_mailbox.front];
+        engine->spec_applied_seq += 2;
+        ramping = 1;
     }
     const float ramp_step =
         (num_samples > 0) ? 1.0f / (float)num_samples : 0.0f;

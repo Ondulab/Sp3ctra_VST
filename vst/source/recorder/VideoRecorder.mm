@@ -17,6 +17,7 @@
  * Manual retain/release (no ARC, matching VideoFileReader.mm).
  */
 #include "VideoRecorder.h"
+#include "../video/VideoBlit.h"   // scaleARGBToSurface — render size → encode size
 
 #import <AVFoundation/AVFoundation.h>
 #import <CoreVideo/CoreVideo.h>
@@ -437,10 +438,13 @@ void VideoRecorder::pushVideoFrame(const juce::Image& composite, double tSeconds
     CVPixelBufferPoolRef pool = impl->vAdaptor.pixelBufferPool;
     if (pool == nullptr) return;   // pool ready only after startSession
 
-    // The mixer renders at exactly recW×recH, but stay robust to a mismatch.
+    // The mixer renders the composite at its BUDGETED size, not at the encode
+    // size: the warp is a CPU pass, so asking it for a 2160p canvas per output
+    // is what used to stall the whole application while recording. The rescale
+    // to the chosen encode resolution happens HERE, in one parallel pass
+    // straight into the pixel buffer below — a waterfall loses nothing visible
+    // to it, the warp having already box-averaged the history down.
     juce::Image img = composite;
-    if (img.getWidth() != impl->width || img.getHeight() != impl->height)
-        img = img.rescaled(impl->width, impl->height, juce::Graphics::highResamplingQuality);
     if (img.getFormat() != juce::Image::ARGB)
         img = img.convertedToFormat(juce::Image::ARGB);
 
@@ -454,11 +458,23 @@ void VideoRecorder::pushVideoFrame(const juce::Image& composite, double tSeconds
     const size_t dstStride = CVPixelBufferGetBytesPerRow(pb);
     if (dst != nullptr)
     {
-        juce::Image::BitmapData bd(img, juce::Image::BitmapData::readOnly);
-        const size_t rowBytes = (size_t) impl->width * 4;
-        // JUCE ARGB byte order == kCVPixelFormatType_32BGRA (little-endian).
-        for (int y = 0; y < impl->height; ++y)
-            std::memcpy(dst + (size_t) y * dstStride, bd.getLinePointer(y), rowBytes);
+        // JUCE ARGB byte order == kCVPixelFormatType_32BGRA (little-endian), so
+        // both paths move bytes without touching the channel layout.
+        const bool sameSize = (img.getWidth() == impl->width && img.getHeight() == impl->height);
+        bool done = false;
+        if (! sameSize)
+            done = videoblit::scaleARGBToSurface(dst, impl->width, impl->height,
+                                                 (int) dstStride, img);
+        if (! done)
+        {
+            if (! sameSize)   // scaler declined (unexpected format) — last resort
+                img = img.rescaled(impl->width, impl->height,
+                                   juce::Graphics::mediumResamplingQuality);
+            juce::Image::BitmapData bd(img, juce::Image::BitmapData::readOnly);
+            const size_t rowBytes = (size_t) impl->width * 4;
+            for (int y = 0; y < impl->height; ++y)
+                std::memcpy(dst + (size_t) y * dstStride, bd.getLinePointer(y), rowBytes);
+        }
     }
     CVPixelBufferUnlockBaseAddress(pb, 0);
 

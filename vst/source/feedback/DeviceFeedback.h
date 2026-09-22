@@ -29,9 +29,9 @@
 #include <memory>
 #include <map>
 #include <vector>
+#include "../communication/link/Sp3ctraLink.h"   // OverlayItem in signatures
 
 class Sp3ctraAudioProcessor;
-class Sp3ctraLink;
 
 class DeviceFeedback
 {
@@ -44,13 +44,20 @@ public:
     /** Any thread: a parameter changed (AudioProcessorListener hook). */
     void noteParamTouched (int paramIndex) noexcept;
 
+    /** Any thread: a VIRTUAL (non-APVTS) target changed — the sampler play
+     *  params (SamplerMidiTargets encoding). Stamped by virtualApply (MIDI)
+     *  and by the sampler UI handlers, which write the engine directly. */
+    void noteVirtualTouched (int targetId) noexcept;
+
     /** Message thread, ~30 ms. */
     void tick();
 
 private:
-    struct Recent { int index = -1; uint32_t touchedMs = 0; };
+    struct Recent { int index = -1; int vt = -1; uint32_t touchedMs = 0; };
 
     bool eligible (int paramIndex, int mode);
+    bool virtualEligible (int targetId, int mode);
+    bool composeVirtualItem (int targetId, Sp3ctraLink::OverlayItem& item);
     void tickOverlay (Sp3ctraLink& link, uint32_t now);
     void tickLeds (Sp3ctraLink& link, uint32_t now, bool resendAll);
 
@@ -61,12 +68,18 @@ private:
     uint32_t suppressUntilMs_ = 0;
     std::vector<juce::String> ids_;
 
+    // virtual-touch ring — (ms << 32) | uint32(targetId), 0 = empty slot
+    static constexpr int kVirtualRing = 8;
+    std::atomic<uint64_t> vRing_[kVirtualRing] {};
+    std::atomic<uint32_t> vRingW_ { 0 };
+
     // overlay state
     std::vector<Recent> recent_;
     juce::String lastOverlaySig_;
     uint32_t lastOverlaySendMs_ = 0;
     bool overlayActive_ = false;
     std::map<int, std::pair<bool, uint32_t>> eligCache_;   // index → (eligible, stampMs)
+    std::map<int, std::pair<bool, uint32_t>> vEligCache_;  // targetId → (eligible, stampMs)
     int lastOverlayMode_ = -1;
 
     // led state

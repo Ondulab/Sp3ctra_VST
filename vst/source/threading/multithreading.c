@@ -1,3 +1,4 @@
+#include "utils/pipeline_metrics.h"
 /* multithreading.c */
 
 #include "multithreading.h"
@@ -30,6 +31,7 @@
 #include "../processing/lux_drive.h"
 #include "../processing/lux_dcblock.h"
 #include "../processing/lux_gain.h"
+#include "../processing/lux_diff.h"
 #include "../processing/video_scroll.h"
 #include "../processing/midi_tap.h"
 #include "../processing/internal_source.h"
@@ -38,7 +40,7 @@
 
 /* VST synchronization function declaration (defined in vst_adapters.cpp) */
 #ifdef VST_MODE
-extern void luxstral_wait_for_buffer_consumed(void);
+extern int luxstral_wait_for_buffer_consumed(void);
 #include "../luxsampler/lux_sampler_hooks.h"
 #include "../luxsampler/score_player_hooks.h"
 #endif
@@ -448,6 +450,8 @@ static void chain_resolve_insert_states(const SynthChainPlan *sp,
                 states[i] = (void *)lux_dcblock_instance(sp->insert_state_idx[i]); break;
             case IMAGE_CHAIN_INSERT_LUXGAIN:
                 states[i] = (void *)lux_gain_instance(sp->insert_state_idx[i]); break;
+            case IMAGE_CHAIN_INSERT_LUXDIFF:
+                states[i] = (void *)lux_diff_instance(sp->insert_state_idx[i]); break;
             case IMAGE_CHAIN_INSERT_VIDEOSCROLL:
                 states[i] = (void *)video_scroll_instance(sp->insert_state_idx[i]); break;
             case IMAGE_CHAIN_INSERT_MIDITAP:
@@ -867,6 +871,7 @@ typedef struct {
     int rec_skip_engine;     /* CHAIN_REC_INPUT: engine that never records
                               * (the driving engine must not record its own
                               * playback); -1 = record every armed marker */
+    int metrics_end;         /* owns the final stream, not an upstream span */
     int publish_tap_at_end;  /* 1 = a tap at position `to` (== num_inserts)
                               * publishes the final stream; 0 = the span owner
                               * below `to` publishes it (pre-marker segments) */
@@ -1080,6 +1085,8 @@ static void chain_execute_span(const SynthChainPlan *sp, int chain_idx,
         }
     }
     out->endR = cr; out->endG = cg; out->endB = cb;
+    if (cx->metrics_end && to == sp->num_inserts && nb_pixels > 0 && chain_idx >= 0 && chain_idx < CHAIN_MAX_CHAINS)
+        pipeline_metric_hit(PIPE_CHAIN + (unsigned)chain_idx);
 }
 
 /* Position of the marker whose player OWNS the stream below it, -1 if none.
@@ -1194,6 +1201,7 @@ int chain_player_execute_owned(int is_score, int engine_slot, int force_play,
          * it) and stops there: walking further double-stages the shared OUTs
          * from two threads, and the staging seqlock is single-writer. */
         int span_to = sp->num_inserts;
+        int metrics_end = 1;
         for (int i = own_mk + 1; i < sp->num_inserts; i++)
         {
             const int id   = sp->insert_id[i];
@@ -1201,11 +1209,11 @@ int chain_player_execute_owned(int is_score, int engine_slot, int force_play,
             if (id == IMAGE_CHAIN_INSERT_SAMPLER
                 && !(!is_score && slot == engine_slot)
                 && lux_sampler_engine_is_driving(slot))
-            { span_to = i + 1; break; }
+            { span_to = i + 1; metrics_end = 0; break; }
             if (id == IMAGE_CHAIN_INSERT_SCORE
                 && !(is_score && slot == engine_slot)
                 && score_player_slot_is_playing(slot))
-            { span_to = i + 1; break; }
+            { span_to = i + 1; metrics_end = 0; break; }
         }
 
         ChainExecCtx cx = {
@@ -1214,6 +1222,7 @@ int chain_player_execute_owned(int is_score, int engine_slot, int force_play,
             .lx_line            = s_lx_player,
             .player_fed         = 1,
             .force_play         = force_play,
+            .metrics_end        = metrics_end,
             .pb_marker_id       = -1,
             .rec_mode           = CHAIN_REC_INPUT,
             .rec_skip_engine    = is_score ? -1 : engine_slot,
@@ -1449,8 +1458,9 @@ void *udpThread(void *arg) {
    * kept the mutex held indefinitely, freezing every other start_write caller
    * (FramePlayerThread injection, feeder tick).  Same bytes copied in total;
    * lock hold is now ~µs. */
-  /* Acquisition-gate hold buffers: the last GRANTED line, repeated downstream
-   * while the gate holds so audio + video freeze together (no dropped lines). */
+  /* Transport hold buffers: the last live line, repeated downstream while the
+   * SP3CTRA module transport HOLDs so audio + video freeze together (no
+   * dropped lines). */
   uint8_t *held_R;
   uint8_t *held_G;
   uint8_t *held_B;
@@ -1486,12 +1496,12 @@ void *udpThread(void *arg) {
     return NULL;
   }
 
-  /* Allocate acquisition-gate hold buffers */
+  /* Allocate transport hold buffers */
   held_R = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
   held_G = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
   held_B = (uint8_t *)malloc(nb_pixels * sizeof(uint8_t));
   if (!held_R || !held_G || !held_B) {
-    log_error("THREAD", "Failed to allocate acquisition-gate hold buffers");
+    log_error("THREAD", "Failed to allocate transport hold buffers");
     if (held_R) free(held_R);
     if (held_G) free(held_G);
     if (held_B) free(held_B);
@@ -1582,6 +1592,10 @@ void *udpThread(void *arg) {
       for (int i = 0; i < (int)SLP_MAX_BUTTONS; i++) smp.button_seq[i] = h.button_seq[i];
       for (int i = 0; i < 3; i++) { smp.acc[i] = h.acc[i]; smp.gyro[i] = h.gyro[i]; }
       smp.temp_c = h.temp_c;
+      smp.gesture_face = h.gesture_face;
+      smp.hit_seq      = h.hit_seq;
+      smp.hit_velocity = h.hit_velocity;
+      smp.hit_face     = h.hit_face;
       slp_hid_publish(&smp);
 
       /* Legacy Context mirror (raw values, g / dps) for any remaining reader. */
@@ -1650,6 +1664,7 @@ void *udpThread(void *arg) {
 
     if (fragmentCount == lh.fragment_count) {
       rxstats->lines_complete++;
+      pipeline_metric_hit(PIPE_RX);
       rxstats->line_pixels = linePixels;
       rxstats->last_line_ms = slp_now_ms();
       log_info_every_ms(10000, "THREAD", "SLP rx: %u lines (%u incomplete, %u lost datagrams), HID %u (%u lost), %u px/line",
@@ -1664,27 +1679,24 @@ void *udpThread(void *arg) {
         break;
       }
 
-      /* ── Acquisition gate ("vitesse d'acquisition") ──────────────────────────
+      /* ── SP3CTRA module transport applied AT THE SOURCE ──────────────────────
        * FREEZE, don't cut.  Decide ONCE whether this freshly assembled line
        * ADVANCES the stream or is HELD.  We never drop a held line: dropping
        * "cuts" the waterfall (it scrolls black) and lets the audio thread's
        * fallback keep re-preprocessing fresh data, so the freeze never reaches
        * the sound.  Instead, on HOLD we overwrite the incoming line with the
-       * last GRANTED line in the single upstream source every consumer derives
+       * last live line in the single upstream source every consumer derives
        * from — db->activeBuffer AND the AudioImageBuffers write buffer — then let
        * the WHOLE pipeline run normally.  Audio and video therefore freeze on the
-       * exact same held frame until the next gate tick / trig.  Gate disabled
-       * (mode Off) ⇒ should_publish() always 1 = full rate (legacy). */
+       * exact same held frame until the transport resumes. */
       {
-        int gate_advance = audio_image_buffers_gate_should_publish(audioBuffers);
-        /* SP3CTRA module transport applied AT THE SOURCE — same doctrine as
-         * the media modules (pause = frozen line IN the stream itself).
-         * Before this, HOLD/STOP only gated the audio sends and the zone-1
-         * display: every chain kept walking the FRESH device line, so the
-         * waterfall and the module flux views kept streaming live while
-         * "paused". HOLD repeats the latched line; STOP delivers blank paper
-         * (WHITE is the empty-stream contract). RAW gate merged the same way
-         * as chain_send_transport (the device's own upstream signal). */
+        /* Same doctrine as the media modules (pause = frozen line IN the
+         * stream itself).  Before this, HOLD/STOP only gated the audio sends
+         * and the zone-1 display: every chain kept walking the FRESH device
+         * line, so the waterfall and the module flux views kept streaming live
+         * while "paused". HOLD repeats the latched line; STOP delivers blank
+         * paper (WHITE is the empty-stream contract). RAW gate merged the same
+         * way as chain_send_transport (the device's own upstream signal). */
         int module_freeze = g_sp3ctra_config.image_freeze_mode;
         if (g_sp3ctra_config.raw_freeze_mode > module_freeze)
           module_freeze = g_sp3ctra_config.raw_freeze_mode;
@@ -1692,7 +1704,7 @@ void *udpThread(void *arg) {
           memset(db->activeBuffer_R, 0xFF, nb_pixels);
           memset(db->activeBuffer_G, 0xFF, nb_pixels);
           memset(db->activeBuffer_B, 0xFF, nb_pixels);
-        } else if ((gate_advance && module_freeze != 1) || !held_line_valid) {
+        } else if (module_freeze != 1 || !held_line_valid) {
           /* ADVANCE (or first line): latch this raw line as the new held frame. */
           memcpy(held_R, db->activeBuffer_R, nb_pixels);
           memcpy(held_G, db->activeBuffer_G, nb_pixels);
@@ -1955,6 +1967,7 @@ void *udpThread(void *arg) {
                 .lx_line            = s_lx_line,
                 .pb_marker_id       = pb_here,
                 .rec_mode           = CHAIN_REC_IDLE,
+                .metrics_end        = 1,
                 .publish_tap_at_end = 1,
             };
             chain_execute_span(sp, c, 0, sp->num_inserts, &cxp,
@@ -2117,7 +2130,7 @@ void *udpThread(void *arg) {
  * Mirrors the per-synth routing of udpThread's completed-line block — sampler
  * record hooks included (REC from an internal source, resampling while a
  * player runs) — minus the device-only machinery (fragment reassembly,
- * acquisition gate, sequencer mix). Known v1 limitation, matching
+ * sequencer mix). Known v1 limitation, matching
  * FramePlayerThread's behaviour: the shared modulated channel stays owned by
  * the sampler/score.
  *
@@ -2290,6 +2303,7 @@ void internal_sources_process_tick(void *arg)
         .lx_line            = s_lx_line_feeder,
         .pb_marker_id       = pb_here,
         .rec_mode           = CHAIN_REC_IDLE,
+        .metrics_end        = 1,
         .publish_tap_at_end = 1,
     };
     chain_execute_span(sp, c, 0, sp->num_inserts, &cxp,
@@ -2496,11 +2510,12 @@ void *audioProcessingThread(void *arg) {
 #ifdef VST_MODE
     // 🎯 VST SYNCHRONIZATION: Wait for processBlock() to consume the previous buffer
     // This ensures perfect producer/consumer handoff without buffer overwrites
-    // The wait has a 200ms timeout to avoid deadlock when audio stops
-    luxstral_wait_for_buffer_consumed();
+    // Timeouts only allow shutdown checks; they never authorize rendering.
+    const int consumed = luxstral_wait_for_buffer_consumed();
     
     // Check if we should exit after waking up (use audio_thread_running, NOT running!)
     if (!context->audio_thread_running) break;
+    if (!consumed) continue;
 #endif
 
     // Get current read pointers atomically (no mutex, no blocking!)
@@ -2508,8 +2523,9 @@ void *audioProcessingThread(void *arg) {
                                           &audio_read_G, &audio_read_B);
 
     // Measure synthesis time for performance profiling
-    struct timeval iteration_start, iteration_end;
-    gettimeofday(&iteration_start, NULL);
+#ifdef VST_MODE
+    const uint64_t iteration_start_ns = rt_profiler_now_ns();
+#endif
 
 #ifdef VST_MODE
     /* Zero-CPU contract — did the LuxStral render actually run this
@@ -2676,6 +2692,7 @@ void *audioProcessingThread(void *arg) {
         /* M7 — dataReady is a plain has-data flag (source tags removed). */
         mdb->dataReady = 1;
         pthread_mutex_unlock(&mdb->mutex);
+        if (mixed > 0) pipeline_metric_hit(PIPE_FEED);
         }
 
         if (luxstral_active)
@@ -2695,14 +2712,16 @@ void *audioProcessingThread(void *arg) {
 
     // Report iteration time to profiler (VST mode only - uses extern profiler)
 #ifdef VST_MODE
-    gettimeofday(&iteration_end, NULL);
-    int64_t sec_diff = (int64_t)(iteration_end.tv_sec - iteration_start.tv_sec);
-    int64_t usec_diff = (int64_t)(iteration_end.tv_usec - iteration_start.tv_usec);
-    uint64_t elapsed_us = (uint64_t)(sec_diff * 1000000LL + usec_diff);
-    
-    // Access VST's global profiler
+    const uint64_t elapsed_ns = rt_profiler_now_ns() - iteration_start_ns;
+    const uint64_t elapsed_us = elapsed_ns / 1000;
     extern RTProfiler g_vst_rt_profiler;
     rt_profiler_report_audio_thread_iteration(&g_vst_rt_profiler, elapsed_us);
+    if (atomic_load_explicit(&g_vst_rt_profiler.enabled, memory_order_relaxed) &&
+        g_sp3ctra_config.sampling_frequency > 0 && g_sp3ctra_config.audio_buffer_size > 0) {
+      const uint64_t budget_ns = (uint64_t)g_sp3ctra_config.audio_buffer_size *
+          1000000000ULL / g_sp3ctra_config.sampling_frequency;
+      rt_profiler_report_producer_block(&g_vst_rt_profiler, elapsed_ns, budget_ns);
+    }
     // Per-family attribution: the synth thread IS the LuxStral engine — but
     // only when its render actually ran (an idle iteration is feed ticks +
     // a silence commit, not LuxStral CPU).

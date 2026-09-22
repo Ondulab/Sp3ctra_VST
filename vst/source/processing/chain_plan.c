@@ -1,62 +1,50 @@
-/*
- * chain_plan.c — see chain_plan.h.
- *
- * Seqlock: one producer (message thread, chain_plan_publish) bumps the
- * sequence to ODD, writes the plan, bumps back to EVEN; consumers (the UDP
- * thread AND audioProcessingThread — two independent readers) retry the copy
- * until they observe the same even sequence on both sides. Publishes are rare
- * (user edits only) and the plan is tiny, so reader retries are practically
- * nonexistent — but unlike the previous double buffer, a copy can never be
- * torn by two publishes landing during one read.
- *
- * Author: zhonx
- */
+/* One message-thread publisher, multiple bounded, nonblocking readers. */
 #include "chain_plan.h"
-
 #include <string.h>
 #include <stdatomic.h>
+#include <sched.h>
 
-static ChainPlan       s_plan;                 /* guarded by s_plan_seq */
-static _Atomic uint32_t s_plan_seq   = 0;      /* even = stable, odd = writing */
-static _Atomic int      s_plan_valid = 0;
+static ChainPlan s_plans[3];
+/* -1 reserves a slot for the writer; nonnegative values count pinned readers. */
+static atomic_int s_readers[3];
+static atomic_int s_current = -1;
+static _Thread_local ChainPlan s_last_valid;
 
 void chain_plan_publish(const ChainPlan* plan)
 {
-    const uint32_t seq = atomic_load_explicit(&s_plan_seq, memory_order_relaxed);
-    atomic_store_explicit(&s_plan_seq, seq + 1, memory_order_relaxed); /* odd: write in progress */
-    /* Full release FENCE (not just a release store): the odd marker must be
-     * visible BEFORE the plan writes below — a release store only orders the
-     * accesses PRECEDING it, so plan writes could otherwise be hoisted above
-     * the odd store on weakly-ordered CPUs and a reader could validate a
-     * half-written plan against two equal even sequences. */
-    atomic_thread_fence(memory_order_release);
-    s_plan = *plan;
-    atomic_store_explicit(&s_plan_seq, seq + 2, memory_order_release); /* even: stable */
-    atomic_store_explicit(&s_plan_valid, 1, memory_order_release);
+    if (!plan) return;
+    for (;;) {
+        const int current = atomic_load_explicit(&s_current, memory_order_acquire);
+        for (int i = 0; i < 3; ++i) {
+            if (i == current) continue;
+            int expected = 0;
+            if (!atomic_compare_exchange_strong_explicit(&s_readers[i], &expected, -1,
+                    memory_order_acquire, memory_order_relaxed)) continue;
+            s_plans[i] = *plan;
+            atomic_store_explicit(&s_readers[i], 0, memory_order_release);
+            atomic_store_explicit(&s_current, i, memory_order_release);
+            return;
+        }
+        // Only the non-audio publisher may wait for a slot to be released.
+        sched_yield();
+    }
 }
 
 void chain_plan_get(ChainPlan* out)
 {
-    if (! atomic_load_explicit(&s_plan_valid, memory_order_acquire))
-    {
-        memset(out, 0, sizeof(*out));
+    if (!out) return;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const int i = atomic_load_explicit(&s_current, memory_order_acquire);
+        if (i < 0) break;
+        int readers = atomic_load_explicit(&s_readers[i], memory_order_relaxed);
+        if (readers < 0) continue;
+        if (!atomic_compare_exchange_strong_explicit(&s_readers[i], &readers, readers + 1,
+                memory_order_acquire, memory_order_relaxed)) continue;
+        *out = s_plans[i];
+        atomic_fetch_sub_explicit(&s_readers[i], 1, memory_order_release);
+        s_last_valid = *out;
         return;
     }
-    /* Bounded retry: the writer (message thread) can be preempted mid-publish
-     * while a HIGH priority reader spins — never let an RT thread spin
-     * unbounded on it. After the cap, return the last copy as-is: worst case
-     * one possibly-mixed plan for one frame (indices stay bounded — same
-     * degradation as the pre-seqlock double buffer), never a stall. */
-    for (int tries = 0; tries < 1000; ++tries)
-    {
-        const uint32_t before = atomic_load_explicit(&s_plan_seq, memory_order_acquire);
-        if (before & 1u)
-            continue;                           /* writer mid-publish — retry */
-        *out = s_plan;
-        atomic_thread_fence(memory_order_acquire);
-        const uint32_t after = atomic_load_explicit(&s_plan_seq, memory_order_relaxed);
-        if (before == after)
-            return;                             /* consistent snapshot */
-    }
-    *out = s_plan;                              /* degraded fallback (see above) */
+    // A coherent previous plan (initially empty), never an unprotected copy.
+    *out = s_last_valid;
 }

@@ -22,6 +22,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../../PluginProcessor.h"
 #include "../../ui/Sp3ctraBarSlider.h"
+#include "../../ui/Sp3ctraGestures.h"
 #include "../../midi/MidiLearnAttachment.h"
 #include <vector>
 
@@ -76,6 +77,7 @@ private:
         void mouseDown(const juce::MouseEvent& e) override;
         void mouseDrag(const juce::MouseEvent& e) override;
         void mouseUp(const juce::MouseEvent& e) override;
+        void mouseDoubleClick(const juce::MouseEvent& e) override;
 
         juce::Image image;          ///< latest preview (updated by the timer)
         float lineFrac     = 0.5f;  ///< param-bound line cursor
@@ -89,8 +91,14 @@ private:
 
         juce::Rectangle<float> imageArea() const;
         void dragTo(const juce::MouseEvent& e, bool begin, bool end);
+        DragTarget targetAt(const juce::MouseEvent& e) const;
+        juce::RangedAudioParameter* paramFor(DragTarget t) const;
+        /** The UI-wide gesture pair (ui/Sp3ctraGestures.h): double-click =
+         *  default, long press = type — on the line and the scan bounds. */
+        void holdToType();
         MediaSourcePage& owner;
         DragTarget drag_ = DragTarget::Line;
+        Sp3ctraGestures::Hold hold_;
     };
 
     Sp3ctraAudioProcessor& processor;

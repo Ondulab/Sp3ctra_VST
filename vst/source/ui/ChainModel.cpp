@@ -30,6 +30,8 @@ const juce::Identifier ChainModel::kSlotProp    { "slot" };
 const juce::Identifier ChainModel::kValuesTag   { "VALUES" };
 const juce::Identifier ChainModel::kMemoryTag   { "MEMORY" };
 const juce::Identifier ChainModel::kBackgroundProp { "background" };
+const juce::Identifier ChainModel::kNameProp       { "name" };
+const juce::Identifier ChainModel::kCollapsedProp  { "collapsed" };
 
 //==============================================================================
 // Queries
@@ -324,7 +326,7 @@ int ChainModel::addChain()
 {
     if (! canAddChain())
         return -1;   // at kMaxChains — a 9th chain would have no RT pool slot
-    chains.push_back(Chain{ juce::Uuid(), {}, {} });
+    chains.push_back(Chain{});
     return (int) chains.size() - 1;
 }
 
@@ -386,6 +388,10 @@ juce::ValueTree ChainModel::toValueTree() const
         juce::ValueTree ct(kChainTag);
         ct.setProperty(kUuidProp, ch.id.toString(), nullptr);
         ct.setProperty(kBackgroundProp, ch.backgroundMode, nullptr);   // schema 4
+        if (ch.name.isNotEmpty())
+            ct.setProperty(kNameProp, ch.name, nullptr);
+        if (ch.collapsed)
+            ct.setProperty(kCollapsedProp, true, nullptr);
         for (const auto& m : ch.modules)
         {
             juce::ValueTree mt(kModuleTag);
@@ -468,6 +474,19 @@ void ChainModel::migrateModuleValues(ModuleType t, juce::ValueTree& values)
             values.setProperty(kRotation,
                 90.0 * juce::jlimit(0, 3, juce::roundToInt((double) values.getProperty(kMode))),
                 nullptr);
+        // 2026-09-04 — the one-way "compress" (1 = neutral … 64) became the
+        // bipolar "pack" (−1 spread … 0 neutral … +1 packed). The old value
+        // only ever covered the packing half, so it lands on [0, 1]:
+        //   pack = (compress − 1) / 63.
+        // Presence-keyed like the migrations above — a tree written by this
+        // build always carries "pack", so it is never re-migrated (which is
+        // why a bipolar range could not simply reuse the "compress" key).
+        static const juce::Identifier kCompress("compress"), kPack("pack");
+        if (values.hasProperty(kCompress) && ! values.hasProperty(kPack))
+            values.setProperty(kPack,
+                juce::jlimit(0.0, 1.0,
+                    ((double) values.getProperty(kCompress) - 1.0) / 63.0),
+                nullptr);
     }
 }
 
@@ -485,6 +504,8 @@ void ChainModel::fromValueTree(const juce::ValueTree& root)
         Chain ch;
         const juce::String cuuid = ct.getProperty(kUuidProp).toString();
         ch.id = cuuid.isNotEmpty() ? juce::Uuid(cuuid) : juce::Uuid();
+        ch.name      = ct.getProperty(kNameProp).toString();
+        ch.collapsed = (bool) ct.getProperty(kCollapsedProp, false);
 
         for (const auto& mt : ct)
         {
@@ -557,6 +578,8 @@ int ChainModel::duplicateChain(int chainIdx)
     copy.id = juce::Uuid();
     const Chain& src = chains[(size_t) chainIdx];
     copy.backgroundMode = src.backgroundMode;
+    copy.name           = src.name;        // same label, different number
+    copy.collapsed      = src.collapsed;
     for (const auto& m : src.modules)
     {
         ModuleInstance mi{ m.type, juce::Uuid(), -1, {} };   // fresh identity + slot
@@ -706,7 +729,7 @@ void ChainModel::validateAndRepair()
     }
 
     if (chains.empty())
-        chains.push_back(Chain{ juce::Uuid(), {}, {} });   // always keep ≥1 chain
+        chains.push_back(Chain{});   // always keep ≥1 chain
 
     // Heal slots: PRESERVE valid unique slots (automation-lane stability); only
     // reassign -1 / out-of-range / colliding ones. INDEPENDENT pools:
@@ -823,8 +846,8 @@ ChainModel ChainModel::makeDefault()
     // A fresh install opens on two empty chains: the user builds their own rack
     // from the catalogue instead of inheriting the legacy fixed topology.
     ChainModel m;
-    m.chains.push_back(Chain{ juce::Uuid(), {}, {} });
-    m.chains.push_back(Chain{ juce::Uuid(), {}, {} });
+    m.chains.push_back(Chain{});
+    m.chains.push_back(Chain{});
     m.validateAndRepair();
     return m;
 }

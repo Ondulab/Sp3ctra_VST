@@ -70,6 +70,8 @@
 #include "../processing/shape_eq.h"
 #include "../processing/lux_eq.h"   // default live glow reads the LuxEq pool
 #include "Sp3ctraBarSlider.h"
+#include "Sp3ctraControls.h"
+#include "Sp3ctraGestures.h"
 #include "Sp3ctraHandles.h"
 #include "ModuleEditorChrome.h"
 
@@ -366,7 +368,7 @@ public:
             const bool sel = (i == selected_);
             const auto st  = Sp3ctraHandles::stateOf(i == dragging_,
                                                      dragging_ == -1 && i == hovered_,
-                                                     sel);
+                                                     sel, handleHeat(i));
             Sp3ctraHandles::drawNode(g, { x, y }, st);
             g.setFont(juce::FontOptions(Sp3ctraTheme::kFontTiny));
             g.setColour(sel ? Sp3ctraHandles::colour() : accent.withAlpha(0.6f));
@@ -399,7 +401,8 @@ public:
                     if (gripHidden(side, gp, { hx, hy }, plot))
                         continue;
                     const auto st = Sp3ctraHandles::stateOf(
-                        dragGrip_ == side, dragGrip_ == 0 && hoverGrip_ == side);
+                        dragGrip_ == side, dragGrip_ == 0 && hoverGrip_ == side,
+                        false, handleHeat(selected_));
                     // Direction handle → chevron: horizontal for the width /
                     // slope chevrons, along the tilt line for the Tilt lever.
                     const float ddx = gp.x - hx, ddy = gp.y - hy;
@@ -422,7 +425,8 @@ public:
         {
             const auto fs = faderStrip();
             const float fx = fs.getCentreX();
-            const auto st  = Sp3ctraHandles::stateOf(dragFader_, hoverFader_);
+            const auto st  = Sp3ctraHandles::stateOf(dragFader_, hoverFader_, false,
+                                                     levelField_.heat());
             const float ty = gainToY(levelDb_, plot);
             g.setColour(juce::Colour(0x2effffff));
             g.drawLine(fx, fs.getY(), fx, fs.getBottom(), 2.0f);
@@ -579,6 +583,7 @@ public:
             dragFader_ = true;
             beginLevelGesture();
             writeLevelAsGesture(yToGain(e.position.y, plotArea()));
+            hold_.arm(e, [this] { holdToType(); });   // long press = type
             repaint();
             return;
         }
@@ -606,6 +611,7 @@ public:
                                              plotArea()) - kGripMinPx;
             beginGestures(selected_);
             applyDrag(e);
+            hold_.arm(e, [this] { holdToType(); });   // long press = type
             return;
         }
 
@@ -614,12 +620,14 @@ public:
             select(hit);
             if (e.getNumberOfClicks() >= 2)
             {
-                // Double-click = DELETE the handle.
-                writeType(hit, SHAPE_EQ_OFF);
+                // Double-click = the handle back to its defaults (the UI-wide
+                // gesture pair; DELETE lives in the right-click menu).
+                resetHandle(hit);
                 repaint();
                 return;
             }
             startDrag(hit, e);
+            hold_.arm(e, [this] { holdToType(); });   // long press = type
             return;
         }
 
@@ -641,10 +649,13 @@ public:
         writeHandleComplete(free, v);   // fresh defaults (slot may be recycled)
         select(free);
         startDrag(free, e);
+        hold_.arm(e, [this] { holdToType(); });       // long press = type
     }
 
     void mouseDrag(const juce::MouseEvent& e) override
     {
+        if (hold_.fired()) return;            // the entry bubble owns the rest
+        hold_.moved(e);
         if (dragFader_)
         {
             writeLevelAsGesture(yToGain(e.position.y, plotArea()));
@@ -656,6 +667,7 @@ public:
 
     void mouseUp(const juce::MouseEvent& e) override
     {
+        hold_.release();
         if (dragFader_)
         {
             endLevelGesture();
@@ -675,6 +687,67 @@ public:
 private:
     static constexpr int kFieldType = 0, kFieldFreq = 1, kFieldGain = 2,
                          kFieldWidth = 3;
+
+    //══════════════════════════════════════════════════════════════════════════
+    // The UI-wide gesture pair (ui/Sp3ctraGestures.h)
+    //══════════════════════════════════════════════════════════════════════════
+    /** Double-click on a handle: Freq / Gain / Width back to their declared
+     *  defaults, type kept (deleting is a menu item). */
+    void resetHandle(int h)
+    {
+        ShapeEqHandle v = cur_[h];
+        if (apvtsMode())
+        {
+            auto def = [this, h](int f, float fallback)
+            {
+                auto* p = fields_[h][f].param;
+                return p != nullptr ? p->convertFrom0to1(p->getDefaultValue()) : fallback;
+            };
+            v.freq01  = def(kFieldFreq,  v.freq01);
+            v.gain_db = def(kFieldGain,  v.gain_db);
+            v.width01 = def(kFieldWidth, v.width01);
+        }
+        else
+        {
+            ShapeEqHandle d; shape_eq_default(&d);
+            v.freq01 = d.freq01; v.gain_db = d.gain_db; v.width01 = d.width01;
+        }
+        writeHandleComplete(h, v);
+    }
+
+    /** Long press: the open gesture closes and the entry bubble opens —
+     *  Level over the fader, Freq / Gain / Width over a handle or a grip,
+     *  in the language the boxes below already speak for this type. */
+    void holdToType()
+    {
+        Sp3ctraGestures::Fields f;
+        if (dragFader_)
+        {
+            endLevelGesture();
+            dragFader_ = false;
+            const float db = apvtsMode() ? levelField_.value : levelDb_;
+            f.push_back(Sp3ctraGestures::fieldOf("Level", juce::String(db, 1) + " dB",
+                [this](const juce::String& t)
+                { writeLevelComplete(juce::jlimit(-kGainRange, kGainRange, t.getFloatValue())); }));
+        }
+        else if (dragging_ >= 0)
+        {
+            endGestures(dragging_);
+            dragging_ = -1;
+            dragGrip_ = 0;
+            if (boundSel_ != selected_ || boundType_ != cur_[selected_].type)
+                rebindBoxes();
+            const int t = cur_[selected_].type;
+            f.push_back(Sp3ctraGestures::fieldOf(boxLabel(t, 0), freqBox_));
+            if (gainBox_.isEnabled())
+                f.push_back(Sp3ctraGestures::fieldOf(boxLabel(t, 1), gainBox_));
+            f.push_back(Sp3ctraGestures::fieldOf(boxLabel(t, 2), widthBox_));
+        }
+        repaint();
+        Sp3ctraGestures::openEntry(*this, hold_.anchor(*this), std::move(f));
+    }
+
+    Sp3ctraGestures::Hold hold_;
 
     //==========================================================================
     // Geometry
@@ -1322,32 +1395,35 @@ private:
     //==========================================================================
     // Model write-through — APVTS attachments or the local (string) handles.
     //==========================================================================
-    struct Field
-    {
-        juce::RangedAudioParameter* param = nullptr;
-        std::unique_ptr<juce::ParameterAttachment> attach;
-    };
+    /** One APVTS field of a handle (type / freq / gain / width) — the shared
+     *  binding, so a change from ANY source (this canvas, the boxes below, a
+     *  MIDI CC on the three "selected handle" targets, automation) stamps
+     *  the handle's edit heat. */
+    using Field = Sp3ctraControls::Bound;
 
     void bindField(int h, int field, const juce::String& id)
     {
-        auto& f = fields_[h][field];
-        f.attach.reset();
-        f.param = apvts_->getParameter(id);
-        jassert(f.param != nullptr);
-        if (f.param == nullptr) return;
-        f.attach = std::make_unique<juce::ParameterAttachment>(
-            *f.param, [this, h, field](float v)
+        fields_[h][field].bind(*apvts_, id, [this, h, field](float v)
+        {
+            switch (field)
             {
-                switch (field)
-                {
-                    case kFieldType:  cur_[h].type    = (int) std::lround(v); break;
-                    case kFieldFreq:  cur_[h].freq01  = v; break;
-                    case kFieldGain:  cur_[h].gain_db = v; break;
-                    default:          cur_[h].width01 = v; break;
-                }
-                repaint();
-            });
-        f.attach->sendInitialUpdate();
+                case kFieldType:  cur_[h].type    = (int) std::lround(v); break;
+                case kFieldFreq:  cur_[h].freq01  = v; break;
+                case kFieldGain:  cur_[h].gain_db = v; break;
+                default:          cur_[h].width01 = v; break;
+            }
+            repaint();
+        });
+    }
+
+    /** Remote-edit heat of a handle = the hottest of its four fields. */
+    float handleHeat(int h) const noexcept
+    {
+        if (! apvtsMode() || h < 0 || h >= SHAPE_EQ_MAX_HANDLES) return 0.0f;
+        const double now = Sp3ctraControls::nowMs();
+        float heat = 0.0f;
+        for (const auto& f : fields_[h]) heat = juce::jmax(heat, f.heat(now));
+        return heat;
     }
 
     bool apvtsMode() const noexcept { return apvts_ != nullptr; }
@@ -1420,13 +1496,7 @@ private:
     void bindLevel(const juce::String& id)
     {
         levelId_ = id;
-        levelField_.attach.reset();
-        levelField_.param = apvts_->getParameter(id);
-        jassert(levelField_.param != nullptr);
-        if (levelField_.param == nullptr) return;
-        levelField_.attach = std::make_unique<juce::ParameterAttachment>(
-            *levelField_.param, [this](float v) { levelDb_ = v; repaint(); });
-        levelField_.attach->sendInitialUpdate();
+        levelField_.bind(*apvts_, id, [this](float v) { levelDb_ = v; repaint(); });
     }
 
     void beginLevelGesture()

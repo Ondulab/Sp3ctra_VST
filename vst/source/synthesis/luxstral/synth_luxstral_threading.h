@@ -48,7 +48,6 @@ typedef struct synth_thread_worker_s {
   // Local output buffers per thread - Float32 (legacy)
   float *thread_luxstralBuffer;
   float *thread_sumVolumeBuffer;
-  float *thread_maxVolumeBuffer;
   
   // Stereo buffers for direct L/R accumulation (always present) - Float32
   // In mono mode: L = R = duplicated signal
@@ -71,7 +70,7 @@ typedef struct synth_thread_worker_s {
   // Pre-computed waves[] data (read-only)
   // NOTE: precomputed_new_idx removed — phase is now a float (phase_acc/phase_inc)
   //       and is committed directly inside synth_precompute_wave_data() (single-threaded).
-  float *precomputed_wave_data; // size: (notes_per_thread * g_sp3ctra_config.audio_buffer_size)
+  float *precomputed_wave_data; // one MAX_BUFFER_SIZE scratch block per worker
   float *precomputed_volume;    // Dynamically allocated based on notes_per_thread
   
   // Pre-computed stereo gains for each note (dynamically allocated)
@@ -83,8 +82,8 @@ typedef struct synth_thread_worker_s {
   float *last_right_gain;
 
   // Debug capture: per-note per-sample volumes (current and target) for this buffer
-  float *captured_current_volume; // size: (notes_per_thread * g_sp3ctra_config.audio_buffer_size)
-  float *captured_target_volume; // size: (notes_per_thread * g_sp3ctra_config.audio_buffer_size)
+  float *captured_current_volume; // notes per worker × audio block size
+  float *captured_target_volume; // notes per worker × audio block size
   size_t capture_capacity_elements; // number of elements allocated across capture buffers; 0 when disabled
 
   // Per-worker timing instrumentation (captured inside worker thread)
@@ -129,6 +128,8 @@ void synth_request_pool_restart(void);  // Hot-apply num_workers (rebuild at nex
 int synth_init_barriers(struct LuxStralEngine *eng, int num_threads);
 void synth_cleanup_barriers(struct LuxStralEngine *eng);
 int synth_set_rt_priority(pthread_t thread, int priority);
+/* Producer only, at a batch boundary: align all cooperating macOS threads. */
+void synth_update_realtime_team_policy(struct LuxStralEngine *eng);
 int synth_barrier_wait(struct LuxStralEngine *eng, void *barrier);
 
 /* Thread processing functions */

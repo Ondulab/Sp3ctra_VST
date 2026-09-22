@@ -1,3 +1,4 @@
+#include "utils/pipeline_metrics.h"
 /*
  * luxgrain_feed.c — see luxgrain_feed.h for the contract.
  */
@@ -87,6 +88,7 @@ void luxgrain_feed_tick(const ChainPlan* plan)
     __atomic_fetch_add(&s_diag_line_pushes, 1, __ATOMIC_RELAXED);
     luxgrain_engine_stage_line(&g_luxgrain_engine, s_line, s_r, s_g, s_b,
                                N, gen);
+    pipeline_metric_hit(PIPE_FEED + 3);
     /* Head-panel tap: the exact RGB mix the engine folds this cycle (the
      * GRAIN_GRAY / GRAIN_COLOR panels condition it for display themselves,
      * like the other engine taps). Gen-gated → ~line rate, not tick rate. */

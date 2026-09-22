@@ -20,6 +20,7 @@
 #include "../UITheme.h"
 #include "../ui/ModuleEditorChrome.h"
 #include "../ui/Sp3ctraHandles.h"
+#include "../ui/Sp3ctraGestures.h"
 
 class WaveformSelectorComponent : public juce::Component,
                                   private juce::ChangeListener
@@ -158,6 +159,7 @@ public:
 
     void mouseDown(const juce::MouseEvent& e) override
     {
+        if (e.mods.isPopupMenu() || e.getNumberOfClicks() != 1) return;   // 2nd click → mouseDoubleClick
         const double total = totalSeconds();
         if (total <= 0.0) return;
         auto area = getLocalBounds().reduced(3);
@@ -189,11 +191,14 @@ public:
         dragStartSec = startSec;
         dragLenSec   = windowLen(total);
         dragStartX   = e.position.x;
+        hold_.arm(e, [this] { holdToType(); });   // long press = type
         notify();
         repaint();
     }
     void mouseDrag(const juce::MouseEvent& e) override
     {
+        if (hold_.fired()) return;            // the entry bubble owns the rest
+        hold_.moved(e);
         const double total = totalSeconds();
         if (total <= 0.0) return;
         auto area = getLocalBounds().reduced(3);
@@ -226,7 +231,54 @@ public:
         notify();
         repaint();
     }
-    void mouseUp(const juce::MouseEvent&) override { dragMode = DragMode::move; repaint(); }
+    void mouseUp(const juce::MouseEvent&) override
+    {
+        hold_.release();
+        dragMode = DragMode::move;
+        repaint();
+    }
+
+    //── The UI-wide gesture pair (ui/Sp3ctraGestures.h) ─────────────────────
+    /** Double-click = the window back to its default: from the start, and
+     *  (free selection) to the end of the file. */
+    void mouseDoubleClick(const juce::MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu() || totalSeconds() <= 0.0) return;
+        startSec = 0.0;
+        if (freeSelection) windowSec = 0.0;
+        clampStart();
+        notify();
+        repaint();
+    }
+
+    /** Long press = type the start (and, free selection, the length), in
+     *  seconds. */
+    void holdToType()
+    {
+        dragMode = DragMode::move;
+        repaint();
+        juce::Component::SafePointer<WaveformSelectorComponent> safe(this);
+        Sp3ctraGestures::Fields f;
+        f.push_back(Sp3ctraGestures::fieldOf("Start (s)", juce::String(startSec, 2),
+            [safe](const juce::String& t)
+            {
+                if (safe == nullptr) return;
+                safe->startSec = juce::jmax(0.0, t.getDoubleValue());
+                safe->clampStart(); safe->notify(); safe->repaint();
+            }));
+        if (freeSelection)
+            f.push_back(Sp3ctraGestures::fieldOf("Length (s)",
+                juce::String(windowLen(totalSeconds()), 2),
+                [safe](const juce::String& t)
+                {
+                    if (safe == nullptr) return;
+                    const double total = safe->totalSeconds();
+                    safe->windowSec = juce::jlimit(kMinSelSec, juce::jmax(kMinSelSec, total - safe->startSec),
+                                                   t.getDoubleValue());
+                    safe->notify(); safe->repaint();
+                }));
+        Sp3ctraGestures::openEntry(*this, hold_.anchor(*this), std::move(f));
+    }
 
     void mouseMove(const juce::MouseEvent& e) override
     {
@@ -263,6 +315,7 @@ private:
     static constexpr double kMinSelSec = 0.1;    // shortest free selection
 
     enum class DragMode { move, resizeL, resizeR };
+    Sp3ctraGestures::Hold hold_;
 
     double totalSeconds() const { return thumb.getTotalLength(); }
     double windowLen(double total) const

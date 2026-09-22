@@ -21,6 +21,11 @@ static const char* kLoopTips[3] = {
 };
 // (Note names removed — banks are numbered, no more note addressing.)
 
+void SlotEditorComponent::stampOverlay(int slot, SamplerMidiTargets::Kind k)
+{
+    processor.noteVirtualTouched(SamplerMidiTargets::encode(samplerIndex_, slot, k));
+}
+
 SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
     : processor(proc),
       spectralEditor(proc) // merged image + time-handles + EQ editor
@@ -37,6 +42,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
         {
             fs->uiToggleRecord(selectedSlot);
             spectralEditor.markDirty(); // image may have changed after record
+            stampOverlay(selectedSlot, SamplerMidiTargets::Kind::Rec);
         }
     };
     // Momentary mode: press starts recording, release stops it. uiToggleRecord
@@ -48,6 +54,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
             {
                 fs->uiToggleRecord(selectedSlot);
                 spectralEditor.markDirty();
+                stampOverlay(selectedSlot, SamplerMidiTargets::Kind::Rec);
             }
     };
     recBtn.onRelease = [this]
@@ -57,6 +64,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
             {
                 fs->uiToggleRecord(selectedSlot);
                 spectralEditor.markDirty();
+                stampOverlay(selectedSlot, SamplerMidiTargets::Kind::Rec);
             }
     };
     addAndMakeVisible(recBtn);
@@ -71,6 +79,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
             // manually set the IMAGE S–Sampler transport to PLAY first.
             if (auto* p = processor.getAPVTS().getParameter("samplerFreezeMode"))
                 p->setValueNotifyingHost(0.0f); // 0 = PLAY
+            stampOverlay(selectedSlot, SamplerMidiTargets::Kind::Play);
         }
     };
     // Momentary mode: press starts playback (+ arms the transport), release stops.
@@ -82,13 +91,17 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
                 fs->uiPlaySlot(selectedSlot);
                 if (auto* p = processor.getAPVTS().getParameter("samplerFreezeMode"))
                     p->setValueNotifyingHost(0.0f); // 0 = PLAY
+                stampOverlay(selectedSlot, SamplerMidiTargets::Kind::Play);
             }
     };
     playBtn.onRelease = [this]
     {
         if (auto* fs = processor.getSampler(samplerIndex_))
             if (fs->getSlotState(selectedSlot) == SlotState::PLAYING)
+            {
                 fs->uiPlaySlot(selectedSlot);
+                stampOverlay(selectedSlot, SamplerMidiTargets::Kind::Play);
+            }
     };
     addAndMakeVisible(playBtn);
 
@@ -116,6 +129,7 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
                     self->refreshSliderValues();   // + refreshFreqCurve + markDirty
                     self->spectralEditor.markDirty();
                     self->processor.sessions()->markBanksDirty();
+                    self->stampOverlay(self->selectedSlot, SamplerMidiTargets::Kind::Clear);
                 }
             });
     };
@@ -232,6 +246,8 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
             // Slot params live in the engine, not the APVTS — the global
             // session-dirty listener never sees them, so mark explicitly.
             processor.sessions()->markStateDirty();
+            processor.noteVirtualTouched(SamplerMidiTargets::encode(
+                samplerIndex_, selectedSlot, SamplerMidiTargets::Kind::Floor));
         }
         spectralEditor.markDirty();   // preview the floor on the image
     };
@@ -258,6 +274,8 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
             fs->setSlotSpeed(selectedSlot,
                              static_cast<float>(speedSlider.getValue()));
             processor.sessions()->markStateDirty();
+            processor.noteVirtualTouched(SamplerMidiTargets::encode(
+                samplerIndex_, selectedSlot, SamplerMidiTargets::Kind::Speed));
         }
     };
     addAndMakeVisible(speedSlider);
@@ -280,6 +298,11 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
             else             r = !r;
             if (!f && !b) return;   // keep at least one direction lit
             applyLoopMode(composeLoopMode(f, b, r));
+            processor.noteVirtualTouched(SamplerMidiTargets::encode(
+                samplerIndex_, selectedSlot,
+                k == 0 ? SamplerMidiTargets::Kind::LoopFwd
+                : k == 1 ? SamplerMidiTargets::Kind::LoopBwd
+                         : SamplerMidiTargets::Kind::LoopRepeat));
         };
         addAndMakeVisible(loopBtns[k]);
     }
@@ -294,6 +317,27 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
             fs->setSlotEq(selectedSlot, eqEditor.encodeState());
             spectralEditor.markDirty();            // preview the EQ on the image
             processor.sessions()->markStateDirty();
+
+            // CIS OLED — stamp the dimension(s) the drag actually moved on the
+            // selected handle (blindly stamping FREQ froze the display when
+            // only the gain was dragged).
+            const int h   = fs->getSlotEqSelHandle(selectedSlot);
+            const int key = (samplerIndex_ << 16) | (selectedSlot << 8) | h;
+            float v[3];
+            for (int w = 0; w < 3; ++w)
+                v[w] = fs->getSlotEqHandleParam(selectedSlot, h, w);
+            if (key == eqOvlKey_)
+            {
+                static constexpr SamplerMidiTargets::Kind kDim[3] = {
+                    SamplerMidiTargets::Kind::SelEqFreq,
+                    SamplerMidiTargets::Kind::SelEqGain,
+                    SamplerMidiTargets::Kind::SelEqWidth };
+                for (int w = 0; w < 3; ++w)
+                    if (std::abs(v[w] - eqOvlLast_[w]) > 1.0e-4f)
+                        stampOverlay(selectedSlot, kDim[w]);
+            }
+            eqOvlKey_ = key;
+            for (int w = 0; w < 3; ++w) eqOvlLast_[w] = v[w];
         }
     };
     addAndMakeVisible(eqEditor);
@@ -308,6 +352,8 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
             fs->setSlotResumeMode(selectedSlot,
                                    resumeToggle.getToggleState());
             processor.sessions()->markStateDirty();
+            processor.noteVirtualTouched(SamplerMidiTargets::encode(
+                samplerIndex_, selectedSlot, SamplerMidiTargets::Kind::Resume));
         }
     };
     addAndMakeVisible(resumeToggle);
@@ -321,6 +367,8 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
         {
             fs->setOverdubMode(overdubToggle.getToggleState());
             processor.sessions()->markStateDirty();
+            processor.noteVirtualTouched(SamplerMidiTargets::encode(
+                samplerIndex_, 0, SamplerMidiTargets::Kind::Overdub));
         }
     };
     addAndMakeVisible(overdubToggle);
@@ -342,9 +390,19 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
                                                     (int) std::lround(n * 3.0f))]);
         };
 
+        // The gesture pair of every chip (ui/Sp3ctraGestures.h): the
+        // double-click target and the inverse of the display format.
+        const auto pctParse = [](const juce::String& t) { return t.getFloatValue() / 100.0f; };
+        const auto powParse = [](const juce::String& t)
+        { return SamplerMidiTargets::powerRange().convertTo0to1(t.getFloatValue()); };
+        const float powDef = SamplerMidiTargets::powerRange().convertTo0to1(1.0f);
+
         auto setup = [this](SamplerValueBox& b, K kind,
-                            std::function<juce::String(float)> fmt)
+                            std::function<juce::String(float)> fmt,
+                            float def, std::function<float(const juce::String&)> parse)
         {
+            b.defaultNorm = def;
+            b.parse       = std::move(parse);
             b.readNorm = [this, kind]
             {
                 auto* fs = processor.getSampler(samplerIndex_);
@@ -359,19 +417,21 @@ SlotEditorComponent::SlotEditorComponent(Sp3ctraAudioProcessor& proc)
                     spectralEditor.markDirty();   // curves/crop live on the image
                     refreshParamBoxes();          // crop chips are coupled (min span)
                     processor.sessions()->markStateDirty();
+                    processor.noteVirtualTouched(
+                        SamplerMidiTargets::encode(samplerIndex_, selectedSlot, kind));
                 }
             };
             b.format = std::move(fmt);
             addAndMakeVisible(b);
         };
-        setup(cropStartBox_,   K::CropStart,   pct);
-        setup(cropEndBox_,     K::CropEnd,     pct);
-        setup(fadeInLenBox_,   K::FadeInLen,   pct);
-        setup(fadeInTypeBox_,  K::FadeInType,  curve);
-        setup(fadeInPowBox_,   K::FadeInPow,   pow2);
-        setup(fadeOutLenBox_,  K::FadeOutLen,  pct);
-        setup(fadeOutTypeBox_, K::FadeOutType, curve);
-        setup(fadeOutPowBox_,  K::FadeOutPow,  pow2);
+        setup(cropStartBox_,   K::CropStart,   pct,   0.0f,   pctParse);
+        setup(cropEndBox_,     K::CropEnd,     pct,   1.0f,   pctParse);
+        setup(fadeInLenBox_,   K::FadeInLen,   pct,   0.0f,   pctParse);
+        setup(fadeInTypeBox_,  K::FadeInType,  curve, -1.0f,  nullptr);   // picked from its menu
+        setup(fadeInPowBox_,   K::FadeInPow,   pow2,  powDef, powParse);
+        setup(fadeOutLenBox_,  K::FadeOutLen,  pct,   0.0f,   pctParse);
+        setup(fadeOutTypeBox_, K::FadeOutType, curve, -1.0f,  nullptr);
+        setup(fadeOutPowBox_,  K::FadeOutPow,  pow2,  powDef, powParse);
         fadeInTypeBox_ .setChoices({ "LIN", "EXP", "LOG", "S" });
         fadeOutTypeBox_.setChoices({ "LIN", "EXP", "LOG", "S" });
     }
@@ -633,6 +693,8 @@ void SlotEditorComponent::saveSlotToDisk(int slot)
         const juce::String ext = asPng ? ".png" : ".jpg";
         fs->exportSlotImage(slot, dir.getChildFile(base + ext), asPng);
     }
+
+    stampOverlay(slot, SamplerMidiTargets::Kind::Save);   // CIS OLED feedback
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -668,17 +730,20 @@ void SlotEditorComponent::drainMidiActionPulses()
             {
                 fs->uiToggleRecord(s);
                 if (s == selectedSlot) spectralEditor.markDirty();
+                stampOverlay(s, SamplerMidiTargets::Kind::Rec);
             }
             if (recR && fs->getSlotState(s) == SlotState::RECORDING)
             {
                 fs->uiToggleRecord(s);
                 if (s == selectedSlot) spectralEditor.markDirty();
+                stampOverlay(s, SamplerMidiTargets::Kind::Rec);
             }
         }
         else if (recP)
         {
             fs->uiToggleRecord(s);
             if (s == selectedSlot) spectralEditor.markDirty();
+            stampOverlay(s, SamplerMidiTargets::Kind::Rec);
         }
 
         // PLAY — Momentary: press starts if idle (and arms the sampler transport,
@@ -695,19 +760,24 @@ void SlotEditorComponent::drainMidiActionPulses()
             {
                 fs->uiPlaySlot(s);
                 armTransport();
+                stampOverlay(s, SamplerMidiTargets::Kind::Play);
             }
             if (playR && fs->getSlotState(s) == SlotState::PLAYING)
+            {
                 fs->uiPlaySlot(s);
+                stampOverlay(s, SamplerMidiTargets::Kind::Play);
+            }
         }
         else if (playP)
         {
             const bool wasPlaying = (fs->getSlotState(s) == SlotState::PLAYING);
             fs->uiPlaySlot(s);
             if (! wasPlaying) armTransport();
+            stampOverlay(s, SamplerMidiTargets::Kind::Play);
         }
 
         if (saveT)
-            saveSlotToDisk(s);
+            saveSlotToDisk(s);   // stamps the overlay itself
 
         // CLEAR (one-shot) → wipe the slot; refresh the view if it is shown.
         if (processor.consumeSmpClearTrigger(samplerIndex_, s))
@@ -715,6 +785,7 @@ void SlotEditorComponent::drainMidiActionPulses()
             fs->uiClearSlot(s);
             if (s == selectedSlot) { refreshSliderValues(); spectralEditor.markDirty(); }
             processor.sessions()->markBanksDirty();   // same as the CLEAR button
+            stampOverlay(s, SamplerMidiTargets::Kind::Clear);
         }
 
         // Selected-handle EQ CCs (continuous) → apply latched values (non-RT:

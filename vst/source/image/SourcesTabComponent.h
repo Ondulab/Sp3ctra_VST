@@ -32,63 +32,26 @@ public:
     explicit SourcesTabComponent(Sp3ctraAudioProcessor& p)
         : processor(p)
     {
-        playStopBtn.setIconPath(Icons::play());
-        pauseBtn.setIconPath(Icons::pause());
-
-        // PLAY/STOP is one toggle (like the rack LED); PAUSE toggles hold
-        // against play and is inert while stopped (holding black = stop).
-        playStopBtn.onClick = [this]{ setFreezeMode(currentMode() == 0 ? 1.f : 0.f); };
-        pauseBtn.onClick    = [this]
+        // The module power lives where every block has it: at the right of the
+        // PLAY|SETUP face row (PluginEditor's modulePowerButton, hand-wired to
+        // imageFreezeMode). This page only carries FREEZE: hold the current
+        // image (mode 1), inert while the module is off (holding black IS stop).
+        freezeBtn.setClickingTogglesState(true);
+        freezeBtn.setTooltip("Freeze: hold the current image (module stays on)");
+        freezeBtn.onClick = [this]
         {
             const int m = currentMode();
-            if (m == 0)      setFreezeMode(0.5f);   // playing → hold
-            else if (m == 1) setFreezeMode(0.f);    // held    → resume
+            if (freezeBtn.getToggleState()) { if (m == 0) setFreezeMode(0.5f); }
+            else                            { if (m == 1) setFreezeMode(0.f);  }
         };
 
-        addAndMakeVisible(playStopBtn);
-        addAndMakeVisible(pauseBtn);
+        addAndMakeVisible(freezeBtn);
 
         // Fade-In (ms) — SP3CTRA input source (Chain 2) only. The sampler
         // (Chain 1) has no transport fade, so this row is hidden there.
         fadeSlider.setTextValueSuffix(" ms");
         fadeSlider.setNumDecimalPlacesToDisplay(0);
         addChildComponent(fadeSlider);   // visibility toggled per chain in setChain()
-
-        // ── Acquisition speed (frame-advance brake) — GLOBAL source control ──
-        // "Vitesse d'acquisition": brakes how often the live CIS line advances
-        // the active frame (audio + visual).  Not per-chain — bound once to the
-        // global acqGate* params (sample-and-hold between gate ticks).
-        auto& apvts = processor.getAPVTS();
-
-        acqModeCombo.addItem("Off",            1);
-        acqModeCombo.addItem("Internal (LFO)", 2);
-        acqModeCombo.addItem("DAW Sync",       3);
-        addAndMakeVisible(acqModeCombo);
-        acqModeAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            apvts, "acqGateMode", acqModeCombo));
-        acqModeCombo.onChange = [this]{ updateAcqEnabled(); };
-
-        acqRateSlider.setTextValueSuffix(" ms");
-        addAndMakeVisible(acqRateSlider);
-        acqRateAttach.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
-            apvts, "acqGateRateMs", acqRateSlider));
-        // The attachment's setRange() (interval 0.1) forces 1-decimal display;
-        // override AFTER attaching so the readout stays integer ms like Fade In.
-        acqRateSlider.setNumDecimalPlacesToDisplay(0);
-
-        for (auto* s : { "1/1", "1/2", "1/4", "1/8", "1/16", "1/32" })
-            acqDivCombo.addItem(s, acqDivCombo.getNumItems() + 1);
-        addAndMakeVisible(acqDivCombo);
-        acqDivAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            apvts, "acqGateSyncDiv", acqDivCombo));
-
-        for (auto* s : { "/32", "/16", "/8", "/4", "/2", "x1", "x2", "x4" })
-            acqMultDivCombo.addItem(s, acqMultDivCombo.getNumItems() + 1);
-        addAndMakeVisible(acqMultDivCombo);
-        acqMultDivAttach.reset(new juce::AudioProcessorValueTreeState::ComboBoxAttachment(
-            apvts, "acqGateMultDiv", acqMultDivCombo));
-
-        updateAcqEnabled();
 
         setChain(1);   // default; the editor re-sets this on block selection
         startTimer(200);
@@ -111,20 +74,18 @@ public:
             apvts, "imageFadeInMs", fadeSlider));
         fadeSlider.setVisible(true);
 
-        // Right-click MIDI Learn — the transport buttons share the SP3CTRA
-        // freeze-mode param (one CC spans 0=play / mid=hold / 1=stop); the
-        // Fade-In and acquisition rate are global (bound once, rebound cheap).
+        // Right-click MIDI Learn. FREEZE learns the VIRTUAL 2-state target
+        // (kImgFreezeMidiId), NOT imageFreezeMode directly: a CC on the raw
+        // 3-step param sweeps play↔stop, i.e. it would drive the module's
+        // power instead of freezing. The Fade-In is global (bound once,
+        // rebound cheap).
         learnAtts_.clear();
         auto& mm = processor.getMidiMap();
         learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, fadeSlider, "imageFadeInMs"));
-        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, playStopBtn,   freezeParamId()));
-        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, pauseBtn,      freezeParamId()));
-        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, acqRateSlider, "acqGateRateMs"));
-        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, acqModeCombo,    "acqGateMode"));
-        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, acqDivCombo,     "acqGateSyncDiv"));
-        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, acqMultDivCombo, "acqGateMultDiv"));
+        learnAtts_.push_back(std::make_unique<MidiLearnAttachment>(mm, freezeBtn,
+                                 Sp3ctraAudioProcessor::kImgFreezeMidiId));
 
-        resized();   // fade row appears/disappears → re-flow the acquisition group
+        resized();
         updateTransportButtons();
         repaint();
     }
@@ -141,8 +102,8 @@ public:
         g.drawText("SP3CTRA",
                    0, 4, w, 14, juce::Justification::centred);
 
-        // All row labels share one right-justified column (Fade In + Acquisition)
-        // so every control lines up on the same left edge.
+        // Row labels share one right-justified column so every control lines
+        // up on the same left edge.
         auto rowLabel = [&] (const char* t, int rowY)
         {
             g.drawText(t, formX(), rowY, labelColW() - 8, kCtrlH,
@@ -153,19 +114,6 @@ public:
         g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
         g.setColour(juce::Colour(0xffd2d8e8));
         rowLabel("Fade In", fadeRowY());
-
-        // ── Acquisition speed section header ────────────────────────────────────
-        g.setFont(juce::Font(juce::FontOptions(Sp3ctraTheme::kFontSmall)).boldened());
-        g.setColour(juce::Colour(0xff8aa0c0));
-        g.drawText("ACQUISITION SPEED", formX(), acqHeaderY(), formW(), 14,
-                   juce::Justification::centredLeft);
-
-        // ── Acquisition row labels ──────────────────────────────────────────────
-        g.setFont(juce::FontOptions(Sp3ctraTheme::kFontSettings));
-        g.setColour(juce::Colour(0xffd2d8e8));
-        const char* names[] = { "Mode", "Rate", "Div", "Mult/Div" };
-        for (int i = 0; i < 4; ++i)
-            rowLabel(names[i], acqRowY(i));
     }
 
     void resized() override
@@ -174,39 +122,26 @@ public:
         constexpr int btnSz = Sp3ctraTheme::kIconBtnSize;
         constexpr int gap   = Sp3ctraTheme::kGap;
 
-        // Transport row — centred.
-        const int totalW = btnSz * 2 + gap;
-        const int startX = w / 2 - totalW / 2;
-        playStopBtn.setBounds(startX,               transportY(), btnSz, btnSz);
-        pauseBtn   .setBounds(startX + btnSz + gap, transportY(), btnSz, btnSz);
+        // Transport row — centred FREEZE toggle (the power switch sits in the
+        // face row like every other module).
+        juce::ignoreUnused(gap);
+        constexpr int freezeW = 76;
+        freezeBtn.setBounds(w / 2 - freezeW / 2, transportY(), freezeW, btnSz);
 
         // Unified form grid — every control fills the same column [ctrlX, +ctrlW].
         const int cx = ctrlX();
         const int cw = ctrlW();
         fadeSlider     .setBounds(cx, fadeRowY(), cw, kCtrlH);
-        acqModeCombo   .setBounds(cx, acqRowY(0), cw, kCtrlH);
-        acqRateSlider  .setBounds(cx, acqRowY(1), cw, kCtrlH);
-        acqDivCombo    .setBounds(cx, acqRowY(2), cw, kCtrlH);
-        acqMultDivCombo.setBounds(cx, acqRowY(3), cw, kCtrlH);
     }
 
 private:
     Sp3ctraAudioProcessor& processor;
     int activeChain_ { 1 };
-    int shownMode_   { -1 };   ///< freeze mode the play/stop glyph reflects
 
-    IconTextButton playStopBtn, pauseBtn;
+    juce::TextButton  freezeBtn { "FREEZE" };
     Sp3ctraBarSlider fadeSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> fadeAttach;
     std::vector<std::unique_ptr<MidiLearnAttachment>> learnAtts_;
-
-    // ── Acquisition speed (global frame-advance brake) ──────────────────────────
-    juce::ComboBox acqModeCombo, acqDivCombo, acqMultDivCombo;
-    Sp3ctraBarSlider acqRateSlider;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> acqModeAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> acqDivAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> acqMultDivAttach;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   acqRateAttach;
 
     // ── SP3CTRA source module transport param (global, chain-independent) ───────
     const char* freezeParamId() const noexcept
@@ -229,16 +164,14 @@ private:
     }
 
     // ── Unified form geometry ────────────────────────────────────────────────
-    // One column grid shared by the Fade In row and the whole Acquisition group,
-    // so labels and controls always line up.  Wider than the old 2/5 node: the
-    // form spans the panel width (minus padding), capped so it stays readable.
+    // One column grid so labels and controls always line up.  Wider than the
+    // old 2/5 node: the form spans the panel width (minus padding), capped so
+    // it stays readable.
     static constexpr int kPad      = 18;  // outer horizontal padding
     static constexpr int kFormMaxW = 460; // cap so the form doesn't stretch absurdly
     static constexpr int kLabelColW= 92;  // right-justified label column
     static constexpr int kColGap   = 12;  // gap between label column and control
     static constexpr int kCtrlH    = 24;  // control height (taller → easier to use)
-    static constexpr int kTextBoxW = 68;  // slider value box width (Fade + Rate)
-    static constexpr int kRowPitch = 32;  // row-to-row spacing
 
     int formW()    const { return juce::jmin(getWidth() - 2 * kPad, kFormMaxW); }
     int formX()    const { return (getWidth() - formW()) / 2; }
@@ -248,56 +181,24 @@ private:
 
     int transportY() const { return 24; }
     int fadeRowY()   const { return transportY() + Sp3ctraTheme::kIconBtnSize + 14; }
-    // The Fade In row is always present (SP3CTRA module transport fade), with
-    // the Acquisition group below it.
-    int acqHeaderY() const { return fadeRowY() + kRowPitch + 6; }
-    int acqRowY(int i) const { return acqHeaderY() + 22 + i * kRowPitch; }
 
-    // Grey out controls that don't apply to the current gate mode.
-    void updateAcqEnabled()
-    {
-        int mode = 0;
-        if (auto* raw = processor.getAPVTS().getRawParameterValue("acqGateMode"))
-            mode = juce::roundToInt(raw->load());
-        acqRateSlider  .setEnabled(mode == 1);  // Internal (LFO) only
-        acqDivCombo    .setEnabled(mode == 2);  // DAW Sync only
-        acqMultDivCombo.setEnabled(mode != 0);  // Internal + DAW Sync
-    }
-
-    // ── Transport button state highlighting ───────────────────────────────────
+    // ── Transport button state (200 ms timer + setChain) ──────────────────────
     void updateTransportButtons()
     {
-        static const juce::Colour kPlay  { 0xff2a6040 };
         static const juce::Colour kHold  { 0xff6040a0 };
         static const juce::Colour kOff   { 0xff2a2a2a };
-        static const juce::Colour kFgOn  = juce::Colours::white;
-        static const juce::Colour kFgOff { 0xff888888 };
 
         const int mode = currentMode();
-
-        auto style = [](IconTextButton& btn, bool active, juce::Colour col)
-        {
-            btn.setColour(juce::TextButton::buttonColourId,   active ? col : kOff);
-            btn.setColour(juce::TextButton::textColourOffId,  active ? kFgOn : kFgOff);
-        };
-
-        // The toggle wears the glyph of what a click DOES next: ■ while
-        // playing (click → stop), ▶ while held/stopped (click → play).
-        // Guarded on the cached mode: setIconPath repaints unconditionally
-        // and this runs from a 200 ms timer.
-        if (mode != shownMode_)
-        {
-            playStopBtn.setIconPath(mode == 0 ? Icons::stop() : Icons::play());
-            shownMode_ = mode;
-        }
-        style(playStopBtn, mode == 0, kPlay);
-        style(pauseBtn,    mode == 1, kHold);
+        freezeBtn.setToggleState(mode == 1, juce::dontSendNotification);
+        freezeBtn.setColour(juce::TextButton::buttonColourId,   kOff);
+        freezeBtn.setColour(juce::TextButton::buttonOnColourId, kHold);
+        freezeBtn.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xff888888));
+        freezeBtn.setColour(juce::TextButton::textColourOnId,   juce::Colours::white);
     }
 
     void timerCallback() override
     {
         updateTransportButtons();
-        updateAcqEnabled();   // reflect mode changes from presets / automation
     }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SourcesTabComponent)

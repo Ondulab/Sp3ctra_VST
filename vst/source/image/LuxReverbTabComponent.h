@@ -3,10 +3,11 @@
  * @brief Tab — REVERB: visual reverberation on the image-line stream.
  *
  * The interactive graphic editor fills the page (ReverbEditorComponent —
- * Decay / Diffusion / Mix handles + live tail fill, numeric boxes below the
- * frame). The background pole is chain-owned (rack header selector), not a
- * module setting. Page skeleton (padding, "--- REVERBERATION ---" caption,
- * height) = ModuleChrome.
+ * TAIL frame: Decay / Mix handles + live tail fill; DAMPING frame: the tail
+ * length along the frequency axis, treble handle + LIN/AIR law chips;
+ * numeric boxes below). The background pole is chain-owned (rack header
+ * selector), not a module setting. Page skeleton (padding,
+ * "--- REVERBERATION ---" caption, height) = ModuleChrome.
  *
  * Power lives in the zone-3 header switch + the rack LED.
  * Per-instance: setSlot(slot) rebinds every control to the luxreverb{slot}_*
@@ -50,7 +51,8 @@ public:
     {
         slot_ = juce::jlimit(0, 7, slot);
         editor.setInstance(slot_, rvParam(slot_, "Decay"),
-                           rvParam(slot_, "Diffusion"), rvParam(slot_, "Mix"));
+                           rvParam(slot_, "Diffusion"), rvParam(slot_, "Mix"),
+                           rvParam(slot_, "Damping"), rvParam(slot_, "DampType"));
     }
 
     int slot() const noexcept { return slot_; }

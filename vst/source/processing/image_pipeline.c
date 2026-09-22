@@ -1,3 +1,4 @@
+#include "utils/pipeline_metrics.h"
 /*
  * image_pipeline.c
  *
@@ -602,6 +603,7 @@ void pipeline_luxwave_feed_tick(const ChainPlan *plan)
      * send is gated at staging time by ITS chain's transport, with the fade
      * ramped into the staged line. The mix is already transport-correct.) */
     luxwave_engine_set_image_line(&g_luxwave_engine, s_mixed_line, nb);
+    pipeline_metric_hit(PIPE_FEED + 2);
 }
 
 /* ============================================================================

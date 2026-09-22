@@ -19,9 +19,9 @@
  *   • A / D / R *bend* handles (segment midpoints) set per-segment curvature
  *     by dragging the segment up/down — exactly the shape the DSP applies
  *     (shared lux_env_shape()).  curve ∈ [-1,1], 0 = linear.
- *   • Compact value boxes (Atck / Dcay / Sus / Rel) below the frame — drag or
- *     double-click to cycle.  Bound through SliderAttachment to the same
- *     parameters.
+ *   • Compact value boxes (Atck / Dcay / Sus / Rel) below the frame — click /
+ *     drag to set, hold to reset, double-click to type.  Bound through
+ *     SliderAttachment to the same parameters.
  *
  * ── Width lane (MASK only) — "WIDTH" ────────────────────────────────────────
  *   A second framed lane on the SAME time axis with three draggable nodes —
@@ -37,6 +37,8 @@
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
 #include "ModuleEditorChrome.h"
+#include "Sp3ctraControls.h"
+#include "Sp3ctraGestures.h"
 #include "Sp3ctraBarSlider.h"
 #include <memory>
 #include <vector>
@@ -108,6 +110,7 @@ public:
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseDrag(const juce::MouseEvent& e) override;
     void mouseUp(const juce::MouseEvent& e) override;
+    void mouseDoubleClick(const juce::MouseEvent& e) override;
 
 private:
     enum class Handle { None,
@@ -132,6 +135,13 @@ private:
     void   updateCursor(Handle h);
     void   beginHandleGesture(Handle h);
     void   endHandleGesture(Handle h);
+
+    // ── The UI-wide gesture pair (ui/Sp3ctraGestures.h) ─────────────────────
+    /** What a node drives: the double-click resets it, the long press types it. */
+    Sp3ctraGestures::BoundList boundsOf(Handle h);
+    /** Long press on a node: the drag gesture closes, the bubble opens. */
+    void holdToType();
+    Sp3ctraGestures::Hold hold_;
     void   applyDrag(Handle h, juce::Point<float> p, const Geometry& geo);
 
     /** Curve solved from a desired shape value at phase 0.5 (segment bending). */
@@ -153,17 +163,22 @@ private:
     bool isAR     = false;   ///< AR mode (no decay/sustain): rise to peak then release
 
     // ── Bound parameters (ParameterAttachment manages begin/endGesture) ──────
-    struct Bound
+    /** The shared parameter binding (ui/Sp3ctraControls.h — attachment,
+     *  mirrored value and EDIT HEAT) plus this editor's cached range: the
+     *  nodes map ms / px onto the plot with it. */
+    struct Bound : Sp3ctraControls::Bound
     {
-        juce::RangedAudioParameter* param = nullptr;
-        std::unique_ptr<juce::ParameterAttachment> attach;
-        float value = 0.0f, min = 0.0f, max = 1.0f;
+        float min = 0.0f, max = 1.0f;
     };
     Bound a, d, s, r;          // attack ms / decay ms / sustain lvl / release ms
     Bound aCurve, dCurve, rCurve;
     Bound wBase, wAtk, wRel;   // mask widths (px)
 
     void bind(Bound& b, const juce::String& id, bool readRange = true);
+
+    /** Remote-edit heat of the parameter a node drives — a box below, a MIDI
+     *  CC or automation lights the node exactly like a drag. */
+    float handleHeat(Handle h) const noexcept;
 
     // ── Compact numeric boxes (SliderAttachment) ────────────────────────────
     Sp3ctraBarSlider boxA, boxD, boxS, boxR;

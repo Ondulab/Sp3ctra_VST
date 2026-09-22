@@ -144,22 +144,18 @@ typedef struct {
     LuxWaveConfig config;
 
     /*
-     * Double-buffered wavetable: prevents race conditions between
+     * Owned wavetable snapshots prevent race conditions between
      * the image processing thread (writer) and the audio RT thread (reader).
      *
-     * wt_buf[0] and wt_buf[1] hold local copies of the image line.
-     * wt_write_idx:  atomic — which buffer the writer fills next.
-     * wt_read_idx:   which buffer the RT thread currently reads from.
-     * wt_new_ready:  atomic flag — set by writer after swap, cleared by RT thread.
-     *
-     * Crossfade: when RT detects new data, it crossfades over
-     * LUXWAVE_CROSSFADE_SAMPLES from old to new buffer to avoid clicks.
+     * Three owned buffers: audio front, atomic mailbox, producer back.
+     * Index 3 is an audio-only snapshot retained for the entire crossfade.
+     * A producer never writes either table being read by the audio thread.
      */
-    float wt_buf[2][LUXWAVE_MAX_PIXELS];
-    int   wt_pixel_count[2];
-    atomic_int wt_write_idx;     /* writer toggles this after memcpy */
+    float wt_buf[4][LUXWAVE_MAX_PIXELS];
+    int   wt_pixel_count[4];
+    int wt_write_idx;            /* producer-owned back buffer */
     int        wt_read_idx;      /* RT thread's current read buffer */
-    atomic_int wt_new_ready;     /* flag: 1 = new data available     */
+    atomic_int wt_middle;       /* SPSC mailbox: index | 4 when dirty */
     int        xfade_remaining;  /* samples left in crossfade        */
     int        xfade_old_idx;    /* buffer index of old wavetable    */
 
@@ -192,7 +188,7 @@ void luxwave_engine_set_sample_rate(LuxWaveEngine *engine, float sample_rate);
 
 /**
  * Set the wavetable image line (called from image processing thread).
- * Data is COPIED into an internal double-buffer — no pointer aliasing.
+ * Data is COPIED into an owned SPSC mailbox — no pointer aliasing.
  */
 void luxwave_engine_set_image_line(LuxWaveEngine *engine,
                                     const float *image_line,

@@ -160,6 +160,14 @@ bool Sp3ctraSharedCore::startWithConfig(const Sp3ctraCore::ActiveConfig& config,
     // toward 0 with nobody to complete it.
     reset_frequency_reinit_state();
 
+    // Reserve render buffers and park auxiliaries before any audio deadline.
+    if (synth_prepare_runtime() != 0)
+    {
+        log_error("SHARED", "startWithConfig() — LuxStral runtime preparation failed");
+        stopThreads();
+        return false;
+    }
+
     // ── 7. Audio processing thread (LuxStral) ────────────────────────────────
     audioThread = std::make_unique<AudioProcessingThread>(core.get());
     audioThread->startThread(juce::Thread::Priority::highest);
@@ -292,17 +300,18 @@ bool Sp3ctraSharedCore::ensureAudioBufferSize(int samplesPerBlock)
 
     if (restartAudioThread)
     {
-        if (luxstral_are_audio_buffers_ready())
+        if (luxstral_are_audio_buffers_ready() && synth_prepare_runtime() == 0)
         {
             audioThread = std::make_unique<AudioProcessingThread>(core.get());
             audioThread->startThread(juce::Thread::Priority::highest);
             log_info("SHARED", "ensureAudioBufferSize() — synthesis thread restarted");
         }
         else
-            // Both reallocations failed (OOM): leave the producer stopped —
-            // silence, but no writes into NULL output buffers.
-            log_error("SHARED", "ensureAudioBufferSize() — output buffers unavailable, "
+        {
+            ok = false;
+            log_error("SHARED", "ensureAudioBufferSize() — runtime preparation failed, "
                                 "synthesis thread NOT restarted");
+        }
     }
     return ok;
 }

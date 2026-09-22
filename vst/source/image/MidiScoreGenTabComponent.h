@@ -53,7 +53,10 @@
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
 #include "ScoreTransportBinding.h"
+#include "ScoreTransportBar.h"
+#include "TimbreParamsPanel.h"
 #include "../ui/Sp3ctraBarSlider.h"
+#include "../ui/Sp3ctraGestures.h"
 #include "../IconPaths.h"
 #include "../licensing/ActivationDialog.h"
 #include "../Sp3ctraDialog.h"
@@ -170,130 +173,14 @@ public:
             voiceTabs[(size_t) i] = std::move(tab);
         }
 
-        // ── Per-voice timbre parameters (same model as TIMBRE) ───────────────
-        initLabel(presetLabel, "Timbre");
-        for (int i = 0; i < timbregen::numPresets(); ++i)
-            presetCombo.addItem(timbregen::presetName(i), i + 1);
-        presetCombo.addItem("Custom", timbregen::numPresets() + 1);
-        presetCombo.onChange = [this]
-        {
-            const int id = presetCombo.getSelectedId();
-            if (id <= 0 || id > timbregen::numPresets())
-                return;   // "Custom" is a display state, not a template
-            timbregen::applyPreset(cur(), id - 1);
-            refreshVoiceControls();
-            voiceTabs[(size_t) selectedVoice]->repaint();
-            markDirty();
-        };
-        addAndMakeVisible(presetCombo);
-
-        auto timbral = [this](juce::Slider& s, auto setter)
-        {
-            s.onValueChange = [this, &s, setter]
-            {
-                setter(cur(), s.getValue());
-                becomeCustom();
-                markDirty();
-            };
-        };
-
-        initLabel(partialsLabel, "Partials");
-        initSlider(partialsSlider, 1, 128, 1, 24);
-        timbral(partialsSlider, [](timbregen::TimbreSlotParams& q, double v) { q.numPartials = (int) v; });
-
-        initLabel(slopeLabel, "Slope (dB/oct)");
-        initSlider(slopeSlider, -36.0, 12.0, 0.1, -6.0);
-        timbral(slopeSlider, [](timbregen::TimbreSlotParams& q, double v) { q.slopeDbPerOct = v; });
-
-        initLabel(oddLabel, "Odd bias");
-        initSlider(oddSlider, 0.0, 1.0, 0.01, 0.0);
-        timbral(oddSlider, [](timbregen::TimbreSlotParams& q, double v) { q.oddBias = v; });
-
-        initLabel(inharmLabel, "Inharmonicity");
-        initSlider(inharmSlider, 0.0, 0.1, 0.0001, 0.0);
-        inharmSlider.setSkewFactor(0.3);
-        timbral(inharmSlider, [](timbregen::TimbreSlotParams& q, double v) { q.inharmonicity = v; });
-
-        initLabel(combLabel, "Pluck comb");
-        initSlider(combSlider, 0.0, 1.0, 0.01, 0.0);
-        timbral(combSlider, [](timbregen::TimbreSlotParams& q, double v) { q.combDepth = v; });
-
-        initLabel(combPosLabel, "Pluck position");
-        initSlider(combPosSlider, 0.02, 0.5, 0.005, 0.28);
-        timbral(combPosSlider, [](timbregen::TimbreSlotParams& q, double v) { q.combPos = v; });
-
-        initLabel(attackLabel, "Attack (ms)");
-        initSlider(attackSlider, 0.0, 1000.0, 1.0, 4.0);
-        attackSlider.setSkewFactor(0.4);
-        timbral(attackSlider, [](timbregen::TimbreSlotParams& q, double v) { q.attackMs = v; });
-
-        initLabel(decayLabel, "Decay (s)");
-        initSlider(decaySlider, 0.0, 20.0, 0.05, 0.0);
-        decaySlider.setSkewFactor(0.5);
-        decaySlider.textFromValueFunction = [](double v)
-        { return v <= 0.0 ? juce::String("sustain") : juce::String(v, 2); };
-        decaySlider.onValueChange = [this]
-        {
-            cur().decaySec = decaySlider.getValue();
-            // HF damping only multiplies the DECAY rate of upper partials —
-            // it has nothing to act on while the notes sustain.
-            hfDampSlider.setEnabled(cur().decaySec > 0.0);
-            hfDampLabel .setEnabled(cur().decaySec > 0.0);
-            becomeCustom();
-            markDirty();
-        };
-
-        initLabel(hfDampLabel, "HF damping");
-        initSlider(hfDampSlider, 0.0, 1.0, 0.01, 0.5);
-        hfDampSlider.setTooltip("Upper partials decay faster. Needs Decay > 0 "
-                                "and a multi-partial timbre.");
-        timbral(hfDampSlider, [](timbregen::TimbreSlotParams& q, double v) { q.hfDamp = v; });
-
-        initLabel(vibDepthLabel, "Vibrato (cents)");
-        initSlider(vibDepthSlider, 0.0, 200.0, 1.0, 0.0);
-        vibDepthSlider.setTooltip("Pitch wave of the whole partial stack, "
-                                  "peak depth in cents. 0 = off.");
-        vibDepthSlider.onValueChange = [this]
-        {
-            cur().vibCents = vibDepthSlider.getValue();
-            // Rate/onset/life shape the wave — nothing to shape at depth 0.
-            const bool vib = cur().vibCents > 0.0;
-            vibRateSlider .setEnabled(vib);
-            vibOnsetSlider.setEnabled(vib);
-            vibLifeSlider .setEnabled(vib);
-            vibRateLabel  .setEnabled(vib);
-            vibOnsetLabel .setEnabled(vib);
-            vibLifeLabel  .setEnabled(vib);
-            becomeCustom();
-            markDirty();
-        };
-
-        initLabel(vibRateLabel, "Vib rate (Hz)");
-        initSlider(vibRateSlider, 0.1, 16.0, 0.1, 5.5);
-        timbral(vibRateSlider, [](timbregen::TimbreSlotParams& q, double v) { q.vibRateHz = v; });
-
-        initLabel(vibOnsetLabel, "Vib onset (s)");
-        initSlider(vibOnsetSlider, 0.0, 5.0, 0.05, 0.4);
-        vibOnsetSlider.setTooltip("Time for the vibrato to develop after the "
-                                  "note starts (delay + smooth rise).");
-        timbral(vibOnsetSlider, [](timbregen::TimbreSlotParams& q, double v) { q.vibOnsetSec = v; });
-
-        initLabel(vibLifeLabel, "Vib life");
-        initSlider(vibLifeSlider, 0.0, 1.0, 0.01, 0.5);
-        vibLifeSlider.setTooltip("Humanisation: the depth waves, the rate drifts, "
-                                 "and every note gets its own phase / rate / depth "
-                                 "defects. 0 = mechanical sine, 1 = loose.");
-        timbral(vibLifeSlider, [](timbregen::TimbreSlotParams& q, double v) { q.vibLife = v; });
-
-        initLabel(levelLabel, "Level (dB)");
-        initSlider(levelSlider, -36.0, 12.0, 0.1, 0.0);
-        levelSlider.setTooltip("Ink / playback gain of this voice "
-                               "(0 dB = full black at maximum velocity).");
-        levelSlider.onValueChange = [this]
-        {
-            cur().levelDb = levelSlider.getValue();   // gain — preset stays
-            markDirty();
-        };
+        // ── Per-voice timbre parameters: the shared timbre editor ────────────
+        params_.target = [this]() -> timbregen::TimbreSlotParams& { return cur(); };
+        params_.onPresetChange  = [this]
+        { voiceTabs[(size_t) selectedVoice]->repaint(); markDirty(); };
+        params_.onTimbralChange = [this]
+        { voiceTabs[(size_t) selectedVoice]->repaint(); markDirty(); };
+        params_.onLevelChange   = [this] { markDirty(); };
+        addAndMakeVisible(params_);
 
         // ── Page-level settings ──────────────────────────────────────────────
         initLabel(wsLabel, "Writing Speed (cm/s)");
@@ -353,32 +240,13 @@ public:
         }
 
         // ── Audition transport (this instance's own score-player slot) ──────
-        playStopButton.setTooltip("Play / stop the piece through the score player");
-        playStopButton.onClick = [this] { togglePlay(); };
-        addAndMakeVisible(playStopButton);
-
-        pauseButton.setTooltip("Freeze the current instant: the held column "
-                               "keeps sounding; click/drag the preview to move "
-                               "it. Works while playing or from stop.");
-        pauseButton.onClick = [this] { togglePause(); };
-        addAndMakeVisible(pauseButton);
-
-        loopBtn.setTooltip("Loop playback");
-        addAndMakeVisible(loopBtn);
-
-        reverseBtn.setTooltip("Reverse (play the piece backward)");
-        addAndMakeVisible(reverseBtn);
-
-        initLabel(speedLabel, "Speed");
-        speedSlider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-        speedSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 52, 22);
-        speedSlider.setColour(juce::Slider::textBoxOutlineColourId,    juce::Colours::transparentBlack);
-        speedSlider.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
-        speedSlider.setColour(juce::Slider::textBoxTextColourId,       juce::Colour(0xffa0c4e8));
-        speedSlider.setRange(0.1, 6.0, 0.01);
-        speedSlider.setTextValueSuffix("x");
-        speedSlider.setSkewFactorFromMidPoint(1.0);
-        addAndMakeVisible(speedSlider);
+        xportBar_.setTooltips("Play / stop the piece through the score player",
+                              "Freeze the current instant: the held column "
+                              "keeps sounding; click/drag the preview to move "
+                              "it. Works while playing or from stop.");
+        xportBar_.onPlay  = [this] { togglePlay();  };
+        xportBar_.onPause = [this] { togglePause(); };
+        addAndMakeVisible(xportBar_);
 
         // P7 — transport attachments + MIDI-Learn follow the SELECTED
         // instance: bindTransport() re-points them on every setScoreSlot().
@@ -408,11 +276,21 @@ public:
                                                         (int) std::lround(n * 3.0f))]);
             };
 
+            // The gesture pair of every chip (ui/Sp3ctraGestures.h): the
+            // double-click target and the inverse of the display format.
+            const auto pctParse = [](const juce::String& t) { return t.getFloatValue() / 100.0f; };
+            const auto powParse = [](const juce::String& t)
+            { return shapePowerRange().convertTo0to1(t.getFloatValue()); };
+            const float powDef = shapePowerRange().convertTo0to1(1.0f);
+
             auto setup = [this](SamplerValueBox& b,
                                 std::function<float()> rd,
                                 std::function<void(float)> ap,
-                                std::function<juce::String(float)> fmt)
+                                std::function<juce::String(float)> fmt,
+                                float def, std::function<float(const juce::String&)> parse)
             {
+                b.defaultNorm = def;
+                b.parse       = std::move(parse);
                 b.readNorm  = std::move(rd);
                 b.applyNorm = [this, ap = std::move(ap)](float n)
                 {
@@ -425,37 +303,37 @@ public:
             setup(cropStartBox_,
                   [this] { return cropStart_; },
                   [this](float n) { cropStart_ = juce::jlimit(0.0f, cropEnd_ - 0.01f, n); },
-                  pct);
+                  pct, 0.0f, pctParse);
             setup(cropEndBox_,
                   [this] { return cropEnd_; },
                   [this](float n) { cropEnd_ = juce::jlimit(cropStart_ + 0.01f, 1.0f, n); },
-                  pct);
+                  pct, 1.0f, pctParse);
             setup(fadeInLenBox_,
                   [this] { return fadeInLen_; },
                   [this](float n) { fadeInLen_ = juce::jlimit(0.0f, 1.0f, n); },
-                  pct);
+                  pct, 0.0f, pctParse);
             setup(fadeInTypeBox_,
                   [this] { return (float) (int) fadeInType_ / 3.0f; },
                   [this](float n) { fadeInType_ = (FadeCurveType)
                         juce::jlimit(0, kNumFadeCurveTypes - 1, (int) std::lround(n * 3.0f)); },
-                  curve);
+                  curve, -1.0f, nullptr);
             setup(fadeInPowBox_,
                   [this] { return shapePowerRange().convertTo0to1(fadeInPow_); },
                   [this](float n) { fadeInPow_ = shapePowerRange().convertFrom0to1(n); },
-                  pow2);
+                  pow2, powDef, powParse);
             setup(fadeOutLenBox_,
                   [this] { return fadeOutLen_; },
                   [this](float n) { fadeOutLen_ = juce::jlimit(0.0f, 1.0f, n); },
-                  pct);
+                  pct, 0.0f, pctParse);
             setup(fadeOutTypeBox_,
                   [this] { return (float) (int) fadeOutType_ / 3.0f; },
                   [this](float n) { fadeOutType_ = (FadeCurveType)
                         juce::jlimit(0, kNumFadeCurveTypes - 1, (int) std::lround(n * 3.0f)); },
-                  curve);
+                  curve, -1.0f, nullptr);
             setup(fadeOutPowBox_,
                   [this] { return shapePowerRange().convertTo0to1(fadeOutPow_); },
                   [this](float n) { fadeOutPow_ = shapePowerRange().convertFrom0to1(n); },
-                  pow2);
+                  pow2, powDef, powParse);
             fadeInTypeBox_ .setChoices({ "LIN", "EXP", "LOG", "S" });
             fadeOutTypeBox_.setChoices({ "LIN", "EXP", "LOG", "S" });
 
@@ -1245,29 +1123,30 @@ public:
             return false;
         }
 
-        // Double-click the MID handle → back to a straight (LIN) fade.
-        if ((midIn || midOut) && e.getNumberOfClicks() >= 2)
-        {
-            if (midIn) { fadeInType_  = FadeCurveType::LINEAR; fadeInPow_  = 1.0f; }
-            else       { fadeOutType_ = FadeCurveType::LINEAR; fadeOutPow_ = 1.0f; }
-            markShapeDirty();
-            return true;
-        }
-
-        if      (endIn)  shapeDrag_ = ShapeDrag::FadeIn;
-        else if (endOut) shapeDrag_ = ShapeDrag::FadeOut;
-        else if (midIn)  shapeDrag_ = ShapeDrag::FadeInShape;
-        else if (midOut) shapeDrag_ = ShapeDrag::FadeOutShape;
+        ShapeDrag target = ShapeDrag::None;
+        if      (endIn)  target = ShapeDrag::FadeIn;
+        else if (endOut) target = ShapeDrag::FadeOut;
+        else if (midIn)  target = ShapeDrag::FadeInShape;
+        else if (midOut) target = ShapeDrag::FadeOutShape;
         else
         {
             const float sx = fracToX(cropStart_), ex = fracToX(cropEnd_);
-            if      (std::abs(e.position.x - sx) <= (float) kShapeSnap) shapeDrag_ = ShapeDrag::Start;
-            else if (std::abs(e.position.x - ex) <= (float) kShapeSnap) shapeDrag_ = ShapeDrag::End;
+            if      (std::abs(e.position.x - sx) <= (float) kShapeSnap) target = ShapeDrag::Start;
+            else if (std::abs(e.position.x - ex) <= (float) kShapeSnap) target = ShapeDrag::End;
             else return false;   // free clicks keep scrubbing the play head
         }
+
+        // The UI-wide gesture pair (ui/Sp3ctraGestures.h): double-click =
+        // the handle back to its default, long press = type it (through
+        // the chip under the image that mirrors it).
+        if (e.getNumberOfClicks() >= 2) { resetShapeHandle(target); return true; }
+        if (e.getNumberOfClicks() != 1) return true;
+        shapeDrag_ = target;
         dragShapeHandle(e);
+        shapeHold_.arm(e, [this] { holdToTypeShape(); });
         return true;
     }
+
 
     void dragShapeHandle(const juce::MouseEvent& e)
     {
@@ -1451,12 +1330,15 @@ public:
     }
     void mouseDrag(const juce::MouseEvent& e) override
     {
+        if (shapeHold_.fired()) return;       // the entry bubble owns the rest
+        shapeHold_.moved(e);
         if (dragPanIdx >= 0) { dragPanHandle(e); return; }
         if (shapeDrag_ != ShapeDrag::None) { dragShapeHandle(e); return; }
         if (scrubbing) scrubTo(e);
     }
     void mouseUp  (const juce::MouseEvent& e)   override
     {
+        shapeHold_.release();
         dragPanIdx = -1;
         scrubbing  = false;
         if (shapeDrag_ != ShapeDrag::None)
@@ -1512,24 +1394,10 @@ public:
             y += ch + 3;
         };
 
-        presetLabel.setBounds(pad, y, 60, ch);
-        presetCombo.setBounds(pad + 60 + gap, y, colW - 60 - gap, ch);
-        y += ch + gap;
-
-        row(partialsLabel, partialsSlider);
-        row(slopeLabel,    slopeSlider);
-        row(oddLabel,      oddSlider);
-        row(inharmLabel,   inharmSlider);
-        row(combLabel,     combSlider);
-        row(combPosLabel,  combPosSlider);
-        row(attackLabel,   attackSlider);
-        row(decayLabel,    decaySlider);
-        row(hfDampLabel,   hfDampSlider);
-        row(vibDepthLabel, vibDepthSlider);
-        row(vibRateLabel,  vibRateSlider);
-        row(vibOnsetLabel, vibOnsetSlider);
-        row(vibLifeLabel,  vibLifeSlider);
-        row(levelLabel,    levelSlider);
+        // The shared timbre editor (preset, series, every bar, level).
+        params_.setRowMetrics(lblW, ch, gap);
+        params_.setBounds(pad, y, colW, params_.preferredHeight());
+        y += params_.preferredHeight();
         y += 6;
 
         row(wsLabel,   wsSlider);
@@ -1543,25 +1411,9 @@ public:
         exportButton.setBounds(pad, y, colW, ch);
         y += ch + gap + 4;
 
-        // ── Transport bar ────────────────────────────────────────────────────
-        {
-            const int knobW = 56, knobDrwH = 42, knobValH = 14;
-            const int blockH = knobDrwH + knobValH;
-            const int btn = 40;
-            const int icon = 34;   // loop / inverse pictograms (matches SCORE)
-
-            int x = pad;
-            playStopButton.setBounds(x, y + (blockH - btn)  / 2, btn,  btn);  x += btn + gap;
-            pauseButton.setBounds  (x, y + (blockH - btn)  / 2, btn,  btn);  x += btn + gap;
-            loopBtn.setBounds      (x, y + (blockH - icon) / 2, icon, icon);  x += icon + 4;
-            reverseBtn.setBounds   (x, y + (blockH - icon) / 2, icon, icon);  x += icon + gap;
-
-            const int knobX = pad + colW - knobW;
-            speedSlider.setBounds(knobX, y, knobW, blockH);
-            speedLabel.setBounds(x, y + (knobDrwH - ch) / 2,
-                                 juce::jmax(0, knobX - gap - x), ch);
-            y += blockH + gap;
-        }
+        // ── Transport bar (the shared widget) ────────────────────────────────
+        xportBar_.setBounds(pad, y, colW, ScoreTransportBar::kHeight);
+        y += ScoreTransportBar::kHeight + gap;
         // Two rows so the routing tip wraps at true proportions (no squish).
         playHint.setBounds(pad, y, colW, ch * 2 - 6); y += ch * 2 - 6 + 2;
 
@@ -1632,179 +1484,6 @@ public:
 
 private:
     //==========================================================================
-    /** Square play/stop transport button (same visual language as SCORE's). */
-    class MidiScorePlayButton : public juce::Button
-    {
-    public:
-        MidiScorePlayButton() : juce::Button("midiScorePlayStop") {}
-
-        void setPlaying(bool p)
-        {
-            if (p == playing) return;
-            playing = p;
-            repaint();
-        }
-
-        void paintButton(juce::Graphics& g, bool over, bool down) override
-        {
-            const auto b = getLocalBounds().toFloat().reduced(1.f);
-            const juce::Colour bg(0xff222230);
-            g.setColour(down ? bg.brighter(0.30f) : over ? bg.brighter(0.12f) : bg);
-            g.fillRoundedRectangle(b, 3.f);
-            g.setColour(juce::Colour(0xff33373f));
-            g.drawRoundedRectangle(b, 3.f, 1.f);
-
-            const auto inner = b.reduced(b.getHeight() * 0.30f);
-            if (! isEnabled())
-                Icons::fillPath(g, Icons::play(), inner, juce::Colour(0xff555a62));
-            else if (playing)
-                Icons::fillPath(g, Icons::stop(), inner, juce::Colour(kAccentARGB));
-            else
-                Icons::fillPath(g, Icons::play(), inner, juce::Colour(0xff66cc88));
-        }
-
-    private:
-        bool playing = false;
-        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MidiScorePlayButton)
-    };
-
-    /** Square pause toggle: freeze the transport on the CURRENT column — the
-     *  player keeps re-injecting that instant every tick (sustained sound)
-     *  and the head can be dragged in the preview while frozen. */
-    class MidiScorePauseButton : public juce::Button
-    {
-    public:
-        MidiScorePauseButton() : juce::Button("midiScorePause") {}
-
-        void setPaused(bool p)
-        {
-            if (p == paused) return;
-            paused = p;
-            repaint();
-        }
-
-        void paintButton(juce::Graphics& g, bool over, bool down) override
-        {
-            const auto b = getLocalBounds().toFloat().reduced(1.f);
-            const bool on = paused && isEnabled();
-            const juce::Colour accent(kAccentARGB);
-
-            const juce::Colour bg = on ? accent.withAlpha(0.22f)
-                                       : juce::Colour(0xff222230);
-            g.setColour(down ? bg.brighter(0.30f) : over ? bg.brighter(0.12f) : bg);
-            g.fillRoundedRectangle(b, 3.f);
-            g.setColour(on ? accent.withAlpha(0.9f) : juce::Colour(0xff33373f));
-            g.drawRoundedRectangle(b, 3.f, 1.f);
-
-            const auto inner = b.reduced(b.getHeight() * 0.32f);
-            const juce::Colour fg = on ? accent
-                                       : juce::Colour(isEnabled() ? 0xff9aa6ba
-                                                                  : 0xff555a62);
-            const float bw = inner.getWidth() * 0.30f;
-            g.setColour(fg);
-            g.fillRoundedRectangle(inner.getX(), inner.getY(),
-                                   bw, inner.getHeight(), 1.5f);
-            g.fillRoundedRectangle(inner.getRight() - bw, inner.getY(),
-                                   bw, inner.getHeight(), 1.5f);
-        }
-
-    private:
-        bool paused = false;
-        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MidiScorePauseButton)
-    };
-
-    /** Compact loop/inverse pictogram toggle — same glyph as the SCORE page
-     *  (ScoreIconToggle) and the TIMBRE page, only the accent differs. */
-    class MidiScoreIconToggle : public juce::Button
-    {
-    public:
-        enum class Glyph { Loop, Inverse };
-
-        explicit MidiScoreIconToggle(Glyph g) : juce::Button("midiScoreLoopToggle"), glyph(g)
-        {
-            setClickingTogglesState(true);
-        }
-
-        void paintButton(juce::Graphics& g, bool over, bool down) override
-        {
-            const auto b = getLocalBounds().toFloat().reduced(1.f);
-            const bool on = getToggleState() && isEnabled();
-            const juce::Colour accent(kAccentARGB);
-
-            const juce::Colour bg = on ? accent.withAlpha(0.22f) : juce::Colour(0xff222230);
-            g.setColour(down ? bg.brighter(0.30f) : over ? bg.brighter(0.12f) : bg);
-            g.fillRoundedRectangle(b, 3.f);
-            g.setColour(on ? accent.withAlpha(0.9f) : juce::Colour(0xff33373f));
-            g.drawRoundedRectangle(b, 3.f, 1.f);
-
-            const auto inner = b.reduced(b.getHeight() * 0.22f);
-            const juce::Colour fg = on ? accent
-                                       : juce::Colour(isEnabled() ? 0xff9aa6ba : 0xff555a62);
-            drawLoopGlyph(g, inner, fg, glyph == Glyph::Inverse);
-        }
-
-    private:
-        /** Stadium (racetrack) loop, open at the top, arrow capping the gap —
-         *  shared shape with ScoreIconToggle / TimbreIconToggle. */
-        static void drawLoopGlyph(juce::Graphics& g, juce::Rectangle<float> r,
-                                  juce::Colour col, bool reversed)
-        {
-            const float h  = r.getHeight();
-            const float th = juce::jmax(2.0f, h * 0.12f);   // stroke thickness
-
-            const float ringH  = h * 0.64f;
-            const float L = r.getX() + th * 0.6f;
-            const float R = r.getRight() - th * 0.6f;
-            const float T = r.getCentreY() - ringH * 0.5f;
-            const float B = r.getCentreY() + ringH * 0.5f;
-            const float radius = (B - T) * 0.5f;
-            const float midY   = (T + B) * 0.5f;
-            const float topLx  = L + radius;
-            const float topRx  = R - radius;
-            const float gx0    = juce::jmap(0.34f, topLx, topRx);
-            const float gx1    = juce::jmap(0.66f, topLx, topRx);
-
-            juce::Path loop;
-            loop.startNewSubPath(gx1, T);
-            loop.lineTo(topRx, T);
-            loop.addCentredArc(topRx, midY, radius, radius, 0.0f,
-                               0.0f, juce::MathConstants<float>::pi, false);
-            loop.lineTo(topLx, B);
-            loop.addCentredArc(topLx, midY, radius, radius, 0.0f,
-                               juce::MathConstants<float>::pi,
-                               juce::MathConstants<float>::twoPi, false);
-            loop.lineTo(gx0, T);
-
-            const float aH     = radius * 0.85f;
-            const float aTipX  = gx0 - th * 0.25f;
-            const float aBackX = gx1 + th * 0.25f;
-            juce::Path arrow;
-            arrow.addTriangle(aTipX, T, aBackX, T - aH, aBackX, T + aH);
-
-            const auto ringBounds = loop.getBounds().expanded(th * 0.5f);
-            const auto offset = r.getCentre() - ringBounds.getCentre();
-            const auto move = juce::AffineTransform::translation(offset.x, offset.y);
-            loop.applyTransform(move);
-            arrow.applyTransform(move);
-
-            if (reversed)
-            {
-                const auto flip = juce::AffineTransform::scale(-1.0f, 1.0f)
-                                      .translated(r.getCentreX() * 2.0f, 0.0f);
-                loop.applyTransform(flip);
-                arrow.applyTransform(flip);
-            }
-
-            g.setColour(col);
-            g.strokePath(loop, juce::PathStrokeType(th, juce::PathStrokeType::curved,
-                                                        juce::PathStrokeType::rounded));
-            g.fillPath(arrow);
-        }
-
-        Glyph glyph;
-        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MidiScoreIconToggle)
-    };
-
     /** The PLAY-page export button: a plain themed TextButton until an export
      *  job runs, then a bronze progress bar fills its face — real fraction
      *  during the note render, full bar + travelling sheen while the file is
@@ -2360,82 +2039,12 @@ private:
     /** Pushes the SELECTED voice's params into the widgets (no notifications). */
     void refreshVoiceControls()
     {
-        const auto& q = cur();
-        // The "Custom" combo entry names the template it drifted from — the
-        // item text is re-pointed at the CURRENT voice's base every refresh.
-        const int customId = timbregen::numPresets() + 1;
-        presetCombo.changeItemText(customId,
-                                   q.preset >= 0 ? juce::String("Custom")
-                                                 : presetDisplayName(q));
-        if (q.preset >= 0)
-            presetCombo.setSelectedId(q.preset + 1, juce::dontSendNotification);
-        else   // setText: setSelectedId short-circuits when the id is unchanged
-            presetCombo.setText(presetDisplayName(q), juce::dontSendNotification);
-        partialsSlider.setValue(q.numPartials,  juce::dontSendNotification);
-        slopeSlider  .setValue(q.slopeDbPerOct, juce::dontSendNotification);
-        oddSlider    .setValue(q.oddBias,       juce::dontSendNotification);
-        inharmSlider .setValue(q.inharmonicity, juce::dontSendNotification);
-        combSlider   .setValue(q.combDepth,     juce::dontSendNotification);
-        combPosSlider.setValue(q.combPos,       juce::dontSendNotification);
-        attackSlider .setValue(q.attackMs,      juce::dontSendNotification);
-        decaySlider  .setValue(q.decaySec,      juce::dontSendNotification);
-        hfDampSlider .setValue(q.hfDamp,        juce::dontSendNotification);
-        vibDepthSlider.setValue(q.vibCents,     juce::dontSendNotification);
-        vibRateSlider .setValue(q.vibRateHz,    juce::dontSendNotification);
-        vibOnsetSlider.setValue(q.vibOnsetSec,  juce::dontSendNotification);
-        vibLifeSlider .setValue(q.vibLife,      juce::dontSendNotification);
-        levelSlider  .setValue(q.levelDb,       juce::dontSendNotification);
-
-        // Bell presets fix their partial set — grey the harmonic-series
-        // fields, LABEL AND BAR (a dim number alone reads as "small value",
-        // not "inert control").
-        const bool harmonic = ! q.bellMode;
-        for (auto* c : std::initializer_list<juce::Component*>{
-                 &partialsSlider, &partialsLabel, &slopeSlider, &slopeLabel,
-                 &oddSlider, &oddLabel, &inharmSlider, &inharmLabel,
-                 &combSlider, &combLabel, &combPosSlider, &combPosLabel })
-            c->setEnabled(harmonic);
-        // HF damping is a decay-rate multiplier — inert on sustained notes.
-        hfDampSlider.setEnabled(q.decaySec > 0.0);
-        hfDampLabel .setEnabled(q.decaySec > 0.0);
-        // Vibrato works in both harmonic and bell modes; its shape controls
-        // only matter once there is a depth to shape.
-        const bool vib = q.vibCents > 0.0;
-        vibRateSlider .setEnabled(vib);
-        vibOnsetSlider.setEnabled(vib);
-        vibLifeSlider .setEnabled(vib);
-        vibRateLabel  .setEnabled(vib);
-        vibOnsetLabel .setEnabled(vib);
-        vibLifeLabel  .setEnabled(vib);
-
+        params_.refresh();
         // Every per-voice control wears the selected voice's identity colour
         // (the page-level sliders below the column keep the neutral blue).
         const juce::Colour vc = voiceColour(selectedVoice);
-        for (auto* sl : { &partialsSlider, &slopeSlider, &oddSlider,
-                          &inharmSlider, &combSlider, &combPosSlider,
-                          &attackSlider, &decaySlider, &hfDampSlider,
-                          &vibDepthSlider, &vibRateSlider, &vibOnsetSlider,
-                          &vibLifeSlider, &levelSlider })
-            sl->setAccent(vc);
-        presetCombo.setColour(juce::ComboBox::outlineColourId,
-                              vc.withAlpha(0.55f));
+        params_.setAccent(vc);
         eqEditor.setAccent(vc);
-    }
-
-    /** A timbral tweak turns the voice into a hand-tuned "Custom" patch —
-     *  remembering WHICH template it drifted from ("Custom (Piano)"). */
-    void becomeCustom()
-    {
-        if (cur().preset != timbregen::kPresetCustom)
-        {
-            cur().customBase = cur().preset;   // the template it just left
-            cur().preset     = timbregen::kPresetCustom;
-            const int customId = timbregen::numPresets() + 1;
-            presetCombo.changeItemText(customId, presetDisplayName(cur()));
-            presetCombo.setText(presetDisplayName(cur()),
-                                juce::dontSendNotification);
-            voiceTabs[(size_t) selectedVoice]->repaint();
-        }
     }
 
     void markDirty()
@@ -2879,7 +2488,7 @@ private:
             if (pauseMode == PauseMode::playing) fs->uiSetScorePaused(false);
             else                                 fs->uiEndScoreScrub();
             pauseMode = PauseMode::none;
-            pauseButton.setPaused(false);
+            xportBar_.setPaused(false);
             repaint(previewArea);
             return;
         }
@@ -2897,14 +2506,14 @@ private:
                 return;
             pauseMode = PauseMode::held;   // holds wherever the head sits
         }
-        pauseButton.setPaused(true);
+        xportBar_.setPaused(true);
         repaint(previewArea);
     }
 
     void releasePauseState()
     {
         pauseMode = PauseMode::none;
-        pauseButton.setPaused(false);
+        xportBar_.setPaused(false);
     }
 
     void togglePlay()
@@ -3016,13 +2625,13 @@ private:
             }
             else
             {
-                playStopButton.setPlaying(fs->isScorePlaying());
+                xportBar_.setPlaying(fs->isScorePlaying());
                 if (fs->isScorePlaying())
                     repaint(previewArea);
             }
         }
         else
-            playStopButton.setPlaying(false);
+            xportBar_.setPlaying(false);
 
         // Mirror MIDI SCORE's play param on the real engine state (DAW lane
         // truthful when a one-shot ends / an internal reload stops playback).
@@ -3366,24 +2975,7 @@ private:
             o->setProperty("en",    q.enabled);
             o->setProperty("solo",  voiceSolo[(size_t) vi]);
             o->setProperty("eq",    d.voiceEqState[(size_t) vi]);
-            o->setProperty("preset",q.preset);
-            o->setProperty("cbase", q.customBase);
-            o->setProperty("part",  q.numPartials);
-            o->setProperty("slope", q.slopeDbPerOct);
-            o->setProperty("odd",   q.oddBias);
-            o->setProperty("inh",   q.inharmonicity);
-            o->setProperty("comb",  q.combDepth);
-            o->setProperty("cpos",  q.combPos);
-            o->setProperty("atk",   q.attackMs);
-            o->setProperty("dec",   q.decaySec);
-            o->setProperty("hf",    q.hfDamp);
-            o->setProperty("lvl",   q.levelDb);
-            o->setProperty("bell",  q.bellMode);
-            o->setProperty("bellT", q.bellTable);
-            o->setProperty("vibC",  q.vibCents);
-            o->setProperty("vibR",  q.vibRateHz);
-            o->setProperty("vibO",  q.vibOnsetSec);
-            o->setProperty("vibL",  q.vibLife);
+            timbregen::encodeParams(*o, q);
             arr.add(juce::var(o));
         }
         auto* root = new juce::DynamicObject();
@@ -3514,8 +3106,6 @@ private:
                 auto* so = (*arr)[i].getDynamicObject();
                 if (so == nullptr) continue;
                 auto& q = voices[(size_t) i];
-                auto get = [&](const char* k, double d)
-                { return so->hasProperty(k) ? (double) so->getProperty(k) : d; };
                 readPanArray(so->getProperty("pan"),
                              pageSettings.panPoints[(size_t) i]);
                 if (so->hasProperty("eq"))
@@ -3524,25 +3114,7 @@ private:
                 q.enabled       = ! so->hasProperty("en")
                                   || (bool) so->getProperty("en");
                 voiceSolo[(size_t) i] = (bool) so->getProperty("solo");
-                q.preset        = (int) get("preset", q.preset);
-                q.customBase    = juce::jlimit(-1, timbregen::numPresets() - 1,
-                                               (int) get("cbase", q.customBase));
-                q.numPartials   = juce::jlimit(1, 128, (int) get("part", q.numPartials));
-                q.slopeDbPerOct = get("slope", q.slopeDbPerOct);
-                q.oddBias       = get("odd",   q.oddBias);
-                q.inharmonicity = get("inh",   q.inharmonicity);
-                q.combDepth     = get("comb",  q.combDepth);
-                q.combPos       = get("cpos",  q.combPos);
-                q.attackMs      = get("atk",   q.attackMs);
-                q.decaySec      = get("dec",   q.decaySec);
-                q.hfDamp        = get("hf",    q.hfDamp);
-                q.levelDb       = get("lvl",   q.levelDb);
-                q.bellMode      = (bool) so->getProperty("bell");
-                q.bellTable     = (int) get("bellT", q.bellTable);
-                q.vibCents      = get("vibC",  q.vibCents);
-                q.vibRateHz     = get("vibR",  q.vibRateHz);
-                q.vibOnsetSec   = get("vibO",  q.vibOnsetSec);
-                q.vibLife       = get("vibL",  q.vibLife);
+                timbregen::decodeParams(*so, q);
             }
         }
 
@@ -3758,7 +3330,8 @@ private:
     {
         xport_.rebind(processor.getAPVTS(), processor.getMidiMap(),
                       ModuleType::MidiScore, transportSlot(),
-                      playStopButton, loopBtn, reverseBtn, speedSlider);
+                      xportBar_.playButton(), xportBar_.loopButton(),
+                      xportBar_.reverseButton(), xportBar_.speedSlider());
     }
     int boundScoreSlot_ = -1;
 
@@ -3776,26 +3349,15 @@ private:
 
     std::array<std::unique_ptr<VoiceTab>, midiscoregen::kMaxVoices> voiceTabs;
 
-    juce::Label    presetLabel, partialsLabel, slopeLabel, oddLabel,
-                   inharmLabel, combLabel, combPosLabel, attackLabel, decayLabel,
-                   hfDampLabel, vibDepthLabel, vibRateLabel, vibOnsetLabel,
-                   vibLifeLabel, levelLabel, wsLabel, lineLabel, velLabel,
-                   speedLabel, playHint, logLabel, fileLabel;
-    juce::ComboBox presetCombo;
+    juce::Label    wsLabel, lineLabel, velLabel, playHint, logLabel, fileLabel;
     juce::ToggleButton labelsToggle;
-    MidiScoreIconToggle loopBtn    { MidiScoreIconToggle::Glyph::Loop };
-    MidiScoreIconToggle reverseBtn { MidiScoreIconToggle::Glyph::Inverse };
-    Sp3ctraBarSlider partialsSlider, slopeSlider, oddSlider, inharmSlider,
-                     combSlider, combPosSlider, attackSlider, decaySlider, hfDampSlider,
-                     vibDepthSlider, vibRateSlider, vibOnsetSlider, vibLifeSlider,
-                     levelSlider, wsSlider, lineSlider, velSlider;
-    juce::Slider   speedSlider;   // rotary transport knob — NOT a bar
+    Sp3ctraBarSlider wsSlider, lineSlider, velSlider;
+    TimbreParamsPanel params_;           // the shared timbre editor (preset + bars)
+    ScoreTransportBar xportBar_ { juce::Colour(kAccentARGB), /*withPause*/ true };
     juce::TextButton loadButton;
     ExportImageButton exportButton;
     bool exportAsPng_ = true;            // SETUP face: PNG (true) / JPEG
     std::shared_ptr<ExportProgress> exportJob_;   // non-null while exporting
-    MidiScorePlayButton playStopButton;
-    MidiScorePauseButton pauseButton;
     PauseMode pauseMode = PauseMode::none;
 
     juce::Rectangle<int>   previewArea;
@@ -3835,6 +3397,40 @@ private:
     float fadeInPow_  = 1.0f, fadeOutPow_ = 1.0f;
     ShapeDrag shapeDrag_  = ShapeDrag::None;
     int       shapeHover_ = 0;   // 1=in end · 2=out end · 3=in mid · 4=out mid
+    Sp3ctraGestures::Hold shapeHold_;   // long press on a shape handle = type it
+
+    void resetShapeHandle(ShapeDrag h)
+    {
+        switch (h)
+        {
+            case ShapeDrag::Start:        cropStart_  = 0.0f; break;
+            case ShapeDrag::End:          cropEnd_    = 1.0f; break;
+            case ShapeDrag::FadeIn:       fadeInLen_  = 0.0f; break;
+            case ShapeDrag::FadeOut:      fadeOutLen_ = 0.0f; break;
+            case ShapeDrag::FadeInShape:  fadeInType_  = FadeCurveType::LINEAR; fadeInPow_  = 1.0f; break;
+            case ShapeDrag::FadeOutShape: fadeOutType_ = FadeCurveType::LINEAR; fadeOutPow_ = 1.0f; break;
+            default: return;
+        }
+        markShapeDirty();
+    }
+
+    void holdToTypeShape()
+    {
+        const ShapeDrag h = shapeDrag_;
+        shapeDrag_ = ShapeDrag::None;
+        SamplerValueBox* box = nullptr;
+        switch (h)
+        {
+            case ShapeDrag::Start:        box = &cropStartBox_;  break;
+            case ShapeDrag::End:          box = &cropEndBox_;    break;
+            case ShapeDrag::FadeIn:       box = &fadeInLenBox_;  break;
+            case ShapeDrag::FadeOut:      box = &fadeOutLenBox_; break;
+            case ShapeDrag::FadeInShape:  box = &fadeInPowBox_;  break;
+            case ShapeDrag::FadeOutShape: box = &fadeOutPowBox_; break;
+            default: return;
+        }
+        box->typeValue(shapeHold_.anchor(*this));
+    }
 
     ShapeEqComponent eqEditor { juce::Colour(kAccentARGB) };
     SamplerValueBox cropStartBox_   { "start", juce::Colour(0xff33ff99), false };

@@ -1,3 +1,5 @@
+#include <chrono>
+#include <thread>
 /*
  * LuxSampler.cpp
  *
@@ -416,11 +418,10 @@ bool LuxSampler::onLiveFrameAssembled(const uint8_t* R, const uint8_t* G,
                                     && slots[i].frame_count < slots[i].capacity;
                 if (!slots[i].isAllocated())
                 {
-                    slots[i].allocate();
-                    recBaseUs_ = 0;
-                    log_info("FS", "Slot %d: buffer allocated (%d frames × %zu B)",
-                             i, LuxSamplerConstants::MAX_FRAMES_PER_SLOT,
-                             sizeof(CapturedFrame));
+                    // REC storage must be prepared by the non-RT UI command.
+                    atomicState.slotState[i].store(static_cast<int>(SlotState::IDLE),
+                                                    std::memory_order_release);
+                    continue;
                 }
                 else if (append)
                 {
@@ -721,6 +722,26 @@ void LuxSampler::uiToggleRecord(int slotIndex) noexcept
         atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::IDLE),
                                                 std::memory_order_release);
 
+    waitForPlayerRelease(slotIndex);
+    // Prepare outside the ingestion thread and before publishing RECORDING.
+    // Allocation failure keeps the existing take intact.
+    try {
+        bool needsStorage;
+        {
+            std::lock_guard<std::mutex> lk(slotsMutex_);
+            needsStorage = slots[slotIndex].capacity < MAX_FRAMES_PER_SLOT;
+        }
+        if (needsStorage) {
+            // Allocation/page initialization must not hold the ingestion mutex.
+            auto storage = std::make_unique<CapturedFrame[]>(MAX_FRAMES_PER_SLOT);
+            std::lock_guard<std::mutex> lk(slotsMutex_);
+            slots[slotIndex].reserve(MAX_FRAMES_PER_SLOT, std::move(storage));
+        }
+    } catch (const std::bad_alloc&) {
+        log_error("FS", "Slot %d: insufficient memory to prepare recording", slotIndex);
+        return;
+    }
+
     // Start recording immediately (UI one-click record)
     atomicState.slotState[slotIndex].store(static_cast<int>(SlotState::RECORDING),
                                             std::memory_order_release);
@@ -981,7 +1002,7 @@ void LuxSampler::copySlotTo(int srcIdx, int dstIdx)
     }
 
     FrameSlot& dst = slots[dstIdx];
-    dst.allocate(); // resets dst.frame_count to 0, keeps existing heap if already allocated
+    dst.allocate(src.frame_count);
 
     // Copy only the recorded frames (not the full capacity)
     const int count = juce::jmin(src.frame_count, dst.capacity);
@@ -1100,7 +1121,7 @@ bool LuxSampler::loadSlotFromImageFile(int slotIndex, const juce::File& imageFil
                 {
                     std::lock_guard<std::mutex> lk(slotsMutex_);
                     FrameSlot& dst = slots[slotIndex];
-                    dst.allocate();
+                    dst.allocate(static_cast<int>(built.size()));
                     count = juce::jmin((int) built.size(), dst.capacity);
                     for (int y = 0; y < count; ++y)
                         dst.frames[y] = built[(size_t) y];   // 1 ms/frame, freq = log columns
@@ -1154,7 +1175,7 @@ bool LuxSampler::loadSlotFromImageFile(int slotIndex, const juce::File& imageFil
         std::lock_guard<std::mutex> lk(slotsMutex_);
 
         FrameSlot& dst = slots[slotIndex];
-        dst.allocate(); // resets frame_count, keeps existing heap if allocated
+        dst.allocate(rows);
 
         count = juce::jmin(rows, dst.capacity);
         juce::Image::BitmapData bd(resized, juce::Image::BitmapData::readOnly);
@@ -1696,7 +1717,8 @@ juce::Image LuxSampler::renderSlotImage(int slotIndex,
         if (!slot.has_content || slot.frame_count <= 0 || !slot.isAllocated())
             return {};
         frameCount = slot.frame_count;
-        pixelCount = slot.frames[0].pixel_count;
+        pixelCount = juce::jmin(static_cast<int>(slot.frames[0].pixel_count),
+                                MAX_PIXELS);
         if (pixelCount <= 0)
             return {};
     }
@@ -1712,9 +1734,11 @@ juce::Image LuxSampler::renderSlotImage(int slotIndex,
         return {};
 
     // Nearest-neighbour striding when downsampled (0 caps = full resolution).
+    // srcN <= 1 must short-circuit: with srcN = 0 the jlimit range inverts
+    // (jlimit(0, -1, x) returns -1) and the caller would index frames[-1].
     const auto srcIndex = [](int o, int outN, int srcN) noexcept
     {
-        if (outN <= 1) return 0;
+        if (outN <= 1 || srcN <= 1) return 0;
         return juce::jlimit(0, srcN - 1,
                             (int) ((long long) o * (srcN - 1) / (outN - 1)));
     };
@@ -1724,7 +1748,19 @@ juce::Image LuxSampler::renderSlotImage(int slotIndex,
         juce::Image::BitmapData bmp(img, juce::Image::BitmapData::writeOnly);
         std::lock_guard<std::mutex> lk(slotsMutex_);
         const FrameSlot& slot = slots[slotIndex];
+
+        // slotsMutex_ was RELEASED while the juce::Image above was allocated
+        // (allocating under the lock froze live capture). In that window the
+        // UDP thread can start a new non-overdub take on this slot — which
+        // resets frame_count to 0 while KEEPING the heap buffer — or the
+        // message thread can clear()/reload it. Both leave fc = 0 here, and
+        // the clamp to fc - 1 then yielded -1, so the loop read
+        // slot.frames[-1] ~10 kB before the allocation → EXC_BAD_ACCESS.
+        // Nothing is left to draw in that case: hand back an empty image so
+        // the editor falls through to its "-- no recording --" placeholder.
         const int fc = juce::jmin(frameCount, slot.frame_count); // re-check after lock
+        if (!slot.isAllocated() || fc <= 0)
+            return {};
 
         // Use setPixelColour() to be platform-independent: the in-memory byte
         // order of juce::Image::RGB (PixelRGB) is platform-dependent (BGR on
@@ -1991,7 +2027,7 @@ bool LuxSampler::loadFromFile(const juce::File& file)
             slots[idx].clear();
             if (!loadOk) continue;
 
-            slots[idx].allocate();
+            slots[idx].allocate(static_cast<int>(staging.size()));
             slots[idx].has_content = true;
             slots[idx].duration_us = shdr.duration_us;
             std::strncpy(slots[idx].label, shdr.label, 63);
@@ -2380,7 +2416,7 @@ bool LuxSampler::loadSlotFromFile(int slotIndex, const juce::File& file)
 
         if (hasFrames)
         {
-            slots[slotIndex].allocate();
+            slots[slotIndex].allocate(static_cast<int>(staging.size()));
             slots[slotIndex].has_content = true;
             slots[slotIndex].duration_us = shdr.duration_us;
             std::strncpy(slots[slotIndex].label, shdr.label, 63);
@@ -3264,7 +3300,9 @@ void FramePlayerThread::runSamplerSession()
     };
 
     constexpr uint64_t kPeriodUs = 1000; // 1 ms = 1000 lines/sec
-    uint64_t lastInjectUs = currentTimeUs();
+    auto pacingNowUs = [] { return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count()); };
+    uint64_t lastInjectUs = pacingNowUs();
 
     // Per-voice scratch (reused voice by voice) + master composite frame.
     uint8_t vR[MAX_PIXELS],    vG[MAX_PIXELS],    vB[MAX_PIXELS];
@@ -3320,24 +3358,23 @@ void FramePlayerThread::runSamplerSession()
         // ── Pause / hold: freeze play heads, re-anchor injection timer ────
         if (sampler.isSeqPlayerHeld())
         {
-            lastInjectUs = currentTimeUs(); // no burst on resume
+            lastInjectUs = pacingNowUs(); // no burst on resume
             Thread::sleep(2);
             continue;
         }
 
         // ── Wait for next 1ms injection tick ───────────────────────────────
-        const uint64_t now             = currentTimeUs();
+        const uint64_t now             = pacingNowUs();
         const uint64_t sinceLastInject = now - lastInjectUs;
         if (sinceLastInject < kPeriodUs)
         {
             const uint64_t remaining = kPeriodUs - sinceLastInject;
-            if (remaining > 2000) Thread::sleep(1);
-            else                  Thread::yield();
+            std::this_thread::sleep_for(std::chrono::microseconds(remaining));
             continue;
         }
         // Lock-step advance — avoid drift accumulation
         lastInjectUs += kPeriodUs;
-        if (lastInjectUs > now) lastInjectUs = now; // catch-up safety
+        if (now - lastInjectUs >= kPeriodUs) lastInjectUs = now; // bound catch-up work
 
         // ── Tick every voice, composite into the master frame ──────────────
         // The master starts white (255 = silence): the identity element of

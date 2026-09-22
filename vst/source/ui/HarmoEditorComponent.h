@@ -24,6 +24,7 @@
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
 #include "../processing/lux_harmo.h"   // self-manages extern "C" linkage
+#include "Sp3ctraControls.h"
 #include "Sp3ctraHandles.h"
 #include "ModuleEditorChrome.h"
 
@@ -121,6 +122,16 @@ public:
             const float x0 = strip.getX() + (float) n * pxPerSt;
             g.setColour(black ? juce::Colour(0xff15151d) : juce::Colour(0xff3a3a48));
             g.fillRect(x0 + 0.5f, strip.getY(), pxPerSt - 1.0f, strip.getHeight());
+            // The strip IS the root selector: the key under the pointer wears
+            // the control colour, so what a click will do is visible before
+            // the click (ui/Sp3ctraControls.h).
+            if (cls == hoverCls_)
+            {
+                const auto look = Sp3ctraControls::stateOf(false, true);
+                g.setColour(Sp3ctraControls::valueInk(look)
+                                .withAlpha(Sp3ctraControls::fillAlpha(look)));
+                g.fillRect(x0 + 0.5f, strip.getY(), pxPerSt - 1.0f, strip.getHeight());
+            }
         }
 
         // Root markers — the SELECTED key, one per octave, at the foot of
@@ -131,7 +142,10 @@ public:
                 if (n % 12 == rootCls)
                     Sp3ctraHandles::drawNode(g, { plot.getX() + (float) n * pxPerSt,
                                                   plot.getBottom() - 2.5f },
-                                             Sp3ctraHandles::State::Selected, 2.5f);
+                                             Sp3ctraHandles::stateOf(false,
+                                                                     rootCls == hoverCls_,
+                                                                     true, root_.heat()),
+                                             2.5f);
 
         // Caption + hint (shared chrome).
         ModuleChrome::drawCaption(g, bf, accent, "SCALE GRID");
@@ -140,6 +154,17 @@ public:
     }
 
     //==========================================================================
+    void mouseMove(const juce::MouseEvent& e) override
+    {
+        const int cls = classAt(e.position.x);
+        if (cls != hoverCls_) { hoverCls_ = cls; repaint(); }
+    }
+
+    void mouseExit(const juce::MouseEvent&) override
+    {
+        if (hoverCls_ >= 0) { hoverCls_ = -1; repaint(); }
+    }
+
     void mouseDown(const juce::MouseEvent& e) override
     {
         // Right-click: MIDI Learn on the Root param (the canvas IS the root
@@ -150,13 +175,8 @@ public:
                 MidiLearnPopup::show(*midiMap_, rootId_, this);
             return;
         }
-        const auto plot = plotArea();
-        const float pxPerSt = plot.getWidth() / (float) (kOctaves * 12);
-        if (pxPerSt <= 0.0f) return;
-        const int n = (int) std::lround((e.position.x - plot.getX()) / pxPerSt);
-        const int cls = ((n % 12) + 12) % 12;
-        if (root_.attach)
-            root_.attach->setValueAsCompleteGesture((float) cls);
+        const int cls = classAt(e.position.x);
+        if (cls >= 0) root_.setComplete((float) cls);
         repaint();
     }
 
@@ -164,6 +184,17 @@ private:
     // Default instrument span (C2 → ~16.7 kHz, 8 octaves) — label grid only.
     static constexpr double kMinFreq = 65.41;
     static constexpr int    kOctaves = 8;
+
+    /** Pitch class under an x position (-1 outside the strip). */
+    int classAt(float x) const noexcept
+    {
+        const auto plot = plotArea();
+        const float pxPerSt = plot.getWidth() / (float) (kOctaves * 12);
+        if (pxPerSt <= 0.0f) return -1;
+        const int n = (int) std::lround((x - plot.getX()) / pxPerSt);
+        if (n < 0 || n > kOctaves * 12) return -1;
+        return ((n % 12) + 12) % 12;
+    }
 
     juce::Rectangle<float> plotArea() const
     {
@@ -180,22 +211,15 @@ private:
     void timerCallback() override { if (isShowing()) repaint(); }
 
     //==========================================================================
-    struct Bound
-    {
-        juce::RangedAudioParameter* param = nullptr;
-        std::unique_ptr<juce::ParameterAttachment> attach;
-        float value = 0.0f;
-    };
+    /** The shared parameter binding — ui/Sp3ctraControls.h. Besides the
+     *  attachment and the mirrored value it carries the EDIT HEAT: any
+     *  change, from this editor's drag, from the box below, from a MIDI CC
+     *  or from automation, lights the handle that owns it. */
+    using Bound = Sp3ctraControls::Bound;
 
     void bind(Bound& bnd, const juce::String& id)
     {
-        bnd.attach.reset();
-        bnd.param = apvts.getParameter(id);
-        jassert(bnd.param != nullptr);
-        if (bnd.param == nullptr) return;
-        bnd.attach = std::make_unique<juce::ParameterAttachment>(
-            *bnd.param, [this, &bnd](float v) { bnd.value = v; repaint(); });
-        bnd.attach->sendInitialUpdate();
+        bnd.bind(apvts, id, [this](float) { repaint(); });
     }
 
     juce::AudioProcessorValueTreeState& apvts;
@@ -205,6 +229,7 @@ private:
     MidiMappingEngine* midiMap_ = nullptr;
 
     Bound root_, scale_, width_, strength_;
+    int hoverCls_ = -1;   // pitch class under the pointer (-1 = none)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(HarmoEditorComponent)
 };

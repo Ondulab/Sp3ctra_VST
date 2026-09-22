@@ -37,7 +37,10 @@ public:
 
     // ── Layout constants (single source of truth for resized() + kPreferredH) ──
     static constexpr int kGridH = SlotGridComponent::kPreferredH; // bank tiles + per-bank mixer
-    static constexpr int kEditH = 500;  // slot editor: 2 param cols + image + EQ
+    static constexpr int kEditH = 500;  // slot editor MINIMUM height (2 param cols
+                                        // + image + EQ) — resized() stretches it
+                                        // with the window, the image absorbing
+                                        // all the extra height
     static constexpr int kSeqH  = 180;  // step-sequencer grid (2 rows + header)
 
     // Natural height — must match the layout in resized(): pad + grid + gap +

@@ -79,20 +79,6 @@ typedef struct AudioImageBuffers {
   // Replaces the dead modulated-bus counter; consumers atomic-load it.
   uint64_t frame_seq;
 
-  // ── Acquisition gate (frame-advance brake / "vitesse d'acquisition") ───────
-  // Throttles the LIVE UDP publish path: when enabled, a freshly assembled line
-  // is swapped into the read buffer only if a permit is pending — otherwise the
-  // line is dropped and the read buffer (hence every consumer: synth + visual)
-  // holds the last published frame.  Sample-and-hold at the gate clock rate.
-  //   gate_enabled / gate_permit : produced by the audio thread (AcquisitionGate
-  //                                clock in processBlock), consumed by the UDP
-  //                                thread at the live publish site.
-  //   gate_holds                 : diagnostic count of lines dropped while gated.
-  // Default disabled → full-rate, byte-for-byte legacy behaviour.
-  atomic_int gate_enabled;
-  atomic_int gate_permit;
-  uint64_t   gate_holds;
-
   // Initialization flag
   uint8_t initialized;
 
@@ -106,18 +92,6 @@ void audio_image_buffers_cleanup(AudioImageBuffers *buffers);
 int audio_image_buffers_start_write(AudioImageBuffers *buffers, uint8_t **out_R,
                                     uint8_t **out_G, uint8_t **out_B);
 void audio_image_buffers_complete_write(AudioImageBuffers *buffers);
-
-// ── Acquisition gate (frame-advance brake) ─────────────────────────────────
-// Enable/disable the gate (audio thread).  Disabled ⇒ should_publish() always
-// returns 1 (legacy full-rate behaviour).
-void audio_image_buffers_gate_set_enabled(AudioImageBuffers *buffers, int enabled);
-// Grant exactly one frame advance (audio thread, on each gate clock tick).
-void audio_image_buffers_gate_grant(AudioImageBuffers *buffers);
-// Decide whether the live publish path may swap now (UDP thread).  Returns 1 if
-// the gate is disabled, or consumes one pending permit (1 once per grant); 0 to
-// hold.  Permits never accumulate (max 1) — the gate only brakes, never
-// fast-forwards beyond the real acquisition rate.
-int  audio_image_buffers_gate_should_publish(AudioImageBuffers *buffers);
 
 // LuxStral synth thread functions (lock-free read)
 void audio_image_buffers_get_read_pointers(AudioImageBuffers *buffers,

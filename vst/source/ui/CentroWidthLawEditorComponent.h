@@ -29,6 +29,8 @@
 #include <memory>
 #include "../UITheme.h"
 #include "../midi/MidiLearnAttachment.h"
+#include "Sp3ctraControls.h"
+#include "Sp3ctraGestures.h"
 #include "Sp3ctraHandles.h"
 #include "ModuleEditorChrome.h"
 #include "../processing/lux_centro.h"   // self-manages extern "C" linkage
@@ -167,15 +169,23 @@ public:
                 MidiLearnPopup::show(*midiMap_, widthTiltId_, this);
             return;
         }
+        if (e.getNumberOfClicks() != 1) return;   // 2nd click → mouseDoubleClick
 
         dragging    = h;
         hovered     = h;
         dragStartY_ = e.position.y;
-        if (dragging != Handle::None) { wtl.begin(); tilt0_ = wtl.value; repaint(); }
+        if (dragging != Handle::None)
+        {
+            wtl.begin(); tilt0_ = wtl.value;
+            hold_.arm(e, [this] { holdToType(); });   // long press = type
+            repaint();
+        }
     }
 
     void mouseDrag(const juce::MouseEvent& e) override
     {
+        if (hold_.fired()) return;            // the entry bubble owns the rest
+        hold_.moved(e);
         if (dragging == Handle::None) return;
         // Up = wider at the held end; the band pivots around the centre, so
         // the LEFT handle drives the tilt mirrored.
@@ -186,14 +196,52 @@ public:
 
     void mouseUp(const juce::MouseEvent& e) override
     {
-        if (dragging != Handle::None) { wtl.end(); }
+        hold_.release();
+        endGesture(dragging);
         dragging = Handle::None;
         hovered  = handleAt(e.position, computeGeometry());
         repaint();
     }
 
+    /** Double-click = the handle's parameters back to their defaults. */
+    void mouseDoubleClick(const juce::MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu()) return;
+        Sp3ctraGestures::toDefault(boundsOf(handleAt(e.position, computeGeometry())));
+    }
+
 private:
     enum class Handle { None, TiltL, TiltR };
+
+    //── The UI-wide gesture pair (ui/Sp3ctraGestures.h) ─────────────────────
+    /** What a handle drives: the double-click resets it, the long press
+     *  types it. */
+    Sp3ctraGestures::BoundList boundsOf(Handle h)
+    {
+        switch (h)
+        {
+            case Handle::TiltL:
+            case Handle::TiltR: return { { "Width tilt", &wtl } };
+            default: return {};
+        }
+    }
+
+    void endGesture(Handle h)
+    {
+        if (h != Handle::None) wtl.end();
+    }
+
+    /** Long press on a handle: the drag gesture closes, the bubble opens. */
+    void holdToType()
+    {
+        const Handle h = dragging;
+        endGesture(h);
+        dragging = Handle::None;
+        repaint();
+        Sp3ctraGestures::openEntry(*this, hold_.anchor(*this), boundsOf(h));
+    }
+
+    Sp3ctraGestures::Hold hold_;
 
     /** Strip under the plot for the px readouts / "Tilt" label. */
     static constexpr float kLabelStripH = 10.0f;
@@ -284,34 +332,34 @@ private:
     }
 
     /** Idle / Hover / Drag for a handle — Hover only while nothing drags. */
-    Sp3ctraHandles::State handleState(Handle h) const noexcept
+    Sp3ctraHandles::Look handleState(Handle h) const noexcept
     {
         return Sp3ctraHandles::stateOf(h == dragging,
-                                       dragging == Handle::None && h == hovered);
+                                       dragging == Handle::None && h == hovered,
+                                       false, handleHeat(h));
     }
 
     //==========================================================================
     void timerCallback() override { if (isShowing()) repaint(); }
 
     //==========================================================================
-    struct Bound
+    /** Remote-edit heat of the parameter(s) a handle drives — a change from
+     *  the box below, a MIDI CC or automation lights the handle exactly like
+     *  a drag (ui/Sp3ctraControls.h). */
+    float handleHeat(Handle h) const noexcept
     {
-        juce::RangedAudioParameter* param = nullptr;
-        std::unique_ptr<juce::ParameterAttachment> attach;
-        float value = 0.0f;
-        void begin()            { if (attach) attach->beginGesture(); }
-        void end()              { if (attach) attach->endGesture(); }
-        void setGesture(float v){ if (attach) attach->setValueAsPartOfGesture(v); }
-    };
+        return (h == Handle::TiltL || h == Handle::TiltR) ? wtl.heat() : 0.0f;
+    }
+
+    /** The shared parameter binding — ui/Sp3ctraControls.h. Besides the
+     *  attachment and the mirrored value it carries the EDIT HEAT: any
+     *  change, from this editor's drag, from the box below, from a MIDI CC
+     *  or from automation, lights the handle that owns it. */
+    using Bound = Sp3ctraControls::Bound;
 
     void bind(Bound& bnd, const juce::String& id)
     {
-        bnd.param = apvts.getParameter(id);
-        jassert(bnd.param != nullptr);
-        if (bnd.param == nullptr) return;
-        bnd.attach = std::make_unique<juce::ParameterAttachment>(
-            *bnd.param, [this, &bnd](float v) { bnd.value = v; repaint(); });
-        bnd.attach->sendInitialUpdate();
+        bnd.bind(apvts, id, [this](float) { repaint(); });
     }
 
     static constexpr float kNodeR = Sp3ctraHandles::kNodeR;   // handle inset from the plot edge

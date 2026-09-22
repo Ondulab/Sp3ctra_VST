@@ -18,6 +18,7 @@
 #include "lux_drive.h"
 #include "lux_dcblock.h"
 #include "lux_gain.h"
+#include "lux_diff.h"
 #include "video_scroll.h"
 #include "midi_tap.h"
 
@@ -102,6 +103,11 @@ void image_chain_run(
                 break;
             case IMAGE_CHAIN_INSERT_LUXGAIN:
                 lux_gain_process_frame((LuxGainState *)insert_states[i],
+                                       cr, cg, cb, pixel_count,
+                                       luxstral_num_octaves, &nr, &ng, &nb);
+                break;
+            case IMAGE_CHAIN_INSERT_LUXDIFF:
+                lux_diff_process_frame((LuxDiffState *)insert_states[i],
                                        cr, cg, cb, pixel_count,
                                        luxstral_num_octaves, &nr, &ng, &nb);
                 break;
