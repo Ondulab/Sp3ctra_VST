@@ -22,6 +22,11 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#ifdef _WIN32
+/* clock_gettime/CLOCK_MONOTONIC come from the shim, normally pulled in via
+ * <pthread.h>, but this TU is pthread-free so it must be explicit. */
+#include "sp3ctra_win_compat.h"
+#endif
 
 /* ── Instance pool (mirrors lux_mask.c) ────────────────────────────────────────
  * Slot 0 is g_lux_reverb_proc (also read by the UI). Slots 1.. are the
