@@ -1,0 +1,4 @@
+60 FPS: 240/240 image passes, 3920 input lines, same final image; process CPU 1.348 s
+30 FPS: 120/240 image passes, 3920 input lines, same final image; process CPU 0.692 s
+15 FPS: 60/240 image passes, 3920 input lines, same final image; process CPU 0.356 s
+10 FPS: 40/240 image passes, 3920 input lines, same final image; process CPU 0.246 s

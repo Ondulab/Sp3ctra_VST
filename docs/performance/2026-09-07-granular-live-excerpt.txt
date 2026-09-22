@@ -1,0 +1,50 @@
+Live sample, 2026-09-07 19:44:22 +0200, pid 96834, ARM64
+Extract: producer stack. Counts describe sampled thread states, not CPU time.
+    1523 Thread_28199847: Sp3ctraAudioProcessing
+    + 1523 thread_start  (in libsystem_pthread.dylib) + 8  [0x181174c1c]
+    +   1523 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x181179c58]
+    +     1523 juce::Thread::createNativeThread(juce::Thread::Priority)::$_0::__invoke(void*)  (in Sp3ctra) + 80  [0x1032f5ed8]
+    +       1523 juce::Thread::threadEntryPoint()  (in Sp3ctra) + 284  [0x1032b58dc]
+    +         1523 AudioProcessingThread::run()  (in Sp3ctra) + 160  [0x102e1a2dc]
+    +           1029 audioProcessingThread  (in Sp3ctra) + 796  [0x102ef8050]
+    +           ! 1029 synth_AudioProcess  (in Sp3ctra) + 700  [0x102eae30c]
+    +           !   578 synth_IfftMode_impl  (in Sp3ctra) + 388  [0x102ead9bc]
+    +           !   : 278 synth_process_worker_range  (in Sp3ctra) + 2076  [0x102eb066c]
+    +           !   : | 278 apply_gap_limiter_ramp  (in Sp3ctra) + 88  [0x102eae6bc]
+    +           !   : |   278 apply_envelope_ramp  (in Sp3ctra) + 32,4  [0x102eaeda8,0x102eaed8c]
+    +           !   : 167 synth_process_worker_range  (in Sp3ctra) + 532  [0x102eb0064]
+    +           !   : | 166 synth_process_worker_range  (in Sp3ctra) + 1332,1356,...  [0x102eb0384,0x102eb039c,...]
+    +           !   : | 1 apply_volume_weighting  (in Sp3ctra) + 256  [0x102eaece0]
+    +           !   : 64 synth_process_worker_range  (in Sp3ctra) + 2152  [0x102eb06b8]
+    +           !   : | 64 apply_stereo_pan_ramp  (in Sp3ctra) + 64,68,...  [0x102eaed7c,0x102eaed80,...]
+    +           !   : 26 synth_process_worker_range  (in Sp3ctra) + 2188  [0x102eb06dc]
+    +           !   : | 26 add_float  (in Sp3ctra) + 52,48  [0x102eae938,0x102eae934]
+    +           !   : 25 synth_process_worker_range  (in Sp3ctra) + 512  [0x102eb0050]
+    +           !   : | 25 add_float  (in Sp3ctra) + 52,48,...  [0x102eae938,0x102eae934,...]
+    +           !   : 17 synth_process_worker_range  (in Sp3ctra) + 2096  [0x102eb0680]
+    +           !   : | 17 mult_float  (in Sp3ctra) + 144,128,...  [0x102eae894,0x102eae884,...]
+    +           !   : 1 synth_process_worker_range  (in Sp3ctra) + 172  [0x102eafefc]
+    +           !   :   1 fill_float  (in Sp3ctra) + 60  [0x102eaeaf4]
+    +           !   451 synth_IfftMode_impl  (in Sp3ctra) + 380  [0x102ead9b4]
+    +           !     451 synth_work_dispatch_begin  (in Sp3ctra) + 60  [0x102ead1d8]
+    +           !       451 _dispatch_semaphore_signal_slow  (in libdispatch.dylib) + 52  [0x180fc0a50]
+    +           !         451 _dispatch_sema4_signal  (in libdispatch.dylib) + 32  [0x180fc0440]
+    +           !           451 semaphore_signal_trap  (in libsystem_kernel.dylib) + 8  [0x181135b8c]
+    +           490 audioProcessingThread  (in Sp3ctra) + 184  [0x102ef7dec]
+    +           ! 490 luxstral_wait_for_buffer_consumed  (in Sp3ctra) + 68  [0x102ead0bc]
+    +           !   490 _dispatch_semaphore_wait_slow  (in libdispatch.dylib) + 76  [0x180fc0ae8]
+    +           !     490 _dispatch_sema4_timedwait  (in libdispatch.dylib) + 64  [0x180ff3db8]
+    +           !       490 semaphore_timedwait_trap  (in libsystem_kernel.dylib) + 8  [0x181135bc8]
+    +           3 audioProcessingThread  (in Sp3ctra) + 392  [0x102ef7ebc]
+    +           ! 3 synth_staging_mix_luxstral  (in Sp3ctra) + 832,1508,...  [0x102efc068,0x102efc30c,...]
+    +           1 audioProcessingThread  (in Sp3ctra) + 872  [0x102ef809c]
+    +             1 _platform_memmove  (in libsystem_platform.dylib) + 88  [0x1811833b8]
+
+Live proc_pidinfo: priority snapshot (producer, five active auxiliaries, CoreAudio callback)
+6167539936 policy=2 priority=97/97 user=179.370 system=1.179 name=
+6168113376 policy=2 priority=97/97 user=179.349 system=1.001 name=
+6168686816 policy=2 priority=97/97 user=179.212 system=0.915 name=
+6169260256 policy=2 priority=97/97 user=179.103 system=0.866 name=
+6169833696 policy=2 priority=97/97 user=179.228 system=0.874 name=
+6141161696 policy=1 priority=46/46 user=158.293 system=2.763 name=Sp3ctraAudioProcessing
+6146322656 policy=2 priority=97/97 user=1.517 system=0.247 name=com.apple.audio.IOThread.client

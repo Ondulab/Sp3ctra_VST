@@ -99,7 +99,7 @@ Demande :
 - **Module SP3CTRA** : `ModuleCatalog.h` L99 (`ModuleType::Sp3ctra`, rôle
   Source, pas de param d'enable → LED du rack = transport `imageFreezeMode`),
   `ChainBlockId::Chain1Source/Chain2Source`, page PLAY
-  `image/SourcesTabComponent.h` (transport + fade + vitesse d'acquisition ;
+  `image/SourcesTabComponent.h` (transport + fade ;
   n'utilise pas `ModuleChrome`), faces PLAY | SETUP (`blockHasSetup` L1007,
   `layoutZone3` L2069/2096). `FaceSwitchBar` a un **mode segments
   personnalisés** (`setCustomSegments`, `onSegmentSelected`) introduit pour
@@ -233,15 +233,15 @@ Contrôles et lois :
 | Contrôle | Types | Réglages |
 |---|---|---|
 | SW1, SW2, SW3 | Off / **CC** (127 press, 0 release) / **Note** (on/off) / **CC toggle** (bascule 0↔127 à chaque press) | canal 1-16, numéro 0-127 |
-| ACC X/Y/Z (g), GYRO X/Y/Z (dps), TILT pitch/roll (dérivés de ACC) | Off / **CC 7 bits** / CC 14 bits (MSB n, LSB n+32) | canal, numéro, **min / max** en unités physiques, **zone morte**, **lissage** (1 pôle, ms), bipolaire (centre = 64) |
+| GYRO X/Y/Z (dps), TILT pitch/roll (dérivés de l'accéléro) | Off / **CC 7 bits** / CC 14 bits (MSB n, LSB n+32) | canal, numéro, **min / max** en unités physiques, **zone morte**, **lissage** (1 pôle, ms), bipolaire (centre = 64) |
 Émission continue **sur changement de valeur quantifiée seulement**, avec un
 plancher de **5 ms** entre deux messages d'un même contrôle (hystérésis
 ½ pas) — pas de flot inutile vers le moteur de mapping. Défauts : SW1-3 →
 CC 20/21/22 canal 1 (les défauts historiques du firmware), IMU Off.
 
 Paramètres APVTS (non automatisables, sauvés avec la session) :
-`sp3ctraHid{Sw1,Sw2,Sw3,AccX,AccY,AccZ,GyrX,GyrY,GyrZ,TiltP,TiltR}{Type,Chan,Num}`
-+ `{Min,Max,Dead,Smooth}` pour les continus (≈ 60 params).
+`sp3ctraHid{Sw1,Sw2,Sw3,GyrX,GyrY,GyrZ,TiltP,TiltR}{Type,Chan,Num}`
++ `{Min,Max,Dead,Smooth}` pour les continus (≈ 40 params).
 
 ### D8 — Bloc SP3CTRA : trois faces **PLAY | CONTROLS | SETUP**
 Via le mode segments personnalisés de `FaceSwitchBar` (comme VIDEO SCROLL) ;
@@ -294,14 +294,43 @@ struct slp_oled_overlay { struct slp_hdr hdr; uint16_t ttl_ms; uint8_t count; ui
   les globaux du module (transport) ; **All** = tout — puis émet
   `OLED_OVERLAY` coalescé (≤ 20 Hz, seulement si changement), label =
   `AudioProcessorParameter::getName(14)`, value = `getCurrentValueAsText()`,
-  norm = `getValue()`.
-- **CM4** (`gui_overlay.c`) : bandeau en haut du waterfall (le waterfall
-  continue dessous) ; 1 item → police 16×16 label + valeur, barre pleine
+  norm = `getValue()`. Les params **virtuels du sampler** (hors APVTS,
+  `SamplerMidiTargets`) passent par `noteVirtualTouched(targetId)`
+  (2026-09-01) : estampillé dans `virtualApply` (MIDI) **et** dans chaque
+  handler UI du sampler (les éditeurs écrivent le moteur en direct) ;
+  `DeviceFeedback::composeVirtualItem` fabrique {label "SA4 SPEED", valeur
+  réelle, barre} depuis l'état LuxSampler, filtre Chain via
+  `navTargetForParam("smp:e…")`. Les actions REC/PLAY/SAVE/CLEAR s'affichent
+  avec l'état résultant (ON/OFF, PLAY/STOP, SAVED, CLEARED — 2026-09-02).
+- **Nommage OLED (2026-09-02)** : un paramètre dont le module vit dans une
+  chaîne s'affiche `{n} {MOD} {PARAM}` (n = index de chaîne 1-based, suit le
+  rack en direct) : le numéro sur **plaque inversée** (noir sur blanc) et le
+  code module dans un **encadré** (flag protocole `SLP_OVL_TAG_INVERT` bit 2 :
+  1er jeton = plaque, 2e jeton = cadre — rendu firmware `ovl_drawLabel`). Abréviations :
+  P/M/RV/EC/EQ/SC/CT/LV/DC/GN/VS + SMP/SP3/SCR/TMB/LS/SY/WV/GR/MT… ; le
+  préfixe d'instance du nom JUCE est retiré (« DC2  », « LuxSampler B  »,
+  « Image Src 1  »). `…Enabled` → label sans le mot, valeur
+  **ENABLED/DISABLED**. Sampler en chaîne : `C5 S4 SPEED` (la chaîne remplace
+  la lettre moteur) ; hors chaîne, repli sur l'ancien nom. Mode overlay par
+  défaut passé à **All** (l'utilisateur veut tous les paramètres, plus
+  seulement la chaîne IN SP3CTRA).
+- **CM4** (`gui_overlay.c`) : bandeau en haut de l'écran qui **ne masque pas
+  l'image live** : `gui_overlay_reservedTop()` (avant `gui_displayImage`)
+  rend le nombre de lignes réservées, l'image est compressée dans les lignes
+  restantes, et le bandeau **glisse** (vitesse constante normalisée à la
+  hauteur du volet — un ease à constante de temps convergeait en 1-2 frames à
+  ~30 fps, invisible : apparition ~140 ms, disparition volontairement plus
+  lente ~400 ms ; contenu ancré au bord mobile, texte clippé via
+  `ssd1362_drawStringClipped`) à l'apparition comme à la disparition
+  (2026-09-02). 1 item → police 16 px label + valeur (les deux tiennent
+  toujours : les deux polices avancent de **8 px/caractère**), barre pleine
   largeur (bande 26 px) ; 2-3 items → lignes 8×8 de 10 px {label · valeur ·
-  barre} ; l'item « dernier touché » en contraste max, les autres à mi-niveau ;
-  disparition à `ttl_ms` (défaut 1500 ms, renouvelé à chaque message) ;
-  `OLED_CLEAR` immédiat. L'en-tête OLED affiche aussi un pictogramme **LINK
-  ●** quand une session est liée (état lu dans `shared_feedback`).
+  barre}, label tronqué à la place restante à gauche de la valeur ; l'item
+  « dernier touché » en contraste max, les autres à mi-niveau ; disparition à
+  `ttl_ms` (défaut 1500 ms, renouvelé à chaque message) ; `OLED_CLEAR`
+  déclenche le repli (l'ancien contenu glisse dehors). Côté VST, `norm` est
+  plafonné à **65534** : 65535 (0xFFFF) est la sentinelle « pas de barre » —
+  à 100 % la barre restait invisible sinon.
 - Mémoire partagée : nouveau `shared_feedback` (`globals.h`) = `{led_seq,
   led_mask, led[3], overlay_seq, overlay, link_state, peer_ip[4]}` écrit par
   CM7 (`SCB_CleanDCache_by_Addr` comme `packet_IMU`), scruté par CM4 sur
@@ -518,7 +547,7 @@ Validation avec `slp_fake_device.py` puis le vrai CIS (image identique à
 aujourd'hui, pertes = 0 à 400 DPI). VST 1.5.0.
 
 ### V3 — VST : HID → MIDI + face CONTROLS (1-2 j)
-D7, D8. Validation : MIDI-learn d'un bouton sur PLAY/STOP, d'ACC X sur un
+D7, D8. Validation : MIDI-learn d'un bouton sur PLAY/STOP, de TILT P sur un
 paramètre de LEVELS ; cadence/latence mesurées (< 10 ms bouton → paramètre).
 
 ### V4 — Retour LEDs + OLED (2 j)
@@ -549,7 +578,7 @@ mémoire projet.
 - **Deux process VST** : session exclusive ; le second reçoit BUSY — mode multicast pour partager le flux, contrôle/feedback réservés au premier (dernier écrivain sinon). À documenter dans SETUP.
 - **Débit MIDI interne** : 8 axes à 200 Hz → hystérésis + plancher 5 ms ; `MidiMappingEngine::processMidi` est O(slots × événements) (128 × ~40/bloc au pire) — mesurer avec `rt_profiler`.
 - **Filtrage « Chain » de l'overlay** : nécessite la résolution paramètre → chaîne pour tous les ids (banqués, virtuels `smp:`/`eqh:`) — réutiliser `navTargetForParam` ; les ids non résolus passent en mode All seulement.
-- **OLED 16 niveaux, 256×64** : 14 caractères 8×8 = 112 px pour le label ; valeurs tronquées à 10 ; police 16×16 pour 1 item = 12 caractères max → `getName(12)`.
+- **OLED 16 niveaux, 256×64** : les deux polices (8×8 et « 16×16 ») avancent en réalité de **8 px/caractère** — 14 caractères label + 10 valeur tiennent toujours sur 256 px, y compris en police 16 px → `getName(14)` partout (corrigé 2026-09-01 ; l'ancien calcul à 16 px/caractère sur-tronquait le label et décalait la valeur).
 - **Repo firmware** : 10 fichiers modifiés non commités ; tout commit de ce chantier doit partir d'un état propre (Conventional Commits, anglais).
 - **Legacy** : l'external Max/PD et le Viewer (dépôts `CISYNTH_*`, `Deprecated/`) ne liront plus le flux 4.0 — assumé (D12).
 
@@ -584,7 +613,7 @@ mémoire projet.
 | 4 | **mDNS retiré entièrement** (`LWIP_MDNS_RESPONDER 0`, plus de hostname ni de service ; le paramètre CubeMX `LWIP_MDNS` reste à 1 dans le `.ioc`, sans effet — à passer à 0 à la prochaine régénération). |
 | 5 | **Actée** : HID 200 Hz par défaut, négociable 1–1000 Hz. |
 | 6 | Détail UI en §12.3. |
-| 7 | **Actée** : ACC X/Y/Z, GYRO X/Y/Z + TILT pitch/roll dérivés (11 contrôles). |
+| 7 | **Révisée le 2026-08-30** : GYRO X/Y/Z + TILT pitch/roll dérivés (**8 contrôles**). Les 3 axes ACC bruts sont retirés : TILT porte déjà la même information dans une loi jouable (atan2) et ACC Z n'est guère que la gravité — trois lignes qui ne faisaient que doubler TILT. Une ligne SHOCK (norme de l'accélération) les remplacerait si la frappe devient un besoin. |
 | 8 | Détail en §12.4. |
 | 9 | **Actée** : configuration sur le lien (`CFG_*`, déjà implémentée côté device en V1) ; la **mise à jour du firmware reste en HTTP** (`POST /upload` multipart, `Sp3ctraDeviceClient::uploadFirmware` conservé, section FIRMWARE du SETUP inchangée). |
 | 10 | **Firmware d'abord** : V0 + V1 faits (ci-dessous), V2–V4 VST ensuite. |
@@ -624,7 +653,9 @@ veille = **fond seul, aucun logo ni texte** (toute forme tenue en place brûle l
 rubans dérivants a été essayée puis abandonnée (« effet Windows 95 ») ; seule protection ajoutée : un
 **décalage vertical de tout le champ** d'un espacement de ligne toutes les 60 s (0,27 px/s, invisible d'une
 image à l'autre, rebouclé sur l'espacement → image statistiquement identique mais aucune rangée à
-éclairement moyen constant), plus une ligne rendue au-delà de chaque bord et `sin()` → `sinf()` ; puis **extinction du panneau** (`0xAE`) après `DEFAULT_SCREENSAVER_DISPLAY_OFF_SEC` = 600 s, rallumage sur
+éclairement moyen constant), plus une ligne rendue au-delà de chaque bord et `sin()` → `sinf()` ; **rétroéclairage des boutons en respiration** pendant la veille (onde SW1→SW3, période 6 s, 2..28 % de rapport
+cyclique, calculée dans le timer LED 10 kHz ; un appui force toujours la LED, et toute commande LED du VST
+reprend la main jusqu'à la prochaine mise en veille), puis **extinction du panneau** (`0xAE`) après `DEFAULT_SCREENSAVER_DISPLAY_OFF_SEC` = 600 s, rallumage sur
 mouvement / bouton / overlay / lien. Candidat CFG ultérieur : délai d'extinction configurable.
 
 Ancienne consigne (pour mémoire) : flasher (`scripts/flash.sh all`), puis depuis un Terminal
@@ -637,30 +668,33 @@ Trois faces **`PLAY | CONTROLS | SETUP`** (mode segments personnalisés de `Face
 **CONTROLS** = une page `ModuleChrome` (cadre + titre, couleur de catégorie SRC pour l'affichage, lime `kColHandle` pour tout ce qui se touche), deux sections :
 
 ```
+ SENSOR — la centrale inertielle (état du DEVICE, HTTP)
+  Gyro range [±250 dps ▾]  Accel range [±4 g ▾]  [Calibrate]   device 192.168.100.1
+
  MIDI OUT — le CIS vu comme un contrôleur
-  contrôle   live            type        ch    num     min       max      ±
-  SW1        [██████    ]    [CC     ▾]  [ 1]  [ 20]    –         –
-  SW2        [          ]    [Note   ▾]  [ 1]  [ 21]    –         –
-  SW3        [          ]    [Toggle ▾]  [ 1]  [ 22]    –         –
-  ACC X      [====|     ]    [CC     ▾]  [ 1]  [ 30]  [-1.00 g] [+1.00 g]  [x]
-  ACC Y      [   Off    ]    [Off    ▾]
-  ACC Z      [   Off    ]    [Off    ▾]
-  GYRO X     [==|       ]    [CC 14b ▾]  [ 2]  [ 16]  [-250 dps][+250 dps] [x]
+  [ids]      live            type        min        max       ±
+  SW1        [██████    ]    [CC     ▾]    –          –
+  SW2        [          ]    [Note   ▾]    –          –
+  SW3        [          ]    [Toggle ▾]    –          –
+  GYRO X     [==|       ]    [CC 14b ▾]  [-250 dps] [+250 dps] [x]
   GYRO Y / GYRO Z   idem
-  TILT P     [    |==   ]    [CC     ▾]  [ 1]  [ 40]  [-45 °]   [+45 °]    [x]
+  TILT P     [    |==   ]    [CC     ▾]  [-45 °]    [+45 °]    [x]
   TILT R     idem
   Deadzone [ 2 % ]      Smoothing [ 30 ms ]        (communs aux contrôles continus)
+  (bouton « ADVANCED - MIDI ch / num », à droite de la légende MIDI OUT, déplié :
+   … [type ▾] ┃ ch [ 1]  num [ 33] ┃ [min] [max] [x]  — les deux colonnes sur un panneau discret)
 
  FEEDBACK — ce que le VST renvoie au CIS
   LED1 [Follow ▾]   LED2 [Press ▾]   LED3 [Manual ▾]  level [======    ]
   OLED [Chain  ▾]   Hold [ 1500 ms ]
 ```
-- **Une ligne par contrôle** (11) : `live` = barre de lecture seule à 30 Hz avec rémanence (règle des éditeurs de modules), pour les boutons pleine quand pressé ; `type` : boutons {Off, CC (127 à l'appui / 0 au relâché), Note (on/off), Toggle (bascule 0↔127 à chaque appui)}, continus {Off, CC 7 bits, CC 14 bits (MSB n, LSB n+32)} ; `ch` 1–16 ; `num` 0–127 ; `min`/`max` en unités physiques (g, dps, °) → 0..127 ; `±` = bipolaire (centre = 64, deadzone autour du centre). Tous ces réglages sont des `Sp3ctraBarSlider`/`ComboBox` standard (double-clic min/centre/max, molette inerte).
+- **Section SENSOR** (2026-08-30) : la pleine échelle gyro / accéléro et le bouton `Calibrate` du DEVICE, lus et écrits **sur la session du lien** — `CFG_GET` / `CFG_SET` (`SLP_CFG_GYRO_FS`, `SLP_CFG_ACCEL_FS`) et `CAL_START` (`SLP_CAL_IMU`), cf. décision 9. Surtout pas en HTTP : depuis l'auth admin du firmware, **tout POST sans identifiants est refusé** (`HTTP: unauthenticated POST rejected`) et le mot de passe est tiré au premier démarrage, affiché une seule fois sur l'écran du CIS — la session bornée, elle, prouve déjà la possession. Le device reste la source de vérité, rien n'est persisté dans la session ; la page recharge à l'ouverture et à chaque retour de session (message de changement du lien). Ce n'est pas de la décoration : **la pleine échelle gyro borne les fenêtres `min`/`max`** des lignes GYRO, sinon on peut régler une fenêtre ±2000 dps sur un capteur qui sature à ±250 et l'axe paraît mort. TILT est un angle (toujours ±90°) et la pleine échelle accéléro n'en change que la résolution : ni l'un ni l'autre n'est borné. Rechargement à l'ouverture de la page, nouvelle tentative toutes les 10 s tant que l'appareil ne répond pas.
+- **Une ligne par contrôle** (8) : `live` = barre de lecture seule à 30 Hz avec rémanence (règle des éditeurs de modules), pour les boutons pleine quand pressé ; `type` : boutons {Off, CC (127 à l'appui / 0 au relâché), Note (on/off), Toggle (bascule 0↔127 à chaque appui)}, continus {Off, CC 7 bits, CC 14 bits (MSB n, LSB n+32)} ; `ch` 1–16 ; `num` 0–127 (**repliés derrière le bouton `ADVANCED - MIDI ch / num`** posé à droite de la légende de section, et cerclés d'un panneau discret quand ils sont dépliés, depuis le 2026-08-30 : ce MIDI ne sort jamais du plugin — `midiMap_.processMidi(hidMidi_)` sur un buffer privé —, ce sont donc des identifiants internes, à ne toucher que pour éviter une collision avec un contrôleur réel déjà appris ; état persisté dans `hidShowIds`) ; `min`/`max` en unités physiques (g, dps, °) → 0..127 ; `±` = bipolaire (centre = 64, deadzone autour du centre). Tous ces réglages sont des `Sp3ctraBarSlider`/`ComboBox` standard (double-clic min/centre/max, molette inerte).
 - **Pastille de mapping** à gauche du nom : allumée quand le MIDI produit par cette ligne est actuellement appris sur un paramètre (recherche inverse dans `MidiMappingEngine` sur (type, canal, numéro)), infobulle = nom du paramètre cible. Deux lignes qui produisent le même (canal, numéro) sont signalées en ambre (autorisé, mais visible).
 - **Aucun bouton « learn » sur cette page** : l'apprentissage se fait comme pour n'importe quel contrôleur — clic droit sur le contrôle de destination (n'importe où dans le VST) → « MIDI Learn » → appuyer sur SW1 / incliner le CIS. Le MIDI passe par `midiMap_.processMidi(hidMidi_)` juste après le MIDI de l'hôte.
 - Les lignes Off ne coûtent rien ; les lignes continues n'émettent que sur changement de valeur quantifiée (hystérésis ½ pas, plancher 5 ms) → au pire ~200 messages/s pour 8 axes très agités.
 - Défauts : SW1–3 → CC 20/21/22 canal 1 (les défauts historiques du firmware) ; tout le reste Off.
-- Hauteur ≈ 13 rangées de boîtes (`kBoxRowH` 30 px) + 2 légendes ≈ 470 px, dans le viewport défilant de la zone 3.
+- Hauteur ≈ 11 rangées de boîtes (`kBoxRowH` 30 px) + 3 légendes, dans le viewport défilant de la zone 3.
 
 **SETUP** (section LINK réécrite, le reste inchangé sauf retraits) :
 ```
@@ -683,7 +717,7 @@ Principe : l'OLED montre **ce que l'on est en train de toucher, si cela concerne
 - **Touché** = tout `parameterChanged()` quelle qu'en soit la source (souris, MIDI appris — y compris un bouton/axe du CIS —, automation de l'hôte). Chaque événement pousse (id, horodatage) dans un petit ring lock-free ; le timer 30 ms du processeur garde les **3 derniers paramètres distincts** touchés dans la fenêtre **Hold** (1500 ms par défaut, réglage sur CONTROLS), le plus récent surligné, un seul paramètre → grand affichage 16 px.
 - **Filtre Chain** (défaut) — un paramètre passe s'il appartient à :
   1. un **module d'une chaîne qui contient un IN SP3CTRA** (chaîne 1 et/ou 2 : modules FX insérés, PITCH, MASK, LEVELS, EQ, etc.) ;
-  2. le **module SP3CTRA lui-même** (transport PLAY/HOLD/STOP, Fade-In, vitesse d'acquisition) ;
+  2. le **module SP3CTRA lui-même** (transport PLAY/HOLD/STOP, Fade-In) ;
   3. une **propriété de cette chaîne** (fond/pôle, sortie de chaîne) ;
   4. le **synthé de sortie de cette chaîne** (banque OUT/send LuxStral/LuxSynth/LuxWave/LuxGrain liée à cette chaîne, et l'engine correspondant).
   Sont **exclus** : les paramètres des chaînes sans IN SP3CTRA (ex. une chaîne SAMPLER ou SCORE seule), le mixage global (masters AUDIO MIX), les sorties vidéo (VIDEO SCROLL / VIDEO MIX), MIDI TAP, tout ce qui est session/UI (ports, IP, agencement).
@@ -719,9 +753,19 @@ Principe : l'OLED montre **ce que l'on est en train de toucher, si cela concerne
 - **Validé sur le vrai CIS** : découverte, BIND (400 DPI, 12 × 288, HID 200 Hz), session confirmée côté device
   (`host 1.4.x`), lignes et HID reçus (stats), pertes 0.
 
+### 12.5 bis — CFG sur le lien, côté hôte (VST, 2026-08-30)
+`Sp3ctraLink` gagne `requestConfig(ids)` / `writeConfig(items)` / `configValue(id, out)` : les items partent
+dans la file de feedback déjà coalescée (par paquets de `SLP_CFG_MAX_ITEMS`), les `CFG_REPLY` alimentent un
+petit cache `id → {value, type, flags}` et déclenchent un message de changement. Premier client : la section
+SENSOR de la face CONTROLS. **Reste à faire** : la face SETUP poste encore en HTTP (`Sp3ctraDeviceClient::postForm`,
+sans en-tête `Authorization`) — donc DPI, oversampling, handedness, GUI, réseau et factory reset sont
+**silencieusement refusés par l'appareil** depuis l'auth admin ; à migrer sur `CFG_*` (tous les ids existent
+déjà côté firmware). Le téléversement de firmware, lui, reste HTTP par décision 9 : il lui faut une vraie
+authentification Basic, donc un champ mot de passe dans le SETUP.
+
 ### 12.6 V3 réalisé (VST, 2026-08-30) — le CIS comme contrôleur MIDI, face CONTROLS
-- `midi/HidMidiMapper.{h,cpp}` : 11 contrôles (SW1-3, ACC X/Y/Z, GYRO X/Y/Z, TILT P/R dérivés de l'accéléro,
-  ±90°), paramètres `sp3ctraHid<Ctrl>{Type,Chan,Num}` (+ `{Min,Max,Bipolar}` pour les continus), globaux
+- `midi/HidMidiMapper.{h,cpp}` : 8 contrôles (SW1-3, GYRO X/Y/Z, TILT P/R dérivés de l'accéléro,
+  ±90° ; ACC brut retiré le 2026-08-30, cf. décision 7), paramètres `sp3ctraHid<Ctrl>{Type,Chan,Num}` (+ `{Min,Max,Bipolar}` pour les continus), globaux
   `sp3ctraHidDeadzone` (%) et `sp3ctraHidSmoothMs`. Boutons : Off / CC (127-0) / Note (on-off) / Toggle ;
   continus : Off / CC / CC 14 bits (MSB n, LSB n+32). Fronts reconstruits depuis les compteurs `button_seq`
   (pertes tolérées), hystérésis ½ pas, lissage 1 pôle calé sur l'horodatage HID. Défauts : SW1-3 → CC 20/21/22
@@ -743,7 +787,7 @@ Principe : l'OLED montre **ce que l'on est en train de toucher, si cela concerne
 - `feedback/DeviceFeedback.{h,cpp}` (timer 30 ms du processeur) :
   - **OLED** — chaque `audioProcessorParameterChanged` (souris, MIDI appris **y compris depuis le CIS**,
     automation hôte) horodate le paramètre ; le tick garde les **3 derniers distincts** dans la fenêtre Hold,
-    filtre (**Chain** = module SP3CTRA + transport `image*`/`acqGate*`/`rawFreeze*` + tout module d'une chaîne
+    filtre (**Chain** = module SP3CTRA + transport `image*`/`rawFreeze*` + tout module d'une chaîne
     hébergeant un IN SP3CTRA via `navTargetForParam` + `instanceChainHostsSp3ctra`, cache 1 s ; **All** = tout
     sauf la plomberie session/UI), compose label `getName(12|14)` · `getCurrentValueAsText()` · barre normalisée
     (bipolaire si la plage traverse 0, pas de barre pour un booléen) et envoie `OLED_OVERLAY` coalescé

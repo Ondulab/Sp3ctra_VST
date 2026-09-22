@@ -1,0 +1,3 @@
+legacy QoS/RT: launch avg/max 60.73/727.00us own 3522.53/5525.00us join 0.78/194.00us total avg 3584.04us P99 5194.00us deadlines 1/400
+matched RT: launch avg/max 6.79/14.00us own 2725.17/3377.00us join 122.73/736.00us total avg 2854.70us P99 3414.00us deadlines 0/400
+PASS: real pool, matching Mach policies after SR/buffer changes, identical audio/state

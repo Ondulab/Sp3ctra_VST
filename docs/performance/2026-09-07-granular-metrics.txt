@@ -1,0 +1,82 @@
+[19:37:57] [INFO] [VST] prepareToPlay - SR=96000.0 Hz, BS=128 samples
+[19:38:07] [INFO] [RT_BLOCK] n=7504 avg=5.22us max=83.00us P95=9us P99=12us P99.9=18us minHeadroom=1250.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:38:07] [INFO] [RT_PRODUCER] n=7390 avg=803.90us max=3285.00us P95=1113us P99=1382us P99.9=1941us minHeadroom=-1951.67us deadlines=102 dropped=0 histogramOverflow=0
+[19:38:07] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 114 (1.52%), underruns 0
+[19:38:18] [INFO] [RT_BLOCK] n=7513 avg=5.37us max=23.00us P95=9us P99=13us P99.9=17us minHeadroom=1310.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:38:18] [INFO] [RT_PRODUCER] n=7495 avg=771.53us max=1526.00us P95=991us P99=1131us P99.9=1394us minHeadroom=-192.67us deadlines=16 dropped=0 histogramOverflow=0
+[19:38:18] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 133 (0.89%), underruns 0
+[19:38:28] [INFO] [RT_BLOCK] n=7502 avg=5.25us max=29.00us P95=9us P99=12us P99.9=17us minHeadroom=1304.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:38:28] [INFO] [RT_PRODUCER] n=7465 avg=798.27us max=1724.00us P95=1069us P99=1236us P99.9=1455us minHeadroom=-390.67us deadlines=35 dropped=0 histogramOverflow=0
+[19:38:28] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 170 (0.75%), underruns 0
+[19:38:38] [INFO] [RT_BLOCK] n=7494 avg=5.62us max=38.00us P95=10us P99=13us P99.9=17us minHeadroom=1295.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:38:38] [INFO] [RT_PRODUCER] n=7466 avg=779.39us max=1837.00us P95=994us P99=1190us P99.9=1401us minHeadroom=-503.67us deadlines=23 dropped=0 histogramOverflow=0
+[19:38:38] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 198 (0.66%), underruns 0
+[19:38:40] [INFO] [VST] prepareToPlay - SR=96000.0 Hz, BS=128 samples
+[19:38:45] [INFO] [VST] prepareToPlay - SR=96000.0 Hz, BS=256 samples
+[19:38:48] [INFO] [VST] prepareToPlay - SR=96000.0 Hz, BS=512 samples
+[19:38:58] [INFO] [RT_BLOCK] n=1878 avg=9.19us max=34.00us P95=15us P99=18us P99.9=27us minHeadroom=5299.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:38:58] [INFO] [RT_PRODUCER] n=7778 avg=1341.50us max=4014.00us P95=2905us P99=3082us P99.9=3501us minHeadroom=80.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:38:58] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 0 (0.00%), underruns 0
+[19:39:08] [INFO] [RT_BLOCK] n=1874 avg=9.14us max=23.00us P95=14us P99=17us P99.9=23us minHeadroom=5310.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:39:08] [INFO] [RT_PRODUCER] n=1873 avg=2875.00us max=3876.00us P95=3114us P99=3418us P99.9=3859us minHeadroom=1457.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:39:08] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 0 (0.00%), underruns 0
+[19:39:18] [INFO] [RT_BLOCK] n=1875 avg=9.04us max=36.00us P95=15us P99=17us P99.9=27us minHeadroom=5297.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:39:18] [INFO] [RT_PRODUCER] n=1875 avg=2837.63us max=3478.00us P95=2995us P99=3153us P99.9=3457us minHeadroom=1855.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:39:18] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 0 (0.00%), underruns 0
+[19:39:28] [INFO] [RT_BLOCK] n=1877 avg=9.03us max=22.00us P95=15us P99=17us P99.9=21us minHeadroom=5311.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:39:28] [INFO] [RT_PRODUCER] n=1877 avg=2864.44us max=4137.00us P95=3091us P99=3368us P99.9=3910us minHeadroom=1196.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:39:28] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 0 (0.00%), underruns 0
+[19:39:38] [INFO] [RT_BLOCK] n=1876 avg=8.83us max=23.00us P95=14us P99=17us P99.9=23us minHeadroom=5310.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:39:38] [INFO] [RT_PRODUCER] n=1876 avg=2849.05us max=3851.00us P95=3112us P99=3457us P99.9=3786us minHeadroom=1482.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:39:38] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 0 (0.00%), underruns 0
+[19:39:48] [INFO] [RT_BLOCK] n=1874 avg=8.96us max=25.00us P95=14us P99=17us P99.9=24us minHeadroom=5308.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:39:48] [INFO] [RT_PRODUCER] n=1874 avg=2872.04us max=5112.00us P95=3120us P99=3700us P99.9=4198us minHeadroom=221.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:39:48] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 0 (0.00%), underruns 0
+[19:39:58] [INFO] [RT_BLOCK] n=1872 avg=9.21us max=22.00us P95=15us P99=17us P99.9=21us minHeadroom=5311.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:39:58] [INFO] [RT_PRODUCER] n=1872 avg=2866.35us max=3909.00us P95=3091us P99=3354us P99.9=3826us minHeadroom=1424.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:39:58] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 0 (0.00%), underruns 0
+[19:40:08] [INFO] [RT_BLOCK] n=1874 avg=9.06us max=26.00us P95=15us P99=17us P99.9=24us minHeadroom=5307.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:40:08] [INFO] [RT_PRODUCER] n=1875 avg=2844.47us max=3713.00us P95=2992us P99=3214us P99.9=3562us minHeadroom=1620.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:40:08] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 0 (0.00%), underruns 0
+[19:40:18] [INFO] [RT_BLOCK] n=1875 avg=8.76us max=24.00us P95=14us P99=17us P99.9=20us minHeadroom=5309.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:40:18] [INFO] [RT_PRODUCER] n=1875 avg=2850.56us max=4260.00us P95=3018us P99=3295us P99.9=4089us minHeadroom=1073.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:40:18] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 0 (0.00%), underruns 0
+[19:40:28] [INFO] [RT_BLOCK] n=1876 avg=8.92us max=29.00us P95=14us P99=17us P99.9=21us minHeadroom=5304.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:40:28] [INFO] [RT_PRODUCER] n=1876 avg=2894.91us max=4252.00us P95=3250us P99=3814us P99.9=4174us minHeadroom=1081.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:40:28] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 0 (0.00%), underruns 0
+[19:40:38] [INFO] [RT_BLOCK] n=1874 avg=8.94us max=40.00us P95=14us P99=17us P99.9=23us minHeadroom=5293.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:40:38] [INFO] [RT_PRODUCER] n=1874 avg=2872.89us max=4824.00us P95=3103us P99=3439us P99.9=3822us minHeadroom=509.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:40:38] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 0 (0.00%), underruns 0
+[19:40:48] [INFO] [RT_BLOCK] n=1876 avg=8.78us max=24.00us P95=14us P99=18us P99.9=23us minHeadroom=5309.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:40:48] [INFO] [RT_PRODUCER] n=1876 avg=2866.82us max=4086.00us P95=3106us P99=3519us P99.9=3979us minHeadroom=1247.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:40:48] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 0 (0.00%), underruns 0
+[19:40:58] [INFO] [RT_BLOCK] n=1874 avg=8.50us max=23.00us P95=14us P99=18us P99.9=23us minHeadroom=5310.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:40:58] [INFO] [RT_PRODUCER] n=1589 avg=3348.24us max=5851.00us P95=5535us P99=5611us P99.9=5752us minHeadroom=-517.67us deadlines=284 dropped=0 histogramOverflow=0
+[19:40:58] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 284 (1.17%), underruns 0
+[19:41:08] [INFO] [RT_BLOCK] n=1879 avg=7.18us max=36.00us P95=13us P99=15us P99.9=25us minHeadroom=5297.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:41:08] [INFO] [RT_PRODUCER] n=963 avg=5404.89us max=5946.00us P95=5616us P99=5671us P99.9=5946us minHeadroom=-612.67us deadlines=917 dropped=0 histogramOverflow=0
+[19:41:08] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 1201 (4.57%), underruns 0
+[19:41:18] [INFO] [RT_BLOCK] n=1873 avg=7.16us max=41.00us P95=13us P99=16us P99.9=23us minHeadroom=5292.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:41:18] [INFO] [RT_PRODUCER] n=983 avg=5281.98us max=6702.00us P95=5601us P99=5797us P99.9=6702us minHeadroom=-1368.67us deadlines=890 dropped=0 histogramOverflow=0
+[19:41:18] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 2091 (7.43%), underruns 0
+[19:41:28] [INFO] [RT_BLOCK] n=1876 avg=7.61us max=48.00us P95=13us P99=16us P99.9=26us minHeadroom=5285.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:41:28] [INFO] [RT_PRODUCER] n=984 avg=5321.65us max=7254.00us P95=5676us P99=6310us P99.9=7254us minHeadroom=-1920.67us deadlines=891 dropped=0 histogramOverflow=0
+[19:41:28] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 2982 (9.94%), underruns 0
+[19:41:38] [INFO] [RT_BLOCK] n=1874 avg=7.68us max=46.00us P95=13us P99=16us P99.9=24us minHeadroom=5287.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:41:38] [INFO] [RT_PRODUCER] n=968 avg=5398.64us max=6129.00us P95=5662us P99=5804us P99.9=6129us minHeadroom=-795.67us deadlines=907 dropped=0 histogramOverflow=0
+[19:41:38] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 3889 (12.20%), underruns 0
+[19:41:48] [INFO] [RT_BLOCK] n=1874 avg=8.04us max=25.00us P95=14us P99=16us P99.9=23us minHeadroom=5308.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:41:48] [INFO] [RT_PRODUCER] n=1020 avg=5154.68us max=8058.00us P95=5684us P99=6098us P99.9=8036us minHeadroom=-2724.67us deadlines=853 dropped=0 histogramOverflow=0
+[19:41:48] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 4742 (14.05%), underruns 0
+[19:41:58] [INFO] [RT_BLOCK] n=1876 avg=7.66us max=29.00us P95=13us P99=17us P99.9=26us minHeadroom=5304.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:41:58] [INFO] [RT_PRODUCER] n=985 avg=5297.07us max=6795.00us P95=5632us P99=5779us P99.9=6795us minHeadroom=-1461.67us deadlines=892 dropped=0 histogramOverflow=0
+[19:41:58] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 5634 (15.81%), underruns 0
+[19:42:08] [INFO] [RT_BLOCK] n=1878 avg=7.70us max=24.00us P95=13us P99=16us P99.9=21us minHeadroom=5309.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:42:08] [INFO] [RT_PRODUCER] n=968 avg=5405.78us max=6651.00us P95=5661us P99=5836us P99.9=6651us minHeadroom=-1317.67us deadlines=910 dropped=0 histogramOverflow=0
+[19:42:08] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 6544 (17.45%), underruns 0
+[19:42:18] [INFO] [RT_BLOCK] n=1872 avg=7.65us max=31.00us P95=13us P99=16us P99.9=22us minHeadroom=5302.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:42:18] [INFO] [RT_PRODUCER] n=964 avg=5407.57us max=6684.00us P95=5664us P99=5837us P99.9=6684us minHeadroom=-1350.67us deadlines=907 dropped=0 histogramOverflow=0
+[19:42:18] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 7451 (18.92%), underruns 0
+[19:42:28] [INFO] [RT_BLOCK] n=1877 avg=8.07us max=33.00us P95=14us P99=17us P99.9=26us minHeadroom=5300.33us deadlines=0 dropped=0 histogramOverflow=0
+[19:42:28] [INFO] [RT_PRODUCER] n=976 avg=5372.09us max=6740.00us P95=5702us P99=6133us P99.9=6740us minHeadroom=-1406.67us deadlines=902 dropped=0 histogramOverflow=0
+[19:42:28] [DEBUG] [RT_PROFILER]   buffer: miss 0 (0.00%), stale 8353 (20.25%), underruns 0

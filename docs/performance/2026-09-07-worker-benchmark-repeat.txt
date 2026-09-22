@@ -1,0 +1,11 @@
+barriers workers=6 samples=32 avg=177.63us P99=216.00us max=335.00us cpu=2.862s hash=2bbc4ae70d3d4f9d
+dispatch workers=6 samples=32 avg=162.83us P99=178.00us max=298.00us cpu=2.721s hash=2bbc4ae70d3d4f9d
+dispatch workers=6 samples=32 avg=165.50us P99=254.00us max=324.00us cpu=2.696s hash=2bbc4ae70d3d4f9d
+barriers workers=6 samples=32 avg=193.93us P99=303.00us max=362.00us cpu=3.124s hash=2bbc4ae70d3d4f9d
+barriers workers=6 samples=32 avg=198.18us P99=315.00us max=349.00us cpu=3.128s hash=2bbc4ae70d3d4f9d
+dispatch workers=6 samples=32 avg=164.21us P99=215.00us max=333.00us cpu=2.722s hash=2bbc4ae70d3d4f9d
+dispatch workers=6 samples=32 avg=161.57us P99=173.00us max=303.00us cpu=2.716s hash=2bbc4ae70d3d4f9d
+barriers workers=6 samples=32 avg=177.76us P99=231.00us max=362.00us cpu=2.858s hash=2bbc4ae70d3d4f9d
+barriers workers=6 samples=32 avg=176.20us P99=198.00us max=312.00us cpu=2.844s hash=2bbc4ae70d3d4f9d
+dispatch workers=6 samples=32 avg=163.37us P99=209.00us max=327.00us cpu=2.724s hash=2bbc4ae70d3d4f9d
+PASS: identical output/state for both schedulers in every selected configuration

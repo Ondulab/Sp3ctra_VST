@@ -361,7 +361,16 @@ vignette ».
   (`drawCards`, zone libre à gauche ≥ 176 px) : glyphe · nom · valeur pour
   Rotation, Zoom, Center, Line Pos, Speed, Thickness, Compression, Fade,
   Blur, Gamma, Display (pastille papier) — la carte éditée s'allume.
-  Le pad repeint à 10 Hz tant qu'un élément est allumé. Même géométrie que
+  Le pad repeint à 10 Hz tant qu'un élément est allumé.
+  **Marge de préhension (2026-08-30)** : la fenêtre n'occupe plus tout le
+  cadre mais `kFitMargin` = 0,68 de l'ajustement — il reste ~24 % de la
+  taille de la fenêtre en bordure, parce que les coins de la vignette, le
+  levier et la bande sortent de la fenêtre dès qu'elle tourne (à 45°,
+  zoom 1, un coin est à 0,207·côté au-delà du bord). Sans cette bordure ils
+  tombaient hors de `plot_` : dessin clippé ET `handleAt()` qui les refuse
+  (« je ne peux pas toucher les poignées hors champ »). Agrandir le cadre
+  seul n'y changeait rien — la fenêtre étant ajustée au cadre, tout
+  grandissait ensemble. Même géométrie que
   `drawWarp` / `birthLine01` (spans visibles,
   offset de centre, clamp de la ligne à la fenêtre) : ce qu'on saisit est ce
   que la sortie fait.
@@ -378,9 +387,8 @@ vignette ».
   (affichage) ; cadre, ligne, coins, levier, nœud central = lime
   (`Sp3ctraHandles`). Aucune boîte dans le cadre.
 - **Page** (`video/VideoScrollPage.h`) réécrite dans le **squelette standard**
-  `ModuleChrome` : cadre VIEWPORT (420 px depuis le 2026-08-30 — « la
-  fenêtre de visualisation doit être plus grande » ; 240 avant) → rangée
-  géométrie (Rotation ·
+  `ModuleChrome` : cadre VIEWPORT (240 → 420 → **640 px** le 2026-08-30) →
+  rangée géométrie (Rotation ·
   Zoom · Center X · Center Y · Line Pos) → rangée rendu (Speed · Thickness ·
   Compression · Fade · Blur · Gamma) → caption `--- VIDEO SCROLL ---` →
   rangée loi d'affichage (Invert · Color · Background). Les barres et le pad
@@ -424,6 +432,88 @@ vignette ».
   flèche aux quatre angles cardinaux, position de la ligne de naissance à
   zoom < 1 avec Center Y ≠ 0, aspect du pad fenêtre détachée 16:9 vs aperçu
   carré, lisibilité des 6 barres de la rangée rendu à 560 px.
+
+## 6 quinquies. Complément du 2026-09-06 — LINK (les deux mix couplés)
+
+Objectif : UN geste pour les deux mix. Le lien va dans UN sens à la fois
+(`videoMixFollowDir`) — deux masques face à face, jamais les deux ensemble
+(ce serait une boucle) :
+
+- **→ AUDIO (défaut)** : la TOILE est maître. Les sends audio de chaque chaîne
+  sont pondérés par le niveau que sa sortie VIDEO SCROLL a sur la toile
+  (poignée × projecteur) : tirer le projecteur sur un rayon fait AVANCER cette
+  chaîne dans le son. Les faders audio ne sont jamais écrits — c'est un
+  masque, replié dans `sendWeight()` de `applyConfigurationToCore` via
+  `Processor::setChainVideoWeights` (quantifié 1/128, une resync coalescée par
+  pas audible, le même chemin qu'un fader qu'on tire). Deux exemptions : une
+  chaîne SANS sortie vidéo garde son poids 1 (le mixeur vidéo ne doit pas
+  faire taire une chaîne qu'il ne montre pas), et une sortie ÉTEINTE est
+  ignorée (elle ne dit rien du son). Le destructeur du mixeur relâche les
+  poids : fermer l'éditeur ne doit jamais laisser l'audio masqué.
+  Côté AUDIO MIX, le masque se LIT : un plafond dans la couleur VIDEO SCROLL
+  est tracé sur la barre de send, la part retirée hachurée au-dessus — le
+  fader reste où l'utilisateur l'a mis (« tu as demandé ça, l'image autorise
+  ça »).
+- **→ VIDEO** : l'inverse, décrit ci-dessous.
+
+**Historique** (2026-09-06, deux corrections dans la journée) : la fonction est
+née dans le seul sens audio→vidéo, ce qui n'était PAS ce que l'utilisateur
+demandait — son test : « j'ai mis le curseur sur SPCTR et j'entends toujours
+VIDEO, rien ne bouge en bas ». Leçon : « lier A à B » se vérifie sur le geste
+que l'utilisateur fera, pas sur la lecture grammaticale de la demande.
+
+### Le sens → VIDEO
+
+- **Un troisième masque**, multiplié dans le même produit que le projecteur :
+  `eff = level × weight(projecteur) × weight(follow)`. Même contrat : il ne
+  peut que MASQUER, jamais amplifier — le polygone dessiné reste le plafond.
+- **Lecture DIRECTE** : le niveau audio de la chaîne EST le poids,
+  `weight = 1 − depth·(1 − niveau)`. Un send à 30 % met son image à 30 %.
+  Première version (2026-09-06 matin) : lecture RELATIVE (chaque chaîne
+  contre la plus forte, fenêtre 24 dB) — **abandonnée le jour même** : avec
+  un mix audio à plat (tous les sends à 100 %, le cas au démarrage) tous les
+  poids valaient 1 et la fonction était invisible par construction. Retour
+  utilisateur : « quoi que je touche ne change rien ». La leçon : un lien
+  audio→vidéo doit répondre au geste sur le fader, pas à un classement.
+- **Deux sources** (`videoMixFollowMode`) : `SET` = les réglages du mixeur
+  audio (niveau de send × power/solo × volume moteur, déjà résolus dans
+  `bank.intensity`) — une position de fader 0…1, déterministe ; `LIVE` = la
+  même chose, encore atténuée par ce que la chaîne joue réellement (son
+  `sendMeter` rapporté au plus fort de la toile), donc une chaîne qui se tait
+  s'efface. Sans aucun signal, LIVE retombe sur les niveaux SET (jamais
+  d'écran noir).
+- **Garde-fous** : une chaîne qui n'alimente AUCUN moteur est exemptée (une
+  chaîne purement visuelle ne disparaît pas), et un mix par défaut (tout à
+  100 %) donne des poids à 1 — armer ne change rien tant qu'on n'a pas bougé
+  un réglage audio, ce qui est le comportement neutre attendu.
+- **Un seul lisseur** : le présentateur (`VideoMixerComponent::updateFollow`,
+  thread message) lit le modèle de chaînes, lisse (attaque 70 ms / release
+  420 ms) et pousse le même masque au compositeur ET à la toile — l'image et
+  le polygone ne peuvent pas diverger d'une frame.
+- **Loi partagée** : `video/VideoMixFollow.h`, jumelle de `VideoMixFocus.h`.
+  Params globaux non bankés : `videoMixFollow` (bool), `videoMixFollowDepth`
+  (0…1), `videoMixFollowMode` (Set/Live). Tous mappables MIDI (clic droit sur
+  le bloc) — la profondeur sur un fader est le geste de scène visé.
+- **Bloc FOLLOW** sur la toile, coin haut-gauche, dessiné en dernier sur sa
+  propre plaque (une étiquette de rayon peut passer dessous) : puce FOLLOW
+  (armement), puce SET/LIVE, arche de profondeur (le x de l'arche donne la
+  valeur, glisser le long de l'arche est littéralement le geste). Le polygone
+  plein reste ce que rend le compositeur, le pointillé ce qui est masqué.
+- **Lisibilité** (2e passe, même jour) : un repère BLEU (la teinte du badge
+  AUDIO MIX) glisse sur chaque rayon là où l'audio place la sortie, avec le
+  segment retiré estompé jusqu'à la poignée — la poignée, elle, ne bouge pas :
+  elle reste le plafond que l'utilisateur a fixé. Plus des infobulles sur
+  chaque zone de la toile (`VideoMixRadar` implémente `juce::TooltipClient`,
+  la fenêtre d'infobulle appartient déjà à l'éditeur) : la toile n'a pas de
+  légende écrite, elle dit ce qu'il y a sous le pointeur.
+- **Deux pièges traités** : la signature de republication du compositeur
+  reçoit le masque QUANTIFIÉ (sinon une sortie figée republierait 60 fois par
+  seconde) ; une couche entièrement masquée n'est plus rasterisée du tout —
+  masquer fait désormais ÉCONOMISER son blit (son vignette VIEWPORT garde son
+  image pleine échelle).
+- **À vérifier visuellement** : position du bloc quand un rayon pointe en haut
+  à gauche, lisibilité de l'arche à 176 px de bande, et le dosage réel de
+  `kRangeDb` à l'oreille/à l'œil.
 
 ## 7. Hors périmètre / suites possibles
 

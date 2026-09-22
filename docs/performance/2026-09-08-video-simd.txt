@@ -1,0 +1,6 @@
+w=640 angle=0.00 identical pixels; CPU 1.832 -> 0.855 ms/frame; wall 0.318 -> 0.170 ms/frame
+w=640 angle=0.30 identical pixels; CPU 1.890 -> 0.881 ms/frame; wall 0.303 -> 0.160 ms/frame
+w=640 angle=1.57 identical pixels; CPU 2.517 -> 1.105 ms/frame; wall 0.410 -> 0.208 ms/frame
+w=1280 angle=0.00 identical pixels; CPU 6.866 -> 3.071 ms/frame; wall 0.998 -> 0.483 ms/frame
+w=1280 angle=0.30 identical pixels; CPU 7.268 -> 3.237 ms/frame; wall 1.060 -> 0.508 ms/frame
+w=1280 angle=1.57 identical pixels; CPU 10.279 -> 4.181 ms/frame; wall 1.479 -> 0.642 ms/frame

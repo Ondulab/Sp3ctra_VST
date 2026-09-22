@@ -72,6 +72,21 @@ Depuis 2026-08-14 un module n'a **pas** de couleur propre : sa couleur est celle
 
 Jamais de teinte de module en littéral local : toujours `moduleColour(ModuleType::X)`. Les contrôles, eux, ne prennent **jamais** la couleur du module (§1.1).
 
+### 1.2b Identité d'un paramètre (étiquette MIDI)
+
+Partout où l'interface nomme un paramètre piloté par MIDI — lignes et bandeau replié du volet MIDI MAP, infobulles de la face CONTROLS, overlay OLED du CIS — elle passe par **une seule** description, [`ui/ParamIdentity.h`](../vst/source/ui/ParamIdentity.h) (`describeParam` + `ParamIdentityLabel::draw`) :
+
+`CC 32  ④ VIDEO · DC BLOCK · Amount`
+
+| Segment | Rendu |
+|---------|-------|
+| Événement MIDI (`CC 32`, `C#3`) | blanc `#eeeeee`, gras — jamais une teinte de chaîne ou de module (la chaîne 1 est ambre comme le badge MIDI) ; le canal n'apparaît que dans l'infobulle (`CC 32 · ch 1`) |
+| Chaîne | la pastille numérotée du rack ([`ui/ChainIdentity.h`](../vst/source/ui/ChainIdentity.h) : `drawPastille`, 14 px en ligne compacte, 16 px dans le rack et la barre PLAY/SETUP) + le nom de chaîne, gras, en couleur de chaîne (`ChainIdentity::colour`) |
+| Module | `moduleDisplayName` sans la flèche « → », gras, en couleur de module |
+| Paramètre | le nom **nu** (`ParamNaming::bareName`) : le tag de banque (`DC2 `, `VS0 `, `LS OUT1 `…) que `moduleAbbrev` pose sur les noms APVTS pour l'unicité côté hôte est retiré, ainsi que les mots répétant le module et le numéro de slot ; texte atténué `#9aa6ba` |
+
+Quand la place manque, le nom du paramètre s'ellipse puis disparaît, puis le module ; l'événement et la chaîne restent. Le code court d'un module (`ModuleDesc::abbrev` : `DC`, `LV`, `VS`, `LS`…) n'existe qu'à un endroit, le catalogue : il sert de tag aux noms APVTS, de code module sur l'OLED et de clé au retrait du tag.
+
 ### 1.3 Typographie
 
 Une seule famille (police système JUCE par défaut), hiérarchie strictement par taille. Tout passe par les tokens `Sp3ctraTheme::kFont*`.
@@ -127,7 +142,7 @@ Hérite de `juce::LookAndFeel_V4`. Instancié une fois dans l'éditeur, posé vi
 
 | Widget JUCE | Style Sp3ctra | Où |
 |-------------|---------------|-----|
-| **`Sp3ctraBarSlider`** ([`ui/Sp3ctraBarSlider.h`](../vst/source/ui/Sp3ctraBarSlider.h)) | LE slider horizontal unique : barre lime, texte superposé lecture seule, double-clic = cycle min → centre → max, clic droit = MIDI learn | **toutes** les valeurs horizontales (boîtes des éditeurs, modulation, video scroll, mixeurs) |
+| **`Sp3ctraBarSlider`** ([`ui/Sp3ctraBarSlider.h`](../vst/source/ui/Sp3ctraBarSlider.h)) | LE slider horizontal unique : barre lime, texte superposé lecture seule, double-clic = valeur par défaut, appui long = saisie au clavier, clic droit = MIDI learn (contrat unique `ui/Sp3ctraGestures.h`, partagé par les poignées des éditeurs graphiques) | **toutes** les valeurs horizontales (boîtes des éditeurs, modulation, video scroll, mixeurs) |
 | `Slider` LinearVertical | fader barre 12 px, teinte moteur | AudioMixPanel |
 | `Slider` Rotary | knob à cadran, arc lime | paramètres continus des panneaux moteurs (LuxSynth / LuxGrain / LuxWave) |
 | `ToggleButton` | switch glissant lime | **Enable** des modules, booléens (loop, sync, velocity…) |
